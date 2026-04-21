@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://i-sase.dev/schemas/blueprint.schema.json",
+  "title": "Blueprint Frontmatter",
+  "description": "Validates the YAML frontmatter of an i-SASE Blueprint artifact. A Blueprint is a reusable, parameterized template extracted from concrete BriefingPacks.",
+  "type": "object",
+  "required": ["schema", "id", "slug", "title", "version", "abstraction-level", "parameters", "created", "author"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "sase/blueprint/v1",
+      "description": "Schema identifier for the Blueprint artifact type."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{12}$",
+      "description": "Unique 12-character hex identifier for the Blueprint."
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*[a-z0-9]$",
+      "description": "Human-readable short name (2-4 words, lowercase, hyphens). Used in directory name and display."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable title of the Blueprint."
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Semantic version. Git provides history; this is for human readability."
+    },
+    "abstraction-level": {
+      "type": "string",
+      "enum": ["methodology", "technology", "project"],
+      "description": "Three-level hierarchy: methodology (any modernization), technology (e.g. COBOL->Java), project (concrete template)."
+    },
+    "parameters": {
+      "type": "array",
+      "description": "Typed placeholder definitions. Each parameter maps to {{PARAM_NAME}} placeholders in the body.",
+      "items": {
+        "type": "object",
+        "required": ["name", "type", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]*$",
+            "description": "Parameter name used in {{PARAM_NAME}} placeholders. UPPER_SNAKE_CASE."
+          },
+          "type": {
+            "type": "string",
+            "enum": ["string", "path", "list", "enum", "boolean", "number"],
+            "description": "Type governs validation during instantiation."
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Human-readable description of what this parameter represents."
+          },
+          "required": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether this parameter must be provided during instantiation."
+          },
+          "default": {
+            "description": "Default value used if the parameter is not provided. Type must match the parameter type."
+          },
+          "enum-values": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Valid values when type is 'enum'. Ignored for other types."
+          },
+          "example": {
+            "type": "string",
+            "description": "Example value from the source project (anonymized if needed)."
+          }
+        }
+      }
+    },
+    "created": {
+      "type": "string",
+      "format": "date",
+      "description": "ISO-8601 date when the Blueprint was created."
+    },
+    "author": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "description": "Authors or originators of the Blueprint."
+    },
+    "provenance": {
+      "type": "object",
+      "description": "Tracks which concrete BP tree this Blueprint was extracted from.",
+      "additionalProperties": false,
+      "properties": {
+        "source-bp": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{12}$",
+          "description": "Hash of the source BriefingPack root."
+        },
+        "source-slug": {
+          "type": "string",
+          "description": "Slug of the source BriefingPack."
+        },
+        "source-mission": {
+          "type": "string",
+          "description": "Mission title of the source BriefingPack."
+        },
+        "extracted-date": {
+          "type": "string",
+          "format": "date",
+          "description": "ISO-8601 date when the Blueprint was extracted."
+        },
+        "extracted-by": {
+          "type": "string",
+          "description": "Name of the person who performed the extraction."
+        }
+      }
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Searchable tags for categorization (e.g. 'cobol', 'java', 'mainframe', 'batch')."
+    },
+    "execution-order": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string",
+            "pattern": "^[0-9a-f]{12}$"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{12}$"
+            },
+            "minItems": 2
+          }
+        ]
+      },
+      "description": "Ordered execution plan for child Blueprints. Strings = sequential, arrays = parallel groups."
+    },
+    "description": {
+      "type": "string",
+      "description": "Short (1-3 sentence) description of what this Blueprint produces when instantiated."
+    },
+    "instantiation-count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many times this Blueprint has been used to create concrete BPs."
+    }
+  }
+}

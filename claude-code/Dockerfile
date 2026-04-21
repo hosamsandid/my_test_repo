@@ -4,6 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ca-certificates \
     curl \
+    python3 \
   && rm -rf /var/lib/apt/lists/*
 
 # Install Claude Code globally
@@ -15,22 +16,17 @@ COPY package.json .
 RUN npm install --omit=dev
 COPY bridge.js .
 
-# Default CLAUDE.md (copied to workspace on first run)
+# Default workspace files (copied to workspace volume on first run)
 COPY CLAUDE.md /defaults/CLAUDE.md
+
+# ACE plugin (installed into the auth volume on first run)
+COPY ace-plugin /defaults/ace-plugin
 
 WORKDIR /workspace
 
-# Entrypoint: restore config + init workspace
-RUN printf '#!/bin/sh\n\
-if [ ! -f /root/.claude.json ] && [ -d /root/.claude/backups ]; then\n\
-  latest=$(ls -t /root/.claude/backups/.claude.json.backup.* 2>/dev/null | head -1)\n\
-  [ -n "$latest" ] && cp "$latest" /root/.claude.json\n\
-fi\n\
-if [ ! -f /workspace/CLAUDE.md ]; then\n\
-  cp /defaults/CLAUDE.md /workspace/CLAUDE.md\n\
-  mkdir -p /workspace/memory /workspace/skills\n\
-fi\n\
-exec "$@"\n' > /entrypoint.sh && chmod +x /entrypoint.sh
+# Entrypoint script
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["node", "/app/bridge.js"]

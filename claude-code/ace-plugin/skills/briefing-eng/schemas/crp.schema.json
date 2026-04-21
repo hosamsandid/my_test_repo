@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://i-sase.dev/schemas/crp.schema.json",
+  "title": "CRP Frontmatter",
+  "description": "Validates the YAML frontmatter of an i-SASE Clarification Request Packet (CRP). A CRP is raised when execution encounters ambiguity, conflict, or other issues requiring human clarification.",
+  "type": "object",
+  "required": ["schema", "id", "bp", "urgency", "category", "status"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "sase/crp/v1",
+      "description": "Schema identifier for the CRP artifact type."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{12}$",
+      "description": "Unique 12-character hex identifier for the CRP."
+    },
+    "bp": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{12}$",
+      "description": "Identifier of the BriefingPack this CRP is associated with."
+    },
+    "urgency": {
+      "type": "string",
+      "enum": ["blocking", "high", "medium", "low"],
+      "description": "How urgently a response is needed. 'blocking' halts execution until resolved."
+    },
+    "category": {
+      "type": "string",
+      "enum": ["ambiguity", "conflict", "security", "scope", "irreversibility", "architecture"],
+      "description": "Classification of the issue that triggered this CRP."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["open", "resolved"],
+      "description": "Current resolution status of the CRP."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["blocking", "deferred", "inline"],
+      "default": "blocking",
+      "description": "CRP escalation mode"
+    },
+    "raised-by": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}$",
+      "description": "Agent-id that raised this CRP"
+    },
+    "routed-to": {
+      "type": "string",
+      "description": "Team member this CRP is routed to"
+    }
+  }
+}

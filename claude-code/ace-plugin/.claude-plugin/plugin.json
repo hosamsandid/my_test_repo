@@ -1,0 +1,10 @@
+{
+  "name": "ace",
+  "description": "Enterprise-grade task management for AI agent teams. Structured Agents with escalation (CRPs), evidence-based review (MRPs), team roles, and Git-based coordination. From solo to 15+ person teams.",
+  "version": "1.29.3",
+  "author": {
+    "name": "Thorsten Maier"
+  },
+  "homepage": "https://github.com/AccentureCodeFoundry/314092_agent-command-environment",
+  "license": "MIT"
+}

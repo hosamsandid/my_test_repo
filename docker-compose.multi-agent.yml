@@ -1,0 +1,45 @@
+# Multi-Agent Overlay — Dynamic Agent Pool
+#
+# Usage:
+#   podman compose -f docker-compose.yml -f docker-compose.multi-agent.yml up -d --build
+#
+# Single container manages all agents dynamically.
+# Create/update/delete agents via chat commands:
+#   !agent add <id> "<name>" expert|synthesizer
+#   ---
+#   <system prompt>
+#
+#   !agent update <id>   — change prompt
+#   !agent delete <id>   — remove agent
+#   !agent list          — show all agents
+
+services:
+  agent-pool:
+    build:
+      context: ./multi-agent
+    container_name: agent-pool
+    restart: unless-stopped
+    volumes:
+      - agent-pool-workspace:/workspace
+    environment:
+      TZ: Europe/Berlin
+      MATRIX_HOMESERVER: http://conduwuit:6167
+      MATRIX_ACCESS_TOKEN: "${ORCHESTRATOR_TOKEN}"
+      MATRIX_BOT_USER_ID: "@orchestrator:local"
+      MULTI_AGENT_ROOM: "${MULTI_AGENT_ROOM}"
+      ADMIN_USER_ID: "@thorsten:local"
+      # Conduwuit admin (for auto-creating Matrix users)
+      CONDUWUIT_ADMIN_TOKEN: "${MATRIX_ACCESS_TOKEN}"
+      CONDUWUIT_ADMIN_ROOM: "!cUxr0SyfINf9yEvBOD:local"
+      # Azure AI Foundry
+      CLAUDE_CODE_USE_FOUNDRY: "1"
+      ANTHROPIC_FOUNDRY_RESOURCE: "${ANTHROPIC_FOUNDRY_RESOURCE}"
+      ANTHROPIC_FOUNDRY_API_KEY: "${ANTHROPIC_FOUNDRY_API_KEY}"
+      ANTHROPIC_DEFAULT_SONNET_MODEL: "${ANTHROPIC_DEFAULT_SONNET_MODEL}"
+    depends_on:
+      conduwuit:
+        condition: service_started
+
+volumes:
+  agent-pool-workspace:
+    name: vgh-claw_agent-pool-workspace

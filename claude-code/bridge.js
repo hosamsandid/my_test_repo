@@ -42,6 +42,10 @@ const SESSIONS_FILE = path.join(WORKSPACE, ".sessions.json");
 const JOBS_FILE = path.join(WORKSPACE, "jobs.json");
 const CLAUDE_TIMEOUT = 600_000; // 10 minutes
 
+// Multi-agent support (optional, backward-compatible)
+const BOT_PEERS = (process.env.BOT_PEERS || "").split(",").filter(Boolean);
+const RESPOND_TO_HUMANS = process.env.RESPOND_TO_HUMANS === "1";
+
 // --- Session persistence (roomId → sessionId) ---
 let sessions = {};
 try {
@@ -263,21 +267,27 @@ async function main() {
 
   client.on("room.message", async (roomId, event) => {
     if (event.sender === botUserId) return;
+    if (BOT_PEERS.includes(event.sender)) return; // Ignore peer bots
     if (event.content?.msgtype !== "m.text") return;
     if (event.origin_server_ts < startTime) return;
 
     const body = event.content.body;
     if (!body) return;
 
-    // In group rooms require mention
-    try {
-      const members = await client.getJoinedRoomMembers(roomId);
-      if (members.length > 2) {
-        const mentioned =
-          body.includes(botUserId) || /claude/i.test(body);
-        if (!mentioned) return;
-      }
-    } catch {}
+    // In group rooms require mention (unless RESPOND_TO_HUMANS mode)
+    if (!RESPOND_TO_HUMANS) {
+      try {
+        const members = await client.getJoinedRoomMembers(roomId);
+        if (members.length > 2) {
+          let mentioned = body.includes(botUserId);
+          // Legacy single-bot mode: also match generic "claude"
+          if (!BOT_PEERS.length) {
+            mentioned = mentioned || /claude/i.test(body);
+          }
+          if (!mentioned) return;
+        }
+      } catch {}
+    }
 
     // Prevent concurrent processing per room
     if (processing.has(roomId)) {
@@ -300,8 +310,12 @@ async function main() {
       }
 
       const response = result.result || "No response.";
-      await sendFormattedMessage(client, roomId, response);
-      console.log(`[${roomId}] Response (${response.length} chars)`);
+      if (response.trim().startsWith("[PASS]")) {
+        console.log(`[${roomId}] Agent passed (no contribution)`);
+      } else {
+        await sendFormattedMessage(client, roomId, response);
+        console.log(`[${roomId}] Response (${response.length} chars)`);
+      }
     } catch (err) {
       console.error(`[${roomId}] Error:`, err.message);
       await client.sendText(roomId, `Error: ${err.message}`);

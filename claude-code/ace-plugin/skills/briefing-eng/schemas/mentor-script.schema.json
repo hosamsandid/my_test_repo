@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://i-sase.dev/schemas/mentor-script.schema.json",
+  "title": "MentorScript Frontmatter",
+  "description": "Validates the YAML frontmatter of an i-SASE MentorScript artifact. A MentorScript provides domain-specific guidance that applies to one or more phases or artifact types.",
+  "type": "object",
+  "required": ["schema", "id", "applies-to"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "sase/mentor-script/v1",
+      "description": "Schema identifier for the MentorScript artifact type."
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique identifier for the MentorScript."
+    },
+    "applies-to": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "description": "Single target this MentorScript applies to."
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "List of targets this MentorScript applies to."
+        }
+      ],
+      "description": "Phase, artifact type, or context that this MentorScript provides guidance for. Can be a single string or an array of strings."
+    }
+  }
+}

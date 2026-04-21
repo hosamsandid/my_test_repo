@@ -1,0 +1,111 @@
+schema: sase/loop-script/v1
+id: LS-standard-v1
+name: Standard Development SOP
+
+phases:
+  - id: understand
+    name: Understand
+    description: Read BriefingPack and MentorScripts, fully understand the task
+    actions:
+      - Read the BriefingPack completely
+      - Read all referenced MentorScripts
+      - Identify all Acceptance Criteria
+      - Clarify the context (files, modules, APIs)
+    gate:
+      description: Can restate the mission goal in own words
+      check: "Agent can correctly paraphrase Goal, AC, and Constraints"
+
+  - id: plan
+    name: Plan
+    description: Create an implementation plan that covers all AC
+    actions:
+      - Create a step-by-step implementation plan
+      - Map each step to at least one AC
+      - Determine output locations from BP artifacts field or Acceptance Criteria
+      - Identify risks and potential gotchas
+      - Verify MentorScript compliance of the plan
+    gate:
+      description: Plan covers all Acceptance Criteria
+      check: "Each AC is mapped to at least one plan step"
+
+  - id: implement
+    name: Implement
+    description: Implement the plan step by step
+    actions:
+      - Implement step by step according to the plan
+      - Place output artifacts at the paths determined during planning (from BP artifacts field or AC)
+      - Follow the MentorScript rules
+      - Test each step after completion
+      - Document deviations from the plan
+    on-uncertainty: create-crp
+    gate:
+      description: All plan steps implemented
+      check: "Implementation complete, all steps executed"
+      gate-command: "Run the project's test suite. Determine the command from package.json (npm test), pyproject.toml (pytest), Makefile, or build.gradle. Must exit 0."
+
+  - id: self-review
+    name: Self-Review
+    description: Critically review own work
+    actions:
+      - Check code against all Acceptance Criteria
+      - Check MentorScript compliance (tests, error handling, security)
+      - Check for code quality and consistency
+      - Ask yourself — Would I approve this PR?
+    gate:
+      description: Self-review passed
+      check: "All AC met, MentorScript-compliant, PR-ready"
+      gate-command: "Run the project's linter. Determine from config files: ruff/flake8 for Python, eslint for JS/TS, rubocop for Ruby. Must exit 0."
+
+  - id: package
+    name: Package
+    description: Create Mission Result Package
+    actions:
+      - Create MRP with all 5 criteria
+      - Link all relevant CRPs and VCRs
+      - Document git diff --stat
+      - Include commit history
+    gate:
+      description: MRP complete
+      check: "All 5 MRP criteria addressed"
+
+escalation:
+  structural-triggers:
+    - id: api-contract
+      description: "Changes affect API contract, database schema, or public interface"
+      action: create-crp
+      mode: blocking
+    - id: security
+      description: "Involves authentication, authorization, or cryptography"
+      action: create-crp
+      mode: blocking
+    - id: scope-deviation
+      description: "Contradicts or goes beyond the BriefingPack scope"
+      action: create-crp
+      mode: blocking
+    - id: multi-approach
+      description: "Multiple valid approaches with different tradeoffs and no BP guidance"
+      action: create-crp
+      mode: deferred
+    - id: cross-scope-reversal
+      description: "Reversing requires touching files beyond current scope"
+      action: create-crp
+      mode: blocking
+    - id: data-destructive
+      description: "Changes that could cause data loss, silent corruption, or irreversible state changes"
+      action: create-crp
+      mode: blocking
+    - id: dependency-change
+      description: "Adding, removing, or upgrading (major version) any external dependency"
+      action: create-crp
+      mode: deferred
+    - id: observable-behavior-change
+      description: "Modifying user-visible output, error messages, log formats, or response structure not explicitly specified by the BP"
+      action: create-crp
+      mode: deferred
+  scope-creep:
+    description: "Changes to files outside the BriefingPack scope"
+    action: create-crp
+
+n-version:
+  enabled: false
+  count: 2

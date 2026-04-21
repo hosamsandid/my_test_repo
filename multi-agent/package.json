@@ -1,0 +1,9 @@
+{
+  "name": "multi-agent-orchestrator",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "matrix-bot-sdk": "^0.7.1",
+    "marked": "^15.0.0"
+  }
+}

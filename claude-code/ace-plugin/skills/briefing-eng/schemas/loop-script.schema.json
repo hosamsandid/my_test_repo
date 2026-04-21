@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://i-sase.dev/schemas/loop-script.schema.json",
+  "title": "LoopScript",
+  "description": "Validates an i-SASE LoopScript (pure YAML). A LoopScript defines the ordered phases, gates, and escalation policies for a SASE execution loop.",
+  "type": "object",
+  "required": ["schema", "id", "name", "phases"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "sase/loop-script/v1",
+      "description": "Schema identifier for the LoopScript artifact type."
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique identifier for the LoopScript."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable name of the LoopScript."
+    },
+    "phases": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Ordered list of phases that make up the execution loop.",
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Unique identifier for this phase within the loop."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-readable phase name"
+          },
+          "description": {
+            "type": "string",
+            "description": "Phase description"
+          },
+          "actions": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Actions for this phase"
+          },
+          "gate": {
+            "type": "string",
+            "description": "Gate condition that must be satisfied before advancing past this phase."
+          },
+          "gate-command": {
+            "type": "string",
+            "description": "Shell command for automated gate check. Must exit 0 to pass."
+          },
+          "strict": {
+            "type": "boolean",
+            "description": "If true, gate failure creates CRP"
+          },
+          "on-uncertainty": {
+            "type": "string",
+            "description": "Action or strategy to apply when uncertainty is detected during this phase."
+          }
+        }
+      }
+    },
+    "escalation": {
+      "type": "object",
+      "description": "Escalation policies that govern when and how the loop escalates issues.",
+      "additionalProperties": false,
+      "properties": {
+        "uncertainty-threshold": {
+          "type": ["number", "string"],
+          "description": "Threshold at which uncertainty triggers escalation. Can be a numeric value or a named level."
+        },
+        "scope-creep": {
+          "type": ["number", "string"],
+          "description": "Threshold or policy for detecting and escalating scope creep."
+        }
+      }
+    },
+    "n-version": {
+      "type": "object",
+      "description": "N-version programming configuration for redundant execution of critical phases.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether n-version redundant execution is enabled."
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of independent versions to execute in parallel."
+        }
+      }
+    }
+  }
+}

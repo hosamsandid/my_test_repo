@@ -1,0 +1,51 @@
+services:
+  conduwuit:
+    image: ghcr.io/continuwuity/continuwuity:latest
+    container_name: conduwuit
+    restart: unless-stopped
+    ports:
+      - "8448:6167"
+    volumes:
+      - conduwuit-db:/var/lib/continuwuity
+    environment:
+      CONTINUWUITY_SERVER_NAME: local
+      CONTINUWUITY_DATABASE_PATH: /var/lib/continuwuity
+      CONTINUWUITY_PORT: 6167
+      CONTINUWUITY_ADDRESS: 0.0.0.0
+      CONTINUWUITY_ALLOW_REGISTRATION: "false"
+      CONTINUWUITY_ALLOW_FEDERATION: "false"
+      CONTINUWUITY_TRUSTED_SERVERS: "[]"
+      CONTINUWUITY_MAX_REQUEST_SIZE: 20000000
+      CONTINUWUITY_NEW_USER_DISPLAYNAME_SUFFIX: ""
+      TZ: Europe/Berlin
+
+  claude-bridge:
+    build:
+      context: ./claude-code
+    container_name: claude-bridge
+    restart: unless-stopped
+    volumes:
+      - claude-auth:/root/.claude
+      - claude-workspace:/workspace
+    environment:
+      TZ: Europe/Berlin
+      MATRIX_HOMESERVER: http://conduwuit:6167
+      MATRIX_ACCESS_TOKEN: "${MATRIX_ACCESS_TOKEN}"
+      MATRIX_BOT_USER_ID: "@claude:local"
+      MATRIX_DEFAULT_ROOM: "${MATRIX_DEFAULT_ROOM}"
+      # Azure AI Foundry — passed through to Claude Code CLI
+      CLAUDE_CODE_USE_FOUNDRY: "1"
+      ANTHROPIC_FOUNDRY_RESOURCE: "${ANTHROPIC_FOUNDRY_RESOURCE}"
+      ANTHROPIC_FOUNDRY_API_KEY: "${ANTHROPIC_FOUNDRY_API_KEY}"
+      ANTHROPIC_DEFAULT_SONNET_MODEL: "${ANTHROPIC_DEFAULT_SONNET_MODEL}"
+    depends_on:
+      conduwuit:
+        condition: service_started
+
+volumes:
+  conduwuit-db:
+    name: vgh-claw_conduwuit-db
+  claude-auth:
+    name: vgh-claw_claude-auth
+  claude-workspace:
+    name: vgh-claw_claude-workspace

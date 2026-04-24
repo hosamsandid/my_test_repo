@@ -22,8 +22,8 @@ services:
     volumes:
       - agent-pool-workspace:/workspace
       - claude-workspace:/template-workspace:ro
-      - ${SSH_AUTH_SOCK:-/dev/null}:/ssh-agent:ro
-      - ~/.ssh/known_hosts:/root/.ssh/known_hosts:ro
+      - ~/.ssh/id_accenturecodefoundry:/root/.ssh/id_accenturecodefoundry:ro
+      - ~/.ssh/id_accenturecodefoundry.pub:/root/.ssh/id_accenturecodefoundry.pub:ro
     environment:
       TZ: Europe/Berlin
       MATRIX_HOMESERVER: http://conduwuit:6167
@@ -34,8 +34,8 @@ services:
       # Conduwuit admin (for auto-creating Matrix users)
       CONDUWUIT_ADMIN_TOKEN: "${MATRIX_ACCESS_TOKEN}"
       CONDUWUIT_ADMIN_ROOM: "!cUxr0SyfINf9yEvBOD:local"
-      # SSH agent forwarding (for git push from autonomous agents)
-      SSH_AUTH_SOCK: /ssh-agent
+      # Git identity for autonomous agents (push/PR)
+      GIT_SSH_COMMAND: "ssh -i /root/.ssh/id_accenturecodefoundry -o StrictHostKeyChecking=accept-new"
       # Azure AI Foundry
       CLAUDE_CODE_USE_FOUNDRY: "1"
       ANTHROPIC_FOUNDRY_RESOURCE: "${ANTHROPIC_FOUNDRY_RESOURCE}"

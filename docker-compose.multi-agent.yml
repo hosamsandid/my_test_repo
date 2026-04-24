@@ -21,6 +21,7 @@ services:
     restart: unless-stopped
     volumes:
       - agent-pool-workspace:/workspace
+      - claude-workspace:/template-workspace:ro
     environment:
       TZ: Europe/Berlin
       MATRIX_HOMESERVER: http://conduwuit:6167
@@ -43,3 +44,5 @@ services:
 volumes:
   agent-pool-workspace:
     name: vgh-claw_agent-pool-workspace
+  claude-workspace:
+    name: vgh-claw_claude-workspace

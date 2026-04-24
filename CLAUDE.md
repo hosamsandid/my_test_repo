@@ -49,7 +49,8 @@ Matrix Client (Element etc.)
 - **Pool identity:** `@orchestrator:local` (invisible watcher/router)
 - **Agents:** dynamically created Matrix users (e.g. `@cobol-expert:local`)
 - **Room:** `!53HsXQ24Pfdnj9WVXF:local` ("Multi-Agent Collaboration")
-- Agent configs persisted in `/workspace/agents/<id>/` (config.json + CLAUDE.md)
+- Agent configs persisted in `/workspace/agents/<id>/` (config.json + CLAUDE.md + AGENT-PROMPT.md)
+- New agents are **seeded from the base bridge workspace** (`claude-workspace` volume mounted read-only at `/template-workspace`). This copies skills, memory, repo clones, and `.claude/` settings into the agent's directory. The agent's CLAUDE.md is a merge of the base instructions + agent-specific role prompt.
 - Matrix users auto-created via Conduwuit admin room
 - Only 1 container (`agent-pool`) manages all agents — no container-per-agent
 
@@ -102,7 +103,7 @@ All commands work in the Multi-Agent room from `@thorsten:local`:
 | File | Purpose |
 |---|---|
 | `docker-compose.multi-agent.yml` | Compose overlay — single `agent-pool` service |
-| `multi-agent/agent-pool.js` | Dynamic agent management, routing, synthesis, admin wizard |
+| `multi-agent/agent-pool.js` | Dynamic agent management, routing, synthesis, admin wizard, workspace seeding |
 | `multi-agent/Dockerfile` | Node 22 + Claude Code CLI + marked |
 | `multi-agent/package.json` | Dependencies: matrix-bot-sdk, marked |
 | `multi-agent/setup.sh` | Initial setup: register Matrix users, create room |

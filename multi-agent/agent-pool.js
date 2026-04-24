@@ -21,10 +21,20 @@ const CONDUWUIT_ADMIN_ROOM = process.env.CONDUWUIT_ADMIN_ROOM;
 
 const AGENTS_DIR = "/workspace/agents";
 const WORKSPACE = "/workspace";
+const TEMPLATE_WORKSPACE = "/template-workspace";
 const CLAUDE_TIMEOUT = 600_000;
 const QUIET_DELAY = 10_000;
 const MAX_TIMEOUT = 240_000;
 const WIZARD_TIMEOUT = 300_000; // 5 min
+
+// Files/dirs to skip when seeding agent workspace from template
+const SEED_EXCLUDE = new Set([
+  ".matrix-state.json",
+  ".sessions.json",
+  ".pool-state.json",
+  "jobs.json",
+  "agents",
+]);
 
 // ============================================================
 // Agent storage
@@ -48,7 +58,86 @@ function saveAgentConfig(id, config) {
 function saveAgentPrompt(id, prompt) {
   const dir = agentDir(id);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, "CLAUDE.md"), prompt);
+  // Store raw agent prompt separately for re-merging on updates
+  fs.writeFileSync(path.join(dir, "AGENT-PROMPT.md"), prompt);
+  // Build merged CLAUDE.md: base workspace instructions + agent role
+  fs.writeFileSync(path.join(dir, "CLAUDE.md"), buildAgentClaudeMd(prompt));
+}
+
+function buildAgentClaudeMd(agentPrompt) {
+  const templatePath = path.join(TEMPLATE_WORKSPACE, "CLAUDE.md");
+  let base = "";
+  try {
+    if (fs.existsSync(templatePath)) {
+      base = fs.readFileSync(templatePath, "utf8");
+    }
+  } catch (err) {
+    console.log(`[Pool] Could not read template CLAUDE.md: ${err.message}`);
+  }
+  if (!base) return agentPrompt;
+  const pathNote =
+    "## Workspace\n\n" +
+    "Your workspace root is the current working directory. All files (repos, skills, memory) are here.\n" +
+    "Memory entries may contain absolute paths like `/workspace/...` from a shared template — " +
+    "translate these to relative paths (e.g. `/workspace/314092_foo/` → `./314092_foo/`).\n";
+  return `${base}\n\n---\n\n${pathNote}\n---\n\n## Agent Role\n\n${agentPrompt}`;
+}
+
+function seedAgentWorkspace(id) {
+  const dest = agentDir(id);
+  fs.mkdirSync(dest, { recursive: true });
+
+  if (!fs.existsSync(TEMPLATE_WORKSPACE)) {
+    console.log(`[Pool] Template workspace not available — skipping seed for ${id}`);
+    return false;
+  }
+
+  let entries;
+  try {
+    entries = fs.readdirSync(TEMPLATE_WORKSPACE);
+  } catch (err) {
+    console.log(`[Pool] Cannot read template workspace: ${err.message}`);
+    return false;
+  }
+
+  let copied = 0;
+  for (const entry of entries) {
+    if (SEED_EXCLUDE.has(entry)) continue;
+    if (entry.startsWith(".agent-state-")) continue;
+    const src = path.join(TEMPLATE_WORKSPACE, entry);
+    const dst = path.join(dest, entry);
+    try {
+      fs.cpSync(src, dst, { recursive: true });
+      copied++;
+    } catch (err) {
+      console.log(`[Pool] Seed copy warning (${entry}): ${err.message}`);
+    }
+  }
+  // Rewrite absolute /workspace/ paths in seeded memory files
+  // so they resolve correctly from the agent's working directory
+  patchSeededPaths(dest);
+
+  console.log(`[Pool] Seeded workspace for ${id} from template (${copied} entries)`);
+  return true;
+}
+
+function patchSeededPaths(dir) {
+  const memoryDir = path.join(dir, "memory");
+  if (!fs.existsSync(memoryDir)) return;
+  for (const file of fs.readdirSync(memoryDir)) {
+    if (!file.endsWith(".md")) continue;
+    const filePath = path.join(memoryDir, file);
+    try {
+      let content = fs.readFileSync(filePath, "utf8");
+      const patched = content.replace(/\/workspace\//g, "./");
+      if (patched !== content) {
+        fs.writeFileSync(filePath, patched);
+        console.log(`[Pool] Patched paths in memory/${file}`);
+      }
+    } catch (err) {
+      console.log(`[Pool] Patch warning (${file}): ${err.message}`);
+    }
+  }
 }
 
 function deleteAgentFiles(id) {
@@ -68,9 +157,27 @@ function listAgentIds() {
 // ============================================================
 function callClaude(prompt, cwd, timeoutMs = CLAUDE_TIMEOUT) {
   return new Promise((resolve, reject) => {
+    const memoryHint =
+      "Read memory/context.md and memory/log.md first (if they exist) before responding. " +
+      "If the user asks you to remember something: update the memory files. " +
+      "IMPORTANT: Your workspace root is the current working directory. " +
+      "Memory entries may reference absolute paths like /workspace/... from a different context. " +
+      "Translate these to relative paths in your current directory (e.g. /workspace/314092_foo/ becomes ./314092_foo/).";
+
     const proc = spawn(
       "claude",
-      ["-p", prompt, "--output-format", "json", "--permission-mode", "acceptEdits"],
+      [
+        "-p", prompt,
+        "--output-format", "json",
+        "--permission-mode", "acceptEdits",
+        "--append-system-prompt", memoryHint,
+        "--allowedTools", "Bash(*)",
+        "--allowedTools", "Read(*)",
+        "--allowedTools", "Write(*)",
+        "--allowedTools", "Edit(*)",
+        "--allowedTools", "Glob(*)",
+        "--allowedTools", "Grep(*)",
+      ],
       { cwd, env: { ...process.env, HOME: "/root" }, stdio: ["ignore", "pipe", "pipe"] }
     );
     let stdout = "", stderr = "";
@@ -105,12 +212,25 @@ async function sendPlain(client, roomId, text) {
   await client.sendMessage(roomId, { msgtype: "m.text", body: text });
 }
 
-async function createMatrixUser(adminClient, username, password) {
+async function ensureMatrixUser(adminClient, username, password) {
+  // Try creating the user first
   await adminClient.sendMessage(CONDUWUIT_ADMIN_ROOM, {
     msgtype: "m.text",
     body: `!admin users create-user ${username} ${password}`,
   });
   await new Promise((r) => setTimeout(r, 3000));
+
+  // If user already existed (e.g. previously deactivated), reset password and re-enable
+  await adminClient.sendMessage(CONDUWUIT_ADMIN_ROOM, {
+    msgtype: "m.text",
+    body: `!admin users reset-password @${username}:local ${password}`,
+  });
+  await new Promise((r) => setTimeout(r, 1000));
+  await adminClient.sendMessage(CONDUWUIT_ADMIN_ROOM, {
+    msgtype: "m.text",
+    body: `!admin users enable-login @${username}:local`,
+  });
+  await new Promise((r) => setTimeout(r, 1000));
 }
 
 async function loginMatrixUser(username, password) {
@@ -204,6 +324,7 @@ class AgentPool {
     this.activeTask = null;
     this.wizard = null; // { step, ctx, timer }
     this.startTime = 0;
+    this.agentProcessing = new Set(); // tracks "agentId:roomId" to prevent concurrent calls
   }
 
   async init() {
@@ -236,13 +357,90 @@ class AgentPool {
   startAgent(id, config) {
     const client = new MatrixClient(HOMESERVER, config.token,
       new SimpleFsStorageProvider(path.join(WORKSPACE, `.agent-state-${id}.json`)));
+    AutojoinRoomsMixin.setupOnClient(client);
+    client.on("room.message", (roomId, event) => {
+      this.onAgentRoomMessage(id, config, client, roomId, event);
+    });
+    client.start().then(() => {
+      console.log(`[Pool] Agent syncing: ${config.displayName} (@${id}:local)`);
+    }).catch((err) => {
+      console.error(`[Pool] Agent sync failed for ${id}: ${err.message}`);
+    });
     this.agents.set(id, { config, client });
     console.log(`[Pool] Agent active: ${config.displayName} (@${id}:local)`);
   }
 
   stopAgent(id) {
+    const agent = this.agents.get(id);
+    if (agent?.client) {
+      try { agent.client.stop(); } catch {}
+    }
     this.agents.delete(id);
     console.log(`[Pool] Agent stopped: ${id}`);
+  }
+
+  async deactivateMatrixUser(id) {
+    if (!this.adminClient) return;
+    try {
+      await this.adminClient.sendMessage(CONDUWUIT_ADMIN_ROOM, {
+        msgtype: "m.text",
+        body: `!admin users deactivate @${id}:local`,
+      });
+      console.log(`[Pool] Matrix user @${id}:local deactivated`);
+    } catch (err) {
+      console.error(`[Pool] Deactivate warning for @${id}:local: ${err.message}`);
+    }
+  }
+
+  // ===========================================================
+  // Agent direct-room handler
+  // ===========================================================
+  async onAgentRoomMessage(agentId, config, client, roomId, event) {
+    // Multi-agent room is handled by pool orchestration — skip here
+    if (roomId === MULTI_AGENT_ROOM) return;
+    // Skip own messages
+    if (event.sender === config.userId) return;
+    if (event.content?.msgtype !== "m.text") return;
+    if (event.origin_server_ts < this.startTime) return;
+
+    const body = event.content.body;
+    if (!body || body.startsWith("!")) return;
+
+    // Skip messages from other bots/agents
+    const botIds = new Set([POOL_USER_ID, ...([...this.agents.values()].map((a) => a.config.userId))]);
+    if (botIds.has(event.sender)) return;
+
+    // Prevent concurrent processing per agent per room
+    const key = `${agentId}:${roomId}`;
+    if (this.agentProcessing.has(key)) return;
+    this.agentProcessing.add(key);
+
+    try {
+      // Check if 1:1 room (just agent + human)
+      let isDirect = false;
+      try {
+        const members = await client.getJoinedRoomMembers(roomId);
+        isDirect = members.length <= 2;
+      } catch {}
+
+      const prompt = isDirect
+        ? `Du bist in einem direkten Chat mit dem Nutzer. Antworte immer, auch wenn das Thema nicht dein Kerngebiet ist.\n\n${body}`
+        : body;
+
+      console.log(`[Pool] ${config.displayName} in ${roomId}${isDirect ? " (1:1)" : ""}...`);
+      const result = await callClaude(prompt, agentDir(agentId));
+
+      if (!isDirect && result.trim().startsWith("[PASS]")) {
+        console.log(`[Pool] ${config.displayName}: [PASS]`);
+      } else {
+        await sendFormatted(client, roomId, result);
+        console.log(`[Pool] ${config.displayName}: ${result.length} chars`);
+      }
+    } catch (err) {
+      console.error(`[Pool] ${config.displayName} error in ${roomId}: ${err.message}`);
+    } finally {
+      this.agentProcessing.delete(key);
+    }
   }
 
   // ===========================================================
@@ -350,8 +548,9 @@ class AgentPool {
         if (text.toLowerCase() === "ja") {
           this.stopAgent(w.ctx.id);
           deleteAgentFiles(w.ctx.id);
+          await this.deactivateMatrixUser(w.ctx.id);
           await sendFormatted(this.poolClient, roomId,
-            `Agent **${w.ctx.displayName}** geloescht.`);
+            `Agent **${w.ctx.displayName}** geloescht (inkl. Matrix-User deaktiviert).`);
         } else {
           await sendPlain(this.poolClient, roomId, "Abgebrochen.");
         }
@@ -451,7 +650,7 @@ class AgentPool {
       const password = `agent-${id}-${Date.now()}`;
       const userId = `@${id}:local`;
 
-      if (this.adminClient) await createMatrixUser(this.adminClient, id, password);
+      if (this.adminClient) await ensureMatrixUser(this.adminClient, id, password);
 
       let token;
       try {
@@ -465,13 +664,19 @@ class AgentPool {
       await setDisplayName(token, userId, displayName);
       await inviteAndJoin(this.poolClient, token, MULTI_AGENT_ROOM);
 
+      // Seed agent workspace from base bridge template
+      const seeded = seedAgentWorkspace(id);
+
       const config = { id, displayName, userId, token, role, enabled: true };
       saveAgentConfig(id, config);
       saveAgentPrompt(id, systemPrompt);
       this.startAgent(id, config);
 
+      const seedNote = seeded
+        ? " Workspace aus Template uebernommen (Skills, Memory, Repo)."
+        : " Kein Template verfuegbar — leerer Workspace.";
       await sendFormatted(this.poolClient, roomId,
-        `Agent **${displayName}** erstellt als \`${userId}\` (${role}) — sofort aktiv!`);
+        `Agent **${displayName}** erstellt als \`${userId}\` (${role}) — sofort aktiv!${seedNote}`);
     } catch (err) {
       console.error(`[Pool] Create error: ${err.message}`);
       await sendPlain(this.poolClient, roomId, `Fehler: ${err.message}`);
@@ -597,6 +802,14 @@ class AgentPool {
           if (!isDirect && result.trim().startsWith("[PASS]")) {
             console.log(`[Pool] ${config.displayName}: [PASS]`);
           } else {
+            // Track response directly (don't wait for Matrix echo in onMessage)
+            if (this.activeTask && !this.activeTask.respondedIds.has(config.userId)) {
+              this.activeTask.respondedIds.add(config.userId);
+              this.activeTask.expertResponses.push({
+                name: config.displayName,
+                response: result,
+              });
+            }
             await sendFormatted(client, roomId, result);
             console.log(`[Pool] ${config.displayName}: ${result.length} chars`);
           }

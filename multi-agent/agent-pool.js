@@ -7,6 +7,7 @@ const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const { marked } = require("marked");
+const cron = require("node-cron");
 
 // ============================================================
 // Config
@@ -55,16 +56,16 @@ function saveAgentConfig(id, config) {
   fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify(config, null, 2));
 }
 
-function saveAgentPrompt(id, prompt) {
+function saveAgentPrompt(id, prompt, role) {
   const dir = agentDir(id);
   fs.mkdirSync(dir, { recursive: true });
   // Store raw agent prompt separately for re-merging on updates
   fs.writeFileSync(path.join(dir, "AGENT-PROMPT.md"), prompt);
   // Build merged CLAUDE.md: base workspace instructions + agent role
-  fs.writeFileSync(path.join(dir, "CLAUDE.md"), buildAgentClaudeMd(prompt));
+  fs.writeFileSync(path.join(dir, "CLAUDE.md"), buildAgentClaudeMd(prompt, role));
 }
 
-function buildAgentClaudeMd(agentPrompt) {
+function buildAgentClaudeMd(agentPrompt, role) {
   const templatePath = path.join(TEMPLATE_WORKSPACE, "CLAUDE.md");
   let base = "";
   try {
@@ -80,7 +81,50 @@ function buildAgentClaudeMd(agentPrompt) {
     "Your workspace root is the current working directory. All files (repos, skills, memory) are here.\n" +
     "Memory entries may contain absolute paths like `/workspace/...` from a shared template — " +
     "translate these to relative paths (e.g. `/workspace/314092_foo/` → `./314092_foo/`).\n";
-  return `${base}\n\n---\n\n${pathNote}\n---\n\n## Agent Role\n\n${agentPrompt}`;
+
+  let extra = "";
+  if (role === "autonomous") {
+    extra =
+      "\n---\n\n## Trigger-Verwaltung (triggers.json)\n\n" +
+      "Du bist ein autonomer Agent. Deine Ausfuehrungen werden durch Trigger gesteuert, " +
+      "die in `triggers.json` in deinem Workspace-Root definiert sind. " +
+      "Du kannst diese Datei selbst lesen und aendern, um deinen eigenen Zeitplan anzupassen.\n\n" +
+      "### Trigger-Typen\n\n" +
+      "**Recurring (cron):**\n" +
+      "```json\n" +
+      "{\n" +
+      '  "id": "unique-id",\n' +
+      '  "type": "cron",\n' +
+      '  "enabled": true,\n' +
+      '  "cron": "*/30 * * * *",\n' +
+      '  "description": "Beschreibung",\n' +
+      '  "prompt": "Was du bei jeder Ausfuehrung tun sollst"\n' +
+      "}\n" +
+      "```\n" +
+      "Cron-Format: `Minute Stunde Tag Monat Wochentag`\n\n" +
+      "**Einmalig (once):**\n" +
+      "```json\n" +
+      "{\n" +
+      '  "id": "unique-id",\n' +
+      '  "type": "once",\n' +
+      '  "enabled": true,\n' +
+      '  "at": "2026-04-25T09:00:00",\n' +
+      '  "description": "Beschreibung",\n' +
+      '  "prompt": "Was du tun sollst"\n' +
+      "}\n" +
+      "```\n\n" +
+      "### Trigger verwalten\n\n" +
+      "1. `triggers.json` lesen\n" +
+      "2. Trigger hinzufuegen, aendern oder entfernen\n" +
+      "3. Datei zurueckschreiben\n" +
+      "4. Aenderungen werden automatisch innerhalb von 60 Sekunden uebernommen\n\n" +
+      "### Optionale Felder\n\n" +
+      "- `roomId` — Ziel-Room fuer die Ausgabe (Standard: Multi-Agent-Room)\n" +
+      "- `timeoutSeconds` — Max. Ausfuehrungszeit (Standard: 600)\n\n" +
+      "Wenn du bei einer geplanten Ausfuehrung nichts zu berichten hast, antworte mit `[PASS]`.\n";
+  }
+
+  return `${base}\n\n---\n\n${pathNote}\n---\n\n## Agent Role\n\n${agentPrompt}${extra}`;
 }
 
 function seedAgentWorkspace(id) {
@@ -138,6 +182,26 @@ function patchSeededPaths(dir) {
       console.log(`[Pool] Patch warning (${file}): ${err.message}`);
     }
   }
+}
+
+// ============================================================
+// Trigger storage (per-agent triggers.json)
+// ============================================================
+function loadTriggers(id) {
+  const p = path.join(agentDir(id), "triggers.json");
+  try {
+    if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, "utf8"));
+  } catch (err) {
+    console.error(`[Triggers] Error loading triggers for ${id}: ${err.message}`);
+  }
+  return [];
+}
+
+function saveTriggers(id, triggers) {
+  fs.writeFileSync(
+    path.join(agentDir(id), "triggers.json"),
+    JSON.stringify(triggers, null, 2)
+  );
 }
 
 function deleteAgentFiles(id) {
@@ -275,7 +339,7 @@ async function inviteAndJoin(poolClient, token, roomId) {
 // ============================================================
 // Wizard
 // ============================================================
-// Steps: add → id → name → role → prompt → done
+// Steps: add → id → name → role → [schedule → taskPrompt (autonomous)] → prompt → done
 //        update → pick → prompt → done
 //        delete → pick → confirm → done
 
@@ -286,9 +350,13 @@ function wizardPrompt(step, ctx) {
     case "add:name":
       return `**Neuer Agent (2/4)**\nAnzeigename fuer \`${ctx.id}\`? (z.B. \`COBOL Expert\`)`;
     case "add:role":
-      return "**Neuer Agent (3/4)**\nWelche Rolle?\n- `expert` — antwortet autonom auf Nutzerfragen\n- `synthesizer` — fasst Experten-Ergebnisse zusammen";
+      return "**Neuer Agent (3/?)**\nWelche Rolle?\n- `expert` — antwortet autonom auf Nutzerfragen\n- `synthesizer` — fasst Experten-Ergebnisse zusammen\n- `autonomous` — arbeitet selbstaendig im Hintergrund nach Zeitplan";
+    case "add:schedule":
+      return `**Neuer Agent (4/6)**\nZeitplan fuer \`${ctx.id}\`?\n\nBeispiele:\n- \`*/30 * * * *\` — alle 30 Minuten\n- \`0 * * * *\` — jede Stunde\n- \`0 9 * * *\` — taeglich um 9:00\n- \`0 */4 * * *\` — alle 4 Stunden`;
+    case "add:taskPrompt":
+      return "**Neuer Agent (5/6)**\nWas soll der Agent bei jedem Durchlauf tun?\n\nDas ist der Prompt, der bei jeder geplanten Ausfuehrung an Claude geschickt wird.\n\n*Tipp: Beschreibe die konkrete Aufgabe, z.B. \"Pruefe alle offenen Tickets auf Qualitaetskriterien...\"*";
     case "add:prompt":
-      return "**Neuer Agent (4/4)**\nSchicke jetzt den System-Prompt.\nDas ist die Anweisung, die dem Agent sagt, wie er sich verhalten soll.\n\n*Tipp: Starte mit `# Rollenname` und beschreibe Verhalten, Grenzen und Ausgabeformat.*";
+      return `**Neuer Agent (${ctx.role === "autonomous" ? "6/6" : "4/4"})**\nSchicke jetzt den System-Prompt.\nDas ist die Anweisung, die dem Agent sagt, wie er sich verhalten soll.\n\n*Tipp: Starte mit \`# Rollenname\` und beschreibe Verhalten, Grenzen und Ausgabeformat.*`;
     case "update:pick":
       return `**Agent aktualisieren**\nWelchen Agent? Schreibe die ID.\n\n${ctx.list}`;
     case "update:prompt":
@@ -325,6 +393,9 @@ class AgentPool {
     this.wizard = null; // { step, ctx, timer }
     this.startTime = 0;
     this.agentProcessing = new Set(); // tracks "agentId:roomId" to prevent concurrent calls
+    // Trigger scheduler: "agentId:triggerId" → { task, cronExpr }
+    this.triggerTasks = new Map();
+    this.triggerRunning = new Set(); // "agentId:triggerId" keys currently executing
   }
 
   async init() {
@@ -347,11 +418,16 @@ class AgentPool {
     this.poolClient.on("room.message", (r, e) => this.onMessage(r, e));
     await this.poolClient.start();
 
+    // Start trigger scheduler for autonomous agents
+    this.startTriggerScheduler();
+
     console.log(`[Pool] Started as ${POOL_USER_ID}`);
     console.log(`[Pool] Room: ${MULTI_AGENT_ROOM}`);
     console.log(`[Pool] Agents loaded: ${this.agents.size}`);
-    for (const [id, a] of this.agents)
-      console.log(`  ${id}: ${a.config.displayName} (${a.config.role})`);
+    for (const [id, a] of this.agents) {
+      const schedInfo = a.config.schedule ? ` [${a.config.schedule}]` : "";
+      console.log(`  ${id}: ${a.config.displayName} (${a.config.role})${schedInfo}`);
+    }
   }
 
   startAgent(id, config) {
@@ -375,6 +451,7 @@ class AgentPool {
     if (agent?.client) {
       try { agent.client.stop(); } catch {}
     }
+    this.stopAgentTriggers(id);
     this.agents.delete(id);
     console.log(`[Pool] Agent stopped: ${id}`);
   }
@@ -389,6 +466,119 @@ class AgentPool {
       console.log(`[Pool] Matrix user @${id}:local deactivated`);
     } catch (err) {
       console.error(`[Pool] Deactivate warning for @${id}:local: ${err.message}`);
+    }
+  }
+
+  // ===========================================================
+  // Trigger scheduler (reads per-agent triggers.json, like bridge.js reads jobs.json)
+  // ===========================================================
+  startTriggerScheduler() {
+    this.syncTriggers();
+    this._triggerInterval = setInterval(() => this.syncTriggers(), 60_000);
+    console.log("[Pool] Trigger scheduler started (sync every 60s)");
+  }
+
+  syncTriggers() {
+    const activeKeys = new Set();
+
+    for (const [agentId, { config }] of this.agents) {
+      if (config.role !== "autonomous" || !config.enabled) continue;
+
+      const triggers = loadTriggers(agentId);
+      for (const trigger of triggers) {
+        if (!trigger.enabled || !trigger.id) continue;
+        const key = `${agentId}:${trigger.id}`;
+
+        if (trigger.type === "cron") {
+          activeKeys.add(key);
+          const existing = this.triggerTasks.get(key);
+          if (existing && existing.cronExpr === trigger.cron) continue;
+
+          // Stop old task if cron changed
+          if (existing) {
+            existing.task.stop();
+            console.log(`[Triggers] Updated: ${config.displayName}/${trigger.id}`);
+          }
+
+          if (!cron.validate(trigger.cron)) {
+            console.error(`[Triggers] Invalid cron: ${trigger.cron} (${config.displayName}/${trigger.id})`);
+            continue;
+          }
+
+          const task = cron.schedule(trigger.cron, () => {
+            this.executeTrigger(agentId, trigger);
+          }, { timezone: "Europe/Berlin" });
+
+          this.triggerTasks.set(key, { task, cronExpr: trigger.cron });
+          console.log(`[Triggers] Scheduled: ${config.displayName}/${trigger.id} (${trigger.cron})`);
+
+        } else if (trigger.type === "once") {
+          const at = new Date(trigger.at).getTime();
+          if (Date.now() >= at) {
+            this.executeTrigger(agentId, trigger);
+            // Mark as done — remove from file
+            const updated = triggers.filter((t) => t.id !== trigger.id);
+            saveTriggers(agentId, updated);
+            console.log(`[Triggers] One-shot fired and removed: ${config.displayName}/${trigger.id}`);
+          }
+        }
+        // Future trigger types (matrix-event, http, ...) would be handled here
+      }
+    }
+
+    // Stop triggers that are no longer in any agent's file
+    for (const [key, { task }] of this.triggerTasks) {
+      if (!activeKeys.has(key)) {
+        task.stop();
+        this.triggerTasks.delete(key);
+        console.log(`[Triggers] Removed: ${key}`);
+      }
+    }
+  }
+
+  async executeTrigger(agentId, trigger) {
+    const key = `${agentId}:${trigger.id}`;
+    if (this.triggerRunning.has(key)) {
+      console.log(`[Triggers] ${key} still running — skipping`);
+      return;
+    }
+    this.triggerRunning.add(key);
+
+    const agent = this.agents.get(agentId);
+    if (!agent) { this.triggerRunning.delete(key); return; }
+    const { config, client } = agent;
+    const roomId = trigger.roomId || MULTI_AGENT_ROOM;
+
+    console.log(`[Triggers] Executing: ${config.displayName}/${trigger.id}...`);
+    try {
+      const prompt =
+        "Du fuehrst eine geplante autonome Aufgabe aus. " +
+        "Poste deine Ergebnisse. Falls es nichts zu berichten gibt, antworte mit [PASS].\n\n" +
+        `Aufgabe: ${trigger.prompt}`;
+
+      const timeoutMs = trigger.timeoutSeconds ? trigger.timeoutSeconds * 1000 : CLAUDE_TIMEOUT;
+      const result = await callClaude(prompt, agentDir(agentId), timeoutMs);
+
+      if (result.trim().startsWith("[PASS]")) {
+        console.log(`[Triggers] ${config.displayName}/${trigger.id}: [PASS]`);
+      } else {
+        await sendFormatted(client, roomId, result);
+        console.log(`[Triggers] ${config.displayName}/${trigger.id}: ${result.length} chars`);
+      }
+    } catch (err) {
+      console.error(`[Triggers] ${config.displayName}/${trigger.id} error: ${err.message}`);
+    } finally {
+      this.triggerRunning.delete(key);
+    }
+  }
+
+  stopAgentTriggers(agentId) {
+    for (const [key, { task }] of this.triggerTasks) {
+      if (key.startsWith(`${agentId}:`)) {
+        task.stop();
+        this.triggerTasks.delete(key);
+        console.log(`[Triggers] Stopped: ${key}`);
+      }
     }
   }
 
@@ -492,11 +682,33 @@ class AgentPool {
       }
       case "add:role": {
         const role = text.toLowerCase();
-        if (role !== "expert" && role !== "synthesizer") {
-          await sendPlain(this.poolClient, roomId, "Bitte `expert` oder `synthesizer` eingeben:");
+        if (role !== "expert" && role !== "synthesizer" && role !== "autonomous") {
+          await sendPlain(this.poolClient, roomId, "Bitte `expert`, `synthesizer` oder `autonomous` eingeben:");
           return;
         }
         w.ctx.role = role;
+        if (role === "autonomous") {
+          w.step = "add:schedule";
+          await sendFormatted(this.poolClient, roomId, wizardPrompt("add:schedule", w.ctx));
+        } else {
+          w.step = "add:prompt";
+          await sendFormatted(this.poolClient, roomId, wizardPrompt("add:prompt", w.ctx));
+        }
+        return;
+      }
+      case "add:schedule": {
+        if (!cron.validate(text.trim())) {
+          await sendPlain(this.poolClient, roomId,
+            "Ungueltiger Cron-Ausdruck. Format: `MIN STD TAG MON WOT` (5 Felder). Nochmal:");
+          return;
+        }
+        w.ctx.schedule = text.trim();
+        w.step = "add:taskPrompt";
+        await sendFormatted(this.poolClient, roomId, wizardPrompt("add:taskPrompt", w.ctx));
+        return;
+      }
+      case "add:taskPrompt": {
+        w.ctx.taskPrompt = text;
         w.step = "add:prompt";
         await sendFormatted(this.poolClient, roomId, wizardPrompt("add:prompt", w.ctx));
         return;
@@ -504,7 +716,8 @@ class AgentPool {
       case "add:prompt": {
         w.ctx.systemPrompt = text;
         this.cancelWizard();
-        await this.createAgent(w.ctx.id, w.ctx.displayName, w.ctx.role, w.ctx.systemPrompt, roomId);
+        await this.createAgent(w.ctx.id, w.ctx.displayName, w.ctx.role, w.ctx.systemPrompt, roomId,
+          { schedule: w.ctx.schedule, taskPrompt: w.ctx.taskPrompt });
         return;
       }
 
@@ -522,7 +735,8 @@ class AgentPool {
         return;
       }
       case "update:prompt": {
-        saveAgentPrompt(w.ctx.id, text);
+        const cfg = loadAgentConfig(w.ctx.id);
+        saveAgentPrompt(w.ctx.id, text, cfg?.role);
         this.cancelWizard();
         await sendFormatted(this.poolClient, roomId,
           `Prompt fuer **${w.ctx.id}** aktualisiert.`);
@@ -589,10 +803,15 @@ class AgentPool {
         await sendPlain(this.poolClient, roomId, "Keine Agenten konfiguriert.");
         return;
       }
-      let table = "| ID | Name | Rolle | Status |\n|---|---|---|---|\n";
+      let table = "| ID | Name | Rolle | Status | Trigger |\n|---|---|---|---|---|\n";
       for (const id of ids) {
         const c = loadAgentConfig(id);
-        table += `| ${id} | ${c.displayName} | ${c.role} | ${this.agents.has(id) ? "aktiv" : "gestoppt"} |\n`;
+        const triggers = loadTriggers(id);
+        const cronTriggers = triggers.filter((t) => t.type === "cron" && t.enabled);
+        const triggerInfo = cronTriggers.length > 0
+          ? cronTriggers.map((t) => `\`${t.cron}\``).join(", ")
+          : "—";
+        table += `| ${id} | ${c.displayName} | ${c.role} | ${this.agents.has(id) ? "aktiv" : "gestoppt"} | ${triggerInfo} |\n`;
       }
       await sendFormatted(this.poolClient, roomId, table);
       return;
@@ -643,7 +862,7 @@ class AgentPool {
   // ===========================================================
   // Agent creation
   // ===========================================================
-  async createAgent(id, displayName, role, systemPrompt, roomId) {
+  async createAgent(id, displayName, role, systemPrompt, roomId, extra = {}) {
     try {
       await sendPlain(this.poolClient, roomId, `Erstelle Agent "${displayName}"...`);
 
@@ -669,14 +888,30 @@ class AgentPool {
 
       const config = { id, displayName, userId, token, role, enabled: true };
       saveAgentConfig(id, config);
-      saveAgentPrompt(id, systemPrompt);
+      saveAgentPrompt(id, systemPrompt, role);
+
+      // Seed initial triggers.json for autonomous agents
+      if (role === "autonomous" && extra.schedule && extra.taskPrompt) {
+        saveTriggers(id, [{
+          id: "initial",
+          type: "cron",
+          enabled: true,
+          cron: extra.schedule,
+          description: displayName,
+          prompt: extra.taskPrompt,
+        }]);
+      }
+
       this.startAgent(id, config);
 
       const seedNote = seeded
         ? " Workspace aus Template uebernommen (Skills, Memory, Repo)."
         : " Kein Template verfuegbar — leerer Workspace.";
+      const scheduleNote = role === "autonomous" && extra.schedule
+        ? `\nInitialer Trigger: \`${extra.schedule}\``
+        : "";
       await sendFormatted(this.poolClient, roomId,
-        `Agent **${displayName}** erstellt als \`${userId}\` (${role}) — sofort aktiv!${seedNote}`);
+        `Agent **${displayName}** erstellt als \`${userId}\` (${role}) — sofort aktiv!${seedNote}${scheduleNote}`);
     } catch (err) {
       console.error(`[Pool] Create error: ${err.message}`);
       await sendPlain(this.poolClient, roomId, `Fehler: ${err.message}`);
@@ -754,25 +989,41 @@ class AgentPool {
       (a) => a.config.role === "expert" && a.config.enabled
     );
 
+    // Check @-mentions across ALL agent types (experts + autonomous)
+    const bodyLower = body.toLowerCase();
+    const isMentioned = (a) => {
+      const name = a.config.displayName.toLowerCase();
+      const id = a.config.id.toLowerCase();
+      const userId = a.config.userId.toLowerCase();
+      return bodyLower.includes(name) || bodyLower.includes(id) || bodyLower.includes(userId);
+    };
+
+    // Handle @-mentioned autonomous agents — they respond outside the expert pipeline
+    const mentionedAutonomous = [...this.agents.values()].filter(
+      (a) => a.config.role === "autonomous" && a.config.enabled && isMentioned(a)
+    );
+    if (mentionedAutonomous.length > 0) {
+      console.log(`[Pool] Autonomous mentioned: ${mentionedAutonomous.map((a) => a.config.displayName).join(", ")}`);
+      for (const { config, client } of mentionedAutonomous) {
+        this.callAutonomousOnMention(config, client, roomId, body);
+      }
+    }
+
+    const mentionedExperts = allExperts.filter(isMentioned);
+
+    // If only autonomous agents mentioned (no experts) → done, no expert pipeline
+    if (mentionedAutonomous.length > 0 && mentionedExperts.length === 0) return;
+
     if (allExperts.length === 0) {
       await sendPlain(this.poolClient, roomId,
         "Keine Experten-Agenten aktiv. Erstelle welche mit `!agent add`.");
       return;
     }
 
-    // Check if user @-mentioned specific agents (by displayName or id)
-    const bodyLower = body.toLowerCase();
-    const mentioned = allExperts.filter((a) => {
-      const name = a.config.displayName.toLowerCase();
-      const id = a.config.id.toLowerCase();
-      const userId = a.config.userId.toLowerCase();
-      return bodyLower.includes(name) || bodyLower.includes(id) || bodyLower.includes(userId);
-    });
-
-    // If specific agents mentioned → only those. Otherwise → all.
-    const experts = mentioned.length > 0 ? mentioned : allExperts;
-    if (mentioned.length > 0) {
-      console.log(`[Pool] Mentioned: ${mentioned.map((a) => a.config.displayName).join(", ")}`);
+    // If specific experts mentioned → only those. Otherwise → all experts.
+    const experts = mentionedExperts.length > 0 ? mentionedExperts : allExperts;
+    if (mentionedExperts.length > 0) {
+      console.log(`[Pool] Mentioned: ${mentionedExperts.map((a) => a.config.displayName).join(", ")}`);
     }
 
     this.activeTask = {
@@ -787,7 +1038,7 @@ class AgentPool {
 
     const totalExperts = experts.length;
 
-    const isDirect = mentioned.length > 0;
+    const isDirect = mentionedExperts.length > 0;
 
     // Call Claude for each expert in parallel
     Promise.allSettled(
@@ -825,6 +1076,28 @@ class AgentPool {
     );
 
     this.activeTask.maxTimer = setTimeout(() => this.triggerSynthesis(), MAX_TIMEOUT);
+  }
+
+  async callAutonomousOnMention(config, client, roomId, body) {
+    const key = `${config.id}:${roomId}`;
+    if (this.agentProcessing.has(key)) return;
+    this.agentProcessing.add(key);
+    try {
+      const prompt =
+        "Der Nutzer hat dich direkt angesprochen. Antworte auf jeden Fall.\n\n" + body;
+      console.log(`[Pool] Autonomous mention: ${config.displayName}...`);
+      const result = await callClaude(prompt, agentDir(config.id));
+      if (result.trim().startsWith("[PASS]")) {
+        console.log(`[Pool] ${config.displayName}: [PASS]`);
+      } else {
+        await sendFormatted(client, roomId, result);
+        console.log(`[Pool] ${config.displayName}: ${result.length} chars`);
+      }
+    } catch (err) {
+      console.error(`[Pool] ${config.displayName} mention error: ${err.message}`);
+    } finally {
+      this.agentProcessing.delete(key);
+    }
   }
 
   checkAllDone(roomId, totalExperts) {

@@ -58,8 +58,27 @@ Matrix Client (Element etc.)
 
 | Role | Behavior |
 |---|---|
-| `expert` | Responds autonomously to human messages. Returns `[PASS]` if topic is outside expertise. When @-mentioned directly, always responds. |
+| `expert` | Responds reactively to human messages. Returns `[PASS]` if topic is outside expertise. When @-mentioned directly, always responds. |
 | `synthesizer` | Called after experts finish. Merges results into one answer. Returns `[PASS]` if synthesis adds no value. |
+| `autonomous` | Runs proactively on a cron schedule. Posts results to the room. Responds to @-mentions and direct messages. Does NOT participate in expert broadcast routing. |
+
+#### Autonomous Agent Triggers
+
+Autonomous agents are driven by **triggers** stored in a per-agent `triggers.json` file (`/workspace/agents/<id>/triggers.json`). The trigger scheduler syncs every 60 seconds (using `node-cron`, same library as the base bridge scheduler).
+
+**Key design properties:**
+- **Self-managed** — the agent can read/write its own `triggers.json` to adjust its schedule
+- **File-based sync** — same pattern as `jobs.json` in the base bridge (`bridge.js`)
+- **Open for extension** — currently supports `cron` and `once`, future types (matrix-event, http-webhook, etc.) can be added
+- **Overlap protection** — if a trigger's previous execution is still running, the next tick is skipped
+
+**Trigger types:**
+| Type | Fields | Behavior |
+|---|---|---|
+| `cron` | `cron` (5-field expression) | Recurring execution via node-cron |
+| `once` | `at` (ISO timestamp) | One-shot, auto-removed after execution |
+
+Results are posted to the multi-agent room (or custom `roomId`); `[PASS]` suppresses output.
 
 #### @-Mention Logic
 
@@ -67,6 +86,7 @@ Matrix Client (Element etc.)
 |---|---|
 | `Vergleiche COBOL und Java` | All experts (no name mentioned) |
 | `Java Experte: was ist ein Record?` | Only Java Experte (direct mention) |
+| `quality-gate: pruefe den letzten Commit` | Only the autonomous agent (direct mention, outside expert pipeline) |
 | Direct mention + off-topic | Agent responds anyway (override [PASS]) |
 
 #### Admin Commands (Chat Wizard)
@@ -76,12 +96,12 @@ All commands work in the Multi-Agent room from `@thorsten:local`:
 | Command | Description |
 |---|---|
 | `!agent` | Show help |
-| `!agent add` | Guided wizard: ID → name → role → system prompt |
+| `!agent add` | Guided wizard: ID → name → role → [cron → taskPrompt (autonomous only)] → system prompt |
 | `!agent update` | Change an agent's system prompt |
 | `!agent delete` | Remove agent (with confirmation) |
-| `!agent list` | Show all agents as table |
+| `!agent list` | Show all agents as table (includes schedule column) |
 | `!agent enable <id>` | Reactivate a stopped agent |
-| `!agent disable <id>` | Pause an agent |
+| `!agent disable <id>` | Pause an agent (stops cron for autonomous) |
 | `!cancel` | Cancel a running wizard |
 
 ## Key Files
@@ -103,9 +123,9 @@ All commands work in the Multi-Agent room from `@thorsten:local`:
 | File | Purpose |
 |---|---|
 | `docker-compose.multi-agent.yml` | Compose overlay — single `agent-pool` service |
-| `multi-agent/agent-pool.js` | Dynamic agent management, routing, synthesis, admin wizard, workspace seeding |
+| `multi-agent/agent-pool.js` | Dynamic agent management, routing, synthesis, trigger scheduler, admin wizard, workspace seeding |
 | `multi-agent/Dockerfile` | Node 22 + Claude Code CLI + marked |
-| `multi-agent/package.json` | Dependencies: matrix-bot-sdk, marked |
+| `multi-agent/package.json` | Dependencies: matrix-bot-sdk, marked, node-cron |
 | `multi-agent/setup.sh` | Initial setup: register Matrix users, create room |
 | `multi-agent/CLAUDE-COBOL.md` | Example: COBOL expert system prompt |
 | `multi-agent/CLAUDE-JAVA.md` | Example: Java expert system prompt |

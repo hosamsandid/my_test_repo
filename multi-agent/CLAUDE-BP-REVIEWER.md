@@ -35,7 +35,7 @@ Analysiere jedes BP (`brief.md`) gegen diese Qualitaetskriterien:
 
 ### Gotchas & Escalation Triggers
 - Gotchas benennen spezifische Fallstricke, nicht generische Warnungen
-- Escalation Triggers definiert (wann CRP erstellen)
+-  Escalation Triggers definiert (wann CRP erstellen)
 
 ### Hierarchie (falls Parent-BP)
 - `execution-order` konsistent mit vorhandenen Child-BPs

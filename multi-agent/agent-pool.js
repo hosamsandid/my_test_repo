@@ -389,7 +389,9 @@ class AgentPool {
     this.agents = new Map();
     this.poolClient = null;
     this.adminClient = null;
-    this.activeTask = null;
+    this.activeTasks = new Map(); // roomId → activeTask (one pipeline per room)
+    this.roomQueues = new Map();  // roomId → [body, ...]
+    this.roomBusy = new Set();    // roomId
     this.wizard = null; // { step, ctx, timer }
     this.startTime = 0;
     this.agentProcessing = new Set(); // tracks "agentId:roomId" to prevent concurrent calls
@@ -953,16 +955,17 @@ class AgentPool {
     const agentEntry = [...this.agents.values()].find(
       (a) => a.config.userId === event.sender
     );
-    if (agentEntry && this.activeTask) {
+    if (agentEntry && this.activeTasks.has(roomId)) {
+      const activeTask = this.activeTasks.get(roomId);
       if (agentEntry.config.role === "expert" &&
-          !this.activeTask.respondedIds.has(event.sender)) {
-        this.activeTask.respondedIds.add(event.sender);
-        this.activeTask.expertResponses.push({
+          !activeTask.respondedIds.has(event.sender)) {
+        activeTask.respondedIds.add(event.sender);
+        activeTask.expertResponses.push({
           name: agentEntry.config.displayName,
           response: body,
         });
         console.log(`[Pool] Expert: ${agentEntry.config.displayName} (${body.length} chars)`);
-        this.resetQuietTimer();
+        this.resetQuietTimer(roomId);
       }
       return;
     }
@@ -976,15 +979,22 @@ class AgentPool {
     if (body.startsWith("!")) return;
 
     console.log(`[Pool] Human: ${body.substring(0, 80)}`);
-    await this.processHumanMessage(roomId, body);
+    if (this.roomBusy.has(roomId)) {
+      if (!this.roomQueues.has(roomId)) this.roomQueues.set(roomId, []);
+      const queue = this.roomQueues.get(roomId);
+      if (queue.length >= 5) {
+        await sendPlain(this.poolClient, roomId, "⚠️ Warteschlange voll — bitte warte kurz.");
+        return;
+      }
+      queue.push(body);
+      await sendPlain(this.poolClient, roomId, `📥 In Warteschlange (${queue.length}).`);
+      return;
+    }
+    this.roomBusy.add(roomId);
+    this.processHumanMessage(roomId, body);
   }
 
   async processHumanMessage(roomId, body) {
-    if (this.activeTask) {
-      if (this.activeTask.quietTimer) clearTimeout(this.activeTask.quietTimer);
-      if (this.activeTask.maxTimer) clearTimeout(this.activeTask.maxTimer);
-    }
-
     const allExperts = [...this.agents.values()].filter(
       (a) => a.config.role === "expert" && a.config.enabled
     );
@@ -1026,15 +1036,16 @@ class AgentPool {
       console.log(`[Pool] Mentioned: ${mentionedExperts.map((a) => a.config.displayName).join(", ")}`);
     }
 
-    this.activeTask = {
+    const task = {
       originalTask: body,
       roomId,
       expertResponses: [],
       respondedIds: new Set(),
-      doneIds: new Set(), // tracks all completed experts (posted + passed + error)
+      doneIds: new Set(),
       quietTimer: null,
       maxTimer: null,
     };
+    this.activeTasks.set(roomId, task);
 
     const totalExperts = experts.length;
 
@@ -1054,9 +1065,10 @@ class AgentPool {
             console.log(`[Pool] ${config.displayName}: [PASS]`);
           } else {
             // Track response directly (don't wait for Matrix echo in onMessage)
-            if (this.activeTask && !this.activeTask.respondedIds.has(config.userId)) {
-              this.activeTask.respondedIds.add(config.userId);
-              this.activeTask.expertResponses.push({
+            const currentTask = this.activeTasks.get(roomId);
+            if (currentTask && !currentTask.respondedIds.has(config.userId)) {
+              currentTask.respondedIds.add(config.userId);
+              currentTask.expertResponses.push({
                 name: config.displayName,
                 response: result,
               });
@@ -1068,14 +1080,15 @@ class AgentPool {
           console.error(`[Pool] ${config.displayName} error: ${err.message}`);
         }
         // Mark expert as done regardless of outcome
-        if (this.activeTask) {
-          this.activeTask.doneIds.add(config.userId);
+        const currentTask = this.activeTasks.get(roomId);
+        if (currentTask) {
+          currentTask.doneIds.add(config.userId);
           this.checkAllDone(roomId, totalExperts);
         }
       })
     );
 
-    this.activeTask.maxTimer = setTimeout(() => this.triggerSynthesis(), MAX_TIMEOUT);
+    this.activeTasks.get(roomId).maxTimer = setTimeout(() => this.triggerSynthesis(roomId), MAX_TIMEOUT);
   }
 
   async callAutonomousOnMention(config, client, roomId, body) {
@@ -1101,51 +1114,72 @@ class AgentPool {
   }
 
   checkAllDone(roomId, totalExperts) {
-    if (!this.activeTask) return;
-    if (this.activeTask.doneIds.size < totalExperts) return;
+    const activeTask = this.activeTasks.get(roomId);
+    if (!activeTask) return;
+    if (activeTask.doneIds.size < totalExperts) return;
 
     // All experts finished processing
-    if (this.activeTask.expertResponses.length === 0) {
+    if (activeTask.expertResponses.length === 0) {
       // Nobody posted anything — all passed or errored
       console.log("[Pool] All experts passed — sending fallback");
-      if (this.activeTask.quietTimer) clearTimeout(this.activeTask.quietTimer);
-      if (this.activeTask.maxTimer) clearTimeout(this.activeTask.maxTimer);
-      this.activeTask = null;
+      if (activeTask.quietTimer) clearTimeout(activeTask.quietTimer);
+      if (activeTask.maxTimer) clearTimeout(activeTask.maxTimer);
+      this.activeTasks.delete(roomId);
       sendPlain(this.poolClient, roomId,
         "Keiner der Experten konnte zu diesem Thema beitragen. Erstelle einen passenden Experten mit `!agent add`.");
+      this.drainQueue(roomId);
     }
     // If some posted, the watcher (resetQuietTimer via onMessage) handles synthesis
   }
 
-  resetQuietTimer() {
-    if (!this.activeTask) return;
-    if (this.activeTask.quietTimer) clearTimeout(this.activeTask.quietTimer);
+  drainQueue(roomId) {
+    const queue = this.roomQueues.get(roomId);
+    if (!queue || queue.length === 0) {
+      this.roomQueues.delete(roomId);
+      this.roomBusy.delete(roomId);
+      console.log(`[Pool] Pipeline done for ${roomId}`);
+      return;
+    }
+    const next = queue.shift();
+    console.log(`[Pool] Draining queue for ${roomId} (${queue.length} remaining)`);
+    this.processHumanMessage(roomId, next);
+  }
+
+  resetQuietTimer(roomId) {
+    const activeTask = this.activeTasks.get(roomId);
+    if (!activeTask) return;
+    if (activeTask.quietTimer) clearTimeout(activeTask.quietTimer);
     const experts = [...this.agents.values()].filter(
       (a) => a.config.role === "expert" && a.config.enabled
     );
-    const allResponded = experts.every((a) => this.activeTask.respondedIds.has(a.config.userId));
-    this.activeTask.quietTimer = setTimeout(
-      () => this.triggerSynthesis(),
+    const allResponded = experts.every((a) => activeTask.respondedIds.has(a.config.userId));
+    activeTask.quietTimer = setTimeout(
+      () => this.triggerSynthesis(roomId),
       allResponded ? 5_000 : QUIET_DELAY
     );
   }
 
-  async triggerSynthesis() {
-    if (!this.activeTask) return;
-    const task = this.activeTask;
-    this.activeTask = null;
+  async triggerSynthesis(roomId) {
+    const task = this.activeTasks.get(roomId);
+    if (!task) return;
+    this.activeTasks.delete(roomId);
     if (task.quietTimer) clearTimeout(task.quietTimer);
     if (task.maxTimer) clearTimeout(task.maxTimer);
 
     if (task.expertResponses.length <= 1) {
       console.log("[Pool] Synthesis not needed");
+      this.drainQueue(roomId);
       return;
     }
 
     const synth = [...this.agents.values()].find(
       (a) => a.config.role === "synthesizer" && a.config.enabled
     );
-    if (!synth) { console.log("[Pool] No synthesizer"); return; }
+    if (!synth) {
+      console.log("[Pool] No synthesizer");
+      this.drainQueue(roomId);
+      return;
+    }
 
     console.log(`[Pool] Synthesizing ${task.expertResponses.length} responses...`);
     const context = task.expertResponses
@@ -1156,11 +1190,15 @@ class AgentPool {
         `Experten haben auf folgende Frage geantwortet. Fasse zusammen.\n\nFrage: ${task.originalTask}\n\nAntworten:\n${context}\n\nRegeln: Einleitungssatz, Vergleichstabelle wenn sinnvoll, max 1500 Zeichen, Sprache der Frage. Falls kein Mehrwert: [PASS]`,
         agentDir(synth.config.id)
       );
-      if (result.trim().startsWith("[PASS]")) { console.log("[Pool] Synthesis: PASS"); return; }
-      await sendFormatted(synth.client, task.roomId, result);
-      console.log(`[Pool] Synthesis: ${result.length} chars`);
+      if (result.trim().startsWith("[PASS]")) { console.log("[Pool] Synthesis: PASS"); }
+      else {
+        await sendFormatted(synth.client, task.roomId, result);
+        console.log(`[Pool] Synthesis: ${result.length} chars`);
+      }
     } catch (err) {
       console.error(`[Pool] Synthesis error: ${err.message}`);
+    } finally {
+      this.drainQueue(roomId);
     }
   }
 }

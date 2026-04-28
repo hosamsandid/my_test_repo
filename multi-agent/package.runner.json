@@ -1,0 +1,9 @@
+{
+  "name": "agent-runner",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "matrix-bot-sdk": "^0.7.1",
+    "node-cron": "^3.0.3"
+  }
+}

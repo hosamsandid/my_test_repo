@@ -1,29 +1,41 @@
-# Multi-Agent Overlay — Dynamic Agent Pool
+# Multi-Agent Overlay — Container-per-Agent Architecture
 #
 # Usage:
 #   podman compose -f docker-compose.yml -f docker-compose.multi-agent.yml up -d --build
 #
-# Single container manages all agents dynamically.
-# Create/update/delete agents via chat commands:
-#   !agent add <id> "<name>" expert|synthesizer
-#   ---
-#   <system prompt>
+# The orchestrator container manages agent containers dynamically via the Podman
+# REST API (socket mounted below). Each agent runs in its own container using
+# the e-vgh-claw-agent-runner:latest image.
 #
-#   !agent update <id>   — change prompt
-#   !agent delete <id>   — remove agent
-#   !agent list          — show all agents
+# IMPORTANT: Build the runner image before starting the stack:
+#   podman build -f multi-agent/Dockerfile.runner -t e-vgh-claw-agent-runner:latest ./multi-agent
+#
+# Create/update/delete agents via chat commands in the Multi-Agent room:
+#   !agent add     — guided wizard
+#   !agent update  — change agent prompt
+#   !agent delete  — remove agent
+#   !agent list    — show all agents
+#   !agent enable <id> / !agent disable <id>
 
 services:
-  agent-pool:
+  orchestrator:
     build:
       context: ./multi-agent
-    container_name: agent-pool
+      dockerfile: Dockerfile
+    container_name: orchestrator
     restart: unless-stopped
     volumes:
       - agent-pool-workspace:/workspace
       - claude-workspace:/template-workspace:ro
       - ~/.ssh/id_accenturecodefoundry:/root/.ssh/id_accenturecodefoundry:ro
       - ~/.ssh/id_accenturecodefoundry.pub:/root/.ssh/id_accenturecodefoundry.pub:ro
+      # Podman socket — allows orchestrator to create/start/stop agent containers.
+      # Path is the rootless Podman socket. Override PODMAN_SOCK_PATH env var if
+      # your Podman socket lives elsewhere (e.g. /run/user/502/podman/podman.sock
+      # on macOS with Podman Desktop, or /run/podman/podman.sock for rootful).
+      # The host-side path must be the actual socket — edit the left side below
+      # if needed and set PODMAN_SOCK_PATH to match inside the container.
+      - /run/user/1000/podman/podman.sock:/var/run/podman.sock
     environment:
       TZ: Europe/Berlin
       MATRIX_HOMESERVER: http://conduwuit:6167
@@ -34,13 +46,19 @@ services:
       # Conduwuit admin (for auto-creating Matrix users)
       CONDUWUIT_ADMIN_TOKEN: "${MATRIX_ACCESS_TOKEN}"
       CONDUWUIT_ADMIN_ROOM: "!cUxr0SyfINf9yEvBOD:local"
-      # Git identity for autonomous agents (push/PR)
+      # Git identity for agents that use git (push/PR)
       GIT_SSH_COMMAND: "ssh -i /root/.ssh/id_accenturecodefoundry -o StrictHostKeyChecking=accept-new"
       # Azure AI Foundry
       CLAUDE_CODE_USE_FOUNDRY: "1"
       ANTHROPIC_FOUNDRY_RESOURCE: "${ANTHROPIC_FOUNDRY_RESOURCE}"
       ANTHROPIC_FOUNDRY_API_KEY: "${ANTHROPIC_FOUNDRY_API_KEY}"
       ANTHROPIC_DEFAULT_SONNET_MODEL: "${ANTHROPIC_DEFAULT_SONNET_MODEL}"
+      # Podman socket path inside the container (change if you remapped above)
+      PODMAN_SOCK_PATH: "/var/run/podman.sock"
+      # Runner image name (built separately — see top of this file)
+      AGENT_RUNNER_IMAGE: "e-vgh-claw-agent-runner:latest"
+      # Compose network name — agent containers must reach conduwuit
+      AGENT_NETWORK: "e-vgh-claw_default"
     depends_on:
       conduwuit:
         condition: service_started

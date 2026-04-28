@@ -10,8 +10,9 @@ WORKDIR /app
 COPY package.json .
 RUN npm install --omit=dev
 COPY agent-pool.js .
+COPY orchestrator.js .
 
 WORKDIR /workspace
 RUN mkdir -p /workspace/agents
 
-CMD ["node", "/app/agent-pool.js"]
+CMD ["node", "/app/orchestrator.js"]

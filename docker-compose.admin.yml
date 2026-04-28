@@ -1,0 +1,35 @@
+# Admin Console Overlay
+# Usage:
+#   podman compose -f docker-compose.yml -f docker-compose.multi-agent.yml -f docker-compose.admin.yml up -d --build
+#
+# Or standalone with multi-agent:
+#   podman compose -f docker-compose.yml -f docker-compose.multi-agent.yml -f docker-compose.admin.yml up admin-console -d --build
+
+services:
+  admin-console:
+    build:
+      context: ./admin-console
+    container_name: admin-console
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    volumes:
+      - agent-pool-workspace:/workspace
+      - claude-workspace:/bridge-workspace
+      # Podman socket — adjust path if needed (see: podman system connection list)
+      - /run/user/1000/podman/podman.sock:/var/run/podman.sock:ro
+    environment:
+      TZ: Europe/Berlin
+      NODE_ENV: production
+      PODMAN_SOCK_PATH: /var/run/podman.sock
+      ANTHROPIC_FOUNDRY_RESOURCE: "${ANTHROPIC_FOUNDRY_RESOURCE}"
+      ANTHROPIC_DEFAULT_SONNET_MODEL: "${ANTHROPIC_DEFAULT_SONNET_MODEL}"
+    depends_on:
+      conduwuit:
+        condition: service_started
+
+volumes:
+  agent-pool-workspace:
+    name: vgh-claw_agent-pool-workspace
+  claude-workspace:
+    name: vgh-claw_claude-workspace

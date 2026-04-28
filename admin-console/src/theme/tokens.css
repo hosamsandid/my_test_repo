@@ -1,0 +1,221 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   Accenture Valkren — Design Tokens
+   Source: R47 Design System (design-system.md)
+   Color space: OKLCH
+   Base unit: 4px
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ─── Reset ─────────────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+/* ─── Admin Dark Theme (Default) ────────────────────────────────────── */
+:root,
+:root[data-theme="admin-dark"] {
+  /* Backgrounds */
+  --eb-bg-app:            oklch(0.13 0.005 260);
+  --eb-bg-surface:        oklch(0.17 0.008 260);
+  --eb-bg-elevated:       oklch(0.21 0.010 260);
+  --eb-bg-hover:          oklch(0.25 0.012 260);
+  --eb-bg-active:         oklch(0.29 0.014 260);
+  --eb-bg-selected:       oklch(0.20 0.040 230);
+
+  /* Borders */
+  --eb-border-default:    oklch(0.30 0.010 260);
+  --eb-border-hover:      oklch(0.38 0.012 260);
+  --eb-border-active:     oklch(0.45 0.015 260);
+
+  /* Text */
+  --eb-text-primary:      oklch(0.93 0.005 260);
+  --eb-text-secondary:    oklch(0.70 0.010 260);
+  --eb-text-muted:        oklch(0.55 0.008 260);
+  --eb-text-inverted:     oklch(0.13 0.005 260);
+
+  /* Accent (Cyan/Teal — SAP EB brand) */
+  --eb-accent-primary:    oklch(0.72 0.15 195);
+  --eb-accent-hover:      oklch(0.65 0.14 195);
+  --eb-accent-muted:      oklch(0.30 0.06 195);
+
+  /* Status Colors */
+  --eb-status-success:    oklch(0.72 0.18 155);
+  --eb-status-warning:    oklch(0.80 0.16 85);
+  --eb-status-error:      oklch(0.63 0.22 25);
+  --eb-status-info:       oklch(0.72 0.15 230);
+
+  /* Status backgrounds (15% opacity tints) */
+  --eb-status-success-bg: oklch(0.25 0.04 155);
+  --eb-status-warning-bg: oklch(0.25 0.04 85);
+  --eb-status-error-bg:   oklch(0.25 0.04 25);
+  --eb-status-info-bg:    oklch(0.25 0.04 230);
+
+  /* ─── Typography ───────────────────────────────────────────────── */
+  --eb-font-sans: 'Inter', 'Inter var', -apple-system, BlinkMacSystemFont,
+                  'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --eb-font-display: 'Inter Display', 'Inter', var(--eb-font-sans);
+  --eb-font-mono: 'JetBrains Mono', 'Geist Mono', 'Fira Code',
+                  'SF Mono', 'Cascadia Code', Consolas, monospace;
+
+  /* Type scale (Admin Console — compact) */
+  --eb-text-xs:   0.6875rem;  /* 11px */
+  --eb-text-sm:   0.75rem;    /* 12px */
+  --eb-text-base: 0.8125rem;  /* 13px */
+  --eb-text-md:   0.875rem;   /* 14px */
+  --eb-text-lg:   1rem;       /* 16px */
+  --eb-text-xl:   1.25rem;    /* 20px */
+  --eb-text-2xl:  1.5rem;     /* 24px */
+  --eb-text-3xl:  2rem;       /* 32px */
+
+  /* Font weights */
+  --eb-font-normal:   400;
+  --eb-font-medium:   500;
+  --eb-font-semibold: 600;
+  --eb-font-bold:     700;
+
+  /* ─── Spacing (4px base) ───────────────────────────────────────── */
+  --eb-space-0:   0px;
+  --eb-space-0-5: 2px;
+  --eb-space-1:   4px;
+  --eb-space-2:   8px;
+  --eb-space-3:   12px;
+  --eb-space-4:   16px;
+  --eb-space-5:   20px;
+  --eb-space-6:   24px;
+  --eb-space-8:   32px;
+  --eb-space-10:  40px;
+  --eb-space-12:  48px;
+  --eb-space-16:  64px;
+
+  /* ─── Border Radius ────────────────────────────────────────────── */
+  --eb-radius-none: 0;
+  --eb-radius-sm:   4px;
+  --eb-radius-md:   6px;
+  --eb-radius-lg:   8px;
+  --eb-radius-xl:   12px;
+  --eb-radius-2xl:  16px;
+  --eb-radius-full: 9999px;
+
+  /* ─── Shadows ──────────────────────────────────────────────────── */
+  --eb-shadow-xs:  0 1px 2px oklch(0 0 0 / 0.05);
+  --eb-shadow-sm:  0 1px 3px oklch(0 0 0 / 0.10), 0 1px 2px oklch(0 0 0 / 0.06);
+  --eb-shadow-md:  0 4px 6px oklch(0 0 0 / 0.10), 0 2px 4px oklch(0 0 0 / 0.06);
+  --eb-shadow-lg:  0 10px 15px oklch(0 0 0 / 0.10), 0 4px 6px oklch(0 0 0 / 0.05);
+  --eb-shadow-xl:  0 20px 25px oklch(0 0 0 / 0.10), 0 8px 10px oklch(0 0 0 / 0.04);
+
+  /* ─── Layout ───────────────────────────────────────────────────── */
+  --eb-sidebar-width:     240px;
+  --eb-sidebar-collapsed: 56px;
+  --eb-header-height:     48px;
+  --eb-breadcrumb-height: 32px;
+  --eb-side-panel-width:  480px;
+
+  /* ─── Transitions ──────────────────────────────────────────────── */
+  --eb-transition-fast:   120ms ease;
+  --eb-transition-normal: 200ms ease;
+  --eb-transition-slow:   350ms ease;
+}
+
+/* ─── Admin Light Theme ─────────────────────────────────────────────── */
+:root[data-theme="admin-light"] {
+  --eb-bg-app:            oklch(0.985 0.002 260);
+  --eb-bg-surface:        oklch(1.0 0 0);
+  --eb-bg-elevated:       oklch(1.0 0 0);
+  --eb-bg-hover:          oklch(0.96 0.003 260);
+  --eb-bg-active:         oklch(0.93 0.005 260);
+  --eb-bg-selected:       oklch(0.95 0.03 230);
+
+  --eb-border-default:    oklch(0.88 0.005 260);
+  --eb-border-hover:      oklch(0.80 0.008 260);
+  --eb-border-active:     oklch(0.72 0.010 260);
+
+  --eb-text-primary:      oklch(0.15 0.005 260);
+  --eb-text-secondary:    oklch(0.45 0.010 260);
+  --eb-text-muted:        oklch(0.60 0.008 260);
+  --eb-text-inverted:     oklch(0.98 0.002 260);
+
+  --eb-accent-primary:    oklch(0.60 0.18 195);
+  --eb-accent-hover:      oklch(0.55 0.17 195);
+  --eb-accent-muted:      oklch(0.95 0.03 195);
+
+  --eb-status-success-bg: oklch(0.95 0.03 155);
+  --eb-status-warning-bg: oklch(0.95 0.03 85);
+  --eb-status-error-bg:   oklch(0.95 0.03 25);
+  --eb-status-info-bg:    oklch(0.95 0.03 230);
+}
+
+/* ─── High Contrast Theme ───────────────────────────────────────────── */
+:root[data-theme="high-contrast"] {
+  --eb-bg-app:            oklch(0 0 0);
+  --eb-bg-surface:        oklch(0.10 0 0);
+  --eb-bg-elevated:       oklch(0.15 0 0);
+  --eb-bg-hover:          oklch(0.20 0 0);
+  --eb-bg-active:         oklch(0.25 0 0);
+
+  --eb-text-primary:      oklch(1.0 0 0);
+  --eb-text-secondary:    oklch(0.85 0 0);
+  --eb-text-muted:        oklch(0.70 0 0);
+
+  --eb-border-default:    oklch(0.60 0 0);
+  --eb-border-hover:      oklch(0.75 0 0);
+  --eb-border-active:     oklch(0.90 0 0);
+
+  --eb-accent-primary:    oklch(0.80 0.20 195);
+  --eb-accent-hover:      oklch(0.75 0.19 195);
+}
+
+/* ─── Global Styles ─────────────────────────────────────────────────── */
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--eb-font-sans);
+  font-size: var(--eb-text-base);
+  font-weight: var(--eb-font-normal);
+  line-height: 1.54;
+  color: var(--eb-text-primary);
+  background-color: var(--eb-bg-app);
+  font-variant-numeric: tabular-nums;
+}
+
+code, pre, kbd {
+  font-family: var(--eb-font-mono);
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+}
+
+/* ─── Scrollbar (Dark-friendly) ─────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--eb-border-default);
+  border-radius: var(--eb-radius-full);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--eb-border-hover);
+}
+
+/* ─── Focus ring ────────────────────────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--eb-accent-primary);
+  outline-offset: 2px;
+  border-radius: var(--eb-radius-sm);
+}
+
+/* ─── Selection ─────────────────────────────────────────────────────── */
+::selection {
+  background: oklch(0.45 0.12 195);
+  color: oklch(0.95 0.01 195);
+}

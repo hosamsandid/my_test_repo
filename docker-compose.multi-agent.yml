@@ -35,7 +35,7 @@ services:
       # on macOS with Podman Desktop, or /run/podman/podman.sock for rootful).
       # The host-side path must be the actual socket — edit the left side below
       # if needed and set PODMAN_SOCK_PATH to match inside the container.
-      - /run/podman/podman.sock:/var/run/podman.sock
+      - /run/user/501/podman/podman.sock:/var/run/podman.sock
     environment:
       TZ: Europe/Berlin
       MATRIX_HOMESERVER: http://conduwuit:6167

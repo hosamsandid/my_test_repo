@@ -1,14 +1,11 @@
-# Multi-Agent Overlay — Container-per-Agent Architecture
+# Multi-Agent Overlay — Process-per-Agent Architecture
 #
 # Usage:
 #   podman compose -f docker-compose.yml -f docker-compose.multi-agent.yml up -d --build
 #
-# The orchestrator container manages agent containers dynamically via the Podman
-# REST API (socket mounted below). Each agent runs in its own container using
-# the e-vgh-claw-agent-runner:latest image.
-#
-# IMPORTANT: Build the runner image before starting the stack:
-#   podman build -f multi-agent/Dockerfile.runner -t e-vgh-claw-agent-runner:latest ./multi-agent
+# The orchestrator container manages agents as child processes (node child_process.spawn).
+# Each agent runs agent-runner.js inside the orchestrator container — no separate
+# container per agent, no Podman socket needed.
 #
 # Create/update/delete agents via chat commands in the Multi-Agent room:
 #   !agent add     — guided wizard
@@ -29,13 +26,6 @@ services:
       - claude-workspace:/template-workspace:ro
       - ~/.ssh/id_accenturecodefoundry:/root/.ssh/id_accenturecodefoundry:ro
       - ~/.ssh/id_accenturecodefoundry.pub:/root/.ssh/id_accenturecodefoundry.pub:ro
-      # Podman socket — allows orchestrator to create/start/stop agent containers.
-      # Path is the rootless Podman socket. Override PODMAN_SOCK_PATH env var if
-      # your Podman socket lives elsewhere (e.g. /run/user/502/podman/podman.sock
-      # on macOS with Podman Desktop, or /run/podman/podman.sock for rootful).
-      # The host-side path must be the actual socket — edit the left side below
-      # if needed and set PODMAN_SOCK_PATH to match inside the container.
-      - /run/user/501/podman/podman.sock:/var/run/podman.sock
     environment:
       TZ: Europe/Berlin
       MATRIX_HOMESERVER: http://conduwuit:6167
@@ -53,12 +43,6 @@ services:
       ANTHROPIC_FOUNDRY_RESOURCE: "${ANTHROPIC_FOUNDRY_RESOURCE}"
       ANTHROPIC_FOUNDRY_API_KEY: "${ANTHROPIC_FOUNDRY_API_KEY}"
       ANTHROPIC_DEFAULT_SONNET_MODEL: "${ANTHROPIC_DEFAULT_SONNET_MODEL}"
-      # Podman socket path inside the container (change if you remapped above)
-      PODMAN_SOCK_PATH: "/var/run/podman.sock"
-      # Runner image name (built separately — see top of this file)
-      AGENT_RUNNER_IMAGE: "e-vgh-claw-agent-runner:latest"
-      # Compose network name — agent containers must reach conduwuit
-      AGENT_NETWORK: "e-vgh-claw_default"
     depends_on:
       conduwuit:
         condition: service_started

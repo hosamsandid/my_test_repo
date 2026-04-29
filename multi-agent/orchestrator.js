@@ -26,17 +26,8 @@ const AGENTS_DIR = "/workspace/agents";
 const WORKSPACE = "/workspace";
 const TEMPLATE_WORKSPACE = "/template-workspace";
 
-// Podman socket path — override with PODMAN_SOCK_PATH env var if needed.
-// Default is the rootless Podman socket path on Linux hosts (e.g. /run/user/1000/podman/podman.sock
-// mounted into the container at /var/run/podman.sock by docker-compose.multi-agent.yml).
-const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || "/var/run/podman.sock";
-
-// The runner image must be built separately before starting the orchestrator.
-// Build: podman build -f multi-agent/Dockerfile.runner -t e-vgh-claw-agent-runner:latest ./multi-agent
-const RUNNER_IMAGE = process.env.AGENT_RUNNER_IMAGE || "e-vgh-claw-agent-runner:latest";
-
-// The Podman compose network name — agents need to reach the Matrix homeserver.
-const AGENT_NETWORK = process.env.AGENT_NETWORK || "e-vgh-claw_default";
+const { spawn } = require("child_process");
+const agentProcesses = new Map(); // id → ChildProcess
 
 const QUIET_DELAY = 10_000;
 const MAX_TIMEOUT = 240_000;
@@ -52,102 +43,54 @@ const SEED_EXCLUDE = new Set([
 ]);
 
 // ============================================================
-// Podman REST API client
-// Uses the socket mounted at PODMAN_SOCK — no extra npm package needed.
+// Process lifecycle (each agent runs as a child process)
 // ============================================================
-function podmanRequest(method, urlPath, body = null) {
-  return new Promise((resolve, reject) => {
-    const opts = {
-      socketPath: PODMAN_SOCK,
-      path: `/v4.0.0/libpod${urlPath}`,
-      method,
-      headers: body ? { "Content-Type": "application/json" } : {},
-    };
-    const req = http.request(opts, (res) => {
-      let data = "";
-      res.on("data", (d) => (data += d));
-      res.on("end", () => {
-        let parsed = null;
-        if (data) {
-          try { parsed = JSON.parse(data); } catch { parsed = data; }
-        }
-        resolve({ status: res.statusCode, body: parsed });
-      });
-    });
-    req.on("error", reject);
-    if (body) req.write(JSON.stringify(body));
-    req.end();
-  });
-}
+function startAgentProcess(config) {
+  const { id, token, userId } = config;
+  stopAgentProcess(id); // kill existing if any
 
-// ============================================================
-// Container lifecycle
-// ============================================================
-async function startAgentContainer(agentConfig) {
-  const { id, token, userId } = agentConfig;
-  const containerName = `agent-${id}`;
-
-  // Remove any stale container
-  await podmanRequest("DELETE", `/containers/${containerName}?force=true`).catch(() => {});
-
-  const envVars = [
-    `AGENT_ID=${id}`,
-    `MATRIX_ACCESS_TOKEN=${token}`,
-    `MATRIX_BOT_USER_ID=${userId}`,
-    `MATRIX_HOMESERVER=${process.env.MATRIX_HOMESERVER || ""}`,
-    `MULTI_AGENT_ROOM=${process.env.MULTI_AGENT_ROOM || ""}`,
-    `ORCHESTRATOR_USER_ID=${process.env.MATRIX_BOT_USER_ID || ""}`,
-    `CLAUDE_CODE_USE_FOUNDRY=${process.env.CLAUDE_CODE_USE_FOUNDRY || ""}`,
-    `ANTHROPIC_FOUNDRY_RESOURCE=${process.env.ANTHROPIC_FOUNDRY_RESOURCE || ""}`,
-    `ANTHROPIC_FOUNDRY_API_KEY=${process.env.ANTHROPIC_FOUNDRY_API_KEY || ""}`,
-    `ANTHROPIC_DEFAULT_SONNET_MODEL=${process.env.ANTHROPIC_DEFAULT_SONNET_MODEL || ""}`,
-    `GIT_SSH_COMMAND=${process.env.GIT_SSH_COMMAND || ""}`,
-  ];
-
-  const home = process.env.HOME || "/root";
-  const sshKey = `${home}/.ssh/id_accenturecodefoundry`;
-
-  const createRes = await podmanRequest("POST", "/containers/create", {
-    name: containerName,
-    Image: RUNNER_IMAGE,
-    Env: envVars,
-    HostConfig: {
-      Binds: [
-        `vgh-claw_agent-pool-workspace:/workspace`,
-        `${sshKey}:/root/.ssh/id_accenturecodefoundry:ro`,
-        `${sshKey}.pub:/root/.ssh/id_accenturecodefoundry.pub:ro`,
-      ],
-      NetworkMode: AGENT_NETWORK,
+  const child = spawn('node', ['/app/agent-runner.js'], {
+    env: {
+      ...process.env,
+      AGENT_ID: id,
+      MATRIX_ACCESS_TOKEN: token,
+      MATRIX_BOT_USER_ID: userId,
     },
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
 
-  if (createRes.status >= 300) {
-    throw new Error(`Failed to create container ${containerName}: ${JSON.stringify(createRes.body)}`);
-  }
+  child.stdout.on('data', (d) =>
+    d.toString().split('\n').filter(Boolean).forEach(line =>
+      console.log(`[Agent:${id}] ${line}`)
+    )
+  );
+  child.stderr.on('data', (d) =>
+    d.toString().split('\n').filter(Boolean).forEach(line =>
+      console.error(`[Agent:${id}] ${line}`)
+    )
+  );
+  child.on('exit', (code) => {
+    console.log(`[Orchestrator] Agent ${id} exited (code ${code})`);
+    agentProcesses.delete(id);
+  });
 
-  const startRes = await podmanRequest("POST", `/containers/${containerName}/start`);
-  if (startRes.status >= 300 && startRes.status !== 304) {
-    throw new Error(`Failed to start container ${containerName}: ${JSON.stringify(startRes.body)}`);
-  }
-
-  console.log(`[Orchestrator] Started container for agent ${id}`);
+  agentProcesses.set(id, child);
+  console.log(`[Orchestrator] Started process for agent ${id} (pid ${child.pid})`);
 }
 
-async function stopAgentContainer(id) {
-  const containerName = `agent-${id}`;
-  await podmanRequest("POST", `/containers/${containerName}/stop`).catch(() => {});
-  await podmanRequest("DELETE", `/containers/${containerName}?force=true`).catch(() => {});
-  console.log(`[Orchestrator] Stopped container for agent ${id}`);
+function stopAgentProcess(id) {
+  const proc = agentProcesses.get(id);
+  if (!proc) return;
+  proc.kill('SIGTERM');
+  agentProcesses.delete(id);
+  console.log(`[Orchestrator] Stopped process for agent ${id}`);
 }
 
 async function startAllEnabledAgents() {
-  const ids = listAgentIds();
-  for (const id of ids) {
+  for (const id of listAgentIds()) {
     const config = loadAgentConfig(id);
     if (config && config.enabled !== false) {
-      await startAgentContainer(config).catch((err) =>
-        console.error(`[Orchestrator] Failed to start agent ${id}: ${err.message}`)
-      );
+      startAgentProcess(config);
     }
   }
 }
@@ -411,7 +354,6 @@ async function inviteAndJoin(poolClient, token, roomId) {
 // ============================================================
 // Synthesis (orchestrator calls Claude CLI for merging responses)
 // ============================================================
-const { spawn } = require("child_process");
 const CLAUDE_TIMEOUT = 600_000;
 
 function callClaude(prompt, cwd, timeoutMs = CLAUDE_TIMEOUT) {
@@ -685,7 +627,7 @@ class Orchestrator {
         this.cancelWizard();
         if (text.toLowerCase() === "ja") {
           this.agentConfigs.delete(w.ctx.id);
-          await stopAgentContainer(w.ctx.id);
+          stopAgentProcess(w.ctx.id);
           deleteAgentFiles(w.ctx.id);
           await this.deactivateMatrixUser(w.ctx.id);
           await sendFormatted(this.poolClient, roomId,
@@ -776,12 +718,10 @@ class Orchestrator {
       saveAgentConfig(id, config);
       if (config.enabled) {
         this.agentConfigs.set(id, { config });
-        await startAgentContainer(config).catch((err) =>
-          console.error(`[Orchestrator] Failed to start agent ${id}: ${err.message}`)
-        );
+        startAgentProcess(config);
       } else {
         this.agentConfigs.delete(id);
-        await stopAgentContainer(id);
+        stopAgentProcess(id);
       }
       await sendFormatted(this.poolClient, roomId,
         `Agent **${config.displayName}** ${config.enabled ? "aktiviert" : "deaktiviert"}.`);
@@ -835,11 +775,9 @@ class Orchestrator {
         }]);
       }
 
-      // Register config and start container
+      // Register config and start agent process
       this.agentConfigs.set(id, { config });
-      await startAgentContainer(config).catch((err) => {
-        console.error(`[Orchestrator] Container start failed for ${id}: ${err.message}`);
-      });
+      startAgentProcess(config);
 
       const seedNote = seeded
         ? " Workspace aus Template uebernommen (Skills, Memory, Repo)."
@@ -1139,6 +1077,15 @@ async function main() {
 
   // Internal API — used by admin-console to create agents without the chat wizard
   const internalApi = http.createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/internal/agents/processes') {
+      const processes = [];
+      for (const [id, proc] of agentProcesses) {
+        processes.push({ id, pid: proc.pid, running: !proc.exitCode && !proc.killed });
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(processes));
+      return;
+    }
     if (req.method !== 'POST' || req.url !== '/internal/agents') {
       res.writeHead(404); res.end(); return;
     }

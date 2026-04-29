@@ -11,6 +11,7 @@ COPY package.json .
 RUN npm install --omit=dev
 COPY agent-pool.js .
 COPY orchestrator.js .
+COPY agent-runner.js .
 
 WORKDIR /workspace
 RUN mkdir -p /workspace/agents

@@ -381,20 +381,18 @@ app.put('/api/mcp/:name', (req, res) => {
 /* ─── Containers ────────────────────────────────────────────────────── */
 
 app.get('/api/containers', async (req, res) => {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
-    const result = await podmanRequest('GET', '/containers/json?all=true');
-    const containers = Array.isArray(result.body) ? result.body : [];
-    const agentContainers = containers
-      .filter(c => {
-        const name = Array.isArray(c.Names) ? c.Names[0] : (c.Name || '');
-        return name.replace(/^\//, '').startsWith('agent-');
-      })
-      .map(c => {
-        const name = (Array.isArray(c.Names) ? c.Names[0] : (c.Name || '')).replace(/^\//, '');
-        return { name, state: c.State || c.Status || 'unknown', id: c.Id || c.ID || '' };
-      });
-    res.json(agentContainers);
-  } catch (err) {
+    const resp = await fetch(`${orchestratorUrl}/internal/agents/processes`);
+    if (!resp.ok) return res.json([]);
+    const processes = await resp.json();
+    // Normalize to the shape the Logs page expects: { name, state }
+    res.json(processes.map(p => ({
+      name: `agent-${p.id}`,
+      state: p.running ? 'running' : 'exited',
+      pid: p.pid,
+    })));
+  } catch {
     res.json([]);
   }
 });

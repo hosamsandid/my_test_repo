@@ -1136,6 +1136,35 @@ async function main() {
   }
   const orchestrator = new Orchestrator();
   await orchestrator.init();
+
+  // Internal API — used by admin-console to create agents without the chat wizard
+  const internalApi = http.createServer((req, res) => {
+    if (req.method !== 'POST' || req.url !== '/internal/agents') {
+      res.writeHead(404); res.end(); return;
+    }
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const { id, displayName, role, systemPrompt, schedule, taskPrompt } = JSON.parse(body);
+        if (!id || !displayName || !role || !systemPrompt) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'id, displayName, role, systemPrompt required' }));
+          return;
+        }
+        const extra = role === 'autonomous' ? { schedule, taskPrompt } : {};
+        await orchestrator.createAgent(id, displayName, role, systemPrompt, MULTI_AGENT_ROOM, extra);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+  });
+  internalApi.listen(4002, '0.0.0.0', () =>
+    console.log('[Orchestrator] Internal API listening on :4002')
+  );
 }
 
 main().catch((err) => { console.error("Fatal:", err); process.exit(1); });

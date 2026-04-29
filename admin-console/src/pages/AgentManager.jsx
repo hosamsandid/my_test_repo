@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from 'react';
-import { Edit, Trash2, FileText } from 'lucide-react';
+import { Edit, Trash2, FileText, Plus } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
@@ -152,6 +152,75 @@ function AgentEditForm({ agent, onSave, onCancel }) {
   );
 }
 
+/* ── Create form ───────────────────────────────────────────────────── */
+function AgentCreateForm({ onSave, onCancel, saving, error }) {
+  const [form, setForm] = useState({
+    id: '', displayName: '', role: 'expert', systemPrompt: '', schedule: '', taskPrompt: '',
+  });
+  const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
+
+  const labelStyle = { fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-0-5)' };
+  const inputStyle = { width: '100%', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      {error && (
+        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-md)' }}>
+          {error}
+        </div>
+      )}
+
+      <div>
+        <div style={labelStyle}>ID <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
+        <input style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }} value={form.id} onChange={e => update('id', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))} placeholder="z.B. cobol-expert" />
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>Nur Kleinbuchstaben, Zahlen und Bindestriche. Wird zu @id:local.</div>
+      </div>
+
+      <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} placeholder="COBOL Experte" />
+
+      <div>
+        <div style={labelStyle}>Rolle <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
+        <select value={form.role} onChange={e => update('role', e.target.value)} style={inputStyle}>
+          <option value="expert">Expert — reagiert auf Fragen im Raum</option>
+          <option value="synthesizer">Synthesizer — fasst Expertenantworten zusammen</option>
+          <option value="autonomous">Autonomous — läuft eigenständig nach Zeitplan</option>
+        </select>
+      </div>
+
+      {form.role === 'autonomous' && (
+        <>
+          <div>
+            <div style={labelStyle}>Cron-Schedule</div>
+            <input style={inputStyle} value={form.schedule} onChange={e => update('schedule', e.target.value)} placeholder="0 8 * * 1-5 (Mo–Fr um 8 Uhr)" />
+          </div>
+          <div>
+            <div style={labelStyle}>Task-Prompt (bei jedem Trigger)</div>
+            <textarea value={form.taskPrompt} onChange={e => update('taskPrompt', e.target.value)} placeholder="Was der Agent bei jedem Trigger tun soll..." rows={3} style={{ ...inputStyle, resize: 'vertical' }} />
+          </div>
+        </>
+      )}
+
+      <div>
+        <div style={labelStyle}>System-Prompt <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
+        <textarea value={form.systemPrompt} onChange={e => update('systemPrompt', e.target.value)} placeholder="Du bist ein erfahrener COBOL-Entwickler..." rows={8} style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }} />
+      </div>
+
+      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+        <button
+          onClick={() => onSave(form)}
+          disabled={saving || !form.id || !form.displayName || !form.systemPrompt}
+          style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: saving ? 'wait' : 'pointer', fontFamily: 'inherit', opacity: (saving || !form.id || !form.displayName || !form.systemPrompt) ? 0.6 : 1 }}
+        >
+          {saving ? 'Erstelle Agent…' : 'Agent erstellen'}
+        </button>
+        <button onClick={onCancel} style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-secondary)', cursor: 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit' }}>
+          Abbrechen
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* ── Prompt editor ─────────────────────────────────────────────────── */
 function PromptEditor({ agentId, onClose }) {
   const [content, setContent] = useState('');
@@ -240,10 +309,12 @@ function PromptEditor({ agentId, onClose }) {
 /* ── Main component ────────────────────────────────────────────────── */
 export default function AgentManager() {
   const { data: agents, loading, error, refetch } = useApi('/api/agents');
-  const [panelMode, setPanelMode] = useState(null); // null | 'edit' | 'prompt'
+  const [panelMode, setPanelMode] = useState(null); // null | 'create' | 'edit' | 'prompt'
   const [selectedAgent, setSelectedAgent] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [actionError, setActionError] = useState(null);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState(null);
 
   const COLUMNS = [
     { key: 'id',          label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
@@ -281,6 +352,20 @@ export default function AgentManager() {
       refetch();
     } catch (e) {
       setActionError(e.message);
+    }
+  }
+
+  async function handleCreate(form) {
+    setCreating(true);
+    setCreateError(null);
+    try {
+      await apiCall('POST', '/api/agents', form);
+      setPanelMode(null);
+      refetch();
+    } catch (e) {
+      setCreateError(e.message);
+    } finally {
+      setCreating(false);
     }
   }
 
@@ -325,11 +410,13 @@ export default function AgentManager() {
         <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
           Agent Manager
         </h1>
+        <button
+          onClick={() => { setCreateError(null); setPanelMode('create'); }}
+          style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit' }}
+        >
+          <Plus size={15} /> Neuer Agent
+        </button>
       </div>
-
-      <InfoBanner>
-        Agents werden via <code style={{ fontFamily: 'var(--eb-font-mono)' }}>!agent add</code> im Matrix-Raum erstellt. Hier koennen bestehende Agenten bearbeitet werden.
-      </InfoBanner>
 
       {actionError && (
         <div role="alert" style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-error-bg)', border: '1px solid var(--eb-status-error)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
@@ -341,8 +428,23 @@ export default function AgentManager() {
       <DataTable
         columns={COLUMNS}
         data={agents ?? []}
-        emptyText="No agents found. Use !agent add in the Matrix room to create agents."
+        emptyText="Noch keine Agenten. Klicke auf 'Neuer Agent' um den ersten zu erstellen."
       />
+
+      {/* Create agent panel */}
+      <SidePanel
+        open={panelMode === 'create'}
+        onClose={() => setPanelMode(null)}
+        title="Neuer Agent"
+        width="520px"
+      >
+        <AgentCreateForm
+          onSave={handleCreate}
+          onCancel={() => setPanelMode(null)}
+          saving={creating}
+          error={createError}
+        />
+      </SidePanel>
 
       {/* Edit config panel */}
       <SidePanel

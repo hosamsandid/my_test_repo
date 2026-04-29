@@ -140,6 +140,26 @@ app.put('/api/agents/:id', (req, res) => {
   res.json({ id, ...cfg });
 });
 
+app.post('/api/agents', async (req, res) => {
+  const { id, displayName, role, systemPrompt, schedule, taskPrompt } = req.body;
+  if (!id || !displayName || !role || !systemPrompt) {
+    return res.status(400).json({ error: 'id, displayName, role, systemPrompt required' });
+  }
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/agents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, displayName, role, systemPrompt, schedule, taskPrompt }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) return res.status(resp.status).json(data);
+    res.status(201).json(data);
+  } catch (err) {
+    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 app.delete('/api/agents/:id', (req, res) => {
   const { id } = req.params;
   const agentDir = path.join(AGENTS_DIR, id);

@@ -1,0 +1,10 @@
+{
+  "defaultHomeserver": 0,
+  "homeserverList": [
+    {
+      "name": "local",
+      "url": "http://localhost:8448"
+    }
+  ],
+  "allowCustomHomeservers": false
+}

@@ -19,6 +19,18 @@ services:
       CONTINUWUITY_NEW_USER_DISPLAYNAME_SUFFIX: ""
       TZ: Europe/Berlin
 
+  cinny:
+    image: ajbura/cinny:latest
+    container_name: cinny
+    restart: unless-stopped
+    ports:
+      - "8090:80"
+    volumes:
+      - ./cinny/config.json:/app/config.json:ro
+    depends_on:
+      conduwuit:
+        condition: service_started
+
   claude-bridge:
     build:
       context: ./claude-code

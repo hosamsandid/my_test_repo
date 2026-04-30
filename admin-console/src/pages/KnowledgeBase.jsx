@@ -3,7 +3,7 @@ import { useApi } from '../hooks/useApi';
 import SidePanel from '../components/SidePanel';
 
 function SourceBadge({ source }) {
-  const isBridge = source === 'bridge';
+  const isPool = source === 'pool';
   return (
     <span style={{
       display: 'inline-block',
@@ -11,9 +11,9 @@ function SourceBadge({ source }) {
       borderRadius: 'var(--eb-radius-sm)',
       fontSize: 'var(--eb-text-xs)',
       fontWeight: 'var(--eb-font-medium)',
-      background: isBridge ? 'var(--eb-accent-muted)' : 'var(--eb-status-info-bg)',
-      color: isBridge ? 'var(--eb-accent-primary)' : 'var(--eb-status-info)',
-      border: `1px solid ${isBridge ? 'var(--eb-accent-primary)' : 'var(--eb-status-info)'}`,
+      background: isPool ? 'var(--eb-accent-muted)' : 'var(--eb-status-info-bg)',
+      color: isPool ? 'var(--eb-accent-primary)' : 'var(--eb-status-info)',
+      border: `1px solid ${isPool ? 'var(--eb-accent-primary)' : 'var(--eb-status-info)'}`,
     }}>
       {source}
     </span>

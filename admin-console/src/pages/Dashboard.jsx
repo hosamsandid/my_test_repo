@@ -42,7 +42,7 @@ export default function Dashboard() {
     { label: 'Total Agents',    value: dash.agents?.total    ?? 0 },
     { label: 'Active',          value: dash.agents?.active   ?? 0, status: 'success' },
     { label: 'Disabled',        value: dash.agents?.disabled ?? 0, status: dash.agents?.disabled > 0 ? 'warning' : undefined },
-    { label: 'Scheduled Jobs',  value: dash.jobs?.total      ?? 0 },
+    { label: 'Triggers',        value: dash.jobs?.total      ?? 0 },
     { label: 'Skills',          value: dash.skills?.total    ?? 0 },
   ] : [];
 

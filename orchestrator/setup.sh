@@ -1,30 +1,45 @@
 #!/bin/bash
 set -euo pipefail
 
-# Multi-Agent Setup Script
-# Registers Matrix users, creates a collaboration room, invites participants.
+# One-shot bootstrap for a fresh Conduwuit installation.
+#
+# Registers the admin (human) user and the @orchestrator:local bot,
+# creates the shared Multi-Agent Collaboration room, and emits the
+# .env values you need.
+#
+# After this completes, manage all expert/synthesizer/autonomous agents
+# via the Admin Console at http://localhost:4000.
+#
 # Compatible with bash 3.2 (macOS default).
 
-HOMESERVER="http://localhost:8448"
-HUMAN_USER="@thorsten:local"
-TIMESTAMP=$(date +%s)
+HOMESERVER="${HOMESERVER:-http://localhost:8448}"
+ADMIN_USER="${ADMIN_USER:-thorsten}"
+ADMIN_PASS="${ADMIN_PASS:-}"
+ORCH_USER="orchestrator"
+ORCH_PASS="${ORCH_PASS:-orch-$(date +%s)}"
 
-echo "=== Multi-Agent Setup ==="
-echo ""
+echo "=== Stack Bootstrap (admin user + orchestrator) ==="
 
-# --- Check prerequisites ---
+# --- Prerequisites ---
 if ! command -v jq &>/dev/null; then
-  echo "ERROR: jq is required. Install with: brew install jq"
+  echo "ERROR: jq is required. Install with: brew install jq" >&2
   exit 1
 fi
 
-echo "Checking Conduwuit connectivity..."
-if ! curl -sf "${HOMESERVER}/_matrix/client/versions" > /dev/null 2>&1; then
-  echo "ERROR: Cannot reach Conduwuit at ${HOMESERVER}"
+if ! curl -sf "${HOMESERVER}/_matrix/client/versions" >/dev/null 2>&1; then
+  echo "ERROR: Cannot reach Conduwuit at ${HOMESERVER}" >&2
   exit 1
 fi
-echo "OK"
-echo ""
+
+if [ -z "$ADMIN_PASS" ]; then
+  echo -n "Password for admin user @${ADMIN_USER}:local: "
+  read -rs ADMIN_PASS
+  echo
+  if [ -z "$ADMIN_PASS" ]; then
+    echo "ERROR: empty password" >&2
+    exit 1
+  fi
+fi
 
 # --- Helper: register or login, returns token on stdout ---
 get_token() {
@@ -32,7 +47,6 @@ get_token() {
   local password="$2"
   local response token
 
-  # Try registration
   response=$(curl -s -X POST "${HOMESERVER}/_matrix/client/v3/register" \
     -H "Content-Type: application/json" \
     -d "{
@@ -48,7 +62,6 @@ get_token() {
     return 0
   fi
 
-  # Try login (user may already exist)
   response=$(curl -s -X POST "${HOMESERVER}/_matrix/client/v3/login" \
     -H "Content-Type: application/json" \
     -d "{
@@ -63,87 +76,60 @@ get_token() {
     return 0
   fi
 
-  echo "FAIL" >&2
   return 1
 }
 
-# --- Register users ---
-echo "Registering @orchestrator:local ..."
-ORCH_TOKEN=$(get_token "orchestrator" "orch-pass-${TIMESTAMP}")
+echo "Registering @${ADMIN_USER}:local ..."
+ADMIN_TOKEN=$(get_token "${ADMIN_USER}" "${ADMIN_PASS}") || {
+  echo "ERROR: failed to register or login admin user" >&2
+  exit 1
+}
 echo "  OK"
 
-echo "Registering @agent-a:local ..."
-AGENT_A_TOKEN=$(get_token "agent-a" "agent-a-pass-${TIMESTAMP}")
+echo "Registering @${ORCH_USER}:local ..."
+ORCH_TOKEN=$(get_token "${ORCH_USER}" "${ORCH_PASS}") || {
+  echo "ERROR: failed to register orchestrator" >&2
+  exit 1
+}
 echo "  OK"
 
-echo "Registering @agent-b:local ..."
-AGENT_B_TOKEN=$(get_token "agent-b" "agent-b-pass-${TIMESTAMP}")
-echo "  OK"
-echo ""
-
-# --- Set display names ---
-echo "Setting display names..."
-curl -sf -X PUT "${HOMESERVER}/_matrix/client/v3/profile/@orchestrator:local/displayname" \
+curl -sf -X PUT "${HOMESERVER}/_matrix/client/v3/profile/@${ORCH_USER}:local/displayname" \
   -H "Authorization: Bearer ${ORCH_TOKEN}" \
   -H "Content-Type: application/json" \
-  -d '{"displayname": "Orchestrator"}' > /dev/null 2>&1 || true
-
-curl -sf -X PUT "${HOMESERVER}/_matrix/client/v3/profile/@agent-a:local/displayname" \
-  -H "Authorization: Bearer ${AGENT_A_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"displayname": "Agent A"}' > /dev/null 2>&1 || true
-
-curl -sf -X PUT "${HOMESERVER}/_matrix/client/v3/profile/@agent-b:local/displayname" \
-  -H "Authorization: Bearer ${AGENT_B_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"displayname": "Agent B"}' > /dev/null 2>&1 || true
-echo "  OK"
-echo ""
+  -d '{"displayname": "Orchestrator"}' >/dev/null 2>&1 || true
 
 # --- Create collaboration room ---
-echo "Creating multi-agent room..."
+echo "Creating Multi-Agent Collaboration room ..."
 room_response=$(curl -sf -X POST "${HOMESERVER}/_matrix/client/v3/createRoom" \
   -H "Authorization: Bearer ${ORCH_TOKEN}" \
   -H "Content-Type: application/json" \
   -d "{
     \"name\": \"Multi-Agent Collaboration\",
-    \"topic\": \"Orchestrator + Agent A + Agent B\",
+    \"topic\": \"Shared room: orchestrator routes messages to expert agents\",
     \"preset\": \"private_chat\",
-    \"invite\": [\"@agent-a:local\", \"@agent-b:local\", \"${HUMAN_USER}\"]
+    \"invite\": [\"@${ADMIN_USER}:local\"]
   }")
 
 ROOM_ID=$(echo "$room_response" | jq -r '.room_id // empty')
 if [ -z "$ROOM_ID" ]; then
-  echo "ERROR: Could not create room."
-  echo "Response: ${room_response}"
+  echo "ERROR: Could not create room. Response: ${room_response}" >&2
   exit 1
 fi
 echo "  Room: ${ROOM_ID}"
-echo ""
-
-# --- Agents join the room ---
-echo "Joining agents to room..."
-curl -sf -X POST "${HOMESERVER}/_matrix/client/v3/join/${ROOM_ID}" \
-  -H "Authorization: Bearer ${AGENT_A_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{}' > /dev/null 2>&1 || echo "  (warning: agent-a join failed)"
-
-curl -sf -X POST "${HOMESERVER}/_matrix/client/v3/join/${ROOM_ID}" \
-  -H "Authorization: Bearer ${AGENT_B_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{}' > /dev/null 2>&1 || echo "  (warning: agent-b join failed)"
-echo "  OK"
-echo ""
 
 # --- Output ---
-echo "==========================================="
+echo
+echo "=========================================="
 echo "  Add these lines to your .env file:"
-echo "==========================================="
-echo ""
-echo "# Multi-Agent"
-echo "MULTI_AGENT_ROOM=${ROOM_ID}"
-echo "ORCHESTRATOR_TOKEN=${ORCH_TOKEN}"
-echo "AGENT_A_TOKEN=${AGENT_A_TOKEN}"
-echo "AGENT_B_TOKEN=${AGENT_B_TOKEN}"
-echo ""
-echo "==========================================="
+echo "=========================================="
+cat <<EOF
+
+MATRIX_ACCESS_TOKEN=${ADMIN_TOKEN}
+MATRIX_BOT_USER_ID=@${ADMIN_USER}:local
+MATRIX_DEFAULT_ROOM=${ROOM_ID}
+MULTI_AGENT_ROOM=${ROOM_ID}
+ORCHESTRATOR_TOKEN=${ORCH_TOKEN}
+
+EOF
+echo "Then start the stack with: ./start-stack.fish"
+echo "Manage agents at:           http://localhost:4000"

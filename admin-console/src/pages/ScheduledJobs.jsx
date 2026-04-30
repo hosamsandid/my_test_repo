@@ -6,39 +6,6 @@ import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 
-/* ── Tab bar ───────────────────────────────────────────────────────── */
-function TabBar({ tabs, active, onChange }) {
-  return (
-    <div role="tablist" style={{
-      display: 'flex', gap: 'var(--eb-space-1)',
-      borderBottom: '1px solid var(--eb-border-default)',
-      marginBottom: 'var(--eb-space-4)',
-    }}>
-      {tabs.map(tab => (
-        <button
-          key={tab}
-          role="tab"
-          aria-selected={active === tab}
-          onClick={() => onChange(tab)}
-          style={{
-            padding: 'var(--eb-space-2) var(--eb-space-4)',
-            background: active === tab ? 'var(--eb-bg-selected)' : 'transparent',
-            border: 'none',
-            borderBottom: active === tab ? '2px solid var(--eb-accent-primary)' : '2px solid transparent',
-            color: active === tab ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
-            cursor: 'pointer',
-            fontSize: 'var(--eb-text-sm)',
-            fontWeight: 'var(--eb-font-medium)',
-            fontFamily: 'inherit',
-          }}
-        >
-          {tab}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 /* ── Toggle switch ─────────────────────────────────────────────────── */
 function ToggleSwitch({ checked, onChange, label }) {
   return (
@@ -68,8 +35,8 @@ function ToggleSwitch({ checked, onChange, label }) {
   );
 }
 
-/* ── Job form ──────────────────────────────────────────────────────── */
-function JobForm({ onSave, onCancel, agentOptions, showAgentSelect }) {
+/* ── Trigger form ──────────────────────────────────────────────────── */
+function TriggerForm({ onSave, onCancel, agentOptions }) {
   const [form, setForm] = useState({
     agentId: agentOptions?.[0]?.id || '',
     id: '',
@@ -84,7 +51,7 @@ function JobForm({ onSave, onCancel, agentOptions, showAgentSelect }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      {showAgentSelect && agentOptions && agentOptions.length > 0 && (
+      {agentOptions && agentOptions.length > 0 && (
         <div>
           <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-0-5)' }}>Agent</div>
           <select
@@ -126,7 +93,7 @@ function JobForm({ onSave, onCancel, agentOptions, showAgentSelect }) {
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         <button onClick={() => onSave(form)} style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit' }}>
-          Add Job
+          Add Trigger
         </button>
         <button onClick={onCancel} style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-secondary)', cursor: 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit' }}>
           Cancel
@@ -136,80 +103,8 @@ function JobForm({ onSave, onCancel, agentOptions, showAgentSelect }) {
   );
 }
 
-/* ── Bridge jobs tab ───────────────────────────────────────────────── */
-function BridgeJobsTab() {
-  const { data: jobs, loading, error, refetch } = useApi('/api/jobs');
-  const [addOpen, setAddOpen] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState(null);
-
-  const COLS = [
-    { key: 'id',          label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
-    { key: 'type',        label: 'Type' },
-    { key: 'schedule',    label: 'Schedule', render: (_, row) => row.cron || row.at || '—' },
-    { key: 'description', label: 'Description' },
-    { key: 'enabled',     label: 'Enabled', sortable: false, render: (v, row) => (
-      <ToggleSwitch
-        checked={v !== false}
-        label="Toggle enabled"
-        onChange={async (val) => {
-          await apiCall('PUT', `/api/jobs/${row.id}`, { enabled: val });
-          refetch();
-        }}
-      />
-    )},
-    { key: '_del', label: '', sortable: false, render: (_, row) => (
-      <button
-        onClick={e => { e.stopPropagation(); setDeleteTarget(row); }}
-        title="Delete job"
-        style={{ background: 'none', border: '1px solid var(--eb-status-error)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-status-error)', cursor: 'pointer', padding: '2px 6px' }}
-      >
-        <Trash2 size={13} />
-      </button>
-    )},
-  ];
-
-  if (loading) return <div style={{ height: 200, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />;
-  if (error) return <div role="alert" style={{ color: 'var(--eb-status-error)' }}>Failed to load jobs: {error}</div>;
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
-      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-        <button onClick={() => setAddOpen(true)} style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit' }}>
-          <Plus size={14} /> Add Job
-        </button>
-      </div>
-      <DataTable columns={COLS} data={jobs ?? []} emptyText="No bridge jobs configured." />
-
-      <SidePanel open={addOpen} onClose={() => setAddOpen(false)} title="Add Bridge Job">
-        <JobForm
-          onSave={async form => {
-            const body = { id: form.id || undefined, type: form.type, description: form.description, prompt: form.prompt, enabled: form.enabled };
-            if (form.type === 'cron') body.cron = form.cron;
-            else body.at = form.at;
-            await apiCall('POST', '/api/jobs', body);
-            setAddOpen(false);
-            refetch();
-          }}
-          onCancel={() => setAddOpen(false)}
-          showAgentSelect={false}
-        />
-      </SidePanel>
-
-      <ConfirmDialog
-        open={!!deleteTarget}
-        title="Delete Job"
-        message={`Delete job "${deleteTarget?.id}"?`}
-        variant="danger"
-        confirmLabel="Delete"
-        onConfirm={async () => { await apiCall('DELETE', `/api/jobs/${deleteTarget.id}`); setDeleteTarget(null); refetch(); }}
-        onCancel={() => setDeleteTarget(null)}
-      />
-    </div>
-  );
-}
-
-/* ── Agent triggers tab ────────────────────────────────────────────── */
-function AgentTriggersTab() {
+/* ── Main page ─────────────────────────────────────────────────────── */
+export default function ScheduledJobs() {
   const { data: agents, loading: agentsLoading } = useApi('/api/agents');
   const [triggers, setTriggers] = useState([]);
   const [triggersLoading, setTriggersLoading] = useState(false);
@@ -217,7 +112,10 @@ function AgentTriggersTab() {
   const [deleteTarget, setDeleteTarget] = useState(null);
 
   const loadAllTriggers = useCallback(async (agentList) => {
-    if (!agentList || agentList.length === 0) return;
+    if (!agentList || agentList.length === 0) {
+      setTriggers([]);
+      return;
+    }
     setTriggersLoading(true);
     const results = await Promise.all(
       agentList.map(async a => {
@@ -267,20 +165,28 @@ function AgentTriggersTab() {
     )},
   ];
 
-  if (agentsLoading || triggersLoading) return <div style={{ height: 200, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />;
+  const skeleton = agentsLoading || triggersLoading;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
+        Scheduled Triggers
+      </h1>
+
       <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-        <button onClick={() => setAddOpen(true)} style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit' }}>
+        <button onClick={() => setAddOpen(true)} disabled={!agents || agents.length === 0} style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit', opacity: (!agents || agents.length === 0) ? 0.5 : 1 }}>
           <Plus size={14} /> Add Trigger
         </button>
       </div>
-      <DataTable columns={COLS} data={triggers} emptyText="No agent triggers configured." />
 
-      <SidePanel open={addOpen} onClose={() => setAddOpen(false)} title="Add Agent Trigger">
-        <JobForm
-          showAgentSelect
+      {skeleton ? (
+        <div style={{ height: 200, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />
+      ) : (
+        <DataTable columns={COLS} data={triggers} emptyText="No triggers configured. Add one to schedule recurring or one-shot agent runs." />
+      )}
+
+      <SidePanel open={addOpen} onClose={() => setAddOpen(false)} title="Add Trigger">
+        <TriggerForm
           agentOptions={agents ?? []}
           onSave={async form => {
             const body = { id: form.id || undefined, type: form.type, description: form.description, prompt: form.prompt, enabled: form.enabled };
@@ -307,21 +213,6 @@ function AgentTriggersTab() {
         }}
         onCancel={() => setDeleteTarget(null)}
       />
-    </div>
-  );
-}
-
-/* ── Main ──────────────────────────────────────────────────────────── */
-export default function ScheduledJobs() {
-  const [tab, setTab] = useState('Bridge Jobs');
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
-        Scheduled Jobs
-      </h1>
-      <TabBar tabs={['Bridge Jobs', 'Agent Triggers']} active={tab} onChange={setTab} />
-      {tab === 'Bridge Jobs' ? <BridgeJobsTab /> : <AgentTriggersTab />}
     </div>
   );
 }

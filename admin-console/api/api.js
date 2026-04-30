@@ -8,12 +8,11 @@ const http = require('http');
 const crypto = require('crypto');
 
 const WORKSPACE = '/workspace';
-const BRIDGE_WORKSPACE = '/bridge-workspace';
+const POOL_DIR = '/pool';
 const AGENTS_DIR = path.join(WORKSPACE, 'agents');
 const ENVIRONMENTS_DIR = path.join(WORKSPACE, 'environments');
 const SSH_KEYS_DIR = path.join(ENVIRONMENTS_DIR, '_keys');
 const SSH_KEYS_INDEX = path.join(SSH_KEYS_DIR, 'index.json');
-const BRIDGE_JOBS_FILE = path.join(BRIDGE_WORKSPACE, 'jobs.json');
 const STATIC_DIR = path.join(__dirname, '..', 'dist');
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 
@@ -91,17 +90,6 @@ function saveEnvironment(envId, data) {
   writeJsonAtomic(path.join(dir, 'environment.json'), data);
 }
 
-function listBridgeSkills() {
-  const skillsDir = path.join(BRIDGE_WORKSPACE, 'skills');
-  try {
-    return fs.readdirSync(skillsDir).filter(name =>
-      fs.existsSync(path.join(skillsDir, name, 'SKILL.md'))
-    );
-  } catch {
-    return [];
-  }
-}
-
 function listSshKeys() {
   return readJsonFile(SSH_KEYS_INDEX, []);
 }
@@ -143,12 +131,13 @@ app.get('/api/dashboard', (req, res) => {
   let active = 0;
   let disabled = 0;
   let agentSkills = 0;
+  let triggerCount = 0;
 
   for (const id of agentDirs) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
     if (cfg.enabled === false) disabled++;
     else active++;
-    // count agent skills
+
     const skillsDir = path.join(AGENTS_DIR, id, 'skills');
     try {
       const skills = fs.readdirSync(skillsDir).filter(n => {
@@ -156,23 +145,23 @@ app.get('/api/dashboard', (req, res) => {
       });
       agentSkills += skills.length;
     } catch { /* no skills dir */ }
+
+    const triggers = readJsonFile(path.join(AGENTS_DIR, id, 'triggers.json'), []);
+    if (Array.isArray(triggers)) triggerCount += triggers.length;
   }
 
-  const bridgeJobs = readJsonFile(BRIDGE_JOBS_FILE, []);
-
-  // bridge skills
-  let bridgeSkills = 0;
-  const bridgeSkillsDir = path.join(BRIDGE_WORKSPACE, 'skills');
+  let poolSkills = 0;
+  const poolSkillsDir = path.join(POOL_DIR, 'skills');
   try {
-    bridgeSkills = fs.readdirSync(bridgeSkillsDir).filter(n =>
-      fs.existsSync(path.join(bridgeSkillsDir, n, 'SKILL.md'))
+    poolSkills = fs.readdirSync(poolSkillsDir).filter(n =>
+      fs.existsSync(path.join(poolSkillsDir, n, 'SKILL.md'))
     ).length;
   } catch { /* no dir */ }
 
   res.json({
     agents: { total: agentDirs.length, active, disabled },
-    jobs: { total: Array.isArray(bridgeJobs) ? bridgeJobs.length : 0 },
-    skills: { total: bridgeSkills + agentSkills },
+    jobs: { total: triggerCount },
+    skills: { total: poolSkills + agentSkills },
   });
 });
 
@@ -321,53 +310,23 @@ app.delete('/api/agents/:id/triggers/:triggerId', (req, res) => {
   res.status(204).end();
 });
 
-/* ─── Bridge Jobs ───────────────────────────────────────────────────── */
-
-app.get('/api/jobs', (req, res) => {
-  res.json(readJsonFile(BRIDGE_JOBS_FILE, []));
-});
-
-app.post('/api/jobs', (req, res) => {
-  const jobs = readJsonFile(BRIDGE_JOBS_FILE, []);
-  const newJob = { id: `j${Date.now()}`, ...req.body };
-  jobs.push(newJob);
-  writeJsonAtomic(BRIDGE_JOBS_FILE, jobs);
-  res.status(201).json(newJob);
-});
-
-app.put('/api/jobs/:id', (req, res) => {
-  const jobs = readJsonFile(BRIDGE_JOBS_FILE, []);
-  const idx = jobs.findIndex(j => j.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Job not found' });
-  jobs[idx] = { ...jobs[idx], ...req.body, id: req.params.id };
-  writeJsonAtomic(BRIDGE_JOBS_FILE, jobs);
-  res.json(jobs[idx]);
-});
-
-app.delete('/api/jobs/:id', (req, res) => {
-  const jobs = readJsonFile(BRIDGE_JOBS_FILE, []);
-  const filtered = jobs.filter(j => j.id !== req.params.id);
-  writeJsonAtomic(BRIDGE_JOBS_FILE, filtered);
-  res.status(204).end();
-});
-
 /* ─── Skills ────────────────────────────────────────────────────────── */
 
 app.get('/api/skills', (req, res) => {
   const skills = [];
   const seen = new Set();
 
-  // Bridge skills
-  const bridgeSkillsDir = path.join(BRIDGE_WORKSPACE, 'skills');
+  // Pool (shared) skills
+  const poolSkillsDir = path.join(POOL_DIR, 'skills');
   try {
-    fs.readdirSync(bridgeSkillsDir).forEach(name => {
-      const skillMd = path.join(bridgeSkillsDir, name, 'SKILL.md');
+    fs.readdirSync(poolSkillsDir).forEach(name => {
+      const skillMd = path.join(poolSkillsDir, name, 'SKILL.md');
       if (fs.existsSync(skillMd) && !seen.has(name)) {
         seen.add(name);
-        skills.push({ name, source: 'bridge', path: skillMd });
+        skills.push({ name, source: 'pool', path: skillMd });
       }
     });
-  } catch { /* no bridge skills dir */ }
+  } catch { /* no pool skills dir */ }
 
   // Agent skills
   for (const agentId of listAgentDirs()) {
@@ -397,7 +356,7 @@ app.get('/api/skills/:name/content', (req, res) => {
   if (source === 'agent' && agentId) {
     skillPath = path.join(AGENTS_DIR, agentId, 'skills', name, 'SKILL.md');
   } else {
-    skillPath = path.join(BRIDGE_WORKSPACE, 'skills', name, 'SKILL.md');
+    skillPath = path.join(POOL_DIR, 'skills', name, 'SKILL.md');
   }
 
   if (!fs.existsSync(skillPath)) return res.status(404).json({ error: 'Skill not found' });
@@ -446,7 +405,7 @@ app.delete('/api/models/:id', (req, res) => {
 
 /* ─── MCP Config ────────────────────────────────────────────────────── */
 
-const MCP_SETTINGS_FILE = path.join(BRIDGE_WORKSPACE, '.claude', 'settings.json');
+const MCP_SETTINGS_FILE = path.join(POOL_DIR, '.claude', 'settings.json');
 
 app.get('/api/mcp', (req, res) => {
   const settings = readJsonFile(MCP_SETTINGS_FILE, {});

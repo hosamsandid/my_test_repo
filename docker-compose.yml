@@ -71,7 +71,7 @@ services:
       - "4000:4000"
     volumes:
       - agent-pool-workspace:/workspace
-      - skills-pool:/bridge-workspace
+      - skills-pool:/pool
       # Rootless Podman socket (core uid=501 inside VM — matches container's mapped uid)
       - /run/user/501/podman/podman.sock:/var/run/podman.sock:ro
     environment:
@@ -90,6 +90,6 @@ volumes:
   agent-pool-workspace:
     name: vgh-claw_agent-pool-workspace
   # Central skill pool, shared between orchestrator (read-only at /template-workspace)
-  # and admin-console (at /bridge-workspace, legacy mount path).
+  # and admin-console (read-write at /pool).
   skills-pool:
     name: vgh-claw_claude-workspace

@@ -17,7 +17,7 @@ const NAV = [
   ]},
   { section: 'CONFIGURATION', items: [
     { path: '/skills',       label: 'Skills Registry',     Icon: Zap },
-    { path: '/jobs',         label: 'Scheduled Jobs',      Icon: Clock },
+    { path: '/jobs',         label: 'Scheduled Triggers',      Icon: Clock },
     { path: '/models',       label: 'Model Registry',      Icon: Sparkles },
     { path: '/mcp',          label: 'MCP Servers',         Icon: Server },
   ]},
@@ -35,7 +35,7 @@ const BREADCRUMBS = {
   '/environments': 'Working Environments',
   '/ssh-keys':     'SSH Keys',
   '/skills':       'Skills Registry',
-  '/jobs':         'Scheduled Jobs',
+  '/jobs':         'Scheduled Triggers',
   '/models':       'Model Registry',
   '/mcp':          'MCP Servers',
   '/knowledge':    'Knowledge Base',

@@ -48,7 +48,7 @@ export default function McpServers() {
         fontSize: 'var(--eb-text-sm)',
         color: 'var(--eb-text-primary)',
       }}>
-        MCP-Konfiguration liegt in <code style={{ fontFamily: 'var(--eb-font-mono)' }}>.claude/settings.json</code> im Bridge-Workspace. Diese Ansicht ist schreibgeschuetzt.
+        MCP-Konfiguration liegt im Pool-Volume unter <code style={{ fontFamily: 'var(--eb-font-mono)' }}>.claude/settings.json</code>. Diese Ansicht ist schreibgeschuetzt.
       </div>
 
       <DataTable

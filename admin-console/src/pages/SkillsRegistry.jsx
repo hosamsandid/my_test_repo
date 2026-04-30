@@ -11,9 +11,9 @@ const COLUMNS = [
       borderRadius: 'var(--eb-radius-sm)',
       fontSize: 'var(--eb-text-xs)',
       fontWeight: 'var(--eb-font-medium)',
-      background: v === 'bridge' ? 'var(--eb-accent-muted)' : 'var(--eb-status-info-bg)',
-      color: v === 'bridge' ? 'var(--eb-accent-primary)' : 'var(--eb-status-info)',
-      border: `1px solid ${v === 'bridge' ? 'var(--eb-accent-primary)' : 'var(--eb-status-info)'}`,
+      background: v === 'pool' ? 'var(--eb-accent-muted)' : 'var(--eb-status-info-bg)',
+      color: v === 'pool' ? 'var(--eb-accent-primary)' : 'var(--eb-status-info)',
+      border: `1px solid ${v === 'pool' ? 'var(--eb-accent-primary)' : 'var(--eb-status-info)'}`,
     }}>
       {v}
     </span>
@@ -86,7 +86,7 @@ export default function SkillsRegistry() {
         columns={COLUMNS}
         data={skills ?? []}
         onRowClick={openSkill}
-        emptyText="No skills found in bridge-workspace or agent workspaces."
+        emptyText="No skills found in the pool or in agent workspaces."
       />
 
       <SidePanel

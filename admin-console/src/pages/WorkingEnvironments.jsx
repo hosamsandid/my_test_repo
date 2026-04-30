@@ -35,7 +35,7 @@ function SkillPicker({ allSkills, selected, onChange }) {
   if (allSkills.length === 0) {
     return (
       <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
-        Keine Skills im zentralen Pool. Lege Skills im Bridge-Workspace unter <code>skills/&lt;name&gt;/SKILL.md</code> ab.
+        Keine Skills im zentralen Pool. Lege Skills im Pool-Volume unter <code>skills/&lt;name&gt;/SKILL.md</code> ab.
       </div>
     );
   }
@@ -95,7 +95,7 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
   const { data: skillsData } = useApi('/api/skills');
   const { data: keysData } = useApi('/api/ssh-keys');
 
-  const bridgeSkills = (skillsData || []).filter(s => s.source === 'bridge').map(s => s.name);
+  const poolSkills = (skillsData || []).filter(s => s.source === 'pool').map(s => s.name);
   const sshKeys = keysData || [];
 
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
@@ -154,7 +154,7 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
       <div>
         <div style={labelStyle}>Skills (aus dem zentralen Pool)</div>
         <SkillPicker
-          allSkills={bridgeSkills}
+          allSkills={poolSkills}
           selected={form.skills}
           onChange={v => update('skills', v)}
         />

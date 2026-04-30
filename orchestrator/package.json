@@ -1,5 +1,5 @@
 {
-  "name": "multi-agent-orchestrator",
+  "name": "orchestrator",
   "version": "1.0.0",
   "private": true,
   "dependencies": {

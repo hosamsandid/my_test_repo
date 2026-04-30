@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # plugin-sync.sh — Fast file sync for ACE plugin updates
 # Copies plugin-owned scripts/templates to the target project.
-# Usage: bash scripts/plugin-sync.sh [--target <project-dir>]
+# Usage: bash scripts/plugin-sync.sh [--target <project-dir>] [--init]
 #
 # If --target is not specified, auto-detects the project that installed this plugin.
+# --init also seeds mentorscripts/team.md (skipped if already present).
 # Exit codes: 0 = success, 1 = error
 
 set -euo pipefail
@@ -13,11 +14,11 @@ PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Parse arguments
 TARGET_DIR=""
-INIT_MODE=""  # solo, team, or empty (update-only, skip mentorscripts/CLAUDE.md)
+INIT=false  # true during --init, false otherwise (update-only, skip mentorscripts/CLAUDE.md)
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --target)  TARGET_DIR="$2"; shift 2 ;;
-    --init)    INIT_MODE="$2"; shift 2 ;;
+    --init)    INIT=true; shift ;;
     *)         echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -77,8 +78,7 @@ for dir in \
   artifacts/log \
   mentorscripts \
   scripts \
-  scripts/bp-explorer \
-  skills/ale/loops; do
+  scripts/bp-explorer; do
   if [[ ! -d "$TARGET_DIR/$dir" ]]; then
     mkdir -p "$TARGET_DIR/$dir"
     CREATED_DIRS+=("$dir")
@@ -98,13 +98,10 @@ done < <(find "$PLUGIN_ROOT/scripts" -type f \
   -not -name '.DS_Store' \
   -print0 | sort -z)
 
-# --- LoopScripts (ALWAYS overwrite — needed for dispatch/validation) ---
-if [[ -d "$PLUGIN_ROOT/skills/ale/loops" ]]; then
-  while IFS= read -r -d '' src_file; do
-    rel_path="${src_file#"$PLUGIN_ROOT"/}"
-    copy_file "$src_file" "$TARGET_DIR/$rel_path" true
-  done < <(find "$PLUGIN_ROOT/skills/ale/loops" -type f -print0 | sort -z)
-fi
+# --- LoopScripts: NO LONGER COPIED ---
+# Standard LoopScripts (standard.yaml, high-rigor.yaml) are resolved directly
+# from the plugin install path at runtime via sase_lib._detect_plugin_root().
+# Projects can still place custom LoopScripts in skills/engineering/loops/ to override.
 
 # --- MentorScripts: global.md is always ensured (framework baseline) ---
 if [[ -f "$PLUGIN_ROOT/mentorscripts/global.md" && ! -f "$TARGET_DIR/mentorscripts/global.md" ]]; then
@@ -112,13 +109,9 @@ if [[ -f "$PLUGIN_ROOT/mentorscripts/global.md" && ! -f "$TARGET_DIR/mentorscrip
 fi
 
 # --- Init-only files (only during --init, skip if exists) ---
-if [[ -n "$INIT_MODE" ]]; then
+if [[ "$INIT" == "true" ]]; then
   # MentorScripts (global.md already handled above)
-  :
-
-  if [[ "$INIT_MODE" == "solo" && -f "$PLUGIN_ROOT/mentorscripts/solo.md" ]]; then
-    copy_file "$PLUGIN_ROOT/mentorscripts/solo.md" "$TARGET_DIR/mentorscripts/solo.md" false
-  elif [[ "$INIT_MODE" == "team" && -f "$PLUGIN_ROOT/mentorscripts/team.md" ]]; then
+  if [[ -f "$PLUGIN_ROOT/mentorscripts/team.md" ]]; then
     copy_file "$PLUGIN_ROOT/mentorscripts/team.md" "$TARGET_DIR/mentorscripts/team.md" false
   fi
 fi

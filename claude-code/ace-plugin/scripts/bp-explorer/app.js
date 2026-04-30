@@ -467,13 +467,14 @@ function render() {
     const numLabel = state.numberLabels[n.id] || '';
     header.innerHTML = `
       <span class="node-title"><span class="node-number">${esc(numLabel)}</span> ${esc(bp.title)}</span>
-      <span class="node-id">${esc(bp.id)}</span>
+      ${bpIdLabel(bp.id, bp.id, 'node-id')}
     `;
     node.appendChild(header);
 
-    // Badges (rigor only — status is shown via node border color)
+    // Badges (rigor + revision — status is shown via node border color)
     const badgeParts = [];
     if (bp.rigor) badgeParts.push(`<span class="badge rigor-${esc(bp.rigor)}">${esc(bp.rigor)}</span>`);
+    if (bp.revision && parseInt(bp.revision) > 1) badgeParts.push(`<span class="badge badge-revision" title="Revised">Rev\u00a0${esc(String(bp.revision))}</span>`);
     if (badgeParts.length > 0) {
       const badges = document.createElement('div');
       badges.className = 'badges';
@@ -1140,6 +1141,51 @@ function esc(str) {
   return el.innerHTML;
 }
 
+// ─── Copyable BP-ID labels ────────────────────────────────────────────
+// Render a BP/blueprint hash label that copies the full ID to the clipboard
+// on click and selects the visible text so it can also be copied manually.
+// `displayText` is what the user sees (e.g. "a3f7c2", "bp:a3f7c2", or the
+// full ID). The full hash always lands on the clipboard regardless of the
+// abbreviated display.
+function bpIdLabel(fullId, displayText, extraClass) {
+  if (!fullId) return esc(displayText || '');
+  const text = (displayText !== undefined && displayText !== null) ? displayText : fullId;
+  const cls = 'bp-id-copy' + (extraClass ? ' ' + extraClass : '');
+  return `<span class="${cls}" data-bp-id="${esc(fullId)}" title="Click to copy ${esc(fullId)}" onclick="copyBpIdLabel(event)">${esc(text)}</span>`;
+}
+
+async function copyBpIdLabel(event) {
+  if (event && event.stopPropagation) event.stopPropagation();
+  const el = event && event.currentTarget;
+  if (!el) return;
+  const id = el.dataset.bpId || el.textContent.trim();
+
+  // Select the visible text so the user can also copy manually.
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  } catch (e) { /* ignore */ }
+
+  // Copy the full ID to the clipboard.
+  let copied = false;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try { await navigator.clipboard.writeText(id); copied = true; } catch (e) { /* fall through */ }
+  }
+  if (!copied) {
+    try { copied = document.execCommand('copy'); } catch (e) { /* ignore */ }
+  }
+
+  // Visual confirmation.
+  el.classList.remove('bp-id-copied');
+  // Force reflow so the animation restarts on rapid repeat clicks.
+  void el.offsetWidth;
+  el.classList.add('bp-id-copied');
+  setTimeout(() => el.classList.remove('bp-id-copied'), 1100);
+}
+
 // ─── Dashboard ────────────────────────────────────────────────────────
 
 const dashState = {
@@ -1566,6 +1612,10 @@ function renderDepGraph(details) {
     <marker id="dep-arrow-done" markerWidth="10" markerHeight="8" refX="10" refY="4" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M0,0 L10,4 L0,8 Z" fill="#22c55e" opacity="0.45" />
     </marker>
+    <pattern id="dep-hatch-stale" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(45)">
+      <rect width="8" height="8" fill="#1f1424" />
+      <line x1="0" y1="0" x2="0" y2="8" stroke="#a855f7" stroke-width="2" stroke-opacity="0.45" />
+    </pattern>
   </defs>`;
 
   // Draw edges (dependency arrows: from dependency → dependent)
@@ -1621,6 +1671,7 @@ function renderDepGraph(details) {
     { cls: 'swatch-dispatched',  label: 'Dispatched' },
     { cls: 'swatch-completed',   label: 'Completed' },
     { cls: 'swatch-reviewed',    label: 'Reviewed' },
+    { cls: 'swatch-stale',       label: 'Stale' },
   ];
 
   const legend = legendItems
@@ -1681,15 +1732,19 @@ function renderDashContent(group) {
 
   // Dependencies
   if (phase.depends_on && phase.depends_on.length > 0) {
-    const depLabels = phase.depends_on.map(depId => {
+    const depHtml = phase.depends_on.map(depId => {
+      let label = null;
       for (const g of dashState.phaseGroups) {
         const depPhase = g.phases.find(p => p.bp_id === depId);
-        if (depPhase) return depPhase.phase_label;
+        if (depPhase) { label = depPhase.phase_label; break; }
       }
-      const b = state.byId[depId];
-      return b ? b.slug : depId.substring(0, 12);
-    });
-    html += `<div class="dash-deps">Depends on: ${depLabels.map(l => `<code>${esc(l)}</code>`).join(', ')}</div>`;
+      if (label === null) {
+        const b = state.byId[depId];
+        label = b ? b.slug : depId.substring(0, 12);
+      }
+      return bpIdLabel(depId, label, 'bp-id-code');
+    }).join(', ');
+    html += `<div class="dash-deps">Depends on: ${depHtml}</div>`;
   }
 
   // Dependency graph visualization
@@ -1857,6 +1912,72 @@ async function showMrp(bpId) {
   }
 }
 
+function renderRevisionHistory(bp) {
+  const log = bp.revision_log;
+  if (!log || !Array.isArray(log) || log.length === 0) {
+    return '<p style="color:var(--text-muted)">No revision history available.</p>';
+  }
+  const scope = bp.re_execution_scope;
+  let html = '<div class="revision-timeline">';
+  log.forEach((entry, idx) => {
+    const rev = entry.rev || (idx + 1);
+    const date = entry.date || '';
+    const agentId = entry['agent-id'] || entry.agent_id || '';
+    const reason = entry['revision-reason'] || entry.revision_reason || '';
+    const outcome = entry.outcome || '';
+    const mrp = entry.mrp || '';
+    const vcr = entry.vcr || '';
+    html += `<div class="revision-entry">
+      <div class="revision-entry-marker"><span class="revision-dot"></span>${idx < log.length - 1 ? '<span class="revision-line"></span>' : ''}</div>
+      <div class="revision-entry-content">
+        <div class="revision-entry-header">
+          <span class="revision-entry-rev">Revision ${esc(String(rev))}</span>
+          <span class="revision-entry-outcome ${esc(outcome)}">${esc(outcome)}</span>
+          ${date ? `<span class="revision-entry-date">${esc(date)}</span>` : ''}
+        </div>
+        ${reason ? `<div class="revision-entry-reason">${esc(reason)}</div>` : ''}
+        <div class="revision-entry-meta">
+          ${agentId ? `<span>Agent: <code>agt:${esc(agentId)}</code></span>` : ''}
+          ${mrp ? `<span>MRP: <code>${esc(mrp)}</code></span>` : ''}
+          ${vcr ? `<span>VCR: <code>${esc(vcr)}</code></span>` : ''}
+        </div>
+      </div>
+    </div>`;
+  });
+  html += '</div>';
+  // Re-execution scope (if present and non-empty)
+  if (scope && typeof scope === 'object' && Object.keys(scope).length > 0) {
+    html += `<details class="revision-scope-details">
+      <summary>Re-execution Scope</summary>
+      <div class="revision-scope-content">`;
+    if (scope.reason) html += `<div class="revision-scope-row"><span class="revision-scope-label">Reason</span><span>${esc(scope.reason)}</span></div>`;
+    const affectedAcs = scope['affected-acs'] || scope.affected_acs || [];
+    if (affectedAcs.length > 0) html += `<div class="revision-scope-row"><span class="revision-scope-label">Affected ACs</span><span>${affectedAcs.map(ac => `<code>${esc(ac)}</code>`).join(', ')}</span></div>`;
+    const preserve = scope['preserve-artifacts'] || scope.preserve_artifacts || [];
+    if (preserve.length > 0) {
+      html += `<div class="revision-scope-row"><span class="revision-scope-label">Preserve</span><ul class="revision-scope-list">`;
+      preserve.forEach(a => {
+        const path = typeof a === 'string' ? a : (a.path || '');
+        const note = typeof a === 'object' ? (a.note || '') : '';
+        html += `<li><code>${esc(path)}</code>${note ? ` — ${esc(note)}` : ''}</li>`;
+      });
+      html += `</ul></div>`;
+    }
+    const reverify = scope['re-verify-artifacts'] || scope.re_verify_artifacts || [];
+    if (reverify.length > 0) {
+      html += `<div class="revision-scope-row"><span class="revision-scope-label">Re-verify</span><ul class="revision-scope-list">`;
+      reverify.forEach(a => {
+        const path = typeof a === 'string' ? a : (a.path || '');
+        const cmd = typeof a === 'object' ? (a['verify-command'] || a.verify_command || '') : '';
+        html += `<li><code>${esc(path)}</code>${cmd ? ` <span class="revision-verify-cmd">${esc(cmd)}</span>` : ''}</li>`;
+      });
+      html += `</ul></div>`;
+    }
+    html += `</div></details>`;
+  }
+  return html;
+}
+
 function showFullBriefingPack(bpId) {
   const bp = state.byId[bpId];
   if (!bp || !bp.body) return;
@@ -1866,8 +1987,9 @@ function showFullBriefingPack(bpId) {
   // Build full BP view: frontmatter summary + body
   let html = '<div class="dash-body-content">';
   html += `<div class="bp-full-meta">`;
-  html += `<div class="bp-full-meta-row"><span class="bp-full-meta-label">ID</span><code>${esc(bp.id)}</code></div>`;
+  html += `<div class="bp-full-meta-row"><span class="bp-full-meta-label">ID</span>${bpIdLabel(bp.id, bp.id, 'bp-id-code')}</div>`;
   html += `<div class="bp-full-meta-row"><span class="bp-full-meta-label">Status</span><span class="dash-status-badge ${bp.status}">${esc(bp.status)}</span></div>`;
+  if (bp.revision && parseInt(bp.revision) > 1) html += `<div class="bp-full-meta-row"><span class="bp-full-meta-label">Revision</span><span class="queue-item-badge queue-badge-revision">Rev\u00a0${esc(String(bp.revision))}</span></div>`;
   if (bp.rigor) html += `<div class="bp-full-meta-row"><span class="bp-full-meta-label">Rigor</span>${esc(bp.rigor)}</div>`;
   if (bp.parent) {
     const parent = state.byId[bp.parent];
@@ -1877,8 +1999,12 @@ function showFullBriefingPack(bpId) {
     html += `<div class="bp-full-meta-row"><span class="bp-full-meta-label">Children</span>${bp.children.length} sub-tasks</div>`;
   }
   if (bp.depends_on && bp.depends_on.length > 0) {
-    const depNames = bp.depends_on.map(did => { const d = state.byId[did]; return d ? d.title : did.substring(0,12); });
-    html += `<div class="bp-full-meta-row"><span class="bp-full-meta-label">Depends on</span>${depNames.map(n => `<code>${esc(n)}</code>`).join(', ')}</div>`;
+    const depHtml = bp.depends_on.map(did => {
+      const d = state.byId[did];
+      const label = d ? d.title : did.substring(0,12);
+      return bpIdLabel(did, label, 'bp-id-code');
+    }).join(', ');
+    html += `<div class="bp-full-meta-row"><span class="bp-full-meta-label">Depends on</span>${depHtml}</div>`;
   }
   html += `</div><hr style="border-color:var(--border);margin:16px 0">`;
   html += linkifyArtifacts(renderMarkdown(bp.body), bp);
@@ -2255,6 +2381,7 @@ const dashboardState2 = {
   openCrps: [],
   pendingReviews: [],
   pendingParentReviews: [],
+  staleBPs: [],
   activeAgents: [],
   readyToDispatch: [],
   drafts: [],
@@ -2313,7 +2440,7 @@ function renderKpiStrip() {
     : state.briefings.filter(bp => !bp.archived);
 
   const leafBPs = allBPs.filter(bp => !bp.children || bp.children.length === 0);
-  const statusCounts = { draft: 0, ready: 0, active: 0, completed: 0, reviewed: 0 };
+  const statusCounts = { draft: 0, ready: 0, active: 0, completed: 0, reviewed: 0, stale: 0 };
   leafBPs.forEach(bp => {
     if (['dispatched','claimed','in-progress','in_progress'].includes(bp.status)) statusCounts.active++;
     else if (statusCounts[bp.status] !== undefined) statusCounts[bp.status]++;
@@ -2340,7 +2467,7 @@ function renderKpiStrip() {
       <div class="kpi-card-info">
         <div class="kpi-card-label">Pipeline</div>
         <div class="kpi-card-value">${doneCount}/${leafBPs.length}</div>
-        <div class="kpi-card-detail">${statusCounts.draft}d &middot; ${statusCounts.ready}r &middot; ${statusCounts.active}a &middot; ${statusCounts.completed}c</div>
+        <div class="kpi-card-detail">${statusCounts.draft}d &middot; ${statusCounts.ready}r &middot; ${statusCounts.active}a &middot; ${statusCounts.completed}c${statusCounts.stale > 0 ? ` &middot; <span style="color:var(--status-stale)">${statusCounts.stale}s</span>` : ''}</div>
       </div>
     </div>
     <div class="kpi-card${agentCount > 0 ? ' kpi-active' : ''}">
@@ -2387,6 +2514,17 @@ function buildQueueItems() {
       badgeLabel: 'review',
       meta: bp.agent_id ? `agt:${bp.agent_id}` : '',
       time: bp.completed ? timeAgo(bp.completed) : '',
+    });
+  });
+  // Stale (needs revalidation)
+  dashboardState2.staleBPs.forEach((bp, idx) => {
+    items.push({
+      type: 'stale', id: bp.id, idx, data: bp,
+      title: bp.title || bp.slug || bp.id,
+      badge: 'stale',
+      badgeLabel: 'stale',
+      meta: bp.prior_status ? `was: ${bp.prior_status}` : '',
+      time: bp.staled ? timeAgo(bp.staled) : '',
     });
   });
   // Active agents
@@ -2470,6 +2608,7 @@ function renderQueue() {
   const groups = [
     { key: 'crp', label: 'Action Required', items: items.filter(i => i.type === 'crp') },
     { key: 'review', label: 'Pending Review', items: items.filter(i => i.type === 'review') },
+    { key: 'stale', label: 'Needs Revalidation', items: items.filter(i => i.type === 'stale') },
     { key: 'active', label: 'Active Missions', items: items.filter(i => i.type === 'active') },
     { key: 'ready', label: 'Ready to Dispatch', items: items.filter(i => i.type === 'ready') },
     { key: 'draft', label: 'Drafts', items: items.filter(i => i.type === 'draft') },
@@ -2494,6 +2633,10 @@ function renderQueue() {
 
       if (item.badge) {
         html += `<span class="queue-item-badge queue-badge-${item.badge}">${esc(item.badgeLabel)}</span>`;
+      }
+      // Revision badge
+      if (item.data && item.data.revision && parseInt(item.data.revision) > 1) {
+        html += `<span class="queue-item-badge queue-badge-revision" title="This BP has been revised">Rev\u00a0${esc(String(item.data.revision))}</span>`;
       }
       // Chat session indicator
       const bpChatSessions = getBpChatSessions(item.id);
@@ -2741,6 +2884,7 @@ function renderReviewDetail(bpId) {
     <div class="detail-header-badges">
       <span class="detail-type-badge detail-type-review">${isParent ? 'Final Review' : 'MRP Review'}</span>`;
   if (bp.agent_id) html += `<span class="db-agent-badge">agt:${esc(bp.agent_id)}</span>`;
+  if (bp.revision && parseInt(bp.revision) > 1) html += `<span class="queue-item-badge queue-badge-revision" title="Revised BP">Rev\u00a0${esc(String(bp.revision))}</span>`;
   if (bp.completed) html += `<span style="font-size:11px;color:var(--text-muted)">Completed ${esc(timeAgo(bp.completed))}</span>`;
   html += `</div></div>`;
   html += renderBpEditorBlock(bpId);
@@ -2751,6 +2895,7 @@ function renderReviewDetail(bpId) {
     html += `<div class="detail-mission-phases"><div class="detail-mission-phases-header">Mission Phases</div>${reviewPhasesHtml}</div>`;
   }
 
+  const hasRevisions = bp.revision_log && Array.isArray(bp.revision_log) && bp.revision_log.length > 0;
   const bpChatCount = getBpChatSessions(bpId).length;
   const activeTab = queueState.detailTab || 'mrp';
   html += `<div class="detail-tabs">
@@ -2758,8 +2903,9 @@ function renderReviewDetail(bpId) {
     <div class="detail-tab${activeTab==='briefing'?' active':''}" data-tab="briefing" onclick="switchDetailTab('briefing')">Agent Brief</div>`;
   if (hasArtifacts) html += `<div class="detail-tab${activeTab==='artifacts'?' active':''}" data-tab="artifacts" onclick="switchDetailTab('artifacts')">Artifacts</div>`;
   html += `<div class="detail-tab${activeTab==='log'?' active':''}" data-tab="log" onclick="switchDetailTab('log')">Agent Log</div>
-    <div class="detail-tab${activeTab==='chat'?' active':''}" data-tab="chat" onclick="switchDetailTab('chat')">Chat${bpChatCount ? ' (' + bpChatCount + ')' : ''}</div>
-  </div>`;
+    <div class="detail-tab${activeTab==='chat'?' active':''}" data-tab="chat" onclick="switchDetailTab('chat')">Chat${bpChatCount ? ' (' + bpChatCount + ')' : ''}</div>`;
+  if (hasRevisions) html += `<div class="detail-tab${activeTab==='history'?' active':''}" data-tab="history" onclick="switchDetailTab('history')">History</div>`;
+  html += `</div>`;
 
   // MRP
   html += `<div class="detail-tab-content${activeTab==='mrp'?' active':''}" data-tab="mrp" data-bpid="${esc(bpId)}">`;
@@ -2770,7 +2916,7 @@ function renderReviewDetail(bpId) {
   html += `<div class="detail-tab-content${activeTab==='briefing'?' active':''}" data-tab="briefing">`;
   if (bp.body) {
     html += `<div class="crp-meta-grid">`;
-    html += `<span class="crp-meta-label">ID</span><span class="crp-meta-value"><code>${esc(bp.id)}</code></span>`;
+    html += `<span class="crp-meta-label">ID</span><span class="crp-meta-value">${bpIdLabel(bp.id, bp.id, 'bp-id-code')}</span>`;
     html += `<span class="crp-meta-label">Status</span><span class="crp-meta-value"><span class="dash-status-badge ${bp.status}">${esc(bp.status)}</span></span>`;
     if (bp.rigor) html += `<span class="crp-meta-label">Rigor</span><span class="crp-meta-value">${esc(bp.rigor)}</span>`;
     if (bp.agent_id) html += `<span class="crp-meta-label">Agent</span><span class="crp-meta-value"><code>agt:${esc(bp.agent_id)}</code></span>`;
@@ -2800,6 +2946,13 @@ function renderReviewDetail(bpId) {
   html += `<div class="embedded-chat-empty"><div style="font-size:28px;opacity:0.3">&#x2B21;</div><p>Loading chat...</p></div>`;
   html += `</div>`;
 
+  // History (revision log)
+  if (hasRevisions) {
+    html += `<div class="detail-tab-content${activeTab==='history'?' active':''}" data-tab="history">`;
+    html += renderRevisionHistory(bp);
+    html += `</div>`;
+  }
+
   return html;
 }
 
@@ -2824,6 +2977,7 @@ function renderActiveDetail(bpId) {
       <span class="dash-status-badge ${(bp.status||'').replace('-','_')}">${esc(bp.status)}</span>`;
   if (bp.agent_id) html += `<span class="db-agent-badge">agt:${esc(bp.agent_id)}</span>`;
   if (bp.phase) html += `<span class="queue-item-badge queue-badge-active">${esc(bp.phase)}</span>`;
+  if (bp.revision && parseInt(bp.revision) > 1) html += `<span class="queue-item-badge queue-badge-revision" title="Revised BP">Rev\u00a0${esc(String(bp.revision))}</span>`;
   if (runtime) html += `<span style="font-size:11px;color:var(--text-muted)">${esc(runtime)}</span>`;
   html += `</div></div>`;
   html += renderBpEditorBlock(bpId);
@@ -2835,19 +2989,21 @@ function renderActiveDetail(bpId) {
   }
 
   const hasArtifacts = bp.artifacts && bp.artifacts.some(a => a.direction === 'output');
+  const hasRevisions = bp.revision_log && Array.isArray(bp.revision_log) && bp.revision_log.length > 0;
   const bpChatCount = getBpChatSessions(bpId).length;
   const activeTab = queueState.detailTab || 'briefing';
   html += `<div class="detail-tabs">
     <div class="detail-tab${activeTab==='briefing'?' active':''}" data-tab="briefing" onclick="switchDetailTab('briefing')">Agent Brief</div>`;
   if (hasArtifacts) html += `<div class="detail-tab${activeTab==='artifacts'?' active':''}" data-tab="artifacts" onclick="switchDetailTab('artifacts')">Artifacts</div>`;
   html += `<div class="detail-tab${activeTab==='log'?' active':''}" data-tab="log" onclick="switchDetailTab('log')">Agent Log</div>
-    <div class="detail-tab${activeTab==='chat'?' active':''}" data-tab="chat" onclick="switchDetailTab('chat')">Chat${bpChatCount ? ' (' + bpChatCount + ')' : ''}</div>
-  </div>`;
+    <div class="detail-tab${activeTab==='chat'?' active':''}" data-tab="chat" onclick="switchDetailTab('chat')">Chat${bpChatCount ? ' (' + bpChatCount + ')' : ''}</div>`;
+  if (hasRevisions) html += `<div class="detail-tab${activeTab==='history'?' active':''}" data-tab="history" onclick="switchDetailTab('history')">History</div>`;
+  html += `</div>`;
 
   html += `<div class="detail-tab-content${activeTab==='briefing'?' active':''}" data-tab="briefing">`;
   if (bp.body) {
     html += `<div class="crp-meta-grid">`;
-    html += `<span class="crp-meta-label">ID</span><span class="crp-meta-value"><code>${esc(bp.id)}</code></span>`;
+    html += `<span class="crp-meta-label">ID</span><span class="crp-meta-value">${bpIdLabel(bp.id, bp.id, 'bp-id-code')}</span>`;
     html += `<span class="crp-meta-label">Claimed</span><span class="crp-meta-value">${esc(timeAgo(bp.claimed))}</span>`;
     if (bp.last_heartbeat) html += `<span class="crp-meta-label">Heartbeat</span><span class="crp-meta-value">${esc(timeAgo(bp.last_heartbeat))}</span>`;
     if (bp.rigor) html += `<span class="crp-meta-label">Rigor</span><span class="crp-meta-value">${esc(bp.rigor)}</span>`;
@@ -2872,6 +3028,12 @@ function renderActiveDetail(bpId) {
   html += `<div class="embedded-chat-empty"><div style="font-size:28px;opacity:0.3">&#x2B21;</div><p>Loading chat...</p></div>`;
   html += `</div>`;
 
+  if (hasRevisions) {
+    html += `<div class="detail-tab-content${activeTab==='history'?' active':''}" data-tab="history">`;
+    html += renderRevisionHistory(bp);
+    html += `</div>`;
+  }
+
   return html;
 }
 
@@ -2893,6 +3055,7 @@ function renderReadyDetail(bpId) {
     <div class="detail-header-badges">
       <span class="detail-type-badge detail-type-ready">Ready to Dispatch</span>`;
   if (bp.rigor) html += `<span class="queue-item-badge queue-badge-ready">${esc(bp.rigor)}</span>`;
+  if (bp.revision && parseInt(bp.revision) > 1) html += `<span class="queue-item-badge queue-badge-revision" title="Revised BP">Rev\u00a0${esc(String(bp.revision))}</span>`;
   html += `</div></div>`;
   html += renderBpEditorBlock(bpId);
 
@@ -2906,7 +3069,7 @@ function renderReadyDetail(bpId) {
   html += `<div class="detail-tab-content${activeTab==='briefing'?' active':''}" data-tab="briefing">`;
   if (bp.body) {
     html += `<div class="crp-meta-grid">`;
-    html += `<span class="crp-meta-label">ID</span><span class="crp-meta-value"><code>${esc(bp.id)}</code></span>`;
+    html += `<span class="crp-meta-label">ID</span><span class="crp-meta-value">${bpIdLabel(bp.id, bp.id, 'bp-id-code')}</span>`;
     if (bp.rigor) html += `<span class="crp-meta-label">Rigor</span><span class="crp-meta-value">${esc(bp.rigor)}</span>`;
     if (bp.loopscript) html += `<span class="crp-meta-label">LoopScript</span><span class="crp-meta-value">${esc(bp.loopscript)}</span>`;
     html += `</div><hr style="border-color:var(--border);margin:12px 0">`;
@@ -2939,6 +3102,7 @@ function renderDraftDetail(bpId) {
     <div class="detail-header-badges">
       <span class="detail-type-badge" style="background:rgba(148,163,184,0.15);color:var(--text-muted)">Draft</span>`;
   if (bp.rigor) html += `<span class="queue-item-badge">${esc(bp.rigor)}</span>`;
+  if (bp.revision && parseInt(bp.revision) > 1) html += `<span class="queue-item-badge queue-badge-revision" title="Revised BP">Rev\u00a0${esc(String(bp.revision))}</span>`;
   if (bp.created) html += `<span style="font-size:11px;color:var(--text-muted)">Created ${esc(timeAgo(bp.created))}</span>`;
   html += `</div></div>`;
   html += renderBpEditorBlock(bpId);
@@ -2953,7 +3117,7 @@ function renderDraftDetail(bpId) {
   html += `<div class="detail-tab-content${activeTab==='briefing'?' active':''}" data-tab="briefing">`;
   if (bp.body) {
     html += `<div class="crp-meta-grid">`;
-    html += `<span class="crp-meta-label">ID</span><span class="crp-meta-value"><code>${esc(bp.id)}</code></span>`;
+    html += `<span class="crp-meta-label">ID</span><span class="crp-meta-value">${bpIdLabel(bp.id, bp.id, 'bp-id-code')}</span>`;
     if (bp.rigor) html += `<span class="crp-meta-label">Rigor</span><span class="crp-meta-value">${esc(bp.rigor)}</span>`;
     if (bp.loopscript) html += `<span class="crp-meta-label">LoopScript</span><span class="crp-meta-value">${esc(bp.loopscript)}</span>`;
     html += `</div><hr style="border-color:var(--border);margin:12px 0">`;
@@ -3867,6 +4031,11 @@ async function buildDashboardData() {
   dashboardState2.pendingReviews = sortByHierarchy(childReviews);
   dashboardState2.pendingParentReviews = parentReviews;
 
+  // Stale BPs — upstream was revised, work needs revalidation
+  dashboardState2.staleBPs = sortByHierarchy(allBPs.filter(bp =>
+    bp.status === 'stale' && (!bp.children || bp.children.length === 0)
+  ));
+
   // Active agents (sorted by hierarchy)
   dashboardState2.activeAgents = sortByHierarchy(allBPs.filter(bp =>
     ['dispatched', 'claimed', 'in-progress', 'in_progress'].includes(bp.status) &&
@@ -4085,7 +4254,7 @@ function _legacyRenderOverview() {
       html += `<div class="crp-tab-content" data-tab="briefing">`;
       if (bp.body) {
         html += `<div class="crp-meta-grid">`;
-        html += `<span class="crp-meta-label">ID</span><span class="crp-meta-value"><code>${esc(bp.id)}</code></span>`;
+        html += `<span class="crp-meta-label">ID</span><span class="crp-meta-value">${bpIdLabel(bp.id, bp.id, 'bp-id-code')}</span>`;
         html += `<span class="crp-meta-label">Status</span><span class="crp-meta-value"><span class="dash-status-badge ${bp.status}">${esc(bp.status)}</span></span>`;
         if (bp.rigor) html += `<span class="crp-meta-label">Rigor</span><span class="crp-meta-value">${esc(bp.rigor)}</span>`;
         if (bp.agent_id) html += `<span class="crp-meta-label">Agent</span><span class="crp-meta-value"><code>agt:${esc(bp.agent_id)}</code></span>`;
@@ -4149,7 +4318,7 @@ function _legacyRenderOverview() {
       html += `<div class="crp-tab-content" data-tab="briefing">`;
       if (bp.body) {
         html += `<div class="crp-meta-grid">`;
-        html += `<span class="crp-meta-label">ID</span><span class="crp-meta-value"><code>${esc(bp.id)}</code></span>`;
+        html += `<span class="crp-meta-label">ID</span><span class="crp-meta-value">${bpIdLabel(bp.id, bp.id, 'bp-id-code')}</span>`;
         html += `<span class="crp-meta-label">Status</span><span class="crp-meta-value"><span class="dash-status-badge ${bp.status}">${esc(bp.status)}</span></span>`;
         if (bp.rigor) html += `<span class="crp-meta-label">Rigor</span><span class="crp-meta-value">${esc(bp.rigor)}</span>`;
         if (bp.agent_id) html += `<span class="crp-meta-label">Agent</span><span class="crp-meta-value"><code>agt:${esc(bp.agent_id)}</code></span>`;
@@ -4791,6 +4960,13 @@ function isUnapprovable(bp) {
 function isResettable(bp) {
   return bp && bp.status === 'completed';
 }
+function isConfirmValidable(bp) {
+  // Parent BPs derive a 'stale' status from children but have no own work to confirm.
+  return bp && bp.status === 'stale' && (!bp.children || bp.children.length === 0);
+}
+function isStaleRevisable(bp) {
+  return bp && bp.status === 'stale' && (!bp.children || bp.children.length === 0);
+}
 
 /**
  * Execute a deterministic BP state transition via the server API.
@@ -4806,6 +4982,7 @@ async function transitionBP(bpId, action, event) {
     approve: 'Approve', cancel: 'Cancel', release: 'Release',
     complete: 'Complete', review: 'Mark Reviewed', archive: 'Archive', restore: 'Restore',
     unapprove: 'Revert to Draft', reset: 'Reset to Ready',
+    'confirm-valid': 'Confirm Valid', revise: 'Revise',
   };
   const label = labels[action] || action;
 
@@ -4816,6 +4993,13 @@ async function transitionBP(bpId, action, event) {
     if (reason === null) return; // user cancelled
     if (!reason.trim()) { alert('A reason is required for the release action.'); return; }
     reason = reason.trim();
+  } else if (action === 'revise') {
+    reason = prompt(`Revise "${title}".\n\nThis bumps the revision and resets the BP to ready for re-execution.\nDirect dependents will be flagged as stale.\n\nEnter a reason for the revision:`);
+    if (reason === null) return;
+    if (!reason.trim()) { alert('A reason is required for the revise action.'); return; }
+    reason = reason.trim();
+  } else if (action === 'confirm-valid') {
+    if (!confirm(`Confirm "${title}" is still valid?\n\nThis restores the prior status (completed/reviewed) and stops the stale cascade.`)) return;
   } else if (action === 'cancel') {
     if (!confirm(`Cancel "${title}"?\n\nThis will reset the BP to ready status and remove agent assignment.`)) return;
   } else if (action === 'archive') {
@@ -4942,6 +5126,12 @@ function renderTransitionButtons(bpId) {
   }
   if (isResettable(bp)) {
     html += `<button class="transition-btn reset-btn" onclick="transitionBP('${esc(bpId)}','reset',event)" title="Reset to ready: discard agent work and revert to ready status.">Reset to Ready</button>`;
+  }
+  if (isConfirmValidable(bp)) {
+    html += `<button class="transition-btn confirm-valid-btn" onclick="transitionBP('${esc(bpId)}','confirm-valid',event)" title="Confirm prior work is still valid: restore the prior status (completed/reviewed) and stop the cascade.">Confirm Valid</button>`;
+  }
+  if (isStaleRevisable(bp)) {
+    html += `<button class="transition-btn revise-btn" onclick="transitionBP('${esc(bpId)}','revise',event)" title="Revise: bump revision and reset to ready for re-execution.">Revise</button>`;
   }
   if (isArchivable(bp)) {
     html += `<button class="transition-btn archive-btn" onclick="transitionBP('${esc(bpId)}','archive',event)" title="Archive this reviewed BP tree.">Archive</button>`;
@@ -6544,7 +6734,7 @@ function renderBlueprintList(blueprints) {
   for (const bp of blueprints) {
     const tags = (bp.tags || []).map(t => `<span class="bp-tmpl-tag">${esc(t)}</span>`).join('');
     html += `<div class="bp-tmpl-card" onclick="showBlueprintDetail('${esc(bp.hash)}')">
-      <h3>bp-tmpl:${esc(bp.hash.substring(0, 6))} (${esc(bp.slug)})</h3>
+      <h3>${bpIdLabel(bp.hash, 'bp-tmpl:' + bp.hash.substring(0, 6))} (${esc(bp.slug)})</h3>
       <div style="font-size:13px;color:var(--text);margin-bottom:6px;">${esc(bp.title || '')}</div>
       <div class="bp-tmpl-meta">
         <span>Level: ${esc(bp['abstraction-level'] || '?')}</span>
@@ -6599,7 +6789,7 @@ function renderBlueprintDetail(bp) {
   if (prov['source-bp']) {
     provHtml = `<h4 style="margin:1rem 0 0.5rem 0;font-size:13px;color:#8b949e;">Provenance</h4>
       <div style="font-size:12px;">
-        Source: bp:${esc((prov['source-bp'] || '').substring(0,6))} (${esc(prov['source-slug'] || '')})
+        Source: ${bpIdLabel(prov['source-bp'] || '', 'bp:' + (prov['source-bp'] || '').substring(0,6))} (${esc(prov['source-slug'] || '')})
         &mdash; extracted ${esc(prov['extracted-date'] || '?')} by ${esc(prov['extracted-by'] || '?')}
       </div>`;
   }
@@ -6611,7 +6801,7 @@ function renderBlueprintDetail(bp) {
       <div style="font-size:12px;font-family:monospace;">
         ${tree.map(n => {
           const indent = '\u00a0\u00a0'.repeat(n.depth || 0);
-          return `<div>${indent}bp-tmpl:${esc(n.hash.substring(0,6))} (${esc(n.slug)}) &mdash; ${esc(n.title || '')}</div>`;
+          return `<div>${indent}${bpIdLabel(n.hash, 'bp-tmpl:' + n.hash.substring(0,6))} (${esc(n.slug)}) &mdash; ${esc(n.title || '')}</div>`;
         }).join('')}
       </div>`;
   }
@@ -6624,7 +6814,7 @@ function renderBlueprintDetail(bp) {
   detailEl.innerHTML = `
     <button class="bp-tmpl-detail-back" onclick="backToBlueprintList()">&larr; Back to list</button>
     <div class="bp-tmpl-detail-header">
-      <h2>bp-tmpl:${esc((bp.hash || '').substring(0,6))} (${esc(bp.slug || '')})</h2>
+      <h2>${bpIdLabel(bp.hash || '', 'bp-tmpl:' + (bp.hash || '').substring(0,6))} (${esc(bp.slug || '')})</h2>
       <div style="font-size:14px;margin-bottom:8px;">${esc(bp.title || '')}</div>
       <div class="bp-tmpl-meta">
         <span>Level: ${esc(bp['abstraction-level'] || '?')}</span>

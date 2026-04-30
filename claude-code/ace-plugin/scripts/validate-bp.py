@@ -99,7 +99,7 @@ def resolve_loopscript(value: str | None, rigor: str | None) -> tuple[bool, str]
     # The file may not exist yet (e.g. fresh init) — treat as a non-blocking default.
     filename = value or ("high-rigor.yaml" if rigor in ("high", "critical") else "standard.yaml")
     if not value:
-        default_path = f"skills/ale/loops/{filename}"
+        default_path = f"skills/engineering/loops/{filename}"
         return True, f"{default_path} (auto-resolved, not yet on disk)"
     return False, f"LoopScript '{filename}' not found in {[rel_path(d) for d in LOOPSCRIPT_DIRS]}"
 

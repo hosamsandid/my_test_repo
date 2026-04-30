@@ -11,6 +11,7 @@ utilities used across all scripts. Import from any script via:
 """
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -34,10 +35,39 @@ BLUEPRINT_INDEX_JSON = BLUEPRINTS_DIR / ".index.json"
 
 DIR_PATTERN = re.compile(r"^([0-9a-f]{12})-(.+)$")
 
-LOOPSCRIPT_DIRS = [
-    REPO_ROOT / "skills" / "ale" / "loops",
-    REPO_ROOT / "skills" / "ale" / "templates",
+
+def _detect_plugin_root() -> Path | None:
+    """Auto-detect the ACE plugin install path from Claude Code's plugin registry.
+
+    Reads ~/.claude/plugins/installed_plugins.json and returns the installPath
+    for 'ace@i-sase-marketplace'. Returns None if not found or on any error.
+    """
+    try:
+        registry = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+        if not registry.exists():
+            return None
+        data = json.loads(registry.read_text(encoding="utf-8"))
+        entries = data.get("plugins", {}).get("ace@i-sase-marketplace", [])
+        if not entries:
+            return None
+        # Use the first (most recent) entry
+        install_path = Path(entries[0].get("installPath", ""))
+        if install_path.is_dir():
+            return install_path
+    except (json.JSONDecodeError, KeyError, TypeError, OSError):
+        pass
+    return None
+
+
+PLUGIN_ROOT = _detect_plugin_root()
+
+# Search order: project-local first (custom overrides), then plugin (standard LoopScripts)
+LOOPSCRIPT_DIRS: list[Path] = [
+    REPO_ROOT / "skills" / "engineering" / "loops",
 ]
+if PLUGIN_ROOT:
+    LOOPSCRIPT_DIRS.append(PLUGIN_ROOT / "skills" / "engineering" / "loops")
+    LOOPSCRIPT_DIRS.append(PLUGIN_ROOT / "skills" / "engineering" / "templates")
 
 
 def rel_path(p: Path) -> str:

@@ -66,14 +66,14 @@ Commands use prefix matching: `/brief a3f7c2` (like git).
 | Artifact | Format | Path |
 |----------|--------|------|
 | **BriefingPack (BP)** | YAML frontmatter + MD | `artifacts/briefings/{hash}-{slug}/brief.md` |
-| **LoopScript (LS)** | Pure YAML | `skills/ale/loops/` |
+| **LoopScript (LS)** | Pure YAML | `skills/engineering/loops/` |
 | **MentorScript (MS)** | YAML frontmatter + MD | `mentorscripts/` (this file = Root MS) |
 | **CRP** | YAML frontmatter + MD | `artifacts/guidance/crp/` |
 | **MRP** | YAML frontmatter + MD | `artifacts/guidance/mrp/` |
 | **VCR** | YAML frontmatter + MD | `artifacts/guidance/vcr/` |
 | **Blueprint** | YAML frontmatter + MD | `artifacts/blueprints/{hash}-{slug}/blueprint.md` |
 
-See `skills/` for detailed artifact specs (briefing-eng, ale, atme, age, blueprint-eng).
+See `skills/engineering/SKILL.md` for the full specification of all artifact types.
 
 ### BP Storage: Directory-Based Hierarchy
 
@@ -92,7 +92,7 @@ artifacts/briefings/
 - The BP index at `artifacts/briefings/.index.json` is the fast-path for status queries. Regenerate with `python3 scripts/build-index.py`. Commands should use the index instead of scanning individual files.
 - Completed BP trees are archived to `artifacts/briefings/.archive/` via the `/archive` command (or `python3 scripts/bp-transition.py archive {hash}`). Archiving is a physical directory move, not a status field. The archive preserves the full directory structure. `/status` does not scan `.archive/`. `/status audit {hash}` searches both active and archive. Use `/archive --restore {hash}` to undo.
 - `depends-on` references any BP hash, not just siblings. Cross-tree dependencies are supported. The dispatcher validates all dependencies before dispatch.
-- `artifacts` (optional): declares inputs and outputs of a leaf BP for traceability. Each entry has `path` (required), `direction` (`input`/`output`, required), `ac` (AC reference, optional), and `description` (optional). Parent BPs do not declare artifacts — their children do. Use `/migrate` to enrich existing BPs.
+- `artifacts` (optional): declares inputs and outputs of a leaf BP for traceability. Each entry has `path` (required), `direction` (`input`/`output`, required), `ac` (AC reference, optional), and `description` (optional). Parent BPs do not declare artifacts — their children do. Existing BPs can be enriched with `python3 scripts/migrate-bp.py --apply`.
 
 ---
 
@@ -103,9 +103,19 @@ artifacts/briefings/
 **Leaf BPs** (no children — the units of agent work):
 ```
 draft -> ready -> dispatched -> claimed -> in-progress -> completed -> reviewed
-  ^        |                                                  |
-  |        \-> draft (unapprove)                              \-> ready (reset: discard agent work)
-  |                                    \-> abandoned (stale lock released)
+  ^        |                                                  |            |
+  |        \-> draft (unapprove)                              |            |
+  |                                                            |            |
+  |                                    \-> abandoned (stale lock released)  |
+  |                                                            |            |
+  |                                                            \-> ready (reset: discard agent work)
+  |                                                            |            |
+  |                                                            \------------\-> ready (revise: revision +1, audit-preserved)
+  |                                                                         |
+  |                                                                         \-> stale (cascade-flagged: an upstream BP was revised)
+  |                                                                         |
+  stale -> {completed|reviewed} (confirm-valid: prior status restored)
+  stale -> ready                (revise from stale)
 
 Reviewed BP trees can be archived via /archive: physically moved to .archive/ directory.
 ```
@@ -113,6 +123,7 @@ Reviewed BP trees can be archived via /archive: physically moved to .archive/ di
 **Archive:** Archiving is a **physical directory move** to `artifacts/briefings/.archive/`, NOT a frontmatter status. Agents must **NEVER** set `status: archived` in frontmatter. Use `python3 scripts/bp-transition.py archive {hash}` or the `/archive` command. Only humans (Author/Approver) may archive.
 
 **Parent BPs** (have children): Status is **derived** from children, never stored in frontmatter. No explicit status transitions — the parent status updates automatically as children progress:
+- Any child `stale` → parent is `stale` (parent surfaces the integrity concern)
 - All children `reviewed` → parent is `reviewed`
 - All children `completed` or `reviewed` → parent is `completed`
 - Any child `dispatched`/`claimed`/`in-progress` → parent is `in-progress`
@@ -132,6 +143,9 @@ Parents with children **cannot be dispatched**. Only leaf BPs are dispatched.
 | reviewed -> [archived] | main | Human (Author/Approver) |
 | ready -> draft (unapprove) | main | Approver |
 | completed -> ready (reset) | main | Human (discards agent work) |
+| {completed,reviewed,stale} -> ready (revise) | main | Author/Approver. Cascade-flags direct dependents as `stale`. |
+| {completed,reviewed} -> stale (cascade) | main | Automatic side-effect of upstream revise. Not a manual transition. |
+| stale -> {completed,reviewed} (confirm-valid) | main | Reviewer (asserts inputs unchanged in effect; cascade stops). |
 | abandoned | main (reset to ready) | Human |
 
 **Status transition monitoring:** BP status transitions are monitored by a PreToolUse hook in `hooks/hooks.json` (plugin) or `.claude/settings.json` (standalone). This is a lightweight advisory check (not a blocking enforcement). All status transitions should follow the authorization matrix defined in `mentorscripts/team.md`.
@@ -203,13 +217,14 @@ An agent must **never** make autonomous decisions on blocking triggers.
 |---------|---------|
 | `/do` | Tier 1 (QUICK): describe, confirm, execute |
 | `/brief` | Tier 2/3: draft BP, review, dispatch |
-| `/status` | Actionable overview: open CRPs, pending MRPs, stale agents |
+| `/status` | Actionable overview: open CRPs, pending MRPs, stale agents, stale-inputs BPs |
 | `/dispatch` | Manual dispatch (child BPs in Tier 3) |
 | `/review-mrp` | Full MRP review with 5 criteria |
 | `/resolve-crp` | CRP resolution with VCR creation |
+| `/revise` | Re-execute a completed/reviewed/stale BP (revision +1, cascade-flags direct dependents) |
+| `/confirm-valid` | Assert a stale BP's prior work is still valid; restore prior status; cascade stops |
 | `/archive` | Archive reviewed BP trees, list/restore archived BPs |
 | `/compare` | N-Version comparison |
-| `/migrate` | Enrich existing BPs with new optional fields (e.g. `artifacts`) |
 | `/blueprint` | Blueprint management: extract from BPs, instantiate new BPs, list/inspect/validate |
 
 ---
@@ -233,7 +248,7 @@ Blueprints are reusable, parameterized templates extracted from concrete BP tree
 
 **Lifecycle:** Extract from BP tree (`/blueprint extract`) -> Refine parameters -> Validate (`/blueprint validate`) -> Instantiate into new BPs (`/blueprint instantiate`).
 
-See `skills/blueprint-eng/SKILL.md` for full specification.
+See `skills/engineering/SKILL.md` (§ Blueprint Engineering) for full specification.
 
 ---
 

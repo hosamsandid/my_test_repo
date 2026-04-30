@@ -15,7 +15,7 @@ You are the Briefing Engineer in the i-SASE framework. Your role is to collabora
 
 1. **Load MentorScripts.** Read `CLAUDE.md` (root MentorScript) and `mentorscripts/global.md` (if it exists) to understand framework conventions and artifact schemas.
 2. **Scan existing BriefingPacks.** List directories in `artifacts/briefings/` to understand existing BPs and to learn from the style of existing ones. Each BP lives in its own directory (`artifacts/briefings/{hash}-{slug}/brief.md`), where the slug is a human-readable short name derived from the mission title.
-3. **Check for schemas.** Read any BP schema in `skills/briefing-eng/schemas/` if available, to ensure the output conforms to the expected structure.
+3. **Check for schemas.** Read any BP schema in `skills/engineering/schemas/` if available, to ensure the output conforms to the expected structure.
 
 ---
 
@@ -128,8 +128,8 @@ Work through the following sections one at a time. For each section:
 After all sections are filled, assess the mission scope and risk:
 
 **Rigor (determines LoopScript -- auto-selected, do NOT ask the human to choose):**
-- **Standard rigor** (`skills/ale/loops/standard.yaml`): Suitable for well-understood tasks with low risk, clear requirements, and reversible changes.
-- **High rigor** (`skills/ale/loops/high-rigor.yaml`): Required when the mission involves security-sensitive changes, architectural decisions, public API changes, data migrations, or when the Agent Coach explicitly requests it.
+- **Standard rigor** (`skills/engineering/loops/standard.yaml`): Suitable for well-understood tasks with low risk, clear requirements, and reversible changes.
+- **High rigor** (`skills/engineering/loops/high-rigor.yaml`): Required when the mission involves security-sensitive changes, architectural decisions, public API changes, data migrations, or when the Agent Coach explicitly requests it.
 
 LoopScript is auto-selected based on rigor -- do NOT ask the human to choose a LoopScript. Simply inform them which will be used.
 
@@ -157,7 +157,7 @@ Present your rigor and tier recommendation with reasoning and let the Agent Coac
    - `author`: Array of author names (from git config)
    - `status`: `draft`
    - `rigor`: `standard` or `high`
-   - `loop-script`: Auto-populated based on rigor -- `skills/ale/loops/standard.yaml` for standard, `skills/ale/loops/high-rigor.yaml` for high
+   - `loop-script`: Auto-populated based on rigor -- `skills/engineering/loops/standard.yaml` for standard, `skills/engineering/loops/high-rigor.yaml` for high
    - `mentor-scripts`: List of MentorScript paths to load
 6. **Write the Markdown body** with clearly labeled sections: Goal & Why, What & Acceptance Criteria, Context, Constraints, Approach (optional), Gotchas, Escalation Triggers.
 7. **Save to** `artifacts/briefings/{hash}-{slug}/brief.md`.

@@ -1,1 +1,207 @@
-{"version":1,"entries":[]}
+{
+  "generated": "2026-04-29T11:09:13Z",
+  "briefings": {
+    "01fc27c00ba5": {
+      "slug": "test-standalone-dispatch",
+      "mission": "Test Standalone Dispatch Flow",
+      "status": "draft",
+      "rigor": "standard",
+      "author": [
+        "Thorsten Maier"
+      ],
+      "created": "2026-04-13",
+      "parent": null,
+      "children": [],
+      "depends-on": [],
+      "execution-order": [],
+      "agent-id": null,
+      "phase": null,
+      "last-heartbeat": null,
+      "artifacts": [],
+      "revision": null,
+      "stale-because": [],
+      "dependents": [],
+      "path": "01fc27c00ba5-test-standalone-dispatch",
+      "branch": null,
+      "is_parent": false
+    },
+    "081b2b284bd4": {
+      "slug": "bp-explorer-sdk-integration",
+      "mission": "BP Explorer — Claude Agent SDK Integration",
+      "status": "completed",
+      "rigor": "high",
+      "author": [],
+      "created": "2026-03-30",
+      "parent": null,
+      "children": [
+        "5a722c889c62",
+        "eb808c82eb44",
+        "686192c722d4",
+        "eb1cfd556568"
+      ],
+      "depends-on": [],
+      "execution-order": [
+        "5a722c889c62",
+        "eb808c82eb44",
+        "686192c722d4",
+        "eb1cfd556568"
+      ],
+      "agent-id": null,
+      "phase": null,
+      "last-heartbeat": null,
+      "artifacts": [],
+      "revision": null,
+      "stale-because": [],
+      "dependents": [
+        "686192c722d4"
+      ],
+      "path": "081b2b284bd4-bp-explorer-sdk-integration",
+      "branch": null,
+      "is_parent": true
+    },
+    "5a722c889c62": {
+      "slug": "fastapi-backend-migration",
+      "mission": "FastAPI Backend Migration",
+      "status": "completed",
+      "rigor": "standard",
+      "author": [],
+      "created": "2026-03-30",
+      "parent": "081b2b284bd4",
+      "children": [],
+      "depends-on": [],
+      "execution-order": [],
+      "agent-id": "fd6a89e3",
+      "phase": "package",
+      "last-heartbeat": "2026-03-31T10:40:00Z",
+      "artifacts": [
+        {
+          "path": "scripts/bp-explorer/server.py",
+          "direction": "output",
+          "ac": "AC-1",
+          "description": "Migrated FastAPI server replacing stdlib BaseHTTPRequestHandler"
+        },
+        {
+          "path": "scripts/bp-explorer/requirements.txt",
+          "direction": "output",
+          "ac": "AC-2",
+          "description": "Python dependencies (fastapi, uvicorn)"
+        }
+      ],
+      "revision": null,
+      "stale-because": [],
+      "dependents": [
+        "eb808c82eb44"
+      ],
+      "path": "081b2b284bd4-bp-explorer-sdk-integration/5a722c889c62-fastapi-backend-migration",
+      "branch": null,
+      "is_parent": false
+    },
+    "686192c722d4": {
+      "slug": "action-buttons-ui",
+      "mission": "Action Buttons UI",
+      "status": "completed",
+      "rigor": "standard",
+      "author": [],
+      "created": null,
+      "parent": "081b2b284bd4",
+      "children": [],
+      "depends-on": [
+        "081b2b284bd4"
+      ],
+      "execution-order": [],
+      "agent-id": "c7388f11",
+      "phase": "package",
+      "last-heartbeat": "2026-03-31T12:50:00Z",
+      "artifacts": [],
+      "revision": null,
+      "stale-because": [],
+      "dependents": [
+        "eb1cfd556568"
+      ],
+      "path": "081b2b284bd4-bp-explorer-sdk-integration/686192c722d4-action-buttons-ui",
+      "branch": null,
+      "is_parent": false
+    },
+    "eb1cfd556568": {
+      "slug": "chat-panel",
+      "mission": "Chat Panel",
+      "status": "completed",
+      "rigor": "standard",
+      "author": [],
+      "created": "2026-03-30",
+      "parent": "081b2b284bd4",
+      "children": [],
+      "depends-on": [
+        "eb808c82eb44",
+        "686192c722d4"
+      ],
+      "execution-order": [],
+      "agent-id": "6226f89d",
+      "phase": "package",
+      "last-heartbeat": "2026-03-31T17:15:00Z",
+      "artifacts": [
+        {
+          "path": "scripts/bp-explorer/index.html",
+          "direction": "output",
+          "ac": "AC-1",
+          "description": "Extended frontend with chat panel view"
+        },
+        {
+          "path": "scripts/bp-explorer/server.py",
+          "direction": "input",
+          "description": "FastAPI server with agent endpoints (from Child 1+2)"
+        },
+        {
+          "path": "scripts/bp-explorer/agent_bridge.py",
+          "direction": "input",
+          "description": "Agent SDK bridge module (from Child 2)"
+        }
+      ],
+      "revision": null,
+      "stale-because": [],
+      "dependents": [],
+      "path": "081b2b284bd4-bp-explorer-sdk-integration/eb1cfd556568-chat-panel",
+      "branch": null,
+      "is_parent": false
+    },
+    "eb808c82eb44": {
+      "slug": "agent-sdk-backend",
+      "mission": "Agent SDK Backend Integration",
+      "status": "completed",
+      "rigor": "standard",
+      "author": [],
+      "created": "2026-03-30",
+      "parent": "081b2b284bd4",
+      "children": [],
+      "depends-on": [
+        "5a722c889c62"
+      ],
+      "execution-order": [],
+      "agent-id": "5457a919",
+      "phase": "package",
+      "last-heartbeat": "2026-03-31T11:15:00Z",
+      "artifacts": [
+        {
+          "path": "scripts/bp-explorer/agent_bridge.py",
+          "direction": "output",
+          "ac": "AC-1",
+          "description": "Agent SDK wrapper module with session management"
+        },
+        {
+          "path": "scripts/bp-explorer/server.py",
+          "direction": "output",
+          "ac": "AC-2",
+          "description": "Extended server with agent API endpoints"
+        }
+      ],
+      "revision": null,
+      "stale-because": [],
+      "dependents": [
+        "eb1cfd556568"
+      ],
+      "path": "081b2b284bd4-bp-explorer-sdk-integration/eb808c82eb44-agent-sdk-backend",
+      "branch": null,
+      "is_parent": false
+    }
+  }
+}

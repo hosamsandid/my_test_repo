@@ -1121,9 +1121,9 @@ def cmd_instantiate(
         is_parent = has_children_in_blueprint(bp_path.parent, tree, bp_hash)
 
         loop_script = (
-            "skills/ale/loops/high-rigor.yaml"
+            "skills/engineering/loops/high-rigor.yaml"
             if rigor in ("high", "critical")
-            else "skills/ale/loops/standard.yaml"
+            else "skills/engineering/loops/standard.yaml"
         )
 
         fm_lines = [

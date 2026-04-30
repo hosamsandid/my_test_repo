@@ -16,6 +16,7 @@ This is the primary status view. It focuses on **actionable items with inline co
 /status --crps                 → Only open/blocked CRPs
 /status --mrps                 → Only pending MRPs
 /status --active               → Only active (in-progress) BPs
+/status --stale                → Only stale (inputs-changed) BPs
 /status b8d4e2                 → Detail view for a specific BP (hash prefix)
 /status cancel b8d4e2          → Cancel a dispatched BP
 /status release b8d4e2         → Release a stale agent lock
@@ -31,14 +32,15 @@ Parse `$ARGUMENTS` to determine the mode:
 1. **No arguments** (empty or blank) → Full status report (all sections)
 2. **`--crps`** → Show only Priority 1a (Open CRPs section), plus Quick Stats
 3. **`--mrps`** → Show only Priority 1b (Pending MRPs section), plus Quick Stats
-4. **`--active`** → Show only Priority 2 (In-Progress Work section), plus Quick Stats
-5. **Hex hash prefix** (e.g. `b8d4e2`) → BP Detail View (search `artifacts/briefings/` for matching directory)
-6. **Starts with `cancel`** + hex hash (e.g. `cancel b8d4e2`) → BP Cancel
-7. **Starts with a CRP hash followed by an answer** (e.g. `c9e1f2a3b4d5 A`) → Inline CRP Resolution
-8. **Starts with `approve`** + MRP hash (e.g. `approve d7a2c1e8f3b6`) → Inline MRP Approval
-9. **Starts with `release`** + hash (e.g. `release b8d4e2`) → Release stale agent lock
-10. **Starts with `audit`** + hash (e.g. `audit a3f7c2`) → Provenance view for a BP
-11. **Starts with `archive`** + hash (e.g. `archive a3f7c2`) → Archive a completed BP tree
+4. **`--stale`** → Show only Priority 1c (Stale BPs section), plus Quick Stats
+5. **`--active`** → Show only Priority 2 (In-Progress Work section), plus Quick Stats
+6. **Hex hash prefix** (e.g. `b8d4e2`) → BP Detail View (search `artifacts/briefings/` for matching directory)
+7. **Starts with `cancel`** + hex hash (e.g. `cancel b8d4e2`) → BP Cancel
+8. **Starts with a CRP hash followed by an answer** (e.g. `c9e1f2a3b4d5 A`) → Inline CRP Resolution
+9. **Starts with `approve`** + MRP hash (e.g. `approve d7a2c1e8f3b6`) → Inline MRP Approval
+10. **Starts with `release`** + hash (e.g. `release b8d4e2`) → Release stale agent lock
+11. **Starts with `audit`** + hash (e.g. `audit a3f7c2`) → Provenance view for a BP
+12. **Starts with `archive`** + hash (e.g. `archive a3f7c2`) → Archive a completed BP tree
 
 If arguments do not match any pattern, show a brief usage hint and fall back to the full status report.
 
@@ -69,6 +71,7 @@ For filtered views, pass the matching flag:
 - `python3 scripts/status-report.py --crps` (CRPs only + stats)
 - `python3 scripts/status-report.py --mrps` (MRPs only + stats)
 - `python3 scripts/status-report.py --active` (active BPs only + stats)
+- `python3 scripts/status-report.py --stale` (stale-inputs BPs only + stats)
 - `python3 scripts/status-report.py --text` (pre-formatted human-readable output)
 
 Read the JSON output and use it to render the sections below. Only read individual `brief.md` files when a detail view is requested (`/status {hash}`).
@@ -147,6 +150,32 @@ Quick approve: type "approve {mrp-hash}" to approve inline.  Or use /ace:review-
 ```
 
 If no pending MRPs: "No MRPs awaiting review."
+
+#### 1c. Stale BPs (inputs changed)
+
+Read `stale_bps.items` from the status report JSON. Each entry is a BP whose status is `stale` because an upstream BP it depends on was revised. The list is sorted oldest-flag first (most urgent for reassessment).
+
+```
+STALE (inputs changed) -- Reassessment required
+-------------------------------------------------
+
+bp:e1f2a3 (caching-layer)  "Implement caching layer"  [2 upstream change(s)]
+  triggers: bp:a3f7c2 rev2, bp:d2c8b4 rev3
+  -> /ace:confirm-valid e1f2a3   (assert work still valid; cascade stops here)
+  -> /ace:revise e1f2a3          (re-execute; cascade re-flags this BP's dependents)
+```
+
+For each stale BP, also surface the **transitive ripple**. The status-report script pre-computes this as a `ripple` array on each stale entry — read it directly, do not re-walk the graph in markdown:
+
+```
+  ripple (potentially affected; not flagged unless you revise this BP):
+    bp:f7a8b9 (rate-limiting)  status: completed
+    bp:c1d2e3 (api-gateway)    status: reviewed
+```
+
+If `ripple` is empty, omit the ripple block.
+
+If no stale BPs: omit this section entirely (do not display "No stale BPs.").
 
 ---
 
@@ -231,7 +260,7 @@ STATS
 Active:    {N} in-progress  |  {N} completed  |  {N} total dispatched
 CRPs:      {N} open ({N} blocking)  |  {N} resolved
 MRPs:      {N} pending review ({N} auto-approve eligible)  |  {N} reviewed
-BPs:       {N} ready  |  {N} draft  |  {N} dispatched  |  {N} parent (derived)
+BPs:       {N} ready  |  {N} draft  |  {N} parent (derived)  |  {N} stale (inputs changed)
 ```
 
 ---

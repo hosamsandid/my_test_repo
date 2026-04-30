@@ -119,6 +119,13 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
 
             if val == "[]":
                 result[key] = []
+            elif val.startswith("[") and val.endswith("]"):
+                # JSON-array inline syntax: ["item1", "item2"] or ["id1"]
+                try:
+                    import json as _json
+                    result[key] = _json.loads(val)
+                except (ValueError, Exception):
+                    result[key] = val
             elif val == "":
                 # Start of a list
                 current_key = key
@@ -491,6 +498,9 @@ def load_all_briefings(project_root: Path) -> list[dict]:
             "completed": meta.get("completed", ""),
             "last_heartbeat": meta.get("last-heartbeat", ""),
             "phase": meta.get("phase", ""),
+            "revision": meta.get("revision", ""),
+            "revision_log": meta.get("revision-log", []),
+            "re_execution_scope": meta.get("re-execution-scope", {}),
             "body": body,
             "archived": is_archived,
             # Branch-awareness fields
@@ -1769,10 +1779,10 @@ async def serve_mrp_structured(bp_id: str, request: Request):
 async def serve_loopscript_phases(request: Request):
     """Return phase definitions for all LoopScripts.
 
-    Reads YAML files from skills/ale/loops/ and extracts phase id/name pairs.
+    Reads YAML files from skills/engineering/loops/ and extracts phase id/name pairs.
     """
     project_root: Path = request.app.state.project_root
-    loops_dir = project_root / "skills" / "ale" / "loops"
+    loops_dir = project_root / "skills" / "engineering" / "loops"
     result = {}
     if loops_dir.is_dir():
         for yf in sorted(loops_dir.glob("*.yaml")):
@@ -1911,7 +1921,7 @@ class BpTransitionRequest(BaseModel):
 @app.post("/api/bp/{bp_id}/transition")
 async def transition_bp(bp_id: str, body: BpTransitionRequest, request: Request):
     """Execute a deterministic BP state transition via bp-transition.py."""
-    allowed = {"approve", "dispatch", "cancel", "release", "complete", "review", "archive", "restore", "unapprove", "reset"}
+    allowed = {"approve", "dispatch", "cancel", "release", "complete", "review", "archive", "restore", "unapprove", "reset", "revise", "confirm-valid"}
     if body.action not in allowed:
         raise HTTPException(status_code=400, detail=f"Invalid action: {body.action}. Allowed: {', '.join(sorted(allowed))}")
 
@@ -1928,6 +1938,14 @@ async def transition_bp(bp_id: str, body: BpTransitionRequest, request: Request)
             if not body.reason:
                 raise ValueError("Release action requires a reason")
             cmd += ["--reason", body.reason]
+        elif body.action == "revise":
+            if not body.reason:
+                raise ValueError("Revise action requires a reason")
+            cmd += ["--reason", body.reason, "--push"]
+        elif body.action == "confirm-valid":
+            if body.reason:
+                cmd += ["--reason", body.reason]
+            cmd += ["--push"]
         result = subprocess.run(cmd, cwd=project_root, capture_output=True, text=True, env=_git_env())
         return result
 

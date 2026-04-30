@@ -40,6 +40,17 @@ Display the script output, then ask the coach which MRP to review.
 3. Load the associated BriefingPack: `python3 scripts/bp-info.py {bp-hash} --with-guidance --json`. This provides all BP fields (rigor, status, CRP counts, etc.) without manual frontmatter parsing.
 4. Check the `reviewers` field in the MRP. If present, verify you are in the reviewers list. Track `reviewed-by` to record who performed this review.
 
+**Token Tracking — Start:** Using `bp_hash` and `slug` from the bp-info output, write the start marker:
+```
+artifacts/token-usage/.pending/{bp_hash}.json
+```
+Contents:
+```json
+{"command": "review-mrp", "bp_hash": "{bp_hash}", "slug": "{slug}", "model": "{current_model_id}", "effort": "{current_effort_level}", "start_time": "{ISO8601_UTC_now}"}
+```
+Create the `.pending/` directory if it does not exist.
+> **MRP location during review:** the agent commits the MRP on its branch (`agent/{agent-id}/{bp-hash}`) inside `.worktrees/{agent-id}-{bp-hash}/`, *not* on `main`. `find-mrp` and `update-mrp` enumerate all worktrees and prefer the worktree copy when the same MRP id is visible in more than one place — so the reviewer can run from `main` and still update the agent-branch MRP. Once the merge in Step 6 lands, the MRP exists only on `main` and the same commands continue to work.
+
 #### Step 1b — Tier-Aware Review
 
 After loading the MRP, read the `tier` field from the associated BriefingPack:
@@ -175,13 +186,25 @@ This deterministically appends a timestamped entry to `artifacts/log/outcomes.lo
        ```
        python3 scripts/merge-agent-work.py --agent-id {agent-id} --bp-hash {bp-hash} --slug {slug} --title "{bp-title}" --pr-mode
        ```
-     The script outputs JSON with `merged` (boolean) and `pr_url` (if PR mode) fields. **Read the JSON output** to determine what actually happened — do NOT assume the merge succeeded.
+     The script outputs JSON with `merged`, `pushed`, and `pr_created` (PR mode) booleans, plus `pr_url` (PR mode). **Read the JSON output** to determine what actually happened — do NOT assume the merge succeeded.
+
+     **Exit code is owned by `merged`, not `pushed`/`pr_created`:** a local-only repo (no remote) or a transient push failure produces `pushed: false` with exit 0 once the local merge has landed. Only an actual merge failure exits non-zero. Downstream steps (worktree cleanup, outcome log, BP status update) should run whenever `merged: true`, regardless of push status.
   3. **Cleanup worktree** using the worktree-ops script:
      ```
      python3 scripts/worktree-ops.py cleanup --agent-id {agent-id} --bp-hash {bp-hash} --delete-remote
      ```
 - If rejected: Run `python3 scripts/bp-transition.py cancel {bp-hash}` to reset status to `ready`. Then cleanup: `python3 scripts/worktree-ops.py cleanup --agent-id {agent-id} --bp-hash {bp-hash} --delete-remote`.
 - If revision requested: BP status remains unchanged (`dispatched` or `in-progress` — agent continues in same worktree).
+
+**Post-approval defect discovery:** If a defect is found after approval (e.g., an output artifact that passed review but turns out to be invalid), do NOT use rejection or reset. Instead, use the revise workflow which preserves full audit history:
+
+```
+-> /ace:revise {bp-hash}
+```
+
+This moves the BP from `reviewed` back to `ready` with a tracked revision number, lets the coach narrow the re-execution scope, and optionally adds `verify-command` to prevent recurrence. See `commands/revise.md` for the full workflow.
+
+**Token Tracking — Complete:** Update `artifacts/token-usage/.pending/{bp_hash}.json` by setting `"completed": true`.
 
 ## Output
 

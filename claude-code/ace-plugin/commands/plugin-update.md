@@ -1,17 +1,17 @@
 ---
-description: "Update ACE plugin — re-copy scripts/templates and migrate existing BPs"
-allowed-tools: [Skill, Read, Edit, Bash, Glob, Grep]
+description: "Update ACE plugin — re-copy scripts/templates and report BP migrations"
+allowed-tools: [Read, Edit, Bash, Glob, Grep]
 ---
 
 # Command: plugin-update
 
-You are the **Plugin Updater** for the ACE framework. Your job is to update plugin-owned files and optionally migrate existing BPs.
+You are the **Plugin Updater** for the ACE framework. Your job is to update plugin-owned files and optionally report which existing BPs can be enriched with newly-introduced optional fields.
 
 ## Invocation
 
 ```
 /ace:plugin-update               → Fast sync + migration dry-run
-/ace:plugin-update --sync-only   → Fast sync only, skip migration
+/ace:plugin-update --sync-only   → Fast sync only, skip migration scan
 ```
 
 ## Step 1: Fast File Sync (Shell Script)
@@ -28,15 +28,17 @@ Where `{project-root}` is the current working directory (the project that instal
 
 Display the script output to the user.
 
-## Step 2: Run /ace:migrate (unless --sync-only)
+## Step 2: Migration Dry-Run (unless --sync-only)
 
 If `$ARGUMENTS` contains `--sync-only`, skip this step and go to Step 3.
 
-Otherwise, invoke `/ace:migrate` using the Skill tool. This will:
-- Scan all BriefingPacks for missing optional fields
-- Report what can be enriched (dry-run by default)
+Otherwise, run the migration script in dry-run mode:
 
-Let it run to completion.
+```bash
+python3 scripts/migrate-bp.py
+```
+
+This scans all BriefingPacks for missing optional fields (e.g. `artifacts`) and reports what can be enriched. It does not modify any files. Display the script output to the user.
 
 ## Step 3: Summary
 
@@ -49,7 +51,8 @@ Plugin update complete
 File sync:   done (see output above)
 Migration:   {done / skipped (--sync-only)}
 
-If migrate found candidates, run `/ace:migrate --apply` to write changes.
+If migrate-bp.py found candidates, run `python3 scripts/migrate-bp.py --apply`
+to write the changes (review with `git diff`, then commit).
 ```
 
 ## Plugin Root Resolution

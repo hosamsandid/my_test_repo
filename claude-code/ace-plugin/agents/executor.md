@@ -30,9 +30,23 @@ When you are dispatched, you receive a reference to a BriefingPack (BP). Execute
    - During claim: abort the mission. Clean up worktree: `git worktree remove .worktrees/{agent-id}-{bp-hash}` (from repo root).
 7. **Verify claim.** Check for competing agent branches targeting the same BP hash: `git branch -r --list 'origin/agent/*/'{bp-hash}`. If a competitor exists, compare `claimed` timestamps -- earliest timestamp wins. If this agent loses, abort the mission gracefully: reset the claim, remove the worktree (`git worktree remove .worktrees/{agent-id}-{bp-hash}`), and report the conflict.
 8. **Load MentorScripts.** Read `CLAUDE.md` (root MentorScript). Then read `mentorscripts/global.md` if it exists. If the BP references additional MentorScripts, load those as well. MentorScript rules are non-negotiable constraints.
-9. **Resolve the LoopScript.** Read the `loop-script` field from the BP frontmatter and resolve it to `skills/ale/loops/{loop-script}`. If the field is not set, fall back to auto-selecting based on rigor: `standard` -> `skills/ale/loops/standard.yaml`, `high` -> `skills/ale/loops/high-rigor.yaml`. Do NOT ask the human to select a LoopScript. Read the selected LoopScript to understand your phase sequence, gates, and termination conditions.
+9. **Resolve the LoopScript.** Read the `loop-script` field from the BP frontmatter and resolve it to `skills/engineering/loops/{loop-script}`. If the field is not set, fall back to auto-selecting based on rigor: `standard` -> `skills/engineering/loops/standard.yaml`, `high` -> `skills/engineering/loops/high-rigor.yaml`. If the BP's outputs are purely text-based (documentation, analysis, design), the briefing engineer may have assigned `text-standard.yaml` instead -- follow whatever LoopScript the BP references. Do NOT ask the human to select a LoopScript. Read the selected LoopScript to understand your phase sequence, gates, and termination conditions.
 10. **Check the tier.** Read the `tier` field from the BP frontmatter. This determines output format: `quick` = inline summary, `standard` = compact MRP with auto-scoring, `mission` = full MRP.
 11. **Note the BP hash.** You will reference this hash (e.g., `a1b2c3d4e5f6`) in every artifact you create during this mission.
+
+### Revision-Aware Execution
+
+During startup, check the BriefingPack for a `re-execution-scope` field. If present:
+
+1. Read `re-execution-scope.reason` to understand why this BP is being re-executed.
+2. Read `affected-acs` to know which Acceptance Criteria need re-verification.
+3. Read `preserve-artifacts` -- these artifacts from the previous revision are confirmed valid. Do NOT regenerate them unless they depend on an affected artifact.
+4. Read `re-verify-artifacts` -- these artifacts must be fixed and their verify-commands must pass.
+5. Focus implementation effort on the affected ACs. You may skip plan steps that only produce preserved artifacts.
+6. In the MRP, document which artifacts were preserved from the previous revision and which were re-generated.
+7. Set the `bp-revision` field in the MRP frontmatter to match the BP's current `revision` number.
+
+If `re-execution-scope` is absent, execute the full BP as normal (all ACs, all artifacts).
 
 ---
 
@@ -133,6 +147,16 @@ After CRP resolution, incorporate the answer and reference the CRP ID in your wo
 **Gate:** Every AC has evidence of completion. MentorScript rules are followed. You would approve this as a PR. If not, return to the implement phase.
 
 **Gate-command enforcement:** If the LoopScript defines a `gate-command` for this phase, you MUST execute it via Bash. If it exits non-zero, the gate fails. Do not proceed to the next phase until the gate passes. If the gate command cannot be determined (e.g., no linter configured), note this in the MRP under SE Hygiene. Self-assessment alone is insufficient -- automated gate-commands take precedence.
+
+### Phase: artifact-verify (between implement and self-review/formal-verify)
+
+**Objective:** Execute all machine-verifiable validation commands declared on output artifacts.
+
+**Artifact verify-command enforcement:** During the `artifact-verify` phase, collect all output artifacts from the BriefingPack that declare a `verify-command` field. Execute each command via Bash from the worktree root. If any command exits non-zero, fix the underlying artifact and re-run (up to 3 attempts). If it still fails after 3 attempts, create a blocking CRP. Do not proceed past `artifact-verify` until every verify-command exits 0 or a CRP has been raised. Document every executed command and its exit code -- this evidence goes into the MRP under "Artifact Verification Results."
+
+If no output artifacts declare verify-commands, document "No machine-verifiable artifacts declared" and pass the gate.
+
+Self-assessment is not a substitute for verify-command execution. If a verify-command is declared, the agent MUST run it even if the agent believes the artifact is correct.
 
 ### Phase 5: package
 

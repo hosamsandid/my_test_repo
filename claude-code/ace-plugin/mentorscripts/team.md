@@ -81,6 +81,9 @@ This matrix defines who can transition BP status:
 | `ready` -> `dispatched`    | **Dispatcher only**      | Assigns agent(s), creates worktree + branch. Leaf BPs only. |
 | `ready` -> `draft`         | Approver                 | Revert to draft for rework.                    |
 | `dispatched` -> `completed`| Executor (agent)         | On MRP submission.                             |
+| `{completed,reviewed,stale}` -> `ready` (`revise`) | Author, Approver | Re-execute. Increments revision. **Side effect:** direct dependents in `completed/reviewed/stale` are cascade-flagged as `stale`. |
+| `{completed,reviewed,stale}` -> `stale` (cascade)  | Automatic                | Side-effect of an upstream `revise`. No manual transition; the revise script writes both files. If the dependent is already `stale`, status remains `stale` and another `stale-because` trigger entry is appended. |
+| `stale` -> `{completed,reviewed}` (`confirm-valid`) | **Reviewer**           | Asserts that the upstream change does not affect this BP's outputs. Cascade ripple stops here. |
 | `reviewed` -> `[archived]`| Author, Approver         | Physical move to `.archive/` via `/archive`. Not a frontmatter status. |
 
 **Violations:**

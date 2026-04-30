@@ -1,0 +1,182 @@
+schema: sase/loop-script/v1
+id: LS-standard-v1
+name: Standard Development SOP
+
+phases:
+  - id: understand
+    name: Understand
+    description: Read BriefingPack and MentorScripts, fully understand the task
+    actions:
+      - Read the BriefingPack completely
+      - Read all referenced MentorScripts
+      - Identify all Acceptance Criteria
+      - Clarify the context (files, modules, APIs)
+    gate:
+      description: Can restate the mission goal in own words
+      check: "Agent can correctly paraphrase Goal, AC, and Constraints"
+
+  - id: plan
+    name: Plan
+    description: Create an implementation plan that covers all AC
+    actions:
+      - Create a step-by-step implementation plan
+      - Map each step to at least one AC
+      - Determine output locations from BP artifacts field or Acceptance Criteria
+      - Identify risks and potential gotchas
+      - Verify MentorScript compliance of the plan
+    gate:
+      description: Plan covers all Acceptance Criteria
+      check: "Each AC is mapped to at least one plan step"
+
+  - id: implement
+    name: Implement
+    description: Implement the plan step by step
+    actions:
+      - Implement step by step according to the plan
+      - Place output artifacts at the paths determined during planning (from BP artifacts field or AC)
+      - Follow the MentorScript rules
+      - Test each step after completion
+      - Document deviations from the plan
+    on-uncertainty: create-crp
+    gate:
+      description: All plan steps implemented and machine-verified
+      check: "Implementation complete, compiled, tested, structured outputs validated"
+      gate-command: |
+        Mandatory build verification — execution is non-negotiable. Uncompiled code, failing tests,
+        and unvalidated build files are NEVER acceptable. You MUST execute every applicable step below.
+
+        1. COMPILE / BUILD — detect the build system and run compilation:
+           - pom.xml → mvn compile (multi-module: run from project root)
+           - build.gradle / build.gradle.kts → gradle build or gradle compileJava compileTestJava
+           - package.json → npm run build (or yarn build / pnpm build if lockfile indicates)
+           - pyproject.toml / setup.py → pip install -e . or python -m build
+           - Makefile → make
+           - go.mod → go build ./...
+           - Cargo.toml → cargo build
+           - tsconfig.json (no bundler) → tsc
+           - If none of these exist, check if individual source files can be compiled directly
+             (javac, gcc/g++, rustc, etc.)
+
+        2. TEST — run the full test suite:
+           - pom.xml → mvn test
+           - build.gradle → gradle test
+           - package.json → npm test
+           - pyproject.toml → pytest
+           - Makefile → make test (if target exists)
+           - go.mod → go test ./...
+           - Cargo.toml → cargo test
+           - If no test suite exists, document this explicitly in the MRP under Sound Verification.
+             The absence of tests does not excuse skipping the build step.
+
+        3. VALIDATE STRUCTURED FILES — if your changes produce or modify structured files, validate them:
+           - JSON → python3 -c "import json, pathlib; json.loads(pathlib.Path('FILE').read_text())"
+           - YAML → python3 -c "import yaml, pathlib; yaml.safe_load(pathlib.Path('FILE').read_text())"
+           - XML (incl. pom.xml) → python3 -c "import xml.etree.ElementTree as ET; ET.parse('FILE')"
+           - TOML → python3 -c "import tomllib, pathlib; tomllib.loads(pathlib.Path('FILE').read_text())"
+           - SQL → syntax-check with the available database client if accessible
+           - Dockerfile → hadolint or docker build --check if available
+           - Terraform (.tf) → terraform validate
+
+        4. BUILD INTEGRITY — if you modified build configuration (pom.xml, build.gradle, package.json,
+           Dockerfile, Makefile, Cargo.toml, etc.), run a clean build from scratch to verify the
+           build pipeline still works end-to-end. Do not rely on incremental builds for this check.
+
+        Every step that applies to the project MUST be executed. All commands must exit 0.
+        If a command fails, fix the root cause and re-run — do not proceed until all applicable
+        verification passes. Document every executed command and its result for the MRP.
+
+  - id: artifact-verify
+    name: Artifact Verification
+    description: Execute all verify-commands declared on output artifacts in the BriefingPack
+    actions:
+      - Collect all output artifacts from the BriefingPack that have a verify-command field
+      - If no output artifacts declare verify-commands, document this and pass the gate
+      - Execute each verify-command via Bash from the project root directory
+      - If any command exits non-zero, fix the artifact and re-run (max 3 attempts per command)
+      - Document each result in a table for the MRP (artifact path, command, exit code)
+    gate:
+      description: All machine-verifiable output artifacts pass their declared verify-command
+      check: "Every output artifact with a verify-command exited 0, or no verify-commands declared. Results documented for MRP."
+      strict: true
+
+  - id: self-review
+    name: Self-Review
+    description: Critically review own work
+    actions:
+      - Check code against all Acceptance Criteria
+      - Check MentorScript compliance (tests, error handling, security)
+      - Check for code quality and consistency
+      - Ask yourself — Would I approve this PR?
+    gate:
+      description: Self-review passed
+      check: "All AC met, MentorScript-compliant, PR-ready"
+      gate-command: |
+        Mandatory static analysis. Run every applicable tool below. All must exit 0.
+
+        LINT — detect and run the project linter:
+        - Python → ruff check . or flake8 (check pyproject.toml / setup.cfg for config)
+        - JavaScript/TypeScript → npx eslint . (check .eslintrc / eslint.config.*)
+        - Java → mvn checkstyle:check or mvn spotbugs:check (if plugin configured in pom.xml)
+        - Go → golangci-lint run (if .golangci.yml exists) or go vet ./...
+        - Rust → cargo clippy
+        - Ruby → rubocop
+
+        TYPE CHECK — if the project has a type system, run it:
+        - TypeScript → tsc --noEmit
+        - Python → mypy . or pyright (if configured in pyproject.toml)
+
+        If no linter or type checker is configured, document this in the MRP under SE Hygiene.
+
+  - id: package
+    name: Package
+    description: Create Mission Result Package
+    actions:
+      - Create MRP with all 5 criteria
+      - Link all relevant CRPs and VCRs
+      - Document git diff --stat
+      - Include commit history
+    gate:
+      description: MRP complete
+      check: "All 5 MRP criteria addressed"
+
+escalation:
+  structural-triggers:
+    - id: api-contract
+      description: "Changes affect API contract, database schema, or public interface"
+      action: create-crp
+      mode: blocking
+    - id: security
+      description: "Involves authentication, authorization, or cryptography"
+      action: create-crp
+      mode: blocking
+    - id: scope-deviation
+      description: "Contradicts or goes beyond the BriefingPack scope"
+      action: create-crp
+      mode: blocking
+    - id: multi-approach
+      description: "Multiple valid approaches with different tradeoffs and no BP guidance"
+      action: create-crp
+      mode: deferred
+    - id: cross-scope-reversal
+      description: "Reversing requires touching files beyond current scope"
+      action: create-crp
+      mode: blocking
+    - id: data-destructive
+      description: "Changes that could cause data loss, silent corruption, or irreversible state changes"
+      action: create-crp
+      mode: blocking
+    - id: dependency-change
+      description: "Adding, removing, or upgrading (major version) any external dependency"
+      action: create-crp
+      mode: deferred
+    - id: observable-behavior-change
+      description: "Modifying user-visible output, error messages, log formats, or response structure not explicitly specified by the BP"
+      action: create-crp
+      mode: deferred
+  scope-creep:
+    description: "Changes to files outside the BriefingPack scope"
+    action: create-crp
+
+n-version:
+  enabled: false
+  count: 2

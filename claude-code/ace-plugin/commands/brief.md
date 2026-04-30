@@ -43,8 +43,18 @@ If the argument looks like a hex string (6-12 characters, matching `[0-9a-f]+`),
 2. Read `artifacts/briefings/{hash}-{slug}/brief.md` and display the current BP contents.
 3. If the BP has `status: draft`, offer to resume drafting from where it left off.
 4. Ask the Agent Coach which section(s) they want to modify.
+
+   **Token Tracking — Start:** Using `bp_hash` and `slug` from the bp-info output, write the start marker:
+   ```
+   artifacts/token-usage/.pending/{bp_hash}.json
+   ```
+   Contents: `{"command": "brief", "bp_hash": "{bp_hash}", "slug": "{slug}", "model": "{current_model_id}", "effort": "{current_effort_level}", "start_time": "{ISO8601_UTC_now}"}`
+   Create the `.pending/` directory if it does not exist.
+
 5. Apply edits, preserving all other fields.
 6. Re-run the scope assessment (Step 1b below) if the goal or scope changed.
+
+**Token Tracking — Complete:** After edits are confirmed and saved, update `artifacts/token-usage/.pending/{bp_hash}.json` by setting `"completed": true`.
 
 ### New BP (default)
 
@@ -203,6 +213,14 @@ Once the coach approves:
    ```
    This deterministically generates a 12-char hex hash, derives the slug, creates `artifacts/briefings/{hash}-{slug}/brief.md`, and commits as `draft(bp:{hash}): create briefing pack`. Read the JSON output to get the `bp_hash`.
    If the draft content was written separately (not via `--from-stdin`), update the brief.md with the approved content using Edit.
+
+   **Token Tracking — Start:** Now that `bp_hash` and `slug` are known from the script output, write the start marker:
+   ```
+   artifacts/token-usage/.pending/{bp_hash}.json
+   ```
+   Contents: `{"command": "brief", "bp_hash": "{bp_hash}", "slug": "{slug}", "model": "{current_model_id}", "effort": "{current_effort_level}", "start_time": "{ISO8601_UTC_now}"}`
+   Create the `.pending/` directory if it does not exist.
+
 4. **Approve**: Run `python3 scripts/bp-transition.py approve {hash}` to set status to `ready`.
 5. **Dispatch** using the transition script (do NOT manually edit frontmatter):
    ```
@@ -229,6 +247,8 @@ Executor: started
 
 Monitor with /status. Agent will produce an MRP when done.
 ```
+
+**Token Tracking — Complete:** Update `artifacts/token-usage/.pending/{bp_hash}.json` by setting `"completed": true`.
 
 ---
 
@@ -304,12 +324,12 @@ Present the extracted artifacts to the coach for confirmation.
 - Context references exist (Glob to confirm file paths).
 - At least one escalation trigger defined.
 - All required frontmatter fields populated.
-- BP conforms to `skills/briefing-eng/schemas/briefing-pack.schema.json`.
+- BP conforms to `skills/engineering/schemas/briefing-pack.schema.json`.
 - If hierarchical: parent/child directory structure and `execution-order` are consistent.
 - If `artifacts` are declared: each entry has `path` and `direction`, output entries reference a valid AC.
 
 **Save and output:**
-1. Assemble using template at `skills/briefing-eng/templates/briefing-pack.md`.
+1. Assemble using template at `skills/engineering/templates/briefing-pack.md`.
 2. Display the complete BP for final review.
 3. Ask: "Ready to save, or want to adjust anything?"
 4. **Create BP** using the scaffolding script (do NOT manually create directories or generate hashes):
@@ -317,8 +337,18 @@ Present the extracted artifacts to the coach for confirmation.
    echo '{assembled-content}' | python3 scripts/create-bp.py --from-stdin --rigor {rigor}
    ```
    This generates hash, derives slug, creates directory, writes brief.md, and commits. Read JSON output for `bp_hash`.
+
+   **Token Tracking — Start:** Now that `bp_hash` and `slug` are known from the script output, write the start marker:
+   ```
+   artifacts/token-usage/.pending/{bp_hash}.json
+   ```
+   Contents: `{"command": "brief", "bp_hash": "{bp_hash}", "slug": "{slug}", "model": "{current_model_id}", "effort": "{current_effort_level}", "start_time": "{ISO8601_UTC_now}"}`
+   Create the `.pending/` directory if it does not exist.
+
 5. **Approve** using the transition script: `python3 scripts/bp-transition.py approve {bp_hash}` to set status to `ready`, regenerate index, and commit.
 6. Display: saved path, BP hash, slug, status, and remind: "Use `/ace:dispatch {hash}` to send this to an AI Teammate."
+
+**Token Tracking — Complete:** Update `artifacts/token-usage/.pending/{bp_hash}.json` by setting `"completed": true`.
 
 Note: `--full` does **not** auto-dispatch. The coach dispatches manually via `/dispatch`.
 

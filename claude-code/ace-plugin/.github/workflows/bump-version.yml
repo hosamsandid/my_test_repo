@@ -1,0 +1,117 @@
+name: Bump plugin version
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  bump-version:
+    runs-on: ubuntu-latest
+    # Skip if this push is a version bump commit
+    if: "!startsWith(github.event.head_commit.message, 'chore: bump plugin version')"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine version bump
+        id: bump
+        run: |
+          PLUGIN_JSON=".claude-plugin/plugin.json"
+
+          # Find the commit that last changed plugin.json (excluding HEAD if it just changed)
+          LAST_BUMP_COMMIT=$(git log --format='%H' -- "$PLUGIN_JSON" | head -n 1)
+
+          if [ -z "$LAST_BUMP_COMMIT" ]; then
+            echo "No previous version bump commit found, using all history"
+            COMMITS=$(git log --format='%s' HEAD)
+          else
+            COMMITS=$(git log --format='%s' "${LAST_BUMP_COMMIT}..HEAD")
+          fi
+
+          # Filter out version bump commits
+          COMMITS=$(echo "$COMMITS" | grep -v '^chore: bump plugin version' || true)
+
+          if [ -z "$COMMITS" ]; then
+            echo "No relevant commits since last bump"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Commits since last bump:"
+          echo "$COMMITS"
+
+          BUMP="none"
+
+          # Check for breaking changes
+          if echo "$COMMITS" | grep -qiE 'BREAKING CHANGE|^[a-z]+(\(.*\))?!:'; then
+            BUMP="major"
+          # Check for features
+          elif echo "$COMMITS" | grep -qE '^feat(\(.*\))?:'; then
+            BUMP="minor"
+          # Check for fixes
+          elif echo "$COMMITS" | grep -qE '^fix(\(.*\))?:'; then
+            BUMP="patch"
+          fi
+
+          if [ "$BUMP" = "none" ]; then
+            echo "No version-bumping commits found (only chore/docs/ci/etc)"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "Determined bump type: $BUMP"
+
+      - name: Compute new version
+        if: steps.bump.outputs.skip != 'true'
+        id: version
+        run: |
+          CURRENT=$(jq -r '.version' .claude-plugin/plugin.json)
+          echo "Current version: $CURRENT"
+
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+
+          case "${{ steps.bump.outputs.bump }}" in
+            major)
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            minor)
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            patch)
+              PATCH=$((PATCH + 1))
+              ;;
+          esac
+
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          echo "New version: $NEW_VERSION"
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Update plugin.json and marketplace.json
+        if: steps.bump.outputs.skip != 'true'
+        run: |
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
+          jq --arg v "$NEW_VERSION" '.version = $v' .claude-plugin/plugin.json > tmp.json
+          mv tmp.json .claude-plugin/plugin.json
+          jq --arg v "$NEW_VERSION" '.plugins[0].version = $v' .claude-plugin/marketplace.json > tmp.json
+          mv tmp.json .claude-plugin/marketplace.json
+
+      - name: Commit, tag, and push
+        if: steps.bump.outputs.skip != 'true'
+        run: |
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .claude-plugin/plugin.json .claude-plugin/marketplace.json
+          git commit -m "chore: bump plugin version to ${NEW_VERSION}"
+          git tag "v${NEW_VERSION}"
+          git push origin main --follow-tags

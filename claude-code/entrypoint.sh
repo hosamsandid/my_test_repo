@@ -21,9 +21,9 @@ if [ ! -f /workspace/.claude/settings.json ]; then
 fi
 
 # --- Install ACE plugin into the auth volume if not already present ---
-ACE_PLUGIN_DIR="/root/.claude/plugins/cache/i-sase-marketplace/ace/1.29.3"
+ACE_PLUGIN_DIR="/root/.claude/plugins/cache/i-sase-marketplace/ace/1.38.1"
 if [ ! -d "$ACE_PLUGIN_DIR" ]; then
-  echo "[entrypoint] Installing ACE plugin v1.29.3..."
+  echo "[entrypoint] Installing ACE plugin v1.38.1..."
   mkdir -p "$(dirname "$ACE_PLUGIN_DIR")"
   cp -r /defaults/ace-plugin/. "$ACE_PLUGIN_DIR/"
   echo "[entrypoint] ACE plugin files installed."
@@ -39,10 +39,10 @@ const path = '/root/.claude/plugins/installed_plugins.json';
 const key = 'ace@i-sase-marketplace';
 const entry = {
   scope: "user",
-  installPath: "/root/.claude/plugins/cache/i-sase-marketplace/ace/1.29.3",
-  version: "1.29.3",
-  installedAt: "2026-04-21T00:00:00.000Z",
-  lastUpdated: "2026-04-21T00:00:00.000Z",
+  installPath: "/root/.claude/plugins/cache/i-sase-marketplace/ace/1.38.1",
+  version: "1.38.1",
+  installedAt: "2026-04-30T00:00:00.000Z",
+  lastUpdated: "2026-04-30T00:00:00.000Z",
   gitCommitSha: "d8ec76abac5f4d2091bd1eab2ae380f810e67354"
 };
 let data = { version: 2, plugins: {} };

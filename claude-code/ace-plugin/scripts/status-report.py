@@ -239,12 +239,47 @@ def analyze_mrps(mrps: list[dict], vcrs: list[dict], crps: list[dict]) -> dict:
 # BP analysis (from index)
 # ---------------------------------------------------------------------------
 
+def _compute_transitive_dependents(
+    start_hashes: list[str],
+    briefings: dict,
+    *,
+    exclude: set | None = None,
+) -> list[dict]:
+    """BFS forward through the 'dependents' graph from any of start_hashes.
+
+    Returns the transitive set of reachable dependents as dicts
+    {hash, slug, status, path}. Excludes hashes in `exclude` and the
+    start hashes themselves. Used by /ace:status and /ace:revise to
+    surface the full ripple beyond direct dependents.
+    """
+    skip = set(exclude or set()) | set(start_hashes)
+    seen: set = set()
+    result: list[dict] = []
+    queue = list(start_hashes)
+    while queue:
+        current = queue.pop(0)
+        for next_hash in (briefings.get(current, {}).get("dependents") or []):
+            if next_hash in seen or next_hash in skip:
+                continue
+            seen.add(next_hash)
+            entry = briefings.get(next_hash, {})
+            result.append({
+                "hash": next_hash,
+                "slug": entry.get("slug", ""),
+                "status": entry.get("status", ""),
+                "path": entry.get("path", ""),
+            })
+            queue.append(next_hash)
+    return result
+
+
 def analyze_bps(briefings: dict) -> dict:
-    """Analyze BPs from the index: active, ready, draft, stale."""
+    """Analyze BPs from the index: active, ready, draft, completed, stale-inputs."""
     active = []
     ready = []
     draft = []
     completed = []
+    stale_inputs = []
     parents = []
 
     for bp_hash, entry in briefings.items():
@@ -265,9 +300,13 @@ def analyze_bps(briefings: dict) -> dict:
             "children": entry.get("children", []),
             "branch": entry.get("branch"),
             "path": entry.get("path", ""),
+            "stale-because": entry.get("stale-because", []),
+            "depends-on": entry.get("depends-on", []),
+            "dependents": entry.get("dependents", []),
+            "revision": entry.get("revision"),
         }
 
-        # Stale detection for active BPs
+        # Stale-heartbeat detection for active BPs (different from status:stale)
         if status in ("dispatched", "claimed", "in-progress"):
             hb = parse_iso_datetime(entry.get("last-heartbeat"))
             hb_age = minutes_ago(hb)
@@ -280,6 +319,13 @@ def analyze_bps(briefings: dict) -> dict:
             draft.append(bp_entry)
         elif status in ("completed", "reviewed"):
             completed.append(bp_entry)
+        elif status == "stale":
+            # Attach the transitive ripple so /ace:status can render it
+            # without doing ad-hoc graph walks in markdown.
+            bp_entry["ripple"] = _compute_transitive_dependents(
+                [bp_hash], briefings, exclude={bp_hash}
+            )
+            stale_inputs.append(bp_entry)
 
         if is_parent:
             parents.append(bp_entry)
@@ -288,15 +334,26 @@ def analyze_bps(briefings: dict) -> dict:
     active.sort(key=lambda b: b.get("created", ""), reverse=True)
     ready.sort(key=lambda b: b.get("created", ""))
     draft.sort(key=lambda b: b.get("created", ""))
+    # Sort stale-inputs by oldest flag first (most urgent for reassessment).
+    # Defensive: if stale-because parsing went wrong upstream, fall back to "".
+    def _stale_sort_key(b: dict) -> str:
+        sb = b.get("stale-because") or []
+        if not sb or not isinstance(sb[0], dict):
+            return ""
+        return sb[0].get("flagged-at", "") or ""
+
+    stale_inputs.sort(key=_stale_sort_key)
 
     return {
         "active": active,
         "ready": ready,
         "draft": draft,
         "completed": completed,
+        "stale_inputs": stale_inputs,
         "parents": parents,
         "active_count": len(active),
         "stale_count": sum(1 for b in active if b.get("stale")),
+        "stale_inputs_count": len(stale_inputs),
         "ready_count": len(ready),
         "draft_count": len(draft),
         "completed_count": len(completed),
@@ -339,6 +396,7 @@ def generate_report(
     include_mrps: bool = True,
     include_active: bool = True,
     include_ready: bool = True,
+    include_stale: bool = True,
 ) -> dict:
     """Generate a full status report as structured data."""
     # Scan guidance artifacts
@@ -347,7 +405,7 @@ def generate_report(
     vcrs = scan_guidance_dir(VCR_DIR) if include_mrps else []
 
     # Load BP index
-    briefings = load_index() if (include_active or include_ready) else {}
+    briefings = load_index() if (include_active or include_ready or include_stale) else {}
 
     report = {
         "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -380,11 +438,21 @@ def generate_report(
         else:
             report["ready_bps"] = {"items": [], "count": 0}
 
+    if include_stale:
+        if bp_data:
+            report["stale_bps"] = {
+                "items": bp_data["stale_inputs"],
+                "count": bp_data["stale_inputs_count"],
+            }
+        else:
+            report["stale_bps"] = {"items": [], "count": 0}
+
     # Quick stats (always included)
     stats = {}
     if bp_data:
         stats["active"] = bp_data["active_count"]
         stats["stale"] = bp_data["stale_count"]
+        stats["stale_inputs"] = bp_data["stale_inputs_count"]
         stats["completed"] = bp_data["completed_count"]
         stats["total_dispatched"] = bp_data["total_dispatched"]
         stats["ready"] = bp_data["ready_count"]
@@ -454,6 +522,41 @@ def format_text_report(report: dict) -> str:
             lines.append("No MRPs awaiting review.")
             lines.append("")
 
+    # Stale BPs (inputs changed via upstream revision)
+    stale = report.get("stale_bps")
+    if stale and stale["items"]:
+        lines.append("STALE (inputs changed) -- Reassessment required")
+        lines.append("-" * 49)
+        for b in stale["items"]:
+            triggers = b.get("stale-because", []) or []
+            count = len(triggers)
+            sources = ", ".join(
+                f"bp:{t.get('source-bp', '')[:6]} rev{t.get('source-revision', '?')}"
+                for t in triggers[:3]
+            )
+            if count > 3:
+                sources += f", +{count - 3} more"
+            lines.append(
+                f"  bp:{b['hash'][:6]} ({b['slug']})  \"{b['mission'][:40]}\"  "
+                f"[{count} upstream change(s)]"
+            )
+            lines.append(f"    triggers: {sources}")
+            ripple = b.get("ripple") or []
+            if ripple:
+                lines.append(
+                    f"    ripple: {len(ripple)} transitive dependent(s) "
+                    f"(not flagged unless you revise this BP):"
+                )
+                for r in ripple[:5]:
+                    lines.append(
+                        f"      bp:{r['hash'][:6]} ({r['slug']})  status: {r['status']}"
+                    )
+                if len(ripple) > 5:
+                    lines.append(f"      ... +{len(ripple) - 5} more")
+            lines.append(f"    -> /confirm-valid {b['hash'][:6]}  (assert still valid)")
+            lines.append(f"    -> /revise {b['hash'][:6]}         (re-execute)")
+        lines.append("")
+
     # Active BPs
     active = report.get("active_bps")
     if active:
@@ -515,7 +618,9 @@ def format_text_report(report: dict) -> str:
         bp_ready = stats.get("ready", 0)
         bp_draft = stats.get("draft", 0)
         bp_parent = stats.get("parent_derived", 0)
-        lines.append(f"  BPs:     {bp_ready} ready  |  {bp_draft} draft  |  {bp_parent} parent (derived)")
+        bp_stale_in = stats.get("stale_inputs", 0)
+        stale_part = f"  |  {bp_stale_in} stale (inputs changed)" if bp_stale_in else ""
+        lines.append(f"  BPs:     {bp_ready} ready  |  {bp_draft} draft  |  {bp_parent} parent (derived){stale_part}")
 
         # Blueprint stats
         blueprints_dir = Path(__file__).resolve().parent.parent / "artifacts" / "blueprints"
@@ -540,15 +645,17 @@ def main():
     parser.add_argument("--crps", action="store_true", help="Only CRP data")
     parser.add_argument("--mrps", action="store_true", help="Only MRP data")
     parser.add_argument("--active", action="store_true", help="Only active BPs")
+    parser.add_argument("--stale", action="store_true", help="Only stale-inputs BPs")
     parser.add_argument("--text", action="store_true", help="Human-readable output")
     args = parser.parse_args()
 
     # If no filter, include everything
-    has_filter = args.crps or args.mrps or args.active
+    has_filter = args.crps or args.mrps or args.active or args.stale
     include_crps = args.crps or not has_filter
     include_mrps = args.mrps or not has_filter
     include_active = args.active or not has_filter
     include_ready = not has_filter
+    include_stale = args.stale or not has_filter
 
     # Regenerate index first
     regenerate_index()
@@ -558,6 +665,7 @@ def main():
         include_mrps=include_mrps,
         include_active=include_active,
         include_ready=include_ready,
+        include_stale=include_stale,
     )
 
     if args.text:

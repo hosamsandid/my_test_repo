@@ -89,7 +89,7 @@ status: draft
 rigor: "{{standard|high|critical}}"
 depends-on: []
 execution-order: []
-loop-script: "skills/ale/loops/standard.yaml"
+loop-script: "skills/engineering/loops/standard.yaml"
 mentor-scripts:
   - "mentorscripts/global.md"
 reviewers: []
@@ -141,9 +141,9 @@ approver: ""
     # Determine loopscript
     if not loopscript:
         loopscript = (
-            "skills/ale/loops/high-rigor.yaml"
+            "skills/engineering/loops/high-rigor.yaml"
             if rigor in ("high", "critical")
-            else "skills/ale/loops/standard.yaml"
+            else "skills/engineering/loops/standard.yaml"
         )
 
     # Apply substitutions

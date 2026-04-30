@@ -37,8 +37,18 @@ Display the script output, then ask the coach which CRP to resolve, or note if t
 
 1. Find the CRP file: `python3 scripts/guidance-ops.py find-crp {hash-prefix}`. If the script exits with error (ambiguous prefix), display its output and ask for a longer prefix.
 2. Read the full content.
-3. Also load the referenced BriefingPack for additional context.
+3. Also load the referenced BriefingPack for additional context: `python3 scripts/bp-info.py {bp-hash} --json`.
 4. Check the `routed-to` field. If present, display who this CRP is routed to (e.g. "This CRP is routed to: {routed-to}").
+
+**Token Tracking — Start:** Using `bp_hash` and `slug` from the bp-info output, write the start marker:
+```
+artifacts/token-usage/.pending/{bp_hash}.json
+```
+Contents:
+```json
+{"command": "resolve-crp", "bp_hash": "{bp_hash}", "slug": "{slug}", "model": "{current_model_id}", "effort": "{current_effort_level}", "start_time": "{ISO8601_UTC_now}"}
+```
+Create the `.pending/` directory if it does not exist.
 
 #### Step 2 — Present CRP
 
@@ -128,6 +138,8 @@ python3 scripts/guidance-ops.py resolve-crp {crp-hash} --vcr-hash {vcr-hash}
 ```
 
 This deterministically sets `status: resolved`, `resolved-by`, `resolved-date`, and commits.
+
+**Token Tracking — Complete:** Update `artifacts/token-usage/.pending/{bp_hash}.json` by setting `"completed": true`.
 
 #### Step 6 — Optional: Update MentorScript
 

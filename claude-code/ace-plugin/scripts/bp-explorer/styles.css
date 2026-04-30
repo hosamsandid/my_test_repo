@@ -14,6 +14,7 @@
   --status-dispatched: #3b82f6;
   --status-completed: #22c55e;
   --status-reviewed: #34d399;
+  --status-stale: #a855f7;
 
   --rigor-high: #f97316;
   --rigor-standard: #6b7280;
@@ -186,6 +187,13 @@ body {
 .node.node-status-dispatched  { border-color: var(--status-dispatched); background: #101828; }
 .node.node-status-completed   { border-color: var(--status-completed);  background: #101e14; }
 .node.node-status-reviewed    { border-color: var(--status-reviewed);   background: #101e1c; }
+.node.node-status-stale {
+  border-color: var(--status-stale);
+  border-style: dashed;
+  background:
+    repeating-linear-gradient(45deg, rgba(168, 85, 247, 0.12) 0 2px, transparent 2px 8px),
+    #1a1320;
+}
 
 /* Pulse animation for dispatched nodes in graph view */
 .node.node-status-dispatched {
@@ -253,6 +261,7 @@ body {
 .badge.status-dispatched  { background: var(--status-dispatched);  color: #fff; }
 .badge.status-completed   { background: var(--status-completed);   color: #fff; }
 .badge.status-reviewed    { background: var(--status-reviewed);    color: #fff; }
+.badge.status-stale       { background: var(--status-stale);       color: #fff; }
 
 .badge.rigor-high     { background: var(--rigor-high);     color: #fff; }
 .badge.rigor-standard { background: var(--rigor-standard); color: #fff; }
@@ -611,6 +620,7 @@ body.view-overview #canvas-viewport { display: none; }
 .queue-item.type-crp { border-left-color: var(--status-ready); }
 .queue-item.type-crp.selected { border-left-color: var(--accent); }
 .queue-item.type-review { border-left-color: var(--accent); }
+.queue-item.type-stale { border-left: 3px dashed var(--status-stale); }
 .queue-item.type-active { border-left-color: var(--status-dispatched); }
 .queue-item.type-ready { border-left-color: var(--status-completed); }
 .queue-item.type-recent { border-left-color: transparent; }
@@ -657,7 +667,10 @@ body.view-overview #canvas-viewport { display: none; }
 .queue-badge-active   { background: rgba(59,130,246,0.2); color: #3b82f6; }
 .queue-badge-ready    { background: rgba(34,197,94,0.2); color: #22c55e; }
 .queue-badge-review   { background: rgba(108,138,255,0.2); color: var(--accent); }
+.queue-badge-stale    { background: rgba(168,85,247,0.2); color: #a855f7; }
 .queue-badge-draft    { background: rgba(148,163,184,0.2); color: #94a3b8; }
+.queue-badge-revision { background: rgba(251,191,36,0.2); color: #f59e0b; font-weight: 600; }
+.badge-revision       { background: rgba(251,191,36,0.2); color: #f59e0b; font-weight: 600; }
 
 .queue-item-status {
   font-size: 9px;
@@ -2197,6 +2210,7 @@ body.view-dashboard #canvas-viewport { display: none; }
 .dash-phase-item.completed .dash-phase-num,
 .dash-phase-item.phase-status-completed .dash-phase-num   { background: var(--status-completed); }
 .dash-phase-item.phase-status-reviewed .dash-phase-num    { background: var(--status-reviewed); }
+.dash-phase-item.phase-status-stale .dash-phase-num       { background: var(--status-stale); }
 
 .dash-phase-num {
   width: 28px;
@@ -2328,6 +2342,7 @@ body.view-dashboard #canvas-viewport { display: none; }
 
 .dash-status-badge.draft       { background: var(--status-draft); color: #fff; }
 .dash-status-badge.ready       { background: var(--status-ready); color: #fff; }
+.dash-status-badge.stale       { background: var(--status-stale); color: #fff; }
 .dash-status-badge.in_progress,
 .dash-status-badge.in-progress,
 .dash-status-badge.dispatched  { background: var(--status-dispatched); color: #fff; }
@@ -2387,6 +2402,11 @@ body.view-dashboard #canvas-viewport { display: none; }
 .dep-graph-node.status-dispatched rect    { fill: #121e38; stroke: var(--status-dispatched); }
 .dep-graph-node.status-completed rect     { fill: #0f2818; stroke: var(--status-completed); }
 .dep-graph-node.status-reviewed rect      { fill: #0f2620; stroke: var(--status-reviewed); }
+.dep-graph-node.status-stale rect {
+  fill: url(#dep-hatch-stale);
+  stroke: var(--status-stale);
+  stroke-dasharray: 5 3;
+}
 
 /* Label colors per status — lighter tint of the status color */
 .dep-graph-node.status-draft .dep-graph-node-label         { color: #f0909d; }
@@ -2396,6 +2416,7 @@ body.view-dashboard #canvas-viewport { display: none; }
 .dep-graph-node.status-dispatched .dep-graph-node-label    { color: #7aadff; }
 .dep-graph-node.status-completed .dep-graph-node-label     { color: #6dd891; }
 .dep-graph-node.status-reviewed .dep-graph-node-label      { color: #6ee8b7; }
+.dep-graph-node.status-stale .dep-graph-node-label         { color: #c89cf8; }
 
 /* Animated pulse for in-progress nodes */
 @keyframes pulse-glow {
@@ -2483,6 +2504,12 @@ body.view-dashboard #canvas-viewport { display: none; }
 .dep-graph-legend-swatch.swatch-dispatched  { background: var(--status-dispatched); }
 .dep-graph-legend-swatch.swatch-completed   { background: var(--status-completed); }
 .dep-graph-legend-swatch.swatch-reviewed    { background: var(--status-reviewed); }
+.dep-graph-legend-swatch.swatch-stale {
+  background:
+    repeating-linear-gradient(45deg, #fff 0 1px, transparent 1px 4px),
+    var(--status-stale);
+  border: 1px dashed var(--status-stale);
+}
 
 /* Dependencies line */
 .dash-deps {
@@ -2530,6 +2557,7 @@ body.view-dashboard #canvas-viewport { display: none; }
 .dash-subtask.status-dispatched   { border-left: 3px solid var(--status-dispatched); }
 .dash-subtask.status-completed    { border-left: 3px solid var(--status-completed); }
 .dash-subtask.status-reviewed     { border-left: 3px solid var(--status-reviewed); }
+.dash-subtask.status-stale        { border-left: 3px dashed var(--status-stale); }
 
 .dash-subtask-header {
   display: flex;
@@ -3673,6 +3701,24 @@ code.artifact-link:hover {
   background: rgba(245, 158, 11, 0.22);
   border-color: var(--status-ready);
 }
+.transition-btn.confirm-valid-btn {
+  background: rgba(34, 197, 94, 0.10);
+  color: var(--status-completed);
+  border-color: rgba(34, 197, 94, 0.25);
+}
+.transition-btn.confirm-valid-btn:hover:not(:disabled) {
+  background: rgba(34, 197, 94, 0.22);
+  border-color: var(--status-completed);
+}
+.transition-btn.revise-btn {
+  background: rgba(168, 85, 247, 0.10);
+  color: var(--status-stale);
+  border-color: rgba(168, 85, 247, 0.30);
+}
+.transition-btn.revise-btn:hover:not(:disabled) {
+  background: rgba(168, 85, 247, 0.22);
+  border-color: var(--status-stale);
+}
 .transition-btn.complete-btn {
   background: rgba(108, 138, 255, 0.12);
   color: var(--accent);
@@ -4403,4 +4449,221 @@ body.view-glossary #canvas-viewport { display: none; }
   .glossary-col-ext::before { content: "External: "; font-size: 10px; color: var(--text-muted); }
   .glossary-col-int::before { content: "Internal: "; font-size: 10px; color: var(--text-muted); }
   .glossary-col-desc { font-size: 12px; margin-top: 4px; }
+}
+
+/* ── Revision Timeline ─────────────────────────────────── */
+.revision-timeline {
+  padding: 8px 0;
+}
+.revision-entry {
+  display: flex;
+  gap: 12px;
+  min-height: 48px;
+}
+.revision-entry-marker {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 16px;
+  flex-shrink: 0;
+}
+.revision-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #f59e0b;
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+.revision-line {
+  width: 2px;
+  flex: 1;
+  background: var(--border);
+  margin-top: 4px;
+}
+.revision-entry-content {
+  flex: 1;
+  padding-bottom: 16px;
+}
+.revision-entry-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.revision-entry-rev {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+}
+.revision-entry-outcome {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(251,191,36,0.2);
+  color: #f59e0b;
+}
+.revision-entry-outcome.revised { background: rgba(251,191,36,0.2); color: #f59e0b; }
+.revision-entry-date {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.revision-entry-reason {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.5;
+}
+.revision-entry-meta {
+  margin-top: 4px;
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.revision-entry-meta code {
+  font-size: 10px;
+  background: var(--bg);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+/* Re-execution scope */
+.revision-scope-details {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.revision-scope-details summary {
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--bg-card);
+  color: var(--text);
+}
+.revision-scope-details summary:hover { background: var(--bg-hover); }
+.revision-scope-content {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.revision-scope-row {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  align-items: baseline;
+}
+.revision-scope-label {
+  font-weight: 600;
+  color: var(--text-muted);
+  min-width: 90px;
+  flex-shrink: 0;
+}
+.revision-scope-list {
+  margin: 0;
+  padding-left: 16px;
+  list-style: disc;
+}
+.revision-scope-list li {
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+.revision-scope-list code {
+  font-size: 11px;
+  background: var(--bg);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.revision-verify-cmd {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* ─── Copyable BP-ID labels ───────────────────────────────────────────── */
+/* A single click copies the full BP/blueprint ID to the clipboard.
+   The visible text is also selected so the user can copy manually. */
+.bp-id-copy {
+  cursor: pointer;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin: 0 -2px;
+  position: relative;
+  transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+  -webkit-user-select: all;
+  user-select: all;
+  white-space: nowrap;
+}
+.bp-id-copy:hover {
+  background-color: rgba(108, 138, 255, 0.18);
+  color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(108, 138, 255, 0.35);
+}
+.bp-id-copy:active {
+  background-color: rgba(108, 138, 255, 0.28);
+}
+/* Variant used where the original markup was a <code>: keep the muted-bg look. */
+.bp-id-copy.bp-id-code {
+  background: var(--bg);
+  font-size: 11px;
+  padding: 1px 5px;
+}
+.bp-id-copy.bp-id-code:hover {
+  background-color: rgba(108, 138, 255, 0.18);
+}
+
+/* "Copied!" confirmation pulse */
+.bp-id-copy.bp-id-copied,
+.bp-id-copy.bp-id-code.bp-id-copied {
+  background-color: rgba(34, 197, 94, 0.22);
+  color: var(--status-completed);
+  box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.45);
+}
+.bp-id-copy.bp-id-copied::after {
+  content: 'copied';
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--status-completed);
+  color: #08160c;
+  font-size: 9px;
+  font-weight: 700;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  pointer-events: none;
+  animation: bp-id-toast 1.1s ease forwards;
+  z-index: 5;
+}
+@keyframes bp-id-toast {
+  0%   { opacity: 0; transform: translate(-50%, 4px); }
+  20%  { opacity: 1; transform: translate(-50%, 0); }
+  75%  { opacity: 1; transform: translate(-50%, 0); }
+  100% { opacity: 0; transform: translate(-50%, -4px); }
+}
+
+/* When used as the graph node's ID badge, keep the existing pill look but
+   still show the copy affordance on hover. .node-id sets the base style;
+   .bp-id-copy adds the cursor + hover background. */
+.bp-id-copy.node-id {
+  font-size: 10px;
+  padding: 2px 6px;
+  background: var(--bg);
+  color: var(--text-muted);
+}
+.bp-id-copy.node-id:hover {
+  background-color: rgba(108, 138, 255, 0.22);
+  color: var(--accent);
 }

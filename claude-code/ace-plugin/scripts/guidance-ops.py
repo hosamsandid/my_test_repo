@@ -28,7 +28,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sase_lib import (
     REPO_ROOT, GUIDANCE_DIR, CRP_DIR, MRP_DIR, VCR_DIR,
-    extract_frontmatter_bounds, get_field, set_field,
+    extract_frontmatter_bounds, extract_frontmatter_bounds_safe,
+    get_field, set_field,
     parse_frontmatter, git_run, git_user, today_iso, rel_path,
 )
 
@@ -37,69 +38,158 @@ from sase_lib import (
 # Artifact lookup
 # ---------------------------------------------------------------------------
 
-def find_artifact(directory: Path, prefix: str) -> tuple[Path, str]:
-    """Find an artifact file by ID prefix. Returns (path, full_id)."""
-    if not directory.exists():
-        print(f"ERROR: Directory {directory} does not exist", file=sys.stderr)
-        sys.exit(2)
+def _list_search_roots() -> list[Path]:
+    """Return repo roots to search for artifacts.
 
-    matches = []
-    # Search both flat files and subdirectory-based layouts (e.g. mrp/{hash}-{slug}/mrp.md)
-    for path in directory.rglob("*.md"):
-        text = path.read_text(encoding="utf-8")
+    Includes the main repo (REPO_ROOT) and every active worktree under
+    `.worktrees/`. Worktrees come first so that artifacts committed on an
+    agent branch but not yet merged to main take precedence over any older
+    copy that may exist on the current branch.
+    """
+    roots: list[Path] = []
+    main_root: Path | None = None
+    main_resolved = REPO_ROOT.resolve()
+
+    r = git_run(["worktree", "list", "--porcelain"], check=False)
+    if r.returncode == 0:
+        for line in r.stdout.splitlines():
+            if not line.startswith("worktree "):
+                continue
+            wt = Path(line[len("worktree "):])
+            try:
+                wt_resolved = wt.resolve()
+            except OSError:
+                wt_resolved = wt
+            if wt_resolved == main_resolved:
+                main_root = wt
+            else:
+                roots.append(wt)
+
+    # Worktrees first (in-flight agent branches), then main (already-merged).
+    roots.append(main_root if main_root is not None else REPO_ROOT)
+    return roots
+
+
+def _scan_dir_for_prefix(search_dir: Path, prefix: str) -> list[tuple[Path, str]]:
+    """Return all (path, artifact_id) matches for a prefix in one directory."""
+    if not search_dir.exists():
+        return []
+
+    matches: list[tuple[Path, str]] = []
+    seen_paths: set[Path] = set()
+
+    def _try_add(path: Path, fallback_id: str) -> None:
+        if path in seen_paths:
+            return
         try:
-            fm_start, fm_end = extract_frontmatter_bounds(text)
-        except SystemExit:
-            continue
-        fm_text = text[fm_start:fm_end]
-        artifact_id = get_field(fm_text, "id") or ""
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return
+        bounds = extract_frontmatter_bounds_safe(text)
+        if bounds is None:
+            return
+        fm_text = text[bounds[0]:bounds[1]]
+        artifact_id = get_field(fm_text, "id") or fallback_id
         if artifact_id.startswith(prefix):
+            seen_paths.add(path)
             matches.append((path, artifact_id))
 
-    # Also try filename-based matching (flat: {prefix}*.md)
-    for path in directory.glob(f"{prefix}*.md"):
-        if path not in [m[0] for m in matches]:
-            text = path.read_text(encoding="utf-8")
-            try:
-                fm_start, fm_end = extract_frontmatter_bounds(text)
-                fm_text = text[fm_start:fm_end]
-                artifact_id = get_field(fm_text, "id") or path.stem
-                matches.append((path, artifact_id))
-            except SystemExit:
-                continue
+    # Frontmatter-based scan (handles both flat files and {hash}-{slug}/foo.md).
+    for path in search_dir.rglob("*.md"):
+        _try_add(path, "")
 
-    # Also try directory-name matching (subdir: {prefix}*/*.md)
-    for path in directory.glob(f"{prefix}*/*.md"):
-        if path not in [m[0] for m in matches]:
-            text = path.read_text(encoding="utf-8")
-            try:
-                fm_start, fm_end = extract_frontmatter_bounds(text)
-                fm_text = text[fm_start:fm_end]
-                artifact_id = get_field(fm_text, "id") or path.parent.name.split("-")[0]
-                matches.append((path, artifact_id))
-            except SystemExit:
+    # Filename-based: {prefix}*.md
+    for path in search_dir.glob(f"{prefix}*.md"):
+        _try_add(path, path.stem)
+
+    # Directory-name based: {prefix}*/*.md
+    for path in search_dir.glob(f"{prefix}*/*.md"):
+        _try_add(path, path.parent.name.split("-")[0])
+
+    return matches
+
+
+def find_artifact(directory: Path, prefix: str) -> tuple[Path, str]:
+    """Find an artifact file by ID prefix across all worktrees.
+
+    Returns (path, full_id). Searches the supplied *directory* (which lives
+    under REPO_ROOT) and the equivalent path inside every active worktree.
+    When the same artifact id is visible in more than one worktree, the
+    worktree copy is preferred over main (see `_list_search_roots`); this
+    matches the agent-branch lifecycle, where a guidance artifact lives on
+    the agent branch until the BP is merged to main.
+    """
+    try:
+        rel_dir = directory.relative_to(REPO_ROOT)
+    except ValueError:
+        rel_dir = None
+
+    matches: list[tuple[Path, str]] = []
+    seen_ids: set[str] = set()
+
+    if rel_dir is None:
+        search_roots = [None]
+    else:
+        search_roots = _list_search_roots()
+
+    for root in search_roots:
+        if root is None:
+            search_dir = directory
+        else:
+            search_dir = root / rel_dir
+        for path, artifact_id in _scan_dir_for_prefix(search_dir, prefix):
+            # Worktrees are searched first; first writer wins on duplicates.
+            if artifact_id and artifact_id in seen_ids:
                 continue
+            if artifact_id:
+                seen_ids.add(artifact_id)
+            matches.append((path, artifact_id))
 
     if not matches:
-        print(f"ERROR: No artifact found matching prefix '{prefix}' in {directory.name}/",
+        location_hint = (
+            f"{directory.name}/ (across {len(search_roots)} worktree(s))"
+            if rel_dir is not None and len(search_roots) > 1
+            else f"{directory.name}/"
+        )
+        print(f"ERROR: No artifact found matching prefix '{prefix}' in {location_hint}",
               file=sys.stderr)
         sys.exit(2)
     if len(matches) > 1:
-        # Deduplicate by path
-        seen = set()
-        unique = []
+        print(f"ERROR: Ambiguous prefix '{prefix}'. Matches:", file=sys.stderr)
         for p, i in matches:
-            if p not in seen:
-                seen.add(p)
-                unique.append((p, i))
-        matches = unique
-        if len(matches) > 1:
-            print(f"ERROR: Ambiguous prefix '{prefix}'. Matches:", file=sys.stderr)
-            for p, i in matches:
-                print(f"  {i} ({p.name})", file=sys.stderr)
-            sys.exit(2)
+            display = i or p.name
+            try:
+                rel = p.relative_to(REPO_ROOT)
+            except ValueError:
+                rel = p
+            print(f"  {display} ({rel})", file=sys.stderr)
+        sys.exit(2)
 
     return matches[0]
+
+
+def _git_root_for(path: Path) -> Path:
+    """Return the worktree/repo root that contains *path*.
+
+    Used so that git operations (`add`, `commit`) run from the same worktree
+    the artifact lives in — important when the artifact is on an agent branch
+    under `.worktrees/` rather than on the current branch in main.
+    """
+    try:
+        path_resolved = path.resolve()
+    except OSError:
+        path_resolved = path
+    for root in _list_search_roots():
+        try:
+            root_resolved = root.resolve()
+        except OSError:
+            root_resolved = root
+        try:
+            path_resolved.relative_to(root_resolved)
+            return root
+        except ValueError:
+            continue
+    return REPO_ROOT
 
 
 # ---------------------------------------------------------------------------
@@ -138,9 +228,13 @@ def resolve_crp(
     print(f"  resolved-date: {date}")
 
     if not no_commit:
-        rel_path = str(path.relative_to(REPO_ROOT))
-        git_run(["add", rel_path])
-        git_run(["commit", "-m", f"resolve-crp({crp_id[:6]}): resolved via VCR {vcr_hash[:6]}"])
+        cwd = _git_root_for(path)
+        rel = str(path.relative_to(cwd))
+        git_run(["add", rel], cwd=str(cwd))
+        git_run(
+            ["commit", "-m", f"resolve-crp({crp_id[:6]}): resolved via VCR {vcr_hash[:6]}"],
+            cwd=str(cwd),
+        )
         print(f"  committed")
 
 
@@ -167,9 +261,13 @@ def defer_crp(
     print(f"  Will surface during MRP review.")
 
     if not no_commit:
-        rel_path = str(path.relative_to(REPO_ROOT))
-        git_run(["add", rel_path])
-        git_run(["commit", "-m", f"defer-crp({crp_id[:6]}): deferred to MRP review"])
+        cwd = _git_root_for(path)
+        rel = str(path.relative_to(cwd))
+        git_run(["add", rel], cwd=str(cwd))
+        git_run(
+            ["commit", "-m", f"defer-crp({crp_id[:6]}): deferred to MRP review"],
+            cwd=str(cwd),
+        )
         print(f"  committed")
 
 
@@ -197,9 +295,13 @@ def update_mrp(
     print(f"MRP {mrp_id[:12]}: {current_status} -> {status}")
 
     if not no_commit:
-        rel_path = str(path.relative_to(REPO_ROOT))
-        git_run(["add", rel_path])
-        git_run(["commit", "-m", f"review-mrp({mrp_id[:6]}): {status}"])
+        cwd = _git_root_for(path)
+        rel = str(path.relative_to(cwd))
+        git_run(["add", rel], cwd=str(cwd))
+        git_run(
+            ["commit", "-m", f"review-mrp({mrp_id[:6]}): {status}"],
+            cwd=str(cwd),
+        )
         print(f"  committed")
 
 

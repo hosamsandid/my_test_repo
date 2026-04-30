@@ -75,6 +75,16 @@ This returns JSON with pre-resolved fields:
 
 Use these values directly for agent assembly in Step 5. Do NOT manually resolve loopscript paths or read rigor fields.
 
+**Token Tracking — Start:** Using the `bp_hash` and `slug` from the bp-info output, write the start marker:
+```
+artifacts/token-usage/.pending/{bp_hash}.json
+```
+Contents:
+```json
+{"command": "dispatch", "bp_hash": "{bp_hash}", "slug": "{slug}", "model": "{current_model_id}", "effort": "{current_effort_level}", "start_time": "{ISO8601_UTC_now}"}
+```
+Create the `.pending/` directory if it does not exist.
+
 ### Step 5 — Start Agent(s)
 
 For each agent to start:
@@ -114,3 +124,5 @@ Display:
 - Execution mode (standard / N-Version)
 - Agent(s) started
 - Next steps: "Monitor with `/ace:status`. Agent will produce an MRP when done."
+
+**Token Tracking — Complete:** Update `artifacts/token-usage/.pending/{bp_hash}.json` by setting `"completed": true`.

@@ -69,7 +69,8 @@ def parse_frontmatter(text: str) -> dict:
             continue
 
         # Detect structured list item start or continuation: "  - key: value"
-        if re.match(r"^  - \w+:", line):
+        # Keys may contain hyphens (e.g. source-bp, flagged-at, previous-status).
+        if re.match(r"^  - [\w-]+:", line):
             if current_key and current_list is not None:
                 # Switch to structured list mode if not already
                 if not in_structured_list:
@@ -87,7 +88,8 @@ def parse_frontmatter(text: str) -> dict:
             continue
 
         # Detect structured list field continuation: "    key: value"
-        if in_structured_list and current_obj is not None and re.match(r"^    \w+:", line):
+        # Keys may contain hyphens (e.g. revision-reason, agent-id, previous-status).
+        if in_structured_list and current_obj is not None and re.match(r"^    [\w-]+:", line):
             item_stripped = line.strip()
             if ":" in item_stripped:
                 k = item_stripped[:item_stripped.index(":")].strip()
@@ -211,7 +213,7 @@ def determine_children(bp_dir: Path) -> list[str]:
 # Branch status ordering — higher number = more advanced in lifecycle
 _STATUS_ORDER = {
     "draft": 0, "ready": 1, "dispatched": 2, "claimed": 3,
-    "in-progress": 4, "completed": 5, "reviewed": 6,
+    "in-progress": 4, "completed": 5, "reviewed": 6, "stale": 7,
 }
 
 
@@ -219,6 +221,7 @@ def _derive_status_from_children(bp_hash: str, briefings: dict, visited: set) ->
     """Recursively derive a parent BP's status from its children.
 
     Rules (checked in order):
+    - Any child stale  -> stale  (parent surfaces the integrity concern)
     - All children reviewed  -> reviewed
     - All children completed or reviewed  -> completed
     - Any child dispatched/claimed/in-progress (not all done)  -> in-progress
@@ -253,6 +256,8 @@ def _derive_status_from_children(bp_hash: str, briefings: dict, visited: set) ->
     if not child_statuses:
         return entry.get("status") or "draft"
 
+    if any(s == "stale" for s in child_statuses):
+        return "stale"
     if all(s == "reviewed" for s in child_statuses):
         return "reviewed"
     if all(s in ("completed", "reviewed") for s in child_statuses):
@@ -426,7 +431,7 @@ def build_index(include_branches: bool = False) -> dict:
 
         entry = {
             "slug": slug,
-            "mission": fm.get("mission"),
+            "mission": fm.get("mission") or fm.get("title"),
             "status": fm.get("status"),
             "rigor": fm.get("rigor"),
             "author": fm.get("author") if isinstance(fm.get("author"), list) else ([fm["author"]] if fm.get("author") else []),
@@ -439,6 +444,9 @@ def build_index(include_branches: bool = False) -> dict:
             "phase": fm.get("phase"),
             "last-heartbeat": fm.get("last-heartbeat"),
             "artifacts": fm.get("artifacts", []),
+            "revision": fm.get("revision"),
+            "stale-because": fm.get("stale-because", []),
+            "dependents": [],
             "path": rel_path,
             "branch": None,
         }
@@ -542,6 +550,16 @@ def build_index(include_branches: bool = False) -> dict:
 
         if wt_overlaid:
             print(f"  Worktree overlay: {wt_overlaid} BPs updated from local worktrees")
+
+    # --- Compute forward dependents (inverse of depends-on) -----------------
+    # For each BP, list the hashes of BPs whose depends-on contains it.
+    # Used by /ace:status and /ace:revise to compute transitive impact on
+    # cascade flagging (revise -> stale).
+    for bp_hash, entry in briefings.items():
+        for dep_hash in (entry.get("depends-on") or []):
+            target = briefings.get(dep_hash)
+            if target is not None:
+                target["dependents"].append(bp_hash)
 
     # --- Derive parent status from children (bottom-up) --------------------
     _derive_parent_statuses(briefings)

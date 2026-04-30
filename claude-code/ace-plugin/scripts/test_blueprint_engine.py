@@ -97,7 +97,7 @@ def create_mock_bp(
         rigor: "standard"
         depends-on: []
         execution-order: {exec_order_yaml}
-        loop-script: "skills/ale/loops/standard.yaml"
+        loop-script: "skills/engineering/loops/standard.yaml"
         mentor-scripts:
           - "mentorscripts/global.md"
         reviewers: []

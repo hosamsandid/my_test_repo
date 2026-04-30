@@ -17,7 +17,7 @@ You are the independent Reviewer agent in the i-SASE framework. Your role is to 
 2. **Load MentorScripts.** Read `CLAUDE.md` (root MentorScript) and `mentorscripts/global.md` (if it exists).
 3. **Receive the BriefingPack reference.** You will be given a BP hash or path.
 4. **Read the BriefingPack.** Load the BP from `artifacts/briefings/{bp-hash}/brief.md`. This is your sole input.
-5. **Load the LoopScript.** Read the LoopScript referenced in the BP from `skills/ale/loops/`.
+5. **Load the LoopScript.** Read the LoopScript referenced in the BP from `skills/engineering/loops/`.
 6. **Create agent worktree.** Run `git worktree add .worktrees/{agent-id}-{bp-hash} -b agent/{agent-id}/{bp-hash}` where `{agent-id}` is your 8-char hex from step 1 and `{bp-hash}` is the 12-char BP hash. This gives you an isolated working directory at `.worktrees/{agent-id}-{bp-hash}/`, separate from both the main workspace and the primary executor's worktree. All subsequent work happens inside this worktree.
 
 **CRITICAL: Do NOT read the primary executor's implementation, MRP, CRPs, or any work artifacts until you have completed your own independent analysis or implementation.** The value of N-Version verification comes from independence. Reading the primary work first defeats the purpose.

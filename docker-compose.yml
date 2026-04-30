@@ -31,21 +31,29 @@ services:
       conduwuit:
         condition: service_started
 
-  claude-bridge:
+  orchestrator:
     build:
-      context: ./claude-code
-    container_name: claude-bridge
+      context: ./orchestrator
+    container_name: orchestrator
     restart: unless-stopped
     volumes:
-      - claude-auth:/root/.claude
-      - claude-workspace:/workspace
+      - agent-pool-workspace:/workspace
+      - skills-pool:/template-workspace:ro
+      - ~/.ssh/id_accenturecodefoundry:/root/.ssh/id_accenturecodefoundry:ro
+      - ~/.ssh/id_accenturecodefoundry.pub:/root/.ssh/id_accenturecodefoundry.pub:ro
     environment:
       TZ: Europe/Berlin
       MATRIX_HOMESERVER: http://conduwuit:6167
-      MATRIX_ACCESS_TOKEN: "${MATRIX_ACCESS_TOKEN}"
-      MATRIX_BOT_USER_ID: "@claude:local"
-      MATRIX_DEFAULT_ROOM: "${MATRIX_DEFAULT_ROOM}"
-      # Azure AI Foundry — passed through to Claude Code CLI
+      MATRIX_ACCESS_TOKEN: "${ORCHESTRATOR_TOKEN}"
+      MATRIX_BOT_USER_ID: "@orchestrator:local"
+      MULTI_AGENT_ROOM: "${MULTI_AGENT_ROOM}"
+      ADMIN_USER_ID: "@thorsten:local"
+      # Conduwuit admin (for auto-creating Matrix users)
+      CONDUWUIT_ADMIN_TOKEN: "${MATRIX_ACCESS_TOKEN}"
+      CONDUWUIT_ADMIN_ROOM: "!cUxr0SyfINf9yEvBOD:local"
+      # Git identity for agents that use git (push/PR)
+      GIT_SSH_COMMAND: "ssh -i /root/.ssh/id_accenturecodefoundry -o StrictHostKeyChecking=accept-new"
+      # Azure AI Foundry
       CLAUDE_CODE_USE_FOUNDRY: "1"
       ANTHROPIC_FOUNDRY_RESOURCE: "${ANTHROPIC_FOUNDRY_RESOURCE}"
       ANTHROPIC_FOUNDRY_API_KEY: "${ANTHROPIC_FOUNDRY_API_KEY}"
@@ -54,10 +62,34 @@ services:
       conduwuit:
         condition: service_started
 
+  admin-console:
+    build:
+      context: ./admin-console
+    container_name: admin-console
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    volumes:
+      - agent-pool-workspace:/workspace
+      - skills-pool:/bridge-workspace
+      # Rootless Podman socket (core uid=501 inside VM — matches container's mapped uid)
+      - /run/user/501/podman/podman.sock:/var/run/podman.sock:ro
+    environment:
+      TZ: Europe/Berlin
+      NODE_ENV: production
+      PODMAN_SOCK_PATH: /var/run/podman.sock
+      ANTHROPIC_FOUNDRY_RESOURCE: "${ANTHROPIC_FOUNDRY_RESOURCE}"
+      ANTHROPIC_DEFAULT_SONNET_MODEL: "${ANTHROPIC_DEFAULT_SONNET_MODEL}"
+    depends_on:
+      conduwuit:
+        condition: service_started
+
 volumes:
   conduwuit-db:
     name: vgh-claw_conduwuit-db
-  claude-auth:
-    name: vgh-claw_claude-auth
-  claude-workspace:
+  agent-pool-workspace:
+    name: vgh-claw_agent-pool-workspace
+  # Central skill pool, shared between orchestrator (read-only at /template-workspace)
+  # and admin-console (at /bridge-workspace, legacy mount path).
+  skills-pool:
     name: vgh-claw_claude-workspace

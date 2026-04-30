@@ -2,7 +2,7 @@
 
 > An AI agent built for complex enterprise problems — with persistent memory, learnable skills, and full access to your codebase. Runs entirely within your infrastructure.
 
-For a visual walkthrough of all concepts, open **[`architecture-story.html`](./architecture-story.html)** in your browser.
+For a visual walkthrough of all concepts, open **[`docs/architecture-story.html`](./docs/architecture-story.html)** in your browser.
 
 ---
 
@@ -27,10 +27,10 @@ The stack runs on Podman, communicates over the Matrix protocol, and uses Azure 
 | Capability | What it means |
 |---|---|
 | **Persistent Memory** | `memory/context.md` stores facts indefinitely. `memory/log.md` summarises every conversation. The agent reads both at session start. |
-| **Learnable Skills** | Drop a `SKILL.md` into `/workspace/skills/<name>/` and the agent gains a new domain capability — COBOL analysis, JCL conversion, DB2 schema mapping, anything. |
-| **Git Access** | The workspace contains a live clone of your enterprise repository. The agent can read, analyse, commit, and open pull requests. |
-| **Autonomous Operation** | A cron-based scheduler (`jobs.json`) lets the agent run tasks without being asked — daily standup summaries, code quality checks, sprint reports. |
-| **Multi-Agent Pool** | An orchestrator routes questions to specialist agents in parallel. A synthesiser merges their answers. Agents are created and managed via chat commands (`!agent add`). |
+| **Learnable Skills** | Drop a `SKILL.md` into the central skill pool and any agent that has a Working Environment selecting it gains a new domain capability — COBOL analysis, JCL conversion, DB2 schema mapping, anything. |
+| **Git Access** | A Working Environment can clone an enterprise repository into the agent's workspace using a registered SSH key. The agent can read, analyse, commit, and open pull requests. |
+| **Autonomous Operation** | Autonomous agents have a self-managed `triggers.json` (cron + one-shot) for proactive tasks — daily standup summaries, code quality checks, sprint reports. |
+| **Multi-Agent Pool** | An orchestrator routes questions to specialist agents in parallel. A synthesiser merges their answers. Agents are managed via the Admin Console. |
 | **Compliance** | Runs on Azure AI Foundry inside your own tenant. Sonnet and Opus are both available. No third-party data handling. |
 
 ---
@@ -38,21 +38,18 @@ The stack runs on Podman, communicates over the Matrix protocol, and uses Azure 
 ## Architecture
 
 ```
-Matrix Client (Element)
+Matrix Client (Cinny @ :8090, Element, etc.)
   → Conduwuit (Matrix homeserver, localhost:8448)
-    → bridge.js (Node.js, matrix-bot-sdk)
-      → Claude Code CLI (spawned per message, acceptEdits mode)
-        → /workspace (persistent volume)
-             ├── CLAUDE.md          agent identity & system prompt
-             ├── skills/            domain-specific capabilities
-             ├── memory/            persistent context & conversation log
-             ├── git-repo/          full enterprise source code clone
-             └── jobs.json          scheduled autonomous tasks
+    → orchestrator (@orchestrator:local)
+        ├── Routes to dynamic agent processes (each agent-runner.js)
+        ├── Each agent: own workspace, own CLAUDE.md, own skills + repo (via Working Environment)
+        └── Synthesises expert answers when broadcast routing is used
+
+Admin Console (localhost:4000)
+  └── CRUD for agents, working environments, SSH keys, skills, MCP
 ```
 
-For the multi-agent overlay, `agent-pool.js` manages a dynamic pool of specialist agents — each with its own workspace, seeded from the base template above.
-
-See [`CLAUDE.md`](./CLAUDE.md) for the full technical reference including all environment variables, Docker Compose commands, and admin commands.
+See [`CLAUDE.md`](./CLAUDE.md) for the full technical reference including all environment variables, Podman commands, and admin operations.
 
 ---
 
@@ -64,34 +61,32 @@ See [`CLAUDE.md`](./CLAUDE.md) for the full technical reference including all en
 # 1. Copy and fill environment config
 cp .env.example .env
 
-# 2. Start the full stack
-podman compose -f docker-compose.yml -f docker-compose.multi-agent.yml up -d --build
+# 2. Start the full stack (single compose file)
+./start-stack.fish
+# or
+podman compose up -d --build
 
 # 3. Tail logs
-podman logs -f claude-bridge
-podman logs -f agent-pool
+podman logs -f orchestrator
+podman logs -f admin-console
 ```
 
 First-time Matrix user setup (homeserver admin room):
 ```
-!admin users create-user claude <password>
 !admin users create-user <yourname> <password>
 ```
 
-Full setup details, volume descriptions, and all `!agent` commands are documented in [`CLAUDE.md`](./CLAUDE.md).
+Open the Admin Console at <http://localhost:4000> to create agents, environments and SSH keys. Open Cinny at <http://localhost:8090> to chat with them.
 
 ---
 
 ## Extending the Agent
 
 **Add a skill:**
-1. Create `/workspace/skills/<name>/SKILL.md` on the workspace volume
-2. Add a row to the skills table in `claude-code/CLAUDE.md`
-3. The agent reads it on the next conversation — no restart needed
+Drop a `SKILL.md` into the skill-pool volume (`vgh-claw_claude-workspace:/skills/<name>/SKILL.md`). It immediately appears in the Admin Console's Working Environment skill picker.
 
 **Add an agent:**
-In the Multi-Agent room, type `!agent add` and follow the guided wizard.
+Use the Admin Console at <http://localhost:4000> — choose a Working Environment, write a system prompt, save.
 
-**Add a scheduled task:**
-Ask the agent directly: *"Create a daily task at 08:30 that reviews overnight CI results."*
-It will write the job into `jobs.json` itself.
+**Schedule autonomous work:**
+For autonomous agents, edit `triggers.json` in the agent's workspace (or ask the agent to do it). Triggers sync within 60 seconds.

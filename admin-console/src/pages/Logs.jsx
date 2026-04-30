@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useApi } from '../hooks/useApi';
 import LogStream from '../components/LogStream';
 
-const STATIC_CONTAINERS = ['orchestrator', 'claude-bridge', 'conduwuit'];
+const STATIC_CONTAINERS = ['orchestrator', 'admin-console', 'conduwuit'];
 
 export default function Logs() {
   const { data: agentContainers } = useApi('/api/containers');

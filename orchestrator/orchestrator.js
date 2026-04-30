@@ -130,14 +130,20 @@ function loadEnvironment(envId) {
 }
 
 function buildAgentClaudeMd(agentPrompt, role, env) {
-  const templatePath = path.join(TEMPLATE_WORKSPACE, "CLAUDE.md");
+  const candidates = [
+    path.join(TEMPLATE_WORKSPACE, "CLAUDE.md"),
+    "/defaults/CLAUDE.md",
+  ];
   let base = "";
-  try {
-    if (fs.existsSync(templatePath)) {
-      base = fs.readFileSync(templatePath, "utf8");
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) {
+        base = fs.readFileSync(candidate, "utf8");
+        if (base) break;
+      }
+    } catch (err) {
+      console.log(`[Orchestrator] Could not read ${candidate}: ${err.message}`);
     }
-  } catch (err) {
-    console.log(`[Orchestrator] Could not read template CLAUDE.md: ${err.message}`);
   }
   if (!base) return agentPrompt;
 

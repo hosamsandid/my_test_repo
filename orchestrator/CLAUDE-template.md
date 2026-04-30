@@ -34,56 +34,7 @@ If memory files don't exist yet, create them on first use.
 
 You have specialized skills in the `skills/` directory. When the user asks about a topic covered by a skill, read the corresponding SKILL.md first.
 
-| Topic | File | Description |
-|---|---|---|
-| _(no skills installed yet)_ | | |
-
-Skills will be added over time. Each skill directory contains a `SKILL.md` with instructions, data point references, and usage examples.
-
-## Scheduler (Timers & Scheduled Tasks)
-
-You can manage time-based tasks. Jobs are stored in `jobs.json`. The bridge checks for changes every 60 seconds.
-
-### Job Types
-
-**Recurring:**
-```json
-{
-  "id": "unique-id",
-  "type": "recurring",
-  "enabled": true,
-  "cron": "30 8 * * 1-5",
-  "description": "Description",
-  "prompt": "What Claude should do"
-}
-```
-Cron format: `Minute Hour Day Month Weekday`
-
-**One-shot:**
-```json
-{
-  "id": "unique-id",
-  "type": "once",
-  "enabled": true,
-  "at": "2026-04-21T15:30:00",
-  "description": "Description",
-  "prompt": "What Claude should do"
-}
-```
-
-### Creating a job
-1. Read `jobs.json`
-2. Create the appropriate entry (recurring with cron, or one-shot with ISO timestamp)
-3. Assign a unique `id`
-4. Write the updated array back to `jobs.json`
-5. Confirm to the user
-
-### Listing / deleting jobs
-- "What timers are running?" — read `jobs.json`, display as table
-- "Delete the X timer" — remove the job from `jobs.json`
-
-### Current time
-Always determine the current time via `date` (Bash), never guess.
+Each skill directory contains a `SKILL.md` with instructions, data point references, and usage examples.
 
 ## Important Notes
 

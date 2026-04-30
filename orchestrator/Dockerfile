@@ -7,14 +7,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN npm install -g @anthropic-ai/claude-code
 
 WORKDIR /app
-COPY package.runner.json package.json
+COPY package.json .
 RUN npm install --omit=dev
-
+COPY orchestrator.js .
 COPY agent-runner.js .
-COPY entrypoint.runner.sh entrypoint.sh
-RUN chmod +x entrypoint.sh
+
+# Bundled fallback template: used by orchestrator when /template-workspace/CLAUDE.md
+# is not available in the mounted skills-pool volume (e.g. fresh installation).
+COPY CLAUDE-template.md /defaults/CLAUDE.md
 
 WORKDIR /workspace
 RUN mkdir -p /workspace/agents
 
-ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["node", "/app/orchestrator.js"]

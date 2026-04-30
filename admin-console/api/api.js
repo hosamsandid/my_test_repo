@@ -160,12 +160,23 @@ app.post('/api/agents', async (req, res) => {
   }
 });
 
-app.delete('/api/agents/:id', (req, res) => {
+app.delete('/api/agents/:id', async (req, res) => {
   const { id } = req.params;
   const agentDir = path.join(AGENTS_DIR, id);
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
-  fs.rmSync(agentDir, { recursive: true, force: true });
-  res.status(204).end();
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      return res.status(resp.status).json(data);
+    }
+    res.status(204).end();
+  } catch (err) {
+    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
 });
 
 /* ─── Agent Prompt ──────────────────────────────────────────────────── */

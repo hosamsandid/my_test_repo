@@ -43,6 +43,7 @@ const AGENT_USER_ID = process.env.MATRIX_BOT_USER_ID;
 const HOMESERVER = process.env.MATRIX_HOMESERVER;
 const MULTI_AGENT_ROOM = process.env.MULTI_AGENT_ROOM;
 const ORCHESTRATOR_USER_ID = process.env.ORCHESTRATOR_USER_ID || "@orchestrator:local";
+const ADMIN_USER_ID = process.env.ADMIN_USER_ID || "@thorsten:local";
 
 const AGENTS_DIR = "/workspace/agents";
 const CLAUDE_TIMEOUT = 600_000;
@@ -302,9 +303,6 @@ async function main() {
   let processing = false;
 
   client.on("room.message", async (roomId, event) => {
-    // Only process messages in our designated room
-    if (MULTI_AGENT_ROOM && roomId !== MULTI_AGENT_ROOM) return;
-    // Ignore our own messages
     if (event.sender === AGENT_USER_ID) return;
     if (event.content?.msgtype !== "m.text") return;
     if (event.origin_server_ts < startTime) return;
@@ -312,6 +310,30 @@ async function main() {
     const body = event.content?.body;
     if (!body) return;
 
+    // Direct conversation: admin writes in any room outside the orchestrated multi-agent room.
+    // The agent responds unconditionally — no routing protocol, no [PASS] filter.
+    const isOrchestratedRoom = MULTI_AGENT_ROOM && roomId === MULTI_AGENT_ROOM;
+    if (!isOrchestratedRoom && event.sender === ADMIN_USER_ID) {
+      if (processing) {
+        console.log(`[Runner:${AGENT_ID}] Busy — dropping direct message`);
+        return;
+      }
+      processing = true;
+      console.log(`[Runner:${AGENT_ID}] Direct message (${body.length} chars)...`);
+      try {
+        const result = await callClaude(body);
+        await sendFormatted(client, roomId, result);
+        console.log(`[Runner:${AGENT_ID}] Posted direct response (${result.length} chars)`);
+      } catch (err) {
+        console.error(`[Runner:${AGENT_ID}] Error: ${err.message}`);
+      } finally {
+        processing = false;
+      }
+      return;
+    }
+
+    // Only process messages in the orchestrated room from here on
+    if (MULTI_AGENT_ROOM && roomId !== MULTI_AGENT_ROOM) return;
     // Only accept routing messages from the orchestrator
     if (event.sender !== ORCHESTRATOR_USER_ID) return;
 

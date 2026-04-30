@@ -1,6 +1,6 @@
 #!/usr/bin/env fish
 #
-# Start the full e-vgh-claw stack (Conduwuit + Claude Bridge + Agent Pool)
+# Start the full e-vgh-claw stack (Conduwuit + Claude Bridge + Agent Pool + Admin Console)
 #
 
 set project_dir (path dirname (status filename))
@@ -10,6 +10,7 @@ echo "Starting e-vgh-claw stack..."
 podman compose \
     -f "$project_dir/docker-compose.yml" \
     -f "$project_dir/docker-compose.multi-agent.yml" \
+    -f "$project_dir/docker-compose.admin.yml" \
     up -d --build
 
 if test $status -eq 0
@@ -18,7 +19,8 @@ if test $status -eq 0
     podman ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" \
         --filter name=conduwuit \
         --filter name=claude-bridge \
-        --filter name=agent-pool
+        --filter name=agent-pool \
+        --filter name=admin-console
 else
     echo "Failed to start stack." >&2
     exit 1

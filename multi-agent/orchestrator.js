@@ -1075,7 +1075,7 @@ async function main() {
   const orchestrator = new Orchestrator();
   await orchestrator.init();
 
-  // Internal API — used by admin-console to create agents without the chat wizard
+  // Internal API — used by admin-console to manage agents without the chat wizard
   const internalApi = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/internal/agents/processes') {
       const processes = [];
@@ -1086,6 +1086,30 @@ async function main() {
       res.end(JSON.stringify(processes));
       return;
     }
+
+    const deleteMatch = req.method === 'DELETE' && req.url.match(/^\/internal\/agents\/([^/]+)$/);
+    if (deleteMatch) {
+      const id = decodeURIComponent(deleteMatch[1]);
+      (async () => {
+        try {
+          if (!fs.existsSync(agentDir(id))) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Agent not found' }));
+            return;
+          }
+          stopAgentProcess(id);
+          deleteAgentFiles(id);
+          await orchestrator.deactivateMatrixUser(id);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      })();
+      return;
+    }
+
     if (req.method !== 'POST' || req.url !== '/internal/agents') {
       res.writeHead(404); res.end(); return;
     }

@@ -6,9 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **e-vgh-claw** is a local Matrix-to-Claude-Code bridge stack for an enterprise context. It provides chat-based AI agents that can be extended with domain-specific skills for **Mainframe Migration** (COBOL, JCL, DB2, IMS, etc.).
 
-The stack runs locally with Podman and consists of two layers:
+The stack runs locally with Podman and consists of three layers:
 1. **Base stack** — Conduwuit homeserver + single Claude bot (`@claude:local`)
-2. **Multi-agent overlay** — dynamic agent pool with domain experts, managed via chat commands
+2. **Multi-agent overlay** — dynamic agent pool with domain experts
+3. **Admin console** — web UI on `:4000` for managing agents, working environments, SSH keys, skills, jobs, etc.
 
 The LLM backend is **Azure AI Foundry** (resource `claude-code-ai-eastus2`, model `claude-sonnet-4-6`). Credentials are in `.env` (gitignored).
 
@@ -36,10 +37,10 @@ Matrix Client (Element etc.)
 ```
 Matrix Client (Element etc.)
   → Conduwuit (localhost:8448)
-    → agent-pool.js (@orchestrator:local)
-        ├── Manages dynamic agents (create/update/delete via chat)
+    → orchestrator.js (@orchestrator:local)
+        ├── Manages dynamic agents (create/update/delete via Admin Console)
         ├── Routes human messages to expert agents in parallel
-        ├── Each expert: Claude CLI call with agent-specific CLAUDE.md
+        ├── Each expert: agent-runner.js child process with agent-specific CLAUDE.md
         ├── @-mention filtering: mentioned agents only, or broadcast to all
         ├── [PASS] filtering: agents stay silent when topic is outside expertise
         ├── Watcher: collects expert responses
@@ -50,9 +51,28 @@ Matrix Client (Element etc.)
 - **Agents:** dynamically created Matrix users (e.g. `@cobol-expert:local`)
 - **Room:** `!53HsXQ24Pfdnj9WVXF:local` ("Multi-Agent Collaboration")
 - Agent configs persisted in `/workspace/agents/<id>/` (config.json + CLAUDE.md + AGENT-PROMPT.md)
-- New agents are **seeded from the base bridge workspace** (`claude-workspace` volume mounted read-only at `/template-workspace`). This copies skills, memory, repo clones, and `.claude/` settings into the agent's directory. The agent's CLAUDE.md is a merge of the base instructions + agent-specific role prompt.
+- Each agent is bound to a **Working Environment** (see below) which defines what gets seeded into its workspace.
 - Matrix users auto-created via Conduwuit admin room
-- Only 1 container (`agent-pool`) manages all agents — no container-per-agent
+- Only 1 container (`orchestrator`) manages all agents — no container-per-agent
+
+#### Working Environments
+
+A **Working Environment** is a reusable workspace recipe. It lives at `/workspace/environments/<envId>/environment.json` (in the orchestrator/admin volume) and contains:
+
+| Field | Purpose |
+|---|---|
+| `id`, `name`, `description` | Identity |
+| `skills` | Names of skills (from the central pool at `/template-workspace/skills/`) to copy into the agent workspace |
+| `repository` | Optional `{ url, branch, sshKeyId }` — orchestrator clones it into the agent's workspace at creation time |
+| `additionalContext` | Optional text appended to the agent's CLAUDE.md |
+
+When an agent is created via the Admin Console, the orchestrator:
+1. Always seeds `.claude/` and `memory/` from the bridge template
+2. Copies only the skills the env lists (from `/template-workspace/skills/`)
+3. If the env has a repository, runs `git clone` with `GIT_SSH_COMMAND` pointing at the env's SSH key (`/workspace/environments/_keys/<sshKeyId>`)
+4. Builds a merged CLAUDE.md: bridge template + env section + agent prompt
+
+SSH keys are stored at `/workspace/environments/_keys/<keyId>` (mode 0600) with metadata in `_keys/index.json`. The private key value is **never** returned by the API after creation; only its fingerprint.
 
 #### Agent Roles
 
@@ -89,20 +109,9 @@ Results are posted to the multi-agent room (or custom `roomId`); `[PASS]` suppre
 | `quality-gate: pruefe den letzten Commit` | Only the autonomous agent (direct mention, outside expert pipeline) |
 | Direct mention + off-topic | Agent responds anyway (override [PASS]) |
 
-#### Admin Commands (Chat Wizard)
+#### Agent Management
 
-All commands work in the Multi-Agent room from `@thorsten:local`:
-
-| Command | Description |
-|---|---|
-| `!agent` | Show help |
-| `!agent add` | Guided wizard: ID → name → role → [cron → taskPrompt (autonomous only)] → system prompt |
-| `!agent update` | Change an agent's system prompt |
-| `!agent delete` | Remove agent (with confirmation) |
-| `!agent list` | Show all agents as table (includes schedule column) |
-| `!agent enable <id>` | Reactivate a stopped agent |
-| `!agent disable <id>` | Pause an agent (stops cron for autonomous) |
-| `!cancel` | Cancel a running wizard |
+All agent lifecycle operations (create / enable / disable / edit prompt / delete) happen via the **Admin Console** at `http://localhost:4000`. The previous in-chat `!agent` wizard has been removed — there are no admin commands in the Matrix room any more.
 
 ## Key Files
 
@@ -122,14 +131,25 @@ All commands work in the Multi-Agent room from `@thorsten:local`:
 
 | File | Purpose |
 |---|---|
-| `docker-compose.multi-agent.yml` | Compose overlay — single `agent-pool` service |
-| `multi-agent/agent-pool.js` | Dynamic agent management, routing, synthesis, trigger scheduler, admin wizard, workspace seeding |
-| `multi-agent/Dockerfile` | Node 22 + Claude Code CLI + marked |
+| `docker-compose.multi-agent.yml` | Compose overlay — single `orchestrator` service |
+| `multi-agent/orchestrator.js` | Dynamic agent management, routing, synthesis, environment-aware workspace seeding, internal API for the admin console |
+| `multi-agent/agent-runner.js` | Per-agent child process: Matrix client + Claude CLI invocations + trigger scheduler |
+| `multi-agent/Dockerfile` | Node 22 + Claude Code CLI + git + openssh-client |
 | `multi-agent/package.json` | Dependencies: matrix-bot-sdk, marked, node-cron |
 | `multi-agent/setup.sh` | Initial setup: register Matrix users, create room |
 | `multi-agent/CLAUDE-COBOL.md` | Example: COBOL expert system prompt |
 | `multi-agent/CLAUDE-JAVA.md` | Example: Java expert system prompt |
 | `multi-agent/CLAUDE-GENERAL.md` | Example: Synthesizer system prompt |
+
+### Admin Console
+
+| File | Purpose |
+|---|---|
+| `docker-compose.admin.yml` | Compose overlay — `admin-console` service on port 4000 |
+| `admin-console/api/api.js` | Express API: agents, environments, ssh-keys, skills, jobs, models, mcp |
+| `admin-console/src/pages/WorkingEnvironments.jsx` | UI: CRUD for environments (skills picker, optional repo + ssh key) |
+| `admin-console/src/pages/SshKeys.jsx` | UI: CRUD for SSH keys (paste private key, see fingerprint only) |
+| `admin-console/src/pages/AgentManager.jsx` | UI: CRUD for agents (with required environment dropdown) |
 
 Note: `claude-code/CLAUDE.md` is the **inner** system prompt (what the single bot sees). This root `CLAUDE.md` is for **you** when working on the repo itself.
 
@@ -177,7 +197,7 @@ Matrix users are managed via the Conduwuit admin room (`!cUxr0SyfINf9yEvBOD:loca
 !admin users deactivate @user:local         — deactivate user
 ```
 
-The agent-pool automates user creation when adding agents via `!agent add`.
+The orchestrator automates user creation when adding agents through the Admin Console.
 
 ## Skills
 

@@ -33,6 +33,7 @@ const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const cron = require("node-cron");
+const { marked } = require("marked");
 
 // ============================================================
 // Config
@@ -142,11 +143,13 @@ function callClaude(prompt, timeoutMs = CLAUDE_TIMEOUT) {
 // Matrix helpers
 // ============================================================
 async function sendFormatted(client, roomId, text) {
-  // Use plain text to keep things simple; the orchestrator parses body text.
-  // Markdown rendering is left to clients.
+  // body stays plain markdown so the orchestrator can parse expert responses;
+  // formatted_body is rendered HTML so Matrix clients display it nicely.
   await client.sendMessage(roomId, {
     msgtype: "m.text",
     body: text,
+    format: "org.matrix.custom.html",
+    formatted_body: marked.parse(text),
   });
 }
 

@@ -66,7 +66,7 @@ export default function Dashboard() {
           <DataTable
             columns={AGENT_COLS}
             data={agents ?? []}
-            emptyText="No agents found. Add agents via !agent add in the Matrix room."
+            emptyText="No agents found. Add agents via Agent Manager."
           />
         )}
       </section>

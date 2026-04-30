@@ -5,13 +5,20 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const crypto = require('crypto');
 
 const WORKSPACE = '/workspace';
 const BRIDGE_WORKSPACE = '/bridge-workspace';
 const AGENTS_DIR = path.join(WORKSPACE, 'agents');
+const ENVIRONMENTS_DIR = path.join(WORKSPACE, 'environments');
+const SSH_KEYS_DIR = path.join(ENVIRONMENTS_DIR, '_keys');
+const SSH_KEYS_INDEX = path.join(SSH_KEYS_DIR, 'index.json');
 const BRIDGE_JOBS_FILE = path.join(BRIDGE_WORKSPACE, 'jobs.json');
 const STATIC_DIR = path.join(__dirname, '..', 'dist');
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
+
+fs.mkdirSync(ENVIRONMENTS_DIR, { recursive: true });
+fs.mkdirSync(SSH_KEYS_DIR, { recursive: true });
 
 const app = express();
 app.use(cors());
@@ -59,6 +66,68 @@ function listAgentDirs() {
   } catch {
     return [];
   }
+}
+
+function listEnvironmentIds() {
+  try {
+    return fs.readdirSync(ENVIRONMENTS_DIR).filter(name => {
+      if (name.startsWith('_')) return false;
+      const p = path.join(ENVIRONMENTS_DIR, name);
+      return fs.statSync(p).isDirectory() && fs.existsSync(path.join(p, 'environment.json'));
+    });
+  } catch {
+    return [];
+  }
+}
+
+function loadEnvironment(envId) {
+  const p = path.join(ENVIRONMENTS_DIR, envId, 'environment.json');
+  return readJsonFile(p, null);
+}
+
+function saveEnvironment(envId, data) {
+  const dir = path.join(ENVIRONMENTS_DIR, envId);
+  fs.mkdirSync(dir, { recursive: true });
+  writeJsonAtomic(path.join(dir, 'environment.json'), data);
+}
+
+function listBridgeSkills() {
+  const skillsDir = path.join(BRIDGE_WORKSPACE, 'skills');
+  try {
+    return fs.readdirSync(skillsDir).filter(name =>
+      fs.existsSync(path.join(skillsDir, name, 'SKILL.md'))
+    );
+  } catch {
+    return [];
+  }
+}
+
+function listSshKeys() {
+  return readJsonFile(SSH_KEYS_INDEX, []);
+}
+
+function saveSshKeysIndex(keys) {
+  writeJsonAtomic(SSH_KEYS_INDEX, keys);
+}
+
+function sshKeyFingerprint(privateKey) {
+  return 'SHA256:' + crypto.createHash('sha256').update(privateKey).digest('base64').replace(/=+$/, '');
+}
+
+function environmentInUse(envId) {
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    if (cfg.environmentId === envId) return id;
+  }
+  return null;
+}
+
+function sshKeyInUse(keyId) {
+  for (const envId of listEnvironmentIds()) {
+    const env = loadEnvironment(envId);
+    if (env?.repository?.sshKeyId === keyId) return envId;
+  }
+  return null;
 }
 
 /* ─── Health ────────────────────────────────────────────────────────── */
@@ -141,16 +210,19 @@ app.put('/api/agents/:id', (req, res) => {
 });
 
 app.post('/api/agents', async (req, res) => {
-  const { id, displayName, role, systemPrompt, schedule, taskPrompt } = req.body;
-  if (!id || !displayName || !role || !systemPrompt) {
-    return res.status(400).json({ error: 'id, displayName, role, systemPrompt required' });
+  const { id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt } = req.body;
+  if (!id || !displayName || !role || !systemPrompt || !environmentId) {
+    return res.status(400).json({ error: 'id, displayName, role, systemPrompt, environmentId required' });
+  }
+  if (!loadEnvironment(environmentId)) {
+    return res.status(400).json({ error: `Working Environment '${environmentId}' not found` });
   }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/agents`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, displayName, role, systemPrompt, schedule, taskPrompt }),
+      body: JSON.stringify({ id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt }),
     });
     const data = await resp.json();
     if (!resp.ok) return res.status(resp.status).json(data);
@@ -440,6 +512,147 @@ app.get('/api/logs/stream', (req, res) => {
   req2.on('error', (err) => res.write(`data: ${JSON.stringify('[log error: ' + err.message + ']')}\n\n`));
   req2.end();
   req.on('close', () => req2.destroy());
+});
+
+/* ─── Working Environments ──────────────────────────────────────────── */
+
+function normalizeEnvId(raw) {
+  return String(raw || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+}
+
+app.get('/api/environments', (req, res) => {
+  const envs = listEnvironmentIds().map(loadEnvironment).filter(Boolean);
+  res.json(envs);
+});
+
+app.get('/api/environments/:id', (req, res) => {
+  const env = loadEnvironment(req.params.id);
+  if (!env) return res.status(404).json({ error: 'Environment not found' });
+  res.json(env);
+});
+
+app.post('/api/environments', (req, res) => {
+  const { name, description, skills, repository, additionalContext } = req.body || {};
+  const id = normalizeEnvId(req.body?.id);
+  if (!id) return res.status(400).json({ error: 'id is required (a-z, 0-9, -)' });
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  if (loadEnvironment(id)) return res.status(409).json({ error: `Environment '${id}' already exists` });
+
+  // Validate repository.sshKeyId if set
+  if (repository?.sshKeyId) {
+    const keys = listSshKeys();
+    if (!keys.some(k => k.id === repository.sshKeyId)) {
+      return res.status(400).json({ error: `SSH key '${repository.sshKeyId}' not found` });
+    }
+  }
+
+  const env = {
+    id,
+    name,
+    description: description || '',
+    skills: Array.isArray(skills) ? skills : [],
+    repository: repository?.url ? {
+      url: repository.url,
+      branch: repository.branch || null,
+      sshKeyId: repository.sshKeyId || null,
+    } : null,
+    additionalContext: additionalContext || '',
+    createdAt: new Date().toISOString(),
+  };
+  saveEnvironment(id, env);
+  res.status(201).json(env);
+});
+
+app.put('/api/environments/:id', (req, res) => {
+  const env = loadEnvironment(req.params.id);
+  if (!env) return res.status(404).json({ error: 'Environment not found' });
+  const { name, description, skills, repository, additionalContext } = req.body || {};
+
+  if (repository?.sshKeyId) {
+    const keys = listSshKeys();
+    if (!keys.some(k => k.id === repository.sshKeyId)) {
+      return res.status(400).json({ error: `SSH key '${repository.sshKeyId}' not found` });
+    }
+  }
+
+  if (name !== undefined) env.name = name;
+  if (description !== undefined) env.description = description;
+  if (skills !== undefined) env.skills = Array.isArray(skills) ? skills : [];
+  if (repository !== undefined) {
+    env.repository = repository?.url ? {
+      url: repository.url,
+      branch: repository.branch || null,
+      sshKeyId: repository.sshKeyId || null,
+    } : null;
+  }
+  if (additionalContext !== undefined) env.additionalContext = additionalContext;
+  env.updatedAt = new Date().toISOString();
+  saveEnvironment(env.id, env);
+  res.json(env);
+});
+
+app.delete('/api/environments/:id', (req, res) => {
+  const env = loadEnvironment(req.params.id);
+  if (!env) return res.status(404).json({ error: 'Environment not found' });
+  const usedBy = environmentInUse(env.id);
+  if (usedBy) {
+    return res.status(409).json({ error: `Environment is used by agent '${usedBy}'. Delete the agent first.` });
+  }
+  fs.rmSync(path.join(ENVIRONMENTS_DIR, env.id), { recursive: true, force: true });
+  res.status(204).end();
+});
+
+/* ─── SSH Keys ──────────────────────────────────────────────────────── */
+
+app.get('/api/ssh-keys', (req, res) => {
+  // Return only metadata — never the private key
+  res.json(listSshKeys());
+});
+
+app.post('/api/ssh-keys', (req, res) => {
+  const { name, privateKey } = req.body || {};
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  if (!privateKey || typeof privateKey !== 'string') {
+    return res.status(400).json({ error: 'privateKey (string) is required' });
+  }
+  const trimmed = privateKey.trim();
+  if (!/-----BEGIN [A-Z ]+PRIVATE KEY-----/.test(trimmed)) {
+    return res.status(400).json({ error: 'privateKey does not look like an SSH private key' });
+  }
+
+  // Generate a stable, filesystem-safe id from the name
+  const baseId = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  let id = baseId || `key-${Date.now()}`;
+  const existing = listSshKeys();
+  if (existing.some(k => k.id === id)) {
+    id = `${id}-${Date.now().toString(36)}`;
+  }
+
+  const keyPath = path.join(SSH_KEYS_DIR, id);
+  fs.writeFileSync(keyPath, trimmed.endsWith('\n') ? trimmed : trimmed + '\n', { mode: 0o600 });
+  try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
+
+  const entry = {
+    id,
+    name,
+    fingerprint: sshKeyFingerprint(trimmed),
+    createdAt: new Date().toISOString(),
+  };
+  saveSshKeysIndex([...existing, entry]);
+  res.status(201).json(entry);
+});
+
+app.delete('/api/ssh-keys/:id', (req, res) => {
+  const { id } = req.params;
+  const keys = listSshKeys();
+  if (!keys.some(k => k.id === id)) return res.status(404).json({ error: 'SSH key not found' });
+  const usedBy = sshKeyInUse(id);
+  if (usedBy) {
+    return res.status(409).json({ error: `SSH key is used by environment '${usedBy}'. Detach it first.` });
+  }
+  try { fs.unlinkSync(path.join(SSH_KEYS_DIR, id)); } catch { /* ignore */ }
+  saveSshKeysIndex(keys.filter(k => k.id !== id));
+  res.status(204).end();
 });
 
 /* ─── SPA fallback ──────────────────────────────────────────────────── */

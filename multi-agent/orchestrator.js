@@ -9,7 +9,6 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const { marked } = require("marked");
-const cron = require("node-cron");
 
 // ============================================================
 // Config
@@ -18,29 +17,21 @@ const HOMESERVER = process.env.MATRIX_HOMESERVER;
 const POOL_TOKEN = process.env.MATRIX_ACCESS_TOKEN;
 const POOL_USER_ID = process.env.MATRIX_BOT_USER_ID;
 const MULTI_AGENT_ROOM = process.env.MULTI_AGENT_ROOM;
-const ADMIN_USER = process.env.ADMIN_USER_ID || "@thorsten:local";
 const CONDUWUIT_ADMIN_TOKEN = process.env.CONDUWUIT_ADMIN_TOKEN;
 const CONDUWUIT_ADMIN_ROOM = process.env.CONDUWUIT_ADMIN_ROOM;
 
 const AGENTS_DIR = "/workspace/agents";
 const WORKSPACE = "/workspace";
 const TEMPLATE_WORKSPACE = "/template-workspace";
+const ENVIRONMENTS_DIR = "/workspace/environments";
+const SSH_KEYS_DIR = path.join(ENVIRONMENTS_DIR, "_keys");
+const SSH_KEYS_INDEX = path.join(SSH_KEYS_DIR, "index.json");
 
-const { spawn } = require("child_process");
+const { spawn, execFileSync } = require("child_process");
 const agentProcesses = new Map(); // id → ChildProcess
 
 const QUIET_DELAY = 10_000;
 const MAX_TIMEOUT = 240_000;
-const WIZARD_TIMEOUT = 300_000; // 5 min
-
-// Files/dirs to skip when seeding agent workspace from template
-const SEED_EXCLUDE = new Set([
-  ".matrix-state.json",
-  ".sessions.json",
-  ".pool-state.json",
-  "jobs.json",
-  "agents",
-]);
 
 // ============================================================
 // Process lifecycle (each agent runs as a child process)
@@ -114,16 +105,31 @@ function saveAgentConfig(id, config) {
   fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify(config, null, 2));
 }
 
-function saveAgentPrompt(id, prompt, role) {
+function saveAgentPrompt(id, prompt, role, env) {
   const dir = agentDir(id);
   fs.mkdirSync(dir, { recursive: true });
   // Store raw agent prompt separately for re-merging on updates
   fs.writeFileSync(path.join(dir, "AGENT-PROMPT.md"), prompt);
-  // Build merged CLAUDE.md: base workspace instructions + agent role
-  fs.writeFileSync(path.join(dir, "CLAUDE.md"), buildAgentClaudeMd(prompt, role));
+  // Build merged CLAUDE.md: base workspace instructions + env context + agent role
+  fs.writeFileSync(path.join(dir, "CLAUDE.md"), buildAgentClaudeMd(prompt, role, env));
 }
 
-function buildAgentClaudeMd(agentPrompt, role) {
+// ============================================================
+// Environment storage
+// ============================================================
+function loadEnvironment(envId) {
+  if (!envId) return null;
+  const p = path.join(ENVIRONMENTS_DIR, envId, "environment.json");
+  if (!fs.existsSync(p)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(p, "utf8"));
+  } catch (err) {
+    console.error(`[Orchestrator] Cannot parse environment ${envId}: ${err.message}`);
+    return null;
+  }
+}
+
+function buildAgentClaudeMd(agentPrompt, role, env) {
   const templatePath = path.join(TEMPLATE_WORKSPACE, "CLAUDE.md");
   let base = "";
   try {
@@ -183,44 +189,132 @@ function buildAgentClaudeMd(agentPrompt, role) {
       "Wenn du bei einer geplanten Ausfuehrung nichts zu berichten hast, antworte mit `[PASS]`.\n";
   }
 
-  return `${base}\n\n---\n\n${pathNote}\n---\n\n## Agent Role\n\n${agentPrompt}${extra}`;
+  let envSection = "";
+  if (env) {
+    const parts = [];
+    if (env.name) parts.push(`**Working Environment:** ${env.name}`);
+    if (env.description) parts.push(env.description);
+    if (env.repository?.url) {
+      const repoName = (env.repository.url.split("/").pop() || "repo").replace(/\.git$/, "");
+      parts.push(`**Repository:** \`${env.repository.url}\` — geklont nach \`./${repoName}/\``);
+    }
+    if (Array.isArray(env.skills) && env.skills.length > 0) {
+      parts.push(`**Skills:** ${env.skills.map((s) => `\`${s}\``).join(", ")}`);
+    }
+    if (env.additionalContext) parts.push(env.additionalContext);
+    if (parts.length > 0) {
+      envSection = `\n---\n\n## Working Environment\n\n${parts.join("\n\n")}\n`;
+    }
+  }
+
+  return `${base}\n\n---\n\n${pathNote}${envSection}\n---\n\n## Agent Role\n\n${agentPrompt}${extra}`;
 }
 
-function seedAgentWorkspace(id) {
+function seedAgentWorkspace(id, env) {
   const dest = agentDir(id);
   fs.mkdirSync(dest, { recursive: true });
 
   if (!fs.existsSync(TEMPLATE_WORKSPACE)) {
     console.log(`[Orchestrator] Template workspace not available — skipping seed for ${id}`);
-    return false;
+    return { seeded: false, warnings: ["Template workspace not mounted"] };
   }
 
-  let entries;
-  try {
-    entries = fs.readdirSync(TEMPLATE_WORKSPACE);
-  } catch (err) {
-    console.log(`[Orchestrator] Cannot read template workspace: ${err.message}`);
-    return false;
-  }
+  const warnings = [];
 
-  let copied = 0;
-  for (const entry of entries) {
-    if (SEED_EXCLUDE.has(entry)) continue;
-    if (entry.startsWith(".agent-state-")) continue;
-    const src = path.join(TEMPLATE_WORKSPACE, entry);
-    const dst = path.join(dest, entry);
+  // 1. Always copy baseline directories (.claude settings, memory)
+  for (const item of [".claude", "memory"]) {
+    const src = path.join(TEMPLATE_WORKSPACE, item);
+    const dst = path.join(dest, item);
+    if (!fs.existsSync(src)) continue;
     try {
       fs.cpSync(src, dst, { recursive: true });
-      copied++;
     } catch (err) {
-      console.log(`[Orchestrator] Seed copy warning (${entry}): ${err.message}`);
+      warnings.push(`copy ${item}: ${err.message}`);
     }
   }
-  // Rewrite absolute /workspace/ paths in seeded memory files
+
+  // 2. Copy selected skills from the central pool
+  const selectedSkills = (env && Array.isArray(env.skills)) ? env.skills : [];
+  if (selectedSkills.length > 0) {
+    const skillsSrc = path.join(TEMPLATE_WORKSPACE, "skills");
+    const skillsDst = path.join(dest, "skills");
+    fs.mkdirSync(skillsDst, { recursive: true });
+    for (const skillName of selectedSkills) {
+      const src = path.join(skillsSrc, skillName);
+      const dst = path.join(skillsDst, skillName);
+      if (!fs.existsSync(src)) {
+        warnings.push(`skill not found in pool: ${skillName}`);
+        continue;
+      }
+      try {
+        fs.cpSync(src, dst, { recursive: true });
+      } catch (err) {
+        warnings.push(`skill ${skillName}: ${err.message}`);
+      }
+    }
+  }
+
+  // 3. Patch absolute /workspace/ paths in seeded memory
   patchSeededPaths(dest);
 
-  console.log(`[Orchestrator] Seeded workspace for ${id} from template (${copied} entries)`);
-  return true;
+  // 4. Optional git clone
+  let cloneInfo = null;
+  if (env && env.repository && env.repository.url) {
+    try {
+      cloneInfo = cloneRepository(dest, env.repository);
+    } catch (err) {
+      warnings.push(`git clone: ${err.message}`);
+    }
+  }
+
+  console.log(`[Orchestrator] Seeded workspace for ${id} (env=${env?.id || "none"}, skills=${selectedSkills.length}${cloneInfo ? `, repo=${cloneInfo.repoName}` : ""})`);
+  return { seeded: true, warnings, clone: cloneInfo };
+}
+
+function cloneRepository(targetDir, repository) {
+  const { url, branch, sshKeyId } = repository;
+  if (!url) return null;
+
+  let keyPath = null;
+  if (sshKeyId) {
+    keyPath = path.join(SSH_KEYS_DIR, sshKeyId);
+    if (!fs.existsSync(keyPath)) {
+      throw new Error(`SSH key not found: ${sshKeyId}`);
+    }
+    try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
+  }
+
+  const repoName = (url.split("/").pop() || "repo").replace(/\.git$/, "");
+  const repoDir = path.join(targetDir, repoName);
+
+  if (fs.existsSync(repoDir)) {
+    console.log(`[Orchestrator] Repo dir already exists: ${repoDir} — skipping clone`);
+    return { repoName, skipped: true };
+  }
+
+  const args = ["clone"];
+  if (branch) args.push("--branch", branch);
+  args.push("--", url, repoName);
+
+  const env = { ...process.env };
+  if (keyPath) {
+    env.GIT_SSH_COMMAND = `ssh -i ${keyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes`;
+  }
+
+  try {
+    execFileSync("git", args, {
+      cwd: targetDir,
+      env,
+      stdio: "pipe",
+      timeout: 120_000,
+    });
+    console.log(`[Orchestrator] Cloned ${url} → ${repoDir}`);
+    return { repoName, skipped: false };
+  } catch (err) {
+    const stderr = (err.stderr || "").toString();
+    const msg = stderr.substring(0, 400) || err.message;
+    throw new Error(`git clone failed: ${msg}`);
+  }
 }
 
 function patchSeededPaths(dir) {
@@ -384,47 +478,6 @@ function callClaude(prompt, cwd, timeoutMs = CLAUDE_TIMEOUT) {
 }
 
 // ============================================================
-// Wizard
-// ============================================================
-function wizardPrompt(step, ctx) {
-  switch (step) {
-    case "add:id":
-      return "**Neuer Agent (1/4)**\nWie soll die ID sein? (Kleinbuchstaben, keine Leerzeichen, z.B. `cobol-expert`)";
-    case "add:name":
-      return `**Neuer Agent (2/4)**\nAnzeigename fuer \`${ctx.id}\`? (z.B. \`COBOL Expert\`)`;
-    case "add:role":
-      return "**Neuer Agent (3/?)**\nWelche Rolle?\n- `expert` — antwortet autonom auf Nutzerfragen\n- `synthesizer` — fasst Experten-Ergebnisse zusammen\n- `autonomous` — arbeitet selbstaendig im Hintergrund nach Zeitplan";
-    case "add:schedule":
-      return `**Neuer Agent (4/6)**\nZeitplan fuer \`${ctx.id}\`?\n\nBeispiele:\n- \`*/30 * * * *\` — alle 30 Minuten\n- \`0 * * * *\` — jede Stunde\n- \`0 9 * * *\` — taeglich um 9:00\n- \`0 */4 * * *\` — alle 4 Stunden`;
-    case "add:taskPrompt":
-      return "**Neuer Agent (5/6)**\nWas soll der Agent bei jedem Durchlauf tun?\n\nDas ist der Prompt, der bei jeder geplanten Ausfuehrung an Claude geschickt wird.\n\n*Tipp: Beschreibe die konkrete Aufgabe, z.B. \"Pruefe alle offenen Tickets auf Qualitaetskriterien...\"*";
-    case "add:prompt":
-      return `**Neuer Agent (${ctx.role === "autonomous" ? "6/6" : "4/4"})**\nSchicke jetzt den System-Prompt.\nDas ist die Anweisung, die dem Agent sagt, wie er sich verhalten soll.\n\n*Tipp: Starte mit \`# Rollenname\` und beschreibe Verhalten, Grenzen und Ausgabeformat.*`;
-    case "update:pick":
-      return `**Agent aktualisieren**\nWelchen Agent? Schreibe die ID.\n\n${ctx.list}`;
-    case "update:prompt":
-      return `**Neuer Prompt fuer \`${ctx.id}\`**\nSchicke den neuen System-Prompt:`;
-    case "delete:pick":
-      return `**Agent loeschen**\nWelchen Agent? Schreibe die ID.\n\n${ctx.list}`;
-    case "delete:confirm":
-      return `Agent **${ctx.displayName}** (\`${ctx.id}\`) wirklich loeschen? Schreibe \`ja\` oder \`nein\`.`;
-    default:
-      return "?";
-  }
-}
-
-function agentListMarkdown() {
-  const ids = listAgentIds();
-  if (ids.length === 0) return "_Keine Agenten vorhanden._";
-  return ids
-    .map((id) => {
-      const c = loadAgentConfig(id);
-      return `- \`${id}\` — ${c.displayName} (${c.role})`;
-    })
-    .join("\n");
-}
-
-// ============================================================
 // Orchestrator
 // ============================================================
 class Orchestrator {
@@ -436,7 +489,6 @@ class Orchestrator {
     this.activeTasks = new Map(); // roomId → activeTask
     this.roomQueues = new Map();  // roomId → [body, ...]
     this.roomBusy = new Set();
-    this.wizard = null; // { step, ctx, timer }
     this.startTime = 0;
   }
 
@@ -494,303 +546,59 @@ class Orchestrator {
   }
 
   // ===========================================================
-  // Wizard flow
-  // ===========================================================
-  startWizard(roomId, step, ctx = {}) {
-    if (this.wizard?.timer) clearTimeout(this.wizard.timer);
-    this.wizard = {
-      step,
-      ctx: { ...ctx, roomId },
-      timer: setTimeout(() => {
-        this.wizard = null;
-        sendPlain(this.poolClient, roomId, "Wizard abgebrochen (Timeout).");
-      }, WIZARD_TIMEOUT),
-    };
-  }
-
-  cancelWizard() {
-    if (this.wizard?.timer) clearTimeout(this.wizard.timer);
-    this.wizard = null;
-  }
-
-  async handleWizardStep(roomId, body) {
-    const w = this.wizard;
-    const text = body.trim();
-
-    switch (w.step) {
-      // --- ADD ---
-      case "add:id": {
-        const id = text.toLowerCase().replace(/[^a-z0-9-]/g, "");
-        if (!id) {
-          await sendPlain(this.poolClient, roomId, "Ungueltige ID. Nur a-z, 0-9, Bindestrich. Nochmal:");
-          return;
-        }
-        if (loadAgentConfig(id)) {
-          await sendPlain(this.poolClient, roomId, `\`${id}\` existiert bereits. Andere ID waehlen:`);
-          return;
-        }
-        w.ctx.id = id;
-        w.step = "add:name";
-        await sendFormatted(this.poolClient, roomId, wizardPrompt("add:name", w.ctx));
-        return;
-      }
-      case "add:name": {
-        w.ctx.displayName = text;
-        w.step = "add:role";
-        await sendFormatted(this.poolClient, roomId, wizardPrompt("add:role", w.ctx));
-        return;
-      }
-      case "add:role": {
-        const role = text.toLowerCase();
-        if (role !== "expert" && role !== "synthesizer" && role !== "autonomous") {
-          await sendPlain(this.poolClient, roomId, "Bitte `expert`, `synthesizer` oder `autonomous` eingeben:");
-          return;
-        }
-        w.ctx.role = role;
-        if (role === "autonomous") {
-          w.step = "add:schedule";
-          await sendFormatted(this.poolClient, roomId, wizardPrompt("add:schedule", w.ctx));
-        } else {
-          w.step = "add:prompt";
-          await sendFormatted(this.poolClient, roomId, wizardPrompt("add:prompt", w.ctx));
-        }
-        return;
-      }
-      case "add:schedule": {
-        if (!cron.validate(text.trim())) {
-          await sendPlain(this.poolClient, roomId,
-            "Ungueltiger Cron-Ausdruck. Format: `MIN STD TAG MON WOT` (5 Felder). Nochmal:");
-          return;
-        }
-        w.ctx.schedule = text.trim();
-        w.step = "add:taskPrompt";
-        await sendFormatted(this.poolClient, roomId, wizardPrompt("add:taskPrompt", w.ctx));
-        return;
-      }
-      case "add:taskPrompt": {
-        w.ctx.taskPrompt = text;
-        w.step = "add:prompt";
-        await sendFormatted(this.poolClient, roomId, wizardPrompt("add:prompt", w.ctx));
-        return;
-      }
-      case "add:prompt": {
-        w.ctx.systemPrompt = text;
-        this.cancelWizard();
-        await this.createAgent(
-          w.ctx.id,
-          w.ctx.displayName,
-          w.ctx.role,
-          w.ctx.systemPrompt,
-          roomId,
-          { schedule: w.ctx.schedule, taskPrompt: w.ctx.taskPrompt }
-        );
-        return;
-      }
-
-      // --- UPDATE ---
-      case "update:pick": {
-        const id = text.toLowerCase();
-        const config = loadAgentConfig(id);
-        if (!config) {
-          await sendPlain(this.poolClient, roomId, `Agent \`${id}\` nicht gefunden. Nochmal:`);
-          return;
-        }
-        w.ctx.id = id;
-        w.step = "update:prompt";
-        await sendFormatted(this.poolClient, roomId, wizardPrompt("update:prompt", w.ctx));
-        return;
-      }
-      case "update:prompt": {
-        const cfg = loadAgentConfig(w.ctx.id);
-        saveAgentPrompt(w.ctx.id, text, cfg?.role);
-        this.cancelWizard();
-        await sendFormatted(this.poolClient, roomId,
-          `Prompt fuer **${w.ctx.id}** aktualisiert.`);
-        return;
-      }
-
-      // --- DELETE ---
-      case "delete:pick": {
-        const id = text.toLowerCase();
-        const config = loadAgentConfig(id);
-        if (!config) {
-          await sendPlain(this.poolClient, roomId, `Agent \`${id}\` nicht gefunden. Nochmal:`);
-          return;
-        }
-        w.ctx.id = id;
-        w.ctx.displayName = config.displayName;
-        w.step = "delete:confirm";
-        await sendFormatted(this.poolClient, roomId, wizardPrompt("delete:confirm", w.ctx));
-        return;
-      }
-      case "delete:confirm": {
-        this.cancelWizard();
-        if (text.toLowerCase() === "ja") {
-          this.agentConfigs.delete(w.ctx.id);
-          stopAgentProcess(w.ctx.id);
-          deleteAgentFiles(w.ctx.id);
-          await this.deactivateMatrixUser(w.ctx.id);
-          await sendFormatted(this.poolClient, roomId,
-            `Agent **${w.ctx.displayName}** geloescht (inkl. Matrix-User deaktiviert).`);
-        } else {
-          await sendPlain(this.poolClient, roomId, "Abgebrochen.");
-        }
-        return;
-      }
-    }
-  }
-
-  // ===========================================================
-  // Admin commands
-  // ===========================================================
-  async handleAdmin(roomId, body) {
-    const cmd = body.trim().toLowerCase();
-
-    if (cmd === "!agent" || cmd === "!agent help") {
-      await sendFormatted(this.poolClient, roomId,
-        "**Agent-Verwaltung**\n" +
-        "- `!agent add` — Neuen Agent anlegen\n" +
-        "- `!agent update` — Prompt aendern\n" +
-        "- `!agent delete` — Agent loeschen\n" +
-        "- `!agent list` — Alle Agenten anzeigen\n" +
-        "- `!agent enable <id>` / `!agent disable <id>`\n" +
-        "- `!cancel` — Aktuellen Wizard abbrechen");
-      return;
-    }
-
-    if (cmd === "!cancel") {
-      this.cancelWizard();
-      await sendPlain(this.poolClient, roomId, "Abgebrochen.");
-      return;
-    }
-
-    if (cmd === "!agent list") {
-      const ids = listAgentIds();
-      if (ids.length === 0) {
-        await sendPlain(this.poolClient, roomId, "Keine Agenten konfiguriert.");
-        return;
-      }
-      let table = "| ID | Name | Rolle | Status | Trigger |\n|---|---|---|---|---|\n";
-      for (const id of ids) {
-        const c = loadAgentConfig(id);
-        const triggers = loadTriggers(id);
-        const cronTriggers = triggers.filter((t) => t.type === "cron" && t.enabled);
-        const triggerInfo = cronTriggers.length > 0
-          ? cronTriggers.map((t) => `\`${t.cron}\``).join(", ")
-          : "—";
-        const isActive = this.agentConfigs.has(id) && c.enabled !== false;
-        table += `| ${id} | ${c.displayName} | ${c.role} | ${isActive ? "aktiv" : "gestoppt"} | ${triggerInfo} |\n`;
-      }
-      await sendFormatted(this.poolClient, roomId, table);
-      return;
-    }
-
-    if (cmd === "!agent add") {
-      this.startWizard(roomId, "add:id");
-      await sendFormatted(this.poolClient, roomId, wizardPrompt("add:id", {}));
-      return;
-    }
-
-    if (cmd === "!agent update") {
-      const list = agentListMarkdown();
-      this.startWizard(roomId, "update:pick", { list });
-      await sendFormatted(this.poolClient, roomId, wizardPrompt("update:pick", { list }));
-      return;
-    }
-
-    if (cmd === "!agent delete") {
-      const list = agentListMarkdown();
-      this.startWizard(roomId, "delete:pick", { list });
-      await sendFormatted(this.poolClient, roomId, wizardPrompt("delete:pick", { list }));
-      return;
-    }
-
-    // Quick enable/disable
-    const toggleMatch = body.match(/^!agent\s+(enable|disable)\s+(\S+)$/i);
-    if (toggleMatch) {
-      const [, action, id] = toggleMatch;
-      const config = loadAgentConfig(id);
-      if (!config) {
-        await sendPlain(this.poolClient, roomId, `Agent \`${id}\` nicht gefunden.`);
-        return;
-      }
-      config.enabled = action.toLowerCase() === "enable";
-      saveAgentConfig(id, config);
-      if (config.enabled) {
-        this.agentConfigs.set(id, { config });
-        startAgentProcess(config);
-      } else {
-        this.agentConfigs.delete(id);
-        stopAgentProcess(id);
-      }
-      await sendFormatted(this.poolClient, roomId,
-        `Agent **${config.displayName}** ${config.enabled ? "aktiviert" : "deaktiviert"}.`);
-      return;
-    }
-
-    await sendPlain(this.poolClient, roomId,
-      "Unbekannter Befehl. Schreibe `!agent` fuer Hilfe.");
-  }
-
-  // ===========================================================
   // Agent creation
   // ===========================================================
-  async createAgent(id, displayName, role, systemPrompt, roomId, extra = {}) {
-    try {
-      await sendPlain(this.poolClient, roomId, `Erstelle Agent "${displayName}"...`);
-
-      const password = `agent-${id}-${Date.now()}`;
-      const userId = `@${id}:local`;
-
-      if (this.adminClient) await ensureMatrixUser(this.adminClient, id, password);
-
-      let token;
-      try {
-        token = await loginMatrixUser(id, password);
-      } catch {
-        await sendPlain(this.poolClient, roomId,
-          `Login als ${userId} fehlgeschlagen. User existiert evtl. schon mit anderem Passwort.`);
-        return;
-      }
-
-      await setDisplayName(token, userId, displayName);
-      await inviteAndJoin(this.poolClient, token, MULTI_AGENT_ROOM);
-
-      // Seed agent workspace from base bridge template
-      const seeded = seedAgentWorkspace(id);
-
-      const config = { id, displayName, userId, token, role, enabled: true };
-      saveAgentConfig(id, config);
-      saveAgentPrompt(id, systemPrompt, role);
-
-      // Seed initial triggers.json for autonomous agents
-      if (role === "autonomous" && extra.schedule && extra.taskPrompt) {
-        saveTriggers(id, [{
-          id: "initial",
-          type: "cron",
-          enabled: true,
-          cron: extra.schedule,
-          description: displayName,
-          prompt: extra.taskPrompt,
-        }]);
-      }
-
-      // Register config and start agent process
-      this.agentConfigs.set(id, { config });
-      startAgentProcess(config);
-
-      const seedNote = seeded
-        ? " Workspace aus Template uebernommen (Skills, Memory, Repo)."
-        : " Kein Template verfuegbar — leerer Workspace.";
-      const scheduleNote = role === "autonomous" && extra.schedule
-        ? `\nInitialer Trigger: \`${extra.schedule}\``
-        : "";
-      await sendFormatted(this.poolClient, roomId,
-        `Agent **${displayName}** erstellt als \`${userId}\` (${role}) — sofort aktiv!${seedNote}${scheduleNote}`);
-    } catch (err) {
-      console.error(`[Orchestrator] Create error: ${err.message}`);
-      await sendPlain(this.poolClient, roomId, `Fehler: ${err.message}`);
+  async createAgent(id, displayName, role, systemPrompt, environmentId, extra = {}) {
+    const env = loadEnvironment(environmentId);
+    if (!env) {
+      throw new Error(`Working Environment not found: ${environmentId}`);
     }
+
+    const password = `agent-${id}-${Date.now()}`;
+    const userId = `@${id}:local`;
+
+    if (this.adminClient) await ensureMatrixUser(this.adminClient, id, password);
+
+    const token = await loginMatrixUser(id, password);
+    await setDisplayName(token, userId, displayName);
+    await inviteAndJoin(this.poolClient, token, MULTI_AGENT_ROOM);
+
+    // Seed agent workspace using the chosen environment
+    const seedResult = seedAgentWorkspace(id, env);
+
+    const config = {
+      id,
+      displayName,
+      userId,
+      token,
+      role,
+      environmentId: env.id,
+      enabled: true,
+    };
+    saveAgentConfig(id, config);
+    saveAgentPrompt(id, systemPrompt, role, env);
+
+    if (role === "autonomous" && extra.schedule && extra.taskPrompt) {
+      saveTriggers(id, [{
+        id: "initial",
+        type: "cron",
+        enabled: true,
+        cron: extra.schedule,
+        description: displayName,
+        prompt: extra.taskPrompt,
+      }]);
+    }
+
+    this.agentConfigs.set(id, { config });
+    startAgentProcess(config);
+
+    return {
+      id,
+      userId,
+      seeded: seedResult.seeded,
+      warnings: seedResult.warnings || [],
+      clone: seedResult.clone || null,
+    };
   }
 
   // ===========================================================
@@ -803,22 +611,6 @@ class Orchestrator {
 
     const body = event.content.body;
     if (!body) return;
-
-    // Active wizard — intercept admin responses
-    if (event.sender === ADMIN_USER && this.wizard && roomId === this.wizard.ctx.roomId) {
-      if (body.startsWith("!")) {
-        this.cancelWizard();
-      } else {
-        await this.handleWizardStep(roomId, body);
-        return;
-      }
-    }
-
-    // Admin commands
-    if (event.sender === ADMIN_USER && (body.startsWith("!agent") || body === "!cancel")) {
-      await this.handleAdmin(roomId, body);
-      return;
-    }
 
     // Only process messages in the multi-agent room
     if (MULTI_AGENT_ROOM && roomId !== MULTI_AGENT_ROOM) return;
@@ -910,7 +702,7 @@ class Orchestrator {
 
     if (allExperts.length === 0) {
       await sendPlain(this.poolClient, roomId,
-        "Keine Experten-Agenten aktiv. Erstelle welche mit `!agent add`.");
+        "Keine Experten-Agenten aktiv. Lege welche in der Admin Console an.");
       this.drainQueue(roomId);
       return;
     }
@@ -1018,7 +810,7 @@ class Orchestrator {
     if (task.expertResponses.length === 0) {
       console.log("[Orchestrator] All experts passed — sending fallback");
       sendPlain(this.poolClient, roomId,
-        "Keiner der Experten konnte zu diesem Thema beitragen. Erstelle einen passenden Experten mit `!agent add`.");
+        "Keiner der Experten konnte zu diesem Thema beitragen. Lege einen passenden Experten in der Admin Console an.");
       this.drainQueue(roomId);
       return;
     }
@@ -1075,7 +867,7 @@ async function main() {
   const orchestrator = new Orchestrator();
   await orchestrator.init();
 
-  // Internal API — used by admin-console to manage agents without the chat wizard
+  // Internal API — used by admin-console to manage agents
   const internalApi = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/internal/agents/processes') {
       const processes = [];
@@ -1117,18 +909,25 @@ async function main() {
     req.on('data', d => body += d);
     req.on('end', async () => {
       try {
-        const { id, displayName, role, systemPrompt, schedule, taskPrompt } = JSON.parse(body);
-        if (!id || !displayName || !role || !systemPrompt) {
+        const { id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt } = JSON.parse(body);
+        if (!id || !displayName || !role || !systemPrompt || !environmentId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'id, displayName, role, systemPrompt required' }));
+          res.end(JSON.stringify({ error: 'id, displayName, role, systemPrompt, environmentId required' }));
+          return;
+        }
+        if (loadAgentConfig(id)) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `Agent '${id}' already exists` }));
           return;
         }
         const extra = role === 'autonomous' ? { schedule, taskPrompt } : {};
-        await orchestrator.createAgent(id, displayName, role, systemPrompt, MULTI_AGENT_ROOM, extra);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true }));
+        const result = await orchestrator.createAgent(id, displayName, role, systemPrompt, environmentId, extra);
+        res.writeHead(201, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
       } catch (err) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
+        console.error(`[Orchestrator] Internal API create error: ${err.message}`);
+        const statusCode = /not found/i.test(err.message) ? 400 : 500;
+        res.writeHead(statusCode, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: err.message }));
       }
     });

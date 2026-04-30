@@ -155,18 +155,35 @@ function AgentEditForm({ agent, onSave, onCancel }) {
 /* ── Create form ───────────────────────────────────────────────────── */
 function AgentCreateForm({ onSave, onCancel, saving, error }) {
   const [form, setForm] = useState({
-    id: '', displayName: '', role: 'expert', systemPrompt: '', schedule: '', taskPrompt: '',
+    id: '', displayName: '', role: 'expert', environmentId: '',
+    systemPrompt: '', schedule: '', taskPrompt: '',
   });
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
 
+  const { data: environments } = useApi('/api/environments');
+  const envs = environments || [];
+
   const labelStyle = { fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-0-5)' };
   const inputStyle = { width: '100%', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' };
+
+  const canSubmit = form.id && form.displayName && form.systemPrompt && form.environmentId;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
       {error && (
         <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-md)' }}>
           {error}
+        </div>
+      )}
+
+      {envs.length === 0 && (
+        <div role="alert" style={{
+          color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)',
+          padding: 'var(--eb-space-3)', background: 'var(--eb-status-warning-bg)',
+          border: '1px solid var(--eb-status-warning)',
+          borderRadius: 'var(--eb-radius-md)',
+        }}>
+          Es ist noch keine Working Environment angelegt. Erstelle zuerst eine unter <strong>Working Environments</strong>.
         </div>
       )}
 
@@ -177,6 +194,23 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
       </div>
 
       <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} placeholder="COBOL Experte" />
+
+      <div>
+        <div style={labelStyle}>Working Environment <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
+        <select value={form.environmentId} onChange={e => update('environmentId', e.target.value)} style={inputStyle} disabled={envs.length === 0}>
+          <option value="">— bitte auswählen —</option>
+          {envs.map(env => (
+            <option key={env.id} value={env.id}>
+              {env.name} ({env.id})
+              {env.repository?.url ? ' · Git' : ''}
+              {Array.isArray(env.skills) && env.skills.length > 0 ? ` · ${env.skills.length} Skills` : ''}
+            </option>
+          ))}
+        </select>
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+          Definiert Skills, Repository und Kontext, die der Agent in seinem Workspace bekommt.
+        </div>
+      </div>
 
       <div>
         <div style={labelStyle}>Rolle <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
@@ -208,8 +242,8 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         <button
           onClick={() => onSave(form)}
-          disabled={saving || !form.id || !form.displayName || !form.systemPrompt}
-          style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: saving ? 'wait' : 'pointer', fontFamily: 'inherit', opacity: (saving || !form.id || !form.displayName || !form.systemPrompt) ? 0.6 : 1 }}
+          disabled={saving || !canSubmit}
+          style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: saving ? 'wait' : 'pointer', fontFamily: 'inherit', opacity: (saving || !canSubmit) ? 0.6 : 1 }}
         >
           {saving ? 'Erstelle Agent…' : 'Agent erstellen'}
         </button>
@@ -320,6 +354,9 @@ export default function AgentManager() {
     { key: 'id',          label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
     { key: 'displayName', label: 'Name' },
     { key: 'role',        label: 'Role', render: v => <span style={{ textTransform: 'capitalize' }}>{v || '--'}</span> },
+    { key: 'environmentId', label: 'Environment', render: v => v ? (
+      <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span>
+    ) : <span style={{ color: 'var(--eb-text-muted)' }}>—</span> },
     { key: 'enabled',     label: 'Status', sortable: false, render: (v) => <StatusBadge enabled={v !== false} /> },
     {
       key: '_actions',

@@ -3,36 +3,43 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, Users, Zap, Clock, Sparkles, Server,
   Database, ScrollText, ChevronLeft, ChevronRight, Bot,
+  Boxes, Key,
 } from 'lucide-react';
 
 const NAV = [
   { section: 'OVERVIEW', items: [
-    { path: '/',          label: 'Dashboard',       Icon: LayoutDashboard },
-    { path: '/agents',    label: 'Agent Manager',   Icon: Users },
+    { path: '/',             label: 'Dashboard',           Icon: LayoutDashboard },
+    { path: '/agents',       label: 'Agent Manager',       Icon: Users },
+  ]},
+  { section: 'WORKSPACES', items: [
+    { path: '/environments', label: 'Working Environments', Icon: Boxes },
+    { path: '/ssh-keys',     label: 'SSH Keys',             Icon: Key },
   ]},
   { section: 'CONFIGURATION', items: [
-    { path: '/skills',    label: 'Skills Registry', Icon: Zap },
-    { path: '/jobs',      label: 'Scheduled Jobs',  Icon: Clock },
-    { path: '/models',    label: 'Model Registry',  Icon: Sparkles },
-    { path: '/mcp',       label: 'MCP Servers',     Icon: Server },
+    { path: '/skills',       label: 'Skills Registry',     Icon: Zap },
+    { path: '/jobs',         label: 'Scheduled Jobs',      Icon: Clock },
+    { path: '/models',       label: 'Model Registry',      Icon: Sparkles },
+    { path: '/mcp',          label: 'MCP Servers',         Icon: Server },
   ]},
   { section: 'KNOWLEDGE', items: [
-    { path: '/knowledge', label: 'Knowledge Base',  Icon: Database },
+    { path: '/knowledge',    label: 'Knowledge Base',      Icon: Database },
   ]},
   { section: 'OBSERVABILITY', items: [
-    { path: '/logs',      label: 'Logs',            Icon: ScrollText },
+    { path: '/logs',         label: 'Logs',                Icon: ScrollText },
   ]},
 ];
 
 const BREADCRUMBS = {
-  '/':          'Dashboard',
-  '/agents':    'Agent Manager',
-  '/skills':    'Skills Registry',
-  '/jobs':      'Scheduled Jobs',
-  '/models':    'Model Registry',
-  '/mcp':       'MCP Servers',
-  '/knowledge': 'Knowledge Base',
-  '/logs':      'Logs',
+  '/':             'Dashboard',
+  '/agents':       'Agent Manager',
+  '/environments': 'Working Environments',
+  '/ssh-keys':     'SSH Keys',
+  '/skills':       'Skills Registry',
+  '/jobs':         'Scheduled Jobs',
+  '/models':       'Model Registry',
+  '/mcp':          'MCP Servers',
+  '/knowledge':    'Knowledge Base',
+  '/logs':         'Logs',
 };
 
 export default function Shell({ children }) {

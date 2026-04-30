@@ -7,12 +7,7 @@
 # Each agent runs agent-runner.js inside the orchestrator container — no separate
 # container per agent, no Podman socket needed.
 #
-# Create/update/delete agents via chat commands in the Multi-Agent room:
-#   !agent add     — guided wizard
-#   !agent update  — change agent prompt
-#   !agent delete  — remove agent
-#   !agent list    — show all agents
-#   !agent enable <id> / !agent disable <id>
+# Manage agents via the Admin Console at http://localhost:4000 (see docker-compose.admin.yml).
 
 services:
   orchestrator:

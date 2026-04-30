@@ -1,0 +1,916 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Autonomous Enterprise Agent</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:#fff;color:#0f172a;font-family:'Syne',sans-serif;overflow-x:hidden}
+
+body::before{content:'';position:fixed;inset:0;
+  background-image:radial-gradient(circle,rgba(15,23,42,.055) 1px,transparent 1px);
+  background-size:32px 32px;pointer-events:none;z-index:0}
+
+/* ── progress dots ── */
+.prog{position:fixed;right:24px;top:50%;transform:translateY(-50%);
+  display:flex;flex-direction:column;gap:10px;z-index:100}
+.pd{width:7px;height:7px;border-radius:50%;background:rgba(15,23,42,.18);
+  transition:all .3s ease;cursor:pointer;display:block;text-decoration:none}
+.pd.active{background:#0f172a;box-shadow:0 0 0 3px rgba(15,23,42,.12);transform:scale(1.3)}
+
+/* ── hero ── */
+.hero{position:relative;z-index:1;min-height:100vh;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;text-align:center;padding:80px 60px;
+  background:linear-gradient(160deg,#eff6ff 0%,#f8fafc 55%,#fff 100%)}
+.hero-eye{font-family:'JetBrains Mono',monospace;font-size:13px;letter-spacing:.2em;
+  color:#2563eb;text-transform:uppercase;margin-bottom:32px}
+.hero h1{font-size:clamp(48px,6.5vw,96px);font-weight:800;letter-spacing:-3px;line-height:.95;
+  background:linear-gradient(135deg,#1d4ed8 0%,#0891b2 45%,#059669 100%);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
+  margin-bottom:32px}
+.hero-sub{font-family:'JetBrains Mono',monospace;font-size:18px;color:#475569;
+  max-width:560px;line-height:1.8}
+.scroll-hint{position:absolute;bottom:44px;left:50%;transform:translateX(-50%);
+  display:flex;flex-direction:column;align-items:center;gap:8px;opacity:.3}
+.scroll-hint span{font-family:'JetBrains Mono',monospace;font-size:11px;
+  letter-spacing:.18em;text-transform:uppercase;color:#0f172a}
+.arrow-line{width:1px;height:40px;background:linear-gradient(to bottom,#0f172a,transparent);
+  animation:bounce 1.8s ease-in-out infinite}
+@keyframes bounce{0%,100%{opacity:.4;transform:scaleY(1)}50%{opacity:.9;transform:scaleY(1.2)}}
+
+/* ── sections ── */
+.section{position:relative;z-index:1;min-height:100vh;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;padding:80px 60px 64px;gap:52px}
+.section:nth-child(even){background:#f8fafc}
+.section:nth-child(odd){background:#fff}
+
+.sec-header{text-align:center;max-width:900px;width:100%}
+.sec-num{font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:500;
+  letter-spacing:.22em;text-transform:uppercase;margin-bottom:18px;display:block}
+.sec-h{font-size:clamp(44px,5vw,72px);font-weight:800;line-height:1.0;
+  letter-spacing:-2px;margin-bottom:18px;color:#0f172a}
+.sec-p{font-family:'JetBrains Mono',monospace;font-size:17px;color:#64748b;
+  line-height:1.85;max-width:720px;margin:0 auto}
+.sec-p strong{font-weight:500}
+
+.visual-wrap{width:100%;max-width:1240px}
+.vis{width:100%;overflow:visible;display:block}
+
+/* ── animation ── */
+.fade{opacity:0;transform:translateY(24px);transition:opacity .65s ease,transform .65s ease}
+.is-visible .fade{opacity:1;transform:translateY(0)}
+.d1{transition-delay:.12s}.d2{transition-delay:.24s}.d3{transition-delay:.36s}
+.d4{transition-delay:.48s}.d5{transition-delay:.6s}.d6{transition-delay:.72s}
+.d7{transition-delay:.84s}
+
+.drw{fill:none;stroke-dasharray:800;stroke-dashoffset:800;
+  transition:stroke-dashoffset 1.1s ease}
+.is-visible .drw{stroke-dashoffset:0}
+.drw.d1{transition-delay:.15s}.drw.d2{transition-delay:.4s}
+.drw.d3{transition-delay:.65s}.drw.d4{transition-delay:.9s}
+
+.tdot{opacity:0;transition:opacity .4s ease}
+.is-visible .tdot{opacity:1}
+
+/* accent colors per section */
+.s-blue  .sec-num{color:#2563eb}
+.s-cyan  .sec-num{color:#0891b2}
+.s-orange .sec-num{color:#ea580c}
+.s-green  .sec-num{color:#059669}
+.s-amber  .sec-num{color:#d97706}
+.s-lime   .sec-num{color:#16a34a}
+.s-purple .sec-num{color:#7c3aed}
+.s-fuchsia .sec-num{color:#c026d3}
+
+/* SVG shared */
+.node-lbl{font-family:'JetBrains Mono',monospace}
+</style>
+</head>
+<body>
+
+<nav class="prog" id="prog">
+  <a class="pd active" href="#hero"></a>
+  <a class="pd" href="#s1"></a><a class="pd" href="#s2"></a>
+  <a class="pd" href="#s3"></a><a class="pd" href="#s4"></a>
+  <a class="pd" href="#s5"></a><a class="pd" href="#s6"></a>
+  <a class="pd" href="#s7"></a><a class="pd" href="#s8"></a>
+  <a class="pd" href="#s9"></a><a class="pd" href="#s10"></a>
+</nav>
+
+<!-- ══════════════════════════════════════════════ HERO -->
+<section class="hero" id="hero">
+  <div class="hero-eye">Autonomous · Self-Learning · On-Premise</div>
+  <h1>The Autonomous Enterprise Agent</h1>
+  <p class="hero-sub">An AI agent built for complex enterprise problems — with persistent memory, learnable skills, and full access to your codebase.</p>
+  <div class="scroll-hint">
+    <span>Scroll</span>
+    <div class="arrow-line"></div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════ S1: THE CHANNEL -->
+<section class="section s-blue" id="s1">
+  <div class="sec-header">
+    <span class="sec-num fade">01</span>
+    <h2 class="sec-h fade d1">The Communication Channel</h2>
+    <p class="sec-p fade d2">Messages flow through <strong style="color:#2563eb">Matrix</strong> — an open, self-hosted protocol. No external cloud services, no third-party dependencies. Everything runs locally.</p>
+  </div>
+  <div class="visual-wrap">
+    <svg class="vis" viewBox="0 0 1100 380" fill="none">
+      <defs>
+        <filter id="sh"><feDropShadow dx="0" dy="3" stdDeviation="8" flood-color="rgba(0,0,0,.09)"/></filter>
+      </defs>
+
+      <!-- connection line -->
+      <path class="drw" d="M 250,190 L 440,190" stroke="#93c5fd" stroke-width="2.5" stroke-dasharray="10 6"/>
+      <path class="drw d1" d="M 660,190 L 850,190" stroke="#93c5fd" stroke-width="2.5" stroke-dasharray="10 6"/>
+
+      <!-- traveling dot -->
+      <circle class="tdot" r="8" fill="#2563eb" opacity=".9">
+        <animateMotion dur="2.4s" repeatCount="indefinite">
+          <mpath href="#mp-s1"/>
+        </animateMotion>
+      </circle>
+      <path id="mp-s1" d="M 250,190 L 850,190"/>
+
+      <!-- User node -->
+      <g class="fade" filter="url(#sh)">
+        <rect x="40" y="90" width="210" height="200" rx="20" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+        <!-- person -->
+        <circle cx="145" cy="160" r="32" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+        <path d="M 95,218 Q 145,196 195,218" stroke="#2563eb" stroke-width="2" stroke-linecap="round"/>
+        <text x="145" y="272" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="13" fill="#1e40af" font-weight="500">@thorsten:local</text>
+      </g>
+
+      <!-- Matrix Server -->
+      <g class="fade d2" filter="url(#sh)">
+        <rect x="450" y="110" width="200" height="160" rx="20" fill="#ecfeff" stroke="#0891b2" stroke-width="2"/>
+        <!-- hex icon -->
+        <polygon points="550,145 580,162 580,195 550,212 520,195 520,162" fill="#cffafe" stroke="#0891b2" stroke-width="2"/>
+        <text x="550" y="258" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="13" fill="#164e63" font-weight="500">Matrix Server</text>
+        <text x="550" y="278" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="11" fill="#94a3b8">Conduwuit · local</text>
+      </g>
+
+      <!-- Agent node -->
+      <g class="fade d3" filter="url(#sh)">
+        <rect x="850" y="90" width="210" height="200" rx="20" fill="#f0fdf4" stroke="#059669" stroke-width="2"/>
+        <!-- circuit icon -->
+        <rect x="896" y="135" width="68" height="60" rx="10" fill="#dcfce7" stroke="#059669" stroke-width="2"/>
+        <line x1="896" y1="165" x2="882" y2="165" stroke="#059669" stroke-width="2"/>
+        <line x1="964" y1="155" x2="978" y2="155" stroke="#059669" stroke-width="2"/>
+        <line x1="964" y1="175" x2="978" y2="175" stroke="#059669" stroke-width="2"/>
+        <line x1="918" y1="195" x2="918" y2="210" stroke="#059669" stroke-width="2"/>
+        <line x1="940" y1="195" x2="940" y2="210" stroke="#059669" stroke-width="2"/>
+        <text x="955" y="272" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="13" fill="#14532d" font-weight="500">@claude:local</text>
+      </g>
+
+      <!-- chat bubble user -->
+      <g class="fade d1">
+        <rect x="52" y="42" width="185" height="36" rx="18" fill="#2563eb"/>
+        <text x="145" y="65" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#fff">"What is COBOL?"</text>
+      </g>
+
+      <!-- response bubble agent -->
+      <g class="fade d4">
+        <rect x="862" y="42" width="176" height="36" rx="18" fill="#059669"/>
+        <text x="950" y="65" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#fff">"COBOL is..."</text>
+      </g>
+
+      <!-- labels -->
+      <text class="fade" x="145" y="310" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#94a3b8">Developer</text>
+      <text class="fade d2" x="550" y="310" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#94a3b8">localhost:8448</text>
+      <text class="fade d3" x="955" y="310" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#94a3b8">AI Agent</text>
+    </svg>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════ S2: THE BRIDGE -->
+<section class="section s-cyan" id="s2">
+  <div class="sec-header">
+    <span class="sec-num fade">02</span>
+    <h2 class="sec-h fade d1">The Bridge</h2>
+    <p class="sec-p fade d2">A lightweight Node.js component translates Matrix chat events into Claude CLI calls — and routes responses back. It serialises messages, manages sessions, and filters output.</p>
+  </div>
+  <div class="visual-wrap">
+    <svg class="vis" viewBox="0 0 1100 400" fill="none">
+      <defs>
+        <filter id="sh2"><feDropShadow dx="0" dy="3" stdDeviation="8" flood-color="rgba(0,0,0,.09)"/></filter>
+      </defs>
+
+      <!-- Input: Matrix event -->
+      <g class="fade" filter="url(#sh2)">
+        <rect x="20" y="70" width="330" height="260" rx="20" fill="#f0f9ff" stroke="#0891b2" stroke-width="2"/>
+        <rect x="20" y="70" width="330" height="52" rx="20" fill="#e0f2fe" stroke="#0891b2" stroke-width="2"/>
+        <rect x="20" y="104" width="330" height="18" fill="#e0f2fe"/>
+        <text x="185" y="101" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#0891b2" letter-spacing=".12em" font-weight="500">MATRIX EVENT</text>
+        <text x="46" y="150" font-family="'JetBrains Mono',monospace" font-size="13" fill="#0369a1">type: m.room.message</text>
+        <text x="46" y="175" font-family="'JetBrains Mono',monospace" font-size="13" fill="#0369a1">sender: @thorsten:local</text>
+        <text x="46" y="200" font-family="'JetBrains Mono',monospace" font-size="13" fill="#0369a1">room: !frJcikj...local</text>
+        <line x1="40" y1="218" x2="332" y2="218" stroke="#bae6fd" stroke-width="1"/>
+        <text x="46" y="244" font-family="'JetBrains Mono',monospace" font-size="15" fill="#0c4a6e" font-weight="500">"What is COBOL?"</text>
+      </g>
+
+      <!-- Arrow + bridge.js label -->
+      <g class="fade d2">
+        <path d="M 350,200 L 540,200" stroke="#0891b2" stroke-width="2.5"/>
+        <polygon points="538,193 554,200 538,207" fill="#0891b2"/>
+        <rect x="392" y="162" width="112" height="34" rx="10" fill="#ecfeff" stroke="#0891b2" stroke-width="1.5"/>
+        <text x="448" y="183" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#0891b2" font-weight="500">bridge.js</text>
+        <!-- small transformation symbol -->
+        <text x="448" y="224" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="11" fill="#94a3b8">Node.js · matrix-bot-sdk</text>
+      </g>
+
+      <!-- Output: Terminal -->
+      <g class="fade d3" filter="url(#sh2)">
+        <rect x="558" y="70" width="522" height="260" rx="20" fill="#0f172a"/>
+        <rect x="558" y="70" width="522" height="48" rx="20" fill="#1e293b"/>
+        <rect x="558" y="100" width="522" height="18" fill="#1e293b"/>
+        <circle cx="592" cy="94" r="7" fill="#ef4444" opacity=".7"/>
+        <circle cx="616" cy="94" r="7" fill="#f59e0b" opacity=".6"/>
+        <circle cx="640" cy="94" r="7" fill="#22c55e" opacity=".6"/>
+        <text x="819" y="99" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="11" fill="#475569" letter-spacing=".1em">Claude Code CLI</text>
+
+        <text x="582" y="150" font-family="'JetBrains Mono',monospace" font-size="13" fill="#64748b">$</text>
+        <text x="600" y="150" font-family="'JetBrains Mono',monospace" font-size="13" fill="#38bdf8">claude \</text>
+        <text x="618" y="173" font-family="'JetBrains Mono',monospace" font-size="13" fill="#94a3b8">  -p "What is COBOL?" \</text>
+        <text x="618" y="196" font-family="'JetBrains Mono',monospace" font-size="13" fill="#94a3b8">  --output-format json \</text>
+        <text x="618" y="219" font-family="'JetBrains Mono',monospace" font-size="13" fill="#94a3b8">  --permission-mode \</text>
+        <text x="618" y="242" font-family="'JetBrains Mono',monospace" font-size="13" fill="#94a3b8">  acceptEdits</text>
+        <rect x="582" y="268" width="9" height="16" rx="1" fill="#38bdf8">
+          <animate attributeName="opacity" values="1;0;1" dur="1.2s" repeatCount="indefinite"/>
+        </rect>
+      </g>
+    </svg>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════ S3: THE AI ENGINE -->
+<section class="section s-orange" id="s3">
+  <div class="sec-header">
+    <span class="sec-num fade">03</span>
+    <h2 class="sec-h fade d1">The AI Engine</h2>
+    <p class="sec-p fade d2"><strong style="color:#ea580c">Claude Code</strong> is not a chatbot — it is a fully capable developer AI. Connected to Azure AI Foundry, it runs on <strong style="color:#ea580c">Sonnet or Opus</strong> — entirely within your enterprise's Azure tenant. No data leaves your environment. Fully compliant.</p>
+  </div>
+  <div class="visual-wrap">
+    <svg class="vis" viewBox="0 0 1100 460" fill="none">
+      <defs>
+        <filter id="sh3"><feDropShadow dx="0" dy="3" stdDeviation="8" flood-color="rgba(0,0,0,.09)"/></filter>
+      </defs>
+
+      <!-- Azure badge — taller, compliance line inside -->
+      <g class="fade d3">
+        <rect x="680" y="14" width="400" height="100" rx="14" fill="#fff7ed" stroke="#ea580c" stroke-width="2" filter="url(#sh3)"/>
+        <text x="880" y="44" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="11" fill="#ea580c" letter-spacing=".12em" font-weight="500">AZURE AI FOUNDRY  ·  YOUR TENANT</text>
+        <text x="880" y="66" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="13" fill="#9a3412" font-weight="500">claude-sonnet-4-6  ·  claude-opus-4-7</text>
+        <line x1="698" y1="78" x2="1062" y2="78" stroke="rgba(234,88,12,.15)" stroke-width="1"/>
+        <text x="880" y="97" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="11" fill="#059669" font-weight="500">✓  No data leaves your environment</text>
+      </g>
+
+      <!-- connecting arrow Azure → Claude (starts below badge at y=114) -->
+      <g class="fade d3">
+        <path d="M 880,114 L 880,150 L 660,150" stroke="#ea580c" stroke-width="2" stroke-dasharray="6 4" opacity=".6"/>
+        <polygon points="662,144 650,150 662,156" fill="#ea580c" opacity=".7"/>
+      </g>
+
+      <!-- main terminal — pushed down to y=136, clear of badge -->
+      <g class="fade" filter="url(#sh3)">
+        <rect x="20" y="136" width="1060" height="306" rx="20" fill="#0f172a"/>
+        <rect x="20" y="136" width="1060" height="50" rx="20" fill="#1e293b"/>
+        <rect x="20" y="168" width="1060" height="18" fill="#1e293b"/>
+        <circle cx="58" cy="161" r="8" fill="#ef4444" opacity=".7"/>
+        <circle cx="84" cy="161" r="8" fill="#f59e0b" opacity=".6"/>
+        <circle cx="110" cy="161" r="8" fill="#22c55e" opacity=".6"/>
+        <text x="550" y="166" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#475569" letter-spacing=".1em">Claude Code Instance — acceptEdits Mode</text>
+      </g>
+
+      <!-- prompt -->
+      <text class="fade d1" x="50" y="222" font-family="'JetBrains Mono',monospace" font-size="15" fill="#f97316">❯</text>
+      <text class="fade d1" x="74" y="222" font-family="'JetBrains Mono',monospace" font-size="15" fill="#e2e8f0">What is COBOL?</text>
+
+      <!-- response lines -->
+      <text class="fade d2" x="50" y="258" font-family="'JetBrains Mono',monospace" font-size="14" fill="#4ade80">COBOL (Common Business-Oriented Language) is a compiled, high-level</text>
+      <text class="fade d3" x="50" y="282" font-family="'JetBrains Mono',monospace" font-size="14" fill="#4ade80">programming language designed for business data processing. First</text>
+      <text class="fade d4" x="50" y="306" font-family="'JetBrains Mono',monospace" font-size="14" fill="#4ade80">standardised in 1959, it remains widely deployed in banking, insurance,</text>
+      <text class="fade d5" x="50" y="330" font-family="'JetBrains Mono',monospace" font-size="14" fill="#4ade80">and government systems — an estimated 800 billion lines still in production.</text>
+
+      <!-- tool calls -->
+      <g class="fade d6">
+        <rect x="50" y="358" width="580" height="30" rx="8" fill="rgba(249,115,22,.08)" stroke="rgba(249,115,22,.25)" stroke-width="1"/>
+        <text x="66" y="377" font-family="'JetBrains Mono',monospace" font-size="12" fill="#f97316" opacity=".8">⚡  Available: Bash · Read · Write · Edit · Glob · Grep · WebSearch · WebFetch</text>
+      </g>
+    </svg>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════ S4: THE WORKSPACE -->
+<section class="section s-green" id="s4">
+  <div class="sec-header">
+    <span class="sec-num fade">04</span>
+    <h2 class="sec-h fade d1">The Workspace</h2>
+    <p class="sec-p fade d2">The agent operates inside a <strong style="color:#059669">persistent volume</strong>. Everything it learns, creates, or retrieves stays available across restarts and conversations.</p>
+  </div>
+  <div class="visual-wrap">
+    <svg class="vis" viewBox="0 0 1100 460" fill="none">
+      <defs>
+        <filter id="sh4"><feDropShadow dx="0" dy="3" stdDeviation="8" flood-color="rgba(0,0,0,.08)"/></filter>
+      </defs>
+
+      <!-- outer volume container -->
+      <g class="fade" filter="url(#sh4)">
+        <rect x="20" y="20" width="1060" height="420" rx="20" fill="#f0fdf4" stroke="#059669" stroke-width="2"/>
+        <rect x="20" y="20" width="360" height="48" rx="20" fill="#dcfce7" stroke="#059669" stroke-width="2"/>
+        <rect x="20" y="52" width="360" height="16" fill="#dcfce7"/>
+        <text x="200" y="50" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#059669" letter-spacing=".12em" font-weight="500">VOLUME: claude-workspace</text>
+      </g>
+
+      <!-- file tree — left column (cards contain name + description, no floating text) -->
+      <g font-family="'JetBrains Mono',monospace">
+        <text class="fade d1" x="60" y="112" font-size="18" fill="#14532d" font-weight="600">📁  /workspace</text>
+
+        <!-- vertical trunk -->
+        <line class="drw d1" x1="88" y1="124" x2="88" y2="400" stroke="#86efac" stroke-width="2"/>
+
+        <!-- CLAUDE.md -->
+        <line class="drw d1" x1="88" y1="158" x2="112" y2="158" stroke="#86efac" stroke-width="2"/>
+        <g class="fade d2" filter="url(#sh4)">
+          <rect x="126" y="134" width="556" height="54" rx="12" fill="#fff" stroke="#a78bfa" stroke-width="1.5"/>
+          <text x="148" y="158" font-size="15" fill="#7c3aed" font-weight="500">📄  CLAUDE.md</text>
+          <text x="148" y="178" font-size="12" fill="#94a3b8">Agent identity · system prompt · role definition</text>
+        </g>
+
+        <!-- skills/ -->
+        <line class="drw d2" x1="88" y1="228" x2="112" y2="228" stroke="#86efac" stroke-width="2"/>
+        <g class="fade d3" filter="url(#sh4)">
+          <rect x="126" y="204" width="556" height="54" rx="12" fill="#fff" stroke="#4ade80" stroke-width="1.5"/>
+          <text x="148" y="228" font-size="15" fill="#16a34a" font-weight="500">📁  skills/</text>
+          <text x="148" y="248" font-size="12" fill="#94a3b8">Learnable capabilities · one SKILL.md per domain module</text>
+        </g>
+
+        <!-- memory/ -->
+        <line class="drw d3" x1="88" y1="298" x2="112" y2="298" stroke="#86efac" stroke-width="2"/>
+        <g class="fade d4" filter="url(#sh4)">
+          <rect x="126" y="274" width="556" height="54" rx="12" fill="#fff" stroke="#fbbf24" stroke-width="1.5"/>
+          <text x="148" y="298" font-size="15" fill="#d97706" font-weight="500">📁  memory/</text>
+          <text x="148" y="318" font-size="12" fill="#94a3b8">Persistent context · context.md (facts) + log.md (history)</text>
+        </g>
+
+        <!-- git-repo/ -->
+        <line class="drw d4" x1="88" y1="368" x2="112" y2="368" stroke="#86efac" stroke-width="2"/>
+        <g class="fade d5" filter="url(#sh4)">
+          <rect x="126" y="344" width="556" height="54" rx="12" fill="#fff" stroke="#a78bfa" stroke-width="1.5"/>
+          <text x="148" y="368" font-size="15" fill="#7c3aed" font-weight="500">📁  git-repo/</text>
+          <text x="148" y="388" font-size="12" fill="#94a3b8">Full enterprise source code clone · SSH key · read &amp; write</text>
+        </g>
+
+        <!-- Properties panel — right column, starts after cards end (126+556=682, gap 30px → 712) -->
+        <g class="fade d5" filter="url(#sh4)">
+          <rect x="716" y="100" width="344" height="330" rx="16" fill="#fff" stroke="#86efac" stroke-width="1.5"/>
+          <text x="888" y="130" text-anchor="middle" font-size="11" fill="#94a3b8" letter-spacing=".14em">PROPERTIES</text>
+          <line x1="734" y1="142" x2="1042" y2="142" stroke="#dcfce7" stroke-width="1"/>
+          <text x="738" y="172" font-size="14" fill="#14532d">✓  Survives container restarts</text>
+          <text x="738" y="204" font-size="14" fill="#14532d">✓  Shared across agents</text>
+          <text x="738" y="236" font-size="14" fill="#14532d">✓  Seeded from template</text>
+          <text x="738" y="268" font-size="14" fill="#14532d">✓  Read-write by Claude</text>
+          <text x="738" y="300" font-size="14" fill="#14532d">✓  Full Git access</text>
+          <text x="738" y="332" font-size="14" fill="#14532d">✓  Tool-accessible</text>
+          <text x="738" y="364" font-size="14" fill="#14532d">✓  Volume-backed</text>
+          <text x="738" y="396" font-size="14" fill="#14532d">✓  Skills extensible</text>
+        </g>
+      </g>
+    </svg>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════ S5: MEMORY -->
+<section class="section s-amber" id="s5">
+  <div class="sec-header">
+    <span class="sec-num fade">05</span>
+    <h2 class="sec-h fade d1">Memory</h2>
+    <p class="sec-p fade d2">The agent remembers — across conversations. Two layers: <strong style="color:#d97706">long-term facts</strong> that persist indefinitely, and a <strong style="color:#d97706">conversation log</strong> summarising past interactions.</p>
+  </div>
+  <div class="visual-wrap">
+    <svg class="vis" viewBox="0 0 1100 380" fill="none">
+      <defs>
+        <filter id="sh5"><feDropShadow dx="0" dy="3" stdDeviation="8" flood-color="rgba(0,0,0,.08)"/></filter>
+      </defs>
+
+      <!-- context.md card -->
+      <g class="fade" filter="url(#sh5)">
+        <rect x="20" y="20" width="510" height="340" rx="20" fill="#fffbeb" stroke="#d97706" stroke-width="2"/>
+        <rect x="20" y="20" width="510" height="56" rx="20" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+        <rect x="20" y="58" width="510" height="18" fill="#fef3c7"/>
+        <text x="275" y="46" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="11" fill="#d97706" letter-spacing=".14em" font-weight="500">LONG-TERM MEMORY</text>
+        <text x="275" y="66" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="15" fill="#92400e" font-weight="500">context.md</text>
+      </g>
+      <!-- fact entries -->
+      <g class="fade d2" filter="url(#sh5)">
+        <rect x="42" y="98" width="466" height="46" rx="10" fill="#fff" stroke="#fde68a" stroke-width="1.5"/>
+        <text x="62" y="126" font-family="'JetBrains Mono',monospace" font-size="14" fill="#92400e">Project: Mainframe migration to Java/Spring</text>
+      </g>
+      <g class="fade d3" filter="url(#sh5)">
+        <rect x="42" y="156" width="466" height="46" rx="10" fill="#fff" stroke="#fde68a" stroke-width="1.5"/>
+        <text x="62" y="184" font-family="'JetBrains Mono',monospace" font-size="14" fill="#92400e">Stack: COBOL + DB2 + IMS + JCL</text>
+      </g>
+      <g class="fade d4" filter="url(#sh5)">
+        <rect x="42" y="214" width="466" height="46" rx="10" fill="#fff" stroke="#fde68a" stroke-width="1.5"/>
+        <text x="62" y="242" font-family="'JetBrains Mono',monospace" font-size="14" fill="#92400e">Team size: 6 developers, agile, 2-week sprints</text>
+      </g>
+      <g class="fade d5" filter="url(#sh5)">
+        <rect x="42" y="272" width="466" height="46" rx="10" fill="#fef9c3" stroke="#d97706" stroke-width="1.5"/>
+        <text x="62" y="300" font-family="'JetBrains Mono',monospace" font-size="14" fill="#d97706">+ Agent writes new entries autonomously</text>
+      </g>
+
+      <!-- log.md card -->
+      <g class="fade d1" filter="url(#sh5)">
+        <rect x="570" y="20" width="510" height="340" rx="20" fill="#fffbeb" stroke="#d97706" stroke-width="2" opacity=".85"/>
+        <rect x="570" y="20" width="510" height="56" rx="20" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+        <rect x="570" y="58" width="510" height="18" fill="#fef3c7"/>
+        <text x="825" y="46" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="11" fill="#d97706" letter-spacing=".14em" font-weight="500">CONVERSATION LOG</text>
+        <text x="825" y="66" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="15" fill="#92400e" font-weight="500">log.md</text>
+      </g>
+      <g class="fade d2">
+        <text x="592" y="108" font-family="'JetBrains Mono',monospace" font-size="11" fill="#d97706">2026-04-20</text>
+        <text x="592" y="130" font-family="'JetBrains Mono',monospace" font-size="14" fill="#92400e">COBOL module XYZ analysis — 3 batch</text>
+        <text x="592" y="150" font-family="'JetBrains Mono',monospace" font-size="14" fill="#92400e">jobs identified, data flows documented.</text>
+      </g>
+      <line class="drw d3" x1="592" y1="168" x2="1058" y2="168" stroke="#fde68a" stroke-width="1"/>
+      <g class="fade d3">
+        <text x="592" y="190" font-family="'JetBrains Mono',monospace" font-size="11" fill="#d97706">2026-04-22</text>
+        <text x="592" y="212" font-family="'JetBrains Mono',monospace" font-size="14" fill="#92400e">JCL to Ansible playbook draft created,</text>
+        <text x="592" y="232" font-family="'JetBrains Mono',monospace" font-size="14" fill="#92400e">PR #42 opened, review pending.</text>
+      </g>
+      <line class="drw d4" x1="592" y1="250" x2="1058" y2="250" stroke="#fde68a" stroke-width="1"/>
+      <g class="fade d4">
+        <text x="592" y="272" font-family="'JetBrains Mono',monospace" font-size="11" fill="#d97706">2026-04-27 · today</text>
+        <text x="592" y="294" font-family="'JetBrains Mono',monospace" font-size="14" fill="#92400e">Architecture diagram created, reviewed</text>
+        <text x="592" y="314" font-family="'JetBrains Mono',monospace" font-size="14" fill="#92400e">with stakeholders, story page exported.</text>
+      </g>
+    </svg>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════ S6: SKILLS -->
+<section class="section s-lime" id="s6">
+  <div class="sec-header">
+    <span class="sec-num fade">06</span>
+    <h2 class="sec-h fade d1">Skills &amp; Capabilities</h2>
+    <p class="sec-p fade d2">The agent can acquire <strong style="color:#16a34a">new domain capabilities</strong> at any time — as simple Markdown files dropped into the workspace. No code changes required.</p>
+  </div>
+  <div class="visual-wrap">
+    <svg class="vis" viewBox="0 0 1100 400" fill="none">
+      <defs>
+        <filter id="sh6"><feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="rgba(0,0,0,.08)"/></filter>
+      </defs>
+
+      <!-- built-in tools row label -->
+      <text class="fade" x="550" y="36" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#94a3b8" letter-spacing=".16em">BUILT-IN TOOLS</text>
+
+      <!-- tool pills -->
+      <g class="fade d1" filter="url(#sh6)">
+        <rect x="20"  y="48" width="112" height="44" rx="12" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="76"  y="74" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="15" fill="#334155">Bash</text>
+        <rect x="144" y="48" width="112" height="44" rx="12" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="200" y="74" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="15" fill="#334155">Read</text>
+        <rect x="268" y="48" width="112" height="44" rx="12" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="324" y="74" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="15" fill="#334155">Write</text>
+        <rect x="392" y="48" width="112" height="44" rx="12" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="448" y="74" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="15" fill="#334155">Edit</text>
+        <rect x="516" y="48" width="112" height="44" rx="12" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="572" y="74" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="15" fill="#334155">Grep</text>
+        <rect x="640" y="48" width="168" height="44" rx="12" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="724" y="74" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="15" fill="#334155">WebSearch</text>
+        <rect x="820" y="48" width="168" height="44" rx="12" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="904" y="74" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="15" fill="#334155">WebFetch</text>
+      </g>
+
+      <!-- separator + skills label -->
+      <line class="drw d2" x1="20" y1="116" x2="1080" y2="116" stroke="#86efac" stroke-width="1.5"/>
+      <text class="fade d2" x="550" y="142" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#16a34a" letter-spacing=".16em">SKILLS  ·  /workspace/skills/</text>
+
+      <!-- skill cards row -->
+      <g class="fade d3" filter="url(#sh6)">
+        <rect x="20" y="158" width="300" height="110" rx="16" fill="#f0fdf4" stroke="#16a34a" stroke-width="2"/>
+        <text x="40" y="192" font-family="'JetBrains Mono',monospace" font-size="16" fill="#14532d" font-weight="500">COBOL Analyzer</text>
+        <text x="40" y="218" font-family="'JetBrains Mono',monospace" font-size="13" fill="#4ade80">Analysis of COBOL modules,</text>
+        <text x="40" y="238" font-family="'JetBrains Mono',monospace" font-size="13" fill="#4ade80">batch detection, data flows</text>
+      </g>
+
+      <g class="fade d4" filter="url(#sh6)">
+        <rect x="338" y="158" width="300" height="110" rx="16" fill="#f0fdf4" stroke="#16a34a" stroke-width="2"/>
+        <text x="358" y="192" font-family="'JetBrains Mono',monospace" font-size="16" fill="#14532d" font-weight="500">JCL Converter</text>
+        <text x="358" y="218" font-family="'JetBrains Mono',monospace" font-size="13" fill="#4ade80">JCL → Ansible / Shell scripts,</text>
+        <text x="358" y="238" font-family="'JetBrains Mono',monospace" font-size="13" fill="#4ade80">job stream mapping</text>
+      </g>
+
+      <g class="fade d5" filter="url(#sh6)">
+        <rect x="656" y="158" width="300" height="110" rx="16" fill="#f0fdf4" stroke="#16a34a" stroke-width="2"/>
+        <text x="676" y="192" font-family="'JetBrains Mono',monospace" font-size="16" fill="#14532d" font-weight="500">DB2 Schema Map</text>
+        <text x="676" y="218" font-family="'JetBrains Mono',monospace" font-size="13" fill="#4ade80">DB2 → PostgreSQL migration,</text>
+        <text x="676" y="238" font-family="'JetBrains Mono',monospace" font-size="13" fill="#4ade80">type mapping, index analysis</text>
+      </g>
+
+      <!-- add new skill hint -->
+      <g class="fade d6">
+        <rect x="20" y="292" width="1060" height="66" rx="14" fill="transparent" stroke="#86efac" stroke-width="1.5" stroke-dasharray="8 5"/>
+        <text x="550" y="333" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="15" fill="#86efac">+  New skill = one SKILL.md file in /workspace/skills/  ·  No code changes required</text>
+      </g>
+    </svg>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════ S7: GIT ACCESS -->
+<section class="section s-purple" id="s7">
+  <div class="sec-header">
+    <span class="sec-num fade">07</span>
+    <h2 class="sec-h fade d1">Full Source Code Access</h2>
+    <p class="sec-p fade d2">The agent has <strong style="color:#7c3aed">complete Git access</strong> — it can clone, read, analyse, commit, and open pull requests against your enterprise repository. Directly from the workspace via SSH.</p>
+  </div>
+  <div class="visual-wrap">
+    <svg class="vis" viewBox="0 0 1100 400" fill="none">
+      <defs>
+        <filter id="sh7"><feDropShadow dx="0" dy="3" stdDeviation="8" flood-color="rgba(0,0,0,.08)"/></filter>
+      </defs>
+
+      <!-- Git Repo -->
+      <g class="fade" filter="url(#sh7)">
+        <rect x="20" y="50" width="340" height="300" rx="20" fill="#faf5ff" stroke="#7c3aed" stroke-width="2"/>
+        <text x="190" y="88" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#7c3aed" letter-spacing=".14em" font-weight="500">GIT REPOSITORY</text>
+        <!-- git graph -->
+        <circle cx="110" cy="148" r="10" fill="#e9d5ff" stroke="#7c3aed" stroke-width="2"/>
+        <circle cx="110" cy="196" r="10" fill="#e9d5ff" stroke="#7c3aed" stroke-width="2"/>
+        <circle cx="110" cy="244" r="10" fill="#e9d5ff" stroke="#7c3aed" stroke-width="2"/>
+        <circle cx="110" cy="292" r="10" fill="#e9d5ff" stroke="#7c3aed" stroke-width="2"/>
+        <line x1="110" y1="158" x2="110" y2="186" stroke="#c4b5fd" stroke-width="2"/>
+        <line x1="110" y1="206" x2="110" y2="234" stroke="#c4b5fd" stroke-width="2"/>
+        <line x1="110" y1="254" x2="110" y2="282" stroke="#c4b5fd" stroke-width="2"/>
+        <!-- branch -->
+        <circle cx="210" cy="172" r="10" fill="#ddd6fe" stroke="#8b5cf6" stroke-width="2"/>
+        <path d="M 110,148 C 160,148 160,172 210,172 C 210,196 160,196 110,196" fill="none" stroke="#c4b5fd" stroke-width="2"/>
+        <text x="235" y="176" font-family="'JetBrains Mono',monospace" font-size="11" fill="#7c3aed">feat/migration</text>
+        <text x="130" y="152" font-family="'JetBrains Mono',monospace" font-size="11" fill="#7c3aed">main</text>
+        <text x="190" y="340" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="13" fill="#94a3b8">250,000+ LOC</text>
+      </g>
+
+      <!-- Arrows -->
+      <g class="fade d2">
+        <!-- clone →→ -->
+        <path d="M 360,170 L 500,170" stroke="#7c3aed" stroke-width="2.5"/>
+        <polygon points="498,163 514,170 498,177" fill="#7c3aed"/>
+        <rect x="388" y="138" width="84" height="28" rx="8" fill="#faf5ff" stroke="#7c3aed" stroke-width="1.5"/>
+        <text x="430" y="156" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="13" fill="#7c3aed">clone</text>
+
+        <!-- commit ←← -->
+        <path d="M 500,230 L 360,230" stroke="#059669" stroke-width="2.5"/>
+        <polygon points="362,223 346,230 362,237" fill="#059669"/>
+        <rect x="376" y="242" width="140" height="28" rx="8" fill="#f0fdf4" stroke="#059669" stroke-width="1.5"/>
+        <text x="446" y="260" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="13" fill="#059669">commit · PR</text>
+      </g>
+
+      <!-- Workspace: git-repo/ -->
+      <g class="fade d2" filter="url(#sh7)">
+        <rect x="514" y="50" width="566" height="300" rx="20" fill="#f0fdf4" stroke="#059669" stroke-width="2"/>
+        <text x="797" y="88" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#059669" letter-spacing=".12em" font-weight="500">WORKSPACE  ·  /git-repo/</text>
+      </g>
+      <g class="fade d3">
+        <rect x="538" y="106" width="518" height="44" rx="10" fill="#fff" stroke="#86efac" stroke-width="1.5"/>
+        <text x="558" y="133" font-family="'JetBrains Mono',monospace" font-size="14" fill="#166534">→  Read COBOL module TRNS01.cbl</text>
+      </g>
+      <g class="fade d4">
+        <rect x="538" y="162" width="518" height="44" rx="10" fill="#fff" stroke="#86efac" stroke-width="1.5"/>
+        <text x="558" y="189" font-family="'JetBrains Mono',monospace" font-size="14" fill="#166534">→  Analyse data structures &amp; batch flows</text>
+      </g>
+      <g class="fade d5">
+        <rect x="538" y="218" width="518" height="44" rx="10" fill="#fff" stroke="#86efac" stroke-width="1.5"/>
+        <text x="558" y="245" font-family="'JetBrains Mono',monospace" font-size="14" fill="#166534">→  Generate migration plan · write tests</text>
+      </g>
+      <g class="fade d6">
+        <rect x="538" y="274" width="518" height="44" rx="10" fill="#faf5ff" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="558" y="301" font-family="'JetBrains Mono',monospace" font-size="14" fill="#6d28d9">→  git commit -m "feat: migrate TRNS01"</text>
+      </g>
+
+      <!-- SSH badge -->
+      <g class="fade d5">
+        <rect x="538" y="332" width="220" height="30" rx="8" fill="#faf5ff" stroke="#c4b5fd" stroke-width="1.5"/>
+        <text x="648" y="351" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#7c3aed">🔑  SSH key mounted</text>
+      </g>
+    </svg>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════ S8: AUTONOMOUS OPERATION -->
+<section class="section s-amber" id="s8">
+  <div class="sec-header">
+    <span class="sec-num fade">08</span>
+    <h2 class="sec-h fade d1">Autonomous Operation</h2>
+    <p class="sec-p fade d2">The agent can work <strong style="color:#d97706">proactively on a schedule</strong> — without being asked. It manages its own trigger file and posts results directly to the Matrix room.</p>
+  </div>
+  <div class="visual-wrap">
+    <svg class="vis" viewBox="0 0 1100 420" fill="none">
+      <defs>
+        <filter id="sh8"><feDropShadow dx="0" dy="3" stdDeviation="8" flood-color="rgba(0,0,0,.08)"/></filter>
+      </defs>
+
+      <!-- clock -->
+      <g class="fade" filter="url(#sh8)">
+        <circle cx="340" cy="210" r="150" fill="#fffbeb" stroke="#d97706" stroke-width="2.5"/>
+        <circle cx="340" cy="210" r="138" fill="none" stroke="#fde68a" stroke-width="1"/>
+        <!-- hour ticks -->
+        <g stroke="#d97706" stroke-width="2" opacity=".4">
+          <line x1="340" y1="74" x2="340" y2="90"/>
+          <line x1="416" y1="94" x2="408" y2="107"/>
+          <line x1="476" y1="170" x2="462" y2="170"/>
+          <line x1="416" y1="326" x2="408" y2="313"/>
+          <line x1="340" y1="346" x2="340" y2="330"/>
+          <line x1="264" y1="326" x2="272" y2="313"/>
+          <line x1="204" y1="210" x2="218" y2="210"/>
+          <line x1="264" y1="94" x2="272" y2="107"/>
+        </g>
+        <circle cx="340" cy="210" r="7" fill="#d97706"/>
+        <!-- hands -->
+        <line class="fade d2" x1="340" y1="210" x2="240" y2="210" stroke="#0f172a" stroke-width="3" stroke-linecap="round"/>
+        <line class="fade d2" x1="340" y1="210" x2="340" y2="110" stroke="#0f172a" stroke-width="2" stroke-linecap="round"/>
+      </g>
+
+      <!-- trigger cards -->
+      <g class="fade d2" filter="url(#sh8)">
+        <rect x="252" y="14" width="176" height="50" rx="12" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+        <text x="340" y="36" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="13" fill="#d97706" font-weight="500">08:30 Mon–Fri</text>
+        <text x="340" y="54" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#92400e">Daily standup review</text>
+        <line x1="340" y1="64" x2="340" y2="78" stroke="#fde68a" stroke-width="1.5" stroke-dasharray="3 3"/>
+      </g>
+
+      <g class="fade d3" filter="url(#sh8)">
+        <rect x="506" y="172" width="206" height="50" rx="12" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+        <text x="609" y="194" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="13" fill="#d97706" font-weight="500">Daily 18:00</text>
+        <text x="609" y="212" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#92400e">Code quality gate</text>
+        <line x1="506" y1="197" x2="490" y2="197" stroke="#fde68a" stroke-width="1.5" stroke-dasharray="3 3"/>
+      </g>
+
+      <g class="fade d4" filter="url(#sh8)">
+        <rect x="252" y="352" width="176" height="50" rx="12" fill="#f0fdf4" stroke="#059669" stroke-width="2"/>
+        <text x="340" y="374" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#059669" font-weight="500">once: 2026-05-01</text>
+        <text x="340" y="392" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#166534">Sprint closure report</text>
+        <line x1="340" y1="352" x2="340" y2="360" stroke="#86efac" stroke-width="1.5" stroke-dasharray="3 3"/>
+      </g>
+
+      <!-- triggers.json note -->
+      <g class="fade d5" filter="url(#sh8)">
+        <rect x="730" y="140" width="340" height="140" rx="16" fill="#fffbeb" stroke="#d97706" stroke-width="2"/>
+        <text x="900" y="170" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="11" fill="#d97706" letter-spacing=".12em">triggers.json</text>
+        <line x1="750" y1="180" x2="1050" y2="180" stroke="#fde68a" stroke-width="1"/>
+        <text x="750" y="205" font-family="'JetBrains Mono',monospace" font-size="13" fill="#92400e">Self-managed by the agent</text>
+        <text x="750" y="228" font-family="'JetBrains Mono',monospace" font-size="13" fill="#92400e">Types: cron · once</text>
+        <text x="750" y="251" font-family="'JetBrains Mono',monospace" font-size="13" fill="#92400e">Posts result → Matrix room</text>
+      </g>
+
+      <!-- posts to matrix -->
+      <g class="fade d6" filter="url(#sh8)">
+        <rect x="730" y="310" width="340" height="68" rx="14" fill="#ecfeff" stroke="#0891b2" stroke-width="2"/>
+        <text x="900" y="342" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="14" fill="#0891b2" font-weight="500">→ Posts result to Matrix</text>
+        <text x="900" y="364" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#164e63">Report · Alert · Summary</text>
+      </g>
+    </svg>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════ S9: AGENT POOL -->
+<section class="section s-fuchsia" id="s9">
+  <div class="sec-header">
+    <span class="sec-num fade">09</span>
+    <h2 class="sec-h fade d1">The Agent Pool</h2>
+    <p class="sec-p fade d2"><strong style="color:#c026d3">Any number of specialist agents</strong> — each with its own workspace, memory, and skills. An orchestrator distributes questions in parallel; a synthesiser combines the answers.</p>
+  </div>
+  <div class="visual-wrap">
+    <svg class="vis" viewBox="0 0 1100 440" fill="none">
+      <defs>
+        <filter id="sh9"><feDropShadow dx="0" dy="3" stdDeviation="8" flood-color="rgba(0,0,0,.08)"/></filter>
+      </defs>
+
+      <!-- incoming message -->
+      <g class="fade" filter="url(#sh9)">
+        <rect x="10" y="178" width="180" height="84" rx="16" fill="#f0f9ff" stroke="#2563eb" stroke-width="2"/>
+        <text x="100" y="208" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="13" fill="#2563eb">"Explain the</text>
+        <text x="100" y="228" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="13" fill="#2563eb">migration path"</text>
+      </g>
+
+      <!-- arrow to orchestrator -->
+      <path class="drw" d="M 190,220 L 258,220" stroke="#c026d3" stroke-width="2.5"/>
+      <polygon class="fade d1" points="256,213 272,220 256,227" fill="#c026d3"/>
+
+      <!-- orchestrator -->
+      <g class="fade d1" filter="url(#sh9)">
+        <circle cx="320" cy="220" r="58" fill="#fdf4ff" stroke="#c026d3" stroke-width="2.5"/>
+        <text x="320" y="214" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="13" fill="#c026d3" font-weight="500">Orches-</text>
+        <text x="320" y="232" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="13" fill="#c026d3" font-weight="500">trator</text>
+      </g>
+
+      <!-- fan-out lines -->
+      <path class="drw d2" d="M 374,185 L 474,106" stroke="#059669" stroke-width="2"/>
+      <path class="drw d2" d="M 378,220 L 474,220" stroke="#059669" stroke-width="2"/>
+      <path class="drw d2" d="M 374,255 L 474,334" stroke="#059669" stroke-width="2"/>
+
+      <!-- expert 1 -->
+      <g class="fade d2" filter="url(#sh9)">
+        <rect x="474" y="56" width="240" height="100" rx="16" fill="#f0fdf4" stroke="#059669" stroke-width="2"/>
+        <text x="594" y="95" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="16" fill="#14532d" font-weight="500">COBOL Expert</text>
+        <text x="594" y="118" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#94a3b8">@cobol-expert:local</text>
+        <rect x="494" y="128" width="64" height="20" rx="8" fill="#dcfce7" stroke="#86efac" stroke-width="1"/>
+        <text x="526" y="142" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="10" fill="#059669">expert</text>
+      </g>
+
+      <!-- expert 2 -->
+      <g class="fade d3" filter="url(#sh9)">
+        <rect x="474" y="170" width="240" height="100" rx="16" fill="#f0fdf4" stroke="#059669" stroke-width="2"/>
+        <text x="594" y="209" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="16" fill="#14532d" font-weight="500">Java Expert</text>
+        <text x="594" y="232" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#94a3b8">@java-expert:local</text>
+        <rect x="494" y="242" width="64" height="20" rx="8" fill="#dcfce7" stroke="#86efac" stroke-width="1"/>
+        <text x="526" y="256" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="10" fill="#059669">expert</text>
+      </g>
+
+      <!-- expert 3 -->
+      <g class="fade d4" filter="url(#sh9)">
+        <rect x="474" y="284" width="240" height="100" rx="16" fill="#f0fdf4" stroke="#059669" stroke-width="2"/>
+        <text x="594" y="323" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="16" fill="#14532d" font-weight="500">DB2 Expert</text>
+        <text x="594" y="346" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#94a3b8">@db2-expert:local</text>
+        <rect x="494" y="356" width="64" height="20" rx="8" fill="#dcfce7" stroke="#86efac" stroke-width="1"/>
+        <text x="526" y="370" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="10" fill="#059669">expert</text>
+      </g>
+
+      <!-- fan-in lines to synthesiser -->
+      <path class="drw d4" d="M 714,106 L 806,220" stroke="#0891b2" stroke-width="2"/>
+      <path class="drw d4" d="M 714,220 L 806,220" stroke="#0891b2" stroke-width="2"/>
+      <path class="drw d4" d="M 714,334 L 806,220" stroke="#0891b2" stroke-width="2"/>
+
+      <!-- synthesiser -->
+      <g class="fade d5" filter="url(#sh9)">
+        <rect x="806" y="162" width="198" height="116" rx="16" fill="#ecfeff" stroke="#0891b2" stroke-width="2.5"/>
+        <text x="905" y="204" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="15" fill="#164e63" font-weight="500">Synthesiser</text>
+        <text x="905" y="228" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#94a3b8">Merges all answers</text>
+        <rect x="826" y="248" width="108" height="20" rx="8" fill="#cffafe" stroke="#67e8f9" stroke-width="1"/>
+        <text x="880" y="262" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="10" fill="#0891b2">synthesizer</text>
+      </g>
+
+      <!-- infinite hint -->
+      <g class="fade d6">
+        <text x="530" y="424" text-anchor="middle" font-family="'Syne',sans-serif" font-size="28" font-weight="800" fill="#d1d5db">∞</text>
+        <text x="636" y="424" font-family="'JetBrains Mono',monospace" font-size="13" fill="#94a3b8">agents — spawned via  </text>
+        <text x="884" y="424" font-family="'JetBrains Mono',monospace" font-size="13" fill="#059669" font-weight="500">!agent add</text>
+      </g>
+    </svg>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════ S10: FULL PICTURE -->
+<section class="section" id="s10" style="background:#f8fafc">
+  <div class="sec-header">
+    <span class="sec-num fade" style="color:#0891b2">10</span>
+    <h2 class="sec-h fade d1">The Full Picture</h2>
+    <p class="sec-p fade d2">All components working together — a locally operated, continuously learning AI system for enterprise development teams.</p>
+  </div>
+  <div class="visual-wrap">
+    <svg class="vis fade d3" viewBox="0 0 1200 520" fill="none">
+      <defs>
+        <filter id="sh10"><feDropShadow dx="0" dy="2" stdDeviation="6" flood-color="rgba(0,0,0,.08)"/></filter>
+      </defs>
+
+      <!-- User -->
+      <g filter="url(#sh10)">
+        <rect x="10" y="210" width="130" height="80" rx="14" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"/>
+        <text x="75" y="246" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#1e40af" font-weight="500">Matrix</text>
+        <text x="75" y="264" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#1e40af" font-weight="500">Client</text>
+      </g>
+
+      <!-- Server -->
+      <g filter="url(#sh10)">
+        <rect x="176" y="210" width="130" height="80" rx="14" fill="#ecfeff" stroke="#0891b2" stroke-width="1.5"/>
+        <text x="241" y="246" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#164e63" font-weight="500">Matrix</text>
+        <text x="241" y="264" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#164e63" font-weight="500">Server</text>
+      </g>
+
+      <!-- client→server -->
+      <path class="drw" d="M 140,250 L 176,250" stroke="#2563eb" stroke-width="1.5"/>
+      <polygon points="174,244 186,250 174,256" fill="#2563eb"/>
+
+      <!-- Agent container -->
+      <g filter="url(#sh10)">
+        <rect x="346" y="30" width="730" height="460" rx="20" fill="#f8fafc" stroke="#0891b2" stroke-width="1.5"/>
+        <text x="711" y="58" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="10" fill="#0891b2" letter-spacing=".14em">AGENT INSTANCE</text>
+      </g>
+
+      <!-- server→bridge -->
+      <path class="drw d1" d="M 306,250 L 346,190" stroke="#0891b2" stroke-width="1.5"/>
+      <polygon points="344,184 356,190 344,196" fill="#0891b2"/>
+
+      <!-- Bridge -->
+      <g filter="url(#sh10)">
+        <rect x="362" y="68" width="148" height="70" rx="12" fill="#ecfeff" stroke="#0891b2" stroke-width="1.5"/>
+        <text x="436" y="101" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="13" fill="#164e63" font-weight="500">Bridge</text>
+        <text x="436" y="120" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="10" fill="#94a3b8">bridge.js</text>
+      </g>
+
+      <!-- bridge→claude -->
+      <path class="drw d1" d="M 436,138 L 436,178" stroke="#0891b2" stroke-width="1.5"/>
+      <polygon points="430,176 436,188 442,176" fill="#0891b2"/>
+
+      <!-- Claude Code -->
+      <g filter="url(#sh10)">
+        <rect x="362" y="188" width="148" height="70" rx="12" fill="#fff7ed" stroke="#ea580c" stroke-width="1.5"/>
+        <text x="436" y="220" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#9a3412" font-weight="500">Claude Code</text>
+        <text x="436" y="238" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="10" fill="#94a3b8">Sonnet · Opus</text>
+      </g>
+
+      <!-- Workspace -->
+      <g filter="url(#sh10)">
+        <rect x="556" y="50" width="494" height="420" rx="16" fill="#f0fdf4" stroke="#059669" stroke-width="1.5"/>
+        <text x="803" y="78" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="10" fill="#059669" letter-spacing=".12em">WORKSPACE</text>
+      </g>
+
+      <!-- claude→workspace -->
+      <path class="drw d2" d="M 510,223 L 556,223" stroke="#059669" stroke-width="1.5"/>
+      <polygon points="554,217 566,223 554,229" fill="#059669"/>
+
+      <!-- workspace items -->
+      <g font-family="'JetBrains Mono',monospace">
+        <g filter="url(#sh10)">
+          <rect x="574" y="90" width="208" height="66" rx="10" fill="#faf5ff" stroke="#a78bfa" stroke-width="1.5"/>
+          <text x="678" y="118" text-anchor="middle" font-size="13" fill="#6d28d9" font-weight="500">CLAUDE.md</text>
+          <text x="678" y="138" text-anchor="middle" font-size="11" fill="#94a3b8">Agent identity</text>
+        </g>
+        <g filter="url(#sh10)">
+          <rect x="796" y="90" width="228" height="66" rx="10" fill="#f0fdf4" stroke="#4ade80" stroke-width="1.5"/>
+          <text x="910" y="118" text-anchor="middle" font-size="13" fill="#16a34a" font-weight="500">Skills</text>
+          <text x="910" y="138" text-anchor="middle" font-size="11" fill="#94a3b8">SKILL.md per module</text>
+        </g>
+        <g filter="url(#sh10)">
+          <rect x="574" y="176" width="450" height="66" rx="10" fill="#fffbeb" stroke="#fbbf24" stroke-width="1.5"/>
+          <text x="799" y="204" text-anchor="middle" font-size="13" fill="#d97706" font-weight="500">Memory</text>
+          <text x="678" y="224" text-anchor="middle" font-size="11" fill="#94a3b8">context.md · facts</text>
+          <text x="910" y="224" text-anchor="middle" font-size="11" fill="#94a3b8">log.md · history</text>
+        </g>
+        <g filter="url(#sh10)">
+          <rect x="574" y="262" width="208" height="66" rx="10" fill="#faf5ff" stroke="#a78bfa" stroke-width="1.5"/>
+          <text x="678" y="290" text-anchor="middle" font-size="13" fill="#6d28d9" font-weight="500">Git Clone</text>
+          <text x="678" y="310" text-anchor="middle" font-size="11" fill="#94a3b8">Full source code</text>
+        </g>
+        <g filter="url(#sh10)">
+          <rect x="796" y="262" width="228" height="66" rx="10" fill="#fffbeb" stroke="#fbbf24" stroke-width="1.5"/>
+          <text x="910" y="290" text-anchor="middle" font-size="13" fill="#d97706" font-weight="500">Triggers</text>
+          <text x="910" y="310" text-anchor="middle" font-size="11" fill="#94a3b8">cron · once · self-managed</text>
+        </g>
+        <g filter="url(#sh10)">
+          <rect x="574" y="348" width="450" height="52" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="1"/>
+          <text x="799" y="378" text-anchor="middle" font-size="11" fill="#64748b">Session state · ACE Plugin · Allowed tools</text>
+        </g>
+      </g>
+
+      <!-- Git external -->
+      <g filter="url(#sh10)">
+        <rect x="1094" y="30" width="96" height="56" rx="10" fill="#faf5ff" stroke="#7c3aed" stroke-width="1.5"/>
+        <text x="1142" y="55" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="11" fill="#6d28d9" font-weight="500">Git</text>
+        <text x="1142" y="72" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="10" fill="#94a3b8">Repo</text>
+      </g>
+      <path class="drw d3" d="M 1094,58 L 962,295" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="6 4"/>
+
+      <!-- Orchestrator -->
+      <g filter="url(#sh10)">
+        <rect x="176" y="400" width="130" height="64" rx="12" fill="#fdf4ff" stroke="#c026d3" stroke-width="1.5"/>
+        <text x="241" y="428" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#c026d3" font-weight="500">Orches-</text>
+        <text x="241" y="448" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="12" fill="#c026d3" font-weight="500">trator</text>
+      </g>
+      <path d="M 241,400 L 241,290" stroke="#c026d3" stroke-width="1" stroke-dasharray="5 4" opacity=".5"/>
+
+      <!-- ∞ agents note -->
+      <text x="1094" y="210" text-anchor="middle" font-family="'Syne',sans-serif" font-size="38" font-weight="800" fill="#e9d5ff">∞</text>
+      <text x="1094" y="240" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="11" fill="#94a3b8">agents</text>
+    </svg>
+  </div>
+</section>
+
+<!-- footer -->
+<footer style="position:relative;z-index:1;text-align:center;padding:60px 40px;border-top:1px solid #f1f5f9;background:#fff">
+  <div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#94a3b8;letter-spacing:.1em">
+    The Autonomous Enterprise Agent · April 2026 · Local-First · Azure AI Foundry · Sonnet &amp; Opus · Matrix Protocol
+  </div>
+</footer>
+
+<script>
+const ids = ['hero','s1','s2','s3','s4','s5','s6','s7','s8','s9','s10'];
+const dots = document.querySelectorAll('.pd');
+
+const obs = new IntersectionObserver(entries => {
+  entries.forEach(e => {
+    if (!e.isIntersecting) return;
+    e.target.classList.add('is-visible');
+    const i = ids.indexOf(e.target.id);
+    if (i >= 0) dots.forEach((d,j) => d.classList.toggle('active', i === j));
+  });
+}, { threshold: 0.22 });
+
+document.querySelectorAll('.hero,.section').forEach(el => obs.observe(el));
+document.getElementById('hero').classList.add('is-visible');
+</script>
+</body>
+</html>

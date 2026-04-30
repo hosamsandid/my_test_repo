@@ -62,7 +62,7 @@ See [`CLAUDE.md`](./CLAUDE.md) for the full technical reference including all en
 cp .env.example .env
 
 # 2. Start the full stack (single compose file)
-./start-stack.fish
+make up
 # or
 podman compose up -d --build
 

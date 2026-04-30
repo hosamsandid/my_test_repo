@@ -131,5 +131,5 @@ MULTI_AGENT_ROOM=${ROOM_ID}
 ORCHESTRATOR_TOKEN=${ORCH_TOKEN}
 
 EOF
-echo "Then start the stack with: ./start-stack.fish"
+echo "Then start the stack with: make up"
 echo "Manage agents at:           http://localhost:4000"

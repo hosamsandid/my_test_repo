@@ -102,7 +102,7 @@ All agent lifecycle operations (create / enable / disable / edit prompt / delete
 |---|---|
 | `docker-compose.yml` | All four services + volumes |
 | `.env` | Secrets: Matrix tokens, Foundry API key (gitignored) |
-| `start-stack.fish` | Build + start convenience script |
+| `Makefile` | Build + start convenience targets (`make up`, `make down`, `make logs`, ...) |
 | `orchestrator/orchestrator.js` | Dynamic agent management, routing, synthesis, environment-aware workspace seeding, internal API for the admin console |
 | `orchestrator/agent-runner.js` | Per-agent child process: Matrix client + Claude CLI invocations + trigger scheduler |
 | `orchestrator/Dockerfile` | Node 22 + Claude Code CLI + git + openssh-client |
@@ -117,12 +117,12 @@ All agent lifecycle operations (create / enable / disable / edit prompt / delete
 
 ```bash
 # Start the full stack
-./start-stack.fish
+make up
 # or
 podman compose up -d --build
 
 # Stop
-podman compose down
+make down
 
 # Rebuild only orchestrator
 podman compose build orchestrator

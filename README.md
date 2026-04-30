@@ -38,14 +38,14 @@ The stack runs on Podman, communicates over the Matrix protocol, and uses Azure 
 ## Architecture
 
 ```
-Matrix Client (Cinny @ :8090, Element, etc.)
-  → Conduwuit (Matrix homeserver, localhost:8448)
+Matrix Client (Cinny, Element, etc.)
+  → Conduwuit (Matrix homeserver)
     → orchestrator (@orchestrator:local)
         ├── Routes to dynamic agent processes (each agent-runner.js)
         ├── Each agent: own workspace, own CLAUDE.md, own skills + repo (via Working Environment)
         └── Synthesises expert answers when broadcast routing is used
 
-Admin Console (localhost:4000)
+Admin Console
   └── CRUD for agents, working environments, SSH keys, skills, MCP
 ```
 
@@ -73,17 +73,23 @@ make up
 make logs
 ```
 
-Open the Admin Console at <http://localhost:4000> to create agents, working environments and SSH keys. Open Cinny at <http://localhost:8090> to chat with them.
+Default ports (configurable via `CONDUWUIT_PORT`, `CINNY_PORT`, `ADMIN_PORT` in `.env`):
+
+| Service | Default |
+|---|---|
+| Admin Console | <http://localhost:4000> |
+| Cinny | <http://localhost:8090> |
+| Conduwuit | `localhost:8448` |
 
 ---
 
 ## Extending the Agent
 
 **Add a skill:**
-Drop a `SKILL.md` into the skill-pool volume (`vgh-claw_claude-workspace:/skills/<name>/SKILL.md`). It immediately appears in the Admin Console's Working Environment skill picker.
+Drop a `SKILL.md` into the skill-pool volume (`skills-pool:/skills/<name>/SKILL.md`). It immediately appears in the Admin Console's Working Environment skill picker.
 
 **Add an agent:**
-Use the Admin Console at <http://localhost:4000> — choose a Working Environment, write a system prompt, save.
+Use the Admin Console — choose a Working Environment, write a system prompt, save.
 
 **Schedule autonomous work:**
 For autonomous agents, edit `triggers.json` in the agent's workspace (or ask the agent to do it). Triggers sync within 60 seconds.

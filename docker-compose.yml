@@ -1,10 +1,10 @@
 services:
   conduwuit:
     image: ghcr.io/continuwuity/continuwuity:latest
-    container_name: conduwuit
+    container_name: ${COMPOSE_PROJECT_NAME}-conduwuit
     restart: unless-stopped
     ports:
-      - "8448:6167"
+      - "${CONDUWUIT_PORT:-8448}:6167"
     volumes:
       - conduwuit-db:/var/lib/continuwuity
     environment:
@@ -21,10 +21,10 @@ services:
 
   cinny:
     image: ajbura/cinny:latest
-    container_name: cinny
+    container_name: ${COMPOSE_PROJECT_NAME}-cinny
     restart: unless-stopped
     ports:
-      - "8090:80"
+      - "${CINNY_PORT:-8090}:80"
     volumes:
       - ./cinny/config.json:/app/config.json:ro
     depends_on:
@@ -34,7 +34,7 @@ services:
   orchestrator:
     build:
       context: ./orchestrator
-    container_name: orchestrator
+    container_name: ${COMPOSE_PROJECT_NAME}-orchestrator
     restart: unless-stopped
     volumes:
       - agent-pool-workspace:/workspace
@@ -47,7 +47,7 @@ services:
       MATRIX_ACCESS_TOKEN: "${ORCHESTRATOR_TOKEN}"
       MATRIX_BOT_USER_ID: "@orchestrator:local"
       MULTI_AGENT_ROOM: "${MULTI_AGENT_ROOM}"
-      ADMIN_USER_ID: "@thorsten:local"
+      ADMIN_USER_ID: "@${ADMIN_USER:-thorsten}:local"
       # Conduwuit admin (for auto-creating Matrix users)
       CONDUWUIT_ADMIN_TOKEN: "${MATRIX_ACCESS_TOKEN}"
       CONDUWUIT_ADMIN_ROOM: "!cUxr0SyfINf9yEvBOD:local"
@@ -65,10 +65,10 @@ services:
   admin-console:
     build:
       context: ./admin-console
-    container_name: admin-console
+    container_name: ${COMPOSE_PROJECT_NAME}-admin-console
     restart: unless-stopped
     ports:
-      - "4000:4000"
+      - "${ADMIN_PORT:-4000}:4000"
     volumes:
       - agent-pool-workspace:/workspace
       - skills-pool:/pool
@@ -86,10 +86,10 @@ services:
 
 volumes:
   conduwuit-db:
-    name: vgh-claw_conduwuit-db
+    name: ${COMPOSE_PROJECT_NAME}_conduwuit-db
   agent-pool-workspace:
-    name: vgh-claw_agent-pool-workspace
+    name: ${COMPOSE_PROJECT_NAME}_agent-pool-workspace
   # Central skill pool, shared between orchestrator (read-only at /template-workspace)
   # and admin-console (read-write at /pool).
   skills-pool:
-    name: vgh-claw_claude-workspace
+    name: ${COMPOSE_PROJECT_NAME}_claude-workspace

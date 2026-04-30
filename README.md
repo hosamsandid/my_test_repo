@@ -58,25 +58,22 @@ See [`CLAUDE.md`](./CLAUDE.md) for the full technical reference including all en
 **Prerequisites:** Podman with `podman compose`, Azure AI Foundry access (or Anthropic API key for Claude Code CLI auth).
 
 ```bash
-# 1. Copy and fill environment config
+# 1. Copy environment config and fill in the Foundry credentials
 cp .env.example .env
 
-# 2. Start the full stack (single compose file)
+# 2. First-time only: boot Conduwuit, register the admin + orchestrator users,
+#    create the shared room. The script prints the values to add to .env.
+podman compose up -d conduwuit
+./orchestrator/setup.sh
+
+# 3. Start the full stack
 make up
-# or
-podman compose up -d --build
 
-# 3. Tail logs
-podman logs -f orchestrator
-podman logs -f admin-console
+# 4. Tail logs
+make logs
 ```
 
-First-time Matrix user setup (homeserver admin room):
-```
-!admin users create-user <yourname> <password>
-```
-
-Open the Admin Console at <http://localhost:4000> to create agents, environments and SSH keys. Open Cinny at <http://localhost:8090> to chat with them.
+Open the Admin Console at <http://localhost:4000> to create agents, working environments and SSH keys. Open Cinny at <http://localhost:8090> to chat with them.
 
 ---
 

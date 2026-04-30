@@ -116,20 +116,25 @@ All agent lifecycle operations (create / enable / disable / edit prompt / delete
 ## Commands
 
 ```bash
-# Start the full stack
+# First-time bootstrap (after `podman compose up -d conduwuit`):
+# registers the admin user + @orchestrator:local, creates the shared room,
+# prints the tokens to add to .env.
+./orchestrator/setup.sh
+
+# Start / stop / restart the full stack
 make up
-# or
-podman compose up -d --build
-
-# Stop
 make down
+make restart
 
-# Rebuild only orchestrator
-podman compose build orchestrator
-podman stop orchestrator && podman rm orchestrator
-podman compose up -d orchestrator
+# Rebuild orchestrator image only
+make build
+# (equivalent to `podman compose build orchestrator`)
 
-# Logs
+# Container status + log streaming for orchestrator + admin-console + conduwuit
+make ps
+make logs
+
+# Per-service logs
 podman logs -f orchestrator
 podman logs -f admin-console
 podman logs -f conduwuit

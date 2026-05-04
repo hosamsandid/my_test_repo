@@ -112,19 +112,43 @@ login() {
   return 1
 }
 
-echo "Logging in @${ADMIN_USER}:local ..."
-ADMIN_TOKEN=$(login "${ADMIN_USER}" "${ADMIN_PASS}") || {
-  echo "ERROR: failed to login admin user" >&2
-  exit 1
-}
-echo "  OK"
+ADMIN_TOKEN=""
+if [ -n "${MATRIX_ACCESS_TOKEN:-}" ]; then
+  whoami=$(curl -s "${HOMESERVER}/_matrix/client/v3/account/whoami" \
+    -H "Authorization: Bearer ${MATRIX_ACCESS_TOKEN}" 2>/dev/null)
+  if echo "$whoami" | jq -e '.user_id' >/dev/null 2>&1; then
+    echo "Reusing existing admin token from .env"
+    ADMIN_TOKEN="${MATRIX_ACCESS_TOKEN}"
+  fi
+fi
 
-echo "Logging in @${ORCH_USER}:local ..."
-ORCH_TOKEN=$(login "${ORCH_USER}" "${ORCH_PASS}") || {
-  echo "ERROR: failed to login orchestrator" >&2
-  exit 1
-}
-echo "  OK"
+if [ -z "${ADMIN_TOKEN}" ]; then
+  echo "Logging in @${ADMIN_USER}:local ..."
+  ADMIN_TOKEN=$(login "${ADMIN_USER}" "${ADMIN_PASS}") || {
+    echo "ERROR: failed to login admin user" >&2
+    exit 1
+  }
+  echo "  OK"
+fi
+
+ORCH_TOKEN=""
+if [ -n "${ORCHESTRATOR_TOKEN:-}" ]; then
+  whoami=$(curl -s "${HOMESERVER}/_matrix/client/v3/account/whoami" \
+    -H "Authorization: Bearer ${ORCHESTRATOR_TOKEN}" 2>/dev/null)
+  if echo "$whoami" | jq -e '.user_id' >/dev/null 2>&1; then
+    echo "Reusing existing orchestrator token from .env"
+    ORCH_TOKEN="${ORCHESTRATOR_TOKEN}"
+  fi
+fi
+
+if [ -z "${ORCH_TOKEN}" ]; then
+  echo "Logging in @${ORCH_USER}:local ..."
+  ORCH_TOKEN=$(login "${ORCH_USER}" "${ORCH_PASS}") || {
+    echo "ERROR: failed to login orchestrator" >&2
+    exit 1
+  }
+  echo "  OK"
+fi
 
 curl -sf -X PUT "${HOMESERVER}/_matrix/client/v3/profile/@${ORCH_USER}:local/displayname" \
   -H "Authorization: Bearer ${ORCH_TOKEN}" \

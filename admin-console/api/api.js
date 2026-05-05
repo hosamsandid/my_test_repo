@@ -761,6 +761,34 @@ app.delete('/api/environments/:id', (req, res) => {
   res.status(204).end();
 });
 
+// Probe a repo URL (optionally with one of our SSH keys) to verify the agent
+// will actually be able to clone it. Delegates to the orchestrator since only
+// that container has git/openssh and the SSH key files mounted.
+app.post('/api/repositories/check', async (req, res) => {
+  const { url, sshKeyId } = req.body || {};
+  if (!url || typeof url !== 'string') {
+    return res.status(400).json({ ok: false, error: 'url is required' });
+  }
+  if (sshKeyId) {
+    const keys = listSshKeys();
+    if (!keys.some(k => k.id === sshKeyId)) {
+      return res.status(400).json({ ok: false, error: `SSH key '${sshKeyId}' not found` });
+    }
+  }
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/repository-check`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, sshKeyId: sshKeyId || null }),
+    });
+    const data = await resp.json();
+    res.status(resp.status).json(data);
+  } catch (err) {
+    res.status(502).json({ ok: false, error: `Probe failed: ${err.message}` });
+  }
+});
+
 /* ─── Blueprints ────────────────────────────────────────────────────── */
 
 app.get('/api/blueprints', async (req, res) => {

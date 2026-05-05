@@ -14,9 +14,9 @@ const NAV = [
     { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
   ]},
   { section: 'WORKSPACES', items: [
-    { path: '/environments', label: 'Working Environments', Icon: Boxes },
-    { path: '/ssh-keys',     label: 'SSH Keys',             Icon: Key },
-    { path: '/github-tokens', label: 'GitHub Tokens',       Icon: Github },
+    { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key },
+    { path: '/github-tokens', label: 'GitHub Tokens',        Icon: Github },
+    { path: '/environments',  label: 'Working Environments', Icon: Boxes },
   ]},
   { section: 'CONFIGURATION', items: [
     { path: '/skills',       label: 'Skills Registry',     Icon: Zap },

@@ -29,7 +29,7 @@ const SSH_KEYS_DIR = path.join(ENVIRONMENTS_DIR, "_keys");
 const SSH_KEYS_INDEX = path.join(SSH_KEYS_DIR, "index.json");
 const GH_TOKENS_DIR = path.join(ENVIRONMENTS_DIR, "_tokens");
 
-const { spawn, execFileSync } = require("child_process");
+const { spawn, execFile, execFileSync } = require("child_process");
 const crypto = require("crypto");
 
 function randomHex(bytes) {
@@ -1143,6 +1143,54 @@ async function main() {
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(processes));
+      return;
+    }
+
+    // Quick "does this repo URL work with this SSH key" probe used by the
+    // admin console to validate a Working Environment repo entry before save.
+    if (req.method === 'POST' && req.url === '/internal/repository-check') {
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', () => {
+        let parsed;
+        try { parsed = JSON.parse(body || '{}'); }
+        catch { parsed = {}; }
+        const url = typeof parsed.url === 'string' ? parsed.url.trim() : '';
+        const sshKeyId = parsed.sshKeyId || null;
+        if (!url || url.startsWith('-')) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'url is required' }));
+          return;
+        }
+        const cmdEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+        if (sshKeyId) {
+          const keyPath = path.join(SSH_KEYS_DIR, sshKeyId);
+          if (!fs.existsSync(keyPath)) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: `SSH key not found: ${sshKeyId}` }));
+            return;
+          }
+          try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
+          cmdEnv.GIT_SSH_COMMAND =
+            `ssh -i ${keyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null` +
+            ` -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8`;
+        }
+        execFile(
+          'git',
+          ['ls-remote', '--exit-code', '--heads', '--', url],
+          { env: cmdEnv, timeout: 12_000, maxBuffer: 1024 * 1024 },
+          (err, _stdout, stderr) => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            if (!err) {
+              res.end(JSON.stringify({ ok: true }));
+              return;
+            }
+            const detail = (stderr || err.message || '').toString().trim();
+            const firstLine = detail.split('\n').find(l => l.trim()) || 'git ls-remote failed';
+            res.end(JSON.stringify({ ok: false, error: firstLine.slice(0, 300) }));
+          },
+        );
+      });
       return;
     }
 

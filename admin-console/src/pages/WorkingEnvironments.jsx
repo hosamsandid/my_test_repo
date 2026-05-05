@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Edit, Trash2, Plus, GitBranch, Key, Github, X } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Edit, Trash2, Plus, GitBranch, Key, Github, X, Check, AlertTriangle, Loader2 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
@@ -75,6 +75,157 @@ function SkillPicker({ allSkills, selected, onChange }) {
           </span>
         </label>
       ))}
+    </div>
+  );
+}
+
+function useRepoCheck(url, sshKeyId) {
+  const [state, setState] = useState({ status: 'idle', error: null });
+  const reqIdRef = useRef(0);
+  const trimmedUrl = url ? url.trim() : '';
+
+  useEffect(() => {
+    if (!trimmedUrl) {
+      setState({ status: 'idle', error: null });
+      return;
+    }
+    const myReqId = ++reqIdRef.current;
+    setState({ status: 'pending', error: null });
+    const handle = setTimeout(async () => {
+      try {
+        const result = await apiCall('POST', '/api/repositories/check', {
+          url: trimmedUrl,
+          sshKeyId: sshKeyId || null,
+        });
+        if (reqIdRef.current !== myReqId) return; // a newer request is in flight
+        if (result.ok) setState({ status: 'ok', error: null });
+        else setState({ status: 'error', error: result.error || 'Repository unreachable' });
+      } catch (err) {
+        if (reqIdRef.current !== myReqId) return;
+        setState({ status: 'error', error: err.message || 'Check failed' });
+      }
+    }, 700);
+    return () => clearTimeout(handle);
+  }, [trimmedUrl, sshKeyId]);
+
+  return state;
+}
+
+function RepoStatusIcon({ status, error }) {
+  if (status === 'pending') {
+    return (
+      <span title="Checking repository…" style={{ display: 'inline-flex', color: 'var(--eb-text-muted)' }}>
+        <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
+      </span>
+    );
+  }
+  if (status === 'ok') {
+    return (
+      <span title="Repository reachable" style={{ display: 'inline-flex', color: 'var(--eb-status-success, #16a34a)' }}>
+        <Check size={14} />
+      </span>
+    );
+  }
+  if (status === 'error') {
+    return (
+      <span title={error || 'Repository unreachable'} style={{ display: 'inline-flex', color: 'var(--eb-status-error)' }}>
+        <AlertTriangle size={14} />
+      </span>
+    );
+  }
+  return null;
+}
+
+function RepositoryCard({ idx, repo, sshKeys, onChange, onRemove }) {
+  const check = useRepoCheck(repo.url, repo.sshKeyId);
+
+  return (
+    <div style={{
+      border: '1px solid var(--eb-border-default)',
+      borderRadius: 'var(--eb-radius-md)',
+      padding: 'var(--eb-space-3)',
+      background: 'var(--eb-bg-surface)',
+      display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+      position: 'relative',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)' }}>
+          Repository #{idx + 1}
+        </span>
+        <button
+          type="button"
+          aria-label="Remove repository"
+          title="Remove repository"
+          onClick={onRemove}
+          style={{
+            display: 'flex', alignItems: 'center',
+            padding: 'var(--eb-space-1)',
+            background: 'transparent',
+            border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-sm)',
+            color: 'var(--eb-status-error)',
+            cursor: 'pointer',
+          }}
+        >
+          <X size={12} />
+        </button>
+      </div>
+
+      <div>
+        <div style={labelStyle}>SSH key</div>
+        <select
+          value={repo.sshKeyId}
+          onChange={e => onChange('sshKeyId', e.target.value)}
+          style={inputStyle}
+        >
+          <option value="">— no key (HTTPS only) —</option>
+          {sshKeys.map(k => (
+            <option key={k.id} value={k.id}>{k.name} ({k.id})</option>
+          ))}
+        </select>
+      </div>
+
+      <div>
+        <div style={labelStyle}>Repository URL <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
+        <div style={{ position: 'relative' }}>
+          <input
+            style={{
+              ...inputStyle,
+              fontFamily: 'var(--eb-font-mono)',
+              paddingRight: 'var(--eb-space-8)',
+            }}
+            value={repo.url}
+            onChange={e => onChange('url', e.target.value)}
+            placeholder="git@github.com:org/repo.git"
+          />
+          <div style={{
+            position: 'absolute',
+            right: 'var(--eb-space-2)',
+            top: '50%',
+            transform: 'translateY(-50%)',
+            display: 'flex',
+            alignItems: 'center',
+            pointerEvents: 'none',
+          }}>
+            <RepoStatusIcon status={check.status} error={check.error} />
+          </div>
+        </div>
+        {check.status === 'error' && (
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', marginTop: 'var(--eb-space-1)' }}>
+            {check.error}
+          </div>
+        )}
+      </div>
+
+      <div>
+        <div style={labelStyle}>Branch (optional)</div>
+        <input
+          style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }}
+          value={repo.branch}
+          onChange={e => onChange('branch', e.target.value)}
+          placeholder="main"
+        />
+      </div>
     </div>
   );
 }
@@ -216,68 +367,14 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
         </div>
 
         {form.repositories.map((repo, idx) => (
-          <div key={idx} style={{
-            border: '1px solid var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-md)',
-            padding: 'var(--eb-space-3)',
-            background: 'var(--eb-bg-surface)',
-            display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
-            position: 'relative',
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)' }}>
-                Repository #{idx + 1}
-              </span>
-              <button
-                type="button"
-                aria-label="Remove repository"
-                title="Remove repository"
-                onClick={() => removeRepo(idx)}
-                style={{
-                  display: 'flex', alignItems: 'center',
-                  padding: 'var(--eb-space-1)',
-                  background: 'transparent',
-                  border: '1px solid var(--eb-border-default)',
-                  borderRadius: 'var(--eb-radius-sm)',
-                  color: 'var(--eb-status-error)',
-                  cursor: 'pointer',
-                }}
-              >
-                <X size={12} />
-              </button>
-            </div>
-            <div>
-              <div style={labelStyle}>Repository URL <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
-              <input
-                style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }}
-                value={repo.url}
-                onChange={e => updateRepo(idx, 'url', e.target.value)}
-                placeholder="git@github.com:org/repo.git"
-              />
-            </div>
-            <div>
-              <div style={labelStyle}>Branch (optional)</div>
-              <input
-                style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }}
-                value={repo.branch}
-                onChange={e => updateRepo(idx, 'branch', e.target.value)}
-                placeholder="main"
-              />
-            </div>
-            <div>
-              <div style={labelStyle}>SSH key</div>
-              <select
-                value={repo.sshKeyId}
-                onChange={e => updateRepo(idx, 'sshKeyId', e.target.value)}
-                style={inputStyle}
-              >
-                <option value="">— no key (HTTPS only) —</option>
-                {sshKeys.map(k => (
-                  <option key={k.id} value={k.id}>{k.name} ({k.id})</option>
-                ))}
-              </select>
-            </div>
-          </div>
+          <RepositoryCard
+            key={idx}
+            idx={idx}
+            repo={repo}
+            sshKeys={sshKeys}
+            onChange={(key, val) => updateRepo(idx, key, val)}
+            onRemove={() => removeRepo(idx)}
+          />
         ))}
 
         <button
@@ -341,6 +438,8 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
           style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
         />
       </div>
+
+      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         <button

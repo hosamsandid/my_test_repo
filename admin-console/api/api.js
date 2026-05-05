@@ -710,16 +710,19 @@ app.get('/api/blueprints', async (req, res) => {
 });
 
 app.post('/api/blueprints', async (req, res) => {
-  const { id, displayName, role, systemPrompt, environmentId } = req.body || {};
-  if (!id || !displayName || !role || !systemPrompt || !environmentId) {
-    return res.status(400).json({ error: 'id, displayName, role, systemPrompt, environmentId required' });
+  const { id, displayName, role, systemPrompt, environmentId, briefingsPath } = req.body || {};
+  if (!id || !displayName || !role || !environmentId) {
+    return res.status(400).json({ error: 'id, displayName, role, environmentId required' });
+  }
+  if (!systemPrompt && role !== 'orchestrator') {
+    return res.status(400).json({ error: 'systemPrompt is required for non-orchestrator agents' });
   }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/blueprints`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, displayName, role, systemPrompt, environmentId }),
+      body: JSON.stringify({ id, displayName, role, systemPrompt, environmentId, briefingsPath }),
     });
     const data = await resp.json();
     res.status(resp.status).json(data);

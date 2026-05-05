@@ -1260,10 +1260,15 @@ async function main() {
       req.on('data', d => body += d);
       req.on('end', () => {
         try {
-          const { id, displayName, role, systemPrompt, environmentId } = JSON.parse(body);
-          if (!id || !displayName || !role || !systemPrompt || !environmentId) {
+          const { id, displayName, role, systemPrompt, environmentId, briefingsPath } = JSON.parse(body);
+          if (!id || !displayName || !role || !environmentId) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'id, displayName, role, systemPrompt, environmentId required' }));
+            res.end(JSON.stringify({ error: 'id, displayName, role, environmentId required' }));
+            return;
+          }
+          if (!systemPrompt && role !== 'orchestrator') {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'systemPrompt is required for non-orchestrator agents' }));
             return;
           }
           if (loadBlueprint(id)) {
@@ -1276,7 +1281,7 @@ async function main() {
             res.end(JSON.stringify({ error: `Working Environment '${environmentId}' not found` }));
             return;
           }
-          const blueprint = { id, displayName, role, systemPrompt, environmentId, createdAt: new Date().toISOString() };
+          const blueprint = { id, displayName, role, systemPrompt, environmentId, ...(briefingsPath && { briefingsPath }), createdAt: new Date().toISOString() };
           saveBlueprint(id, blueprint);
           seedBlueprintMemory(id);
           res.writeHead(201, { 'Content-Type': 'application/json' });

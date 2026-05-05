@@ -1310,6 +1310,37 @@ app.get('/api/agents/:agentId/session/:roomId/stream', (req, res) => {
   });
 });
 
+/* ─── Agent activity statuses ───────────────────────────────────────── */
+
+// Returns [{ id, activityState: 'busy' | 'idle' | 'offline' | 'disabled' }]
+// for every known agent. The orchestrator process list determines online/offline;
+// each agent writes status.json to its workspace directory to signal busy/idle.
+app.get('/api/agents/statuses', async (req, res) => {
+  const ids = listAgentDirs();
+
+  let runningIds = new Set();
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/agents/processes`);
+    if (resp.ok) {
+      const processes = await resp.json();
+      for (const p of processes) {
+        if (p.running) runningIds.add(p.id);
+      }
+    }
+  } catch { /* orchestrator unreachable — all agents appear offline */ }
+
+  const statuses = ids.map(id => {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    if (cfg.enabled === false) return { id, activityState: 'disabled' };
+    if (!runningIds.has(id)) return { id, activityState: 'offline' };
+    const status = readJsonFile(path.join(AGENTS_DIR, id, 'status.json'), null);
+    return { id, activityState: status?.state === 'busy' ? 'busy' : 'idle' };
+  });
+
+  res.json(statuses);
+});
+
 /* ─── SPA fallback ──────────────────────────────────────────────────── */
 
 app.get('*', (req, res) => {

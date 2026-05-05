@@ -10,8 +10,9 @@ import { MessageCircle, Bot, Brain, Clock, Server } from 'lucide-react';
  * @param {object[]} agents          List of `/api/matrix/agents` entries
  * @param {string|null} selectedAgentId
  * @param {(id:string)=>void} onSelect
+ * @param {Record<string,string>} statuses  Map agentId → activityState
  */
-export default function AgentList({ agents, selectedAgentId, onSelect }) {
+export default function AgentList({ agents, selectedAgentId, onSelect, statuses = {} }) {
   return (
     <div role="listbox" style={{ display: 'flex', flexDirection: 'column' }}>
       {agents.map(agent => (
@@ -20,6 +21,7 @@ export default function AgentList({ agents, selectedAgentId, onSelect }) {
           agent={agent}
           selected={agent.id === selectedAgentId}
           onSelect={() => onSelect(agent.id)}
+          activityState={statuses[agent.id] || 'idle'}
         />
       ))}
     </div>
@@ -35,9 +37,16 @@ function iconForRole(role) {
   }
 }
 
-function AgentRow({ agent, selected, onSelect }) {
+const STATUS_DOT = {
+  busy:     { color: 'var(--eb-status-warning)', label: 'Arbeitet gerade…', pulse: true },
+  idle:     { color: 'var(--eb-status-success)', label: 'Bereit',           pulse: false },
+  offline:  { color: 'var(--eb-status-error)',   label: 'Offline',          pulse: false },
+  disabled: { color: 'var(--eb-text-muted)',     label: 'Deaktiviert',      pulse: false },
+};
+
+function AgentRow({ agent, selected, onSelect, activityState = 'idle' }) {
   const Icon = iconForRole(agent.role);
-  const enabled = agent.enabled !== false;
+  const dot = STATUS_DOT[activityState] ?? STATUS_DOT.idle;
 
   return (
     <button
@@ -100,12 +109,13 @@ function AgentRow({ agent, selected, onSelect }) {
       </div>
 
       <span
-        title={enabled ? 'Enabled' : 'Disabled'}
+        title={dot.label}
+        className={dot.pulse ? 'eb-status-pulse' : undefined}
         style={{
           width: 8,
           height: 8,
           borderRadius: '50%',
-          background: enabled ? 'var(--eb-status-success)' : 'var(--eb-text-muted)',
+          background: dot.color,
           flexShrink: 0,
         }}
       />

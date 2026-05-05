@@ -220,6 +220,15 @@ code, pre, kbd {
   color: oklch(0.95 0.01 195);
 }
 
+/* ─── Agent status dot pulse animation ─────────────────────────────── */
+@keyframes eb-status-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.35; }
+}
+.eb-status-pulse {
+  animation: eb-status-pulse 1.4s ease-in-out infinite;
+}
+
 /* ─── Shiki dual-theme switching (rehype-pretty-code) ────────────────────
    rehype-pretty-code v0.13 with `theme: { light, dark }` emits CSS
    variables `--shiki-light`, `--shiki-light-bg`, `--shiki-dark`,

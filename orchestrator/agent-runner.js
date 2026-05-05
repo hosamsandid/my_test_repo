@@ -125,6 +125,20 @@ function clearSessionPointer(roomId) {
 }
 
 // ============================================================
+// Activity status (written to status.json for the Admin Console)
+// ============================================================
+function writeStatus(state) {
+  try {
+    fs.writeFileSync(
+      path.join(AGENT_WORKDIR, 'status.json'),
+      JSON.stringify({ state, updatedAt: new Date().toISOString() })
+    );
+  } catch { /* best effort — never crash the runner */ }
+}
+
+let activeInvocations = 0;
+
+// ============================================================
 // Claude CLI
 // ============================================================
 /**
@@ -430,6 +444,7 @@ class TriggerScheduler {
         console.error(`[Runner:${AGENT_ID}] session-log warning: ${err.message}`);
       }
 
+      if (++activeInvocations === 1) writeStatus('busy');
       let result;
       try {
         result = await callClaude(prompt, { roomId, correlationId, timeoutMs });
@@ -443,6 +458,8 @@ class TriggerScheduler {
           });
         } catch {}
         throw err;
+      } finally {
+        if (--activeInvocations === 0) writeStatus('idle');
       }
 
       if (result.trim().startsWith("[PASS]")) {
@@ -494,6 +511,7 @@ async function main() {
 
   // Ensure workspace directory exists
   fs.mkdirSync(AGENT_WORKDIR, { recursive: true });
+  writeStatus('idle');
 
   const stateFile = path.join(AGENT_WORKDIR, ".agent-state.json");
   const client = new MatrixClient(
@@ -580,7 +598,13 @@ async function main() {
       }
 
       try {
-        const result = await callClaude(body, { roomId, correlationId });
+        if (++activeInvocations === 1) writeStatus('busy');
+        let result;
+        try {
+          result = await callClaude(body, { roomId, correlationId });
+        } finally {
+          if (--activeInvocations === 0) writeStatus('idle');
+        }
         let eventId;
         try {
           eventId = await sendFormatted(client, roomId, result);
@@ -667,7 +691,13 @@ async function main() {
     }
 
     try {
-      const result = await callClaude(prompt, { roomId, correlationId });
+      if (++activeInvocations === 1) writeStatus('busy');
+      let result;
+      try {
+        result = await callClaude(prompt, { roomId, correlationId });
+      } finally {
+        if (--activeInvocations === 0) writeStatus('idle');
+      }
 
       // [PASS] filtering: suppress output if agent has nothing to say
       if (!isDirect && result.trim().startsWith("[PASS]")) {

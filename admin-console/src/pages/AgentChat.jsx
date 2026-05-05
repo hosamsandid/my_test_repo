@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { PanelRightOpen, MessageCircle, Loader2 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
@@ -7,6 +7,7 @@ import ChatPanel from './agent-chat/ChatPanel';
 import RightRail from './agent-chat/RightRail';
 
 const LAST_AGENT_KEY = 'agentChat.lastAgentId';
+const STATUS_POLL_MS = 5000;
 
 /**
  * Top-level page for the integrated agent chat (PR #3).
@@ -29,6 +30,26 @@ export default function AgentChat() {
   // Local map agentId -> roomId, for rooms we created during this session
   // (overrides the persisted `dmRoomId` returned by /api/matrix/agents).
   const [createdRooms, setCreatedRooms] = useState({});
+
+  // Map agentId -> activityState ('idle'|'busy'|'offline'|'disabled')
+  // polled every STATUS_POLL_MS so the list reflects live agent activity.
+  const [agentStatuses, setAgentStatuses] = useState({});
+  const statusTimerRef = useRef(null);
+  useEffect(() => {
+    const poll = () => {
+      fetch('/api/agents/statuses')
+        .then(r => r.ok ? r.json() : [])
+        .then(list => {
+          const map = {};
+          for (const { id, activityState } of list) map[id] = activityState;
+          setAgentStatuses(map);
+        })
+        .catch(() => {});
+    };
+    poll();
+    statusTimerRef.current = setInterval(poll, STATUS_POLL_MS);
+    return () => clearInterval(statusTimerRef.current);
+  }, []);
 
   // Right-rail (session log panel) toggle, persisted in localStorage so the
   // user's preference survives reload.
@@ -214,6 +235,7 @@ export default function AgentChat() {
               agents={agents}
               selectedAgentId={agentId || null}
               onSelect={handleSelect}
+              statuses={agentStatuses}
             />
           )}
         </div>

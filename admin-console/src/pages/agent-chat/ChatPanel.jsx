@@ -480,6 +480,7 @@ export default function ChatPanel({
   const lastMsg = messages[messages.length - 1];
   const showThinking =
     !!lastMsg &&
+    lastMsg.type !== 'context-reset' &&
     lastMsg.sender !== agent.userId &&
     !lastMsg.isOptimistic && // already covered by sending state below
     !sending;

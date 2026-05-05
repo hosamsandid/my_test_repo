@@ -362,8 +362,8 @@ function AgentCloneForm({ sourceAgent, onSave, onCancel, saving, error }) {
       )}
 
       <InfoBanner>
-        Klont den kompletten Workspace von <strong>{sourceAgent.displayName || sourceAgent.id}</strong> —
-        inklusive Memory, Skills, Prompt und Triggern. Sitzungsdaten werden nicht übernommen.
+        Clones the full workspace of <strong>{sourceAgent.displayName || sourceAgent.id}</strong> —
+        including memory, skills, prompt and triggers. Session history is not copied.
       </InfoBanner>
 
       <div>
@@ -375,12 +375,12 @@ function AgentCloneForm({ sourceAgent, onSave, onCancel, saving, error }) {
           placeholder="e.g. cobol-expert-2"
         />
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-          Nur Kleinbuchstaben, Ziffern und Bindestriche. Wird zu @id:local.
+          Only lowercase letters, digits and hyphens. Becomes @id:local.
         </div>
       </div>
 
       <FormInput
-        label="Anzeigename *"
+        label="Display Name *"
         value={form.newDisplayName}
         onChange={v => update('newDisplayName', v)}
         placeholder="COBOL Expert 2"
@@ -392,13 +392,13 @@ function AgentCloneForm({ sourceAgent, onSave, onCancel, saving, error }) {
           disabled={saving || !canSubmit}
           style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: saving ? 'wait' : 'pointer', fontFamily: 'inherit', opacity: (saving || !canSubmit) ? 0.6 : 1 }}
         >
-          {saving ? 'Klone Agent…' : 'Agent klonen'}
+          {saving ? 'Cloning agent…' : 'Clone agent'}
         </button>
         <button
           onClick={onCancel}
           style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-secondary)', cursor: 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit' }}
         >
-          Abbrechen
+          Cancel
         </button>
       </div>
     </div>

@@ -185,14 +185,12 @@ function InstanceCreateForm({ blueprint, onSave, onCancel, saving, error }) {
 }
 
 /* ── Shared Memory Viewer ──────────────────────────────────────────── */
-function MemoryViewer({ blueprintId, onClose }) {
-  const { data: contextData, loading: loadingCtx } = useApi(`/api/blueprints/${blueprintId}/memory/context.md`);
-  const { data: logData, loading: loadingLog } = useApi(`/api/blueprints/${blueprintId}/memory/log.md`);
+const MEMORY_TABS = ['context.md', 'log.md', 'facts.md', 'entities.md', 'users.md'];
 
-  const [activeTab, setActiveTab] = useState('context');
-  const raw = activeTab === 'context' ? contextData : logData;
+function MemoryViewer({ blueprintId, onClose }) {
+  const [activeTab, setActiveTab] = useState('context.md');
+  const { data: raw, loading } = useApi(`/api/blueprints/${blueprintId}/memory/${activeTab}`);
   const content = typeof raw === 'object' && raw !== null ? raw.content : raw;
-  const loading = activeTab === 'context' ? loadingCtx : loadingLog;
 
   const tabStyle = (tab) => ({
     padding: 'var(--eb-space-2) var(--eb-space-3)',
@@ -207,9 +205,10 @@ function MemoryViewer({ blueprintId, onClose }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', height: '100%' }}>
-      <div style={{ display: 'flex', borderBottom: '1px solid var(--eb-border-default)' }}>
-        <button style={tabStyle('context')} onClick={() => setActiveTab('context')}>context.md</button>
-        <button style={tabStyle('log')} onClick={() => setActiveTab('log')}>log.md</button>
+      <div style={{ display: 'flex', borderBottom: '1px solid var(--eb-border-default)', flexWrap: 'wrap' }}>
+        {MEMORY_TABS.map(tab => (
+          <button key={tab} style={tabStyle(tab)} onClick={() => setActiveTab(tab)}>{tab}</button>
+        ))}
       </div>
       {loading ? (
         <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading…</div>

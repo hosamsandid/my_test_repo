@@ -726,7 +726,7 @@ function fileIconFor(name) {
   if (lower === 'skill.md') {
     return <BookOpen size={12} color="var(--eb-status-success)" />;
   }
-  if (lower === 'context.md' || lower === 'log.md' || lower.startsWith('memory.')) {
+  if (['context.md', 'log.md', 'facts.md', 'entities.md', 'users.md'].includes(lower) || lower.startsWith('memory.')) {
     return <Brain size={12} color="var(--eb-accent-primary)" />;
   }
   if (lower.endsWith('.md') || lower.endsWith('.txt') || lower.endsWith('.log')) {

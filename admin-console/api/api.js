@@ -691,6 +691,110 @@ app.delete('/api/environments/:id', (req, res) => {
   res.status(204).end();
 });
 
+/* ─── Blueprints ────────────────────────────────────────────────────── */
+
+app.get('/api/blueprints', async (req, res) => {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/blueprints`);
+    const data = await resp.json();
+    res.status(resp.status).json(data);
+  } catch (err) {
+    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+app.post('/api/blueprints', async (req, res) => {
+  const { id, displayName, role, systemPrompt, environmentId } = req.body || {};
+  if (!id || !displayName || !role || !systemPrompt || !environmentId) {
+    return res.status(400).json({ error: 'id, displayName, role, systemPrompt, environmentId required' });
+  }
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/blueprints`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, displayName, role, systemPrompt, environmentId }),
+    });
+    const data = await resp.json();
+    res.status(resp.status).json(data);
+  } catch (err) {
+    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+app.delete('/api/blueprints/:id', async (req, res) => {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/blueprints/${encodeURIComponent(req.params.id)}`, {
+      method: 'DELETE',
+    });
+    if (resp.status === 200 || resp.status === 204) return res.status(204).end();
+    const data = await resp.json().catch(() => ({}));
+    res.status(resp.status).json(data);
+  } catch (err) {
+    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+app.post('/api/blueprints/:id/instances', async (req, res) => {
+  const { instanceId, displayName } = req.body || {};
+  if (!instanceId || !displayName) {
+    return res.status(400).json({ error: 'instanceId and displayName required' });
+  }
+  const normalizedId = instanceId.toLowerCase().replace(/[^a-z0-9-]/g, '');
+  if (!normalizedId) {
+    return res.status(400).json({ error: 'instanceId must contain at least one valid character (a-z, 0-9, -)' });
+  }
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(
+      `${orchestratorUrl}/internal/blueprints/${encodeURIComponent(req.params.id)}/instances`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instanceId: normalizedId, displayName }),
+      }
+    );
+    const data = await resp.json();
+    res.status(resp.status).json(data);
+  } catch (err) {
+    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+app.get('/api/blueprints/:id/memory/:file', async (req, res) => {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(
+      `${orchestratorUrl}/internal/blueprints/${encodeURIComponent(req.params.id)}/memory/${encodeURIComponent(req.params.file)}`
+    );
+    if (!resp.ok) return res.status(resp.status).json({ error: 'Not found' });
+    const content = await resp.text();
+    res.json({ content });
+  } catch (err) {
+    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+app.put('/api/blueprints/:id/memory/:file', express.text({ type: '*/*' }), async (req, res) => {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(
+      `${orchestratorUrl}/internal/blueprints/${encodeURIComponent(req.params.id)}/memory/${encodeURIComponent(req.params.file)}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'text/plain' },
+        body: typeof req.body === 'string' ? req.body : JSON.stringify(req.body),
+      }
+    );
+    const data = await resp.json().catch(() => ({}));
+    res.status(resp.status).json(data);
+  } catch (err) {
+    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 /* ─── SSH Keys ──────────────────────────────────────────────────────── */
 
 app.get('/api/ssh-keys', (req, res) => {

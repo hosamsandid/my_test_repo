@@ -57,6 +57,9 @@ if (!AGENT_ID || !AGENT_TOKEN || !AGENT_USER_ID || !HOMESERVER) {
 
 const AGENT_WORKDIR = path.join(AGENTS_DIR, AGENT_ID);
 
+// Load blueprintId at startup (available after config is read below in main())
+let BLUEPRINT_ID = null;
+
 // ============================================================
 // Storage helpers
 // ============================================================
@@ -177,12 +180,24 @@ let activeInvocations = 0;
  * fallback). Rejects on timeout or non-zero exit.
  */
 function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT, resume = true } = {}) {
-  const memoryHint =
-    "Read memory/context.md and memory/log.md first (if they exist) before responding. " +
-    "If the user asks you to remember something: update the memory files. " +
-    "IMPORTANT: Your workspace root is the current working directory. " +
-    "Memory entries may reference absolute paths like /workspace/... from a different context. " +
-    "Translate these to relative paths in your current directory (e.g. /workspace/314092_foo/ becomes ./314092_foo/).";
+  const memoryHint = BLUEPRINT_ID
+    ? `This agent is an instance of blueprint '${BLUEPRINT_ID}'. ` +
+      `Memory is SHARED across all instances of this blueprint. ` +
+      `WORKFLOW — follow this exactly: ` +
+      `(1) PULL shared memory at conversation start: ` +
+      `curl -sf http://localhost:4002/internal/blueprints/${BLUEPRINT_ID}/memory/context.md > memory/context.md || true; ` +
+      `curl -sf http://localhost:4002/internal/blueprints/${BLUEPRINT_ID}/memory/log.md > memory/log.md || true. ` +
+      `Then read both files. ` +
+      `(2) Update memory/context.md and memory/log.md locally during the conversation. ` +
+      `(3) PUSH at end (wrap-up or remember request): ` +
+      `curl -s -X PUT -H 'Content-Type: text/plain' --data-binary @memory/context.md http://localhost:4002/internal/blueprints/${BLUEPRINT_ID}/memory/context.md; ` +
+      `curl -s -X PUT -H 'Content-Type: text/plain' --data-binary @memory/log.md http://localhost:4002/internal/blueprints/${BLUEPRINT_ID}/memory/log.md. ` +
+      `IMPORTANT: Your workspace root is the current working directory.`
+    : "Read memory/context.md and memory/log.md first (if they exist) before responding. " +
+      "If the user asks you to remember something: update the memory files. " +
+      "IMPORTANT: Your workspace root is the current working directory. " +
+      "Memory entries may reference absolute paths like /workspace/... from a different context. " +
+      "Translate these to relative paths in your current directory (e.g. /workspace/314092_foo/ becomes ./314092_foo/).";
 
   const baseArgs = [
     "-p", prompt,
@@ -521,6 +536,10 @@ async function main() {
 
   const displayName = config.displayName || AGENT_ID;
   const role = config.role || "expert";
+  BLUEPRINT_ID = config.blueprintId || null;
+  if (BLUEPRINT_ID) {
+    console.log(`[Runner:${AGENT_ID}] Blueprint instance: ${BLUEPRINT_ID}`);
+  }
 
   // Ensure workspace directory exists
   fs.mkdirSync(AGENT_WORKDIR, { recursive: true });

@@ -21,6 +21,7 @@ const CONDUWUIT_ADMIN_TOKEN = process.env.CONDUWUIT_ADMIN_TOKEN;
 const CONDUWUIT_ADMIN_ROOM = process.env.CONDUWUIT_ADMIN_ROOM;
 
 const AGENTS_DIR = "/workspace/agents";
+const BLUEPRINTS_DIR = "/workspace/blueprints";
 const WORKSPACE = "/workspace";
 const TEMPLATE_WORKSPACE = "/template-workspace";
 const ENVIRONMENTS_DIR = "/workspace/environments";
@@ -126,13 +127,11 @@ function saveAgentConfig(id, config) {
   fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify(config, null, 2));
 }
 
-function saveAgentPrompt(id, prompt, role, env) {
+function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
   const dir = agentDir(id);
   fs.mkdirSync(dir, { recursive: true });
-  // Store raw agent prompt separately for re-merging on updates
   fs.writeFileSync(path.join(dir, "AGENT-PROMPT.md"), prompt);
-  // Build merged CLAUDE.md: base workspace instructions + env context + agent role
-  fs.writeFileSync(path.join(dir, "CLAUDE.md"), buildAgentClaudeMd(prompt, role, env));
+  fs.writeFileSync(path.join(dir, "CLAUDE.md"), buildAgentClaudeMd(prompt, role, env, blueprintId));
 }
 
 // ============================================================
@@ -150,7 +149,88 @@ function loadEnvironment(envId) {
   }
 }
 
-function buildAgentClaudeMd(agentPrompt, role, env) {
+// ============================================================
+// Blueprint storage
+// ============================================================
+function blueprintDir(id) {
+  return path.join(BLUEPRINTS_DIR, id);
+}
+
+function loadBlueprint(id) {
+  const p = path.join(blueprintDir(id), "blueprint.json");
+  if (!fs.existsSync(p)) return null;
+  try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; }
+}
+
+function saveBlueprint(id, data) {
+  const dir = blueprintDir(id);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "blueprint.json"), JSON.stringify(data, null, 2));
+}
+
+function listBlueprintIds() {
+  if (!fs.existsSync(BLUEPRINTS_DIR)) return [];
+  return fs.readdirSync(BLUEPRINTS_DIR).filter(f =>
+    fs.existsSync(path.join(BLUEPRINTS_DIR, f, "blueprint.json"))
+  );
+}
+
+function listInstanceIds(blueprintId) {
+  return listAgentIds().filter(id => {
+    const cfg = loadAgentConfig(id);
+    return cfg && cfg.blueprintId === blueprintId;
+  });
+}
+
+// ============================================================
+// Blueprint shared memory
+// ============================================================
+function blueprintMemoryDir(blueprintId) {
+  return path.join(BLUEPRINTS_DIR, blueprintId, "memory");
+}
+
+function ensureBlueprintMemoryDir(blueprintId) {
+  const dir = blueprintMemoryDir(blueprintId);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function readBlueprintMemory(blueprintId, filename) {
+  const safeFilename = path.basename(filename);
+  const p = path.join(blueprintMemoryDir(blueprintId), safeFilename);
+  try {
+    if (fs.existsSync(p)) return fs.readFileSync(p, "utf8");
+  } catch {}
+  return "";
+}
+
+function writeBlueprintMemory(blueprintId, filename, content) {
+  const dir = ensureBlueprintMemoryDir(blueprintId);
+  const safeFilename = path.basename(filename);
+  const p = path.join(dir, safeFilename);
+  const tmp = p + ".tmp";
+  fs.writeFileSync(tmp, content, "utf8");
+  fs.renameSync(tmp, p);
+}
+
+// Seed blueprint memory from template if files don't exist yet
+function seedBlueprintMemory(blueprintId) {
+  const dir = ensureBlueprintMemoryDir(blueprintId);
+  const templateMemory = path.join(TEMPLATE_WORKSPACE, "memory");
+  if (!fs.existsSync(templateMemory)) return;
+  for (const file of fs.readdirSync(templateMemory)) {
+    const dst = path.join(dir, file);
+    if (!fs.existsSync(dst)) {
+      try {
+        let content = fs.readFileSync(path.join(templateMemory, file), "utf8");
+        content = content.replace(/\/workspace\//g, "./");
+        fs.writeFileSync(dst, content, "utf8");
+      } catch {}
+    }
+  }
+}
+
+function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null) {
   const candidates = [
     path.join(TEMPLATE_WORKSPACE, "CLAUDE.md"),
     "/defaults/CLAUDE.md",
@@ -234,7 +314,28 @@ function buildAgentClaudeMd(agentPrompt, role, env) {
     }
   }
 
-  return `${base}\n\n---\n\n${pathNote}${envSection}\n---\n\n## Agent Role\n\n${agentPrompt}${extra}`;
+  let blueprintSection = "";
+  if (blueprintId) {
+    blueprintSection =
+      `\n---\n\n## Memory System (Shared — Blueprint Instance)\n\n` +
+      `This agent is an **instance of blueprint \`${blueprintId}\`**. ` +
+      `Memory is **shared** across all instances of this blueprint — whatever one instance learns, all instances know.\n\n` +
+      `### Reading memory (do this at the start of each conversation)\n\n` +
+      "```bash\n" +
+      `curl -sf http://localhost:4002/internal/blueprints/${blueprintId}/memory/context.md > memory/context.md || true\n` +
+      `curl -sf http://localhost:4002/internal/blueprints/${blueprintId}/memory/log.md > memory/log.md || true\n` +
+      "```\n\n" +
+      `Then read both files as usual.\n\n` +
+      `### Writing memory (when wrapping up or asked to remember something)\n\n` +
+      `Edit the local files as usual, then push to the shared store:\n\n` +
+      "```bash\n" +
+      `curl -s -X PUT -H 'Content-Type: text/plain' --data-binary @memory/context.md http://localhost:4002/internal/blueprints/${blueprintId}/memory/context.md\n` +
+      `curl -s -X PUT -H 'Content-Type: text/plain' --data-binary @memory/log.md http://localhost:4002/internal/blueprints/${blueprintId}/memory/log.md\n` +
+      "```\n\n" +
+      `**Always pull before reading** — another instance may have updated memory since your last session.\n`;
+  }
+
+  return `${base}\n\n---\n\n${pathNote}${envSection}\n---\n\n## Agent Role\n\n${agentPrompt}${extra}${blueprintSection}`;
 }
 
 function seedAgentWorkspace(id, env) {
@@ -361,6 +462,58 @@ function patchSeededPaths(dir) {
       console.log(`[Orchestrator] Patch warning (${file}): ${err.message}`);
     }
   }
+}
+
+// Workspace seeding for blueprint instances: no memory copy (shared via API)
+function seedAgentWorkspaceForInstance(id, env, blueprintId) {
+  const dest = agentDir(id);
+  fs.mkdirSync(dest, { recursive: true });
+
+  if (!fs.existsSync(TEMPLATE_WORKSPACE)) {
+    console.log(`[Orchestrator] Template workspace not available — skipping seed for instance ${id}`);
+    return { seeded: false, warnings: ["Template workspace not mounted"] };
+  }
+
+  const warnings = [];
+
+  // Copy .claude settings (not memory — shared via blueprint)
+  const src = path.join(TEMPLATE_WORKSPACE, ".claude");
+  const dst = path.join(dest, ".claude");
+  if (fs.existsSync(src)) {
+    try { fs.cpSync(src, dst, { recursive: true }); }
+    catch (err) { warnings.push(`copy .claude: ${err.message}`); }
+  }
+
+  // Copy selected skills
+  const selectedSkills = (env && Array.isArray(env.skills)) ? env.skills : [];
+  if (selectedSkills.length > 0) {
+    const skillsSrc = path.join(TEMPLATE_WORKSPACE, "skills");
+    const skillsDst = path.join(dest, "skills");
+    fs.mkdirSync(skillsDst, { recursive: true });
+    for (const skillName of selectedSkills) {
+      const skillSrc = path.join(skillsSrc, skillName);
+      const skillDst = path.join(skillsDst, skillName);
+      if (!fs.existsSync(skillSrc)) { warnings.push(`skill not found: ${skillName}`); continue; }
+      try { fs.cpSync(skillSrc, skillDst, { recursive: true }); }
+      catch (err) { warnings.push(`skill ${skillName}: ${err.message}`); }
+    }
+  }
+
+  // Create local memory dir (used as staging area; content synced from blueprint API at session start)
+  fs.mkdirSync(path.join(dest, "memory"), { recursive: true });
+
+  // Ensure blueprint memory dir exists and seed from template if first instance
+  seedBlueprintMemory(blueprintId);
+
+  // Git clone
+  let cloneInfo = null;
+  if (env && env.repository && env.repository.url) {
+    try { cloneInfo = cloneRepository(dest, env.repository); }
+    catch (err) { warnings.push(`git clone: ${err.message}`); }
+  }
+
+  console.log(`[Orchestrator] Seeded instance workspace for ${id} (blueprint=${blueprintId}, skills=${selectedSkills.length}${cloneInfo ? `, repo=${cloneInfo.repoName}` : ""})`);
+  return { seeded: true, warnings, clone: cloneInfo };
 }
 
 // ============================================================
@@ -622,6 +775,54 @@ class Orchestrator {
     return {
       id,
       userId,
+      seeded: seedResult.seeded,
+      warnings: seedResult.warnings || [],
+      clone: seedResult.clone || null,
+    };
+  }
+
+  // ===========================================================
+  // Blueprint instance creation
+  // ===========================================================
+  async createInstance(blueprintId, instanceId, instanceDisplayName) {
+    const blueprint = loadBlueprint(blueprintId);
+    if (!blueprint) throw new Error(`Blueprint '${blueprintId}' not found`);
+    if (loadAgentConfig(instanceId)) throw new Error(`Agent '${instanceId}' already exists`);
+
+    const env = loadEnvironment(blueprint.environmentId);
+    if (!env) throw new Error(`Working Environment '${blueprint.environmentId}' not found`);
+
+    const password = `agent-${instanceId}-${Date.now()}`;
+    const userId = `@${instanceId}:local`;
+
+    if (this.adminClient) await ensureMatrixUser(this.adminClient, instanceId, password);
+    const token = await loginMatrixUser(instanceId, password);
+    await setDisplayName(token, userId, instanceDisplayName);
+    await inviteAndJoin(this.poolClient, token, MULTI_AGENT_ROOM);
+
+    const seedResult = seedAgentWorkspaceForInstance(instanceId, env, blueprintId);
+
+    const config = {
+      id: instanceId,
+      displayName: instanceDisplayName,
+      userId,
+      token,
+      role: blueprint.role,
+      environmentId: env.id,
+      blueprintId,
+      enabled: true,
+    };
+    saveAgentConfig(instanceId, config);
+    saveAgentPrompt(instanceId, blueprint.systemPrompt, blueprint.role, env, blueprintId);
+
+    this.agentConfigs.set(instanceId, { config });
+    startAgentProcess(config);
+
+    console.log(`[Orchestrator] Created instance ${instanceId} from blueprint ${blueprintId}`);
+    return {
+      id: instanceId,
+      userId,
+      blueprintId,
       seeded: seedResult.seeded,
       warnings: seedResult.warnings || [],
       clone: seedResult.clone || null,
@@ -948,6 +1149,148 @@ async function main() {
       res.end(JSON.stringify(processes));
       return;
     }
+
+    // ── Blueprint routes ───────────────────────────────────────────────────
+    if (req.method === 'GET' && req.url === '/internal/blueprints') {
+      const blueprints = listBlueprintIds().map(id => {
+        const bp = loadBlueprint(id);
+        const instances = listInstanceIds(id).map(iid => {
+          const cfg = loadAgentConfig(iid);
+          return { id: iid, displayName: cfg?.displayName || iid, enabled: cfg?.enabled !== false };
+        });
+        return { ...bp, instances };
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(blueprints));
+      return;
+    }
+
+    const blueprintInstanceMatch = req.method === 'POST' && req.url.match(/^\/internal\/blueprints\/([^/]+)\/instances$/);
+    if (blueprintInstanceMatch) {
+      const blueprintId = decodeURIComponent(blueprintInstanceMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        try {
+          const { instanceId, displayName } = JSON.parse(body);
+          if (!instanceId || !displayName) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'instanceId and displayName required' }));
+            return;
+          }
+          const result = await orchestrator.createInstance(blueprintId, instanceId, displayName);
+          res.writeHead(201, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] createInstance error: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404 : /already exists/i.test(err.message) ? 409 : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    const blueprintMemoryGetMatch = req.method === 'GET' && req.url.match(/^\/internal\/blueprints\/([^/]+)\/memory\/([^/]+)$/);
+    if (blueprintMemoryGetMatch) {
+      const blueprintId = decodeURIComponent(blueprintMemoryGetMatch[1]);
+      const filename = decodeURIComponent(blueprintMemoryGetMatch[2]);
+      if (!loadBlueprint(blueprintId)) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Blueprint not found' }));
+        return;
+      }
+      const content = readBlueprintMemory(blueprintId, filename);
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end(content);
+      return;
+    }
+
+    const blueprintMemoryPutMatch = req.method === 'PUT' && req.url.match(/^\/internal\/blueprints\/([^/]+)\/memory\/([^/]+)$/);
+    if (blueprintMemoryPutMatch) {
+      const blueprintId = decodeURIComponent(blueprintMemoryPutMatch[1]);
+      const filename = decodeURIComponent(blueprintMemoryPutMatch[2]);
+      if (!loadBlueprint(blueprintId)) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Blueprint not found' }));
+        return;
+      }
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', () => {
+        try {
+          writeBlueprintMemory(blueprintId, filename, body);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    const blueprintDeleteMatch = req.method === 'DELETE' && req.url.match(/^\/internal\/blueprints\/([^/]+)$/);
+    if (blueprintDeleteMatch) {
+      const blueprintId = decodeURIComponent(blueprintDeleteMatch[1]);
+      if (!loadBlueprint(blueprintId)) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Blueprint not found' }));
+        return;
+      }
+      const instances = listInstanceIds(blueprintId);
+      if (instances.length > 0) {
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `Blueprint has ${instances.length} instance(s). Delete them first.` }));
+        return;
+      }
+      try {
+        fs.rmSync(blueprintDir(blueprintId), { recursive: true });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    const blueprintCreateMatch = req.method === 'POST' && req.url === '/internal/blueprints';
+    if (blueprintCreateMatch) {
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', () => {
+        try {
+          const { id, displayName, role, systemPrompt, environmentId } = JSON.parse(body);
+          if (!id || !displayName || !role || !systemPrompt || !environmentId) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'id, displayName, role, systemPrompt, environmentId required' }));
+            return;
+          }
+          if (loadBlueprint(id)) {
+            res.writeHead(409, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `Blueprint '${id}' already exists` }));
+            return;
+          }
+          if (!loadEnvironment(environmentId)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `Working Environment '${environmentId}' not found` }));
+            return;
+          }
+          const blueprint = { id, displayName, role, systemPrompt, environmentId, createdAt: new Date().toISOString() };
+          saveBlueprint(id, blueprint);
+          seedBlueprintMemory(id);
+          res.writeHead(201, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(blueprint));
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── End blueprint routes ───────────────────────────────────────────────
 
     const cloneMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/clone$/);
     if (cloneMatch) {

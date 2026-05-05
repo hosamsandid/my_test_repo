@@ -1,10 +1,10 @@
 import React from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { GitBranch } from 'lucide-react';
+import { GitBranch, Server } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import { BPGraph } from './briefings/BPGraph';
 
-function FlowRow({ agent, selected, onSelect }) {
+function FlowRow({ agent, environmentName, selected, onSelect }) {
   return (
     <button
       onClick={onSelect}
@@ -33,16 +33,33 @@ function FlowRow({ agent, selected, onSelect }) {
       }}
     >
       <GitBranch size={18} style={{ flexShrink: 0, color: selected ? 'var(--eb-accent-primary)' : 'var(--eb-text-muted)' }} />
-      <div style={{
-        flex: 1, minWidth: 0,
-        fontSize: 'var(--eb-text-md)',
-        fontWeight: 'var(--eb-font-medium)',
-        color: 'var(--eb-text-primary)',
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
-      }}>
-        {agent.displayName || agent.id}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          fontSize: 'var(--eb-text-md)',
+          fontWeight: 'var(--eb-font-medium)',
+          color: 'var(--eb-text-primary)',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}>
+          {agent.displayName || agent.id}
+        </div>
+        {environmentName && (
+          <div style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 3,
+            marginTop: 2,
+            fontSize: 'var(--eb-text-xs)',
+            color: 'var(--eb-text-muted)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}>
+            <Server size={10} style={{ flexShrink: 0 }} />
+            {environmentName}
+          </div>
+        )}
       </div>
     </button>
   );
@@ -52,8 +69,10 @@ export default function Briefings() {
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedFlow = searchParams.get('flow');
   const { data: agents } = useApi('/api/agents');
+  const { data: environments } = useApi('/api/environments');
 
   const orchestrators = (agents || []).filter(a => a.role === 'orchestrator');
+  const envNameById = new Map((environments || []).map(e => [e.id, e.name]));
 
   function selectFlow(id) {
     setSearchParams({ flow: id });
@@ -114,6 +133,7 @@ export default function Briefings() {
               <FlowRow
                 key={a.id}
                 agent={a}
+                environmentName={envNameById.get(a.environmentId) || a.environmentId || null}
                 selected={selectedFlow === a.id}
                 onSelect={() => selectFlow(a.id)}
               />

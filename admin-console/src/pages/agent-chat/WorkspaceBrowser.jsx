@@ -1,7 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import rehypeSanitize from 'rehype-sanitize';
 import {
   ChevronRight, ChevronDown, Folder, FolderOpen, FileText, FileCode,
   Brain, Sparkles, BookOpen, Loader2, X, RefreshCw, AlertCircle, FileWarning,
+  Maximize2, Minimize2, Code2, Eye,
 } from 'lucide-react';
 
 /**
@@ -353,11 +358,259 @@ function Row({ indent, icon, label, secondary, dim, active, onClick }) {
 
 /* ─── File viewer ─────────────────────────────────────────────────── */
 
+function isMarkdownFile(path) {
+  return String(path || '').toLowerCase().endsWith('.md');
+}
+
+function FileViewerHeader({ relPath, data, isMarkdown, viewMode, onToggleViewMode, expanded, onToggleExpand, onClose }) {
+  const idx = relPath.lastIndexOf('/');
+  const dir = idx >= 0 ? relPath.slice(0, idx + 1) : '';
+  const file = idx >= 0 ? relPath.slice(idx + 1) : relPath;
+
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      gap: 'var(--eb-space-2)',
+      padding: '6px var(--eb-space-3)',
+      borderBottom: '1px solid var(--eb-border-default)',
+      flexShrink: 0,
+    }}>
+      <span style={{ display: 'inline-flex', flexShrink: 0 }}>
+        {fileIconFor(relPath.split('/').pop())}
+      </span>
+      <div
+        title={relPath}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          display: 'flex',
+          alignItems: 'baseline',
+          gap: 0,
+          fontSize: 'var(--eb-text-xs)',
+          fontFamily: 'var(--eb-font-mono)',
+        }}
+      >
+        {dir && (
+          <span style={{
+            color: 'var(--eb-text-muted)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            flexShrink: 1,
+            minWidth: 0,
+          }}>
+            {dir}
+          </span>
+        )}
+        <span style={{
+          color: 'var(--eb-text-primary)',
+          fontWeight: 'var(--eb-font-medium)',
+          whiteSpace: 'nowrap',
+          flexShrink: 0,
+        }}>
+          {file}
+        </span>
+      </div>
+      {data?.truncated && (
+        <span title={`Truncated at ${formatBytes(data.size)}; showing first 512 KB`}
+          style={{ display: 'inline-flex', alignItems: 'center', color: 'var(--eb-status-warning)' }}>
+          <FileWarning size={12} />
+        </span>
+      )}
+      {isMarkdown && (
+        <button
+          onClick={onToggleViewMode}
+          title={viewMode === 'rendered' ? 'Show raw source' : 'Show rendered Markdown'}
+          aria-label={viewMode === 'rendered' ? 'Show raw source' : 'Show rendered Markdown'}
+          style={iconBtnStyle}
+          onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
+          onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
+        >
+          {viewMode === 'rendered' ? <Code2 size={13} /> : <Eye size={13} />}
+        </button>
+      )}
+      <button
+        onClick={onToggleExpand}
+        title={expanded ? 'Collapse viewer' : 'Expand viewer'}
+        aria-label={expanded ? 'Collapse viewer' : 'Expand viewer'}
+        style={iconBtnStyle}
+        onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
+        onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
+      >
+        {expanded ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+      </button>
+      {onClose && (
+        <button
+          onClick={onClose}
+          title="Close file"
+          aria-label="Close file"
+          style={iconBtnStyle}
+          onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
+          onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
+        >
+          <X size={13} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function FileViewerBody({ loading, error, data, viewMode }) {
+  return (
+    <div style={{
+      flex: 1,
+      minHeight: 0,
+      overflow: 'auto',
+      padding: 0,
+      background: 'var(--eb-bg-app)',
+    }}>
+      {loading && (
+        <div style={{ ...emptyStyle, padding: 'var(--eb-space-4)' }}>
+          <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
+          <span style={{ marginLeft: 8 }}>Loading…</span>
+        </div>
+      )}
+      {!loading && error && (
+        <div style={{ ...emptyStyle, color: 'var(--eb-status-error)', padding: 'var(--eb-space-4)' }}>
+          <AlertCircle size={14} />
+          <span style={{ marginLeft: 8 }}>{error}</span>
+        </div>
+      )}
+      {!loading && !error && data && data.binary && (
+        <div style={{ ...emptyStyle, padding: 'var(--eb-space-4)', flexDirection: 'column', textAlign: 'center' }}>
+          <FileWarning size={20} />
+          <div style={{ marginTop: 8 }}>Binary file — preview unavailable</div>
+          <div style={{ marginTop: 4, fontSize: 'var(--eb-text-xs)' }}>
+            {formatBytes(data.size)}
+          </div>
+        </div>
+      )}
+      {!loading && !error && data && !data.binary && viewMode === 'rendered' && (
+        <div style={{ padding: 'var(--eb-space-3)', fontSize: 'var(--eb-text-sm)' }} className="ws-md">
+          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>
+            {data.content || ''}
+          </ReactMarkdown>
+          {data.truncated && (
+            <p style={{ marginTop: 'var(--eb-space-3)', color: 'var(--eb-status-warning)', fontStyle: 'italic', fontSize: 'var(--eb-text-xs)' }}>
+              --- truncated at 512 KB; full size {formatBytes(data.size)} ---
+            </p>
+          )}
+        </div>
+      )}
+      {!loading && !error && data && !data.binary && viewMode === 'raw' && (
+        <pre style={{
+          margin: 0,
+          padding: 'var(--eb-space-3)',
+          fontSize: 'var(--eb-text-xs)',
+          fontFamily: 'var(--eb-font-mono)',
+          color: 'var(--eb-text-primary)',
+          whiteSpace: 'pre',
+          tabSize: 2,
+          minWidth: 0,
+        }}>
+          {data.content || ''}
+          {data.truncated && (
+            <span style={{
+              display: 'block',
+              marginTop: 'var(--eb-space-3)',
+              color: 'var(--eb-status-warning)',
+              fontStyle: 'italic',
+            }}>
+              {`\n--- truncated at 512 KB; full size ${formatBytes(data.size)} ---`}
+            </span>
+          )}
+        </pre>
+      )}
+      <style>{`
+        .ws-md { line-height: 1.6; color: var(--eb-text-primary); }
+        .ws-md p { margin: 0; }
+        .ws-md p + p { margin-top: var(--eb-space-2); }
+        .ws-md ul, .ws-md ol { padding-left: 1.4em; margin: var(--eb-space-1) 0; }
+        .ws-md li { margin: 2px 0; }
+        .ws-md table { border-collapse: collapse; margin: var(--eb-space-2) 0; font-size: var(--eb-text-sm); width: max-content; max-width: 100%; }
+        .ws-md th, .ws-md td { border: 1px solid var(--eb-border-default); padding: 4px 8px; text-align: left; }
+        .ws-md th { background: var(--eb-bg-elevated); font-weight: var(--eb-font-semibold); }
+        .ws-md blockquote { margin: var(--eb-space-2) 0; padding-left: var(--eb-space-3); border-left: 3px solid var(--eb-border-default); color: var(--eb-text-secondary); }
+        .ws-md h1, .ws-md h2, .ws-md h3, .ws-md h4 { margin: var(--eb-space-3) 0 var(--eb-space-1); font-weight: var(--eb-font-semibold); }
+        .ws-md h1 { font-size: var(--eb-text-lg); }
+        .ws-md h2 { font-size: var(--eb-text-md); border-bottom: 1px solid var(--eb-border-default); padding-bottom: var(--eb-space-1); }
+        .ws-md h3 { font-size: var(--eb-text-md); color: var(--eb-text-secondary); }
+        .ws-md hr { border: none; border-top: 1px solid var(--eb-border-default); margin: var(--eb-space-3) 0; }
+        .ws-md a { color: var(--eb-accent-primary); }
+        .ws-md code { background: var(--eb-bg-elevated); padding: 1px 6px; border-radius: var(--eb-radius-sm); font-size: 0.9em; font-family: var(--eb-font-mono); border: 1px solid var(--eb-border-default); }
+        .ws-md pre { background: var(--eb-bg-elevated); border: 1px solid var(--eb-border-default); border-radius: var(--eb-radius-md); padding: var(--eb-space-3); overflow-x: auto; margin: var(--eb-space-2) 0; }
+        .ws-md pre code { background: none; border: none; padding: 0; font-size: var(--eb-text-xs); }
+      `}</style>
+    </div>
+  );
+}
+
+function FileViewerModal({ agentId, relPath, data, loading, error, viewMode, onToggleViewMode, onClose }) {
+  const isMarkdown = isMarkdownFile(relPath);
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return createPortal(
+    <div
+      role="dialog"
+      aria-modal="true"
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 9999,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'rgba(0,0,0,0.55)',
+        padding: 'var(--eb-space-4)',
+      }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        width: '90vw',
+        height: '90vh',
+        background: 'var(--eb-bg-surface)',
+        borderRadius: 'var(--eb-radius-lg)',
+        border: '1px solid var(--eb-border-default)',
+        boxShadow: '0 24px 64px rgba(0,0,0,0.4)',
+        overflow: 'hidden',
+      }}>
+        <FileViewerHeader
+          relPath={relPath}
+          data={data}
+          isMarkdown={isMarkdown}
+          viewMode={viewMode}
+          onToggleViewMode={onToggleViewMode}
+          expanded
+          onToggleExpand={onClose}
+          onClose={onClose}
+        />
+        <FileViewerBody loading={loading} error={error} data={data} viewMode={viewMode} />
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 function FileViewer({ agentId, path: relPath, onClose }) {
-  const [data, setData]     = useState(null);
+  const [data, setData]       = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError]   = useState(null);
+  const [error, setError]     = useState(null);
+  const [expanded, setExpanded] = useState(false);
+  const [viewMode, setViewMode] = useState(() => isMarkdownFile(relPath) ? 'rendered' : 'raw');
   const reqIdRef = useRef(0);
+
+  // Reset view mode when file changes.
+  useEffect(() => {
+    setViewMode(isMarkdownFile(relPath) ? 'rendered' : 'raw');
+  }, [relPath]);
 
   useEffect(() => {
     if (!agentId || !relPath) return;
@@ -381,144 +634,44 @@ function FileViewer({ agentId, path: relPath, onClose }) {
       });
   }, [agentId, relPath]);
 
-  return (
-    <div style={{
-      flex: '1 1 60%',
-      minHeight: 0,
-      display: 'flex',
-      flexDirection: 'column',
-      borderTop: '1px solid var(--eb-border-default)',
-      background: 'var(--eb-bg-surface)',
-    }}>
-      {/* Viewer header */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 'var(--eb-space-2)',
-        padding: '6px var(--eb-space-3)',
-        borderBottom: '1px solid var(--eb-border-default)',
-        flexShrink: 0,
-      }}>
-        <span style={{ display: 'inline-flex', flexShrink: 0 }}>
-          {fileIconFor(relPath.split('/').pop())}
-        </span>
-        {/* Path: show containing directory dimmed, filename in normal weight.
-            When the row overflows we ellipsize the directory part rather than
-            the filename, so the most useful piece stays visible. */}
-        {(() => {
-          const idx = relPath.lastIndexOf('/');
-          const dir = idx >= 0 ? relPath.slice(0, idx + 1) : '';
-          const file = idx >= 0 ? relPath.slice(idx + 1) : relPath;
-          return (
-            <div
-              title={relPath}
-              style={{
-                flex: 1,
-                minWidth: 0,
-                display: 'flex',
-                alignItems: 'baseline',
-                gap: 0,
-                fontSize: 'var(--eb-text-xs)',
-                fontFamily: 'var(--eb-font-mono)',
-              }}
-            >
-              {dir && (
-                <span style={{
-                  color: 'var(--eb-text-muted)',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  flexShrink: 1,
-                  minWidth: 0,
-                }}>
-                  {dir}
-                </span>
-              )}
-              <span style={{
-                color: 'var(--eb-text-primary)',
-                fontWeight: 'var(--eb-font-medium)',
-                whiteSpace: 'nowrap',
-                flexShrink: 0,
-              }}>
-                {file}
-              </span>
-            </div>
-          );
-        })()}
-        {data?.truncated && (
-          <span title={`Truncated at ${formatBytes(data.size)}; showing first 512 KB`}
-            style={{ display: 'inline-flex', alignItems: 'center', color: 'var(--eb-status-warning)' }}>
-            <FileWarning size={12} />
-          </span>
-        )}
-        <button
-          onClick={onClose}
-          title="Close file"
-          aria-label="Close file"
-          style={iconBtnStyle}
-          onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
-          onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
-        >
-          <X size={13} />
-        </button>
-      </div>
+  const isMarkdown = isMarkdownFile(relPath);
+  const toggleViewMode = () => setViewMode(m => m === 'rendered' ? 'raw' : 'rendered');
 
-      {/* Body */}
+  return (
+    <>
       <div style={{
-        flex: 1,
+        flex: '1 1 60%',
         minHeight: 0,
-        overflow: 'auto',
-        padding: 0,
-        background: 'var(--eb-bg-app)',
+        display: 'flex',
+        flexDirection: 'column',
+        borderTop: '1px solid var(--eb-border-default)',
+        background: 'var(--eb-bg-surface)',
       }}>
-        {loading && (
-          <div style={{ ...emptyStyle, padding: 'var(--eb-space-4)' }}>
-            <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
-            <span style={{ marginLeft: 8 }}>Loading…</span>
-          </div>
-        )}
-        {!loading && error && (
-          <div style={{ ...emptyStyle, color: 'var(--eb-status-error)', padding: 'var(--eb-space-4)' }}>
-            <AlertCircle size={14} />
-            <span style={{ marginLeft: 8 }}>{error}</span>
-          </div>
-        )}
-        {!loading && !error && data && data.binary && (
-          <div style={{ ...emptyStyle, padding: 'var(--eb-space-4)', flexDirection: 'column', textAlign: 'center' }}>
-            <FileWarning size={20} />
-            <div style={{ marginTop: 8 }}>Binary file — preview unavailable</div>
-            <div style={{ marginTop: 4, fontSize: 'var(--eb-text-xs)' }}>
-              {formatBytes(data.size)}
-            </div>
-          </div>
-        )}
-        {!loading && !error && data && !data.binary && (
-          <pre style={{
-            margin: 0,
-            padding: 'var(--eb-space-3)',
-            fontSize: 'var(--eb-text-xs)',
-            fontFamily: 'var(--eb-font-mono)',
-            color: 'var(--eb-text-primary)',
-            whiteSpace: 'pre',
-            tabSize: 2,
-            minWidth: 0,
-          }}>
-            {data.content || ''}
-            {data.truncated && (
-              <span style={{
-                display: 'block',
-                marginTop: 'var(--eb-space-3)',
-                color: 'var(--eb-status-warning)',
-                fontStyle: 'italic',
-              }}>
-                {/* Render as plain text so it sits inside the <pre> */}
-                {`\n--- truncated at 512 KB; full size ${formatBytes(data.size)} ---`}
-              </span>
-            )}
-          </pre>
-        )}
+        <FileViewerHeader
+          relPath={relPath}
+          data={data}
+          isMarkdown={isMarkdown}
+          viewMode={viewMode}
+          onToggleViewMode={toggleViewMode}
+          expanded={false}
+          onToggleExpand={() => setExpanded(true)}
+          onClose={onClose}
+        />
+        <FileViewerBody loading={loading} error={error} data={data} viewMode={viewMode} />
       </div>
-    </div>
+      {expanded && (
+        <FileViewerModal
+          agentId={agentId}
+          relPath={relPath}
+          data={data}
+          loading={loading}
+          error={error}
+          viewMode={viewMode}
+          onToggleViewMode={toggleViewMode}
+          onClose={() => setExpanded(false)}
+        />
+      )}
+    </>
   );
 }
 

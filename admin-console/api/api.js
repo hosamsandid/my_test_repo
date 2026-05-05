@@ -211,6 +211,35 @@ app.get('/api/agents', (req, res) => {
   res.json(agents);
 });
 
+// NOTE: must be registered BEFORE `/api/agents/:id` — otherwise Express
+// would match this static path against the parameterized route (with
+// id="statuses") and return 404.
+app.get('/api/agents/statuses', async (req, res) => {
+  const ids = listAgentDirs();
+
+  let runningIds = new Set();
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/agents/processes`);
+    if (resp.ok) {
+      const processes = await resp.json();
+      for (const p of processes) {
+        if (p.running) runningIds.add(p.id);
+      }
+    }
+  } catch { /* orchestrator unreachable — all agents appear offline */ }
+
+  const statuses = ids.map(id => {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    if (cfg.enabled === false) return { id, activityState: 'disabled' };
+    if (!runningIds.has(id)) return { id, activityState: 'offline' };
+    const status = readJsonFile(path.join(AGENTS_DIR, id, 'status.json'), null);
+    return { id, activityState: status?.state === 'busy' ? 'busy' : 'idle' };
+  });
+
+  res.json(statuses);
+});
+
 app.get('/api/agents/:id', (req, res) => {
   const { id } = req.params;
   const agentDir = path.join(AGENTS_DIR, id);
@@ -1444,37 +1473,6 @@ app.get('/api/agents/:agentId/session/:roomId/stream', (req, res) => {
     if (dirWatcher) { try { dirWatcher.close(); } catch { /* noop */ } dirWatcher = null; }
     try { res.end(); } catch { /* noop */ }
   });
-});
-
-/* ─── Agent activity statuses ───────────────────────────────────────── */
-
-// Returns [{ id, activityState: 'busy' | 'idle' | 'offline' | 'disabled' }]
-// for every known agent. The orchestrator process list determines online/offline;
-// each agent writes status.json to its workspace directory to signal busy/idle.
-app.get('/api/agents/statuses', async (req, res) => {
-  const ids = listAgentDirs();
-
-  let runningIds = new Set();
-  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
-  try {
-    const resp = await fetch(`${orchestratorUrl}/internal/agents/processes`);
-    if (resp.ok) {
-      const processes = await resp.json();
-      for (const p of processes) {
-        if (p.running) runningIds.add(p.id);
-      }
-    }
-  } catch { /* orchestrator unreachable — all agents appear offline */ }
-
-  const statuses = ids.map(id => {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (cfg.enabled === false) return { id, activityState: 'disabled' };
-    if (!runningIds.has(id)) return { id, activityState: 'offline' };
-    const status = readJsonFile(path.join(AGENTS_DIR, id, 'status.json'), null);
-    return { id, activityState: status?.state === 'busy' ? 'busy' : 'idle' };
-  });
-
-  res.json(statuses);
 });
 
 /* ─── SPA fallback ──────────────────────────────────────────────────── */

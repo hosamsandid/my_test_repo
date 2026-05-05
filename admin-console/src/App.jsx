@@ -4,6 +4,7 @@ import Shell from './components/Shell';
 
 const Dashboard           = lazy(() => import('./pages/Dashboard'));
 const AgentManager        = lazy(() => import('./pages/AgentManager'));
+const AgentChat           = lazy(() => import('./pages/AgentChat'));
 const WorkingEnvironments = lazy(() => import('./pages/WorkingEnvironments'));
 const SshKeys             = lazy(() => import('./pages/SshKeys'));
 const SkillsRegistry      = lazy(() => import('./pages/SkillsRegistry'));
@@ -20,6 +21,8 @@ export default function App() {
         <Routes>
           <Route path="/"             element={<Dashboard />} />
           <Route path="/agents"       element={<AgentManager />} />
+          <Route path="/chats"           element={<AgentChat />} />
+          <Route path="/chats/:agentId"  element={<AgentChat />} />
           <Route path="/environments" element={<WorkingEnvironments />} />
           <Route path="/ssh-keys"     element={<SshKeys />} />
           <Route path="/skills"       element={<SkillsRegistry />} />

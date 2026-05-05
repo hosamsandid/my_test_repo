@@ -9,8 +9,7 @@ RUN npm install -g @anthropic-ai/claude-code
 WORKDIR /app
 COPY package.json .
 RUN npm install --omit=dev
-COPY orchestrator.js .
-COPY agent-runner.js .
+COPY *.js .
 
 # Bundled fallback template: used by orchestrator when /template-workspace/CLAUDE.md
 # is not available in the mounted skills-pool volume (e.g. fresh installation).

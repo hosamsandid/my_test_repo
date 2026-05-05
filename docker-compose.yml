@@ -47,17 +47,18 @@ services:
       MATRIX_ACCESS_TOKEN: "${ORCHESTRATOR_TOKEN}"
       MATRIX_BOT_USER_ID: "@orchestrator:local"
       MULTI_AGENT_ROOM: "${MULTI_AGENT_ROOM}"
-      ADMIN_USER_ID: "@${ADMIN_USER:-thorsten}:local"
+      ADMIN_USER_ID: "@${ADMIN_USER:-admin}:local"
       # Conduwuit admin (for auto-creating Matrix users)
       CONDUWUIT_ADMIN_TOKEN: "${MATRIX_ACCESS_TOKEN}"
       CONDUWUIT_ADMIN_ROOM: "!cUxr0SyfINf9yEvBOD:local"
       # Git identity for agents that use git (push/PR)
       GIT_SSH_COMMAND: "ssh -i /root/.ssh/id_accenturecodefoundry -o StrictHostKeyChecking=accept-new"
-      # Azure AI Foundry
-      CLAUDE_CODE_USE_FOUNDRY: "1"
-      ANTHROPIC_FOUNDRY_RESOURCE: "${ANTHROPIC_FOUNDRY_RESOURCE}"
-      ANTHROPIC_FOUNDRY_API_KEY: "${ANTHROPIC_FOUNDRY_API_KEY}"
+      # LLM endpoint (LiteLLM proxy)
+      ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL}"
+      ANTHROPIC_AUTH_TOKEN: "${ANTHROPIC_AUTH_TOKEN}"
       ANTHROPIC_DEFAULT_SONNET_MODEL: "${ANTHROPIC_DEFAULT_SONNET_MODEL}"
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: "${ANTHROPIC_DEFAULT_HAIKU_MODEL}"
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "${CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS:-1}"
     depends_on:
       conduwuit:
         condition: service_started
@@ -78,8 +79,11 @@ services:
       TZ: Europe/Berlin
       NODE_ENV: production
       PODMAN_SOCK_PATH: /var/run/podman.sock
-      ANTHROPIC_FOUNDRY_RESOURCE: "${ANTHROPIC_FOUNDRY_RESOURCE}"
+      ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL}"
       ANTHROPIC_DEFAULT_SONNET_MODEL: "${ANTHROPIC_DEFAULT_SONNET_MODEL}"
+      MATRIX_HOMESERVER: http://conduwuit:6167
+      MATRIX_ACCESS_TOKEN: "${MATRIX_ACCESS_TOKEN}"
+      ADMIN_USER_ID: "@${ADMIN_USER:-admin}:local"
     depends_on:
       conduwuit:
         condition: service_started

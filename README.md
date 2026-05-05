@@ -18,7 +18,7 @@ This project is different. It is a locally operated AI agent that:
 - **Reads and writes your code** — full Git access, SSH-authenticated, commit and PR capable
 - **Scales to a team** — spawn any number of specialist agents that collaborate in parallel
 
-The stack runs on Podman, communicates over the Matrix protocol, and uses Azure AI Foundry (Sonnet or Opus) as its LLM backend — entirely within your enterprise's Azure tenant. No data leaves your environment.
+The stack runs on Podman, communicates over the Matrix protocol, and reaches its LLM via an Anthropic-compatible proxy (`ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`). Point it at any compatible gateway — LiteLLM, an enterprise-internal endpoint, or the public Anthropic API.
 
 ---
 
@@ -31,7 +31,7 @@ The stack runs on Podman, communicates over the Matrix protocol, and uses Azure 
 | **Git Access** | A Working Environment can clone an enterprise repository into the agent's workspace using a registered SSH key. The agent can read, analyse, commit, and open pull requests. |
 | **Autonomous Operation** | Autonomous agents have a self-managed `triggers.json` (cron + one-shot) for proactive tasks — daily standup summaries, code quality checks, sprint reports. |
 | **Multi-Agent Pool** | An orchestrator routes questions to specialist agents in parallel. A synthesiser merges their answers. Agents are managed via the Admin Console. |
-| **Compliance** | Runs on Azure AI Foundry inside your own tenant. Sonnet and Opus are both available. No third-party data handling. |
+| **Compliance** | LLM endpoint is configurable — point it at a tenant-internal proxy (LiteLLM, Azure AI Foundry gateway, etc.) so no data leaves your environment. |
 
 ---
 
@@ -55,10 +55,10 @@ See [`CLAUDE.md`](./CLAUDE.md) for the full technical reference including all en
 
 ## Getting Started
 
-**Prerequisites:** Podman with `podman compose`, Azure AI Foundry access (or Anthropic API key for Claude Code CLI auth).
+**Prerequisites:** Podman with `podman compose`, an Anthropic-compatible LLM endpoint (LiteLLM proxy, enterprise gateway, or Anthropic API directly).
 
 ```bash
-# 1. Copy environment config and fill in the Foundry credentials
+# 1. Copy environment config and fill in the LLM endpoint + auth token
 cp .env.example .env
 
 # 2. First-time only: boot Conduwuit, register the admin + orchestrator users,
@@ -93,3 +93,15 @@ Use the Admin Console — choose a Working Environment, write a system prompt, s
 
 **Schedule autonomous work:**
 For autonomous agents, edit `triggers.json` in the agent's workspace (or ask the agent to do it). Triggers sync within 60 seconds.
+
+### Agent Chat
+
+The Admin Console embeds a Matrix client for direct 1:1 conversations with each agent. Click **Agent Chat** in the left navigation to open it.
+
+The page has three panels:
+
+- **Agent list** (left): pick an enabled agent.
+- **Chat** (middle): markdown and code-block rendering, sticky scroll, scroll-up backfill of older messages.
+- **Session log** (right, toggle with `Cmd/Ctrl+Shift+L`): structured timeline of the agent's internal activity (Claude tool calls, intermediate text, errors, timings).
+
+Messages flow through the same Matrix room you would see in Cinny — the chat UI is just a viewer. The last-opened agent is remembered, so reopening the page lands you back in the same conversation.

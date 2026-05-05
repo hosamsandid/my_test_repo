@@ -13,7 +13,7 @@ The stack runs locally with Podman as a single compose file with four services:
 3. **Orchestrator** — dynamic agent pool with domain experts (`@orchestrator:local`)
 4. **Admin Console** — web UI on `:4000` for managing agents, working environments, SSH keys, skills, etc.
 
-The LLM backend is **Azure AI Foundry** (resource `claude-code-ai-eastus2`, model `claude-sonnet-4-6`). Credentials are in `.env` (gitignored).
+The LLM backend is reached via an Anthropic-compatible proxy configured by `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` in `.env` (gitignored). Default Sonnet/Haiku models are set there too.
 
 ## Architecture
 
@@ -96,15 +96,59 @@ Results are posted to the multi-agent room (or custom `roomId`); `[PASS]` suppre
 
 All agent lifecycle operations (create / enable / disable / edit prompt / delete) happen via the **Admin Console** at `http://localhost:4000`.
 
+### Direct Messages & Session Log
+
+Each agent runs the Claude CLI as:
+
+```
+claude -p <prompt> \
+  --output-format stream-json --verbose \
+  --permission-mode bypassPermissions
+```
+
+NDJSON lines from stdout are parsed event-by-event and written, together with wrapper events (`message.received`, `claude.invoke`, `message.posted`, `error`, `trigger.fired`), to an append-only file at:
+
+```
+/workspace/agents/<agentId>/sessions/<roomId>.jsonl
+```
+
+The schema is defined in `docs/agent-chat-plan.md` §4.1 and includes `assistant_text`, `tool_use`, `tool_result`, `thinking`, and `result` events. Every entry carries a `correlationId` (the originating Matrix `event_id`, or a synthetic `trigger:<id>:<ts>` for cron triggers) so the Admin Console can tie log rows to chat bubbles.
+
+**DM heuristic.** Agents now respond to direct messages from any user (not just the hardcoded admin). The rule, applied in `agent-runner.js`, is: the room is not the multi-agent room AND `getJoinedRoomMembers(roomId)` returns exactly two members (this agent + one other) AND the sender is neither this agent nor the orchestrator. Membership counts are cached for 30 s. The old `ADMIN_USER_ID` env var is no longer consulted.
+
+### Agent Chat UI
+
+The Admin Console embeds a Matrix client at `/chats` (and `/chats/:agentId`) so users can talk to any enabled agent without leaving the console.
+
+**Where it lives**
+
+| File | Role |
+|---|---|
+| `admin-console/src/pages/AgentChat.jsx` | Top-level page: owns selected agent, log-panel toggle, last-agent persistence |
+| `admin-console/src/pages/agent-chat/AgentList.jsx` | Left rail of enabled agents |
+| `admin-console/src/pages/agent-chat/ChatPanel.jsx` | Chat view: backfill, scroll-up history pagination, optimistic send, SSE live tail |
+| `admin-console/src/pages/agent-chat/Message.jsx` | Single bubble; markdown via `react-markdown` + `remark-gfm` + `rehype-pretty-code` (dual themes) + `rehype-sanitize` |
+| `admin-console/src/pages/agent-chat/MessageInput.jsx` | Auto-resizing textarea with IME-safe Cmd/Ctrl+Enter submit |
+| `admin-console/src/pages/agent-chat/SessionLogPanel.jsx` | Right rail toggle (`Cmd/Ctrl+Shift+L`); SSE tail of the JSONL session log |
+| `admin-console/src/hooks/useSSE.js` | Generic SSE consumer with exponential-backoff reconnect |
+| `admin-console/src/hooks/useColorScheme.js` | Tracks `<html data-theme>` so Shiki blocks switch with the page theme |
+
+**DM rooms.** When the user opens an agent for the first time, the UI lazily POSTs `/api/matrix/agents/:id/dm`; the server creates (or reuses) a 1:1 Matrix room, invites the admin user, and persists `{ roomId, createdAt, createdBy }` to `/workspace/agents/<id>/dm-room.json`. Subsequent loads short-circuit on that file, so the room id round-trips through `GET /api/matrix/agents`.
+
+**Session log rendering.** The right panel subscribes to `/api/agents/:id/session/:roomId/stream` (SSE, with a `since=<byte-offset>` cursor for replay). Each JSONL line carries a `correlationId` (the originating Matrix `event_id`) which lets the UI pair log rows with chat bubbles: hovering a message dims log entries with non-matching ids, and vice versa. Adjacent `tool_use` / `tool_result` entries with the same `toolId` are folded into a single collapsible block.
+
+**Markdown safety.** Agent output is sanitized with `rehype-sanitize` using the GitHub-flavoured `defaultSchema`, extended only to allow `style` and the `data-*` attributes that `rehype-pretty-code` emits on `span` / `code` / `pre` / `figure` / `div`. Sanitize runs *after* pretty-code in the rehype pipeline so the syntax-highlighting markup survives. Code blocks ship both Shiki themes (`github-light`, `github-dark`); the active theme is selected by CSS rules in `admin-console/src/theme/tokens.css` keyed off `<html data-theme>`.
+
 ## Key Files
 
 | File | Purpose |
 |---|---|
 | `docker-compose.yml` | All four services + volumes |
-| `.env` | Secrets: Matrix tokens, Foundry API key (gitignored) |
+| `.env` | Secrets: Matrix tokens, LLM proxy URL + auth token (gitignored) |
 | `Makefile` | Build + start convenience targets (`make up`, `make down`, `make logs`, ...) |
 | `orchestrator/orchestrator.js` | Dynamic agent management, routing, synthesis, environment-aware workspace seeding, internal API for the admin console |
 | `orchestrator/agent-runner.js` | Per-agent child process: Matrix client + Claude CLI invocations + trigger scheduler |
+| `orchestrator/session-log.js` | JSONL session logger: maps Claude `stream-json` NDJSON to normalized events, append-only writer |
 | `orchestrator/Dockerfile` | Node 22 + Claude Code CLI + git + openssh-client |
 | `orchestrator/CLAUDE-template.md` | Base template baked into the image as `/defaults/CLAUDE.md`, used as fallback when the skill-pool volume has no CLAUDE.md |
 | `orchestrator/setup.sh` | Initial setup: register Matrix users, create room |

@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
+const matrix = require('./matrix');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -375,7 +376,7 @@ app.get('/api/models', (req, res) => {
   res.json([{
     id: 'default',
     name: process.env.ANTHROPIC_DEFAULT_SONNET_MODEL || 'claude-sonnet-4-6',
-    resource: process.env.ANTHROPIC_FOUNDRY_RESOURCE || '',
+    baseUrl: process.env.ANTHROPIC_BASE_URL || '',
   }]);
 });
 
@@ -612,6 +613,515 @@ app.delete('/api/ssh-keys/:id', (req, res) => {
   try { fs.unlinkSync(path.join(SSH_KEYS_DIR, id)); } catch { /* ignore */ }
   saveSshKeysIndex(keys.filter(k => k.id !== id));
   res.status(204).end();
+});
+
+/* ─── Matrix Proxy ──────────────────────────────────────────────────── */
+
+/*
+ * REST + SSE proxy for the Conduwuit Matrix homeserver.
+ *
+ * Browser clients never see Matrix tokens. The admin user's token is read
+ * from MATRIX_ACCESS_TOKEN; per-agent tokens come from /workspace/agents/<id>/config.json.
+ *
+ * Routes:
+ *   GET  /api/matrix/agents                          List enabled agents with Matrix identities
+ *   POST /api/matrix/agents/:agentId/dm              Idempotent create/get DM room
+ *   GET  /api/matrix/rooms/:roomId/messages          Paginated history (proxy)
+ *   POST /api/matrix/rooms/:roomId/messages          Send m.text as admin
+ *   GET  /api/matrix/rooms/:roomId/stream            SSE long-poll on /sync filtered to room
+ */
+
+// 1. List enabled agents that have Matrix identities
+app.get('/api/matrix/agents', (req, res) => {
+  const ids = listAgentDirs();
+  const out = [];
+  for (const id of ids) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg) continue;
+    if (cfg.enabled === false) continue;
+    if (!cfg.token) continue;
+    const dm = matrix.getAgentDmRoom(id);
+    out.push({
+      id,
+      displayName: cfg.displayName || id,
+      role: cfg.role || 'expert',
+      userId: cfg.userId || `@${id}:local`,
+      enabled: cfg.enabled !== false,
+      dmRoomId: dm?.roomId || null,
+    });
+  }
+  res.json(out);
+});
+
+// 2. Idempotent create-or-get DM room with an agent
+app.post('/api/matrix/agents/:agentId/dm', async (req, res) => {
+  const { agentId } = req.params;
+  const cfgPath = path.join(AGENTS_DIR, agentId, 'config.json');
+  const cfg = readJsonFile(cfgPath, null);
+  if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  if (cfg.enabled === false) return res.status(409).json({ error: 'Agent disabled' });
+  if (!cfg.token) return res.status(409).json({ error: 'Agent has no Matrix token' });
+  if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
+
+  // Reuse existing DM room if admin is still joined
+  const existing = matrix.getAgentDmRoom(agentId);
+  if (existing?.roomId) {
+    try {
+      const joined = await matrix.matrixFetch(matrix.ADMIN_TOKEN, '/_matrix/client/v3/joined_rooms');
+      if (joined.status === 200 && Array.isArray(joined.data?.joined_rooms) &&
+          joined.data.joined_rooms.includes(existing.roomId)) {
+        return res.json({ roomId: existing.roomId, reused: true });
+      }
+    } catch (err) {
+      return res.status(502).json({ error: `Matrix unreachable: ${err.message}` });
+    }
+    // Fall through and recreate if admin is no longer in the room
+  }
+
+  // Create the room as the agent, inviting the admin
+  try {
+    const adminUserId = await matrix.resolveAdminUserId();
+    const createResp = await matrix.matrixFetch(cfg.token, '/_matrix/client/v3/createRoom', {
+      method: 'POST',
+      body: {
+        preset: 'trusted_private_chat',
+        invite: [adminUserId],
+        is_direct: true,
+        name: `DM with ${cfg.displayName || agentId}`,
+      },
+    });
+    if (createResp.status >= 400) {
+      console.error('[Matrix] createRoom failed:', createResp.status, createResp.data);
+      return res.status(502).json({ error: 'createRoom failed', upstream: createResp.data });
+    }
+    const roomId = createResp.data?.room_id;
+    if (!roomId) {
+      return res.status(502).json({ error: 'createRoom returned no room_id', upstream: createResp.data });
+    }
+
+    // Admin (human) accepts the invite. We use a token, not a syncing client,
+    // so auto-join doesn't happen — we explicitly POST /join.
+    const joinResp = await matrix.matrixFetch(matrix.ADMIN_TOKEN,
+      `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/join`,
+      { method: 'POST', body: {} });
+    if (joinResp.status >= 400) {
+      console.error('[Matrix] admin join failed:', joinResp.status, joinResp.data);
+      return res.status(502).json({ error: 'admin join failed', upstream: joinResp.data });
+    }
+
+    matrix.setAgentDmRoom(agentId, {
+      roomId,
+      createdAt: new Date().toISOString(),
+      createdBy: adminUserId,
+    });
+    res.status(201).json({ roomId, reused: false });
+  } catch (err) {
+    res.status(502).json({ error: `Matrix unreachable: ${err.message}` });
+  }
+});
+
+// 3. Paginated message history (proxy)
+app.get('/api/matrix/rooms/:roomId/messages', async (req, res) => {
+  if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
+  const { roomId } = req.params;
+  const dir = req.query.dir === 'f' ? 'f' : 'b';
+  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+  const query = { dir, limit };
+  if (req.query.from) query.from = req.query.from;
+  if (req.query.to) query.to = req.query.to;
+  if (req.query.filter) query.filter = req.query.filter;
+
+  try {
+    const resp = await matrix.matrixFetch(matrix.ADMIN_TOKEN,
+      `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages`,
+      { query });
+    res.status(resp.status).json(resp.data);
+  } catch (err) {
+    res.status(502).json({ error: `Matrix unreachable: ${err.message}` });
+  }
+});
+
+// 4. Send a text message to a room as the admin user
+app.post('/api/matrix/rooms/:roomId/messages', async (req, res) => {
+  if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
+  const { roomId } = req.params;
+  const { body } = req.body || {};
+  if (typeof body !== 'string' || !body.trim()) {
+    return res.status(400).json({ error: 'body (non-empty string) is required' });
+  }
+
+  const txnId = crypto.randomUUID();
+  try {
+    const resp = await matrix.matrixFetch(matrix.ADMIN_TOKEN,
+      `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(txnId)}`,
+      {
+        method: 'PUT',
+        body: { msgtype: 'm.text', body },
+      });
+    if (resp.status >= 400) {
+      return res.status(resp.status).json(resp.data);
+    }
+    res.json({ event_id: resp.data?.event_id });
+  } catch (err) {
+    res.status(502).json({ error: `Matrix unreachable: ${err.message}` });
+  }
+});
+
+// 5. SSE stream — long-poll /sync filtered to this room
+app.get('/api/matrix/rooms/:roomId/stream', async (req, res) => {
+  if (!matrix.ADMIN_TOKEN) {
+    return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
+  }
+  const { roomId } = req.params;
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  const filter = JSON.stringify({
+    room: {
+      rooms: [roomId],
+      timeline: { limit: 50, types: ['m.room.message'] },
+      state: { types: [], lazy_load_members: true },
+    },
+    presence: { types: [] },
+    account_data: { types: [] },
+  });
+
+  let closed = false;
+  let abort = null;
+
+  const heartbeat = setInterval(() => {
+    if (!closed) res.write(': ping\n\n');
+  }, 15000);
+
+  req.on('close', () => {
+    closed = true;
+    clearInterval(heartbeat);
+    if (abort) {
+      try { abort.abort(); } catch { /* noop */ }
+    }
+  });
+
+  // Bootstrap: pick up where we left off, or do a quick initial sync to get next_batch
+  let since = matrix.loadSyncToken();
+  try {
+    if (!since) {
+      const initResp = await matrix.matrixFetch(matrix.ADMIN_TOKEN, '/_matrix/client/v3/sync', {
+        query: { timeout: 0, full_state: false, filter },
+      });
+      if (initResp.status >= 400) {
+        res.write(`event: error\ndata: ${JSON.stringify({ status: initResp.status, body: initResp.data })}\n\n`);
+        return res.end();
+      }
+      since = initResp.data?.next_batch || null;
+      if (since) matrix.saveSyncToken(since);
+    }
+  } catch (err) {
+    res.write(`event: error\ndata: ${JSON.stringify({ message: `initial sync failed: ${err.message}` })}\n\n`);
+    return res.end();
+  }
+
+  // Long-poll loop
+  while (!closed) {
+    abort = new AbortController();
+    let resp;
+    try {
+      resp = await matrix.matrixFetch(matrix.ADMIN_TOKEN, '/_matrix/client/v3/sync', {
+        query: { since, timeout: 25000, filter },
+        signal: abort.signal,
+      });
+    } catch (err) {
+      if (closed) break;
+      // Network blip — wait a moment and retry
+      res.write(`event: warn\ndata: ${JSON.stringify({ message: `sync failed: ${err.message}` })}\n\n`);
+      await new Promise(r => setTimeout(r, 1500));
+      continue;
+    }
+    if (closed) break;
+
+    if (resp.status >= 400) {
+      res.write(`event: error\ndata: ${JSON.stringify({ status: resp.status, body: resp.data })}\n\n`);
+      // Reset since token if invalid, then back off
+      if (resp.status === 400 || resp.status === 401) {
+        since = null;
+      }
+      await new Promise(r => setTimeout(r, 2000));
+      continue;
+    }
+
+    const data = resp.data || {};
+    const next = data.next_batch || since;
+    const room = data.rooms?.join?.[roomId];
+    const events = room?.timeline?.events || [];
+    for (const ev of events) {
+      if (ev.type !== 'm.room.message') continue;
+      const payload = {
+        event_id: ev.event_id,
+        sender: ev.sender,
+        origin_server_ts: ev.origin_server_ts,
+        content: ev.content,
+        room_id: roomId,
+      };
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    }
+
+    if (next && next !== since) {
+      since = next;
+      try { matrix.saveSyncToken(since); } catch (err) {
+        console.error('[Matrix] saveSyncToken failed:', err.message);
+      }
+    }
+  }
+
+  clearInterval(heartbeat);
+  try { res.end(); } catch { /* noop */ }
+});
+
+/* ─── Session Log ───────────────────────────────────────────────────── */
+
+const AGENT_ID_RE = /^[a-zA-Z0-9_.-]+$/;
+const ROOM_ID_RE = /^![a-zA-Z0-9_-]+:[a-zA-Z0-9.-]+$/;
+
+function sessionFile(agentId, roomId) {
+  return path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.jsonl');
+}
+
+function validSessionIds(req, res) {
+  const { agentId, roomId } = req.params;
+  if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
+    res.status(400).json({ error: 'invalid id' });
+    return null;
+  }
+  return { agentId, roomId };
+}
+
+function parseJsonlLine(line) {
+  try {
+    return JSON.parse(line);
+  } catch {
+    return { type: 'parse_error', raw: line.slice(0, 200) };
+  }
+}
+
+// Static backfill: read JSONL from `since` (default 0) up to current EOF.
+app.get('/api/agents/:agentId/session/:roomId', (req, res) => {
+  const ids = validSessionIds(req, res);
+  if (!ids) return;
+  const filepath = sessionFile(ids.agentId, ids.roomId);
+
+  if (!fs.existsSync(filepath)) {
+    return res.json({ events: [], cursor: 0 });
+  }
+
+  const since = Math.max(0, parseInt(req.query.since, 10) || 0);
+  const limit = Math.max(1, parseInt(req.query.limit, 10) || 1000);
+
+  let size;
+  try {
+    size = fs.statSync(filepath).size;
+  } catch (err) {
+    return res.status(500).json({ error: 'stat failed: ' + err.message });
+  }
+
+  // If `since` is past EOF (e.g. file was truncated), read from start.
+  const start = since > size ? 0 : since;
+  if (start >= size) {
+    return res.json({ events: [], cursor: size });
+  }
+
+  const stream = fs.createReadStream(filepath, { start, end: size - 1, encoding: 'utf8' });
+  let buf = '';
+  let events = [];
+
+  stream.on('data', (chunk) => {
+    buf += chunk;
+    let idx;
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, idx);
+      buf = buf.slice(idx + 1);
+      if (line.trim()) events.push(parseJsonlLine(line));
+    }
+  });
+
+  stream.on('error', (err) => {
+    res.status(500).json({ error: 'read failed: ' + err.message });
+  });
+
+  stream.on('end', () => {
+    if (buf.trim()) events.push(parseJsonlLine(buf));
+    let truncated = false;
+    if (events.length > limit) {
+      events = events.slice(events.length - limit);
+      truncated = true;
+    }
+    const body = { events, cursor: size };
+    if (truncated) body.truncated = true;
+    res.json(body);
+  });
+});
+
+// Live tail via SSE.
+app.get('/api/agents/:agentId/session/:roomId/stream', (req, res) => {
+  const ids = validSessionIds(req, res);
+  if (!ids) return;
+  const filepath = sessionFile(ids.agentId, ids.roomId);
+  const dirpath = path.dirname(filepath);
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  // Initial cursor: explicit `since`, else end-of-file.
+  let cursor;
+  if (req.query.since !== undefined) {
+    cursor = Math.max(0, parseInt(req.query.since, 10) || 0);
+  } else {
+    try {
+      cursor = fs.existsSync(filepath) ? fs.statSync(filepath).size : 0;
+    } catch {
+      cursor = 0;
+    }
+  }
+
+  let lineBuf = '';
+  let fileWatcher = null;
+  let dirWatcher = null;
+  let draining = false;
+  let pending = false;
+  let closed = false;
+
+  const writeEvent = (obj) => {
+    try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch { /* noop */ }
+  };
+  const writeCursor = () => {
+    writeEvent({ type: '_cursor', cursor });
+  };
+
+  // Initial ready signal + cursor so the client knows where it's positioned.
+  try { res.write(': ready\n\n'); } catch { /* noop */ }
+  writeCursor();
+
+  // Heartbeat — keep proxies / load balancers from closing the connection.
+  const heartbeat = setInterval(() => {
+    try { res.write(': ping\n\n'); } catch { /* noop */ }
+  }, 15000);
+
+  const drain = () => {
+    if (closed) return;
+    if (draining) { pending = true; return; }
+    draining = true;
+
+    let size;
+    try {
+      if (!fs.existsSync(filepath)) {
+        draining = false;
+        if (pending) { pending = false; setImmediate(drain); }
+        return;
+      }
+      size = fs.statSync(filepath).size;
+    } catch (err) {
+      draining = false;
+      return;
+    }
+
+    // File truncated / rotated externally — start over from the top.
+    if (size < cursor) {
+      cursor = 0;
+      lineBuf = '';
+      writeEvent({ type: '_truncated' });
+    }
+    if (size === cursor) {
+      draining = false;
+      if (pending) { pending = false; setImmediate(drain); }
+      return;
+    }
+
+    const stream = fs.createReadStream(filepath, { start: cursor, end: size - 1, encoding: 'utf8' });
+
+    stream.on('data', (chunk) => {
+      lineBuf += chunk;
+      let idx;
+      while ((idx = lineBuf.indexOf('\n')) >= 0) {
+        const line = lineBuf.slice(0, idx);
+        lineBuf = lineBuf.slice(idx + 1);
+        if (line.trim()) writeEvent(parseJsonlLine(line));
+      }
+    });
+
+    stream.on('error', () => {
+      draining = false;
+      if (pending) { pending = false; setImmediate(drain); }
+    });
+
+    stream.on('end', () => {
+      cursor = size;
+      writeCursor();
+      draining = false;
+      if (pending) { pending = false; setImmediate(drain); }
+    });
+  };
+
+  const startFileWatcher = () => {
+    if (fileWatcher || closed) return;
+    try {
+      fileWatcher = fs.watch(filepath, { persistent: false }, () => drain());
+      fileWatcher.on('error', () => {
+        try { fileWatcher.close(); } catch { /* noop */ }
+        fileWatcher = null;
+        // Fall back to dir-watch so we re-pick the file up if it reappears.
+        startDirWatcher();
+      });
+    } catch {
+      fileWatcher = null;
+      startDirWatcher();
+    }
+  };
+
+  const startDirWatcher = () => {
+    if (dirWatcher || closed) return;
+    try {
+      fs.mkdirSync(dirpath, { recursive: true });
+    } catch { /* noop */ }
+    try {
+      dirWatcher = fs.watch(dirpath, { persistent: false }, (_evt, fname) => {
+        if (closed) return;
+        if (fname && fname !== path.basename(filepath)) return;
+        if (fs.existsSync(filepath)) {
+          try { dirWatcher.close(); } catch { /* noop */ }
+          dirWatcher = null;
+          startFileWatcher();
+          drain();
+        }
+      });
+      dirWatcher.on('error', () => {
+        try { dirWatcher.close(); } catch { /* noop */ }
+        dirWatcher = null;
+      });
+    } catch {
+      dirWatcher = null;
+    }
+  };
+
+  if (fs.existsSync(filepath)) {
+    startFileWatcher();
+    // Read anything that's already past cursor (matters when `since` < EOF).
+    drain();
+  } else {
+    startDirWatcher();
+  }
+
+  req.on('close', () => {
+    closed = true;
+    clearInterval(heartbeat);
+    if (fileWatcher) { try { fileWatcher.close(); } catch { /* noop */ } fileWatcher = null; }
+    if (dirWatcher) { try { dirWatcher.close(); } catch { /* noop */ } dirWatcher = null; }
+    try { res.end(); } catch { /* noop */ }
+  });
 });
 
 /* ─── SPA fallback ──────────────────────────────────────────────────── */

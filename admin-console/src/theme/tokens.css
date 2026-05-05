@@ -219,3 +219,52 @@ code, pre, kbd {
   background: oklch(0.45 0.12 195);
   color: oklch(0.95 0.01 195);
 }
+
+/* ─── Shiki dual-theme switching (rehype-pretty-code) ────────────────────
+   rehype-pretty-code v0.13 with `theme: { light, dark }` emits CSS
+   variables `--shiki-light`, `--shiki-light-bg`, `--shiki-dark`,
+   `--shiki-dark-bg` (plus `--shiki-{theme}-font-style` and
+   `--shiki-{theme}-font-weight`) on every <code>, <pre>, and inner
+   <span>. The `data-theme` attribute on those elements lists the
+   themes, space-separated.
+
+   We pick which set of variables wins based on the admin console's own
+   theme (set on <html data-theme="admin-dark"|"admin-light"|...>). The
+   rules deliberately match both `<code>` and `<span>` so inline code,
+   block code, and per-token spans all switch in lockstep.
+───────────────────────────────────────────────────────────────────────── */
+:root[data-theme='admin-light'] code[data-theme*=' '],
+:root[data-theme='admin-light'] code[data-theme*=' '] span,
+:root[data-theme='admin-light'] pre[data-theme*=' '],
+:root[data-theme='admin-light'] pre[data-theme*=' '] span {
+  color:            var(--shiki-light);
+  background-color: var(--shiki-light-bg);
+  font-style:       var(--shiki-light-font-style);
+  font-weight:      var(--shiki-light-font-weight);
+  text-decoration:  var(--shiki-light-text-decoration);
+}
+
+:root[data-theme='admin-dark'] code[data-theme*=' '],
+:root[data-theme='admin-dark'] code[data-theme*=' '] span,
+:root[data-theme='admin-dark'] pre[data-theme*=' '],
+:root[data-theme='admin-dark'] pre[data-theme*=' '] span,
+:root[data-theme='high-contrast'] code[data-theme*=' '],
+:root[data-theme='high-contrast'] code[data-theme*=' '] span,
+:root[data-theme='high-contrast'] pre[data-theme*=' '],
+:root[data-theme='high-contrast'] pre[data-theme*=' '] span {
+  color:            var(--shiki-dark);
+  background-color: var(--shiki-dark-bg);
+  font-style:       var(--shiki-dark-font-style);
+  font-weight:      var(--shiki-dark-font-weight);
+  text-decoration:  var(--shiki-dark-text-decoration);
+}
+
+/* Default to dark when no data-theme is set on <html> (rare, but possible
+   during the first paint before tokens.css :root selectors apply). */
+:root:not([data-theme]) code[data-theme*=' '],
+:root:not([data-theme]) code[data-theme*=' '] span,
+:root:not([data-theme]) pre[data-theme*=' '],
+:root:not([data-theme]) pre[data-theme*=' '] span {
+  color:            var(--shiki-dark);
+  background-color: var(--shiki-dark-bg);
+}

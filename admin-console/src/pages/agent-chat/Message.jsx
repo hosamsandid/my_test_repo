@@ -1,0 +1,371 @@
+import React from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import rehypePrettyCode from 'rehype-pretty-code';
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
+import { Bot } from 'lucide-react';
+
+/**
+ * Defensive markdown wrapper.
+ *
+ * `rehype-pretty-code` uses Shiki, which is async; `react-markdown` runs
+ * unified synchronously. In some setups this combination throws ("Expected
+ * sync transformer") on first render. To avoid taking down the whole chat
+ * if that happens, we fall back to GFM-only rendering (with sanitize) and
+ * surface a one-line notice in the dev console.
+ */
+class SafeMarkdown extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { fallback: false };
+  }
+  static getDerivedStateFromError() {
+    return { fallback: true };
+  }
+  componentDidCatch(err) {
+    // eslint-disable-next-line no-console
+    console.warn('[agent-chat] rehype-pretty-code render failed; falling back to GFM only:', err?.message || err);
+  }
+  render() {
+    const { body } = this.props;
+    if (this.state.fallback) {
+      return (
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          rehypePlugins={[[rehypeSanitize, SANITIZE_SCHEMA]]}
+          components={MARKDOWN_COMPONENTS}
+        >
+          {body}
+        </ReactMarkdown>
+      );
+    }
+    try {
+      return (
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          // IMPORTANT: rehype-sanitize must run *after* rehype-pretty-code so
+          // the syntax-highlighting markup (spans with style + data-* attrs)
+          // survives into the rendered output. The custom schema below
+          // explicitly allow-lists those attributes.
+          rehypePlugins={[
+            [rehypePrettyCode, PRETTY_CODE_OPTIONS],
+            [rehypeSanitize, SANITIZE_SCHEMA],
+          ]}
+          components={MARKDOWN_COMPONENTS}
+        >
+          {body}
+        </ReactMarkdown>
+      );
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn('[agent-chat] rehype-pretty-code threw synchronously; using GFM-only fallback:', err?.message || err);
+      return (
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          rehypePlugins={[[rehypeSanitize, SANITIZE_SCHEMA]]}
+          components={MARKDOWN_COMPONENTS}
+        >
+          {body}
+        </ReactMarkdown>
+      );
+    }
+  }
+}
+
+/**
+ * Single chat bubble.
+ *
+ * - Right-aligned for the user, left-aligned for the agent.
+ * - Body rendered with react-markdown + remark-gfm for tables/strikethrough/
+ *   task-lists. Code blocks: rehype-pretty-code with dual Shiki themes; the
+ *   active theme is selected by CSS rules in `tokens.css` keyed off the
+ *   `<html data-theme>` attribute.
+ * - Output is passed through `rehype-sanitize` with a permissive-but-bounded
+ *   schema (style + a small set of data-* attrs whitelisted on `span`,
+ *   `code`, `pre`, `figure`).
+ * - Long code (>40 lines) is wrapped in <details> for cleaner reading.
+ * - `thinking` mode replaces the body with an animated three-dot ellipsis.
+ *
+ * Time format: 24 h hh:mm (locale `de-DE`); messages from previous days get
+ * a `DD.MM., HH:MM` prefix.
+ *
+ * @param {object} props
+ * @param {{event_id, sender, ts, body, isOptimistic?}} props.message
+ * @param {string} props.agentUserId      The agent's userId — anything else is "user".
+ * @param {boolean} [props.thinking]      Show typing-dots placeholder.
+ */
+
+const PRETTY_CODE_OPTIONS = {
+  // Dual-theme: rehype-pretty-code emits Shiki output for both themes and
+  // labels each token span with `data-theme="github-dark github-light"`.
+  // tokens.css picks which set of CSS vars wins based on `<html data-theme>`.
+  theme: { light: 'github-light', dark: 'github-dark' },
+  keepBackground: true,
+  defaultLang: 'plaintext',
+};
+
+/**
+ * rehype-sanitize schema: defaultSchema (GitHub-flavoured), extended to keep
+ * the `style` and rehype-pretty-code data-* attributes that drive code-block
+ * presentation. We deliberately do NOT widen this for arbitrary tags — only
+ * the small set produced by Shiki/rehype-pretty-code (`span`, `code`, `pre`,
+ * `figure`, `div` for line wrappers).
+ */
+const PRETTY_CODE_DATA_ATTRS = [
+  'data-line',
+  'data-language',
+  'data-theme',
+  'data-rehype-pretty-code-figure',
+  'data-rehype-pretty-code-fragment',
+  'data-rehype-pretty-code-title',
+  'data-highlighted-line',
+  'data-highlighted-line-id',
+  'data-highlighted-chars',
+  'data-chars-id',
+  'data-line-numbers',
+  'data-line-numbers-max-digits',
+  'data-word',
+  'data-word-id',
+];
+
+const SANITIZE_SCHEMA = {
+  ...defaultSchema,
+  attributes: {
+    ...(defaultSchema.attributes || {}),
+    span:   [...((defaultSchema.attributes && defaultSchema.attributes.span)   || []), 'style', 'className', ...PRETTY_CODE_DATA_ATTRS],
+    code:   [...((defaultSchema.attributes && defaultSchema.attributes.code)   || []), 'style', 'className', ...PRETTY_CODE_DATA_ATTRS],
+    pre:    [...((defaultSchema.attributes && defaultSchema.attributes.pre)    || []), 'style', 'className', ...PRETTY_CODE_DATA_ATTRS],
+    figure: [...((defaultSchema.attributes && defaultSchema.attributes.figure) || []), 'style', 'className', ...PRETTY_CODE_DATA_ATTRS],
+    div:    [...((defaultSchema.attributes && defaultSchema.attributes.div)    || []), 'style', 'className', ...PRETTY_CODE_DATA_ATTRS],
+  },
+};
+
+const TIME_FORMAT = new Intl.DateTimeFormat('de-DE', { hour: '2-digit', minute: '2-digit' });
+const DATE_TIME_FORMAT = new Intl.DateTimeFormat('de-DE', {
+  day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+});
+
+/**
+ * Format a message timestamp:
+ *   - same calendar day      → `HH:MM`
+ *   - earlier day (any year) → `DD.MM., HH:MM`
+ */
+function formatMessageTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  const now = new Date();
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth()    === now.getMonth() &&
+    d.getDate()     === now.getDate();
+  return sameDay ? TIME_FORMAT.format(d) : DATE_TIME_FORMAT.format(d);
+}
+
+const MARKDOWN_COMPONENTS = {
+  a: ({ node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+  // Long code blocks: wrap in <details>. We detect line count from the
+  // rendered children (rehype-pretty-code outputs <code> > <span data-line>).
+  pre: ({ node, ...props }) => <PreWithCollapse {...props} />,
+  // Inline code: react-markdown v9 dropped the `inline` flag, so we detect
+  // block code by the `language-*` class that GFM/remark adds to fenced
+  // blocks (rehype-pretty-code preserves it). Anything else is inline.
+  code: ({ node, className, children, ...rest }) => {
+    const isBlock = typeof className === 'string' && /language-/.test(className);
+    if (isBlock) {
+      // Let rehype-pretty-code own the styling for block code.
+      return <code className={className} {...rest}>{children}</code>;
+    }
+    return (
+      <code
+        className={className}
+        style={{
+          background: 'var(--eb-bg-elevated)',
+          padding: '1px 6px',
+          borderRadius: 'var(--eb-radius-sm)',
+          fontSize: '0.9em',
+          fontFamily: 'var(--eb-font-mono)',
+          border: '1px solid var(--eb-border-default)',
+        }}
+        {...rest}
+      >
+        {children}
+      </code>
+    );
+  },
+};
+
+function PreWithCollapse({ children, ...rest }) {
+  // Inspect children to count rendered code lines. rehype-pretty-code emits
+  // one <span data-line> per line inside <code>. We do a structural walk.
+  const lineCount = countCodeLines(children);
+  const wrapperStyle = {
+    margin: 'var(--eb-space-2) 0',
+    border: '1px solid var(--eb-border-default)',
+    borderRadius: 'var(--eb-radius-md)',
+    overflow: 'hidden',
+    fontSize: 'var(--eb-text-sm)',
+  };
+  const preStyle = {
+    margin: 0,
+    padding: 'var(--eb-space-3)',
+    overflowX: 'auto',
+    fontFamily: 'var(--eb-font-mono)',
+  };
+
+  if (lineCount > 40) {
+    return (
+      <details style={wrapperStyle}>
+        <summary style={{
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          fontSize: 'var(--eb-text-xs)',
+          color: 'var(--eb-text-muted)',
+          background: 'var(--eb-bg-elevated)',
+          cursor: 'pointer',
+          userSelect: 'none',
+        }}>
+          Show {lineCount} lines
+        </summary>
+        <pre {...rest} style={preStyle}>{children}</pre>
+      </details>
+    );
+  }
+  return (
+    <div style={wrapperStyle}>
+      <pre {...rest} style={preStyle}>{children}</pre>
+    </div>
+  );
+}
+
+/** Walk `children` tree and count `data-line` spans (rehype-pretty-code output). */
+function countCodeLines(children) {
+  let n = 0;
+  const visit = (node) => {
+    if (!node) return;
+    if (Array.isArray(node)) { node.forEach(visit); return; }
+    if (typeof node !== 'object') return;
+    const props = node.props || {};
+    if (props['data-line'] !== undefined) n += 1;
+    if (props.children) visit(props.children);
+  };
+  visit(children);
+  return n;
+}
+
+export default function Message({ message, agentUserId, thinking }) {
+  const isAgent = message.sender === agentUserId;
+  const align = isAgent ? 'flex-start' : 'flex-end';
+  const bubbleColor = isAgent
+    ? { bg: 'var(--eb-bg-surface)',  fg: 'var(--eb-text-primary)' }
+    : { bg: 'var(--eb-bg-selected)', fg: 'var(--eb-text-primary)' };
+
+  const time = formatMessageTime(message.ts);
+
+  const initials = isAgent
+    ? null
+    : 'YOU';
+
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: isAgent ? 'row' : 'row-reverse',
+      alignItems: 'flex-end',
+      gap: 'var(--eb-space-2)',
+      maxWidth: '100%',
+    }}>
+      <Avatar isAgent={isAgent} initials={initials} />
+
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: align,
+        maxWidth: 'min(720px, 75%)',
+        minWidth: 0,
+      }}>
+        <div style={{
+          background: bubbleColor.bg,
+          color: bubbleColor.fg,
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          borderRadius: 'var(--eb-radius-lg)',
+          border: '1px solid var(--eb-border-default)',
+          fontSize: 'var(--eb-text-md)',
+          lineHeight: 1.5,
+          overflowWrap: 'anywhere',
+          wordBreak: 'break-word',
+          opacity: message.isOptimistic ? 0.7 : 1,
+          maxWidth: '100%',
+        }}>
+          {thinking ? (
+            <ThinkingDots />
+          ) : (
+            <div className="agent-chat-md">
+              <SafeMarkdown body={message.body || ''} />
+            </div>
+          )}
+        </div>
+
+        <div style={{
+          fontSize: 'var(--eb-text-xs)',
+          color: 'var(--eb-text-muted)',
+          marginTop: 'var(--eb-space-0-5)',
+          padding: '0 var(--eb-space-1)',
+        }}>
+          {thinking ? 'thinking…' : (message.isOptimistic ? `${time} · sending…` : time)}
+        </div>
+      </div>
+
+      <style>{`
+        .agent-chat-md p { margin: 0; }
+        .agent-chat-md p + p { margin-top: var(--eb-space-2); }
+        .agent-chat-md ul, .agent-chat-md ol { padding-left: 1.4em; margin: var(--eb-space-1) 0; }
+        .agent-chat-md li { margin: 2px 0; }
+        .agent-chat-md table { border-collapse: collapse; margin: var(--eb-space-2) 0; font-size: var(--eb-text-sm); }
+        .agent-chat-md th, .agent-chat-md td { border: 1px solid var(--eb-border-default); padding: 4px 8px; text-align: left; }
+        .agent-chat-md th { background: var(--eb-bg-elevated); }
+        .agent-chat-md blockquote { margin: var(--eb-space-2) 0; padding-left: var(--eb-space-3); border-left: 3px solid var(--eb-border-default); color: var(--eb-text-secondary); }
+        .agent-chat-md h1, .agent-chat-md h2, .agent-chat-md h3, .agent-chat-md h4 { margin: var(--eb-space-3) 0 var(--eb-space-1); font-weight: var(--eb-font-semibold); }
+        .agent-chat-md h1 { font-size: var(--eb-text-lg); }
+        .agent-chat-md h2 { font-size: var(--eb-text-md); }
+        .agent-chat-md h3 { font-size: var(--eb-text-md); color: var(--eb-text-secondary); }
+        .agent-chat-md hr { border: none; border-top: 1px solid var(--eb-border-default); margin: var(--eb-space-3) 0; }
+        .agent-chat-md a { color: var(--eb-accent-primary); }
+      `}</style>
+    </div>
+  );
+}
+
+function Avatar({ isAgent, initials }) {
+  return (
+    <div style={{
+      width: 28, height: 28,
+      borderRadius: '50%',
+      background: isAgent ? 'var(--eb-accent-muted)' : 'var(--eb-bg-elevated)',
+      border: '1px solid var(--eb-border-default)',
+      color: isAgent ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      flexShrink: 0,
+      fontSize: 'var(--eb-text-xs)',
+      fontWeight: 'var(--eb-font-semibold)',
+    }}>
+      {isAgent ? <Bot size={16} /> : (initials || '?')}
+    </div>
+  );
+}
+
+function ThinkingDots() {
+  const dotStyle = (delay) => ({
+    display: 'inline-block',
+    width: 6, height: 6,
+    margin: '0 2px',
+    borderRadius: '50%',
+    background: 'var(--eb-text-secondary)',
+    animation: `dotPulse 1.4s infinite ease-in-out`,
+    animationDelay: delay,
+  });
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', padding: '4px 0' }} aria-label="Thinking">
+      <span style={dotStyle('0s')} />
+      <span style={dotStyle('0.2s')} />
+      <span style={dotStyle('0.4s')} />
+    </span>
+  );
+}

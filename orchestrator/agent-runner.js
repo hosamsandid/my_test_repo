@@ -30,10 +30,12 @@ const {
   AutojoinRoomsMixin,
 } = require("matrix-bot-sdk");
 const { spawn } = require("child_process");
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const cron = require("node-cron");
 const { marked } = require("marked");
+const { appendEvent, mapStreamJsonLine } = require("./session-log");
 
 // ============================================================
 // Config
@@ -44,7 +46,6 @@ const AGENT_USER_ID = process.env.MATRIX_BOT_USER_ID;
 const HOMESERVER = process.env.MATRIX_HOMESERVER;
 const MULTI_AGENT_ROOM = process.env.MULTI_AGENT_ROOM;
 const ORCHESTRATOR_USER_ID = process.env.ORCHESTRATOR_USER_ID || "@orchestrator:local";
-const ADMIN_USER_ID = process.env.ADMIN_USER_ID || "@thorsten:local";
 
 const AGENTS_DIR = "/workspace/agents";
 const CLAUDE_TIMEOUT = 600_000;
@@ -85,7 +86,21 @@ function saveTriggers(triggers) {
 // ============================================================
 // Claude CLI
 // ============================================================
-function callClaude(prompt, timeoutMs = CLAUDE_TIMEOUT) {
+/**
+ * Invoke the Claude Code CLI with stream-json output and write each
+ * NDJSON event to the per-room session log.
+ *
+ * Options:
+ *   - roomId         (required) — used as the JSONL filename for session logging
+ *   - correlationId  (required) — Matrix event id (or synthetic id) tying log
+ *                                 entries to the originating user message
+ *   - timeoutMs      (optional) — defaults to CLAUDE_TIMEOUT
+ *
+ * Resolves with the final assistant text (the `result` field of the last
+ * `result` event, or a concatenation of all `assistant_text` events as a
+ * fallback). Rejects on timeout or non-zero exit.
+ */
+function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT } = {}) {
   return new Promise((resolve, reject) => {
     const memoryHint =
       "Read memory/context.md and memory/log.md first (if they exist) before responding. " +
@@ -98,7 +113,12 @@ function callClaude(prompt, timeoutMs = CLAUDE_TIMEOUT) {
       "claude",
       [
         "-p", prompt,
-        "--output-format", "json",
+        "--output-format", "stream-json",
+        "--verbose",
+        // bypassPermissions is refused by Claude when running as root (the
+        // orchestrator container's default user). acceptEdits + the
+        // allowedTools whitelist below covers the same practical surface
+        // without prompts for the tools agents actually use.
         "--permission-mode", "acceptEdits",
         "--append-system-prompt", memoryHint,
         "--allowedTools", "Bash(*)",
@@ -107,6 +127,9 @@ function callClaude(prompt, timeoutMs = CLAUDE_TIMEOUT) {
         "--allowedTools", "Edit(*)",
         "--allowedTools", "Glob(*)",
         "--allowedTools", "Grep(*)",
+        "--allowedTools", "Task(*)",
+        "--allowedTools", "WebFetch(*)",
+        "--allowedTools", "WebSearch(*)",
       ],
       {
         cwd: AGENT_WORKDIR,
@@ -115,8 +138,42 @@ function callClaude(prompt, timeoutMs = CLAUDE_TIMEOUT) {
       }
     );
 
-    let stdout = "", stderr = "";
-    proc.stdout.on("data", (d) => (stdout += d));
+    let stderr = "";
+    let lineBuf = "";
+    let finalResult = null;          // text from the last `result` event
+    const assistantTextChunks = [];  // fallback if no `result` event
+
+    const logEvent = (ev) => {
+      try {
+        if (roomId) appendEvent(AGENT_ID, roomId, ev);
+      } catch (err) {
+        // never let logging errors crash the runner
+        console.error(`[Runner:${AGENT_ID}] session-log append failed: ${err.message}`);
+      }
+    };
+
+    const handleLine = (line) => {
+      const events = mapStreamJsonLine(line, correlationId);
+      for (const ev of events) {
+        logEvent(ev);
+        if (ev.type === "result" && typeof ev.result === "string") {
+          finalResult = ev.result;
+        } else if (ev.type === "assistant_text" && typeof ev.text === "string") {
+          assistantTextChunks.push(ev.text);
+        }
+      }
+    };
+
+    proc.stdout.on("data", (chunk) => {
+      lineBuf += chunk.toString("utf8");
+      let idx;
+      while ((idx = lineBuf.indexOf("\n")) >= 0) {
+        const line = lineBuf.slice(0, idx);
+        lineBuf = lineBuf.slice(idx + 1);
+        if (line.trim()) handleLine(line);
+      }
+    });
+
     proc.stderr.on("data", (d) => (stderr += d));
 
     const timer = setTimeout(() => {
@@ -126,13 +183,18 @@ function callClaude(prompt, timeoutMs = CLAUDE_TIMEOUT) {
 
     proc.on("close", (code) => {
       clearTimeout(timer);
-      if (code !== 0) return reject(new Error(stderr.substring(0, 300) || `Exit ${code}`));
-      try {
-        const lines = stdout.split("\n").filter((l) => l.trim().startsWith("{"));
-        resolve(JSON.parse(lines[lines.length - 1]).result || stdout.trim());
-      } catch {
-        resolve(stdout.trim());
+      // Flush any remaining partial line
+      if (lineBuf.trim()) {
+        handleLine(lineBuf);
+        lineBuf = "";
       }
+      if (code !== 0) {
+        return reject(new Error(stderr.substring(0, 300) || `Exit ${code}`));
+      }
+      if (finalResult !== null) return resolve(finalResult);
+      if (assistantTextChunks.length) return resolve(assistantTextChunks.join(""));
+      // Last-resort: empty output
+      resolve("");
     });
 
     proc.on("error", (err) => { clearTimeout(timer); reject(err); });
@@ -145,7 +207,8 @@ function callClaude(prompt, timeoutMs = CLAUDE_TIMEOUT) {
 async function sendFormatted(client, roomId, text) {
   // body stays plain markdown so the orchestrator can parse expert responses;
   // formatted_body is rendered HTML so Matrix clients display it nicely.
-  await client.sendMessage(roomId, {
+  // matrix-bot-sdk's sendMessage returns the Matrix event id (string).
+  return await client.sendMessage(roomId, {
     msgtype: "m.text",
     body: text,
     format: "org.matrix.custom.html",
@@ -251,6 +314,7 @@ class TriggerScheduler {
     this.triggerRunning.add(trigger.id);
 
     const roomId = trigger.roomId || MULTI_AGENT_ROOM;
+    const correlationId = `trigger:${trigger.id}:${Date.now()}`;
     console.log(`[Runner:${AGENT_ID}] Executing trigger: ${trigger.id}...`);
 
     try {
@@ -260,12 +324,62 @@ class TriggerScheduler {
         `Aufgabe: ${trigger.prompt}`;
 
       const timeoutMs = trigger.timeoutSeconds ? trigger.timeoutSeconds * 1000 : CLAUDE_TIMEOUT;
-      const result = await callClaude(prompt, timeoutMs);
+
+      try {
+        appendEvent(AGENT_ID, roomId, {
+          type: "trigger.fired",
+          correlationId,
+          triggerId: trigger.id,
+          triggerType: trigger.type,
+        });
+        appendEvent(AGENT_ID, roomId, {
+          type: "claude.invoke",
+          correlationId,
+          promptChars: prompt.length,
+        });
+      } catch (err) {
+        console.error(`[Runner:${AGENT_ID}] session-log warning: ${err.message}`);
+      }
+
+      let result;
+      try {
+        result = await callClaude(prompt, { roomId, correlationId, timeoutMs });
+      } catch (err) {
+        try {
+          appendEvent(AGENT_ID, roomId, {
+            type: "error",
+            correlationId,
+            stage: "claude",
+            message: err.message,
+          });
+        } catch {}
+        throw err;
+      }
 
       if (result.trim().startsWith("[PASS]")) {
         console.log(`[Runner:${AGENT_ID}] Trigger ${trigger.id}: [PASS]`);
       } else {
-        await sendFormatted(this.agentClient, roomId, result);
+        let eventId;
+        try {
+          eventId = await sendFormatted(this.agentClient, roomId, result);
+        } catch (err) {
+          try {
+            appendEvent(AGENT_ID, roomId, {
+              type: "error",
+              correlationId,
+              stage: "matrix",
+              message: err.message,
+            });
+          } catch {}
+          throw err;
+        }
+        try {
+          appendEvent(AGENT_ID, roomId, {
+            type: "message.posted",
+            correlationId,
+            eventId,
+          });
+        } catch {}
         console.log(`[Runner:${AGENT_ID}] Trigger ${trigger.id}: ${result.length} chars`);
       }
     } catch (err) {
@@ -305,6 +419,39 @@ async function main() {
   // Prevent concurrent Claude invocations
   let processing = false;
 
+  // Cache of joined-member counts per room. Keys: roomId.
+  // Value: { members: string[], expiresAt: number }
+  const memberCache = new Map();
+  const MEMBER_CACHE_TTL_MS = 30_000;
+
+  async function getJoinedMembersCached(roomId) {
+    const cached = memberCache.get(roomId);
+    const now = Date.now();
+    if (cached && cached.expiresAt > now) return cached.members;
+    const members = await client.getJoinedRoomMembers(roomId);
+    memberCache.set(roomId, { members, expiresAt: now + MEMBER_CACHE_TTL_MS });
+    return members;
+  }
+
+  // Decide whether this room counts as a 1:1 DM with a real user (not an
+  // agent / not the orchestrator). True when the room is not the multi-agent
+  // room, has exactly two joined members (this agent + one other), and the
+  // sender is neither this agent nor the orchestrator.
+  async function isDmFromHuman(roomId, event) {
+    if (MULTI_AGENT_ROOM && roomId === MULTI_AGENT_ROOM) return false;
+    if (event.sender === AGENT_USER_ID) return false;
+    if (event.sender === ORCHESTRATOR_USER_ID) return false;
+    let members;
+    try {
+      members = await getJoinedMembersCached(roomId);
+    } catch (err) {
+      console.error(`[Runner:${AGENT_ID}] getJoinedRoomMembers(${roomId}) failed: ${err.message}`);
+      return false;
+    }
+    if (!Array.isArray(members) || members.length !== 2) return false;
+    return members.includes(AGENT_USER_ID) && members.includes(event.sender);
+  }
+
   client.on("room.message", async (roomId, event) => {
     if (event.sender === AGENT_USER_ID) return;
     if (event.content?.msgtype !== "m.text") return;
@@ -313,22 +460,77 @@ async function main() {
     const body = event.content?.body;
     if (!body) return;
 
-    // Direct conversation: admin writes in any room outside the orchestrated multi-agent room.
-    // The agent responds unconditionally — no routing protocol, no [PASS] filter.
+    // Direct 1:1 conversation: any room outside the multi-agent room with
+    // exactly two members where the other member is a real user (heuristic:
+    // not orchestrator, not self). The agent responds unconditionally —
+    // no routing protocol, no [PASS] filter.
     const isOrchestratedRoom = MULTI_AGENT_ROOM && roomId === MULTI_AGENT_ROOM;
-    if (!isOrchestratedRoom && event.sender === ADMIN_USER_ID) {
+    if (!isOrchestratedRoom && await isDmFromHuman(roomId, event)) {
       if (processing) {
         console.log(`[Runner:${AGENT_ID}] Busy — dropping direct message`);
         return;
       }
       processing = true;
+      const correlationId = event.event_id || crypto.randomUUID();
       console.log(`[Runner:${AGENT_ID}] Direct message (${body.length} chars)...`);
+
       try {
-        const result = await callClaude(body);
-        await sendFormatted(client, roomId, result);
+        appendEvent(AGENT_ID, roomId, {
+          type: "message.received",
+          correlationId,
+          from: event.sender,
+          body: body.slice(0, 4000),
+        });
+        appendEvent(AGENT_ID, roomId, {
+          type: "claude.invoke",
+          correlationId,
+          promptChars: body.length,
+        });
+      } catch (err) {
+        console.error(`[Runner:${AGENT_ID}] session-log warning: ${err.message}`);
+      }
+
+      try {
+        const result = await callClaude(body, { roomId, correlationId });
+        let eventId;
+        try {
+          eventId = await sendFormatted(client, roomId, result);
+        } catch (err) {
+          try {
+            appendEvent(AGENT_ID, roomId, {
+              type: "error",
+              correlationId,
+              stage: "matrix",
+              message: err.message,
+            });
+          } catch {}
+          throw err;
+        }
+        try {
+          appendEvent(AGENT_ID, roomId, {
+            type: "message.posted",
+            correlationId,
+            eventId,
+          });
+        } catch {}
         console.log(`[Runner:${AGENT_ID}] Posted direct response (${result.length} chars)`);
       } catch (err) {
+        try {
+          appendEvent(AGENT_ID, roomId, {
+            type: "error",
+            correlationId,
+            stage: "claude",
+            message: err.message,
+          });
+        } catch {}
         console.error(`[Runner:${AGENT_ID}] Error: ${err.message}`);
+        // Surface the failure to the user so the chat doesn't hang on a typing indicator.
+        try {
+          await sendFormatted(client, roomId,
+            `⚠️ **Agent error**\n\n\`\`\`\n${String(err.message).slice(0, 800)}\n\`\`\``);
+        } catch (postErr) {
+          console.error(`[Runner:${AGENT_ID}] Could not post error to chat: ${postErr.message}`);
+        }
       } finally {
         processing = false;
       }
@@ -355,20 +557,65 @@ async function main() {
 
     const prompt = route.prompt;
     const isDirect = prompt.startsWith("Der Nutzer hat dich direkt angesprochen.");
+    const correlationId = event.event_id || crypto.randomUUID();
 
     console.log(`[Runner:${AGENT_ID}] Processing prompt (${prompt.length} chars)...`);
 
     try {
-      const result = await callClaude(prompt);
+      appendEvent(AGENT_ID, roomId, {
+        type: "message.received",
+        correlationId,
+        from: event.sender,
+        body: prompt.slice(0, 4000),
+      });
+      appendEvent(AGENT_ID, roomId, {
+        type: "claude.invoke",
+        correlationId,
+        promptChars: prompt.length,
+      });
+    } catch (err) {
+      console.error(`[Runner:${AGENT_ID}] session-log warning: ${err.message}`);
+    }
+
+    try {
+      const result = await callClaude(prompt, { roomId, correlationId });
 
       // [PASS] filtering: suppress output if agent has nothing to say
       if (!isDirect && result.trim().startsWith("[PASS]")) {
         console.log(`[Runner:${AGENT_ID}] [PASS] — not posting`);
       } else {
-        await sendFormatted(client, roomId, result);
+        let eventId;
+        try {
+          eventId = await sendFormatted(client, roomId, result);
+        } catch (err) {
+          try {
+            appendEvent(AGENT_ID, roomId, {
+              type: "error",
+              correlationId,
+              stage: "matrix",
+              message: err.message,
+            });
+          } catch {}
+          throw err;
+        }
+        try {
+          appendEvent(AGENT_ID, roomId, {
+            type: "message.posted",
+            correlationId,
+            eventId,
+          });
+        } catch {}
         console.log(`[Runner:${AGENT_ID}] Posted response (${result.length} chars)`);
       }
     } catch (err) {
+      try {
+        appendEvent(AGENT_ID, roomId, {
+          type: "error",
+          correlationId,
+          stage: "claude",
+          message: err.message,
+        });
+      } catch {}
       console.error(`[Runner:${AGENT_ID}] Error: ${err.message}`);
     } finally {
       processing = false;

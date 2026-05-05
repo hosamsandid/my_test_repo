@@ -3,13 +3,14 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, Users, Zap, Clock, Sparkles, Server,
   Database, ScrollText, ChevronLeft, ChevronRight, Bot,
-  Boxes, Key,
+  Boxes, Key, MessageCircle,
 } from 'lucide-react';
 
 const NAV = [
   { section: 'OVERVIEW', items: [
     { path: '/',             label: 'Dashboard',           Icon: LayoutDashboard },
     { path: '/agents',       label: 'Agent Manager',       Icon: Users },
+    { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
   ]},
   { section: 'WORKSPACES', items: [
     { path: '/environments', label: 'Working Environments', Icon: Boxes },
@@ -32,6 +33,7 @@ const NAV = [
 const BREADCRUMBS = {
   '/':             'Dashboard',
   '/agents':       'Agent Manager',
+  '/chats':        'Agent Chat',
   '/environments': 'Working Environments',
   '/ssh-keys':     'SSH Keys',
   '/skills':       'Skills Registry',
@@ -41,6 +43,15 @@ const BREADCRUMBS = {
   '/knowledge':    'Knowledge Base',
   '/logs':         'Logs',
 };
+
+function breadcrumbFor(pathname) {
+  if (BREADCRUMBS[pathname]) return BREADCRUMBS[pathname];
+  if (pathname.startsWith('/chats/')) {
+    const id = pathname.slice('/chats/'.length);
+    return `Agent Chat / ${id}`;
+  }
+  return pathname;
+}
 
 export default function Shell({ children }) {
   const [collapsed, setCollapsed] = useState(false);
@@ -133,7 +144,9 @@ export default function Shell({ children }) {
                 </div>
               )}
               {section.items.map(({ path, label, Icon }) => {
-                const isActive = location.pathname === path;
+                const isActive = path === '/'
+                  ? location.pathname === '/'
+                  : location.pathname === path || location.pathname.startsWith(path + '/');
                 return (
                   <button
                     key={path}
@@ -195,7 +208,7 @@ export default function Shell({ children }) {
           flexShrink: 0,
         }}>
           <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-            {BREADCRUMBS[location.pathname] || location.pathname}
+            {breadcrumbFor(location.pathname)}
           </div>
         </header>
 

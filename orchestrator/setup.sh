@@ -19,7 +19,7 @@ if [ -f "${SCRIPT_DIR}/../.env" ]; then
 fi
 
 HOMESERVER="${HOMESERVER:-http://localhost:${CONDUWUIT_PORT:-8448}}"
-ADMIN_USER="${ADMIN_USER:-thorsten}"
+ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASS="${ADMIN_PASS:-}"
 ORCH_USER="orchestrator"
 ORCH_PASS="${ORCH_PASS:-orch-$(date +%s)}"

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Wifi, WifiOff, Loader2, RefreshCw, RotateCcw, GraduationCap } from 'lucide-react';
+import { Wifi, WifiOff, Loader2, RefreshCw, RotateCcw, GraduationCap, Server } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
 import Message from './Message';
@@ -500,13 +500,18 @@ export default function ChatPanel({
           }}>
             {agent.displayName || agent.id}
           </div>
-          <div style={{
-            fontSize: 'var(--eb-text-xs)',
-            color: 'var(--eb-text-muted)',
-            fontFamily: 'var(--eb-font-mono)',
-          }}>
-            {agent.userId}
-          </div>
+          {agent.environmentName && (
+            <div style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 4,
+              fontSize: 'var(--eb-text-xs)',
+              color: 'var(--eb-text-muted)',
+            }}>
+              <Server size={11} />
+              {agent.environmentName}
+            </div>
+          )}
         </div>
         <ConnectionDot status={sseStatus} />
       </div>

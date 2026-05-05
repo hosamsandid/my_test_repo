@@ -1,5 +1,5 @@
 import React from 'react';
-import { MessageCircle, Bot, Brain, Clock } from 'lucide-react';
+import { MessageCircle, Bot, Brain, Clock, Server } from 'lucide-react';
 
 /**
  * Vertical list of selectable agents in the left rail.
@@ -81,16 +81,22 @@ function AgentRow({ agent, selected, onSelect }) {
         }}>
           {agent.displayName || agent.id}
         </div>
-        <div style={{
-          fontSize: 'var(--eb-text-xs)',
-          color: 'var(--eb-text-muted)',
-          fontFamily: 'var(--eb-font-mono)',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}>
-          {agent.userId}
-        </div>
+        {agent.environmentName && (
+          <div style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 3,
+            marginTop: 2,
+            fontSize: 'var(--eb-text-xs)',
+            color: 'var(--eb-text-muted)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}>
+            <Server size={10} style={{ flexShrink: 0 }} />
+            {agent.environmentName}
+          </div>
+        )}
       </div>
 
       <span

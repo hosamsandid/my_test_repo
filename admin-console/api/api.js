@@ -641,6 +641,7 @@ app.get('/api/matrix/agents', (req, res) => {
     if (cfg.enabled === false) continue;
     if (!cfg.token) continue;
     const dm = matrix.getAgentDmRoom(id);
+    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
     out.push({
       id,
       displayName: cfg.displayName || id,
@@ -648,6 +649,8 @@ app.get('/api/matrix/agents', (req, res) => {
       userId: cfg.userId || `@${id}:local`,
       enabled: cfg.enabled !== false,
       dmRoomId: dm?.roomId || null,
+      environmentId: cfg.environmentId || null,
+      environmentName: env?.name || cfg.environmentId || null,
     });
   }
   res.json(out);

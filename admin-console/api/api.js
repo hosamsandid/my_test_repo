@@ -1166,6 +1166,7 @@ app.get('/api/agents/:agentId/workspace/tree', (req, res) => {
     if (d.isDirectory()) kind = 'dir';
     else if (d.isSymbolicLink()) kind = 'link';
     else if (!d.isFile()) kind = 'other';
+    let gitBranch = null;
     try {
       const st = fs.statSync(full);
       size = st.size;
@@ -1178,12 +1179,23 @@ app.get('/api/agents/:agentId/workspace/tree', (req, res) => {
         else if (st.isFile()) kind = 'file';
       }
     } catch { /* dangling link or transient — surface minimal info */ }
+    if (kind === 'dir') {
+      try {
+        const headContent = fs.readFileSync(path.join(full, '.git', 'HEAD'), 'utf8').trim();
+        if (headContent.startsWith('ref: refs/heads/')) {
+          gitBranch = headContent.slice('ref: refs/heads/'.length);
+        } else if (/^[0-9a-f]{7,40}$/i.test(headContent)) {
+          gitBranch = headContent.slice(0, 7); // detached HEAD — show short hash
+        }
+      } catch { /* not a git repo or unreadable */ }
+    }
     return {
       name: d.name,
       type: kind,
       size,
       mtime,
       hidden: d.name.startsWith('.'),
+      ...(gitBranch !== null && { gitBranch }),
     };
   });
 

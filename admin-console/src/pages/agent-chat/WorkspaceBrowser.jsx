@@ -6,7 +6,7 @@ import rehypeSanitize from 'rehype-sanitize';
 import {
   ChevronRight, ChevronDown, Folder, FolderOpen, FileText, FileCode,
   Brain, Sparkles, BookOpen, Loader2, X, RefreshCw, AlertCircle, FileWarning,
-  Maximize2, Minimize2, Code2, Eye,
+  Maximize2, Minimize2, Code2, Eye, GitBranch,
 } from 'lucide-react';
 
 /**
@@ -182,7 +182,7 @@ export default function WorkspaceBrowser({ agentId, active }) {
 
 /* ─── Tree node ───────────────────────────────────────────────────── */
 
-function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath }) {
+function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, gitBranch }) {
   const isRoot = relPath === '';
   const isOpen = expanded.has(relPath);
   const cache  = dirCache.get(relPath);
@@ -203,6 +203,7 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
             </span>
           }
           label={name}
+          gitBranch={gitBranch}
           onClick={() => onToggleDir(relPath)}
         />
       )}
@@ -284,6 +285,7 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
               onToggleDir={onToggleDir}
               onSelectFile={onSelectFile}
               selectedFilePath={selectedFilePath}
+              gitBranch={item.gitBranch || null}
             />
           );
         }
@@ -304,7 +306,7 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
   );
 }
 
-function Row({ indent, icon, label, secondary, dim, active, onClick }) {
+function Row({ indent, icon, label, secondary, dim, active, onClick, gitBranch }) {
   return (
     <button
       type="button"
@@ -342,6 +344,21 @@ function Row({ indent, icon, label, secondary, dim, active, onClick }) {
       }}>
         {label}
       </span>
+      {gitBranch && (
+        <span style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 3,
+          color: 'var(--eb-text-muted)',
+          fontFamily: 'var(--eb-font-mono)',
+          fontSize: '10px',
+          flexShrink: 0,
+          opacity: 0.8,
+        }}>
+          <GitBranch size={10} />
+          {gitBranch}
+        </span>
+      )}
       {secondary && (
         <span style={{
           color: 'var(--eb-text-muted)',

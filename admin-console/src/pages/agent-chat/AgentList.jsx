@@ -38,15 +38,15 @@ function iconForRole(role) {
 }
 
 const STATUS_DOT = {
-  busy:     { color: 'var(--eb-status-warning)', label: 'Arbeitet gerade…', pulse: true },
-  idle:     { color: 'var(--eb-status-success)', label: 'Bereit',           pulse: false },
-  offline:  { color: 'var(--eb-status-error)',   label: 'Offline',          pulse: false },
-  disabled: { color: 'var(--eb-text-muted)',     label: 'Deaktiviert',      pulse: false },
+  busy:    { color: 'var(--eb-status-warning)', label: 'Verarbeitet…',        pulse: true  },
+  unread:  { color: 'var(--eb-status-success)', label: 'Neue Nachricht',       pulse: false },
+  idle:    { color: 'var(--eb-text-muted)',     label: 'Wartet auf Eingabe',  pulse: false },
+  problem: { color: 'var(--eb-status-error)',   label: 'Nicht verfügbar',      pulse: false },
 };
 
 function AgentRow({ agent, selected, onSelect, activityState = 'idle' }) {
   const Icon = iconForRole(agent.role);
-  const dot = STATUS_DOT[activityState] ?? STATUS_DOT.idle;
+  const dot = STATUS_DOT[activityState] ?? STATUS_DOT.problem;
 
   return (
     <button

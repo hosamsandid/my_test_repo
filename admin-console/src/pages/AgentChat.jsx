@@ -7,7 +7,16 @@ import ChatPanel from './agent-chat/ChatPanel';
 import RightRail from './agent-chat/RightRail';
 
 const LAST_AGENT_KEY = 'agentChat.lastAgentId';
+const LAST_VIEWED_KEY = 'agentChat.lastViewed';
 const STATUS_POLL_MS = 5000;
+
+function loadLastViewed() {
+  try { return JSON.parse(localStorage.getItem(LAST_VIEWED_KEY) || '{}'); }
+  catch { return {}; }
+}
+function saveLastViewed(map) {
+  try { localStorage.setItem(LAST_VIEWED_KEY, JSON.stringify(map)); } catch {}
+}
 
 /**
  * Top-level page for the integrated agent chat (PR #3).
@@ -31,17 +40,44 @@ export default function AgentChat() {
   // (overrides the persisted `dmRoomId` returned by /api/matrix/agents).
   const [createdRooms, setCreatedRooms] = useState({});
 
-  // Map agentId -> activityState ('idle'|'busy'|'offline'|'disabled')
-  // polled every STATUS_POLL_MS so the list reflects live agent activity.
+  // Keep a ref to the current agentId so the polling closure can read it
+  // without becoming stale (the effect has [] deps and runs once).
+  const agentIdRef = useRef(agentId);
+  useEffect(() => { agentIdRef.current = agentId; }, [agentId]);
+
+  // Map agentId -> effective display state
+  // ('busy'|'unread'|'idle'|'problem')
   const [agentStatuses, setAgentStatuses] = useState({});
   const statusTimerRef = useRef(null);
   useEffect(() => {
     const poll = () => {
+      // Always mark the currently open agent as "viewed" before computing
+      // statuses so it never flips to "unread" while the user is looking at it.
+      const currentId = agentIdRef.current;
+      if (currentId) {
+        const viewed = loadLastViewed();
+        viewed[currentId] = Date.now();
+        saveLastViewed(viewed);
+      }
+
       fetch('/api/agents/statuses')
         .then(r => r.ok ? r.json() : [])
         .then(list => {
+          const viewed = loadLastViewed();
           const map = {};
-          for (const { id, activityState } of list) map[id] = activityState;
+          for (const { id, activityState, lastResponseAt } of list) {
+            let effective;
+            if (activityState === 'disabled' || activityState === 'offline') {
+              effective = 'problem';
+            } else if (activityState === 'busy') {
+              effective = 'busy';
+            } else if (lastResponseAt && new Date(lastResponseAt).getTime() > (viewed[id] || 0)) {
+              effective = 'unread';
+            } else {
+              effective = 'idle';
+            }
+            map[id] = effective;
+          }
           setAgentStatuses(map);
         })
         .catch(() => {});
@@ -75,6 +111,9 @@ export default function AgentChat() {
 
   const handleSelect = useCallback((id) => {
     try { localStorage.setItem(LAST_AGENT_KEY, id); } catch { /* ignore */ }
+    const viewed = loadLastViewed();
+    viewed[id] = Date.now();
+    saveLastViewed(viewed);
     navigate(`/chats/${id}`);
   }, [navigate]);
 

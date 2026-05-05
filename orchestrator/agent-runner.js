@@ -129,11 +129,23 @@ function clearSessionPointer(roomId) {
 // ============================================================
 function writeStatus(state) {
   try {
+    let prev = {};
+    try { prev = JSON.parse(fs.readFileSync(path.join(AGENT_WORKDIR, 'status.json'), 'utf8')); } catch {}
+    const data = { state, updatedAt: new Date().toISOString() };
+    if (prev.lastResponseAt) data.lastResponseAt = prev.lastResponseAt;
+    fs.writeFileSync(path.join(AGENT_WORKDIR, 'status.json'), JSON.stringify(data));
+  } catch { /* best effort — never crash the runner */ }
+}
+
+function writeLastResponseAt() {
+  try {
+    let prev = {};
+    try { prev = JSON.parse(fs.readFileSync(path.join(AGENT_WORKDIR, 'status.json'), 'utf8')); } catch {}
     fs.writeFileSync(
       path.join(AGENT_WORKDIR, 'status.json'),
-      JSON.stringify({ state, updatedAt: new Date().toISOString() })
+      JSON.stringify({ ...prev, lastResponseAt: new Date().toISOString() })
     );
-  } catch { /* best effort — never crash the runner */ }
+  } catch { /* best effort */ }
 }
 
 let activeInvocations = 0;
@@ -479,6 +491,7 @@ class TriggerScheduler {
           } catch {}
           throw err;
         }
+        writeLastResponseAt();
         try {
           appendEvent(AGENT_ID, roomId, {
             type: "message.posted",
@@ -619,6 +632,7 @@ async function main() {
           } catch {}
           throw err;
         }
+        writeLastResponseAt();
         try {
           appendEvent(AGENT_ID, roomId, {
             type: "message.posted",
@@ -717,6 +731,7 @@ async function main() {
           } catch {}
           throw err;
         }
+        writeLastResponseAt();
         try {
           appendEvent(AGENT_ID, roomId, {
             type: "message.posted",

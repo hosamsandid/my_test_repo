@@ -234,7 +234,11 @@ app.get('/api/agents/statuses', async (req, res) => {
     if (cfg.enabled === false) return { id, activityState: 'disabled' };
     if (!runningIds.has(id)) return { id, activityState: 'offline' };
     const status = readJsonFile(path.join(AGENTS_DIR, id, 'status.json'), null);
-    return { id, activityState: status?.state === 'busy' ? 'busy' : 'idle' };
+    return {
+      id,
+      activityState: status?.state === 'busy' ? 'busy' : 'idle',
+      lastResponseAt: status?.lastResponseAt ?? null,
+    };
   });
 
   res.json(statuses);

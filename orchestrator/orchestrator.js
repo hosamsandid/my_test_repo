@@ -316,21 +316,23 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null) {
 
   let blueprintSection = "";
   if (blueprintId) {
+    const bpBase = `http://localhost:4002/internal/blueprints/${blueprintId}/memory`;
+    const memFiles = ["context.md", "log.md", "facts.md", "entities.md", "users.md"];
+    const pullCmds = memFiles.map(f => `curl -sf ${bpBase}/${f} > memory/${f} || true`).join("\n");
+    const pushCmds = memFiles.map(f => `curl -s -X PUT -H 'Content-Type: text/plain' --data-binary @memory/${f} ${bpBase}/${f}`).join("\n");
     blueprintSection =
       `\n---\n\n## Memory System (Shared — Blueprint Instance)\n\n` +
       `This agent is an **instance of blueprint \`${blueprintId}\`**. ` +
       `Memory is **shared** across all instances of this blueprint — whatever one instance learns, all instances know.\n\n` +
       `### Reading memory (do this at the start of each conversation)\n\n` +
       "```bash\n" +
-      `curl -sf http://localhost:4002/internal/blueprints/${blueprintId}/memory/context.md > memory/context.md || true\n` +
-      `curl -sf http://localhost:4002/internal/blueprints/${blueprintId}/memory/log.md > memory/log.md || true\n` +
+      `${pullCmds}\n` +
       "```\n\n" +
-      `Then read both files as usual.\n\n` +
+      `Then read all five files.\n\n` +
       `### Writing memory (when wrapping up or asked to remember something)\n\n` +
-      `Edit the local files as usual, then push to the shared store:\n\n` +
+      `Edit the local files as usual, then push all to the shared store:\n\n` +
       "```bash\n" +
-      `curl -s -X PUT -H 'Content-Type: text/plain' --data-binary @memory/context.md http://localhost:4002/internal/blueprints/${blueprintId}/memory/context.md\n` +
-      `curl -s -X PUT -H 'Content-Type: text/plain' --data-binary @memory/log.md http://localhost:4002/internal/blueprints/${blueprintId}/memory/log.md\n` +
+      `${pushCmds}\n` +
       "```\n\n" +
       `**Always pull before reading** — another instance may have updated memory since your last session.\n`;
   }

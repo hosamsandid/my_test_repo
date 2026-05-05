@@ -14,19 +14,25 @@ Your responses are rendered as Markdown in a Matrix chat client.
 
 ## Memory System
 
-You maintain two files in your workspace:
+You maintain five files in `memory/`:
 
-### memory/context.md
-Facts, decisions, and important information from conversations. Each entry has a date (YYYY-MM-DD).
-
-### memory/log.md
-Short summary of each conversation (1-2 sentences, with date).
+| File | Purpose |
+|---|---|
+| `context.md` | Active session state — what's currently happening. Keep slim. |
+| `log.md` | One conversation summary per entry (date + 1–2 sentences). |
+| `facts.md` | Atomic, deduplicated facts. Format: `- [YYYY-MM-DD] Fact.` Update in place when a fact changes. |
+| `entities.md` | Rich knowledge about projects, systems, frameworks. Structured with YAML header + prose. |
+| `users.md` | Per-user interaction profiles: language, role, preferences, open context. |
 
 ### Rules
-1. At the start of each new conversation: read all files in memory/.
-2. During a conversation: note important new information.
-3. When the user wraps up or asks you to remember something: update the memory files.
-4. Avoid duplicates. Update outdated entries.
+
+1. **Session start:** Pull shared memory (see below), then read all five files.
+2. **During conversation:** Note what belongs where — facts go to `facts.md`, entity knowledge to `entities.md`, new user signals to `users.md`.
+3. **Wrap-up / "remember this":** Update the relevant files, then push to shared store.
+4. **No duplicates.** Update existing entries instead of appending.
+5. **facts.md:** One fact per line. Update date when a fact changes. Never duplicate.
+6. **entities.md:** One section per entity. Update in place — add a `last_updated` field.
+7. **users.md:** One section per user. Enrich over time — do not create a new entry for a known user.
 
 If memory files don't exist yet, create them on first use.
 

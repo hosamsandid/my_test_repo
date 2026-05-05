@@ -30,6 +30,11 @@ const SSH_KEYS_INDEX = path.join(SSH_KEYS_DIR, "index.json");
 const GH_TOKENS_DIR = path.join(ENVIRONMENTS_DIR, "_tokens");
 
 const { spawn, execFileSync } = require("child_process");
+const crypto = require("crypto");
+
+function randomHex(bytes) {
+  return crypto.randomBytes(bytes).toString("hex");
+}
 const agentProcesses = new Map(); // id → ChildProcess
 
 const QUIET_DELAY = 10_000;
@@ -102,7 +107,7 @@ function stopAgentProcess(id) {
 async function startAllEnabledAgents() {
   for (const id of listAgentIds()) {
     const config = loadAgentConfig(id);
-    if (config && config.enabled !== false) {
+    if (config && config.enabled !== false && config.role !== 'orchestrator') {
       startAgentProcess(config);
     }
   }
@@ -1335,6 +1340,175 @@ async function main() {
       return;
     }
 
+    // ── Ephemeral agent ───────────────────────────────────────────────────
+    if (req.method === 'POST' && req.url === '/internal/agents/ephemeral') {
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        try {
+          const { blueprintId, displayName, missionPrompt, environmentId, timeoutSeconds } = JSON.parse(body);
+          if (!displayName || !missionPrompt || !environmentId) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'displayName, missionPrompt, environmentId required' }));
+            return;
+          }
+
+          const agentId = 'bp-' + randomHex(4);
+          const env = loadEnvironment(environmentId);
+          if (!env) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `Working Environment not found: ${environmentId}` }));
+            return;
+          }
+
+          const password = `agent-${agentId}-${Date.now()}`;
+          const userId = `@${agentId}:local`;
+
+          if (orchestrator.adminClient) await ensureMatrixUser(orchestrator.adminClient, agentId, password);
+          const token = await loginMatrixUser(agentId, password);
+          await setDisplayName(token, userId, displayName);
+          await inviteAndJoin(orchestrator.poolClient, token, MULTI_AGENT_ROOM);
+
+          const seedResult = blueprintId
+            ? seedAgentWorkspaceForInstance(agentId, env, blueprintId)
+            : seedAgentWorkspace(agentId, env);
+
+          const systemPrompt = blueprintId
+            ? (loadBlueprint(blueprintId)?.systemPrompt || displayName)
+            : displayName;
+
+          const config = {
+            id: agentId,
+            displayName,
+            userId,
+            token,
+            role: 'autonomous',
+            environmentId: env.id,
+            ephemeral: true,
+            enabled: true,
+            ...(blueprintId && { blueprintId }),
+          };
+          saveAgentConfig(agentId, config);
+          saveAgentPrompt(agentId, systemPrompt, 'autonomous', env, blueprintId || null);
+
+          const triggerId = 'trigger-' + randomHex(4);
+          const fireAt = new Date(Date.now() + 5000).toISOString();
+          saveTriggers(agentId, [{
+            id: triggerId,
+            type: 'once',
+            enabled: true,
+            at: fireAt,
+            prompt: missionPrompt,
+            ...(timeoutSeconds && { timeoutSeconds }),
+          }]);
+
+          orchestrator.agentConfigs.set(agentId, { config });
+          startAgentProcess(config);
+
+          const workspacePath = agentDir(agentId);
+          console.log(`[Orchestrator] Created ephemeral agent ${agentId} (displayName=${displayName})`);
+          res.writeHead(201, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ agentId, workspacePath }));
+        } catch (err) {
+          console.error(`[Orchestrator] Ephemeral agent create error: ${err.message}`);
+          const statusCode = /not found/i.test(err.message) ? 400 : 500;
+          res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Poll agent status ─────────────────────────────────────────────────
+    const pollMatch = req.method === 'GET' && req.url.match(/^\/internal\/agents\/([^/]+)\/poll$/);
+    if (pollMatch) {
+      const id = decodeURIComponent(pollMatch[1]);
+      if (!fs.existsSync(agentDir(id))) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Agent not found' }));
+        return;
+      }
+      const statusPath = path.join(agentDir(id), 'status.json');
+      let status = {};
+      try {
+        if (fs.existsSync(statusPath)) {
+          status = JSON.parse(fs.readFileSync(statusPath, 'utf8'));
+        }
+      } catch (err) {
+        console.error(`[Orchestrator] Poll read error for ${id}: ${err.message}`);
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        agentId: id,
+        busy: status.busy ?? null,
+        triggerFired: status.triggerFired ?? null,
+        lastActivity: status.lastActivity ?? null,
+        exitedAt: status.exitedAt ?? null,
+      }));
+      return;
+    }
+
+    // ── Session tail ──────────────────────────────────────────────────────
+    const sessionTailMatch = req.method === 'GET' && req.url.match(/^\/internal\/agents\/([^/]+)\/session-tail(\?.*)?$/);
+    if (sessionTailMatch) {
+      const id = decodeURIComponent(sessionTailMatch[1]);
+      const urlObj = new URL(req.url, 'http://localhost');
+      const lines = parseInt(urlObj.searchParams.get('lines') || '100', 10);
+      const since = parseInt(urlObj.searchParams.get('since') || '0', 10);
+
+      if (!fs.existsSync(agentDir(id))) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Agent not found' }));
+        return;
+      }
+
+      try {
+        const sessionsDir = path.join(agentDir(id), 'sessions');
+        let newestFile = null;
+        let newestMtime = 0;
+        if (fs.existsSync(sessionsDir)) {
+          for (const f of fs.readdirSync(sessionsDir)) {
+            if (!f.endsWith('.jsonl')) continue;
+            const fp = path.join(sessionsDir, f);
+            const st = fs.statSync(fp);
+            if (st.mtimeMs > newestMtime) {
+              newestMtime = st.mtimeMs;
+              newestFile = fp;
+            }
+          }
+        }
+
+        if (!newestFile) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ lines: [], nextOffset: 0 }));
+          return;
+        }
+
+        const fileSize = fs.statSync(newestFile).size;
+        const startOffset = Math.min(since, fileSize);
+        const toRead = fileSize - startOffset;
+        let chunk = '';
+        if (toRead > 0) {
+          const buf = Buffer.alloc(toRead);
+          const fd = fs.openSync(newestFile, 'r');
+          fs.readSync(fd, buf, 0, toRead, startOffset);
+          fs.closeSync(fd);
+          chunk = buf.toString('utf8');
+        }
+
+        const allLines = chunk.split('\n').filter(l => l.trim());
+        const tail = allLines.slice(-lines);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ lines: tail, nextOffset: fileSize }));
+      } catch (err) {
+        console.error(`[Orchestrator] session-tail error for ${id}: ${err.message}`);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
     if (req.method !== 'POST' || req.url !== '/internal/agents') {
       res.writeHead(404); res.end(); return;
     }
@@ -1342,10 +1516,20 @@ async function main() {
     req.on('data', d => body += d);
     req.on('end', async () => {
       try {
-        const { id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt } = JSON.parse(body);
-        if (!id || !displayName || !role || !systemPrompt || !environmentId) {
+        const { id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt, briefingsPath } = JSON.parse(body);
+        if (!id || !displayName || !role || !environmentId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'id, displayName, role, systemPrompt, environmentId required' }));
+          res.end(JSON.stringify({ error: 'id, displayName, role, environmentId required' }));
+          return;
+        }
+        if (!['expert', 'autonomous', 'orchestrator'].includes(role)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `Invalid role: ${role}. Must be one of: expert, autonomous, orchestrator` }));
+          return;
+        }
+        if (role !== 'orchestrator' && !systemPrompt) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'systemPrompt required for non-orchestrator roles' }));
           return;
         }
         if (loadAgentConfig(id)) {
@@ -1353,6 +1537,37 @@ async function main() {
           res.end(JSON.stringify({ error: `Agent '${id}' already exists` }));
           return;
         }
+
+        if (role === 'orchestrator') {
+          // Orchestrator-role agents: seed workspace but no Matrix user, no process
+          const env = loadEnvironment(environmentId);
+          if (!env) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `Working Environment not found: ${environmentId}` }));
+            return;
+          }
+          const seedResult = seedAgentWorkspace(id, env);
+          const config = {
+            id,
+            displayName,
+            role: 'orchestrator',
+            environmentId: env.id,
+            briefingsPath: briefingsPath || null,
+            enabled: true,
+          };
+          saveAgentConfig(id, config);
+          orchestrator.agentConfigs.set(id, { config });
+          console.log(`[Orchestrator] Created orchestrator agent ${id} (briefingsPath=${briefingsPath || 'none'})`);
+          res.writeHead(201, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            id,
+            seeded: seedResult.seeded,
+            warnings: seedResult.warnings || [],
+            clone: seedResult.clone || null,
+          }));
+          return;
+        }
+
         const extra = role === 'autonomous' ? { schedule, taskPrompt } : {};
         const result = await orchestrator.createAgent(id, displayName, role, systemPrompt, environmentId, extra);
         res.writeHead(201, { 'Content-Type': 'application/json' });

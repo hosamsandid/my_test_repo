@@ -1,11 +1,12 @@
 import React, { useState, useCallback } from 'react';
-import { Edit, Trash2, FileText, Plus, Copy } from 'lucide-react';
+import { Edit, Trash2, FileText, Plus, Copy, Folder } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import StatusBadge from '../components/StatusBadge';
 import FormInput from '../components/FormInput';
+import DirectoryPicker from '../components/DirectoryPicker';
 
 /* ── Toggle switch ─────────────────────────────────────────────────── */
 function ToggleSwitch({ checked, onChange, label }) {
@@ -108,6 +109,7 @@ function AgentEditForm({ agent, onSave, onCancel }) {
         >
           <option value="expert">Expert</option>
           <option value="autonomous">Autonomous</option>
+          <option value="orchestrator">Orchestrator</option>
         </select>
       </div>
 
@@ -156,7 +158,9 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
   const [form, setForm] = useState({
     id: '', displayName: '', role: 'expert', environmentId: '',
     systemPrompt: '', schedule: '', taskPrompt: '',
+    briefingsPath: '',
   });
+  const [showDirPicker, setShowDirPicker] = useState(false);
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
 
   const { data: environments } = useApi('/api/environments');
@@ -165,7 +169,8 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
   const labelStyle = { fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-0-5)' };
   const inputStyle = { width: '100%', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' };
 
-  const canSubmit = form.id && form.displayName && form.systemPrompt && form.environmentId;
+  const canSubmit = form.id && form.displayName && form.environmentId &&
+    (form.role === 'orchestrator' || form.systemPrompt);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -216,6 +221,7 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
         <select value={form.role} onChange={e => update('role', e.target.value)} style={inputStyle}>
           <option value="expert">Expert — responds to questions in the room</option>
           <option value="autonomous">Autonomous — runs on its own schedule</option>
+          <option value="orchestrator">Orchestrator</option>
         </select>
       </div>
 
@@ -232,10 +238,51 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
         </>
       )}
 
-      <div>
-        <div style={labelStyle}>System Prompt <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
-        <textarea value={form.systemPrompt} onChange={e => update('systemPrompt', e.target.value)} placeholder="You are an experienced COBOL developer..." rows={8} style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }} />
-      </div>
+      {form.role === 'orchestrator' && (
+        <div>
+          <div style={labelStyle}>Briefings-Verzeichnis</div>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+            <input
+              style={{ ...inputStyle, flex: 1 }}
+              value={form.briefingsPath}
+              onChange={e => update('briefingsPath', e.target.value)}
+              placeholder="z.B. briefings/"
+            />
+            <button
+              type="button"
+              onClick={() => setShowDirPicker(true)}
+              disabled={!form.id}
+              title={form.id ? 'Verzeichnis auswählen' : 'Bitte zuerst eine Agent-ID eingeben'}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
+                padding: 'var(--eb-space-2) var(--eb-space-3)',
+                background: 'var(--eb-bg-elevated)',
+                border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-md)',
+                color: 'var(--eb-text-secondary)',
+                cursor: form.id ? 'pointer' : 'not-allowed',
+                fontSize: 'var(--eb-text-sm)',
+                fontFamily: 'inherit',
+                flexShrink: 0,
+                opacity: form.id ? 1 : 0.5,
+              }}
+            >
+              <Folder size={15} />
+              Durchsuchen
+            </button>
+          </div>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+            Pfad im Agenten-Workspace, in dem BriefingPacks abgelegt werden.
+          </div>
+        </div>
+      )}
+
+      {form.role !== 'orchestrator' && (
+        <div>
+          <div style={labelStyle}>System Prompt <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
+          <textarea value={form.systemPrompt} onChange={e => update('systemPrompt', e.target.value)} placeholder="You are an experienced COBOL developer..." rows={8} style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }} />
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         <button
@@ -249,6 +296,17 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           Cancel
         </button>
       </div>
+
+      {showDirPicker && form.id && (
+        <DirectoryPicker
+          agentId={form.id}
+          onSelect={(selectedPath) => {
+            update('briefingsPath', selectedPath);
+            setShowDirPicker(false);
+          }}
+          onClose={() => setShowDirPicker(false)}
+        />
+      )}
     </div>
   );
 }

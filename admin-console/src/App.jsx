@@ -14,6 +14,7 @@ const ModelRegistry       = lazy(() => import('./pages/ModelRegistry'));
 const McpServers          = lazy(() => import('./pages/McpServers'));
 const KnowledgeBase       = lazy(() => import('./pages/KnowledgeBase'));
 const Logs                = lazy(() => import('./pages/Logs'));
+const Briefings           = lazy(() => import('./pages/Briefings'));
 
 export default function App() {
   return (
@@ -34,6 +35,7 @@ export default function App() {
           <Route path="/mcp"          element={<McpServers />} />
           <Route path="/knowledge"    element={<KnowledgeBase />} />
           <Route path="/logs"         element={<Logs />} />
+          <Route path="/briefings"    element={<Briefings />} />
         </Routes>
       </Suspense>
     </Shell>

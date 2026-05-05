@@ -18,6 +18,7 @@ const GH_TOKENS_DIR = path.join(ENVIRONMENTS_DIR, '_tokens');
 const GH_TOKENS_INDEX = path.join(GH_TOKENS_DIR, 'index.json');
 const STATIC_DIR = path.join(__dirname, '..', 'dist');
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
+const BP_EXPLORER_URL = process.env.BP_EXPLORER_URL || 'http://bp-explorer:8765';
 
 fs.mkdirSync(ENVIRONMENTS_DIR, { recursive: true });
 fs.mkdirSync(SSH_KEYS_DIR, { recursive: true });
@@ -258,18 +259,22 @@ app.put('/api/agents/:id', (req, res) => {
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled } = req.body;
+  const { displayName, role, enabled, briefingsPath } = req.body;
   if (displayName !== undefined) cfg.displayName = displayName;
   if (role !== undefined) cfg.role = role;
   if (enabled !== undefined) cfg.enabled = enabled;
+  if (briefingsPath !== undefined) cfg.briefingsPath = briefingsPath;
   writeJsonAtomic(cfgPath, cfg);
   res.json({ id, ...cfg });
 });
 
 app.post('/api/agents', async (req, res) => {
-  const { id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt } = req.body;
-  if (!id || !displayName || !role || !systemPrompt || !environmentId) {
-    return res.status(400).json({ error: 'id, displayName, role, systemPrompt, environmentId required' });
+  const { id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt, briefingsPath } = req.body;
+  if (!id || !displayName || !role || !environmentId) {
+    return res.status(400).json({ error: 'id, displayName, role, environmentId required' });
+  }
+  if (!systemPrompt && role !== 'orchestrator') {
+    return res.status(400).json({ error: 'systemPrompt is required for non-orchestrator agents' });
   }
   if (!loadEnvironment(environmentId)) {
     return res.status(400).json({ error: `Working Environment '${environmentId}' not found` });
@@ -279,7 +284,7 @@ app.post('/api/agents', async (req, res) => {
     const resp = await fetch(`${orchestratorUrl}/internal/agents`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt }),
+      body: JSON.stringify({ id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt, briefingsPath }),
     });
     const data = await resp.json();
     if (!resp.ok) return res.status(resp.status).json(data);
@@ -1350,6 +1355,23 @@ app.get('/api/agents/:agentId/workspace/tree', (req, res) => {
   res.json({ path: echoPath, items });
 });
 
+// Directory-only listing — delegated to BP-Explorer for orchestrator directory picker.
+app.get('/api/agents/:agentId/workspace/dirs', async (req, res) => {
+  const { agentId } = req.params;
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  const root = path.join(AGENTS_DIR, agentId);
+  // Verify agent exists
+  if (!fs.existsSync(root)) return res.status(404).json({ error: 'Agent not found' });
+  try {
+    const qs = new URLSearchParams({ root, path: relPath }).toString();
+    const upstream = await fetch(`${BP_EXPLORER_URL}/api/workspace/tree?${qs}`);
+    const data = await upstream.json();
+    res.status(upstream.status).json(data);
+  } catch (err) {
+    res.status(502).json({ error: `BP-Explorer unreachable: ${err.message}` });
+  }
+});
+
 // File content. Caps reads at WORKSPACE_FILE_MAX_BYTES; flags binary files
 // (NUL byte detection in the prefix) so the UI can show a "binary file"
 // stub instead of garbled UTF-8.
@@ -1624,6 +1646,26 @@ app.get('/api/agents/:agentId/session/:roomId/stream', (req, res) => {
     if (dirWatcher) { try { dirWatcher.close(); } catch { /* noop */ } dirWatcher = null; }
     try { res.end(); } catch { /* noop */ }
   });
+});
+
+/* ─── BP-Explorer Proxy ────────────────────────────────────────────── */
+// Forwards /api/bp-explorer/* → http://bp-explorer:8765/api/*
+app.all('/api/bp-explorer/*', async (req, res) => {
+  const upstreamPath = req.path.replace(/^\/api\/bp-explorer/, '/api');
+  const qs = new URLSearchParams(req.query).toString();
+  const url = `${BP_EXPLORER_URL}${upstreamPath}${qs ? '?' + qs : ''}`;
+  const opts = { method: req.method };
+  if (req.method !== 'GET' && req.method !== 'HEAD' && req.body) {
+    opts.headers = { 'Content-Type': 'application/json' };
+    opts.body = JSON.stringify(req.body);
+  }
+  try {
+    const upstream = await fetch(url, opts);
+    const data = await upstream.json();
+    res.status(upstream.status).json(data);
+  } catch (err) {
+    res.status(502).json({ error: `BP-Explorer unreachable: ${err.message}` });
+  }
 });
 
 /* ─── SPA fallback ──────────────────────────────────────────────────── */

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import {
   MessageCircle, Sparkles, Wrench, CheckCircle2, AlertTriangle, Brain,
-  Send, ArrowDown, Cpu, Clock,
+  Send, ArrowDown, Cpu, Clock, Settings2,
 } from 'lucide-react';
 import ToolBlock from './ToolBlock';
 
@@ -51,6 +51,7 @@ function iconForType(type) {
     case 'error':
     case 'parse_error':      return AlertTriangle;
     case 'system_init':      return Cpu;
+    case 'system_event':     return Settings2;
     case 'trigger.fired':    return Clock;
     case '_truncated':       return AlertTriangle;
     default:                 return MessageCircle;
@@ -65,6 +66,7 @@ function colorForType(type) {
     case 'thinking':         return 'var(--eb-text-muted)';
     case 'assistant_text':   return 'var(--eb-accent-primary)';
     case '_truncated':       return 'var(--eb-status-warning)';
+    case 'system_event':     return 'var(--eb-text-muted)';
     default:                 return 'var(--eb-text-secondary)';
   }
 }
@@ -176,6 +178,7 @@ function hasExpansion(ev) {
       return false;
   }
 }
+
 
 function Body({ event, expanded }) {
   const COMPACT = 200;
@@ -306,16 +309,24 @@ function Body({ event, expanded }) {
           Parse error: {truncate(event.raw || '', 200)}
         </div>
       );
-    default: {
-      const raw = JSON.stringify(event).slice(0, 150);
+    case 'system_event':
       return (
-        <div style={{
-          ...baseStyle,
-          color: 'var(--eb-text-muted)',
-          fontFamily: 'var(--eb-font-mono)',
-          fontSize: 'var(--eb-text-xs)',
-        }}>
-          [unknown] {raw}
+        <div style={{ ...baseStyle, color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
+          system / <span style={{ color: 'var(--eb-text-secondary)' }}>{event.subtype || 'unknown'}</span>
+        </div>
+      );
+    default: {
+      const rawObj = event.raw ?? event;
+      const summary = [rawObj?.type, rawObj?.subtype].filter(Boolean).join(' / ') || event.type || 'unknown';
+      const detail = expanded ? JSON.stringify(rawObj, null, 2) : null;
+      return (
+        <div style={{ ...baseStyle, color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
+          {summary}
+          {detail && (
+            <pre style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', fontSize: 'inherit', color: 'var(--eb-text-muted)' }}>
+              {detail}
+            </pre>
+          )}
         </div>
       );
     }

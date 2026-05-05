@@ -74,8 +74,10 @@ function mapStreamJsonLine(line, correlationId) {
           model: parsed.model,
           correlationId,
         });
+      } else if (parsed.subtype === 'task_progress') {
+        // suppress — pure progress heartbeat, no display value
       } else {
-        events.push({ type: 'unknown', raw: parsed, correlationId });
+        events.push({ type: 'system_event', subtype: parsed.subtype || 'unknown', raw: parsed, correlationId });
       }
       break;
     }

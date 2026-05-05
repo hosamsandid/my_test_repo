@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from 'react';
-import { Edit, Trash2, FileText, Plus } from 'lucide-react';
+import { Edit, Trash2, FileText, Plus, Copy } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
@@ -340,15 +340,82 @@ function PromptEditor({ agentId, onClose }) {
   );
 }
 
+/* ── Clone form ────────────────────────────────────────────────────── */
+function AgentCloneForm({ sourceAgent, onSave, onCancel, saving, error }) {
+  const [form, setForm] = useState({
+    newId: '',
+    newDisplayName: `Copy of ${sourceAgent.displayName || sourceAgent.id}`,
+  });
+  const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
+
+  const labelStyle = { fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-0-5)' };
+  const inputStyle = { width: '100%', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' };
+
+  const canSubmit = form.newId && form.newDisplayName;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      {error && (
+        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-md)' }}>
+          {error}
+        </div>
+      )}
+
+      <InfoBanner>
+        Klont den kompletten Workspace von <strong>{sourceAgent.displayName || sourceAgent.id}</strong> —
+        inklusive Memory, Skills, Prompt und Triggern. Sitzungsdaten werden nicht übernommen.
+      </InfoBanner>
+
+      <div>
+        <div style={labelStyle}>Neue ID <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
+        <input
+          style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }}
+          value={form.newId}
+          onChange={e => update('newId', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
+          placeholder="e.g. cobol-expert-2"
+        />
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+          Nur Kleinbuchstaben, Ziffern und Bindestriche. Wird zu @id:local.
+        </div>
+      </div>
+
+      <FormInput
+        label="Anzeigename *"
+        value={form.newDisplayName}
+        onChange={v => update('newDisplayName', v)}
+        placeholder="COBOL Expert 2"
+      />
+
+      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+        <button
+          onClick={() => onSave(form)}
+          disabled={saving || !canSubmit}
+          style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: saving ? 'wait' : 'pointer', fontFamily: 'inherit', opacity: (saving || !canSubmit) ? 0.6 : 1 }}
+        >
+          {saving ? 'Klone Agent…' : 'Agent klonen'}
+        </button>
+        <button
+          onClick={onCancel}
+          style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-secondary)', cursor: 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit' }}
+        >
+          Abbrechen
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* ── Main component ────────────────────────────────────────────────── */
 export default function AgentManager() {
   const { data: agents, loading, error, refetch } = useApi('/api/agents');
-  const [panelMode, setPanelMode] = useState(null); // null | 'create' | 'edit' | 'prompt'
+  const [panelMode, setPanelMode] = useState(null); // null | 'create' | 'edit' | 'prompt' | 'clone'
   const [selectedAgent, setSelectedAgent] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [actionError, setActionError] = useState(null);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState(null);
+  const [cloning, setCloning] = useState(false);
+  const [cloneError, setCloneError] = useState(null);
 
   const COLUMNS = [
     { key: 'id',          label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
@@ -366,6 +433,7 @@ export default function AgentManager() {
         <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
           <ActionBtn icon={Edit} label="Edit" onClick={() => { setSelectedAgent(row); setPanelMode('edit'); }} />
           <ActionBtn icon={FileText} label="Prompt" onClick={() => { setSelectedAgent(row); setPanelMode('prompt'); }} />
+          <ActionBtn icon={Copy} label="Clone" onClick={() => { setCloneError(null); setSelectedAgent(row); setPanelMode('clone'); }} />
           <ActionBtn icon={Trash2} label="Delete" danger onClick={() => setDeleteTarget(row)} />
         </div>
       ),
@@ -403,6 +471,24 @@ export default function AgentManager() {
       setCreateError(e.message);
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function handleClone(form) {
+    setCloning(true);
+    setCloneError(null);
+    try {
+      await apiCall('POST', `/api/agents/${selectedAgent.id}/clone`, {
+        newId: form.newId,
+        newDisplayName: form.newDisplayName,
+      });
+      setPanelMode(null);
+      setSelectedAgent(null);
+      refetch();
+    } catch (e) {
+      setCloneError(e.message);
+    } finally {
+      setCloning(false);
     }
   }
 
@@ -510,6 +596,25 @@ export default function AgentManager() {
           <PromptEditor
             agentId={selectedAgent.id}
             onClose={() => { setPanelMode(null); setSelectedAgent(null); refetch(); }}
+          />
+        )}
+      </SidePanel>
+
+      {/* Clone panel */}
+      <SidePanel
+        open={panelMode === 'clone' && !!selectedAgent}
+        onClose={() => { setPanelMode(null); setSelectedAgent(null); }}
+        title={`Clone: ${selectedAgent?.displayName || selectedAgent?.id}`}
+        width="480px"
+        loading={cloning}
+      >
+        {selectedAgent && panelMode === 'clone' && (
+          <AgentCloneForm
+            sourceAgent={selectedAgent}
+            onSave={handleClone}
+            onCancel={() => { setPanelMode(null); setSelectedAgent(null); }}
+            saving={cloning}
+            error={cloneError}
           />
         )}
       </SidePanel>

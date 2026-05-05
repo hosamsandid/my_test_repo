@@ -275,6 +275,36 @@ app.delete('/api/agents/:id', async (req, res) => {
   }
 });
 
+/* ─── Agent Clone ───────────────────────────────────────────────────── */
+
+app.post('/api/agents/:id/clone', async (req, res) => {
+  const { id } = req.params;
+  const { newId, newDisplayName } = req.body || {};
+  if (!newId || !newDisplayName) {
+    return res.status(400).json({ error: 'newId and newDisplayName required' });
+  }
+  const normalizedNewId = newId.toLowerCase().replace(/[^a-z0-9-]/g, '');
+  if (!normalizedNewId) {
+    return res.status(400).json({ error: 'newId must contain at least one valid character (a-z, 0-9, -)' });
+  }
+  if (!fs.existsSync(path.join(AGENTS_DIR, id))) {
+    return res.status(404).json({ error: 'Agent not found' });
+  }
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/clone`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ newId: normalizedNewId, newDisplayName }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) return res.status(resp.status).json(data);
+    res.status(201).json(data);
+  } catch (err) {
+    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 /* ─── Agent Prompt ──────────────────────────────────────────────────── */
 
 app.get('/api/agents/:id/prompt', (req, res) => {

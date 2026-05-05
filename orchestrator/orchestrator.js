@@ -629,6 +629,49 @@ class Orchestrator {
   }
 
   // ===========================================================
+  // Agent cloning
+  // ===========================================================
+  async cloneAgent(sourceId, newId, newDisplayName) {
+    const sourceCfg = loadAgentConfig(sourceId);
+    if (!sourceCfg) throw new Error(`Source agent '${sourceId}' not found`);
+    if (loadAgentConfig(newId)) throw new Error(`Agent '${newId}' already exists`);
+
+    const password = `agent-${newId}-${Date.now()}`;
+    const userId = `@${newId}:local`;
+
+    if (this.adminClient) await ensureMatrixUser(this.adminClient, newId, password);
+    const token = await loginMatrixUser(newId, password);
+    await setDisplayName(token, userId, newDisplayName);
+    await inviteAndJoin(this.poolClient, token, MULTI_AGENT_ROOM);
+
+    // Copy workspace — skip runtime-only files
+    const srcDir = agentDir(sourceId);
+    const dstDir = agentDir(newId);
+    fs.mkdirSync(dstDir, { recursive: true });
+    const SKIP = new Set(['config.json', 'status.json', 'dm-room.json', 'sessions']);
+    for (const entry of fs.readdirSync(srcDir)) {
+      if (SKIP.has(entry)) continue;
+      fs.cpSync(path.join(srcDir, entry), path.join(dstDir, entry), { recursive: true });
+    }
+
+    const newConfig = {
+      ...sourceCfg,
+      id: newId,
+      displayName: newDisplayName,
+      userId,
+      token,
+      enabled: true,
+    };
+    saveAgentConfig(newId, newConfig);
+
+    this.agentConfigs.set(newId, { config: newConfig });
+    startAgentProcess(newConfig);
+
+    console.log(`[Orchestrator] Cloned agent ${sourceId} → ${newId}`);
+    return { id: newId, userId, clonedFrom: sourceId };
+  }
+
+  // ===========================================================
   // Message routing
   // ===========================================================
   async onMessage(roomId, event) {
@@ -903,6 +946,32 @@ async function main() {
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(processes));
+      return;
+    }
+
+    const cloneMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/clone$/);
+    if (cloneMatch) {
+      const sourceId = decodeURIComponent(cloneMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        try {
+          const { newId, newDisplayName } = JSON.parse(body);
+          if (!newId || !newDisplayName) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'newId and newDisplayName required' }));
+            return;
+          }
+          const result = await orchestrator.cloneAgent(sourceId, newId, newDisplayName);
+          res.writeHead(201, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] Clone error: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404 : /already exists/i.test(err.message) ? 409 : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
       return;
     }
 

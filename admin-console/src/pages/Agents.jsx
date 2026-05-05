@@ -172,7 +172,7 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
         />
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-          Shared by all sessions. Memory instructions are added automatically.
+          Shared by all instances. Memory instructions are added automatically.
         </div>
       </div>
 
@@ -260,7 +260,7 @@ function AgentPromptEditor({ agent, onClose, saving, setSaving, setError, error 
         <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{error}</div>
       )}
       <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-info-bg)', border: '1px solid var(--eb-status-info)', borderRadius: 'var(--eb-radius-md)' }}>
-        Changes apply to new sessions only. Existing sessions already have this prompt seeded in their workspace.
+        Changes apply to new instances only. Existing instances already have this prompt seeded in their workspace.
       </div>
       <textarea
         value={content}
@@ -295,11 +295,11 @@ function SessionCreateForm({ agent, onSave, onCancel, saving, error }) {
       )}
 
       <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-info-bg)', border: '1px solid var(--eb-status-info)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>
-        New session of <strong>{agent.displayName}</strong>. Gets its own workspace and chat history. Memory is shared with all other sessions of this agent.
+        New instance of <strong>{agent.displayName}</strong>. Gets its own workspace and chat history. Memory is shared with all other instances of this agent.
       </div>
 
       <div>
-        <div style={labelStyle}>Session ID <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
+        <div style={labelStyle}>Instance ID <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
         <input
           style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }}
           value={form.instanceId}
@@ -314,7 +314,7 @@ function SessionCreateForm({ agent, onSave, onCancel, saving, error }) {
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         <PrimaryBtn onClick={() => onSave(form)} saving={saving} disabled={!canSubmit}>
-          {saving ? 'Creating session…' : 'Create Session'}
+          {saving ? 'Creating instance…' : 'Create Instance'}
         </PrimaryBtn>
         <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
       </div>
@@ -423,11 +423,11 @@ function SessionRow({ session, idx, onToggleEnabled, onEdit, onDelete, navigate 
         <ToggleSwitch
           checked={session.enabled !== false}
           onChange={() => onToggleEnabled(session)}
-          label={`${session.enabled !== false ? 'Disable' : 'Enable'} session`}
+          label={`${session.enabled !== false ? 'Disable' : 'Enable'} instance`}
         />
-        <IconBtn icon={Edit} label="Edit session" onClick={() => onEdit(session)} />
+        <IconBtn icon={Edit} label="Edit instance" onClick={() => onEdit(session)} />
         <IconBtn icon={MessageCircle} label="Open chat" title="Open chat" onClick={() => navigate(`/chats/${session.id}`)} />
-        <IconBtn icon={Trash2} label="Delete session" danger onClick={() => onDelete(session)} />
+        <IconBtn icon={Trash2} label="Delete instance" danger onClick={() => onDelete(session)} />
       </div>
     </div>
   );
@@ -476,7 +476,7 @@ function AgentCard({ agent, onEdit, onEditPrompt, onViewMemory, onNewSession, on
             background: 'var(--eb-bg-app)', padding: '2px 8px',
             borderRadius: 'var(--eb-radius-full)', border: '1px solid var(--eb-border-default)',
           }}>
-            {sessions.length} session{sessions.length !== 1 ? 's' : ''}
+            {sessions.length} instance{sessions.length !== 1 ? 's' : ''}
           </span>
           <IconBtn icon={Edit} label="Edit agent" title="Edit agent" onClick={() => onEdit(agent)} />
           <IconBtn icon={FileText} label="Edit prompt" title="Edit system prompt" onClick={() => onEditPrompt(agent)} />
@@ -490,7 +490,7 @@ function AgentCard({ agent, onEdit, onEditPrompt, onViewMemory, onNewSession, on
               display: 'flex', alignItems: 'center', gap: 4,
             }}
           >
-            <Plus size={13} /> New Session
+            <Plus size={13} /> New Instance
           </button>
           <IconBtn icon={Trash2} label="Delete agent" danger onClick={() => onDelete(agent)} />
         </div>
@@ -501,7 +501,7 @@ function AgentCard({ agent, onEdit, onEditPrompt, onViewMemory, onNewSession, on
         <div style={{ padding: sessions.length === 0 ? 'var(--eb-space-4)' : 0 }}>
           {sessions.length === 0 ? (
             <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)', textAlign: 'center', padding: 'var(--eb-space-4)' }}>
-              No sessions yet. Click <strong>+ New Session</strong> to create the first one.
+              No instances yet. Click <strong>+ New Instance</strong> to create the first one.
             </div>
           ) : (
             sessions.map((sess, idx) => (
@@ -657,7 +657,7 @@ export default function Agents() {
         <div>
           <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>Agents</h1>
           <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', margin: 'var(--eb-space-1) 0 0' }}>
-            Define an agent once. Spin up multiple sessions — each with its own workspace, all sharing memory.
+            Define an agent once. Spin up multiple instances — each with its own workspace, all sharing memory.
           </p>
         </div>
         <PrimaryBtn onClick={() => openPanel('create', null)}>
@@ -744,7 +744,7 @@ export default function Agents() {
       <SidePanel
         open={panelMode === 'session' && !!selectedAgent}
         onClose={closePanel}
-        title={`New Session — ${selectedAgent?.displayName ?? ''}`}
+        title={`New Instance — ${selectedAgent?.displayName ?? ''}`}
         width="480px"
         loading={saving}
       >
@@ -757,7 +757,7 @@ export default function Agents() {
       <SidePanel
         open={panelMode === 'edit-session' && !!selectedSession}
         onClose={closePanel}
-        title={`Edit Session — ${selectedSession?.displayName ?? ''}`}
+        title={`Edit Instance — ${selectedSession?.displayName ?? ''}`}
         width="400px"
         loading={saving}
       >
@@ -781,11 +781,11 @@ export default function Agents() {
       {/* Delete confirmation */}
       <ConfirmDialog
         open={!!deleteTarget}
-        title={deleteTarget?.type === 'agent' ? 'Delete Agent' : 'Delete Session'}
+        title={deleteTarget?.type === 'agent' ? 'Delete Agent' : 'Delete Instance'}
         message={
           deleteTarget?.type === 'agent'
-            ? `Delete agent "${deleteTarget.item.displayName ?? deleteTarget.item.id}"? This removes the agent and its shared memory. All sessions must be deleted first.`
-            : `Delete session "${deleteTarget?.item.displayName ?? deleteTarget?.item.id}"? This removes the workspace and all session data.`
+            ? `Delete agent "${deleteTarget.item.displayName ?? deleteTarget.item.id}"? This removes the agent and its shared memory. All instances must be deleted first.`
+            : `Delete instance "${deleteTarget?.item.displayName ?? deleteTarget?.item.id}"? This removes the workspace and all instance data.`
         }
         variant="danger"
         confirmLabel="Delete"

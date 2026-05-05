@@ -76,7 +76,7 @@ function BlueprintCreateForm({ onSave, onCancel, saving, error }) {
           placeholder="e.g. cobol-expert"
         />
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-          Lowercase letters, digits, hyphens. Becomes the blueprint identifier.
+          Lowercase letters, digits, hyphens. Becomes the agent identifier.
         </div>
       </div>
 

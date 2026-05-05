@@ -1,9 +1,20 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Wifi, WifiOff, Loader2, RefreshCw } from 'lucide-react';
+import { Wifi, WifiOff, Loader2, RefreshCw, RotateCcw, GraduationCap } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
 import Message from './Message';
 import MessageInput from './MessageInput';
+
+// Default prompt sent when the user clicks "Reset & lernen". The agent
+// continues in its current Claude session (so it has full conversational
+// context), is asked to consolidate that context into the memory files,
+// and replies with a short summary. After the reply lands, the UI clears
+// the session pointer so the next message starts fresh.
+const LEARN_PROMPT =
+  'Bevor wir das Gespraech hier beenden: Bitte fasse die wichtigsten Erkenntnisse, ' +
+  'Entscheidungen und offenen Punkte aus unserer bisherigen Konversation zusammen ' +
+  'und aktualisiere deine memory/-Dateien (insbesondere memory/log.md und memory/context.md, ' +
+  'falls vorhanden) entsprechend. Antworte danach kurz mit dem, was du dir gemerkt hast.';
 
 /**
  * The middle column: header + scrollable message list + input.
@@ -46,6 +57,20 @@ export default function ChatPanel({
   const scrollerRef     = useRef(null);
   const [atBottom, setAtBottom] = useState(true);
   const [unread, setUnread]     = useState(0);
+
+  // Active Claude `--resume <sessionId>` pointer for this (agent, room).
+  // The pointer file is written by the runner after every successful
+  // invocation and read back here so the UI can show a "Session aktiv"
+  // badge and offer reset controls.
+  const [sessionId, setSessionId]     = useState(null);
+  const [sessionUpdatedAt, setSessionUpdatedAt] = useState(null);
+  const [resetting, setResetting]     = useState(false);
+  const [learnPending, setLearnPending] = useState(false);
+  // Wall-clock at the moment the user clicked "Reset & lernen". The
+  // post-message effect uses it to decide which agent reply to treat as
+  // "the response to the learn prompt" — namely, the next agent message
+  // whose timestamp is at or after this value.
+  const learnTriggeredAtRef = useRef(0);
 
   /* ─── 1. Lazy DM-room creation ───────────────────────────────────── */
   useEffect(() => {
@@ -289,6 +314,103 @@ export default function ChatPanel({
       .finally(() => setLoading(false));
   }, [roomId]);
 
+  /* ─── 4b. Session pointer (Claude --resume id) ───────────────────── */
+  const sessionApiBase = roomId && agent?.id
+    ? `/api/agents/${encodeURIComponent(agent.id)}/session/${encodeURIComponent(roomId)}/current`
+    : null;
+
+  const fetchSession = useCallback(async () => {
+    if (!sessionApiBase) {
+      setSessionId(null);
+      setSessionUpdatedAt(null);
+      return;
+    }
+    try {
+      const r = await fetch(sessionApiBase);
+      if (!r.ok) return; // best-effort; leave stale state alone
+      const j = await r.json();
+      setSessionId(j?.sessionId || null);
+      setSessionUpdatedAt(j?.updatedAt || null);
+    } catch {
+      // Network blip — the next refetch will fix it.
+    }
+  }, [sessionApiBase]);
+
+  // Refetch on roomId change.
+  useEffect(() => { fetchSession(); }, [fetchSession]);
+
+  // Refetch shortly after each new agent message — the runner writes the
+  // pointer at the end of the Claude run, which lands just before/around
+  // the Matrix reply. A small delay gives the FS write time to land.
+  useEffect(() => {
+    if (!messages.length || !agent?.userId) return;
+    const last = messages[messages.length - 1];
+    if (last?.sender !== agent.userId) return;
+    if (last?.isOptimistic) return;
+    const t = setTimeout(fetchSession, 600);
+    return () => clearTimeout(t);
+  }, [messages, agent?.userId, fetchSession]);
+
+  async function handleResetSession() {
+    if (!sessionApiBase || resetting) return;
+    setResetting(true);
+    setError(null);
+    try {
+      await apiCall('DELETE', sessionApiBase);
+      setSessionId(null);
+      setSessionUpdatedAt(null);
+    } catch (err) {
+      setError(`Reset failed: ${err.message}`);
+    } finally {
+      setResetting(false);
+    }
+  }
+
+  async function handleLearnAndReset() {
+    if (!sessionApiBase || learnPending) return;
+    setError(null);
+    setLearnPending(true);
+    learnTriggeredAtRef.current = Date.now();
+    try {
+      // Send the learn prompt as a normal user message — the user sees it
+      // in the chat, the agent replies in its current Claude session, and
+      // the post-reply effect below clears the pointer.
+      await handleSend(LEARN_PROMPT);
+    } catch (err) {
+      setLearnPending(false);
+      setError(`Learn-and-reset failed: ${err.message}`);
+    }
+  }
+
+  // Auto-clear the session pointer once the agent has replied to the
+  // learn prompt. We treat "the next non-optimistic agent message whose
+  // ts >= triggered-at" as that reply. Edge case: a stray agent message
+  // arriving in that window would short-circuit the wait — acceptable
+  // for a rare manual workflow.
+  useEffect(() => {
+    if (!learnPending || !sessionApiBase) return;
+    if (!messages.length || !agent?.userId) return;
+    const last = messages[messages.length - 1];
+    if (last?.sender !== agent.userId) return;
+    if (last?.isOptimistic) return;
+    if ((last?.ts || 0) < learnTriggeredAtRef.current) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        await apiCall('DELETE', sessionApiBase);
+        if (cancelled) return;
+        setSessionId(null);
+        setSessionUpdatedAt(null);
+      } catch (err) {
+        if (cancelled) return;
+        setError(`Auto-reset after lernen failed: ${err.message}`);
+      } finally {
+        if (!cancelled) setLearnPending(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [messages, learnPending, agent?.userId, sessionApiBase]);
+
   /* ─── 5. Send ────────────────────────────────────────────────────── */
   async function handleSend(text) {
     if (!roomId) return;
@@ -387,6 +509,62 @@ export default function ChatPanel({
           </div>
         </div>
         <ConnectionDot status={sseStatus} />
+      </div>
+
+      {/* Session-control toolbar */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 'var(--eb-space-2)',
+        padding: '6px var(--eb-space-4)',
+        borderBottom: '1px solid var(--eb-border-default)',
+        background: 'var(--eb-bg-surface)',
+        flexShrink: 0,
+        fontSize: 'var(--eb-text-xs)',
+        color: 'var(--eb-text-muted)',
+      }}>
+        <SessionBadge active={!!sessionId} updatedAt={sessionUpdatedAt} />
+        <button
+          type="button"
+          onClick={handleResetSession}
+          disabled={!sessionId || resetting || learnPending || disabled}
+          title="Aktuelle Session verwerfen — naechste Nachricht startet frisch"
+          style={sessionBtnStyle(!sessionId || resetting || learnPending || disabled)}
+        >
+          {resetting
+            ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
+            : <RotateCcw size={11} />}
+          Reset
+        </button>
+        <button
+          type="button"
+          onClick={handleLearnAndReset}
+          disabled={!sessionId || resetting || learnPending || disabled}
+          title="Agent fasst die Konversation zusammen, aktualisiert seine memory/-Dateien und startet danach mit frischer Session"
+          style={sessionBtnStyle(!sessionId || resetting || learnPending || disabled)}
+        >
+          {learnPending
+            ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
+            : <GraduationCap size={11} />}
+          Reset &amp; lernen
+        </button>
+        <div style={{ flex: 1 }} />
+        {sessionId && (
+          <span
+            title={`Session-ID: ${sessionId}${sessionUpdatedAt ? ` (aktualisiert ${sessionUpdatedAt})` : ''}`}
+            style={{
+              fontFamily: 'var(--eb-font-mono)',
+              fontSize: 'var(--eb-text-xs)',
+              color: 'var(--eb-text-muted)',
+              maxWidth: 120,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {sessionId.slice(0, 8)}…
+          </span>
+        )}
       </div>
 
       {disabled && (
@@ -587,6 +765,46 @@ export default function ChatPanel({
       `}</style>
     </div>
   );
+}
+
+function SessionBadge({ active }) {
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 'var(--eb-space-1)',
+      fontSize: 'var(--eb-text-xs)',
+      color: active ? 'var(--eb-status-success)' : 'var(--eb-text-muted)',
+      fontWeight: 'var(--eb-font-medium)',
+    }}>
+      <span style={{
+        width: 7,
+        height: 7,
+        borderRadius: 'var(--eb-radius-full)',
+        background: active ? 'var(--eb-status-success)' : 'var(--eb-text-muted)',
+        display: 'inline-block',
+      }} />
+      {active ? 'Session aktiv' : 'Neue Session'}
+    </span>
+  );
+}
+
+function sessionBtnStyle(isDisabled) {
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 4,
+    padding: '3px 8px',
+    fontSize: 'var(--eb-text-xs)',
+    fontFamily: 'inherit',
+    color: isDisabled ? 'var(--eb-text-muted)' : 'var(--eb-text-secondary)',
+    background: 'transparent',
+    border: '1px solid var(--eb-border-default)',
+    borderRadius: 'var(--eb-radius-sm)',
+    cursor: isDisabled ? 'not-allowed' : 'pointer',
+    opacity: isDisabled ? 0.6 : 1,
+    transition: 'background var(--eb-transition-fast), color var(--eb-transition-fast)',
+  };
 }
 
 function ConnectionDot({ status }) {

@@ -39,6 +39,11 @@ services:
     volumes:
       - agent-pool-workspace:/workspace
       - skills-pool:/template-workspace:ro
+      # Persistent Claude config: stores per-session conversation snapshots
+      # (~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl). Without this
+      # volume, `--resume <sessionId>` would fail after every container
+      # restart because Claude's local session state lives under HOME.
+      - claude-home:/root/.claude
       - ~/.ssh/id_accenturecodefoundry:/root/.ssh/id_accenturecodefoundry:ro
       - ~/.ssh/id_accenturecodefoundry.pub:/root/.ssh/id_accenturecodefoundry.pub:ro
     environment:
@@ -97,3 +102,7 @@ volumes:
   # and admin-console (read-write at /pool).
   skills-pool:
     name: ${COMPOSE_PROJECT_NAME}_claude-workspace
+  # Persisted Claude CLI home (~/.claude) — keeps `--resume <sessionId>`
+  # working across orchestrator container restarts.
+  claude-home:
+    name: ${COMPOSE_PROJECT_NAME}_claude-home

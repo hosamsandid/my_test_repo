@@ -83,6 +83,47 @@ function saveTriggers(triggers) {
   );
 }
 
+// ─── Per-room Claude session pointer ───────────────────────────────────
+// We persist the most recent Claude `session_id` per (agent, room) so the
+// next message in the same chat resumes that session. The pointer file lives
+// next to the JSONL log: /workspace/agents/<id>/sessions/<roomId>.current.json
+// Format: { sessionId: "...", updatedAt: "ISO-ts" }
+function sessionPointerFile(roomId) {
+  return path.join(AGENT_WORKDIR, "sessions", `${roomId}.current.json`);
+}
+
+function readSessionPointer(roomId) {
+  try {
+    const p = sessionPointerFile(roomId);
+    if (!fs.existsSync(p)) return null;
+    const j = JSON.parse(fs.readFileSync(p, "utf8"));
+    return typeof j?.sessionId === "string" && j.sessionId ? j.sessionId : null;
+  } catch (err) {
+    console.error(`[Runner:${AGENT_ID}] readSessionPointer ${roomId}: ${err.message}`);
+    return null;
+  }
+}
+
+function writeSessionPointer(roomId, sessionId) {
+  if (!sessionId || typeof sessionId !== "string") return;
+  try {
+    const p = sessionPointerFile(roomId);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(
+      p,
+      JSON.stringify({ sessionId, updatedAt: new Date().toISOString() }, null, 2)
+    );
+  } catch (err) {
+    console.error(`[Runner:${AGENT_ID}] writeSessionPointer: ${err.message}`);
+  }
+}
+
+function clearSessionPointer(roomId) {
+  try {
+    fs.rmSync(sessionPointerFile(roomId), { force: true });
+  } catch { /* noop */ }
+}
+
 // ============================================================
 // Claude CLI
 // ============================================================
@@ -90,57 +131,68 @@ function saveTriggers(triggers) {
  * Invoke the Claude Code CLI with stream-json output and write each
  * NDJSON event to the per-room session log.
  *
+ * Session resumption: when `roomId` is given, we read the session pointer
+ * for that room (if any) and pass `--resume <sessionId>` so Claude continues
+ * the prior conversation in-context. After each successful run we re-write
+ * the pointer with the freshest `session_id` reported in the stream-json
+ * `system_init` / `result` events. If `--resume` fails (CLI prints
+ * "session not found" or similar), we transparently retry once without it.
+ *
  * Options:
- *   - roomId         (required) — used as the JSONL filename for session logging
- *   - correlationId  (required) — Matrix event id (or synthetic id) tying log
- *                                 entries to the originating user message
+ *   - roomId         (required) — used as the JSONL filename and pointer key
+ *   - correlationId  (required) — Matrix event id (or synthetic id) tying
+ *                                 log entries to the originating user message
  *   - timeoutMs      (optional) — defaults to CLAUDE_TIMEOUT
+ *   - resume         (optional, default true) — set false to force a fresh
+ *                                 session even if a pointer exists
  *
  * Resolves with the final assistant text (the `result` field of the last
  * `result` event, or a concatenation of all `assistant_text` events as a
  * fallback). Rejects on timeout or non-zero exit.
  */
-function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT } = {}) {
-  return new Promise((resolve, reject) => {
-    const memoryHint =
-      "Read memory/context.md and memory/log.md first (if they exist) before responding. " +
-      "If the user asks you to remember something: update the memory files. " +
-      "IMPORTANT: Your workspace root is the current working directory. " +
-      "Memory entries may reference absolute paths like /workspace/... from a different context. " +
-      "Translate these to relative paths in your current directory (e.g. /workspace/314092_foo/ becomes ./314092_foo/).";
+function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT, resume = true } = {}) {
+  const memoryHint =
+    "Read memory/context.md and memory/log.md first (if they exist) before responding. " +
+    "If the user asks you to remember something: update the memory files. " +
+    "IMPORTANT: Your workspace root is the current working directory. " +
+    "Memory entries may reference absolute paths like /workspace/... from a different context. " +
+    "Translate these to relative paths in your current directory (e.g. /workspace/314092_foo/ becomes ./314092_foo/).";
 
-    const proc = spawn(
-      "claude",
-      [
-        "-p", prompt,
-        "--output-format", "stream-json",
-        "--verbose",
-        // bypassPermissions is refused by Claude when running as root (the
-        // orchestrator container's default user). acceptEdits + the
-        // allowedTools whitelist below covers the same practical surface
-        // without prompts for the tools agents actually use.
-        "--permission-mode", "acceptEdits",
-        "--append-system-prompt", memoryHint,
-        "--allowedTools", "Bash(*)",
-        "--allowedTools", "Read(*)",
-        "--allowedTools", "Write(*)",
-        "--allowedTools", "Edit(*)",
-        "--allowedTools", "Glob(*)",
-        "--allowedTools", "Grep(*)",
-        "--allowedTools", "Task(*)",
-        "--allowedTools", "WebFetch(*)",
-        "--allowedTools", "WebSearch(*)",
-      ],
-      {
-        cwd: AGENT_WORKDIR,
-        env: { ...process.env, HOME: "/root" },
-        stdio: ["ignore", "pipe", "pipe"],
-      }
-    );
+  const baseArgs = [
+    "-p", prompt,
+    "--output-format", "stream-json",
+    "--verbose",
+    // bypassPermissions is refused by Claude when running as root (the
+    // orchestrator container's default user). acceptEdits + the
+    // allowedTools whitelist below covers the same practical surface
+    // without prompts for the tools agents actually use.
+    "--permission-mode", "acceptEdits",
+    "--append-system-prompt", memoryHint,
+    "--allowedTools", "Bash(*)",
+    "--allowedTools", "Read(*)",
+    "--allowedTools", "Write(*)",
+    "--allowedTools", "Edit(*)",
+    "--allowedTools", "Glob(*)",
+    "--allowedTools", "Grep(*)",
+    "--allowedTools", "Task(*)",
+    "--allowedTools", "WebFetch(*)",
+    "--allowedTools", "WebSearch(*)",
+  ];
+
+  const resumeId = resume && roomId ? readSessionPointer(roomId) : null;
+
+  const runOnce = (withResumeId) => new Promise((resolve, reject) => {
+    const args = withResumeId ? ["--resume", withResumeId, ...baseArgs] : baseArgs;
+    const proc = spawn("claude", args, {
+      cwd: AGENT_WORKDIR,
+      env: { ...process.env, HOME: "/root" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
 
     let stderr = "";
     let lineBuf = "";
     let finalResult = null;          // text from the last `result` event
+    let observedSessionId = null;    // freshest session id seen in this run
     const assistantTextChunks = [];  // fallback if no `result` event
 
     const logEvent = (ev) => {
@@ -156,8 +208,11 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT 
       const events = mapStreamJsonLine(line, correlationId);
       for (const ev of events) {
         logEvent(ev);
-        if (ev.type === "result" && typeof ev.result === "string") {
-          finalResult = ev.result;
+        if (ev.type === "system_init" && typeof ev.sessionId === "string") {
+          observedSessionId = ev.sessionId;
+        } else if (ev.type === "result") {
+          if (typeof ev.sessionId === "string") observedSessionId = ev.sessionId;
+          if (typeof ev.result === "string") finalResult = ev.result;
         } else if (ev.type === "assistant_text" && typeof ev.text === "string") {
           assistantTextChunks.push(ev.text);
         }
@@ -178,7 +233,7 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT 
 
     const timer = setTimeout(() => {
       proc.kill("SIGTERM");
-      reject(new Error("Timeout"));
+      reject(Object.assign(new Error("Timeout"), { stderr }));
     }, timeoutMs);
 
     proc.on("close", (code) => {
@@ -189,7 +244,16 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT 
         lineBuf = "";
       }
       if (code !== 0) {
-        return reject(new Error(stderr.substring(0, 300) || `Exit ${code}`));
+        const err = new Error(stderr.substring(0, 300) || `Exit ${code}`);
+        err.stderr = stderr;
+        err.exitCode = code;
+        return reject(err);
+      }
+      // Persist the freshest session id we observed. With `--resume`, this is
+      // typically the same id (Claude keeps it stable); without it, this is
+      // the brand-new id that future messages should resume into.
+      if (roomId && observedSessionId) {
+        writeSessionPointer(roomId, observedSessionId);
       }
       if (finalResult !== null) return resolve(finalResult);
       if (assistantTextChunks.length) return resolve(assistantTextChunks.join(""));
@@ -199,6 +263,31 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT 
 
     proc.on("error", (err) => { clearTimeout(timer); reject(err); });
   });
+
+  return (async () => {
+    if (resumeId) {
+      try {
+        return await runOnce(resumeId);
+      } catch (err) {
+        // Stale or missing session — fall back to a fresh run. Detection is
+        // best-effort; we treat any "session"/"resume" reference in stderr
+        // as a hint to retry. The pointer is cleared so we don't loop on
+        // the same broken id.
+        const blob = String(err.stderr || err.message || "").toLowerCase();
+        const sessionRelated =
+          blob.includes("session") || blob.includes("resume") || blob.includes("not found");
+        if (sessionRelated) {
+          console.warn(
+            `[Runner:${AGENT_ID}] --resume ${resumeId} failed (${err.message?.slice(0, 120)}); retrying without resume`
+          );
+          clearSessionPointer(roomId);
+          return await runOnce(null);
+        }
+        throw err;
+      }
+    }
+    return runOnce(null);
+  })();
 }
 
 // ============================================================

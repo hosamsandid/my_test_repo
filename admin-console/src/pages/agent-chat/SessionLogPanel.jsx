@@ -34,7 +34,7 @@ import LogEvent from './LogEvent';
  *   onClose()                  — parent toggles `logOpen` to false
  */
 export default function SessionLogPanel({
-  agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose,
+  agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, embedded = false,
 }) {
   const [events, setEvents]       = useState([]);
   const [cursor, setCursor]       = useState(0);
@@ -175,50 +175,54 @@ export default function SessionLogPanel({
       minWidth: 0,
       background: 'var(--eb-bg-app)',
     }}>
-      {/* Header strip */}
-      <div style={{
-        height: 'var(--eb-header-height)',
-        flexShrink: 0,
-        display: 'flex',
-        alignItems: 'center',
-        gap: 'var(--eb-space-2)',
-        padding: '0 var(--eb-space-3)',
-        borderBottom: '1px solid var(--eb-border-default)',
-        background: 'var(--eb-bg-surface)',
-      }}>
+      {/* Header strip — hidden when the panel is embedded inside a tabbed
+          right rail (the parent renders its own tab strip + close button). */}
+      {!embedded && (
         <div style={{
-          fontSize: 'var(--eb-text-sm)',
-          fontWeight: 'var(--eb-font-semibold)',
-          color: 'var(--eb-text-secondary)',
+          height: 'var(--eb-header-height)',
           flexShrink: 0,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--eb-space-2)',
+          padding: '0 var(--eb-space-3)',
+          borderBottom: '1px solid var(--eb-border-default)',
+          background: 'var(--eb-bg-surface)',
         }}>
-          Session Log
+          <div style={{
+            fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-semibold)',
+            color: 'var(--eb-text-secondary)',
+            flexShrink: 0,
+          }}>
+            Session Log
+          </div>
+          <div style={{ flex: 1 }} />
+          <ConnectionDot status={sseStatus} />
+          <button
+            onClick={onClose}
+            title="Hide log panel (Cmd+Shift+L)"
+            aria-label="Hide log panel"
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--eb-text-muted)',
+              cursor: 'pointer',
+              padding: 4,
+              display: 'flex',
+              alignItems: 'center',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
+            onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
+          >
+            <PanelRightClose size={16} />
+          </button>
         </div>
-        <div style={{ flex: 1 }} />
-        <ConnectionDot status={sseStatus} />
-        <button
-          onClick={onClose}
-          title="Hide log panel (Cmd+Shift+L)"
-          aria-label="Hide log panel"
-          style={{
-            background: 'none',
-            border: 'none',
-            color: 'var(--eb-text-muted)',
-            cursor: 'pointer',
-            padding: 4,
-            display: 'flex',
-            alignItems: 'center',
-          }}
-          onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
-          onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
-        >
-          <PanelRightClose size={16} />
-        </button>
-      </div>
+      )}
 
       {/* Filter chips */}
       <div style={{
         display: 'flex',
+        alignItems: 'center',
         gap: 4,
         padding: 'var(--eb-space-2) var(--eb-space-3)',
         borderBottom: '1px solid var(--eb-border-default)',
@@ -229,6 +233,12 @@ export default function SessionLogPanel({
         <Chip label="Tool Calls" active={filter === 'tools'}   onClick={() => setFilter('tools')} />
         <Chip label="Errors"     active={filter === 'errors'}  onClick={() => setFilter('errors')} />
         <Chip label="Posted"     active={filter === 'posted'}  onClick={() => setFilter('posted')} />
+        {embedded && (
+          <>
+            <div style={{ flex: 1 }} />
+            <ConnectionDot status={sseStatus} />
+          </>
+        )}
       </div>
 
       {error && (

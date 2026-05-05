@@ -889,6 +889,10 @@ function sessionFile(agentId, roomId) {
   return path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.jsonl');
 }
 
+function sessionPointerFile(agentId, roomId) {
+  return path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.current.json');
+}
+
 function validSessionIds(req, res) {
   const { agentId, roomId } = req.params;
   if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
@@ -897,6 +901,185 @@ function validSessionIds(req, res) {
   }
   return { agentId, roomId };
 }
+
+/* ─── Session pointer (Claude --resume id) ─────────────────────────── */
+
+// Returns the active Claude session id for a given (agent, room), if any.
+// The runner writes this file after every successful Claude invocation;
+// an empty / missing file means the next message starts a fresh session.
+app.get('/api/agents/:agentId/session/:roomId/current', (req, res) => {
+  const ids = validSessionIds(req, res);
+  if (!ids) return;
+  const ptr = sessionPointerFile(ids.agentId, ids.roomId);
+  if (!fs.existsSync(ptr)) return res.json({ sessionId: null, updatedAt: null });
+  try {
+    const j = JSON.parse(fs.readFileSync(ptr, 'utf8'));
+    res.json({
+      sessionId: typeof j?.sessionId === 'string' ? j.sessionId : null,
+      updatedAt: typeof j?.updatedAt === 'string' ? j.updatedAt : null,
+    });
+  } catch {
+    // Corrupt pointer → treat as no session
+    res.json({ sessionId: null, updatedAt: null });
+  }
+});
+
+// Drop the session pointer so the next message starts a fresh Claude
+// session (memory files are still re-read; only the in-conversation
+// context is discarded).
+app.delete('/api/agents/:agentId/session/:roomId/current', (req, res) => {
+  const ids = validSessionIds(req, res);
+  if (!ids) return;
+  try {
+    fs.rmSync(sessionPointerFile(ids.agentId, ids.roomId), { force: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  res.json({ ok: true });
+});
+
+/* ─── Workspace browser (read-only) ────────────────────────────────── */
+
+const WORKSPACE_FILE_MAX_BYTES = 512 * 1024; // 512 KB read cap per file
+
+// Resolve a user-supplied relative path against the agent root, refusing
+// anything that escapes the root (path traversal, symlinks aimed outside,
+// absolute paths). Returns the absolute path on success, null otherwise.
+function safeAgentPath(agentId, relPath) {
+  if (!AGENT_ID_RE.test(agentId)) return null;
+  const agentRoot = path.join(AGENTS_DIR, agentId);
+  // realpath the root first so symlinks at /workspace level still resolve
+  // consistently. If the agent dir doesn't exist yet, bail out.
+  let realRoot;
+  try {
+    realRoot = fs.realpathSync(agentRoot);
+  } catch {
+    return null;
+  }
+  const normalized = path.normalize(String(relPath || '').replace(/^\/+/, ''));
+  if (normalized.split(path.sep).some(seg => seg === '..')) return null;
+  const target = path.resolve(realRoot, normalized);
+  // Final containment check (covers symlinks pointing outward).
+  let realTarget;
+  try {
+    realTarget = fs.realpathSync(target);
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    return null;
+  }
+  if (realTarget !== realRoot && !realTarget.startsWith(realRoot + path.sep)) return null;
+  return realTarget;
+}
+
+// Directory listing. Hidden dotfiles are returned but flagged with `hidden`
+// so the UI can collapse them by default. Symlinks are reported with their
+// link target (best-effort) so the user understands what they're looking at.
+app.get('/api/agents/:agentId/workspace/tree', (req, res) => {
+  const { agentId } = req.params;
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  const target = safeAgentPath(agentId, relPath);
+  if (!target) return res.status(400).json({ error: 'invalid path' });
+
+  let entries;
+  try {
+    entries = fs.readdirSync(target, { withFileTypes: true });
+  } catch (err) {
+    if (err.code === 'ENOTDIR') return res.status(400).json({ error: 'not a directory' });
+    if (err.code === 'ENOENT') return res.status(404).json({ error: 'not found' });
+    if (err.code === 'EACCES') return res.status(403).json({ error: 'permission denied' });
+    return res.status(500).json({ error: err.message });
+  }
+
+  const items = entries.map(d => {
+    const full = path.join(target, d.name);
+    let size = 0;
+    let mtime = 0;
+    let kind = 'file';
+    if (d.isDirectory()) kind = 'dir';
+    else if (d.isSymbolicLink()) kind = 'link';
+    else if (!d.isFile()) kind = 'other';
+    try {
+      const st = fs.statSync(full);
+      size = st.size;
+      mtime = st.mtimeMs;
+      // For symlinks, prefer the target's type so the UI can navigate into
+      // resolved directories. We've already constrained safeAgentPath to
+      // refuse outward-pointing links, but defense-in-depth: catch ENOENT.
+      if (kind === 'link') {
+        if (st.isDirectory()) kind = 'dir';
+        else if (st.isFile()) kind = 'file';
+      }
+    } catch { /* dangling link or transient — surface minimal info */ }
+    return {
+      name: d.name,
+      type: kind,
+      size,
+      mtime,
+      hidden: d.name.startsWith('.'),
+    };
+  });
+
+  // Stable ordering: dirs first, then alphabetical (case-insensitive).
+  items.sort((a, b) => {
+    if (a.type === 'dir' && b.type !== 'dir') return -1;
+    if (a.type !== 'dir' && b.type === 'dir') return 1;
+    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+  });
+
+  // Normalize the path we echo back — trailing slashes etc. shouldn't leak.
+  const echoPath = path.relative(path.join(AGENTS_DIR, agentId), target);
+  res.json({ path: echoPath, items });
+});
+
+// File content. Caps reads at WORKSPACE_FILE_MAX_BYTES; flags binary files
+// (NUL byte detection in the prefix) so the UI can show a "binary file"
+// stub instead of garbled UTF-8.
+app.get('/api/agents/:agentId/workspace/file', (req, res) => {
+  const { agentId } = req.params;
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  const target = safeAgentPath(agentId, relPath);
+  if (!target) return res.status(400).json({ error: 'invalid path' });
+
+  let st;
+  try {
+    st = fs.statSync(target);
+  } catch (err) {
+    if (err.code === 'ENOENT') return res.status(404).json({ error: 'not found' });
+    return res.status(500).json({ error: err.message });
+  }
+  if (!st.isFile()) return res.status(400).json({ error: 'not a file' });
+
+  const truncated = st.size > WORKSPACE_FILE_MAX_BYTES;
+  const readSize  = Math.min(st.size, WORKSPACE_FILE_MAX_BYTES);
+
+  let buf;
+  try {
+    const fd = fs.openSync(target, 'r');
+    try {
+      buf = Buffer.alloc(readSize);
+      if (readSize > 0) fs.readSync(fd, buf, 0, readSize, 0);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+
+  // Cheap binary heuristic: NUL byte in the first 8 KB. Good enough for
+  // distinguishing source files from images / native binaries.
+  const probe = buf.slice(0, Math.min(buf.length, 8192));
+  const isBinary = probe.includes(0);
+
+  const echoPath = path.relative(path.join(AGENTS_DIR, agentId), target);
+  res.json({
+    path: echoPath,
+    size: st.size,
+    truncated,
+    binary: isBinary,
+    content: isBinary ? null : buf.toString('utf8'),
+    mtime: st.mtimeMs,
+  });
+});
 
 function parseJsonlLine(line) {
   try {

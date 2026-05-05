@@ -4,7 +4,7 @@ import { PanelRightOpen, MessageCircle, Loader2 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import AgentList from './agent-chat/AgentList';
 import ChatPanel from './agent-chat/ChatPanel';
-import SessionLogPanel from './agent-chat/SessionLogPanel';
+import RightRail from './agent-chat/RightRail';
 
 const LAST_AGENT_KEY = 'agentChat.lastAgentId';
 
@@ -240,11 +240,11 @@ export default function AgentChat() {
         )}
       </div>
 
-      {/* Right rail: session log panel */}
+      {/* Right rail: tabbed Session Log / Workspace browser */}
       {logOpen && (
         <div style={{
-          width: 350,
-          minWidth: 350,
+          width: 380,
+          minWidth: 380,
           height: '100%',
           borderLeft: '1px solid var(--eb-border-default)',
           background: 'var(--eb-bg-app)',
@@ -252,7 +252,7 @@ export default function AgentChat() {
           flexDirection: 'column',
           overflow: 'hidden',
         }}>
-          <SessionLogPanel
+          <RightRail
             agentId={selectedAgent?.id || null}
             roomId={effectiveRoomId}
             hoveredCorrelationId={hoveredCorrelationId}

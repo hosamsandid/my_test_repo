@@ -101,9 +101,9 @@ All agent lifecycle operations (create / enable / disable / edit prompt / delete
 Each agent runs the Claude CLI as:
 
 ```
-claude -p <prompt> \
+claude [--resume <sessionId>] -p <prompt> \
   --output-format stream-json --verbose \
-  --permission-mode bypassPermissions
+  --permission-mode acceptEdits
 ```
 
 NDJSON lines from stdout are parsed event-by-event and written, together with wrapper events (`message.received`, `claude.invoke`, `message.posted`, `error`, `trigger.fired`), to an append-only file at:
@@ -111,6 +111,8 @@ NDJSON lines from stdout are parsed event-by-event and written, together with wr
 ```
 /workspace/agents/<agentId>/sessions/<roomId>.jsonl
 ```
+
+**Per-room session pinning.** After every successful Claude run, the runner captures `session_id` from the stream-json `system_init` / `result` events and writes it to `/workspace/agents/<agentId>/sessions/<roomId>.current.json`. The next message in the same chat room is invoked with `--resume <sessionId>` so Claude keeps the conversation in-context. If `--resume` fails (stale session, e.g. after a CLI upgrade) the runner clears the pointer and retries once without it. The Admin Console exposes `GET` / `DELETE /api/agents/:agentId/session/:roomId/current` to read or drop the pointer; the chat header shows a "Session aktiv" badge plus *Reset* (drop pointer) and *Reset & lernen* (send a learn-prompt as a normal user message, then auto-drop after the agent's reply) buttons. Claude's per-session conversation snapshots live under `~/.claude/projects/<encoded-cwd>/`, persisted via the `claude-home` volume so `--resume` survives orchestrator restarts.
 
 The schema is defined in `docs/agent-chat-plan.md` §4.1 and includes `assistant_text`, `tool_use`, `tool_result`, `thinking`, and `result` events. Every entry carries a `correlationId` (the originating Matrix `event_id`, or a synthetic `trigger:<id>:<ts>` for cron triggers) so the Admin Console can tie log rows to chat bubbles.
 
@@ -126,16 +128,20 @@ The Admin Console embeds a Matrix client at `/chats` (and `/chats/:agentId`) so 
 |---|---|
 | `admin-console/src/pages/AgentChat.jsx` | Top-level page: owns selected agent, log-panel toggle, last-agent persistence |
 | `admin-console/src/pages/agent-chat/AgentList.jsx` | Left rail of enabled agents |
-| `admin-console/src/pages/agent-chat/ChatPanel.jsx` | Chat view: backfill, scroll-up history pagination, optimistic send, SSE live tail |
+| `admin-console/src/pages/agent-chat/ChatPanel.jsx` | Chat view: backfill, scroll-up history pagination, optimistic send, SSE live tail, session-control toolbar (Reset / Reset & lernen) |
 | `admin-console/src/pages/agent-chat/Message.jsx` | Single bubble; markdown via `react-markdown` + `remark-gfm` + `rehype-pretty-code` (dual themes) + `rehype-sanitize` |
 | `admin-console/src/pages/agent-chat/MessageInput.jsx` | Auto-resizing textarea with IME-safe Cmd/Ctrl+Enter submit |
-| `admin-console/src/pages/agent-chat/SessionLogPanel.jsx` | Right rail toggle (`Cmd/Ctrl+Shift+L`); SSE tail of the JSONL session log |
+| `admin-console/src/pages/agent-chat/RightRail.jsx` | Tabbed right rail (toggle `Cmd/Ctrl+Shift+L`) — hosts `SessionLogPanel` and `WorkspaceBrowser`; persists active tab in localStorage |
+| `admin-console/src/pages/agent-chat/SessionLogPanel.jsx` | SSE tail of the JSONL session log; renders headerless when `embedded` |
+| `admin-console/src/pages/agent-chat/WorkspaceBrowser.jsx` | Lazy-loading file tree of `/workspace/agents/<id>/` plus inline read-only file viewer (text + binary detection, 512 KB cap) |
 | `admin-console/src/hooks/useSSE.js` | Generic SSE consumer with exponential-backoff reconnect |
 | `admin-console/src/hooks/useColorScheme.js` | Tracks `<html data-theme>` so Shiki blocks switch with the page theme |
 
 **DM rooms.** When the user opens an agent for the first time, the UI lazily POSTs `/api/matrix/agents/:id/dm`; the server creates (or reuses) a 1:1 Matrix room, invites the admin user, and persists `{ roomId, createdAt, createdBy }` to `/workspace/agents/<id>/dm-room.json`. Subsequent loads short-circuit on that file, so the room id round-trips through `GET /api/matrix/agents`.
 
 **Session log rendering.** The right panel subscribes to `/api/agents/:id/session/:roomId/stream` (SSE, with a `since=<byte-offset>` cursor for replay). Each JSONL line carries a `correlationId` (the originating Matrix `event_id`) which lets the UI pair log rows with chat bubbles: hovering a message dims log entries with non-matching ids, and vice versa. Adjacent `tool_use` / `tool_result` entries with the same `toolId` are folded into a single collapsible block.
+
+**Workspace browser.** The right rail's second tab is a read-only file explorer over `/workspace/agents/<agentId>/`. It calls `GET /api/agents/:agentId/workspace/tree?path=<rel>` for lazy directory listings and `GET /api/agents/:agentId/workspace/file?path=<rel>` for content; both endpoints reject any path that resolves outside the agent root (path traversal, escaping symlinks). File reads are capped at 512 KB and binary files (NUL byte in the first 8 KB) are flagged so the UI can show a placeholder instead of garbled text. The tab is intended as an at-a-glance peek at memory files, skills and the cloned repo — agent-side edits should still go through the agent itself.
 
 **Markdown safety.** Agent output is sanitized with `rehype-sanitize` using the GitHub-flavoured `defaultSchema`, extended only to allow `style` and the `data-*` attributes that `rehype-pretty-code` emits on `span` / `code` / `pre` / `figure` / `div`. Sanitize runs *after* pretty-code in the rehype pipeline so the syntax-highlighting markup survives. Code blocks ship both Shiki themes (`github-light`, `github-dark`); the active theme is selected by CSS rules in `admin-console/src/theme/tokens.css` keyed off `<html data-theme>`.
 

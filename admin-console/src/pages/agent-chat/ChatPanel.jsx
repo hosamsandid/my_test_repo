@@ -542,27 +542,27 @@ export default function ChatPanel({
         <SessionBadge active={!!sessionId} updatedAt={sessionUpdatedAt} />
         <button
           type="button"
-          onClick={handleResetSession}
-          disabled={!sessionId || resetting || learnPending || disabled}
-          title="Discard current session — the next message starts fresh"
-          style={sessionBtnStyle(!sessionId || resetting || learnPending || disabled)}
-        >
-          {resetting
-            ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
-            : <RotateCcw size={11} />}
-          Reset
-        </button>
-        <button
-          type="button"
           onClick={handleLearnAndReset}
           disabled={!sessionId || resetting || learnPending || disabled}
-          title="Agent summarizes the conversation, updates its memory/ files, and then starts a fresh session"
+          title="Agent summarizes this conversation and saves key insights to its memory files — then the session is cleared for a fresh start"
           style={sessionBtnStyle(!sessionId || resetting || learnPending || disabled)}
         >
           {learnPending
             ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
             : <GraduationCap size={11} />}
-          Reset &amp; learn
+          Learn &amp; Reset
+        </button>
+        <button
+          type="button"
+          onClick={handleResetSession}
+          disabled={!sessionId || resetting || learnPending || disabled}
+          title="Clear the session without saving — the next message starts a new conversation with no memory of this one"
+          style={sessionBtnStyle(!sessionId || resetting || learnPending || disabled)}
+        >
+          {resetting
+            ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
+            : <RotateCcw size={11} />}
+          Discard Session
         </button>
         <div style={{ flex: 1 }} />
         {sessionId && (

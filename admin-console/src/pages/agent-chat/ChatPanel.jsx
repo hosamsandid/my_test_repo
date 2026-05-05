@@ -66,7 +66,7 @@ export default function ChatPanel({
   const [sessionUpdatedAt, setSessionUpdatedAt] = useState(null);
   const [resetting, setResetting]     = useState(false);
   const [learnPending, setLearnPending] = useState(false);
-  // Wall-clock at the moment the user clicked "Reset & learn". The
+  // Wall-clock at the moment the user clicked "Full Learn". The
   // post-message effect uses it to decide which agent reply to treat as
   // "the response to the learn prompt" — namely, the next agent message
   // whose timestamp is at or after this value.
@@ -371,55 +371,29 @@ export default function ChatPanel({
     }
   }
 
-  async function handleLearnAndReset() {
+  async function handleFullLearn() {
     if (!sessionApiBase || learnPending) return;
     setError(null);
     setLearnPending(true);
     learnTriggeredAtRef.current = Date.now();
     try {
-      // Send the learn prompt as a normal user message — the user sees it
-      // in the chat, the agent replies in its current Claude session, and
-      // the post-reply effect below clears the pointer.
       await handleSend(LEARN_PROMPT);
     } catch (err) {
       setLearnPending(false);
-      setError(`Learn-and-reset failed: ${err.message}`);
+      setError(`Full learn failed: ${err.message}`);
     }
   }
 
-  // Auto-clear the session pointer once the agent has replied to the
-  // learn prompt. We treat "the next non-optimistic agent message whose
-  // ts >= triggered-at" as that reply. Edge case: a stray agent message
-  // arriving in that window would short-circuit the wait — acceptable
-  // for a rare manual workflow.
+  // Clear learnPending once the agent has replied to the learn prompt.
   useEffect(() => {
-    if (!learnPending || !sessionApiBase) return;
+    if (!learnPending) return;
     if (!messages.length || !agent?.userId) return;
     const last = messages[messages.length - 1];
     if (last?.sender !== agent.userId) return;
     if (last?.isOptimistic) return;
     if ((last?.ts || 0) < learnTriggeredAtRef.current) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        await apiCall('DELETE', sessionApiBase);
-        if (cancelled) return;
-        setSessionId(null);
-        setSessionUpdatedAt(null);
-        setMessages(prev => [...prev, {
-          event_id: `reset-${crypto.randomUUID()}`,
-          type: 'context-reset',
-          ts: Date.now(),
-        }]);
-      } catch (err) {
-        if (cancelled) return;
-        setError(`Auto-reset after learn failed: ${err.message}`);
-      } finally {
-        if (!cancelled) setLearnPending(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [messages, learnPending, agent?.userId, sessionApiBase]);
+    setLearnPending(false);
+  }, [messages, learnPending, agent?.userId]);
 
   /* ─── 5. Send ────────────────────────────────────────────────────── */
   async function handleSend(text) {
@@ -542,27 +516,27 @@ export default function ChatPanel({
         <SessionBadge active={!!sessionId} updatedAt={sessionUpdatedAt} />
         <button
           type="button"
-          onClick={handleLearnAndReset}
-          disabled={!sessionId || resetting || learnPending || disabled}
-          title="Agent summarizes this conversation and saves key insights to its memory files — then the session is cleared for a fresh start"
-          style={sessionBtnStyle(!sessionId || resetting || learnPending || disabled)}
+          onClick={handleFullLearn}
+          disabled={!sessionId || learnPending || disabled}
+          title="Agent summarizes this conversation and saves key insights to its memory files — the session stays open afterwards"
+          style={sessionBtnStyle(!sessionId || learnPending || disabled)}
         >
           {learnPending
             ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
             : <GraduationCap size={11} />}
-          Learn &amp; Reset
+          Full Learn
         </button>
         <button
           type="button"
           onClick={handleResetSession}
           disabled={!sessionId || resetting || learnPending || disabled}
-          title="Clear the session without saving — the next message starts a new conversation with no memory of this one"
+          title="Clear the session — the next message starts a new conversation with no memory of this one"
           style={sessionBtnStyle(!sessionId || resetting || learnPending || disabled)}
         >
           {resetting
             ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
             : <RotateCcw size={11} />}
-          Discard Session
+          Reset Session
         </button>
         <div style={{ flex: 1 }} />
         {sessionId && (

@@ -1,10 +1,9 @@
 import React, { Suspense, lazy } from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, Navigate } from 'react-router-dom';
 import Shell from './components/Shell';
 
 const Dashboard           = lazy(() => import('./pages/Dashboard'));
-const AgentManager        = lazy(() => import('./pages/AgentManager'));
-const Blueprints          = lazy(() => import('./pages/Blueprints'));
+const Agents              = lazy(() => import('./pages/Agents'));
 const AgentChat           = lazy(() => import('./pages/AgentChat'));
 const WorkingEnvironments = lazy(() => import('./pages/WorkingEnvironments'));
 const SshKeys             = lazy(() => import('./pages/SshKeys'));
@@ -22,8 +21,8 @@ export default function App() {
       <Suspense fallback={<div style={{ padding: 'var(--eb-space-6)', color: 'var(--eb-text-muted)' }}>Loading...</div>}>
         <Routes>
           <Route path="/"             element={<Dashboard />} />
-          <Route path="/agents"       element={<AgentManager />} />
-          <Route path="/blueprints"   element={<Blueprints />} />
+          <Route path="/agents"       element={<Agents />} />
+          <Route path="/blueprints"   element={<Navigate to="/agents" replace />} />
           <Route path="/chats"           element={<AgentChat />} />
           <Route path="/chats/:agentId"  element={<AgentChat />} />
           <Route path="/environments" element={<WorkingEnvironments />} />

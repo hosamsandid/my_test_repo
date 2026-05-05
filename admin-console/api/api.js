@@ -723,6 +723,22 @@ app.post('/api/blueprints', async (req, res) => {
   }
 });
 
+app.put('/api/blueprints/:id', async (req, res) => {
+  const { displayName, role, systemPrompt } = req.body || {};
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/blueprints/${encodeURIComponent(req.params.id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ displayName, role, systemPrompt }),
+    });
+    const data = await resp.json();
+    res.status(resp.status).json(data);
+  } catch (err) {
+    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 app.delete('/api/blueprints/:id', async (req, res) => {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {

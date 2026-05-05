@@ -1255,6 +1255,37 @@ async function main() {
       return;
     }
 
+    const blueprintUpdateMatch = req.method === 'PUT' && req.url.match(/^\/internal\/blueprints\/([^/]+)$/);
+    if (blueprintUpdateMatch) {
+      const blueprintId = decodeURIComponent(blueprintUpdateMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', () => {
+        try {
+          const existing = loadBlueprint(blueprintId);
+          if (!existing) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Blueprint not found' }));
+            return;
+          }
+          const { displayName, role, systemPrompt } = JSON.parse(body || '{}');
+          const updated = {
+            ...existing,
+            ...(displayName !== undefined && { displayName }),
+            ...(role !== undefined && { role }),
+            ...(systemPrompt !== undefined && { systemPrompt }),
+          };
+          saveBlueprint(blueprintId, updated);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(updated));
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
     const blueprintCreateMatch = req.method === 'POST' && req.url === '/internal/blueprints';
     if (blueprintCreateMatch) {
       let body = '';

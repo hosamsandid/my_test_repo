@@ -9,8 +9,7 @@ import {
 const NAV = [
   { section: 'OVERVIEW', items: [
     { path: '/',             label: 'Dashboard',           Icon: LayoutDashboard },
-    { path: '/agents',       label: 'Agent Manager',       Icon: Users },
-    { path: '/blueprints',   label: 'Blueprints',          Icon: Layers },
+    { path: '/agents',       label: 'Agents',              Icon: Layers },
     { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
   ]},
   { section: 'WORKSPACES', items: [
@@ -34,8 +33,7 @@ const NAV = [
 
 const BREADCRUMBS = {
   '/':             'Dashboard',
-  '/agents':       'Agent Manager',
-  '/blueprints':   'Blueprints',
+  '/agents':       'Agents',
   '/chats':        'Agent Chat',
   '/environments': 'Working Environments',
   '/ssh-keys':     'SSH Keys',

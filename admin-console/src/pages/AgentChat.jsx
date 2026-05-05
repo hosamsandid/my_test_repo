@@ -251,6 +251,7 @@ export default function AgentChat() {
       <div style={{ flex: 1, height: '100%', minWidth: 0, display: 'flex', flexDirection: 'column' }}>
         {selectedAgent ? (
           <ChatPanel
+            key={selectedAgent.id}
             agent={selectedAgent}
             roomId={effectiveRoomId}
             onRoomCreated={(roomId) => handleRoomCreated(selectedAgent.id, roomId)}

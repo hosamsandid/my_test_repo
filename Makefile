@@ -1,5 +1,5 @@
 #
-# e-vgh-claw stack — Conduwuit + Orchestrator + Admin Console + Cinny
+# e-vgh-claw stack — Conduwuit + Orchestrator + Admin Console
 #
 # Usage:
 #   make up        # build + start the full stack
@@ -13,7 +13,7 @@
 
 COMPOSE     ?= podman compose
 COMPOSE_FILE = docker-compose.yml
-SERVICES     = conduwuit cinny orchestrator admin-console
+SERVICES     = conduwuit orchestrator admin-console
 
 .PHONY: up down restart build update ps logs help
 

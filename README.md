@@ -38,7 +38,7 @@ The stack runs on Podman, communicates over the Matrix protocol, and reaches its
 ## Architecture
 
 ```
-Matrix Client (Cinny, Element, etc.)
+Admin Console chat UI (or any Matrix client, e.g. Element)
   → Conduwuit (Matrix homeserver)
     → orchestrator (@orchestrator:local)
         ├── Routes to dynamic agent processes (each agent-runner.js)
@@ -73,12 +73,11 @@ make up
 make logs
 ```
 
-Default ports (configurable via `CONDUWUIT_PORT`, `CINNY_PORT`, `ADMIN_PORT` in `.env`):
+Default ports (configurable via `CONDUWUIT_PORT`, `ADMIN_PORT` in `.env`):
 
 | Service | Default |
 |---|---|
 | Admin Console | <http://localhost:4000> |
-| Cinny | <http://localhost:8090> |
 | Conduwuit | `localhost:8448` |
 
 ---
@@ -104,4 +103,4 @@ The page has three panels:
 - **Chat** (middle): markdown and code-block rendering, sticky scroll, scroll-up backfill of older messages.
 - **Session log** (right, toggle with `Cmd/Ctrl+Shift+L`): structured timeline of the agent's internal activity (Claude tool calls, intermediate text, errors, timings).
 
-Messages flow through the same Matrix room you would see in Cinny — the chat UI is just a viewer. The last-opened agent is remembered, so reopening the page lands you back in the same conversation.
+Messages flow through Matrix; the chat UI is just a viewer, so any external Matrix client (e.g. Element) connected to the same Conduwuit homeserver stays in sync. The last-opened agent is remembered, so reopening the page lands you back in the same conversation.

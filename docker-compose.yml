@@ -19,18 +19,6 @@ services:
       CONTINUWUITY_NEW_USER_DISPLAYNAME_SUFFIX: ""
       TZ: Europe/Berlin
 
-  cinny:
-    image: ajbura/cinny:latest
-    container_name: ${COMPOSE_PROJECT_NAME}-cinny
-    restart: unless-stopped
-    ports:
-      - "${CINNY_PORT:-8090}:80"
-    volumes:
-      - ./cinny/config.json:/app/config.json:ro
-    depends_on:
-      conduwuit:
-        condition: service_started
-
   orchestrator:
     build:
       context: ./orchestrator

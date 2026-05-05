@@ -6,19 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **e-vgh-claw** is a local Matrix-to-Claude-Code stack for an enterprise context. It provides chat-based AI agents that can be extended with domain-specific skills for **Mainframe Migration** (COBOL, JCL, DB2, IMS, etc.).
 
-The stack runs locally with Podman as a single compose file with four services:
+The stack runs locally with Podman as a single compose file with three services:
 
 1. **Conduwuit** — Matrix homeserver
-2. **Cinny** — Matrix web client on `:8090`
-3. **Orchestrator** — dynamic agent pool with domain experts (`@orchestrator:local`)
-4. **Admin Console** — web UI on `:4000` for managing agents, working environments, SSH keys, skills, etc.
+2. **Orchestrator** — dynamic agent pool with domain experts (`@orchestrator:local`)
+3. **Admin Console** — web UI on `:4000` for managing agents, working environments, SSH keys, skills, etc. Includes an embedded chat UI at `/chats/:agentId` for direct 1:1 conversations with each agent.
 
 The LLM backend is reached via an Anthropic-compatible proxy configured by `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` in `.env` (gitignored). Default Sonnet/Haiku models are set there too.
 
 ## Architecture
 
 ```
-Matrix Client (Cinny / Element / etc.)
+Admin Console chat UI (or any Matrix client, e.g. Element)
   → Conduwuit (localhost:8448)
     → orchestrator.js (@orchestrator:local)
         ├── Manages dynamic agents (create/update/delete via Admin Console)

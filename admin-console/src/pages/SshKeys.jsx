@@ -39,7 +39,7 @@ function CreateForm({ onSave, onCancel, saving, error }) {
         label="Name *"
         value={name}
         onChange={setName}
-        placeholder="z.B. GitHub Deploy Key"
+        placeholder="e.g. GitHub Deploy Key"
       />
 
       <div>
@@ -49,7 +49,7 @@ function CreateForm({ onSave, onCancel, saving, error }) {
           color: 'var(--eb-text-secondary)',
           marginBottom: 'var(--eb-space-1)',
         }}>
-          Privater SSH-Key <span style={{ color: 'var(--eb-status-error)' }}>*</span>
+          Private SSH key <span style={{ color: 'var(--eb-status-error)' }}>*</span>
         </div>
         <textarea
           value={privateKey}
@@ -64,7 +64,7 @@ function CreateForm({ onSave, onCancel, saving, error }) {
           }}
         />
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-          Der Key wird im Workspace-Volume gespeichert (chmod 600). Er wird nie wieder über die API ausgegeben.
+          The key is stored in the workspace volume (chmod 600). It will never be returned by the API again.
         </div>
       </div>
 
@@ -81,7 +81,7 @@ function CreateForm({ onSave, onCancel, saving, error }) {
             opacity: (saving || !canSubmit) ? 0.6 : 1,
           }}
         >
-          {saving ? 'Speichere…' : 'Key speichern'}
+          {saving ? 'Saving…' : 'Save key'}
         </button>
         <button
           onClick={onCancel}
@@ -92,7 +92,7 @@ function CreateForm({ onSave, onCancel, saving, error }) {
             cursor: 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
           }}
         >
-          Abbrechen
+          Cancel
         </button>
       </div>
     </div>
@@ -111,7 +111,7 @@ export default function SshKeys() {
     { key: 'id', label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
     { key: 'name', label: 'Name' },
     { key: 'fingerprint', label: 'Fingerprint', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{v}</span> },
-    { key: 'createdAt', label: 'Hinzugefügt', render: v => v ? new Date(v).toLocaleString() : '—' },
+    { key: 'createdAt', label: 'Added', render: v => v ? new Date(v).toLocaleString() : '—' },
     {
       key: '_actions',
       label: '',
@@ -119,9 +119,9 @@ export default function SshKeys() {
       render: (_, row) => (
         <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
           <button
-            aria-label="Löschen"
+            aria-label="Delete"
             onClick={() => setDeleteTarget(row)}
-            title="Löschen"
+            title="Delete"
             style={{
               display: 'flex', alignItems: 'center',
               padding: 'var(--eb-space-1) var(--eb-space-2)',
@@ -180,7 +180,7 @@ export default function SshKeys() {
           onClick={() => { setCreating(true); setFormError(null); }}
           style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit' }}
         >
-          <Plus size={15} /> Neuer Key
+          <Plus size={15} /> New Key
         </button>
       </div>
 
@@ -192,7 +192,7 @@ export default function SshKeys() {
         fontSize: 'var(--eb-text-sm)',
         color: 'var(--eb-text-secondary)',
       }}>
-        SSH-Keys werden für Git-Operationen in Working Environments verwendet. Der private Key wird im Workspace-Volume gespeichert und nie wieder ausgegeben — du kannst nur den Fingerprint zum Vergleich sehen.
+        SSH keys are used for Git operations in Working Environments. The private key is stored in the workspace volume and never returned again — you can only see the fingerprint for comparison.
       </div>
 
       {actionError && (
@@ -205,13 +205,13 @@ export default function SshKeys() {
       <DataTable
         columns={COLUMNS}
         data={keys ?? []}
-        emptyText="Noch keine SSH-Keys hinterlegt."
+        emptyText="No SSH keys stored yet."
       />
 
       <SidePanel
         open={creating}
         onClose={() => setCreating(false)}
-        title="Neuer SSH-Key"
+        title="New SSH key"
         width="560px"
       >
         {creating && (
@@ -226,10 +226,10 @@ export default function SshKeys() {
 
       <ConfirmDialog
         open={!!deleteTarget}
-        title="SSH-Key löschen"
-        message={`"${deleteTarget?.name || deleteTarget?.id}" wirklich löschen? Working Environments, die den Key verwenden, müssen ihn vorher entfernen.`}
+        title="Delete SSH key"
+        message={`Really delete "${deleteTarget?.name || deleteTarget?.id}"? Working Environments using this key must remove it first.`}
         variant="danger"
-        confirmLabel="Löschen"
+        confirmLabel="Delete"
         onConfirm={handleDelete}
         onCancel={() => setDeleteTarget(null)}
       />

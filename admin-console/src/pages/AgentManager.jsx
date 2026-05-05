@@ -183,22 +183,22 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           border: '1px solid var(--eb-status-warning)',
           borderRadius: 'var(--eb-radius-md)',
         }}>
-          Es ist noch keine Working Environment angelegt. Erstelle zuerst eine unter <strong>Working Environments</strong>.
+          No Working Environment has been created yet. Create one first under <strong>Working Environments</strong>.
         </div>
       )}
 
       <div>
         <div style={labelStyle}>ID <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
-        <input style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }} value={form.id} onChange={e => update('id', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))} placeholder="z.B. cobol-expert" />
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>Nur Kleinbuchstaben, Zahlen und Bindestriche. Wird zu @id:local.</div>
+        <input style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }} value={form.id} onChange={e => update('id', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))} placeholder="e.g. cobol-expert" />
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>Only lowercase letters, digits and hyphens. Becomes @id:local.</div>
       </div>
 
-      <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} placeholder="COBOL Experte" />
+      <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} placeholder="COBOL Expert" />
 
       <div>
         <div style={labelStyle}>Working Environment <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
         <select value={form.environmentId} onChange={e => update('environmentId', e.target.value)} style={inputStyle} disabled={envs.length === 0}>
-          <option value="">— bitte auswählen —</option>
+          <option value="">— please select —</option>
           {envs.map(env => (
             <option key={env.id} value={env.id}>
               {env.name} ({env.id})
@@ -208,35 +208,35 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           ))}
         </select>
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-          Definiert Skills, Repository und Kontext, die der Agent in seinem Workspace bekommt.
+          Defines the skills, repository and context the agent gets in its workspace.
         </div>
       </div>
 
       <div>
-        <div style={labelStyle}>Rolle <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
+        <div style={labelStyle}>Role <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
         <select value={form.role} onChange={e => update('role', e.target.value)} style={inputStyle}>
-          <option value="expert">Expert — reagiert auf Fragen im Raum</option>
-          <option value="synthesizer">Synthesizer — fasst Expertenantworten zusammen</option>
-          <option value="autonomous">Autonomous — läuft eigenständig nach Zeitplan</option>
+          <option value="expert">Expert — responds to questions in the room</option>
+          <option value="synthesizer">Synthesizer — merges expert responses</option>
+          <option value="autonomous">Autonomous — runs on its own schedule</option>
         </select>
       </div>
 
       {form.role === 'autonomous' && (
         <>
           <div>
-            <div style={labelStyle}>Cron-Schedule</div>
-            <input style={inputStyle} value={form.schedule} onChange={e => update('schedule', e.target.value)} placeholder="0 8 * * 1-5 (Mo–Fr um 8 Uhr)" />
+            <div style={labelStyle}>Cron Schedule</div>
+            <input style={inputStyle} value={form.schedule} onChange={e => update('schedule', e.target.value)} placeholder="0 8 * * 1-5 (Mon–Fri at 8 AM)" />
           </div>
           <div>
-            <div style={labelStyle}>Task-Prompt (bei jedem Trigger)</div>
-            <textarea value={form.taskPrompt} onChange={e => update('taskPrompt', e.target.value)} placeholder="Was der Agent bei jedem Trigger tun soll..." rows={3} style={{ ...inputStyle, resize: 'vertical' }} />
+            <div style={labelStyle}>Task Prompt (run on every trigger)</div>
+            <textarea value={form.taskPrompt} onChange={e => update('taskPrompt', e.target.value)} placeholder="What the agent should do on every trigger..." rows={3} style={{ ...inputStyle, resize: 'vertical' }} />
           </div>
         </>
       )}
 
       <div>
-        <div style={labelStyle}>System-Prompt <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
-        <textarea value={form.systemPrompt} onChange={e => update('systemPrompt', e.target.value)} placeholder="Du bist ein erfahrener COBOL-Entwickler..." rows={8} style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }} />
+        <div style={labelStyle}>System Prompt <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
+        <textarea value={form.systemPrompt} onChange={e => update('systemPrompt', e.target.value)} placeholder="You are an experienced COBOL developer..." rows={8} style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }} />
       </div>
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
@@ -245,10 +245,10 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           disabled={saving || !canSubmit}
           style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: saving ? 'wait' : 'pointer', fontFamily: 'inherit', opacity: (saving || !canSubmit) ? 0.6 : 1 }}
         >
-          {saving ? 'Erstelle Agent…' : 'Agent erstellen'}
+          {saving ? 'Creating agent…' : 'Create agent'}
         </button>
         <button onClick={onCancel} style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-secondary)', cursor: 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit' }}>
-          Abbrechen
+          Cancel
         </button>
       </div>
     </div>
@@ -451,7 +451,7 @@ export default function AgentManager() {
           onClick={() => { setCreateError(null); setPanelMode('create'); }}
           style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit' }}
         >
-          <Plus size={15} /> Neuer Agent
+          <Plus size={15} /> New Agent
         </button>
       </div>
 
@@ -465,14 +465,14 @@ export default function AgentManager() {
       <DataTable
         columns={COLUMNS}
         data={agents ?? []}
-        emptyText="Noch keine Agenten. Klicke auf 'Neuer Agent' um den ersten zu erstellen."
+        emptyText="No agents yet. Click 'New Agent' to create the first one."
       />
 
       {/* Create agent panel */}
       <SidePanel
         open={panelMode === 'create'}
         onClose={() => setPanelMode(null)}
-        title="Neuer Agent"
+        title="New Agent"
         width="520px"
       >
         <AgentCreateForm

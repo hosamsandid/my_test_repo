@@ -35,7 +35,7 @@ function SkillPicker({ allSkills, selected, onChange }) {
   if (allSkills.length === 0) {
     return (
       <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
-        Keine Skills im zentralen Pool. Lege Skills im Pool-Volume unter <code>skills/&lt;name&gt;/SKILL.md</code> ab.
+        No skills in the central pool. Place skills in the pool volume under <code>skills/&lt;name&gt;/SKILL.md</code>.
       </div>
     );
   }
@@ -134,32 +134,32 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
           value={form.id}
           disabled={isEdit}
           onChange={e => update('id', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
-          placeholder="z.B. cobol-migration"
+          placeholder="e.g. cobol-migration"
         />
       </div>
 
       <FormInput label="Name *" value={form.name} onChange={v => update('name', v)} placeholder="COBOL Migration" />
 
       <div>
-        <div style={labelStyle}>Beschreibung</div>
+        <div style={labelStyle}>Description</div>
         <textarea
           value={form.description}
           onChange={e => update('description', e.target.value)}
-          placeholder="Wofür wird diese Arbeitsumgebung verwendet?"
+          placeholder="What is this working environment used for?"
           rows={2}
           style={{ ...inputStyle, resize: 'vertical' }}
         />
       </div>
 
       <div>
-        <div style={labelStyle}>Skills (aus dem zentralen Pool)</div>
+        <div style={labelStyle}>Skills (from the central pool)</div>
         <SkillPicker
           allSkills={poolSkills}
           selected={form.skills}
           onChange={v => update('skills', v)}
         />
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-          {form.skills.length} ausgewählt
+          {form.skills.length} selected
         </div>
       </div>
 
@@ -177,14 +177,14 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
           />
           <GitBranch size={14} />
           <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
-            Git-Repository klonen
+            Clone Git repository
           </span>
         </label>
 
         {form.repoEnabled && (
           <>
             <div>
-              <div style={labelStyle}>Repository-URL <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
+              <div style={labelStyle}>Repository URL <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
               <input
                 style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }}
                 value={form.repoUrl}
@@ -202,19 +202,19 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
               />
             </div>
             <div>
-              <div style={labelStyle}>SSH-Key</div>
+              <div style={labelStyle}>SSH key</div>
               <select
                 value={form.sshKeyId}
                 onChange={e => update('sshKeyId', e.target.value)}
                 style={inputStyle}
               >
-                <option value="">— kein Key (nur HTTPS) —</option>
+                <option value="">— no key (HTTPS only) —</option>
                 {sshKeys.map(k => (
                   <option key={k.id} value={k.id}>{k.name} ({k.id})</option>
                 ))}
               </select>
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-                Verwalte SSH-Keys auf der SSH-Keys-Seite.
+                Manage SSH keys on the SSH Keys page.
               </div>
             </div>
           </>
@@ -222,11 +222,11 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
       </div>
 
       <div>
-        <div style={labelStyle}>Zusätzlicher Kontext (CLAUDE.md)</div>
+        <div style={labelStyle}>Additional context (CLAUDE.md)</div>
         <textarea
           value={form.additionalContext}
           onChange={e => update('additionalContext', e.target.value)}
-          placeholder="Optionale Anweisungen, die jedem Agenten in dieser Umgebung mitgegeben werden..."
+          placeholder="Optional instructions passed to every agent in this environment..."
           rows={4}
           style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
         />
@@ -245,7 +245,7 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
             opacity: (saving || !canSubmit) ? 0.6 : 1,
           }}
         >
-          {saving ? 'Speichere…' : (isEdit ? 'Änderungen speichern' : 'Umgebung anlegen')}
+          {saving ? 'Saving…' : (isEdit ? 'Save changes' : 'Create environment')}
         </button>
         <button
           onClick={onCancel}
@@ -256,7 +256,7 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
             cursor: 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
           }}
         >
-          Abbrechen
+          Cancel
         </button>
       </div>
     </div>
@@ -299,8 +299,8 @@ export default function WorkingEnvironments() {
       sortable: false,
       render: (_, row) => (
         <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
-          <ActionBtn icon={Edit} label="Bearbeiten" onClick={() => { setSelected(row); setPanelMode('edit'); setFormError(null); }} />
-          <ActionBtn icon={Trash2} label="Löschen" danger onClick={() => setDeleteTarget(row)} />
+          <ActionBtn icon={Edit} label="Edit" onClick={() => { setSelected(row); setPanelMode('edit'); setFormError(null); }} />
+          <ActionBtn icon={Trash2} label="Delete" danger onClick={() => setDeleteTarget(row)} />
         </div>
       ),
     },
@@ -351,7 +351,7 @@ export default function WorkingEnvironments() {
           onClick={() => { setPanelMode('create'); setSelected(null); setFormError(null); }}
           style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit' }}
         >
-          <Plus size={15} /> Neue Umgebung
+          <Plus size={15} /> New Environment
         </button>
       </div>
 
@@ -363,7 +363,7 @@ export default function WorkingEnvironments() {
         fontSize: 'var(--eb-text-sm)',
         color: 'var(--eb-text-secondary)',
       }}>
-        Eine Working Environment definiert, was ein Agent in seinem Workspace mitbekommt: ausgewählte Skills aus dem Pool, optional ein Git-Repository (mit SSH-Key) und zusätzlichen Kontext für CLAUDE.md.
+        A Working Environment defines what an agent gets in its workspace: selected skills from the pool, optionally a Git repository (with SSH key), and additional context for CLAUDE.md.
       </div>
 
       {actionError && (
@@ -376,13 +376,13 @@ export default function WorkingEnvironments() {
       <DataTable
         columns={COLUMNS}
         data={envs ?? []}
-        emptyText="Noch keine Working Environments. Klicke 'Neue Umgebung' um die erste anzulegen."
+        emptyText="No Working Environments yet. Click 'New Environment' to create the first one."
       />
 
       <SidePanel
         open={panelMode === 'create' || panelMode === 'edit'}
         onClose={() => { setPanelMode(null); setSelected(null); }}
-        title={panelMode === 'edit' ? `Bearbeiten: ${selected?.name || selected?.id}` : 'Neue Umgebung'}
+        title={panelMode === 'edit' ? `Edit: ${selected?.name || selected?.id}` : 'New Environment'}
         width="560px"
       >
         {(panelMode === 'create' || (panelMode === 'edit' && selected)) && (
@@ -399,10 +399,10 @@ export default function WorkingEnvironments() {
 
       <ConfirmDialog
         open={!!deleteTarget}
-        title="Working Environment löschen"
-        message={`"${deleteTarget?.name || deleteTarget?.id}" wirklich löschen? Agenten, die diese Umgebung benutzen, müssen vorher entfernt werden.`}
+        title="Delete Working Environment"
+        message={`Really delete "${deleteTarget?.name || deleteTarget?.id}"? Agents using this environment must be removed first.`}
         variant="danger"
-        confirmLabel="Löschen"
+        confirmLabel="Delete"
         onConfirm={handleDelete}
         onCancel={() => setDeleteTarget(null)}
       />

@@ -5,16 +5,16 @@ import { useSSE } from '../../hooks/useSSE';
 import Message from './Message';
 import MessageInput from './MessageInput';
 
-// Default prompt sent when the user clicks "Reset & lernen". The agent
+// Default prompt sent when the user clicks "Reset & learn". The agent
 // continues in its current Claude session (so it has full conversational
 // context), is asked to consolidate that context into the memory files,
 // and replies with a short summary. After the reply lands, the UI clears
 // the session pointer so the next message starts fresh.
 const LEARN_PROMPT =
-  'Bevor wir das Gespraech hier beenden: Bitte fasse die wichtigsten Erkenntnisse, ' +
-  'Entscheidungen und offenen Punkte aus unserer bisherigen Konversation zusammen ' +
-  'und aktualisiere deine memory/-Dateien (insbesondere memory/log.md und memory/context.md, ' +
-  'falls vorhanden) entsprechend. Antworte danach kurz mit dem, was du dir gemerkt hast.';
+  'Before we end this conversation: please summarize the key insights, ' +
+  'decisions and open points from our discussion so far ' +
+  'and update your memory/ files (especially memory/log.md and memory/context.md, ' +
+  'if present) accordingly. Then briefly reply with what you have remembered.';
 
 /**
  * The middle column: header + scrollable message list + input.
@@ -60,13 +60,13 @@ export default function ChatPanel({
 
   // Active Claude `--resume <sessionId>` pointer for this (agent, room).
   // The pointer file is written by the runner after every successful
-  // invocation and read back here so the UI can show a "Session aktiv"
+  // invocation and read back here so the UI can show a "Session active"
   // badge and offer reset controls.
   const [sessionId, setSessionId]     = useState(null);
   const [sessionUpdatedAt, setSessionUpdatedAt] = useState(null);
   const [resetting, setResetting]     = useState(false);
   const [learnPending, setLearnPending] = useState(false);
-  // Wall-clock at the moment the user clicked "Reset & lernen". The
+  // Wall-clock at the moment the user clicked "Reset & learn". The
   // post-message effect uses it to decide which agent reply to treat as
   // "the response to the learn prompt" — namely, the next agent message
   // whose timestamp is at or after this value.
@@ -403,7 +403,7 @@ export default function ChatPanel({
         setSessionUpdatedAt(null);
       } catch (err) {
         if (cancelled) return;
-        setError(`Auto-reset after lernen failed: ${err.message}`);
+        setError(`Auto-reset after learn failed: ${err.message}`);
       } finally {
         if (!cancelled) setLearnPending(false);
       }
@@ -528,7 +528,7 @@ export default function ChatPanel({
           type="button"
           onClick={handleResetSession}
           disabled={!sessionId || resetting || learnPending || disabled}
-          title="Aktuelle Session verwerfen — naechste Nachricht startet frisch"
+          title="Discard current session — the next message starts fresh"
           style={sessionBtnStyle(!sessionId || resetting || learnPending || disabled)}
         >
           {resetting
@@ -540,18 +540,18 @@ export default function ChatPanel({
           type="button"
           onClick={handleLearnAndReset}
           disabled={!sessionId || resetting || learnPending || disabled}
-          title="Agent fasst die Konversation zusammen, aktualisiert seine memory/-Dateien und startet danach mit frischer Session"
+          title="Agent summarizes the conversation, updates its memory/ files, and then starts a fresh session"
           style={sessionBtnStyle(!sessionId || resetting || learnPending || disabled)}
         >
           {learnPending
             ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
             : <GraduationCap size={11} />}
-          Reset &amp; lernen
+          Reset &amp; learn
         </button>
         <div style={{ flex: 1 }} />
         {sessionId && (
           <span
-            title={`Session-ID: ${sessionId}${sessionUpdatedAt ? ` (aktualisiert ${sessionUpdatedAt})` : ''}`}
+            title={`Session ID: ${sessionId}${sessionUpdatedAt ? ` (updated ${sessionUpdatedAt})` : ''}`}
             style={{
               fontFamily: 'var(--eb-font-mono)',
               fontSize: 'var(--eb-text-xs)',
@@ -784,7 +784,7 @@ function SessionBadge({ active }) {
         background: active ? 'var(--eb-status-success)' : 'var(--eb-text-muted)',
         display: 'inline-block',
       }} />
-      {active ? 'Session aktiv' : 'Neue Session'}
+      {active ? 'Session active' : 'New session'}
     </span>
   );
 }

@@ -136,7 +136,11 @@ function BlueprintCreateForm({ onSave, onCancel, saving, error }) {
 
 /* ── Instance Create Form ──────────────────────────────────────────── */
 function InstanceCreateForm({ blueprint, onSave, onCancel, saving, error }) {
-  const [form, setForm] = useState({ instanceId: '', displayName: '' });
+  const nextNum = (blueprint.instances?.length ?? 0) + 1;
+  const [form, setForm] = useState({
+    instanceId: `${blueprint.id}-${nextNum}`,
+    displayName: `${blueprint.displayName} ${nextNum}`,
+  });
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
   const canSubmit = form.instanceId && form.displayName;
 
@@ -158,7 +162,6 @@ function InstanceCreateForm({ blueprint, onSave, onCancel, saving, error }) {
           style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }}
           value={form.instanceId}
           onChange={e => update('instanceId', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
-          placeholder={`e.g. ${blueprint.id}-1`}
         />
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
           Becomes @id:local in Matrix.
@@ -169,7 +172,6 @@ function InstanceCreateForm({ blueprint, onSave, onCancel, saving, error }) {
         label="Display Name *"
         value={form.displayName}
         onChange={v => update('displayName', v)}
-        placeholder={`${blueprint.displayName} 1`}
       />
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>

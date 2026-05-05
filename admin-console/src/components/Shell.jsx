@@ -10,7 +10,7 @@ const NAV = [
   { section: 'OVERVIEW', items: [
     { path: '/',             label: 'Dashboard',           Icon: LayoutDashboard },
     { path: '/agents',       label: 'Agents',              Icon: Layers },
-    { path: '/briefings',    label: 'Flows',               Icon: GitBranch },
+    { path: '/flows',         label: 'Flows',               Icon: GitBranch },
     { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
   ]},
   { section: 'WORKSPACES', items: [
@@ -35,7 +35,7 @@ const NAV = [
 const BREADCRUMBS = {
   '/':             'Dashboard',
   '/agents':       'Agents',
-  '/briefings':    'Flows',
+  '/flows':        'Flows',
   '/chats':        'Agent Chat',
   '/environments': 'Working Environments',
   '/ssh-keys':     'SSH Keys',

@@ -1,7 +1,52 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { GitBranch } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import { BPGraph } from './briefings/BPGraph';
+
+function FlowRow({ agent, selected, onSelect }) {
+  return (
+    <button
+      onClick={onSelect}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 'var(--eb-space-3)',
+        width: '100%',
+        padding: 'var(--eb-space-2) var(--eb-space-3)',
+        background: selected ? 'var(--eb-bg-selected)' : 'transparent',
+        borderLeft: selected ? '3px solid var(--eb-accent-primary)' : '3px solid transparent',
+        borderTop: 'none',
+        borderRight: 'none',
+        borderBottom: '1px solid transparent',
+        color: selected ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        textAlign: 'left',
+        transition: 'background var(--eb-transition-fast)',
+      }}
+      onMouseEnter={e => {
+        if (!selected) e.currentTarget.style.background = 'var(--eb-bg-hover)';
+      }}
+      onMouseLeave={e => {
+        if (!selected) e.currentTarget.style.background = 'transparent';
+      }}
+    >
+      <GitBranch size={18} style={{ flexShrink: 0, color: selected ? 'var(--eb-accent-primary)' : 'var(--eb-text-muted)' }} />
+      <div style={{
+        flex: 1, minWidth: 0,
+        fontSize: 'var(--eb-text-md)',
+        fontWeight: 'var(--eb-font-medium)',
+        color: 'var(--eb-text-primary)',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+      }}>
+        {agent.displayName || agent.id}
+      </div>
+    </button>
+  );
+}
 
 export default function Briefings() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -18,41 +63,63 @@ export default function Briefings() {
 
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
-      {/* Linke Spalte: Orchestrator-Liste */}
+      {/* Linke Spalte: Flow-Liste */}
       <div style={{
-        width: 280, flexShrink: 0,
+        width: 260,
+        minWidth: 260,
+        height: '100%',
         borderRight: '1px solid var(--eb-border-default)',
-        overflowY: 'auto',
-        padding: 'var(--eb-space-4)',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
       }}>
-        <div style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-muted)', marginBottom: 'var(--eb-space-3)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-          Flows
-        </div>
-        {orchestrators.length === 0 && (
-          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
-            Kein Orchestrator-Agent vorhanden.<br />
-            Lege einen Agenten mit Rolle &ldquo;Orchestrator&rdquo; an.
+        <div style={{
+          padding: 'var(--eb-space-4)',
+          borderBottom: '1px solid var(--eb-border-default)',
+          flexShrink: 0,
+        }}>
+          <div style={{
+            fontSize: 'var(--eb-text-md)',
+            fontWeight: 'var(--eb-font-semibold)',
+            color: 'var(--eb-text-primary)',
+            margin: 0,
+          }}>
+            Flows
           </div>
-        )}
-        {orchestrators.map(a => (
-          <button
-            key={a.id}
-            onClick={() => selectFlow(a.id)}
-            style={{
-              width: '100%', textAlign: 'left',
-              padding: 'var(--eb-space-2) var(--eb-space-3)',
-              borderRadius: 'var(--eb-radius-md)',
-              border: 'none',
-              background: selectedFlow === a.id ? 'var(--eb-accent-primary)' : 'transparent',
-              color: selectedFlow === a.id ? 'white' : 'var(--eb-text-primary)',
-              cursor: 'pointer',
+          <div style={{
+            fontSize: 'var(--eb-text-xs)',
+            color: 'var(--eb-text-muted)',
+            marginTop: 'var(--eb-space-1)',
+          }}>
+            {orchestrators.length > 0
+              ? `${orchestrators.length} flow${orchestrators.length !== 1 ? 's' : ''}`
+              : ''}
+          </div>
+        </div>
+
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {orchestrators.length === 0 ? (
+            <div style={{
+              padding: 'var(--eb-space-4)',
               fontSize: 'var(--eb-text-sm)',
-              marginBottom: 'var(--eb-space-1)',
-            }}
-          >
-            {a.displayName}
-          </button>
-        ))}
+              color: 'var(--eb-text-muted)',
+              textAlign: 'center',
+              lineHeight: 1.5,
+            }}>
+              Kein Orchestrator-Agent vorhanden.<br />
+              Lege einen Agenten mit Rolle <strong>Orchestrator</strong> an.
+            </div>
+          ) : (
+            orchestrators.map(a => (
+              <FlowRow
+                key={a.id}
+                agent={a}
+                selected={selectedFlow === a.id}
+                onSelect={() => selectFlow(a.id)}
+              />
+            ))
+          )}
+        </div>
       </div>
 
       {/* Rechte Fläche: Graph */}

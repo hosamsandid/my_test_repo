@@ -35,7 +35,8 @@ export default function App() {
           <Route path="/mcp"          element={<McpServers />} />
           <Route path="/knowledge"    element={<KnowledgeBase />} />
           <Route path="/logs"         element={<Logs />} />
-          <Route path="/briefings"    element={<Briefings />} />
+          <Route path="/flows"         element={<Briefings />} />
+          <Route path="/briefings"    element={<Navigate to="/flows" replace />} />
         </Routes>
       </Suspense>
     </Shell>

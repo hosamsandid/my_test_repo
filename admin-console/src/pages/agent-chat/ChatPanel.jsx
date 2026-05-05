@@ -359,6 +359,11 @@ export default function ChatPanel({
       await apiCall('DELETE', sessionApiBase);
       setSessionId(null);
       setSessionUpdatedAt(null);
+      setMessages(prev => [...prev, {
+        event_id: `reset-${crypto.randomUUID()}`,
+        type: 'context-reset',
+        ts: Date.now(),
+      }]);
     } catch (err) {
       setError(`Reset failed: ${err.message}`);
     } finally {
@@ -401,6 +406,11 @@ export default function ChatPanel({
         if (cancelled) return;
         setSessionId(null);
         setSessionUpdatedAt(null);
+        setMessages(prev => [...prev, {
+          event_id: `reset-${crypto.randomUUID()}`,
+          type: 'context-reset',
+          ts: Date.now(),
+        }]);
       } catch (err) {
         if (cancelled) return;
         setError(`Auto-reset after learn failed: ${err.message}`);
@@ -705,6 +715,9 @@ export default function ChatPanel({
         )}
 
         {messages.map(msg => {
+          if (msg.type === 'context-reset') {
+            return <ContextResetSeparator key={msg.event_id} ts={msg.ts} />;
+          }
           const cid = correlationByEvent.get(msg.event_id) || null;
           const dimmed = !!hoveredCorrelationId && cid !== hoveredCorrelationId;
           return (
@@ -768,6 +781,36 @@ export default function ChatPanel({
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         @keyframes dotPulse { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
       `}</style>
+    </div>
+  );
+}
+
+function ContextResetSeparator({ ts }) {
+  const label = ts
+    ? new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : null;
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      gap: 'var(--eb-space-3)',
+      margin: 'var(--eb-space-2) 0',
+      userSelect: 'none',
+    }}>
+      <div style={{ flex: 1, height: 1, background: 'var(--eb-status-warning)' }} />
+      <span style={{
+        fontSize: 'var(--eb-text-xs)',
+        color: 'var(--eb-status-warning)',
+        fontWeight: 'var(--eb-font-medium)',
+        whiteSpace: 'nowrap',
+        padding: '2px var(--eb-space-2)',
+        border: '1px solid var(--eb-status-warning)',
+        borderRadius: 'var(--eb-radius-sm)',
+        background: 'var(--eb-status-warning-bg)',
+      }}>
+        ↺ Neuer Kontext{label ? ` · ${label}` : ''}
+      </span>
+      <div style={{ flex: 1, height: 1, background: 'var(--eb-status-warning)' }} />
     </div>
   );
 }

@@ -20,7 +20,7 @@ const TAB_KEY = 'agentChat.rightRailTab';
  * twice; the close action moves up to the tab strip.
  */
 export default function RightRail({
-  agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose,
+  agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate,
 }) {
   const [tab, setTab] = useState(() => {
     try {
@@ -92,6 +92,7 @@ export default function RightRail({
             roomId={roomId}
             hoveredCorrelationId={hoveredCorrelationId}
             onHoverCorrelation={onHoverCorrelation}
+            onCostUpdate={onCostUpdate}
             embedded
           />
         </div>

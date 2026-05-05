@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Wifi, WifiOff, Loader2, RefreshCw, RotateCcw, GraduationCap, Server } from 'lucide-react';
+import { Wifi, WifiOff, Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
 import Message from './Message';
@@ -37,7 +37,7 @@ const LEARN_PROMPT =
  * @param {(id:string|null)=>void} onHoverCorrelation
  */
 export default function ChatPanel({
-  agent, roomId, onRoomCreated, hoveredCorrelationId, onHoverCorrelation,
+  agent, roomId, onRoomCreated, hoveredCorrelationId, onHoverCorrelation, sessionCost,
 }) {
   const [messages, setMessages]      = useState([]);
   const [loading, setLoading]        = useState(false);
@@ -539,6 +539,23 @@ export default function ChatPanel({
           Reset Session
         </button>
         <div style={{ flex: 1 }} />
+        {sessionCost !== null && sessionCost.usd > 0 && (
+          <span
+            title={`Session total: $${sessionCost.usd.toFixed(4)} · ${sessionCost.tokIn.toLocaleString()} tokens in / ${sessionCost.tokOut.toLocaleString()} tokens out`}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 3,
+              fontFamily: 'var(--eb-font-mono)',
+              fontSize: 'var(--eb-text-xs)',
+              color: 'var(--eb-text-muted)',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            <DollarSign size={10} />
+            {sessionCost.usd.toFixed(4)}
+          </span>
+        )}
         {sessionId && (
           <span
             title={`Session ID: ${sessionId}${sessionUpdatedAt ? ` (updated ${sessionUpdatedAt})` : ''}`}

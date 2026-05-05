@@ -103,11 +103,20 @@ export default function AgentChat() {
   // whose correlationId doesn't match.
   const [hoveredCorrelationId, setHoveredCorrelationId] = useState(null);
 
+  // Aggregated cost for the current agent+room, fed by SessionLogPanel via onCostUpdate.
+  const [sessionCost, setSessionCost] = useState(null); // null = no data yet
+  const handleCostUpdate = useCallback((usd, tokIn, tokOut) => {
+    setSessionCost({ usd, tokIn, tokOut });
+  }, []);
+
   const selectedAgent = (agents ?? []).find(a => a.id === agentId) || null;
   const effectiveRoomId =
     (selectedAgent && createdRooms[selectedAgent.id]) ||
     selectedAgent?.dmRoomId ||
     null;
+
+  // Reset cost totals whenever the conversation context changes.
+  useEffect(() => { setSessionCost(null); }, [agentId, effectiveRoomId]);
 
   const handleSelect = useCallback((id) => {
     try { localStorage.setItem(LAST_AGENT_KEY, id); } catch { /* ignore */ }
@@ -296,6 +305,7 @@ export default function AgentChat() {
             onRoomCreated={(roomId) => handleRoomCreated(selectedAgent.id, roomId)}
             hoveredCorrelationId={hoveredCorrelationId}
             onHoverCorrelation={setHoveredCorrelationId}
+            sessionCost={sessionCost}
           />
         ) : (
           <EmptyState />
@@ -320,6 +330,7 @@ export default function AgentChat() {
             hoveredCorrelationId={hoveredCorrelationId}
             onHoverCorrelation={setHoveredCorrelationId}
             onClose={() => setLogOpen(false)}
+            onCostUpdate={handleCostUpdate}
           />
         </div>
       )}

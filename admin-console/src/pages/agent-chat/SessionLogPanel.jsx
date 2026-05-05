@@ -34,7 +34,7 @@ import LogEvent from './LogEvent';
  *   onClose()                  — parent toggles `logOpen` to false
  */
 export default function SessionLogPanel({
-  agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, embedded = false,
+  agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, embedded = false,
 }) {
   const [events, setEvents]       = useState([]);
   const [cursor, setCursor]       = useState(0);
@@ -165,6 +165,23 @@ export default function SessionLogPanel({
     if (filter === 'all') return merged;
     return merged.filter(ev => matchesFilter(ev, filter));
   }, [events, filter]);
+
+  /* ─── 5. Session cost aggregation ──────────────────────────────────── */
+  const costTotals = useMemo(() => {
+    let usd = 0, tokIn = 0, tokOut = 0;
+    for (const ev of events) {
+      if (ev.type === 'result' && typeof ev.costUsd === 'number') {
+        usd += ev.costUsd;
+        tokIn  += ev.tokens?.input  ?? 0;
+        tokOut += ev.tokens?.output ?? 0;
+      }
+    }
+    return { usd, tokIn, tokOut };
+  }, [events]);
+
+  useEffect(() => {
+    if (onCostUpdate) onCostUpdate(costTotals.usd, costTotals.tokIn, costTotals.tokOut);
+  }, [costTotals, onCostUpdate]);
 
   /* ─── Render ────────────────────────────────────────────────────────── */
   return (

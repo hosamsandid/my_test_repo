@@ -81,13 +81,20 @@ export default function Briefings() {
   const selectedAgent = orchestrators.find(a => a.id === selectedFlow);
 
   return (
-    <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
+    <div style={{
+      display: 'flex',
+      height: 'calc(100vh - var(--eb-header-height))',
+      margin: 'calc(-1 * var(--eb-space-6))',
+      background: 'var(--eb-bg-app)',
+      overflow: 'hidden',
+    }}>
       {/* Linke Spalte: Flow-Liste */}
       <div style={{
         width: 260,
         minWidth: 260,
         height: '100%',
         borderRight: '1px solid var(--eb-border-default)',
+        background: 'var(--eb-bg-surface)',
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',

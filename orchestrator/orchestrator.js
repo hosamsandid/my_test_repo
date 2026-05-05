@@ -26,6 +26,7 @@ const TEMPLATE_WORKSPACE = "/template-workspace";
 const ENVIRONMENTS_DIR = "/workspace/environments";
 const SSH_KEYS_DIR = path.join(ENVIRONMENTS_DIR, "_keys");
 const SSH_KEYS_INDEX = path.join(SSH_KEYS_DIR, "index.json");
+const GH_TOKENS_DIR = path.join(ENVIRONMENTS_DIR, "_tokens");
 
 const { spawn, execFileSync } = require("child_process");
 const agentProcesses = new Map(); // id → ChildProcess
@@ -37,16 +38,36 @@ const MAX_TIMEOUT = 240_000;
 // Process lifecycle (each agent runs as a child process)
 // ============================================================
 function startAgentProcess(config) {
-  const { id, token, userId } = config;
+  const { id, token, userId, environmentId } = config;
   stopAgentProcess(id); // kill existing if any
 
+  const childEnv = {
+    ...process.env,
+    AGENT_ID: id,
+    MATRIX_ACCESS_TOKEN: token,
+    MATRIX_BOT_USER_ID: userId,
+  };
+
+  // If the agent's environment has a GitHub token attached, expose it as
+  // GH_TOKEN so the `gh` CLI authenticates without `gh auth login`.
+  // (Also exported as GITHUB_TOKEN for git-over-HTTPS pushes.)
+  const env = environmentId ? loadEnvironment(environmentId) : null;
+  if (env?.githubTokenId) {
+    const tokenPath = path.join(GH_TOKENS_DIR, env.githubTokenId);
+    try {
+      const ghToken = fs.readFileSync(tokenPath, "utf8").trim();
+      if (ghToken) {
+        childEnv.GH_TOKEN = ghToken;
+        childEnv.GITHUB_TOKEN = ghToken;
+        console.log(`[Orchestrator] Agent ${id} → GH_TOKEN injected (env=${env.id}, token=${env.githubTokenId})`);
+      }
+    } catch (err) {
+      console.error(`[Orchestrator] Cannot read GitHub token ${env.githubTokenId} for agent ${id}: ${err.message}`);
+    }
+  }
+
   const child = spawn('node', ['/app/agent-runner.js'], {
-    env: {
-      ...process.env,
-      AGENT_ID: id,
-      MATRIX_ACCESS_TOKEN: token,
-      MATRIX_BOT_USER_ID: userId,
-    },
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 

@@ -7,6 +7,7 @@ const AgentManager        = lazy(() => import('./pages/AgentManager'));
 const AgentChat           = lazy(() => import('./pages/AgentChat'));
 const WorkingEnvironments = lazy(() => import('./pages/WorkingEnvironments'));
 const SshKeys             = lazy(() => import('./pages/SshKeys'));
+const GithubTokens        = lazy(() => import('./pages/GithubTokens'));
 const SkillsRegistry      = lazy(() => import('./pages/SkillsRegistry'));
 const ScheduledJobs       = lazy(() => import('./pages/ScheduledJobs'));
 const ModelRegistry       = lazy(() => import('./pages/ModelRegistry'));
@@ -25,6 +26,7 @@ export default function App() {
           <Route path="/chats/:agentId"  element={<AgentChat />} />
           <Route path="/environments" element={<WorkingEnvironments />} />
           <Route path="/ssh-keys"     element={<SshKeys />} />
+          <Route path="/github-tokens" element={<GithubTokens />} />
           <Route path="/skills"       element={<SkillsRegistry />} />
           <Route path="/jobs"         element={<ScheduledJobs />} />
           <Route path="/models"       element={<ModelRegistry />} />

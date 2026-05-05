@@ -14,11 +14,14 @@ const AGENTS_DIR = path.join(WORKSPACE, 'agents');
 const ENVIRONMENTS_DIR = path.join(WORKSPACE, 'environments');
 const SSH_KEYS_DIR = path.join(ENVIRONMENTS_DIR, '_keys');
 const SSH_KEYS_INDEX = path.join(SSH_KEYS_DIR, 'index.json');
+const GH_TOKENS_DIR = path.join(ENVIRONMENTS_DIR, '_tokens');
+const GH_TOKENS_INDEX = path.join(GH_TOKENS_DIR, 'index.json');
 const STATIC_DIR = path.join(__dirname, '..', 'dist');
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 
 fs.mkdirSync(ENVIRONMENTS_DIR, { recursive: true });
 fs.mkdirSync(SSH_KEYS_DIR, { recursive: true });
+fs.mkdirSync(GH_TOKENS_DIR, { recursive: true });
 
 const app = express();
 app.use(cors());
@@ -115,6 +118,37 @@ function sshKeyInUse(keyId) {
   for (const envId of listEnvironmentIds()) {
     const env = loadEnvironment(envId);
     if (env?.repository?.sshKeyId === keyId) return envId;
+  }
+  return null;
+}
+
+/* ─── GitHub Tokens ─────────────────────────────────────────────────── */
+
+function listGithubTokens() {
+  return readJsonFile(GH_TOKENS_INDEX, []);
+}
+
+function saveGithubTokensIndex(tokens) {
+  writeJsonAtomic(GH_TOKENS_INDEX, tokens);
+}
+
+function githubTokenFingerprint(token) {
+  return 'SHA256:' + crypto.createHash('sha256').update(token).digest('base64').replace(/=+$/, '').slice(0, 16);
+}
+
+// Return only a non-sensitive preview (prefix + last 4 chars).
+// E.g. "github_pat_…ABCD" or "ghp_…ABCD".
+function githubTokenPreview(token) {
+  const m = token.match(/^(github_pat_|ghp_|gho_|ghs_|ghu_|ghr_)?(.*)$/);
+  const prefix = (m && m[1]) || '';
+  const tail = token.slice(-4);
+  return `${prefix}…${tail}`;
+}
+
+function githubTokenInUse(tokenId) {
+  for (const envId of listEnvironmentIds()) {
+    const env = loadEnvironment(envId);
+    if (env?.githubTokenId === tokenId) return envId;
   }
   return null;
 }
@@ -492,7 +526,7 @@ app.get('/api/environments/:id', (req, res) => {
 });
 
 app.post('/api/environments', (req, res) => {
-  const { name, description, skills, repository, additionalContext } = req.body || {};
+  const { name, description, skills, repository, additionalContext, githubTokenId } = req.body || {};
   const id = normalizeEnvId(req.body?.id);
   if (!id) return res.status(400).json({ error: 'id is required (a-z, 0-9, -)' });
   if (!name) return res.status(400).json({ error: 'name is required' });
@@ -506,6 +540,14 @@ app.post('/api/environments', (req, res) => {
     }
   }
 
+  // Validate githubTokenId if set
+  if (githubTokenId) {
+    const tokens = listGithubTokens();
+    if (!tokens.some(t => t.id === githubTokenId)) {
+      return res.status(400).json({ error: `GitHub token '${githubTokenId}' not found` });
+    }
+  }
+
   const env = {
     id,
     name,
@@ -516,6 +558,7 @@ app.post('/api/environments', (req, res) => {
       branch: repository.branch || null,
       sshKeyId: repository.sshKeyId || null,
     } : null,
+    githubTokenId: githubTokenId || null,
     additionalContext: additionalContext || '',
     createdAt: new Date().toISOString(),
   };
@@ -526,12 +569,19 @@ app.post('/api/environments', (req, res) => {
 app.put('/api/environments/:id', (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
-  const { name, description, skills, repository, additionalContext } = req.body || {};
+  const { name, description, skills, repository, additionalContext, githubTokenId } = req.body || {};
 
   if (repository?.sshKeyId) {
     const keys = listSshKeys();
     if (!keys.some(k => k.id === repository.sshKeyId)) {
       return res.status(400).json({ error: `SSH key '${repository.sshKeyId}' not found` });
+    }
+  }
+
+  if (githubTokenId) {
+    const tokens = listGithubTokens();
+    if (!tokens.some(t => t.id === githubTokenId)) {
+      return res.status(400).json({ error: `GitHub token '${githubTokenId}' not found` });
     }
   }
 
@@ -545,6 +595,7 @@ app.put('/api/environments/:id', (req, res) => {
       sshKeyId: repository.sshKeyId || null,
     } : null;
   }
+  if (githubTokenId !== undefined) env.githubTokenId = githubTokenId || null;
   if (additionalContext !== undefined) env.additionalContext = additionalContext;
   env.updatedAt = new Date().toISOString();
   saveEnvironment(env.id, env);
@@ -612,6 +663,61 @@ app.delete('/api/ssh-keys/:id', (req, res) => {
   }
   try { fs.unlinkSync(path.join(SSH_KEYS_DIR, id)); } catch { /* ignore */ }
   saveSshKeysIndex(keys.filter(k => k.id !== id));
+  res.status(204).end();
+});
+
+/* ─── GitHub Tokens ─────────────────────────────────────────────────── */
+
+app.get('/api/github-tokens', (req, res) => {
+  // Metadata only — never the raw token
+  res.json(listGithubTokens());
+});
+
+app.post('/api/github-tokens', (req, res) => {
+  const { name, token } = req.body || {};
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  if (!token || typeof token !== 'string') {
+    return res.status(400).json({ error: 'token (string) is required' });
+  }
+  const trimmed = token.trim();
+  if (!/^(github_pat_|ghp_|gho_|ghs_|ghu_|ghr_)[A-Za-z0-9_]{20,}$/.test(trimmed)) {
+    return res.status(400).json({
+      error: "token does not look like a GitHub token (expected prefix github_pat_, ghp_, gho_, ghs_, ghu_ or ghr_)",
+    });
+  }
+
+  const baseId = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  let id = baseId || `token-${Date.now()}`;
+  const existing = listGithubTokens();
+  if (existing.some(t => t.id === id)) {
+    id = `${id}-${Date.now().toString(36)}`;
+  }
+
+  const tokenPath = path.join(GH_TOKENS_DIR, id);
+  fs.writeFileSync(tokenPath, trimmed, { mode: 0o600 });
+  try { fs.chmodSync(tokenPath, 0o600); } catch { /* best effort */ }
+
+  const entry = {
+    id,
+    name,
+    preview: githubTokenPreview(trimmed),
+    fingerprint: githubTokenFingerprint(trimmed),
+    createdAt: new Date().toISOString(),
+  };
+  saveGithubTokensIndex([...existing, entry]);
+  res.status(201).json(entry);
+});
+
+app.delete('/api/github-tokens/:id', (req, res) => {
+  const { id } = req.params;
+  const tokens = listGithubTokens();
+  if (!tokens.some(t => t.id === id)) return res.status(404).json({ error: 'GitHub token not found' });
+  const usedBy = githubTokenInUse(id);
+  if (usedBy) {
+    return res.status(409).json({ error: `GitHub token is used by environment '${usedBy}'. Detach it first.` });
+  }
+  try { fs.unlinkSync(path.join(GH_TOKENS_DIR, id)); } catch { /* ignore */ }
+  saveGithubTokensIndex(tokens.filter(t => t.id !== id));
   res.status(204).end();
 });
 

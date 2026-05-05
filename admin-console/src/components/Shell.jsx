@@ -3,7 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, Users, Zap, Clock, Sparkles, Server,
   Database, ScrollText, ChevronLeft, ChevronRight, Bot,
-  Boxes, Key, MessageCircle,
+  Boxes, Key, MessageCircle, Github,
 } from 'lucide-react';
 
 const NAV = [
@@ -15,6 +15,7 @@ const NAV = [
   { section: 'WORKSPACES', items: [
     { path: '/environments', label: 'Working Environments', Icon: Boxes },
     { path: '/ssh-keys',     label: 'SSH Keys',             Icon: Key },
+    { path: '/github-tokens', label: 'GitHub Tokens',       Icon: Github },
   ]},
   { section: 'CONFIGURATION', items: [
     { path: '/skills',       label: 'Skills Registry',     Icon: Zap },
@@ -36,6 +37,7 @@ const BREADCRUMBS = {
   '/chats':        'Agent Chat',
   '/environments': 'Working Environments',
   '/ssh-keys':     'SSH Keys',
+  '/github-tokens': 'GitHub Tokens',
   '/skills':       'Skills Registry',
   '/jobs':         'Scheduled Triggers',
   '/models':       'Model Registry',

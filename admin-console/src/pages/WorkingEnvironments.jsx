@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Edit, Trash2, Plus, GitBranch, Key } from 'lucide-react';
+import { Edit, Trash2, Plus, GitBranch, Key, Github } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
@@ -90,13 +90,16 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
     repoUrl: initial?.repository?.url || '',
     repoBranch: initial?.repository?.branch || '',
     sshKeyId: initial?.repository?.sshKeyId || '',
+    githubTokenId: initial?.githubTokenId || '',
   }));
 
   const { data: skillsData } = useApi('/api/skills');
   const { data: keysData } = useApi('/api/ssh-keys');
+  const { data: tokensData } = useApi('/api/github-tokens');
 
   const poolSkills = (skillsData || []).filter(s => s.source === 'pool').map(s => s.name);
   const sshKeys = keysData || [];
+  const ghTokens = tokensData || [];
 
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
 
@@ -112,6 +115,7 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
         branch: form.repoBranch || null,
         sshKeyId: form.sshKeyId || null,
       } : null,
+      githubTokenId: form.githubTokenId || null,
     });
   };
 
@@ -219,6 +223,33 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
             </div>
           </>
         )}
+      </div>
+
+      <div style={{
+        border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-md)',
+        padding: 'var(--eb-space-3)',
+        display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+          <Github size={14} />
+          <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
+            GitHub token (gh CLI / HTTPS push)
+          </span>
+        </div>
+        <select
+          value={form.githubTokenId}
+          onChange={e => update('githubTokenId', e.target.value)}
+          style={inputStyle}
+        >
+          <option value="">— no token —</option>
+          {ghTokens.map(t => (
+            <option key={t.id} value={t.id}>{t.name} ({t.preview})</option>
+          ))}
+        </select>
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+          Exposed to agents in this environment as <code>GH_TOKEN</code> / <code>GITHUB_TOKEN</code>. Manage tokens on the GitHub Tokens page.
+        </div>
       </div>
 
       <div>

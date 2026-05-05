@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Edit, Trash2, Plus, GitBranch, Key, Github } from 'lucide-react';
+import { Edit, Trash2, Plus, GitBranch, Key, Github, X } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
@@ -79,6 +79,24 @@ function SkillPicker({ allSkills, selected, onChange }) {
   );
 }
 
+function initialRepositories(initial) {
+  if (Array.isArray(initial?.repositories) && initial.repositories.length > 0) {
+    return initial.repositories.map(r => ({
+      url: r.url || '',
+      branch: r.branch || '',
+      sshKeyId: r.sshKeyId || '',
+    }));
+  }
+  if (initial?.repository?.url) {
+    return [{
+      url: initial.repository.url,
+      branch: initial.repository.branch || '',
+      sshKeyId: initial.repository.sshKeyId || '',
+    }];
+  }
+  return [];
+}
+
 function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
   const [form, setForm] = useState(() => ({
     id: initial?.id || '',
@@ -86,10 +104,7 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
     description: initial?.description || '',
     skills: initial?.skills || [],
     additionalContext: initial?.additionalContext || '',
-    repoEnabled: !!initial?.repository?.url,
-    repoUrl: initial?.repository?.url || '',
-    repoBranch: initial?.repository?.branch || '',
-    sshKeyId: initial?.repository?.sshKeyId || '',
+    repositories: initialRepositories(initial),
     githubTokenId: initial?.githubTokenId || '',
   }));
 
@@ -103,6 +118,20 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
 
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
 
+  const updateRepo = (idx, key, val) => {
+    setForm(f => {
+      const next = f.repositories.slice();
+      next[idx] = { ...next[idx], [key]: val };
+      return { ...f, repositories: next };
+    });
+  };
+  const addRepo = () => {
+    setForm(f => ({ ...f, repositories: [...f.repositories, { url: '', branch: '', sshKeyId: '' }] }));
+  };
+  const removeRepo = (idx) => {
+    setForm(f => ({ ...f, repositories: f.repositories.filter((_, i) => i !== idx) }));
+  };
+
   const submit = () => {
     onSave({
       id: form.id,
@@ -110,16 +139,19 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
       description: form.description,
       skills: form.skills,
       additionalContext: form.additionalContext,
-      repository: form.repoEnabled && form.repoUrl ? {
-        url: form.repoUrl,
-        branch: form.repoBranch || null,
-        sshKeyId: form.sshKeyId || null,
-      } : null,
+      repositories: form.repositories
+        .filter(r => r.url.trim())
+        .map(r => ({
+          url: r.url.trim(),
+          branch: r.branch.trim() || null,
+          sshKeyId: r.sshKeyId || null,
+        })),
       githubTokenId: form.githubTokenId || null,
     });
   };
 
-  const canSubmit = form.id && form.name && (!form.repoEnabled || form.repoUrl);
+  const reposValid = form.repositories.every(r => r.url.trim());
+  const canSubmit = form.id && form.name && reposValid;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -173,26 +205,53 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
         padding: 'var(--eb-space-3)',
         display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)',
       }}>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', cursor: 'pointer' }}>
-          <input
-            type="checkbox"
-            checked={form.repoEnabled}
-            onChange={e => update('repoEnabled', e.target.checked)}
-          />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
           <GitBranch size={14} />
           <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
-            Clone Git repository
+            Git repositories
           </span>
-        </label>
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            ({form.repositories.length})
+          </span>
+        </div>
 
-        {form.repoEnabled && (
-          <>
+        {form.repositories.map((repo, idx) => (
+          <div key={idx} style={{
+            border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-md)',
+            padding: 'var(--eb-space-3)',
+            background: 'var(--eb-bg-surface)',
+            display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+            position: 'relative',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)' }}>
+                Repository #{idx + 1}
+              </span>
+              <button
+                type="button"
+                aria-label="Remove repository"
+                title="Remove repository"
+                onClick={() => removeRepo(idx)}
+                style={{
+                  display: 'flex', alignItems: 'center',
+                  padding: 'var(--eb-space-1)',
+                  background: 'transparent',
+                  border: '1px solid var(--eb-border-default)',
+                  borderRadius: 'var(--eb-radius-sm)',
+                  color: 'var(--eb-status-error)',
+                  cursor: 'pointer',
+                }}
+              >
+                <X size={12} />
+              </button>
+            </div>
             <div>
               <div style={labelStyle}>Repository URL <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
               <input
                 style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }}
-                value={form.repoUrl}
-                onChange={e => update('repoUrl', e.target.value)}
+                value={repo.url}
+                onChange={e => updateRepo(idx, 'url', e.target.value)}
                 placeholder="git@github.com:org/repo.git"
               />
             </div>
@@ -200,16 +259,16 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
               <div style={labelStyle}>Branch (optional)</div>
               <input
                 style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }}
-                value={form.repoBranch}
-                onChange={e => update('repoBranch', e.target.value)}
+                value={repo.branch}
+                onChange={e => updateRepo(idx, 'branch', e.target.value)}
                 placeholder="main"
               />
             </div>
             <div>
               <div style={labelStyle}>SSH key</div>
               <select
-                value={form.sshKeyId}
-                onChange={e => update('sshKeyId', e.target.value)}
+                value={repo.sshKeyId}
+                onChange={e => updateRepo(idx, 'sshKeyId', e.target.value)}
                 style={inputStyle}
               >
                 <option value="">— no key (HTTPS only) —</option>
@@ -217,12 +276,32 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
                   <option key={k.id} value={k.id}>{k.name} ({k.id})</option>
                 ))}
               </select>
-              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-                Manage SSH keys on the SSH Keys page.
-              </div>
             </div>
-          </>
-        )}
+          </div>
+        ))}
+
+        <button
+          type="button"
+          onClick={addRepo}
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            gap: 'var(--eb-space-2)',
+            padding: 'var(--eb-space-2) var(--eb-space-3)',
+            background: 'var(--eb-bg-elevated)',
+            border: '1px dashed var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-md)',
+            color: 'var(--eb-text-secondary)',
+            cursor: 'pointer',
+            fontSize: 'var(--eb-text-sm)',
+            fontFamily: 'inherit',
+          }}
+        >
+          <Plus size={13} /> Add repository
+        </button>
+
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+          Each repository is cloned into the agent workspace at creation time. Manage SSH keys on the SSH Keys page.
+        </div>
       </div>
 
       <div style={{
@@ -315,14 +394,30 @@ export default function WorkingEnvironments() {
       ) : <span style={{ color: 'var(--eb-text-muted)' }}>—</span>,
     },
     {
-      key: 'repository',
-      label: 'Repository',
+      key: 'repositories',
+      label: 'Repositories',
       sortable: false,
-      render: v => v?.url ? (
-        <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-          <GitBranch size={12} /> {v.url.split('/').pop().replace(/\.git$/, '')}
-        </span>
-      ) : <span style={{ color: 'var(--eb-text-muted)' }}>—</span>,
+      render: (_, row) => {
+        const repos = Array.isArray(row.repositories) && row.repositories.length > 0
+          ? row.repositories
+          : (row.repository?.url ? [row.repository] : []);
+        if (repos.length === 0) return <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
+        if (repos.length === 1) {
+          return (
+            <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <GitBranch size={12} /> {repos[0].url.split('/').pop().replace(/\.git$/, '')}
+            </span>
+          );
+        }
+        return (
+          <span
+            title={repos.map(r => r.url).join('\n')}
+            style={{ fontSize: 'var(--eb-text-xs)', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+          >
+            <GitBranch size={12} /> {repos.length} repos
+          </span>
+        );
+      },
     },
     {
       key: '_actions',
@@ -394,7 +489,7 @@ export default function WorkingEnvironments() {
         fontSize: 'var(--eb-text-sm)',
         color: 'var(--eb-text-secondary)',
       }}>
-        A Working Environment defines what an agent gets in its workspace: selected skills from the pool, optionally a Git repository (with SSH key), and additional context for CLAUDE.md.
+        A Working Environment defines what an agent gets in its workspace: selected skills from the pool, any number of Git repositories (each with its own SSH key), and additional context for CLAUDE.md.
       </div>
 
       {actionError && (

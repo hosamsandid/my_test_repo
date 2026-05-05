@@ -8,6 +8,10 @@ import StatusBadge from '../components/StatusBadge';
 import FormInput from '../components/FormInput';
 import DirectoryPicker from '../components/DirectoryPicker';
 
+const hasRepos = (env) =>
+  (Array.isArray(env?.repositories) && env.repositories.length > 0) ||
+  !!env?.repository?.url;
+
 /* ── Toggle switch ─────────────────────────────────────────────────── */
 function ToggleSwitch({ checked, onChange, label }) {
   return (
@@ -206,7 +210,7 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           {envs.map(env => (
             <option key={env.id} value={env.id}>
               {env.name} ({env.id})
-              {env.repository?.url ? ' · Git' : ''}
+              {hasRepos(env) ? ' · Git' : ''}
               {Array.isArray(env.skills) && env.skills.length > 0 ? ` · ${env.skills.length} Skills` : ''}
             </option>
           ))}

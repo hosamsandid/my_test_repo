@@ -147,11 +147,23 @@ function loadEnvironment(envId) {
   const p = path.join(ENVIRONMENTS_DIR, envId, "environment.json");
   if (!fs.existsSync(p)) return null;
   try {
-    return JSON.parse(fs.readFileSync(p, "utf8"));
+    const raw = JSON.parse(fs.readFileSync(p, "utf8"));
+    return normalizeEnvironmentRepositories(raw);
   } catch (err) {
     console.error(`[Orchestrator] Cannot parse environment ${envId}: ${err.message}`);
     return null;
   }
+}
+
+// Migrate legacy `repository` (single) into `repositories: [...]` so the rest
+// of the orchestrator can iterate over a uniform list.
+function normalizeEnvironmentRepositories(env) {
+  if (!env) return env;
+  if (Array.isArray(env.repositories)) return env;
+  if (env.repository && env.repository.url) {
+    return { ...env, repositories: [env.repository] };
+  }
+  return { ...env, repositories: [] };
 }
 
 // ============================================================
@@ -306,9 +318,16 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null) {
     const parts = [];
     if (env.name) parts.push(`**Working Environment:** ${env.name}`);
     if (env.description) parts.push(env.description);
-    if (env.repository?.url) {
-      const repoName = (env.repository.url.split("/").pop() || "repo").replace(/\.git$/, "");
-      parts.push(`**Repository:** \`${env.repository.url}\` — geklont nach \`./${repoName}/\``);
+    const repos = Array.isArray(env.repositories) ? env.repositories : [];
+    if (repos.length === 1) {
+      const repoName = (repos[0].url.split("/").pop() || "repo").replace(/\.git$/, "");
+      parts.push(`**Repository:** \`${repos[0].url}\` — geklont nach \`./${repoName}/\``);
+    } else if (repos.length > 1) {
+      const lines = repos.map(r => {
+        const repoName = (r.url.split("/").pop() || "repo").replace(/\.git$/, "");
+        return `- \`${r.url}\` — geklont nach \`./${repoName}/\``;
+      });
+      parts.push(`**Repositories:**\n${lines.join("\n")}`);
     }
     if (Array.isArray(env.skills) && env.skills.length > 0) {
       parts.push(`**Skills:** ${env.skills.map((s) => `\`${s}\``).join(", ")}`);
@@ -392,18 +411,29 @@ function seedAgentWorkspace(id, env) {
   // 3. Patch absolute /workspace/ paths in seeded memory
   patchSeededPaths(dest);
 
-  // 4. Optional git clone
-  let cloneInfo = null;
-  if (env && env.repository && env.repository.url) {
+  // 4. Optional git clone(s)
+  const clones = cloneEnvironmentRepositories(dest, env, warnings);
+
+  const cloneSummary = clones.length > 0 ? `, repos=${clones.map(c => c.repoName).join(",")}` : "";
+  console.log(`[Orchestrator] Seeded workspace for ${id} (env=${env?.id || "none"}, skills=${selectedSkills.length}${cloneSummary})`);
+  return { seeded: true, warnings, clones };
+}
+
+// Clone every repository attached to an environment. Errors are pushed to the
+// shared warnings list so one failed clone never aborts the rest of the seed.
+function cloneEnvironmentRepositories(targetDir, env, warnings) {
+  const repos = Array.isArray(env?.repositories) ? env.repositories : [];
+  const results = [];
+  for (const repo of repos) {
+    if (!repo?.url) continue;
     try {
-      cloneInfo = cloneRepository(dest, env.repository);
+      const info = cloneRepository(targetDir, repo);
+      if (info) results.push(info);
     } catch (err) {
-      warnings.push(`git clone: ${err.message}`);
+      warnings.push(`git clone (${repo.url}): ${err.message}`);
     }
   }
-
-  console.log(`[Orchestrator] Seeded workspace for ${id} (env=${env?.id || "none"}, skills=${selectedSkills.length}${cloneInfo ? `, repo=${cloneInfo.repoName}` : ""})`);
-  return { seeded: true, warnings, clone: cloneInfo };
+  return results;
 }
 
 function cloneRepository(targetDir, repository) {
@@ -512,15 +542,12 @@ function seedAgentWorkspaceForInstance(id, env, blueprintId) {
   // Ensure blueprint memory dir exists and seed from template if first instance
   seedBlueprintMemory(blueprintId);
 
-  // Git clone
-  let cloneInfo = null;
-  if (env && env.repository && env.repository.url) {
-    try { cloneInfo = cloneRepository(dest, env.repository); }
-    catch (err) { warnings.push(`git clone: ${err.message}`); }
-  }
+  // Git clone(s)
+  const clones = cloneEnvironmentRepositories(dest, env, warnings);
 
-  console.log(`[Orchestrator] Seeded instance workspace for ${id} (blueprint=${blueprintId}, skills=${selectedSkills.length}${cloneInfo ? `, repo=${cloneInfo.repoName}` : ""})`);
-  return { seeded: true, warnings, clone: cloneInfo };
+  const cloneSummary = clones.length > 0 ? `, repos=${clones.map(c => c.repoName).join(",")}` : "";
+  console.log(`[Orchestrator] Seeded instance workspace for ${id} (blueprint=${blueprintId}, skills=${selectedSkills.length}${cloneSummary})`);
+  return { seeded: true, warnings, clones };
 }
 
 // ============================================================
@@ -784,7 +811,7 @@ class Orchestrator {
       userId,
       seeded: seedResult.seeded,
       warnings: seedResult.warnings || [],
-      clone: seedResult.clone || null,
+      clones: seedResult.clones || [],
     };
   }
 
@@ -833,7 +860,7 @@ class Orchestrator {
       blueprintId,
       seeded: seedResult.seeded,
       warnings: seedResult.warnings || [],
-      clone: seedResult.clone || null,
+      clones: seedResult.clones || [],
     };
   }
 
@@ -1569,7 +1596,7 @@ async function main() {
             id,
             seeded: seedResult.seeded,
             warnings: seedResult.warnings || [],
-            clone: seedResult.clone || null,
+            clones: seedResult.clones || [],
           }));
           return;
         }

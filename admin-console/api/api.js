@@ -86,7 +86,20 @@ function listEnvironmentIds() {
 
 function loadEnvironment(envId) {
   const p = path.join(ENVIRONMENTS_DIR, envId, 'environment.json');
-  return readJsonFile(p, null);
+  const raw = readJsonFile(p, null);
+  return normalizeEnvironmentRepositories(raw);
+}
+
+// Migrate legacy single-repo `repository` into `repositories: [...]` on read so
+// every consumer can rely on the array shape. The legacy field is kept on the
+// returned object only if it's still present on disk; saves drop it.
+function normalizeEnvironmentRepositories(env) {
+  if (!env) return env;
+  if (Array.isArray(env.repositories)) return env;
+  if (env.repository && env.repository.url) {
+    return { ...env, repositories: [env.repository] };
+  }
+  return { ...env, repositories: [] };
 }
 
 function saveEnvironment(envId, data) {
@@ -118,7 +131,8 @@ function environmentInUse(envId) {
 function sshKeyInUse(keyId) {
   for (const envId of listEnvironmentIds()) {
     const env = loadEnvironment(envId);
-    if (env?.repository?.sshKeyId === keyId) return envId;
+    const repos = Array.isArray(env?.repositories) ? env.repositories : [];
+    if (repos.some(r => r?.sshKeyId === keyId)) return envId;
   }
   return null;
 }
@@ -627,6 +641,38 @@ function normalizeEnvId(raw) {
   return String(raw || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
 }
 
+// Accept the new `repositories: [...]` array or the legacy single `repository`
+// payload, validate referenced SSH keys exist, and return the normalized array.
+// Throws on validation failure so the caller can surface a 400.
+function normalizeRepositoriesInput(repositories, legacyRepository) {
+  let raw;
+  if (Array.isArray(repositories)) {
+    raw = repositories;
+  } else if (legacyRepository && typeof legacyRepository === 'object') {
+    raw = legacyRepository.url ? [legacyRepository] : [];
+  } else {
+    raw = [];
+  }
+
+  const cleaned = [];
+  const knownKeys = listSshKeys();
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const url = typeof entry.url === 'string' ? entry.url.trim() : '';
+    if (!url) continue;
+    const sshKeyId = entry.sshKeyId || null;
+    if (sshKeyId && !knownKeys.some(k => k.id === sshKeyId)) {
+      throw new Error(`SSH key '${sshKeyId}' not found`);
+    }
+    cleaned.push({
+      url,
+      branch: entry.branch ? String(entry.branch).trim() || null : null,
+      sshKeyId: sshKeyId || null,
+    });
+  }
+  return cleaned;
+}
+
 app.get('/api/environments', (req, res) => {
   const envs = listEnvironmentIds().map(loadEnvironment).filter(Boolean);
   res.json(envs);
@@ -639,18 +685,17 @@ app.get('/api/environments/:id', (req, res) => {
 });
 
 app.post('/api/environments', (req, res) => {
-  const { name, description, skills, repository, additionalContext, githubTokenId } = req.body || {};
+  const { name, description, skills, repositories, repository, additionalContext, githubTokenId } = req.body || {};
   const id = normalizeEnvId(req.body?.id);
   if (!id) return res.status(400).json({ error: 'id is required (a-z, 0-9, -)' });
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (loadEnvironment(id)) return res.status(409).json({ error: `Environment '${id}' already exists` });
 
-  // Validate repository.sshKeyId if set
-  if (repository?.sshKeyId) {
-    const keys = listSshKeys();
-    if (!keys.some(k => k.id === repository.sshKeyId)) {
-      return res.status(400).json({ error: `SSH key '${repository.sshKeyId}' not found` });
-    }
+  let normalizedRepos;
+  try {
+    normalizedRepos = normalizeRepositoriesInput(repositories, repository);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
   }
 
   // Validate githubTokenId if set
@@ -666,11 +711,7 @@ app.post('/api/environments', (req, res) => {
     name,
     description: description || '',
     skills: Array.isArray(skills) ? skills : [],
-    repository: repository?.url ? {
-      url: repository.url,
-      branch: repository.branch || null,
-      sshKeyId: repository.sshKeyId || null,
-    } : null,
+    repositories: normalizedRepos,
     githubTokenId: githubTokenId || null,
     additionalContext: additionalContext || '',
     createdAt: new Date().toISOString(),
@@ -682,14 +723,7 @@ app.post('/api/environments', (req, res) => {
 app.put('/api/environments/:id', (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
-  const { name, description, skills, repository, additionalContext, githubTokenId } = req.body || {};
-
-  if (repository?.sshKeyId) {
-    const keys = listSshKeys();
-    if (!keys.some(k => k.id === repository.sshKeyId)) {
-      return res.status(400).json({ error: `SSH key '${repository.sshKeyId}' not found` });
-    }
-  }
+  const { name, description, skills, repositories, repository, additionalContext, githubTokenId } = req.body || {};
 
   if (githubTokenId) {
     const tokens = listGithubTokens();
@@ -701,12 +735,13 @@ app.put('/api/environments/:id', (req, res) => {
   if (name !== undefined) env.name = name;
   if (description !== undefined) env.description = description;
   if (skills !== undefined) env.skills = Array.isArray(skills) ? skills : [];
-  if (repository !== undefined) {
-    env.repository = repository?.url ? {
-      url: repository.url,
-      branch: repository.branch || null,
-      sshKeyId: repository.sshKeyId || null,
-    } : null;
+  if (repositories !== undefined || repository !== undefined) {
+    try {
+      env.repositories = normalizeRepositoriesInput(repositories, repository);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    delete env.repository;
   }
   if (githubTokenId !== undefined) env.githubTokenId = githubTokenId || null;
   if (additionalContext !== undefined) env.additionalContext = additionalContext;

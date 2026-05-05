@@ -6,6 +6,10 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import StatusBadge from '../components/StatusBadge';
 
+const hasRepos = (env) =>
+  (Array.isArray(env?.repositories) && env.repositories.length > 0) ||
+  !!env?.repository?.url;
+
 /* ── Helpers ───────────────────────────────────────────────────────── */
 const labelStyle = {
   fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
@@ -89,7 +93,7 @@ function BlueprintCreateForm({ onSave, onCancel, saving, error }) {
           {envs.map(env => (
             <option key={env.id} value={env.id}>
               {env.name} ({env.id})
-              {env.repository?.url ? ' · Git' : ''}
+              {hasRepos(env) ? ' · Git' : ''}
               {Array.isArray(env.skills) && env.skills.length > 0 ? ` · ${env.skills.length} Skills` : ''}
             </option>
           ))}

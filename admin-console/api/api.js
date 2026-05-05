@@ -462,6 +462,21 @@ app.get('/api/skills/:name/content', (req, res) => {
   res.json({ content });
 });
 
+/* ─── LLM Config ─────────────────────────────────────────────────────── */
+
+app.get('/api/llm-config', (req, res) => {
+  const token = process.env.ANTHROPIC_AUTH_TOKEN || '';
+  const maskedToken = token.length > 4
+    ? '•'.repeat(Math.min(token.length - 4, 12)) + token.slice(-4)
+    : token ? '••••' : '';
+  res.json({
+    baseUrl:     process.env.ANTHROPIC_BASE_URL || '',
+    authToken:   maskedToken,
+    sonnetModel: process.env.ANTHROPIC_DEFAULT_SONNET_MODEL || 'claude-sonnet-4-6',
+    haikuModel:  process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL  || 'claude-haiku-4-5',
+  });
+});
+
 /* ─── Models ────────────────────────────────────────────────────────── */
 
 const MODELS_FILE = path.join(WORKSPACE, 'models.json');

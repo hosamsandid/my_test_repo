@@ -39,6 +39,8 @@ services:
     volumes:
       - agent-pool-workspace:/workspace
       - skills-pool:/template-workspace:ro
+      # ACE / BriefingPack integration: uncomment when ACE_REPO_PATH is set in .env
+      # - ${ACE_REPO_PATH}:/ace:rw
       # Persistent Claude config: stores per-session conversation snapshots
       # (~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl). Without this
       # volume, `--resume <sessionId>` would fail after every container
@@ -64,6 +66,9 @@ services:
       ANTHROPIC_DEFAULT_SONNET_MODEL: "${ANTHROPIC_DEFAULT_SONNET_MODEL}"
       ANTHROPIC_DEFAULT_HAIKU_MODEL: "${ANTHROPIC_DEFAULT_HAIKU_MODEL}"
       CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "${CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS:-1}"
+      ACE_REPO_PATH: "${ACE_REPO_PATH:-}"
+      ACE_WATCH_INTERVAL_SECONDS: "${ACE_WATCH_INTERVAL_SECONDS:-30}"
+      ACE_BRIEFING_ENV_ID: "${ACE_BRIEFING_ENV_ID:-briefing-pack}"
     depends_on:
       conduwuit:
         condition: service_started
@@ -99,6 +104,8 @@ services:
     volumes:
       - agent-pool-workspace:/workspace
       - skills-pool:/pool
+      # ACE / BriefingPack integration: uncomment when ACE_REPO_PATH is set in .env
+      # - ${ACE_REPO_PATH}:/ace:rw
       # Rootless Podman socket (core uid=501 inside VM — matches container's mapped uid)
       - /run/user/501/podman/podman.sock:/var/run/podman.sock:ro
     environment:
@@ -110,6 +117,7 @@ services:
       MATRIX_HOMESERVER: http://conduwuit:6167
       MATRIX_ACCESS_TOKEN: "${MATRIX_ACCESS_TOKEN}"
       ADMIN_USER_ID: "@${ADMIN_USER:-admin}:local"
+      ACE_REPO_PATH: "${ACE_REPO_PATH:-}"
     depends_on:
       conduwuit:
         condition: service_started

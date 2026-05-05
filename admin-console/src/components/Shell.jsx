@@ -3,7 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, Users, Zap, Clock, Sparkles, Server,
   Database, ScrollText, ChevronLeft, ChevronRight, Bot,
-  Boxes, Key, MessageCircle, Github, Layers, GitBranch,
+  Boxes, Key, MessageCircle, Github, Layers, GitBranch, Settings,
 } from 'lucide-react';
 
 const NAV = [
@@ -23,6 +23,7 @@ const NAV = [
     { path: '/jobs',         label: 'Scheduled Triggers',      Icon: Clock },
     { path: '/models',       label: 'Model Registry',      Icon: Sparkles },
     { path: '/mcp',          label: 'MCP Servers',         Icon: Server },
+    { path: '/config',       label: 'System Config',        Icon: Settings },
   ]},
   { section: 'KNOWLEDGE', items: [
     { path: '/knowledge',    label: 'Knowledge Base',      Icon: Database },
@@ -44,6 +45,7 @@ const BREADCRUMBS = {
   '/jobs':         'Scheduled Triggers',
   '/models':       'Model Registry',
   '/mcp':          'MCP Servers',
+  '/config':       'System Config',
   '/knowledge':    'Knowledge Base',
   '/logs':         'Logs',
 };

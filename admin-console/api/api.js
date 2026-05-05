@@ -467,6 +467,36 @@ app.get('/api/skills/:name/content', (req, res) => {
   res.json({ content });
 });
 
+/* ─── System Config ─────────────────────────────────────────────────── */
+
+const SYSTEM_CONFIG_FILE = path.join(WORKSPACE, 'config.json');
+
+function readSystemConfig() {
+  const stored = readJsonFile(SYSTEM_CONFIG_FILE, {});
+  return {
+    aceRepoPath: stored.aceRepoPath ?? (process.env.ACE_REPO_PATH || ''),
+  };
+}
+
+app.get('/api/config', (req, res) => {
+  res.json(readSystemConfig());
+});
+
+app.put('/api/config', (req, res) => {
+  const { aceRepoPath } = req.body || {};
+  if (aceRepoPath !== undefined && typeof aceRepoPath !== 'string') {
+    return res.status(400).json({ error: 'aceRepoPath must be a string' });
+  }
+  if (aceRepoPath && !path.isAbsolute(aceRepoPath)) {
+    return res.status(400).json({ error: 'aceRepoPath must be an absolute path' });
+  }
+  const current = readSystemConfig();
+  const updated = { ...current };
+  if (aceRepoPath !== undefined) updated.aceRepoPath = aceRepoPath;
+  writeJsonAtomic(SYSTEM_CONFIG_FILE, updated);
+  res.json(updated);
+});
+
 /* ─── LLM Config ─────────────────────────────────────────────────────── */
 
 app.get('/api/llm-config', (req, res) => {

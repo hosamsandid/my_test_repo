@@ -15,6 +15,7 @@ const McpServers          = lazy(() => import('./pages/McpServers'));
 const KnowledgeBase       = lazy(() => import('./pages/KnowledgeBase'));
 const Logs                = lazy(() => import('./pages/Logs'));
 const Briefings           = lazy(() => import('./pages/Briefings'));
+const SystemConfig        = lazy(() => import('./pages/SystemConfig'));
 
 export default function App() {
   return (
@@ -37,6 +38,7 @@ export default function App() {
           <Route path="/logs"         element={<Logs />} />
           <Route path="/flows"         element={<Briefings />} />
           <Route path="/briefings"    element={<Navigate to="/flows" replace />} />
+          <Route path="/config"       element={<SystemConfig />} />
         </Routes>
       </Suspense>
     </Shell>

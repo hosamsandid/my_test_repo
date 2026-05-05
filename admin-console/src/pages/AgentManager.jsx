@@ -107,7 +107,6 @@ function AgentEditForm({ agent, onSave, onCancel }) {
           }}
         >
           <option value="expert">Expert</option>
-          <option value="synthesizer">Synthesizer</option>
           <option value="autonomous">Autonomous</option>
         </select>
       </div>
@@ -216,7 +215,6 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
         <div style={labelStyle}>Role <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
         <select value={form.role} onChange={e => update('role', e.target.value)} style={inputStyle}>
           <option value="expert">Expert — responds to questions in the room</option>
-          <option value="synthesizer">Synthesizer — merges expert responses</option>
           <option value="autonomous">Autonomous — runs on its own schedule</option>
         </select>
       </div>

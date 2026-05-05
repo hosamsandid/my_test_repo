@@ -1,5 +1,5 @@
 import React from 'react';
-import { MessageCircle, Bot, Brain, Clock, Server } from 'lucide-react';
+import { MessageCircle, Bot, Clock, Server } from 'lucide-react';
 
 /**
  * Vertical list of selectable agents in the left rail.
@@ -30,7 +30,6 @@ export default function AgentList({ agents, selectedAgentId, onSelect, statuses 
 
 function iconForRole(role) {
   switch (role) {
-    case 'synthesizer': return Brain;
     case 'autonomous':  return Clock;
     case 'expert':      return Bot;
     default:            return MessageCircle;

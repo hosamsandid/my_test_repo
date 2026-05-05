@@ -26,8 +26,7 @@ Matrix Client (Cinny / Element / etc.)
         ├── Each expert: agent-runner.js child process with agent-specific CLAUDE.md
         ├── @-mention filtering: mentioned agents only, or broadcast to all
         ├── [PASS] filtering: agents stay silent when topic is outside expertise
-        ├── Watcher: collects expert responses
-        └── Synthesis: calls Claude, posts result as synthesizer agent
+        └── Watcher: collects expert responses
 ```
 
 - **Pool identity:** `@orchestrator:local` (invisible watcher/router)
@@ -62,7 +61,6 @@ SSH keys are stored at `/workspace/environments/_keys/<keyId>` (mode 0600) with 
 | Role | Behavior |
 |---|---|
 | `expert` | Responds reactively to human messages. Returns `[PASS]` if topic is outside expertise. When @-mentioned directly, always responds. |
-| `synthesizer` | Called after experts finish. Merges results into one answer. Returns `[PASS]` if synthesis adds no value. |
 | `autonomous` | Runs proactively on a cron schedule. Posts results to the room. Responds to @-mentions and direct messages. Does NOT participate in expert broadcast routing. |
 
 ### Autonomous Agent Triggers

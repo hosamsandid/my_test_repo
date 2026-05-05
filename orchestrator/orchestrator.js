@@ -1068,12 +1068,12 @@ class Orchestrator {
       activeTask.respondedIds.has(a.config.userId)
     );
     activeTask.quietTimer = setTimeout(
-      () => this.triggerSynthesis(roomId),
+      () => this.finishTask(roomId),
       allResponded ? 5_000 : QUIET_DELAY
     );
   }
 
-  async triggerSynthesis(roomId) {
+  finishTask(roomId) {
     const task = this.activeTasks.get(roomId);
     if (!task) return;
     this.activeTasks.delete(roomId);
@@ -1084,48 +1084,9 @@ class Orchestrator {
       console.log("[Orchestrator] All experts passed — sending fallback");
       sendPlain(this.poolClient, roomId,
         "Keiner der Experten konnte zu diesem Thema beitragen. Lege einen passenden Experten in der Admin Console an.");
-      this.drainQueue(roomId);
-      return;
     }
 
-    if (task.expertResponses.length <= 1) {
-      console.log("[Orchestrator] Synthesis not needed (single expert)");
-      this.drainQueue(roomId);
-      return;
-    }
-
-    const synth = [...this.agentConfigs.values()].find(
-      (a) => a.config.role === "synthesizer" && a.config.enabled !== false
-    );
-    if (!synth) {
-      console.log("[Orchestrator] No synthesizer configured");
-      this.drainQueue(roomId);
-      return;
-    }
-
-    console.log(`[Orchestrator] Synthesizing ${task.expertResponses.length} responses...`);
-    const context = task.expertResponses
-      .map((r) => `### ${r.name}\n${r.response}`)
-      .join("\n\n");
-
-    try {
-      const result = await callClaude(
-        `Experten haben auf folgende Frage geantwortet. Fasse zusammen.\n\nFrage: ${task.originalTask}\n\nAntworten:\n${context}\n\nRegeln: Einleitungssatz, Vergleichstabelle wenn sinnvoll, max 1500 Zeichen, Sprache der Frage. Falls kein Mehrwert: [PASS]`,
-        agentDir(synth.config.id)
-      );
-      if (result.trim().startsWith("[PASS]")) {
-        console.log("[Orchestrator] Synthesis: PASS");
-      } else {
-        // Post synthesis as the orchestrator (could also be posted as synth agent user
-        // by sending a ROUTE message — keeping it simple: orchestrator posts directly)
-        await sendFormatted(this.poolClient, roomId, result);
-        console.log(`[Orchestrator] Synthesis: ${result.length} chars`);
-      }
-    } catch (err) {
-      console.error(`[Orchestrator] Synthesis error: ${err.message}`);
-    } finally {
-      this.drainQueue(roomId);
-    }
+    this.drainQueue(roomId);
   }
 }
 

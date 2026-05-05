@@ -105,7 +105,6 @@ function BlueprintCreateForm({ onSave, onCancel, saving, error }) {
         <div style={labelStyle}>Role <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
         <select value={form.role} onChange={e => update('role', e.target.value)} style={inputStyle}>
           <option value="expert">Expert — responds to questions</option>
-          <option value="synthesizer">Synthesizer — merges expert responses</option>
           <option value="autonomous">Autonomous — runs on schedule</option>
         </select>
       </div>

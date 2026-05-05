@@ -171,15 +171,15 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
 
       {form.role === 'orchestrator' && (
         <div>
-          <div style={labelStyle}>Briefings-Verzeichnis</div>
+          <div style={labelStyle}>Briefings Directory</div>
           <input
             style={inputStyle}
             value={form.briefingsPath}
             onChange={e => update('briefingsPath', e.target.value)}
-            placeholder="z.B. my-repo/artifacts/briefings"
+            placeholder="e.g. my-repo"
           />
           <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-            Relativer Pfad im Agenten-Workspace zum Briefings-Verzeichnis.
+            Relative path in the agent workspace. The <code>artifacts/briefings/</code> subdirectory is appended automatically — leave empty to use the workspace root.
           </div>
         </div>
       )}
@@ -255,15 +255,15 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
 
       {form.role === 'orchestrator' && (
         <div>
-          <div style={labelStyle}>Briefings-Verzeichnis</div>
+          <div style={labelStyle}>Briefings Directory</div>
           <input
             style={inputStyle}
             value={form.briefingsPath}
             onChange={e => update('briefingsPath', e.target.value)}
-            placeholder="z.B. my-repo/artifacts/briefings"
+            placeholder="e.g. my-repo"
           />
           <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-            Relativer Pfad im Agenten-Workspace zum Briefings-Verzeichnis.
+            Relative path in the agent workspace. The <code>artifacts/briefings/</code> subdirectory is appended automatically — leave empty to use the workspace root.
           </div>
         </div>
       )}

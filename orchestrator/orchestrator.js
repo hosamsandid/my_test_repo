@@ -817,6 +817,7 @@ class Orchestrator {
       role: blueprint.role,
       environmentId: env.id,
       blueprintId,
+      ...(blueprint.briefingsPath && { briefingsPath: blueprint.briefingsPath }),
       enabled: true,
     };
     saveAgentConfig(instanceId, config);

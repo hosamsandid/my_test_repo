@@ -211,6 +211,7 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
   const [form, setForm] = useState({
     displayName: agent.displayName || '',
     role: agent.role || 'expert',
+    briefingsPath: agent.briefingsPath || '',
   });
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
   const canSubmit = !!form.displayName;
@@ -247,6 +248,21 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
           <option value="orchestrator">Orchestrator — holds BP tree &amp; domain memory</option>
         </select>
       </div>
+
+      {form.role === 'orchestrator' && (
+        <div>
+          <div style={labelStyle}>Briefings-Verzeichnis</div>
+          <input
+            style={inputStyle}
+            value={form.briefingsPath}
+            onChange={e => update('briefingsPath', e.target.value)}
+            placeholder="z.B. my-repo/artifacts/briefings"
+          />
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+            Relativer Pfad im Agenten-Workspace zum Briefings-Verzeichnis.
+          </div>
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         <PrimaryBtn onClick={() => onSave(form)} saving={saving} disabled={!canSubmit}>

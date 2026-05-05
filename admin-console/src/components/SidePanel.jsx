@@ -11,7 +11,7 @@ import { X } from 'lucide-react';
  *   children — panel content
  *   width    — optional override (default: var(--eb-side-panel-width))
  */
-export default function SidePanel({ open, onClose, title, children, width }) {
+export default function SidePanel({ open, onClose, title, children, width, loading }) {
   const panelRef = useRef(null);
 
   /* ── Escape to close ─────────────────────────────────────────────── */
@@ -44,6 +44,7 @@ export default function SidePanel({ open, onClose, title, children, width }) {
       <div style={{
         position: 'fixed', inset: 0, zIndex: 60,
         background: 'oklch(0 0 0 / 0.3)',
+        cursor: loading ? 'wait' : undefined,
       }} />
 
       {/* Panel */}
@@ -61,6 +62,7 @@ export default function SidePanel({ open, onClose, title, children, width }) {
           background: 'var(--eb-bg-surface)',
           borderLeft: '1px solid var(--eb-border-default)',
           zIndex: 61,
+          cursor: loading ? 'wait' : undefined,
           display: 'flex',
           flexDirection: 'column',
           boxShadow: 'var(--eb-shadow-xl)',

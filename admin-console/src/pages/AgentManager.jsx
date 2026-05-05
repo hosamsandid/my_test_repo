@@ -474,6 +474,7 @@ export default function AgentManager() {
         onClose={() => setPanelMode(null)}
         title="New Agent"
         width="520px"
+        loading={creating}
       >
         <AgentCreateForm
           onSave={handleCreate}

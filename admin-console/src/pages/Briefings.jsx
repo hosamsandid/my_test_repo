@@ -134,7 +134,9 @@ export default function Briefings() {
         ) : (
           <BPGraph
             orchestratorId={selectedAgent.id}
-            workspacePath={selectedAgent.briefingsPath || `/workspace/agents/${selectedAgent.id}`}
+            workspacePath={selectedAgent.briefingsPath
+                ? `/workspace/agents/${selectedAgent.id}/${selectedAgent.briefingsPath}`
+                : `/workspace/agents/${selectedAgent.id}`}
           />
         )}
       </div>

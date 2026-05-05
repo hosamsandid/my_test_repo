@@ -107,7 +107,10 @@ function stopAgentProcess(id) {
 async function startAllEnabledAgents() {
   for (const id of listAgentIds()) {
     const config = loadAgentConfig(id);
-    if (config && config.enabled !== false && config.role !== 'orchestrator') {
+    // Skip pure-config orchestrators (created via POST /internal/agents/create
+    // without a Matrix user). Blueprint-instance orchestrators DO carry a token
+    // and need to be respawned on container restart just like experts/autonomous.
+    if (config && config.enabled !== false && config.token) {
       startAgentProcess(config);
     }
   }

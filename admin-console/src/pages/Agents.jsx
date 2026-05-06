@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Plus, Trash2, Layers, ChevronDown, ChevronRight,
@@ -12,6 +12,123 @@ import FormInput from '../components/FormInput';
 const hasRepos = (env) =>
   (Array.isArray(env?.repositories) && env.repositories.length > 0) ||
   !!env?.repository?.url;
+
+/* ── BP-dependency hierarchy helpers ────────────────────────────────────
+   Mirrors the topo-sort logic in admin-console/src/pages/briefings/bp-graph.js
+   so the bp-instance children of an orchestrator are listed in the same
+   dependency order as the BP-explorer flow view. */
+
+function topoSortBpIds(ids, byId) {
+  const idSet = new Set(ids);
+  const result = [];
+  const visited = new Set();
+  function visit(id) {
+    if (visited.has(id)) return;
+    visited.add(id);
+    const bp = byId[id];
+    if (!bp) return;
+    (bp.depends_on || []).forEach((depId) => {
+      if (idSet.has(depId)) visit(depId);
+    });
+    result.push(id);
+  }
+  ids.forEach((id) => visit(id));
+  return result;
+}
+
+function collectBpDescendants(id, byId, into) {
+  const bp = byId[id];
+  if (!bp || !bp.children) return;
+  bp.children.forEach((cid) => {
+    into.add(cid);
+    collectBpDescendants(cid, byId, into);
+  });
+}
+
+function topoSortBpRoots(rootIds, byId) {
+  const treeMembers = {};
+  rootIds.forEach((rid) => {
+    const m = new Set([rid]);
+    collectBpDescendants(rid, byId, m);
+    treeMembers[rid] = m;
+  });
+  const idToRoot = {};
+  rootIds.forEach((rid) => {
+    treeMembers[rid].forEach((m) => { idToRoot[m] = rid; });
+  });
+  const rootDeps = {};
+  rootIds.forEach((rid) => { rootDeps[rid] = new Set(); });
+  rootIds.forEach((rid) => {
+    treeMembers[rid].forEach((m) => {
+      const bp = byId[m];
+      if (!bp) return;
+      (bp.depends_on || []).forEach((depId) => {
+        const depRoot = idToRoot[depId];
+        if (depRoot && depRoot !== rid) rootDeps[rid].add(depRoot);
+      });
+    });
+  });
+  const rootSet = new Set(rootIds);
+  const result = [];
+  const visited = new Set();
+  function visit(rid) {
+    if (visited.has(rid)) return;
+    visited.add(rid);
+    (rootDeps[rid] || new Set()).forEach((dep) => {
+      if (rootSet.has(dep)) visit(dep);
+    });
+    result.push(rid);
+  }
+  rootIds.forEach((rid) => visit(rid));
+  return result;
+}
+
+// Map bp-instance agents to BP-tree order with parent/child indentation depth.
+// Falls back to alphabetical at depth 0 when BP metadata is unavailable
+// (still loading, fetch failed, or no agent.bpId).
+function buildHierarchicalChildren(agents, bps) {
+  const list = Array.isArray(agents) ? agents : [];
+  if (!Array.isArray(bps) || bps.length === 0) {
+    return [...list]
+      .sort((a, b) => (a.displayName || a.id).localeCompare(b.displayName || b.id))
+      .map((a) => ({ agent: a, depth: 0 }));
+  }
+
+  const byId = {};
+  bps.forEach((bp) => { if (bp && bp.id) byId[bp.id] = bp; });
+
+  const agentByBpId = {};
+  list.forEach((a) => { if (a.bpId) agentByBpId[a.bpId] = a; });
+
+  const result = [];
+  const emitted = new Set();
+
+  function walk(bpId, depth) {
+    const bp = byId[bpId];
+    if (!bp) return;
+    const ag = agentByBpId[bpId];
+    if (ag && !emitted.has(ag.id)) {
+      result.push({ agent: ag, depth });
+      emitted.add(ag.id);
+    }
+    if (Array.isArray(bp.children) && bp.children.length > 0) {
+      const sortedChildren = topoSortBpIds(bp.children, byId);
+      sortedChildren.forEach((cid) => walk(cid, depth + 1));
+    }
+  }
+
+  const rootIds = bps.filter((bp) => bp && !bp.parent).map((bp) => bp.id);
+  const sortedRoots = topoSortBpRoots(rootIds, byId);
+  sortedRoots.forEach((rid) => walk(rid, 0));
+
+  // Orphan agents (BP no longer present) — append at the end, alphabetical.
+  const orphans = list
+    .filter((a) => !emitted.has(a.id))
+    .sort((a, b) => (a.displayName || a.id).localeCompare(b.displayName || b.id));
+  orphans.forEach((a) => result.push({ agent: a, depth: 0 }));
+
+  return result;
+}
 
 /* ── Shared style helpers ───────────────────────────────────────────── */
 const labelStyle = {
@@ -327,12 +444,18 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
 function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, navigate, indent, busy }) {
   const state = agentState(agent);
   const isStub = state === 'stub';
+  // `indent` is a depth integer: 0 = no indent (top-level leaves), 1 = direct
+  // child of an orchestrator card, 2+ = nested under another bp-instance.
+  const depth = typeof indent === 'number' ? indent : indent ? 1 : 0;
+  const paddingLeft = depth > 0
+    ? `calc(var(--eb-space-4) + ${depth} * var(--eb-space-4))`
+    : 'var(--eb-space-4)';
   return (
     <div
       style={{
         display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
         padding: 'var(--eb-space-3) var(--eb-space-4)',
-        paddingLeft: indent ? 'var(--eb-space-8)' : 'var(--eb-space-4)',
+        paddingLeft,
         borderTop: '1px solid var(--eb-border-default)',
         background: 'var(--eb-bg-surface)',
         opacity: isStub ? 0.85 : 1,
@@ -390,9 +513,30 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
 /* ── Orchestrator Card (with bp-instance children) ─────────────────── */
 function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDeactivate, onToggleEnabled, onEditChild, onDeleteChild, navigate, syncing, busyIds }) {
   const [expanded, setExpanded] = useState(false);
+  const [bps, setBps] = useState(null); // null = not yet loaded
   const children = agent.children || [];
   const state = agentState(agent);
   const isStub = state === 'stub';
+
+  // Lazy fetch BP metadata on first expansion. We re-fetch whenever the BP
+  // count changes (sync added/removed stubs) so the order stays consistent
+  // with what the user just clicked. Failures fall through to alphabetical.
+  useEffect(() => {
+    if (!expanded || isStub || !agent.briefingsPath) return;
+    let cancelled = false;
+    const rel = (agent.briefingsPath || '').replace(/^\/+|\/+$/g, '');
+    const workspace = `/workspace/agents/${agent.id}${rel ? `/${rel}` : ''}`;
+    fetch(`/api/bp-explorer/briefings?workspace=${encodeURIComponent(workspace)}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((data) => { if (!cancelled) setBps(Array.isArray(data) ? data : []); })
+      .catch(() => { if (!cancelled) setBps([]); });
+    return () => { cancelled = true; };
+  }, [expanded, isStub, agent.id, agent.briefingsPath, children.length]);
+
+  const sortedChildren = useMemo(
+    () => buildHierarchicalChildren(children, bps),
+    [children, bps],
+  );
 
   return (
     <div style={{
@@ -492,11 +636,11 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
               : 'No Briefing Packs found. Click Sync BPs to re-scan the directory.'}
           </div>
         ) : (
-          children.map((child) => (
+          sortedChildren.map(({ agent: child, depth }) => (
             <AgentRow
               key={child.id}
               agent={child}
-              indent
+              indent={depth + 1}
               navigate={navigate}
               busy={busyIds.has(child.id)}
               onActivate={onActivate}

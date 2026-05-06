@@ -1,8 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   Plus, Trash2, Layers, ChevronDown, ChevronRight,
-  Edit, MessageCircle, RefreshCw, Power, PowerOff,
+  Edit, MessageCircle, RefreshCw, Power, PowerOff, FileText,
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import SidePanel from '../components/SidePanel';
@@ -200,6 +202,122 @@ const _hLine = (extra) => ({
   transform: 'translateY(-0.5px)',
   ...extra,
 });
+
+/* ── Brief Viewer ──────────────────────────────────────────────────────
+   Reads the brief.md straight from the orchestrator's already-cloned
+   workspace via the existing /api/agents/:id/workspace/file endpoint.
+   The orchestrator's claim loop pulls main on a throttle, so what we
+   read here matches the latest committed state on the default branch. */
+
+function stripYamlFrontmatter(text) {
+  if (typeof text !== 'string') return '';
+  // Match a leading --- block and remove it. Tolerates leading whitespace.
+  return text.replace(/^\s*---\n[\s\S]*?\n---\s*\n?/, '');
+}
+
+// Compact, dashboard-aligned typography for the brief.md body. Without
+// these the browser's default heading sizes look oversized inside a
+// 640px side panel.
+const BRIEF_MD_COMPONENTS = {
+  h1: (props) => <h2 style={{ fontSize: 'var(--eb-text-lg)', fontWeight: 'var(--eb-font-semibold)', margin: '1em 0 0.4em' }} {...props} />,
+  h2: (props) => <h3 style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', margin: '1em 0 0.4em' }} {...props} />,
+  h3: (props) => <h4 style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--eb-text-secondary)', margin: '0.9em 0 0.3em' }} {...props} />,
+  h4: (props) => <h5 style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', margin: '0.8em 0 0.3em' }} {...props} />,
+  p:  (props) => <p style={{ margin: '0 0 0.6em' }} {...props} />,
+  ul: (props) => <ul style={{ paddingLeft: '1.4em', margin: '0 0 0.6em' }} {...props} />,
+  ol: (props) => <ol style={{ paddingLeft: '1.4em', margin: '0 0 0.6em' }} {...props} />,
+  li: (props) => <li style={{ margin: '0.15em 0' }} {...props} />,
+  code: ({ inline, ...props }) => inline
+    ? <code style={{ fontFamily: 'var(--eb-font-mono)', fontSize: '0.92em', background: 'var(--eb-bg-elevated)', padding: '1px 5px', borderRadius: 'var(--eb-radius-sm)' }} {...props} />
+    : <code style={{ fontFamily: 'var(--eb-font-mono)', fontSize: '0.9em' }} {...props} />,
+  pre: (props) => <pre style={{ background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-3)', overflowX: 'auto', fontSize: '0.92em' }} {...props} />,
+  blockquote: (props) => <blockquote style={{ borderLeft: '3px solid var(--eb-border-default)', paddingLeft: 'var(--eb-space-3)', color: 'var(--eb-text-secondary)', margin: '0.5em 0' }} {...props} />,
+  a:  (props) => <a target="_blank" rel="noreferrer" style={{ color: 'var(--eb-accent-primary)' }} {...props} />,
+  hr: () => <hr style={{ border: 'none', borderTop: '1px solid var(--eb-border-default)', margin: '1em 0' }} />,
+  table: (props) => <table style={{ borderCollapse: 'collapse', width: '100%', margin: '0.5em 0', fontSize: '0.95em' }} {...props} />,
+  th: (props) => <th style={{ borderBottom: '1px solid var(--eb-border-default)', padding: '4px 8px', textAlign: 'left' }} {...props} />,
+  td: (props) => <td style={{ borderBottom: '1px solid var(--eb-border-default)', padding: '4px 8px' }} {...props} />,
+};
+
+function BriefViewer({ orchestratorId, relPath }) {
+  const [state, setState] = useState({ loading: true, content: '', error: null, truncated: false });
+
+  useEffect(() => {
+    if (!orchestratorId || !relPath) return;
+    let cancelled = false;
+    setState({ loading: true, content: '', error: null, truncated: false });
+    fetch(`/api/agents/${orchestratorId}/workspace/file?path=${encodeURIComponent(relPath)}`)
+      .then(async (r) => {
+        if (!r.ok) {
+          const detail = await r.json().catch(() => ({}));
+          throw new Error(detail.error || `HTTP ${r.status}`);
+        }
+        return r.json();
+      })
+      .then((data) => {
+        if (cancelled) return;
+        if (data.binary) {
+          setState({ loading: false, content: '', error: 'Binary file', truncated: false });
+        } else {
+          setState({ loading: false, content: data.content || '', error: null, truncated: !!data.truncated });
+        }
+      })
+      .catch((err) => { if (!cancelled) setState({ loading: false, content: '', error: err.message, truncated: false }); });
+    return () => { cancelled = true; };
+  }, [orchestratorId, relPath]);
+
+  const body = useMemo(() => stripYamlFrontmatter(state.content), [state.content]);
+
+  if (state.loading) {
+    return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading brief…</div>;
+  }
+  if (state.error) {
+    return (
+      <div role="alert" style={{
+        padding: 'var(--eb-space-3)',
+        background: 'var(--eb-status-error-bg)',
+        border: '1px solid var(--eb-status-error)',
+        borderRadius: 'var(--eb-radius-md)',
+        fontSize: 'var(--eb-text-sm)',
+        color: 'var(--eb-status-error)',
+      }}>
+        Failed to load brief: {state.error}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+      <div style={{
+        fontFamily: 'var(--eb-font-mono)',
+        fontSize: 'var(--eb-text-xs)',
+        color: 'var(--eb-text-muted)',
+        wordBreak: 'break-all',
+      }}>
+        {relPath}
+      </div>
+      {state.truncated && (
+        <div style={{
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          background: 'var(--eb-status-warning-bg)',
+          border: '1px solid var(--eb-status-warning)',
+          borderRadius: 'var(--eb-radius-md)',
+          fontSize: 'var(--eb-text-xs)',
+          color: 'var(--eb-status-warning)',
+        }}>
+          File was truncated by the workspace API — showing the first portion only.
+        </div>
+      )}
+      <div className="brief-viewer-md" style={{
+        fontSize: 'var(--eb-text-sm)',
+        color: 'var(--eb-text-primary)',
+        lineHeight: 1.55,
+      }}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={BRIEF_MD_COMPONENTS}>{body}</ReactMarkdown>
+      </div>
+    </div>
+  );
+}
 
 function TreeConnector({ ancestorMore, isLast }) {
   return (
@@ -547,7 +665,7 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
 }
 
 /* ── Agent Row ──────────────────────────────────────────────────────── */
-function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, navigate, tree, busy }) {
+function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, onOpenBrief, navigate, tree, busy }) {
   const state = agentState(agent);
   const isStub = state === 'stub';
   const t = tree || {
@@ -617,6 +735,14 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
             />
           </>
         )}
+        {onOpenBrief && (
+          <IconBtn
+            icon={FileText}
+            label="View Briefing Pack"
+            title="View Briefing Pack file"
+            onClick={() => onOpenBrief(agent)}
+          />
+        )}
         <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
         <IconBtn
           icon={MessageCircle}
@@ -668,6 +794,31 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
     () => buildAgentTree(children, bps, collapsedNodes),
     [children, bps, collapsedNodes],
   );
+
+  // Resolve each bp-instance row to its brief.md path (relative to the
+  // orchestrator's workspace). Empty when bps haven't loaded yet or a
+  // particular row's BP is gone (orphan).
+  const briefPathByAgentId = useMemo(() => {
+    if (!Array.isArray(bps) || bps.length === 0) return {};
+    const bpById = {};
+    bps.forEach((bp) => { if (bp && bp.id) bpById[bp.id] = bp; });
+    const briefingsBase = (agent.briefingsPath || '').replace(/^\/+|\/+$/g, '');
+    const out = {};
+    children.forEach((c) => {
+      const bp = c.bpId ? bpById[c.bpId] : null;
+      const rel = bp && bp._rel_path;
+      if (!rel) return;
+      out[c.id] = briefingsBase ? `${briefingsBase}/${rel}` : rel;
+    });
+    return out;
+  }, [bps, children, agent.briefingsPath]);
+
+  const [briefTarget, setBriefTarget] = useState(null);
+  const handleOpenBrief = (childAgent) => {
+    const relPath = briefPathByAgentId[childAgent.id];
+    if (!relPath) return;
+    setBriefTarget({ agent: childAgent, relPath });
+  };
 
   return (
     <div style={{
@@ -786,10 +937,22 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
               onToggleEnabled={onToggleEnabled}
               onEdit={onEditChild}
               onDelete={onDeleteChild}
+              onOpenBrief={briefPathByAgentId[row.agent.id] ? handleOpenBrief : undefined}
             />
           ))
         )
       )}
+
+      <SidePanel
+        open={!!briefTarget}
+        onClose={() => setBriefTarget(null)}
+        title={briefTarget ? `Briefing Pack — ${briefTarget.agent.displayName}` : ''}
+        width="640px"
+      >
+        {briefTarget && (
+          <BriefViewer orchestratorId={agent.id} relPath={briefTarget.relPath} />
+        )}
+      </SidePanel>
     </div>
   );
 }

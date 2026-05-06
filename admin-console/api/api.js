@@ -1117,69 +1117,101 @@ app.get('/api/matrix/agents', (req, res) => {
   res.json(out);
 });
 
-// 2. Idempotent create-or-get DM room with an agent
-app.post('/api/matrix/agents/:agentId/dm', async (req, res) => {
-  const { agentId } = req.params;
+// 2. Idempotent create-or-get DM room with an agent.
+//
+// Per-agent in-flight cache: concurrent POSTs for the same agent share one
+// upstream `createRoom` call. Without this, two near-simultaneous requests
+// (e.g. component re-mount, double-click, second tab) each see no
+// dm-room.json, both create rooms, and one room ends up orphaned with the
+// session log but no dm-room.json pointer.
+const dmCreateInFlight = new Map();
+
+async function ensureAgentDmRoom(agentId) {
   const cfgPath = path.join(AGENTS_DIR, agentId, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
-  if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  if (cfg.enabled === false) return res.status(409).json({ error: 'Agent disabled' });
-  if (!cfg.token) return res.status(409).json({ error: 'Agent has no Matrix token' });
-  if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
+  if (!cfg) { const e = new Error('Agent not found'); e.status = 404; throw e; }
+  if (cfg.enabled === false) { const e = new Error('Agent disabled'); e.status = 409; throw e; }
+  if (!cfg.token) { const e = new Error('Agent has no Matrix token'); e.status = 409; throw e; }
+  if (!matrix.ADMIN_TOKEN) { const e = new Error('MATRIX_ACCESS_TOKEN not configured'); e.status = 500; throw e; }
 
   // Reuse existing DM room if admin is still joined
   const existing = matrix.getAgentDmRoom(agentId);
   if (existing?.roomId) {
-    try {
-      const joined = await matrix.matrixFetch(matrix.ADMIN_TOKEN, '/_matrix/client/v3/joined_rooms');
-      if (joined.status === 200 && Array.isArray(joined.data?.joined_rooms) &&
-          joined.data.joined_rooms.includes(existing.roomId)) {
-        return res.json({ roomId: existing.roomId, reused: true });
-      }
-    } catch (err) {
-      return res.status(502).json({ error: `Matrix unreachable: ${err.message}` });
+    const joined = await matrix.matrixFetch(matrix.ADMIN_TOKEN, '/_matrix/client/v3/joined_rooms');
+    if (joined.status === 200 && Array.isArray(joined.data?.joined_rooms) &&
+        joined.data.joined_rooms.includes(existing.roomId)) {
+      return { roomId: existing.roomId, reused: true, created: false };
     }
-    // Fall through and recreate if admin is no longer in the room
+    // Admin no longer joined — fall through and create a fresh room.
   }
 
-  // Create the room as the agent, inviting the admin
+  const adminUserId = await matrix.resolveAdminUserId();
+  const createResp = await matrix.matrixFetch(cfg.token, '/_matrix/client/v3/createRoom', {
+    method: 'POST',
+    body: {
+      preset: 'trusted_private_chat',
+      invite: [adminUserId],
+      is_direct: true,
+      name: `DM with ${cfg.displayName || agentId}`,
+    },
+  });
+  if (createResp.status >= 400) {
+    console.error('[Matrix] createRoom failed:', createResp.status, createResp.data);
+    const e = new Error('createRoom failed'); e.status = 502; e.upstream = createResp.data;
+    throw e;
+  }
+  const roomId = createResp.data?.room_id;
+  if (!roomId) {
+    const e = new Error('createRoom returned no room_id'); e.status = 502; e.upstream = createResp.data;
+    throw e;
+  }
+
+  // Admin (human) accepts the invite. We use a token, not a syncing client,
+  // so auto-join doesn't happen — we explicitly POST /join.
+  const joinResp = await matrix.matrixFetch(matrix.ADMIN_TOKEN,
+    `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/join`,
+    { method: 'POST', body: {} });
+  if (joinResp.status >= 400) {
+    console.error('[Matrix] admin join failed:', joinResp.status, joinResp.data);
+    const e = new Error('admin join failed'); e.status = 502; e.upstream = joinResp.data;
+    throw e;
+  }
+
+  matrix.setAgentDmRoom(agentId, {
+    roomId,
+    createdAt: new Date().toISOString(),
+    createdBy: adminUserId,
+  });
+  return { roomId, reused: false, created: true };
+}
+
+app.post('/api/matrix/agents/:agentId/dm', async (req, res) => {
+  const { agentId } = req.params;
+
+  let promise = dmCreateInFlight.get(agentId);
+  let leader = false;
+  if (!promise) {
+    leader = true;
+    promise = ensureAgentDmRoom(agentId).finally(() => {
+      dmCreateInFlight.delete(agentId);
+    });
+    dmCreateInFlight.set(agentId, promise);
+  }
+
   try {
-    const adminUserId = await matrix.resolveAdminUserId();
-    const createResp = await matrix.matrixFetch(cfg.token, '/_matrix/client/v3/createRoom', {
-      method: 'POST',
-      body: {
-        preset: 'trusted_private_chat',
-        invite: [adminUserId],
-        is_direct: true,
-        name: `DM with ${cfg.displayName || agentId}`,
-      },
+    const r = await promise;
+    // Followers always report `reused: true` — they didn't drive the creation,
+    // they just observed the leader's result.
+    const status = leader && r.created ? 201 : 200;
+    res.status(status).json({
+      roomId: r.roomId,
+      reused: leader ? r.reused : true,
     });
-    if (createResp.status >= 400) {
-      console.error('[Matrix] createRoom failed:', createResp.status, createResp.data);
-      return res.status(502).json({ error: 'createRoom failed', upstream: createResp.data });
-    }
-    const roomId = createResp.data?.room_id;
-    if (!roomId) {
-      return res.status(502).json({ error: 'createRoom returned no room_id', upstream: createResp.data });
-    }
-
-    // Admin (human) accepts the invite. We use a token, not a syncing client,
-    // so auto-join doesn't happen — we explicitly POST /join.
-    const joinResp = await matrix.matrixFetch(matrix.ADMIN_TOKEN,
-      `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/join`,
-      { method: 'POST', body: {} });
-    if (joinResp.status >= 400) {
-      console.error('[Matrix] admin join failed:', joinResp.status, joinResp.data);
-      return res.status(502).json({ error: 'admin join failed', upstream: joinResp.data });
-    }
-
-    matrix.setAgentDmRoom(agentId, {
-      roomId,
-      createdAt: new Date().toISOString(),
-      createdBy: adminUserId,
-    });
-    res.status(201).json({ roomId, reused: false });
   } catch (err) {
+    if (err.status) {
+      const body = err.upstream ? { error: err.message, upstream: err.upstream } : { error: err.message };
+      return res.status(err.status).json(body);
+    }
     res.status(502).json({ error: `Matrix unreachable: ${err.message}` });
   }
 });

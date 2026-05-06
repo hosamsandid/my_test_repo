@@ -15,7 +15,16 @@ COMPOSE     ?= podman compose
 COMPOSE_FILE = docker-compose.yml
 SERVICES     = conduwuit orchestrator admin-console
 
-.PHONY: up down restart build update ps logs help
+# Skill pool seed sources — copied into the skill-pool volume by `make seed-skills`.
+# The ACE engineering skill is required for bp-instance agents to actually
+# execute Briefing Packs; without it they only have a brief.md to read.
+ACE_PLUGIN_SKILLS_DIR ?= $(HOME)/.claude/plugins/marketplaces/i-sase-marketplace/skills
+SKILL_POOL_VOLUME      = $(COMPOSE_PROJECT_NAME)_claude-workspace
+ifeq ($(COMPOSE_PROJECT_NAME),)
+SKILL_POOL_VOLUME      = vgh-claw_claude-workspace
+endif
+
+.PHONY: up down restart build update ps logs help seed-skills
 
 up:
 	@echo "Starting e-vgh-claw stack..."
@@ -51,5 +60,19 @@ logs:
 	podman logs -f --tail=100 conduwuit &
 	wait
 
+seed-skills:
+	@if [ ! -d "$(ACE_PLUGIN_SKILLS_DIR)/engineering" ]; then \
+	  echo "ERROR: $(ACE_PLUGIN_SKILLS_DIR)/engineering not found" >&2; \
+	  echo "Install the i-sase plugin via the Claude Code marketplace first." >&2; \
+	  exit 1; \
+	fi
+	@echo "Seeding engineering skill into volume $(SKILL_POOL_VOLUME)..."
+	podman run --rm \
+	  -v $(SKILL_POOL_VOLUME):/pool \
+	  -v $(ACE_PLUGIN_SKILLS_DIR):/src:ro \
+	  alpine sh -c 'mkdir -p /pool/skills && rm -rf /pool/skills/engineering && cp -r /src/engineering /pool/skills/engineering'
+	@echo "Done. Pool contents:"
+	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/skills/
+
 help:
-	@echo "Targets: up, down, restart, build, update, ps, logs"
+	@echo "Targets: up, down, restart, build, update, ps, logs, seed-skills"

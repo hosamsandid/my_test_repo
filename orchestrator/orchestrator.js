@@ -478,6 +478,32 @@ function cloneRepository(targetDir, repository) {
   }
 }
 
+// Force-copy the ACE engineering skill into an agent's workspace, regardless
+// of whether its Working Environment lists it. Required for bp-instance
+// agents to actually execute Briefing Packs. No-op if the skill is already
+// in the workspace; logs a warning if the pool is missing it (run `make
+// seed-skills` to fix).
+function ensureEngineeringSkill(agentId) {
+  const dst = path.join(agentDir(agentId), "skills", "engineering");
+  if (fs.existsSync(dst)) return { copied: false };
+  const src = path.join(TEMPLATE_WORKSPACE, "skills", "engineering");
+  if (!fs.existsSync(src)) {
+    console.warn(
+      `[Orchestrator] Engineering skill missing from skill pool — bp-instance ${agentId} ` +
+      `cannot execute Briefing Packs. Run \`make seed-skills\` to install it.`
+    );
+    return { copied: false, missing: true };
+  }
+  try {
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    fs.cpSync(src, dst, { recursive: true });
+    return { copied: true };
+  } catch (err) {
+    console.error(`[Orchestrator] Failed to copy engineering skill into ${agentId}: ${err.message}`);
+    return { copied: false, error: err.message };
+  }
+}
+
 function patchSeededPaths(dir) {
   const memoryDir = path.join(dir, "memory");
   if (!fs.existsSync(memoryDir)) return;
@@ -670,6 +696,36 @@ function bpInstanceDisplayName(bp, agentId) {
       .join(" ");
   }
   return agentId;
+}
+
+// Build the system prompt for a bp-instance agent. Pins down the exact
+// filesystem path of the brief.md (we know it because we know the BP id,
+// slug, and the orchestrator's briefingsPath) and points at the engineering
+// skill that defines how to actually execute a Briefing Pack.
+function bpInstanceSystemPrompt(cfg) {
+  const briefingsRoot = (cfg.briefingsPath || "").replace(/^\/+|\/+$/g, "");
+  const bpDirName = cfg.bpSlug ? `${cfg.bpId}-${cfg.bpSlug}` : cfg.bpId;
+  const briefPath = briefingsRoot
+    ? `./${briefingsRoot}/artifacts/briefings/${bpDirName}/brief.md`
+    : `./artifacts/briefings/${bpDirName}/brief.md`;
+  const slugDisplay = cfg.bpSlug ? ` (\`${cfg.bpSlug}\`)` : "";
+
+  return [
+    `You are the agent instance assigned to execute Briefing Pack \`${cfg.bpId}\`${slugDisplay}.`,
+    ``,
+    `**Your brief:** \`${briefPath}\``,
+    `**Execution skill:** \`./skills/engineering/SKILL.md\` (ACE engineering — required reading)`,
+    ``,
+    `## Workflow`,
+    ``,
+    `1. **Read the engineering skill first.** It defines the LoopScript-driven phases, artifact conventions, and the CRP / MRP / VCR escalation flow you must follow.`,
+    `2. **Read your \`brief.md\`** at the path above. Its YAML frontmatter names the LoopScript and any MentorScripts that apply to this BP.`,
+    `3. **Execute the LoopScript phase by phase.** Write artifacts into the BP's own directory (next to \`brief.md\`).`,
+    `4. **Escalate via a CRP** if you are blocked or uncertain — never guess past an unclear instruction.`,
+    `5. **Submit an MRP** when the work is complete and wait for a VCR before considering yourself done.`,
+    ``,
+    `Stay strictly within the scope of this BP. If a request lands in your DM that is unrelated, ask the human to use the orchestrator for cross-BP coordination.`,
+  ].join("\n");
 }
 
 // Default system prompt used when creating an agent without an explicit
@@ -869,6 +925,9 @@ class Orchestrator {
         parentOrchestratorId: orchestratorId,
         bpId: bp.id,
         ...(bp.slug && { bpSlug: bp.slug }),
+        // Inherited from the orchestrator so the bp-instance prompt can
+        // construct an exact filesystem path to its brief.md.
+        briefingsPath: orchCfg.briefingsPath,
         environmentId: orchCfg.environmentId,
         enabled: false,
       };
@@ -917,6 +976,11 @@ class Orchestrator {
 
     const seedResult = seedAgentWorkspace(id, env);
 
+    // bp-instance agents always need the ACE engineering skill — the env's
+    // skills array is overridden here so the agent can actually execute the
+    // BP regardless of how the user configured the Working Environment.
+    ensureEngineeringSkill(id);
+
     const updated = {
       ...cfg,
       userId,
@@ -925,16 +989,10 @@ class Orchestrator {
     };
     saveAgentConfig(id, updated);
 
-    // Write a minimal AGENT-PROMPT.md if missing — the BP-aware prompt
-    // engineering follows in a separate iteration.
-    const promptPath = path.join(agentDir(id), "AGENT-PROMPT.md");
-    if (!fs.existsSync(promptPath)) {
-      const prompt =
-        `You are the agent instance for Briefing Pack \`${cfg.bpId}\`` +
-        (cfg.bpSlug ? ` (\`${cfg.bpSlug}\`)` : "") +
-        `.\n\nYour briefing lives in the attached repository. Read it before responding for the first time.`;
-      saveAgentPrompt(id, prompt, "bp-instance", env);
-    }
+    // Always (re)write the BP-instance prompt — the path / skill reference
+    // depends on cfg fields (bpId, bpSlug, briefingsPath) that are stable
+    // for this stub, and we want a consistent prompt across reactivations.
+    saveAgentPrompt(id, bpInstanceSystemPrompt(updated), "bp-instance", env);
 
     this.agentConfigs.set(id, { config: updated });
     startAgentProcess(updated);

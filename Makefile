@@ -15,16 +15,20 @@ COMPOSE     ?= podman compose
 COMPOSE_FILE = docker-compose.yml
 SERVICES     = conduwuit orchestrator admin-console
 
-# Skill pool seed sources — copied into the skill-pool volume by `make seed-skills`.
-# The ACE engineering skill is required for bp-instance agents to actually
-# execute Briefing Packs; without it they only have a brief.md to read.
+# Skill pool seed sources — copied into the skill-pool volume by `make seed-pool`.
+# Two inputs combine into the pool: the ACE engineering skill (host-side, from
+# the user's i-sase plugin install) and the pool CLAUDE.md (repo-side, in
+# orchestrator/skill-pool/). Without the engineering skill, bp-instance agents
+# only have a brief.md to read; without the CLAUDE.md, agents lose the curated
+# skill index they reference.
 ACE_PLUGIN_SKILLS_DIR ?= $(HOME)/.claude/plugins/marketplaces/i-sase-marketplace/skills
+SKILL_POOL_DEFAULTS    = $(CURDIR)/orchestrator/skill-pool
 SKILL_POOL_VOLUME      = $(COMPOSE_PROJECT_NAME)_claude-workspace
 ifeq ($(COMPOSE_PROJECT_NAME),)
 SKILL_POOL_VOLUME      = vgh-claw_claude-workspace
 endif
 
-.PHONY: up down restart build update ps logs help seed-skills
+.PHONY: up down restart build update ps logs help seed-pool seed-skills
 
 up:
 	@echo "Starting e-vgh-claw stack..."
@@ -60,6 +64,17 @@ logs:
 	podman logs -f --tail=100 conduwuit &
 	wait
 
+seed-pool: seed-skills
+	@echo "Seeding pool CLAUDE.md from $(SKILL_POOL_DEFAULTS)/CLAUDE.md..."
+	@if [ ! -f "$(SKILL_POOL_DEFAULTS)/CLAUDE.md" ]; then \
+	  echo "ERROR: $(SKILL_POOL_DEFAULTS)/CLAUDE.md not found in repo" >&2; \
+	  exit 1; \
+	fi
+	podman run --rm -i \
+	  -v $(SKILL_POOL_VOLUME):/pool \
+	  alpine sh -c 'cat > /pool/CLAUDE.md' < $(SKILL_POOL_DEFAULTS)/CLAUDE.md
+	@echo "Done."
+
 seed-skills:
 	@if [ ! -d "$(ACE_PLUGIN_SKILLS_DIR)/engineering" ]; then \
 	  echo "ERROR: $(ACE_PLUGIN_SKILLS_DIR)/engineering not found" >&2; \
@@ -75,4 +90,4 @@ seed-skills:
 	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/skills/
 
 help:
-	@echo "Targets: up, down, restart, build, update, ps, logs, seed-skills"
+	@echo "Targets: up, down, restart, build, update, ps, logs, seed-pool, seed-skills"

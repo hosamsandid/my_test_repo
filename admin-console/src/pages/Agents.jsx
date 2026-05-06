@@ -287,6 +287,32 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
         </div>
       )}
 
+      {agent.role === 'bp-instance' && (
+        <>
+          <div>
+            <div style={labelStyle}>Parent Orchestrator (read-only)</div>
+            <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
+              {agent.parentOrchestratorId || '—'}
+            </div>
+          </div>
+          <div>
+            <div style={labelStyle}>Briefing Pack ID (read-only)</div>
+            <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
+              {agent.bpId || '—'}
+              {agent.bpSlug ? <span style={{ marginLeft: 8 }}>· slug: <code>{agent.bpSlug}</code></span> : null}
+            </div>
+          </div>
+          {agent.briefingsPath && (
+            <div>
+              <div style={labelStyle}>Briefings Directory (inherited, read-only)</div>
+              <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
+                {agent.briefingsPath}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         <PrimaryBtn onClick={() => onSave(form)} saving={saving} disabled={!canSubmit}>
           {saving ? 'Saving…' : 'Save Changes'}
@@ -347,7 +373,7 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
             />
           </>
         )}
-        <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} disabled={isStub} />
+        <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
         <IconBtn
           icon={MessageCircle}
           label="Open chat"

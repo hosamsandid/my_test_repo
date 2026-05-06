@@ -174,25 +174,65 @@ function buildAgentTree(agents, bps, collapsedSet) {
   return rows;
 }
 
-/* ── Tree connector prefix (├── / └── / │) ─────────────────────────────
-   Renders the classic file-tree connector glyphs in monospace so the
-   parent-child relationships are visible at a glance. */
-function TreePrefix({ ancestorMore, isLast }) {
-  let s = '';
-  for (let i = 0; i < ancestorMore.length; i++) {
-    s += ancestorMore[i] ? '│   ' : '    ';
-  }
-  s += isLast ? '└── ' : '├── ';
+/* ── Tree connector lines ──────────────────────────────────────────────
+   Renders ancestor + elbow segments as absolutely-positioned CSS lines.
+   Each slot stretches across the row's full padding-box (negative vertical
+   margin) so vertical lines stitch through adjacent rows without breaks —
+   far more continuous than Unicode glyphs in monospace. */
+
+const TREE_SLOT_WIDTH = 22;
+const TREE_LINE_COLOR = 'var(--eb-border-default)';
+
+const _vLine = (extra) => ({
+  position: 'absolute',
+  left: '50%',
+  width: 1,
+  background: TREE_LINE_COLOR,
+  transform: 'translateX(-0.5px)',
+  ...extra,
+});
+
+const _hLine = (extra) => ({
+  position: 'absolute',
+  top: '50%',
+  height: 1,
+  background: TREE_LINE_COLOR,
+  transform: 'translateY(-0.5px)',
+  ...extra,
+});
+
+function TreeConnector({ ancestorMore, isLast }) {
   return (
-    <span style={{
-      fontFamily: 'var(--eb-font-mono)',
-      whiteSpace: 'pre',
-      color: 'var(--eb-text-muted)',
-      fontSize: 'var(--eb-text-sm)',
-      lineHeight: 1,
+    <div style={{
+      display: 'flex',
+      alignSelf: 'stretch',
       flexShrink: 0,
-      userSelect: 'none',
-    }}>{s}</span>
+      // Pull connector across the row's vertical padding so vertical lines
+      // bridge the gap between adjacent rows.
+      margin: 'calc(-1 * var(--eb-space-3)) 0',
+    }}>
+      {ancestorMore.map((more, i) => (
+        <div key={i} style={{
+          width: TREE_SLOT_WIDTH,
+          position: 'relative',
+          alignSelf: 'stretch',
+        }}>
+          {more && <span style={_vLine({ top: 0, bottom: 0 })} />}
+        </div>
+      ))}
+      <div style={{
+        width: TREE_SLOT_WIDTH,
+        position: 'relative',
+        alignSelf: 'stretch',
+      }}>
+        {/* top half: always — connects upward to parent */}
+        <span style={_vLine({ top: 0, height: '50%' })} />
+        {/* bottom half: only when this row is not the last sibling */}
+        {!isLast && <span style={_vLine({ top: '50%', bottom: 0 })} />}
+        {/* horizontal: from elbow corner to the right edge of the slot */}
+        <span style={_hLine({ left: '50%', right: 0 })} />
+      </div>
+    </div>
   );
 }
 
@@ -524,7 +564,7 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
       }}
     >
       {t.depth > 0 && (
-        <TreePrefix ancestorMore={t.ancestorMore} isLast={t.isLast} />
+        <TreeConnector ancestorMore={t.ancestorMore} isLast={t.isLast} />
       )}
       {t.hasChildren ? (
         <button

@@ -29,12 +29,10 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
   viewport.appendChild(canvas);
 
   const svgEdges = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svgEdges.style.position = 'absolute';
-  svgEdges.style.top      = '0';
-  svgEdges.style.left     = '0';
-  svgEdges.style.width    = '100%';
-  svgEdges.style.height   = '100%';
-  svgEdges.style.overflow = 'visible';
+  svgEdges.style.position     = 'absolute';
+  svgEdges.style.top          = '0';
+  svgEdges.style.left         = '0';
+  svgEdges.style.overflow     = 'visible';
   svgEdges.style.pointerEvents = 'none';
   canvas.appendChild(svgEdges);
 
@@ -817,6 +815,19 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
   function drawEdges() {
     svgEdges.innerHTML = '';
 
+    // Resize SVG to cover all content so paths at large coordinates are rendered
+    let svgMaxX = 100, svgMaxY = 100;
+    Object.values(state.positions).forEach(pos => {
+      svgMaxX = Math.max(svgMaxX, pos.x + NODE_W + 100);
+      svgMaxY = Math.max(svgMaxY, pos.y + 300);
+    });
+    Object.values(state.artifactPositions).forEach(pos => {
+      svgMaxX = Math.max(svgMaxX, pos.x + ARTIFACT_W + 100);
+      svgMaxY = Math.max(svgMaxY, pos.y + 200);
+    });
+    svgEdges.setAttribute('width',  svgMaxX);
+    svgEdges.setAttribute('height', svgMaxY);
+
     const visible    = getVisibleNodes();
     const visibleIds = new Set(visible.map(n => n.id));
 
@@ -1258,13 +1269,35 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
     b.textContent = label;
     b.style.cssText = 'padding:4px 10px;font-size:11px;border-radius:4px;border:1px solid #444;background:rgba(20,20,30,0.88);backdrop-filter:blur(4px);color:#ccc;cursor:pointer;transition:border-color 0.1s,color 0.1s;';
     b.addEventListener('mouseover', () => { b.style.borderColor = '#666'; b.style.color = '#fff'; });
-    b.addEventListener('mouseout',  () => { b.style.borderColor = '#444'; b.style.color = '#ccc'; });
+    b.addEventListener('mouseout',  () => {
+      b.style.borderColor = b._active ? '#3b82f6' : '#444';
+      b.style.color       = b._active ? '#60a5fa' : '#ccc';
+    });
     b.addEventListener('click', fn);
     return b;
   }
+
+  function updateArchivedBtn(btn) {
+    btn._active            = state.showArchived;
+    btn.style.borderColor  = state.showArchived ? '#3b82f6' : '#444';
+    btn.style.color        = state.showArchived ? '#60a5fa' : '#ccc';
+    btn.style.background   = state.showArchived ? 'rgba(59,130,246,0.15)' : 'rgba(20,20,30,0.88)';
+  }
+
   toolbarEl.appendChild(makeToolBtn('Fit',          () => { state.userTransform = false; fitToView(); }));
   toolbarEl.appendChild(makeToolBtn('Expand All',   () => expandAll()));
   toolbarEl.appendChild(makeToolBtn('Collapse All', () => collapseAll()));
+
+  const archivedBtn = makeToolBtn('Archived', () => {
+    state.showArchived = !state.showArchived;
+    localStorage.setItem('ace-graph-show-archived', state.showArchived);
+    updateArchivedBtn(archivedBtn);
+    recomputeRoots();
+    render();
+    requestAnimationFrame(() => fitToView());
+  });
+  updateArchivedBtn(archivedBtn);
+  toolbarEl.appendChild(archivedBtn);
 
   // ─── Init ─────────────────────────────────────────────────────────────
 

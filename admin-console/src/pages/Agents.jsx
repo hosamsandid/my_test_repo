@@ -83,15 +83,30 @@ function topoSortBpRoots(rootIds, byId) {
   return result;
 }
 
-// Map bp-instance agents to BP-tree order with parent/child indentation depth.
-// Falls back to alphabetical at depth 0 when BP metadata is unavailable
+// Build a flat list of bp-instance rows annotated with classic
+// file-tree-connector metadata: depth, ancestorMore (vertical-line flags
+// per ancestor level), isLast (last sibling at its depth), hasChildren,
+// and isCollapsed. The orchestrator itself is the implicit depth-0 ancestor;
+// BP roots are emitted at depth 1 so every row gets a connector.
+//
+// Falls back to a flat alphabetical list when BP metadata is unavailable
 // (still loading, fetch failed, or no agent.bpId).
-function buildHierarchicalChildren(agents, bps) {
+function buildAgentTree(agents, bps, collapsedSet) {
   const list = Array.isArray(agents) ? agents : [];
+  const collapsed = collapsedSet instanceof Set ? collapsedSet : new Set();
+
   if (!Array.isArray(bps) || bps.length === 0) {
-    return [...list]
-      .sort((a, b) => (a.displayName || a.id).localeCompare(b.displayName || b.id))
-      .map((a) => ({ agent: a, depth: 0 }));
+    const sorted = [...list].sort(
+      (a, b) => (a.displayName || a.id).localeCompare(b.displayName || b.id),
+    );
+    return sorted.map((a, i) => ({
+      agent: a,
+      depth: 1,
+      ancestorMore: [],
+      isLast: i === sorted.length - 1,
+      hasChildren: false,
+      isCollapsed: false,
+    }));
   }
 
   const byId = {};
@@ -100,34 +115,85 @@ function buildHierarchicalChildren(agents, bps) {
   const agentByBpId = {};
   list.forEach((a) => { if (a.bpId) agentByBpId[a.bpId] = a; });
 
-  const result = [];
+  const sortedRootBpIds = topoSortBpRoots(
+    bps.filter((bp) => bp && !bp.parent).map((bp) => bp.id),
+    byId,
+  );
+
+  // Depth-1 items: BP roots that have agents, then orphans (agents whose BP
+  // is no longer in the directory). Orphans never have BP children.
+  const depth1 = [];
+  sortedRootBpIds.forEach((bpId) => {
+    if (agentByBpId[bpId]) depth1.push({ kind: 'bp', bpId });
+  });
+  list
+    .filter((a) => !a.bpId || !byId[a.bpId])
+    .sort((a, b) => (a.displayName || a.id).localeCompare(b.displayName || b.id))
+    .forEach((a) => depth1.push({ kind: 'orphan', agent: a }));
+
+  const rows = [];
   const emitted = new Set();
 
-  function walk(bpId, depth) {
-    const bp = byId[bpId];
-    if (!bp) return;
-    const ag = agentByBpId[bpId];
-    if (ag && !emitted.has(ag.id)) {
-      result.push({ agent: ag, depth });
-      emitted.add(ag.id);
-    }
-    if (Array.isArray(bp.children) && bp.children.length > 0) {
-      const sortedChildren = topoSortBpIds(bp.children, byId);
-      sortedChildren.forEach((cid) => walk(cid, depth + 1));
-    }
+  function walk(items, depth, ancestorTrail) {
+    items.forEach((item, idx) => {
+      const isLast = idx === items.length - 1;
+      let agent;
+      let childIds = [];
+      if (item.kind === 'bp') {
+        const bp = byId[item.bpId];
+        if (!bp) return;
+        agent = agentByBpId[item.bpId];
+        childIds = Array.isArray(bp.children) && bp.children.length > 0
+          ? topoSortBpIds(bp.children, byId).filter((cid) => agentByBpId[cid])
+          : [];
+      } else {
+        agent = item.agent;
+      }
+      if (!agent || emitted.has(agent.id)) return;
+
+      const hasChildren = childIds.length > 0;
+      const isCollapsed = hasChildren && collapsed.has(agent.id);
+      rows.push({
+        agent,
+        depth,
+        ancestorMore: ancestorTrail.slice(),
+        isLast,
+        hasChildren,
+        isCollapsed,
+      });
+      emitted.add(agent.id);
+
+      if (hasChildren && !isCollapsed) {
+        const childItems = childIds.map((bpId) => ({ kind: 'bp', bpId }));
+        walk(childItems, depth + 1, [...ancestorTrail, !isLast]);
+      }
+    });
   }
 
-  const rootIds = bps.filter((bp) => bp && !bp.parent).map((bp) => bp.id);
-  const sortedRoots = topoSortBpRoots(rootIds, byId);
-  sortedRoots.forEach((rid) => walk(rid, 0));
+  walk(depth1, 1, []);
+  return rows;
+}
 
-  // Orphan agents (BP no longer present) — append at the end, alphabetical.
-  const orphans = list
-    .filter((a) => !emitted.has(a.id))
-    .sort((a, b) => (a.displayName || a.id).localeCompare(b.displayName || b.id));
-  orphans.forEach((a) => result.push({ agent: a, depth: 0 }));
-
-  return result;
+/* ── Tree connector prefix (├── / └── / │) ─────────────────────────────
+   Renders the classic file-tree connector glyphs in monospace so the
+   parent-child relationships are visible at a glance. */
+function TreePrefix({ ancestorMore, isLast }) {
+  let s = '';
+  for (let i = 0; i < ancestorMore.length; i++) {
+    s += ancestorMore[i] ? '│   ' : '    ';
+  }
+  s += isLast ? '└── ' : '├── ';
+  return (
+    <span style={{
+      fontFamily: 'var(--eb-font-mono)',
+      whiteSpace: 'pre',
+      color: 'var(--eb-text-muted)',
+      fontSize: 'var(--eb-text-sm)',
+      lineHeight: 1,
+      flexShrink: 0,
+      userSelect: 'none',
+    }}>{s}</span>
+  );
 }
 
 /* ── Shared style helpers ───────────────────────────────────────────── */
@@ -441,26 +507,41 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
 }
 
 /* ── Agent Row ──────────────────────────────────────────────────────── */
-function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, navigate, indent, busy }) {
+function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, navigate, tree, busy }) {
   const state = agentState(agent);
   const isStub = state === 'stub';
-  // `indent` is a depth integer: 0 = no indent (top-level leaves), 1 = direct
-  // child of an orchestrator card, 2+ = nested under another bp-instance.
-  const depth = typeof indent === 'number' ? indent : indent ? 1 : 0;
-  const paddingLeft = depth > 0
-    ? `calc(var(--eb-space-4) + ${depth} * var(--eb-space-4))`
-    : 'var(--eb-space-4)';
+  const t = tree || {
+    depth: 0, ancestorMore: [], isLast: true, hasChildren: false, isCollapsed: false,
+  };
   return (
     <div
       style={{
         display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
         padding: 'var(--eb-space-3) var(--eb-space-4)',
-        paddingLeft,
         borderTop: '1px solid var(--eb-border-default)',
         background: 'var(--eb-bg-surface)',
         opacity: isStub ? 0.85 : 1,
       }}
     >
+      {t.depth > 0 && (
+        <TreePrefix ancestorMore={t.ancestorMore} isLast={t.isLast} />
+      )}
+      {t.hasChildren ? (
+        <button
+          onClick={t.onToggleCollapse}
+          aria-label={t.isCollapsed ? 'Expand subtree' : 'Collapse subtree'}
+          title={t.isCollapsed ? 'Expand' : 'Collapse'}
+          style={{
+            background: 'none', border: 'none', cursor: 'pointer',
+            color: 'var(--eb-text-secondary)', padding: 0,
+            display: 'flex', alignItems: 'center', flexShrink: 0,
+          }}
+        >
+          {t.isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+        </button>
+      ) : (
+        t.depth > 0 && <span style={{ display: 'inline-block', width: 14, flexShrink: 0 }} />
+      )}
       <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
         <span style={{ fontSize: 'var(--eb-text-sm)' }}>{agent.displayName}</span>
         <span style={{ fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)' }}>
@@ -514,6 +595,8 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
 function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDeactivate, onToggleEnabled, onEditChild, onDeleteChild, navigate, syncing, busyIds }) {
   const [expanded, setExpanded] = useState(false);
   const [bps, setBps] = useState(null); // null = not yet loaded
+  // Subtrees default to fully expanded — entries in this set are collapsed.
+  const [collapsedNodes, setCollapsedNodes] = useState(() => new Set());
   const children = agent.children || [];
   const state = agentState(agent);
   const isStub = state === 'stub';
@@ -533,9 +616,17 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
     return () => { cancelled = true; };
   }, [expanded, isStub, agent.id, agent.briefingsPath, children.length]);
 
-  const sortedChildren = useMemo(
-    () => buildHierarchicalChildren(children, bps),
-    [children, bps],
+  const toggleCollapse = (id) => {
+    setCollapsedNodes((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const treeRows = useMemo(
+    () => buildAgentTree(children, bps, collapsedNodes),
+    [children, bps, collapsedNodes],
   );
 
   return (
@@ -636,13 +727,20 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
               : 'No Briefing Packs found. Click Sync BPs to re-scan the directory.'}
           </div>
         ) : (
-          sortedChildren.map(({ agent: child, depth }) => (
+          treeRows.map((row) => (
             <AgentRow
-              key={child.id}
-              agent={child}
-              indent={depth + 1}
+              key={row.agent.id}
+              agent={row.agent}
+              tree={{
+                depth: row.depth,
+                ancestorMore: row.ancestorMore,
+                isLast: row.isLast,
+                hasChildren: row.hasChildren,
+                isCollapsed: row.isCollapsed,
+                onToggleCollapse: () => toggleCollapse(row.agent.id),
+              }}
               navigate={navigate}
-              busy={busyIds.has(child.id)}
+              busy={busyIds.has(row.agent.id)}
               onActivate={onActivate}
               onDeactivate={onDeactivate}
               onToggleEnabled={onToggleEnabled}

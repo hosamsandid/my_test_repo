@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Plus, Trash2, Layers, ChevronDown, ChevronRight,
-  Edit, MessageCircle, RefreshCw, Power,
+  Edit, MessageCircle, RefreshCw, Power, PowerOff,
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import SidePanel from '../components/SidePanel';
@@ -121,9 +121,9 @@ function agentState(agent) {
 
 function StateBadge({ state }) {
   const cfg = {
-    stub:    { bg: 'var(--eb-bg-app)',         color: 'var(--eb-text-muted)',     label: 'Nicht initialisiert' },
-    paused:  { bg: 'var(--eb-status-warning-bg)', color: 'var(--eb-status-warning)', label: 'Pausiert' },
-    active:  { bg: 'var(--eb-status-success-bg)', color: 'var(--eb-status-success)', label: 'Aktiv' },
+    stub:    { bg: 'var(--eb-bg-app)',            color: 'var(--eb-text-muted)',     label: 'Not initialised' },
+    paused:  { bg: 'var(--eb-status-warning-bg)', color: 'var(--eb-status-warning)', label: 'Paused' },
+    active:  { bg: 'var(--eb-status-success-bg)', color: 'var(--eb-status-success)', label: 'Active' },
   }[state] || { bg: 'var(--eb-bg-app)', color: 'var(--eb-text-muted)', label: state };
   return (
     <span style={{
@@ -298,7 +298,7 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
 }
 
 /* ── Agent Row ──────────────────────────────────────────────────────── */
-function AgentRow({ agent, onActivate, onToggleEnabled, onEdit, onDelete, navigate, indent, busy }) {
+function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, navigate, indent, busy }) {
   const state = agentState(agent);
   const isStub = state === 'stub';
   return (
@@ -327,16 +327,25 @@ function AgentRow({ agent, onActivate, onToggleEnabled, onEdit, onDelete, naviga
             style={{ padding: '4px 10px', fontSize: 'var(--eb-text-xs)' }}
           >
             <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <Power size={13} /> Aktivieren
+              <Power size={13} /> Activate
             </span>
           </PrimaryBtn>
         ) : (
-          <ToggleSwitch
-            checked={state === 'active'}
-            onChange={() => onToggleEnabled(agent)}
-            label={state === 'active' ? 'Disable' : 'Enable'}
-            disabled={busy}
-          />
+          <>
+            <ToggleSwitch
+              checked={state === 'active'}
+              onChange={() => onToggleEnabled(agent)}
+              label={state === 'active' ? 'Disable' : 'Enable'}
+              disabled={busy}
+            />
+            <IconBtn
+              icon={PowerOff}
+              label="Deactivate"
+              title="Deactivate — reset to stub state"
+              onClick={() => onDeactivate(agent)}
+              disabled={busy}
+            />
+          </>
         )}
         <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} disabled={isStub} />
         <IconBtn
@@ -353,7 +362,7 @@ function AgentRow({ agent, onActivate, onToggleEnabled, onEdit, onDelete, naviga
 }
 
 /* ── Orchestrator Card (with bp-instance children) ─────────────────── */
-function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onToggleEnabled, onEditChild, onDeleteChild, navigate, syncing, busyIds }) {
+function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDeactivate, onToggleEnabled, onEditChild, onDeleteChild, navigate, syncing, busyIds }) {
   const [expanded, setExpanded] = useState(true);
   const children = agent.children || [];
   const state = agentState(agent);
@@ -404,7 +413,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onTo
           <button
             onClick={() => onSyncBps(agent)}
             disabled={syncing || isStub}
-            title={isStub ? 'Aktiviere den Orchestrator zuerst' : 'Briefings-Verzeichnis erneut scannen'}
+            title={isStub ? 'Activate the orchestrator first' : 'Re-scan the briefings directory'}
             style={{
               background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
               borderRadius: 'var(--eb-radius-md)', cursor: (syncing || isStub) ? 'not-allowed' : 'pointer',
@@ -413,7 +422,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onTo
               opacity: (syncing || isStub) ? 0.5 : 1,
             }}
           >
-            <RefreshCw size={13} /> {syncing ? 'Syncing…' : 'BPs syncen'}
+            <RefreshCw size={13} /> {syncing ? 'Syncing…' : 'Sync BPs'}
           </button>
           {isStub ? (
             <PrimaryBtn
@@ -422,16 +431,25 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onTo
               style={{ padding: '4px 10px', fontSize: 'var(--eb-text-xs)' }}
             >
               <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                <Power size={13} /> Aktivieren
+                <Power size={13} /> Activate
               </span>
             </PrimaryBtn>
           ) : (
-            <ToggleSwitch
-              checked={state === 'active'}
-              onChange={() => onToggleEnabled(agent)}
-              label={state === 'active' ? 'Disable' : 'Enable'}
-              disabled={busyIds.has(agent.id)}
-            />
+            <>
+              <ToggleSwitch
+                checked={state === 'active'}
+                onChange={() => onToggleEnabled(agent)}
+                label={state === 'active' ? 'Disable' : 'Enable'}
+                disabled={busyIds.has(agent.id)}
+              />
+              <IconBtn
+                icon={PowerOff}
+                label="Deactivate"
+                title="Deactivate — reset to stub state"
+                onClick={() => onDeactivate(agent)}
+                disabled={busyIds.has(agent.id)}
+              />
+            </>
           )}
           <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
           <IconBtn icon={MessageCircle} label="Open chat" onClick={() => !isStub && navigate(`/chats/${agent.id}`)} disabled={isStub} />
@@ -444,8 +462,8 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onTo
         children.length === 0 ? (
           <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)', textAlign: 'center', padding: 'var(--eb-space-4)' }}>
             {isStub
-              ? 'Aktiviere den Orchestrator, um seine Briefing Packs zu laden.'
-              : 'Keine Briefing Packs gefunden. Klicke auf BPs syncen, um den Ordner erneut zu scannen.'}
+              ? 'Activate the orchestrator to load its Briefing Packs.'
+              : 'No Briefing Packs found. Click Sync BPs to re-scan the directory.'}
           </div>
         ) : (
           children.map((child) => (
@@ -456,6 +474,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onTo
               navigate={navigate}
               busy={busyIds.has(child.id)}
               onActivate={onActivate}
+              onDeactivate={onDeactivate}
               onToggleEnabled={onToggleEnabled}
               onEdit={onEditChild}
               onDelete={onDeleteChild}
@@ -468,7 +487,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onTo
 }
 
 /* ── Leaf Agent Card (expert / autonomous) ─────────────────────────── */
-function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, navigate, busy }) {
+function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate, navigate, busy }) {
   const state = agentState(agent);
 
   return (
@@ -500,6 +519,13 @@ function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, navigate, bus
             label={state === 'active' ? 'Disable' : 'Enable'}
             disabled={busy}
           />
+          <IconBtn
+            icon={PowerOff}
+            label="Deactivate"
+            title="Deactivate — reset to stub state"
+            onClick={() => onDeactivate(agent)}
+            disabled={busy}
+          />
           <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
           <IconBtn icon={MessageCircle} label="Open chat" onClick={() => navigate(`/chats/${agent.id}`)} />
           <IconBtn icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
@@ -517,6 +543,7 @@ export default function Agents() {
   const [panelMode, setPanelMode] = useState(null); // null | 'create' | 'edit'
   const [selectedAgent, setSelectedAgent] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deactivateTarget, setDeactivateTarget] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [actionError, setActionError] = useState(null);
@@ -624,6 +651,21 @@ export default function Agents() {
     }
   }
 
+  async function handleDeactivateConfirmed() {
+    const target = deactivateTarget;
+    setDeactivateTarget(null);
+    if (!target) return;
+    markBusy(target.id, true);
+    try {
+      await apiCall('POST', `/api/agents/${target.id}/deactivate`);
+      refetch();
+    } catch (e) {
+      setActionError(e.message);
+    } finally {
+      markBusy(target.id, false);
+    }
+  }
+
   if (loading) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -686,6 +728,7 @@ export default function Agents() {
               onDelete={a => setDeleteTarget(a)}
               onSyncBps={handleSyncBps}
               onActivate={handleActivate}
+              onDeactivate={a => setDeactivateTarget(a)}
               onToggleEnabled={handleToggleEnabled}
               onEditChild={a => openPanel('edit', a)}
               onDeleteChild={a => setDeleteTarget(a)}
@@ -699,6 +742,7 @@ export default function Agents() {
               busy={busyIds.has(a.id)}
               onEdit={ag => openPanel('edit', ag)}
               onDelete={ag => setDeleteTarget(ag)}
+              onDeactivate={ag => setDeactivateTarget(ag)}
               onToggleEnabled={handleToggleEnabled}
             />
           ))}
@@ -733,6 +777,21 @@ export default function Agents() {
         confirmLabel="Delete"
         onConfirm={handleDelete}
         onCancel={() => setDeleteTarget(null)}
+      />
+
+      <ConfirmDialog
+        open={!!deactivateTarget}
+        title="Deactivate Agent"
+        message={
+          `Reset "${deactivateTarget?.displayName ?? deactivateTarget?.id}" to its stub state? ` +
+          `This stops the agent process, deactivates its Matrix user, and wipes the workspace. ` +
+          `The stub config is kept so the agent can be reactivated later — but session history, ` +
+          `cloned repositories, and any in-workspace state will be lost.`
+        }
+        variant="danger"
+        confirmLabel="Deactivate"
+        onConfirm={handleDeactivateConfirmed}
+        onCancel={() => setDeactivateTarget(null)}
       />
     </div>
   );

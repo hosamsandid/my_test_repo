@@ -304,6 +304,23 @@ app.put('/api/agents/:id', async (req, res) => {
   res.json({ id, ...fresh });
 });
 
+/* ─── Reset agent to stub state ─────────────────────────────────────── */
+
+app.post('/api/agents/:id/deactivate', async (req, res) => {
+  const { id } = req.params;
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/deactivate`, {
+      method: 'POST',
+    });
+    const data = await resp.json();
+    if (!resp.ok) return res.status(resp.status).json(data);
+    res.json(data);
+  } catch (err) {
+    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 /* ─── BP stub sync ──────────────────────────────────────────────────── */
 
 app.post('/api/agents/:id/sync-bps', async (req, res) => {

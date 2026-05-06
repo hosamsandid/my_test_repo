@@ -678,14 +678,14 @@ function defaultSystemPromptFor(role, extra = {}) {
   if (role === "orchestrator") {
     const briefingsPath = extra.briefingsPath || "(unset)";
     return [
-      `Du bist ein Orchestrator-Agent.`,
+      `You are an orchestrator agent.`,
       ``,
-      `Du verwaltest die Briefing Packs im Verzeichnis \`${briefingsPath}\`. ` +
-        `Jeder Briefing Pack in diesem Verzeichnis kann zu einer eigenständigen Agent-Instanz werden, ` +
-        `die du betreust.`,
+      `You manage the Briefing Packs in the directory \`${briefingsPath}\`. ` +
+        `Each Briefing Pack in this directory may become a standalone agent instance ` +
+        `under your supervision.`,
       ``,
-      `Wenn ein Mensch dir Fragen stellt, hilf ihm, den Stand der Briefing Packs einzuordnen, ` +
-        `Status-Wechsel zu erklären und einzelne Instanzen zu verstehen.`,
+      `When a human asks you questions, help them understand the state of the Briefing Packs, ` +
+        `explain status transitions, and reason about individual instances.`,
     ].join("\n");
   }
   return "";
@@ -930,9 +930,9 @@ class Orchestrator {
     const promptPath = path.join(agentDir(id), "AGENT-PROMPT.md");
     if (!fs.existsSync(promptPath)) {
       const prompt =
-        `Du bist die Agenten-Instanz für den Briefing Pack \`${cfg.bpId}\`` +
+        `You are the agent instance for Briefing Pack \`${cfg.bpId}\`` +
         (cfg.bpSlug ? ` (\`${cfg.bpSlug}\`)` : "") +
-        `.\n\nDein Briefing liegt im verbundenen Repo. Lies es vor der ersten Antwort.`;
+        `.\n\nYour briefing lives in the attached repository. Read it before responding for the first time.`;
       saveAgentPrompt(id, prompt, "bp-instance", env);
     }
 
@@ -960,6 +960,60 @@ class Orchestrator {
     saveAgentConfig(id, updated);
     this.agentConfigs.set(id, { config: updated });
     return { id, enabled: false };
+  }
+
+  // Reset an agent back to its stub state: stop the process, deactivate the
+  // Matrix user (best-effort), wipe the workspace, and strip the config of
+  // any runtime identity (token, userId). The stub config keeps just the
+  // metadata needed to re-activate later.
+  //
+  // Destructive — caller is expected to have confirmed with the user.
+  async deactivateAgent(id) {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) throw new Error(`Agent '${id}' not found`);
+
+    stopAgentProcess(id);
+
+    if (cfg.userId || cfg.token) {
+      // Best-effort — we don't want to fail the reset if the admin client
+      // or Conduwuit is unavailable; the local config wipe is what matters.
+      await this.deactivateMatrixUser(id);
+    }
+
+    // Wipe the workspace except for config.json so the next activation seeds
+    // a fresh repo + skills + memory copy.
+    const dir = agentDir(id);
+    if (fs.existsSync(dir)) {
+      for (const entry of fs.readdirSync(dir)) {
+        if (entry === "config.json") continue;
+        try {
+          fs.rmSync(path.join(dir, entry), { recursive: true, force: true });
+        } catch (err) {
+          console.error(`[Orchestrator] Could not remove ${entry} from ${id}: ${err.message}`);
+        }
+      }
+    }
+
+    // Strip runtime identity. Keep id, displayName, role, environmentId, and
+    // role-specific metadata (briefingsPath / parentOrchestratorId / bpId /
+    // bpSlug). Drop token, userId. Mark disabled.
+    const stripped = {
+      id: cfg.id,
+      displayName: cfg.displayName,
+      role: cfg.role,
+      environmentId: cfg.environmentId,
+      ...(cfg.briefingsPath && { briefingsPath: cfg.briefingsPath }),
+      ...(cfg.parentOrchestratorId && { parentOrchestratorId: cfg.parentOrchestratorId }),
+      ...(cfg.bpId && { bpId: cfg.bpId }),
+      ...(cfg.bpSlug && { bpSlug: cfg.bpSlug }),
+      ...(cfg.blueprintId && { blueprintId: cfg.blueprintId }),
+      enabled: false,
+    };
+    saveAgentConfig(id, stripped);
+    this.agentConfigs.set(id, { config: stripped });
+
+    console.log(`[Orchestrator] Reset ${id} to stub state`);
+    return { id, reset: true };
   }
 
   // Materialize an existing config-only orchestrator agent (created before
@@ -1585,6 +1639,24 @@ async function main() {
           res.end(JSON.stringify(result));
         } catch (err) {
           console.error(`[Orchestrator] disableAgent error for ${id}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404 : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      })();
+      return;
+    }
+
+    const deactivateMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/deactivate$/);
+    if (deactivateMatch) {
+      const id = decodeURIComponent(deactivateMatch[1]);
+      (async () => {
+        try {
+          const result = await orchestrator.deactivateAgent(id);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] deactivateAgent error for ${id}: ${err.message}`);
           const status = /not found/i.test(err.message) ? 404 : 500;
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));

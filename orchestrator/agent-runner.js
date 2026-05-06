@@ -163,6 +163,7 @@ function writeLastResponseAt() {
 
 let activeInvocations = 0;
 let activeClaudeProc = null;
+let userStopRequested = false;
 
 // ============================================================
 // Claude CLI
@@ -298,9 +299,12 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT,
         lineBuf = "";
       }
       if (code !== 0) {
-        const err = new Error(stderr.substring(0, 300) || `Exit ${code}`);
+        const wasUserStop = userStopRequested;
+        userStopRequested = false;
+        const err = new Error(wasUserStop ? 'UserAborted' : stderr.substring(0, 300) || `Exit ${code}`);
         err.stderr = stderr;
         err.exitCode = code;
+        err.userAborted = wasUserStop;
         return reject(err);
       }
       // Persist the freshest session id we observed. With `--resume`, this is
@@ -327,6 +331,7 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT,
         // best-effort; we treat any "session"/"resume" reference in stderr
         // as a hint to retry. The pointer is cleared so we don't loop on
         // the same broken id.
+        if (err.userAborted) throw err;
         const blob = String(err.stderr || err.message || "").toLowerCase();
         const sessionRelated =
           blob.includes("session") || blob.includes("resume") || blob.includes("not found");
@@ -710,21 +715,29 @@ async function main() {
       } catch {}
       console.log(`[Runner:${AGENT_ID}] Posted direct response (${result.length} chars)`);
     } catch (err) {
-      try {
-        appendEvent(AGENT_ID, roomId, {
-          type: "error",
-          correlationId,
-          stage: "claude",
-          message: err.message,
-        });
-      } catch {}
-      console.error(`[Runner:${AGENT_ID}] Error: ${err.message}`);
-      // Surface the failure to the user so the chat doesn't hang on a typing indicator.
-      try {
-        await sendFormatted(client, roomId,
-          `⚠️ **Agent error**\n\n\`\`\`\n${String(err.message).slice(0, 800)}\n\`\`\``);
-      } catch (postErr) {
-        console.error(`[Runner:${AGENT_ID}] Could not post error to chat: ${postErr.message}`);
+      if (err.userAborted) {
+        console.log(`[Runner:${AGENT_ID}] Session stopped by user`);
+        try {
+          await sendFormatted(client, roomId, '_(Ausführung abgebrochen.)_');
+        } catch (postErr) {
+          console.error(`[Runner:${AGENT_ID}] Could not post abort notice: ${postErr.message}`);
+        }
+      } else {
+        try {
+          appendEvent(AGENT_ID, roomId, {
+            type: "error",
+            correlationId,
+            stage: "claude",
+            message: err.message,
+          });
+        } catch {}
+        console.error(`[Runner:${AGENT_ID}] Error: ${err.message}`);
+        try {
+          await sendFormatted(client, roomId,
+            `⚠️ **Agent error**\n\n\`\`\`\n${String(err.message).slice(0, 800)}\n\`\`\``);
+        } catch (postErr) {
+          console.error(`[Runner:${AGENT_ID}] Could not post error to chat: ${postErr.message}`);
+        }
       }
     } finally {
       processing = false;
@@ -736,6 +749,7 @@ async function main() {
     if (msg?.type === 'stop-session') {
       if (activeClaudeProc) {
         console.log(`[Runner:${AGENT_ID}] Stop-session signal received — terminating Claude process`);
+        userStopRequested = true;
         activeClaudeProc.kill('SIGTERM');
       } else {
         console.log(`[Runner:${AGENT_ID}] Stop-session signal received — no active invocation`);

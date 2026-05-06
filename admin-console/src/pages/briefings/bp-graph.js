@@ -991,21 +991,18 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
       state.childrenVisible.add(id);
     }
     render();
-    requestAnimationFrame(() => fitToView());
   }
 
   function toggleOutputs(id) {
     if (state.outputsVisible.has(id)) state.outputsVisible.delete(id);
     else state.outputsVisible.add(id);
     render();
-    requestAnimationFrame(() => fitToView());
   }
 
   function toggleInputs(id) {
     if (state.inputsVisible.has(id)) state.inputsVisible.delete(id);
     else state.inputsVisible.add(id);
     render();
-    requestAnimationFrame(() => fitToView());
   }
 
   function collapseSubtree(id) {
@@ -1023,7 +1020,6 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
       }
     });
     render();
-    requestAnimationFrame(() => fitToView());
   }
 
   function collapseAll() {
@@ -1033,7 +1029,6 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
     state.outputsVisible.clear();
     state.inputsVisible.clear();
     render();
-    requestAnimationFrame(() => fitToView());
   }
 
   function fitToView() {
@@ -1294,7 +1289,6 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
     updateArchivedBtn(archivedBtn);
     recomputeRoots();
     render();
-    requestAnimationFrame(() => fitToView());
   });
   updateArchivedBtn(archivedBtn);
   toolbarEl.appendChild(archivedBtn);

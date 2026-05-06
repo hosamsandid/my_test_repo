@@ -162,6 +162,7 @@ function writeLastResponseAt() {
 }
 
 let activeInvocations = 0;
+let activeClaudeProc = null;
 
 // ============================================================
 // Claude CLI
@@ -239,6 +240,7 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT,
       env: { ...process.env, HOME: "/root" },
       stdio: ["ignore", "pipe", "pipe"],
     });
+    activeClaudeProc = proc;
 
     let stderr = "";
     let lineBuf = "";
@@ -288,6 +290,7 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT,
     }, timeoutMs);
 
     proc.on("close", (code) => {
+      if (activeClaudeProc === proc) activeClaudeProc = null;
       clearTimeout(timer);
       // Flush any remaining partial line
       if (lineBuf.trim()) {
@@ -725,6 +728,18 @@ async function main() {
       }
     } finally {
       processing = false;
+    }
+  });
+
+  // IPC: accept stop-session signal from orchestrator to kill an in-flight Claude invocation.
+  process.on('message', (msg) => {
+    if (msg?.type === 'stop-session') {
+      if (activeClaudeProc) {
+        console.log(`[Runner:${AGENT_ID}] Stop-session signal received — terminating Claude process`);
+        activeClaudeProc.kill('SIGTERM');
+      } else {
+        console.log(`[Runner:${AGENT_ID}] Stop-session signal received — no active invocation`);
+      }
     }
   });
 

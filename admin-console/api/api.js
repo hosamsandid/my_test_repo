@@ -1402,6 +1402,24 @@ app.delete('/api/agents/:agentId/session/:roomId/current', (req, res) => {
   res.json({ ok: true });
 });
 
+// Send a stop-session signal to the orchestrator, which forwards it via IPC
+// to the agent-runner. The runner kills any in-flight Claude invocation.
+app.post('/api/agents/:agentId/session/:roomId/stop', async (req, res) => {
+  const ids = validSessionIds(req, res);
+  if (!ids) return;
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(
+      `${orchestratorUrl}/internal/agents/${encodeURIComponent(ids.agentId)}/stop-session`,
+      { method: 'POST' },
+    );
+    const data = await resp.json();
+    res.status(resp.status).json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 /* ─── Workspace browser (read-only) ────────────────────────────────── */
 
 const WORKSPACE_FILE_MAX_BYTES = 512 * 1024; // 512 KB read cap per file

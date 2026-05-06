@@ -67,7 +67,7 @@ function startAgentProcess(config) {
 
   const child = spawn('node', ['/app/agent-runner.js'], {
     env: childEnv,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
 
   child.stdout.on('data', (d) =>
@@ -95,6 +95,19 @@ function stopAgentProcess(id) {
   proc.kill('SIGTERM');
   agentProcesses.delete(id);
   console.log(`[Orchestrator] Stopped process for agent ${id}`);
+}
+
+function stopAgentSession(id) {
+  const proc = agentProcesses.get(id);
+  if (!proc) return false;
+  try {
+    proc.send({ type: 'stop-session' });
+    console.log(`[Orchestrator] Sent stop-session to agent ${id}`);
+    return true;
+  } catch (err) {
+    console.error(`[Orchestrator] stopAgentSession ${id}: ${err.message}`);
+    return false;
+  }
 }
 
 async function startAllEnabledAgents() {
@@ -1842,6 +1855,15 @@ async function main() {
           res.end(JSON.stringify({ error: err.message }));
         }
       })();
+      return;
+    }
+
+    const stopSessionMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/stop-session$/);
+    if (stopSessionMatch) {
+      const id = decodeURIComponent(stopSessionMatch[1]);
+      const ok = stopAgentSession(id);
+      res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(ok ? { ok: true } : { error: 'Agent not running' }));
       return;
     }
 

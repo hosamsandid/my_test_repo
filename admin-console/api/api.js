@@ -268,18 +268,57 @@ app.get('/api/agents/:id', (req, res) => {
   res.json({ id, ...cfg, triggers });
 });
 
-app.put('/api/agents/:id', (req, res) => {
+app.put('/api/agents/:id', async (req, res) => {
   const { id } = req.params;
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
   const { displayName, role, enabled, briefingsPath } = req.body;
-  if (displayName !== undefined) cfg.displayName = displayName;
-  if (role !== undefined) cfg.role = role;
-  if (enabled !== undefined) cfg.enabled = enabled;
-  if (briefingsPath !== undefined) cfg.briefingsPath = briefingsPath;
-  writeJsonAtomic(cfgPath, cfg);
-  res.json({ id, ...cfg });
+
+  // Enable/disable goes through the orchestrator so stubs (no token yet)
+  // get fully materialized — Matrix user, workspace seeding, agent-runner
+  // process — on first activation. For already-materialized agents this
+  // just (re)spawns or stops the runner.
+  if (enabled !== undefined && enabled !== (cfg.enabled !== false)) {
+    const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+    const action = enabled ? 'enable' : 'disable';
+    try {
+      const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/${action}`, {
+        method: 'POST',
+      });
+      const data = await resp.json();
+      if (!resp.ok) return res.status(resp.status).json(data);
+      // Re-read the updated config — orchestrator wrote the canonical version.
+    } catch (err) {
+      return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+    }
+  }
+
+  // Apply the rest of the field updates directly to the on-disk config.
+  // (The orchestrator's enable/disable already wrote enabled itself.)
+  const fresh = readJsonFile(cfgPath, cfg);
+  if (displayName !== undefined) fresh.displayName = displayName;
+  if (role !== undefined) fresh.role = role;
+  if (briefingsPath !== undefined) fresh.briefingsPath = briefingsPath;
+  writeJsonAtomic(cfgPath, fresh);
+  res.json({ id, ...fresh });
+});
+
+/* ─── BP stub sync ──────────────────────────────────────────────────── */
+
+app.post('/api/agents/:id/sync-bps', async (req, res) => {
+  const { id } = req.params;
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/orchestrators/${encodeURIComponent(id)}/sync-bps`, {
+      method: 'POST',
+    });
+    const data = await resp.json();
+    if (!resp.ok) return res.status(resp.status).json(data);
+    res.json(data);
+  } catch (err) {
+    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
 });
 
 app.post('/api/agents', async (req, res) => {

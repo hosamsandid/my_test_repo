@@ -14,6 +14,7 @@ const path = require("path");
 const HOMESERVER = process.env.MATRIX_HOMESERVER;
 const CONDUWUIT_ADMIN_TOKEN = process.env.CONDUWUIT_ADMIN_TOKEN;
 const CONDUWUIT_ADMIN_ROOM = process.env.CONDUWUIT_ADMIN_ROOM;
+const BP_EXPLORER_URL = process.env.BP_EXPLORER_URL || "http://bp-explorer:8765";
 
 const AGENTS_DIR = "/workspace/agents";
 const BLUEPRINTS_DIR = "/workspace/blueprints";
@@ -626,6 +627,71 @@ async function setDisplayName(token, userId, displayName) {
 }
 
 // ============================================================
+// BriefingPack helpers
+// ============================================================
+
+// Fetch the list of Briefing Packs from bp-explorer for a given orchestrator
+// agent. The workspace path passed to bp-explorer is the absolute path inside
+// the shared agent-pool-workspace volume; bp-explorer expects exactly that
+// shape and looks for `<path>/artifacts/briefings/`.
+async function fetchBriefingPacks(orchestratorId, briefingsPath) {
+  const rel = briefingsPath ? briefingsPath.replace(/^\/+|\/+$/g, "") : "";
+  const workspace = path.join("/workspace/agents", orchestratorId, rel);
+  const url = `${BP_EXPLORER_URL}/api/briefings?workspace=${encodeURIComponent(workspace)}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`bp-explorer ${res.status}: ${detail.slice(0, 200)}`);
+  }
+  const data = await res.json();
+  return Array.isArray(data) ? data : [];
+}
+
+// Build the agent id for a BP-instance stub. Schema: `<slug>-<8-hex>` if a
+// slug is available, else `bp-<8-hex>`. The hash prefix disambiguates BPs
+// that share a slug.
+function bpInstanceAgentId(bp) {
+  const hash = (bp.id || "").replace(/[^0-9a-f]/gi, "").slice(0, 8) || "unknown0";
+  const slug = (bp.slug || "").trim().toLowerCase();
+  return slug ? `${slug}-${hash}` : `bp-${hash}`;
+}
+
+// Pick the best displayName for a stub: BP title, falling back to a humanized
+// slug, then to the agent id. Matters because the user sees this in the UI.
+function bpInstanceDisplayName(bp, agentId) {
+  const title = (bp.title || "").trim();
+  if (title) return title;
+  const slug = (bp.slug || "").trim();
+  if (slug) {
+    return slug
+      .split(/[-_]+/)
+      .filter(Boolean)
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(" ");
+  }
+  return agentId;
+}
+
+// Default system prompt used when creating an agent without an explicit
+// systemPrompt — currently only meaningful for the orchestrator role.
+function defaultSystemPromptFor(role, extra = {}) {
+  if (role === "orchestrator") {
+    const briefingsPath = extra.briefingsPath || "(unset)";
+    return [
+      `Du bist ein Orchestrator-Agent.`,
+      ``,
+      `Du verwaltest die Briefing Packs im Verzeichnis \`${briefingsPath}\`. ` +
+        `Jeder Briefing Pack in diesem Verzeichnis kann zu einer eigenständigen Agent-Instanz werden, ` +
+        `die du betreust.`,
+      ``,
+      `Wenn ein Mensch dir Fragen stellt, hilf ihm, den Stand der Briefing Packs einzuordnen, ` +
+        `Status-Wechsel zu erklären und einzelne Instanzen zu verstehen.`,
+    ].join("\n");
+  }
+  return "";
+}
+
+// ============================================================
 // Orchestrator (backend service — no Matrix routing identity)
 //
 // The orchestrator runs as a pure backend service: it manages the per-agent
@@ -656,6 +722,20 @@ class Orchestrator {
     for (const id of listAgentIds()) {
       const config = loadAgentConfig(id);
       if (config) this.agentConfigs.set(id, { config });
+    }
+
+    // Migrate orchestrator agents created before the role gained a Matrix
+    // identity. Errors are logged and swallowed so a Matrix outage doesn't
+    // prevent the rest of the orchestrator from starting — failed migrations
+    // retry on the next container restart.
+    for (const [id, { config }] of this.agentConfigs) {
+      if (config.role !== "orchestrator") continue;
+      if (config.token) continue;
+      try {
+        await this.materializeOrchestrator(id);
+      } catch (err) {
+        console.error(`[Orchestrator] Migration failed for ${id}: ${err.message}`);
+      }
     }
 
     // Start all enabled agent containers
@@ -702,6 +782,11 @@ class Orchestrator {
     // Seed agent workspace using the chosen environment
     const seedResult = seedAgentWorkspace(id, env);
 
+    const effectivePrompt =
+      systemPrompt && systemPrompt.trim()
+        ? systemPrompt
+        : defaultSystemPromptFor(role, extra);
+
     const config = {
       id,
       displayName,
@@ -709,10 +794,11 @@ class Orchestrator {
       token,
       role,
       environmentId: env.id,
+      ...(role === "orchestrator" && extra.briefingsPath && { briefingsPath: extra.briefingsPath }),
       enabled: true,
     };
     saveAgentConfig(id, config);
-    saveAgentPrompt(id, systemPrompt, role, env);
+    saveAgentPrompt(id, effectivePrompt, role, env);
 
     if (role === "autonomous" && extra.schedule && extra.taskPrompt) {
       saveTriggers(id, [{
@@ -728,13 +814,189 @@ class Orchestrator {
     this.agentConfigs.set(id, { config });
     startAgentProcess(config);
 
+    // For orchestrator agents: scan the briefings directory and create a
+    // disabled stub for each BP. Errors are non-fatal — the orchestrator
+    // itself is already up; the user can retry the sync from the UI.
+    let bpStubs = [];
+    if (role === "orchestrator" && extra.briefingsPath) {
+      try {
+        bpStubs = await this.syncBpStubs(id);
+      } catch (err) {
+        console.error(`[Orchestrator] Stub sync failed for ${id}: ${err.message}`);
+      }
+    }
+
     return {
       id,
       userId,
       seeded: seedResult.seeded,
       warnings: seedResult.warnings || [],
       clones: seedResult.clones || [],
+      ...(role === "orchestrator" && { bpStubs: bpStubs.length }),
     };
+  }
+
+  // Scan an orchestrator agent's briefings directory and ensure a disabled
+  // stub config exists for each BP. Returns the list of stub agent IDs that
+  // are now present (both newly created and already existing).
+  //
+  // Stubs carry no Matrix identity, no token, and no seeded workspace —
+  // those are materialized on first activation via enableAgent().
+  async syncBpStubs(orchestratorId) {
+    const orchCfg = loadAgentConfig(orchestratorId);
+    if (!orchCfg) throw new Error(`Orchestrator '${orchestratorId}' not found`);
+    if (orchCfg.role !== "orchestrator") {
+      throw new Error(`Agent '${orchestratorId}' is not an orchestrator`);
+    }
+    if (!orchCfg.briefingsPath) {
+      throw new Error(`Orchestrator '${orchestratorId}' has no briefingsPath configured`);
+    }
+
+    const bps = await fetchBriefingPacks(orchestratorId, orchCfg.briefingsPath);
+    const present = [];
+    let created = 0;
+
+    for (const bp of bps) {
+      if (!bp || !bp.id) continue;
+      const stubId = bpInstanceAgentId(bp);
+      present.push(stubId);
+      if (loadAgentConfig(stubId)) continue; // already a stub or activated agent
+
+      const stubConfig = {
+        id: stubId,
+        displayName: bpInstanceDisplayName(bp, stubId),
+        role: "bp-instance",
+        parentOrchestratorId: orchestratorId,
+        bpId: bp.id,
+        ...(bp.slug && { bpSlug: bp.slug }),
+        environmentId: orchCfg.environmentId,
+        enabled: false,
+      };
+      saveAgentConfig(stubId, stubConfig);
+      this.agentConfigs.set(stubId, { config: stubConfig });
+      created += 1;
+    }
+
+    if (created > 0) {
+      console.log(
+        `[Orchestrator] BP stubs synced for ${orchestratorId}: ${created} new, ${present.length} total`
+      );
+    }
+    return present;
+  }
+
+  // Materialize a stub bp-instance agent (or re-enable a previously-active
+  // one). Idempotent: a stub gets full provisioning on the first call;
+  // subsequent calls just (re)spawn the agent-runner process.
+  async enableAgent(id) {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) throw new Error(`Agent '${id}' not found`);
+
+    // Already-materialized agents: just flip enabled and respawn.
+    if (cfg.token) {
+      const updated = { ...cfg, enabled: true };
+      saveAgentConfig(id, updated);
+      this.agentConfigs.set(id, { config: updated });
+      startAgentProcess(updated);
+      return { id, materialized: false, enabled: true };
+    }
+
+    // Stub: full materialization.
+    if (cfg.role !== "bp-instance") {
+      throw new Error(`Agent '${id}' is a stub but has unexpected role '${cfg.role}'`);
+    }
+    const env = loadEnvironment(cfg.environmentId);
+    if (!env) throw new Error(`Working Environment '${cfg.environmentId}' not found`);
+
+    const password = `agent-${id}-${Date.now()}`;
+    const userId = `@${id}:local`;
+
+    if (this.adminClient) await ensureMatrixUser(this.adminClient, id, password);
+    const token = await loginMatrixUser(id, password);
+    await setDisplayName(token, userId, cfg.displayName);
+
+    const seedResult = seedAgentWorkspace(id, env);
+
+    const updated = {
+      ...cfg,
+      userId,
+      token,
+      enabled: true,
+    };
+    saveAgentConfig(id, updated);
+
+    // Write a minimal AGENT-PROMPT.md if missing — the BP-aware prompt
+    // engineering follows in a separate iteration.
+    const promptPath = path.join(agentDir(id), "AGENT-PROMPT.md");
+    if (!fs.existsSync(promptPath)) {
+      const prompt =
+        `Du bist die Agenten-Instanz für den Briefing Pack \`${cfg.bpId}\`` +
+        (cfg.bpSlug ? ` (\`${cfg.bpSlug}\`)` : "") +
+        `.\n\nDein Briefing liegt im verbundenen Repo. Lies es vor der ersten Antwort.`;
+      saveAgentPrompt(id, prompt, "bp-instance", env);
+    }
+
+    this.agentConfigs.set(id, { config: updated });
+    startAgentProcess(updated);
+
+    console.log(`[Orchestrator] Materialized bp-instance ${id} (parent=${cfg.parentOrchestratorId}, bp=${cfg.bpId})`);
+    return {
+      id,
+      materialized: true,
+      enabled: true,
+      seeded: seedResult.seeded,
+      warnings: seedResult.warnings || [],
+      clones: seedResult.clones || [],
+    };
+  }
+
+  // Disable an agent: stop its process, mark enabled=false. Keeps token and
+  // workspace intact so it can be re-enabled with a single click.
+  async disableAgent(id) {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) throw new Error(`Agent '${id}' not found`);
+    stopAgentProcess(id);
+    const updated = { ...cfg, enabled: false };
+    saveAgentConfig(id, updated);
+    this.agentConfigs.set(id, { config: updated });
+    return { id, enabled: false };
+  }
+
+  // Materialize an existing config-only orchestrator agent (created before
+  // the orchestrator role gained Matrix identity). Idempotent — if the
+  // config already has a token, this is a no-op. Errors are thrown so the
+  // caller can decide whether to abort or continue.
+  async materializeOrchestrator(id) {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) throw new Error(`Agent '${id}' not found`);
+    if (cfg.role !== "orchestrator") throw new Error(`Agent '${id}' is not an orchestrator`);
+    if (cfg.token) return cfg; // already materialized
+
+    const env = loadEnvironment(cfg.environmentId);
+    if (!env) throw new Error(`Working Environment '${cfg.environmentId}' not found`);
+
+    const password = `agent-${id}-${Date.now()}`;
+    const userId = `@${id}:local`;
+
+    if (this.adminClient) await ensureMatrixUser(this.adminClient, id, password);
+    const token = await loginMatrixUser(id, password);
+    await setDisplayName(token, userId, cfg.displayName);
+
+    // Workspace was already seeded at config-create time; no second seed.
+    const updated = { ...cfg, userId, token, enabled: true };
+    saveAgentConfig(id, updated);
+
+    // If AGENT-PROMPT.md is missing (config-only created without it), write a default.
+    const promptPath = path.join(agentDir(id), "AGENT-PROMPT.md");
+    if (!fs.existsSync(promptPath)) {
+      saveAgentPrompt(id, defaultSystemPromptFor("orchestrator", { briefingsPath: cfg.briefingsPath }), "orchestrator", env);
+    }
+
+    this.agentConfigs.set(id, { config: updated });
+    startAgentProcess(updated);
+
+    console.log(`[Orchestrator] Materialized orchestrator agent ${id}`);
+    return updated;
   }
 
   // ===========================================================
@@ -1294,6 +1556,62 @@ async function main() {
       return;
     }
 
+    // ── Enable / Disable an agent (with stub materialization) ────────────
+    const enableMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/enable$/);
+    if (enableMatch) {
+      const id = decodeURIComponent(enableMatch[1]);
+      (async () => {
+        try {
+          const result = await orchestrator.enableAgent(id);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] enableAgent error for ${id}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404 : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      })();
+      return;
+    }
+
+    const disableMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/disable$/);
+    if (disableMatch) {
+      const id = decodeURIComponent(disableMatch[1]);
+      (async () => {
+        try {
+          const result = await orchestrator.disableAgent(id);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] disableAgent error for ${id}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404 : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      })();
+      return;
+    }
+
+    // ── Re-scan briefings directory for an orchestrator ──────────────────
+    const syncBpsMatch = req.method === 'POST' && req.url.match(/^\/internal\/orchestrators\/([^/]+)\/sync-bps$/);
+    if (syncBpsMatch) {
+      const orchId = decodeURIComponent(syncBpsMatch[1]);
+      (async () => {
+        try {
+          const stubs = await orchestrator.syncBpStubs(orchId);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ orchestratorId: orchId, stubs, total: stubs.length }));
+        } catch (err) {
+          console.error(`[Orchestrator] sync-bps error for ${orchId}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404 : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      })();
+      return;
+    }
+
     if (req.method !== 'POST' || req.url !== '/internal/agents') {
       res.writeHead(404); res.end(); return;
     }
@@ -1323,37 +1641,10 @@ async function main() {
           return;
         }
 
-        if (role === 'orchestrator') {
-          // Orchestrator-role agents: seed workspace but no Matrix user, no process
-          const env = loadEnvironment(environmentId);
-          if (!env) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: `Working Environment not found: ${environmentId}` }));
-            return;
-          }
-          const seedResult = seedAgentWorkspace(id, env);
-          const config = {
-            id,
-            displayName,
-            role: 'orchestrator',
-            environmentId: env.id,
-            briefingsPath: briefingsPath || null,
-            enabled: true,
-          };
-          saveAgentConfig(id, config);
-          orchestrator.agentConfigs.set(id, { config });
-          console.log(`[Orchestrator] Created orchestrator agent ${id} (briefingsPath=${briefingsPath || 'none'})`);
-          res.writeHead(201, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            id,
-            seeded: seedResult.seeded,
-            warnings: seedResult.warnings || [],
-            clones: seedResult.clones || [],
-          }));
-          return;
-        }
-
-        const extra = role === 'autonomous' ? { schedule, taskPrompt } : {};
+        const extra =
+          role === 'autonomous' ? { schedule, taskPrompt } :
+          role === 'orchestrator' ? { briefingsPath: briefingsPath || null } :
+          {};
         const result = await orchestrator.createAgent(id, displayName, role, systemPrompt, environmentId, extra);
         res.writeHead(201, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));

@@ -677,8 +677,11 @@ async function main() {
 
   await client.start();
 
-  // Start trigger scheduler for autonomous agents
-  if (role === "autonomous") {
+  // Start trigger scheduler for autonomous and orchestrator agents.
+  // Orchestrator agents will use this scheduler for the BP claim loop
+  // (added in a follow-up); for now they just behave like an expert that
+  // can also be cron-driven.
+  if (role === "autonomous" || role === "orchestrator") {
     const scheduler = new TriggerScheduler(client);
     scheduler.start();
   }

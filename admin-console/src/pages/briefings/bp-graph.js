@@ -38,6 +38,24 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
   svgEdges.style.pointerEvents = 'none';
   canvas.appendChild(svgEdges);
 
+  // Inject shared styles once (animations + badge colours)
+  if (!document.getElementById('bp-graph-styles')) {
+    const style = document.createElement('style');
+    style.id = 'bp-graph-styles';
+    style.textContent = `
+      @keyframes bp-node-pulse {
+        0%   { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4); }
+        70%  { box-shadow: 0 0 0 8px rgba(59, 130, 246, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+      }
+      .bp-badge { display:inline-block; padding:1px 6px; border-radius:3px; font-size:10px; font-weight:500; }
+      .bp-badge-rigor-high     { background:rgba(249,115,22,0.15); color:#f97316; border:1px solid rgba(249,115,22,0.4); }
+      .bp-badge-rigor-standard { background:rgba(107,114,128,0.15); color:#9ca3af; border:1px solid rgba(107,114,128,0.4); }
+      .bp-badge-revision       { background:rgba(99,102,241,0.15);  color:#818cf8; border:1px solid rgba(99,102,241,0.4); }
+    `;
+    document.head.appendChild(style);
+  }
+
   // Loading indicator
   const loadingEl = document.createElement('div');
   loadingEl.textContent = 'Loading briefings…';
@@ -47,8 +65,32 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
   // Zoom display
   const zoomEl = document.createElement('div');
   zoomEl.textContent = '100%';
-  zoomEl.style.cssText = 'position:absolute;bottom:8px;right:12px;font-size:11px;color:#888;pointer-events:none;z-index:10;';
+  zoomEl.style.cssText = 'position:absolute;bottom:8px;right:12px;font-size:11px;color:#888;pointer-events:none;z-index:20;';
   viewport.appendChild(zoomEl);
+
+  // Toolbar (buttons wired after functions are defined below)
+  const toolbarEl = document.createElement('div');
+  toolbarEl.style.cssText = 'position:absolute;top:12px;left:12px;z-index:20;display:flex;gap:6px;align-items:center;';
+  viewport.appendChild(toolbarEl);
+
+  // Status legend
+  const legendEl = document.createElement('div');
+  legendEl.style.cssText = 'position:absolute;bottom:16px;left:50%;transform:translateX(-50%);background:rgba(20,20,30,0.88);backdrop-filter:blur(4px);border:1px solid #333;border-radius:8px;padding:6px 14px;display:flex;gap:10px;align-items:center;z-index:20;pointer-events:none;font-size:11px;white-space:nowrap;';
+  const _mkSwatch = (bg, label, dashed) =>
+    `<span style="display:flex;align-items:center;gap:4px">` +
+    `<span style="width:10px;height:10px;border-radius:2px;display:inline-block;background:${bg};` +
+    (dashed ? `border:1px dashed ${bg};background-image:repeating-linear-gradient(-45deg,transparent,transparent 2px,rgba(168,85,247,0.2) 2px,rgba(168,85,247,0.2) 4px);` : '') +
+    `"></span><span style="color:#aaa">${label}</span></span>`;
+  legendEl.innerHTML =
+    `<span style="color:#666;font-size:10px;margin-right:2px">Status:</span>` +
+    _mkSwatch('#e05d6f', 'Draft') +
+    _mkSwatch('#f59e0b', 'Ready') +
+    _mkSwatch('#3b82f6', 'Dispatched') +
+    _mkSwatch('#3b82f6', 'Claimed') +
+    _mkSwatch('#22c55e', 'Completed') +
+    _mkSwatch('#34d399', 'Reviewed') +
+    _mkSwatch('#a855f7', 'Stale', true);
+  viewport.appendChild(legendEl);
 
   // ─── State ──────────────────────────────────────────────────────────
   const state = {
@@ -259,7 +301,7 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
   }
 
   function getNodeHeight(id) {
-    const el = canvas.querySelector(`.node[data-id="${id}"]`);
+    const el = canvas.querySelector(`.bp-node[data-id="${id}"]`);
     if (el) return el.offsetHeight;
     let h = 90;
     if (state.expanded.has(id))      h += 150;
@@ -478,7 +520,7 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
     const visible    = getVisibleNodes();
     const visibleIds = new Set(visible.map(n => n.id));
 
-    canvas.querySelectorAll('.node, .artifact-node').forEach(el => el.remove());
+    canvas.querySelectorAll('.bp-node, .artifact-node').forEach(el => el.remove());
 
     visible.forEach(n => {
       const bp  = state.byId[n.id];
@@ -716,17 +758,35 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
 
   function applyStatusBorderColor(node, status) {
     const colors = {
-      draft:      '#6b7280',
-      ready:      '#3b82f6',
-      dispatched: '#f59e0b',
-      claimed:    '#8b5cf6',
-      completed:  '#10b981',
-      reviewed:   '#06b6d4',
-      stale:      '#ef4444',
+      draft:      '#e05d6f',
+      ready:      '#f59e0b',
+      dispatched: '#3b82f6',
+      claimed:    '#3b82f6',
+      completed:  '#22c55e',
+      reviewed:   '#34d399',
+      stale:      '#a855f7',
     };
-    if (status && colors[status]) {
-      node.style.borderColor = colors[status];
-      node.style.borderWidth = '2px';
+    const bgColors = {
+      draft:      '#1e1318',
+      ready:      '#1c1810',
+      dispatched: '#111827',
+      claimed:    '#13111e',
+      completed:  '#0f1e13',
+      reviewed:   '#0e1c19',
+      stale:      '#1a1028',
+    };
+    if (!status || !colors[status]) return;
+
+    node.style.borderColor = colors[status];
+    node.style.borderWidth = '2px';
+    node.style.background  = bgColors[status] || node.style.background;
+
+    if (status === 'stale') {
+      node.style.borderStyle = 'dashed';
+      node.style.backgroundImage = 'repeating-linear-gradient(-45deg,transparent,transparent 4px,rgba(168,85,247,0.08) 4px,rgba(168,85,247,0.08) 8px)';
+    }
+    if (status === 'dispatched') {
+      node.style.animation = 'bp-node-pulse 2.5s ease-in-out infinite';
     }
   }
 
@@ -1190,6 +1250,21 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
 
   const resizeObserver = new ResizeObserver(onResize);
   resizeObserver.observe(viewport);
+
+  // ─── Toolbar setup ────────────────────────────────────────────────────
+
+  function makeToolBtn(label, fn) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = 'padding:4px 10px;font-size:11px;border-radius:4px;border:1px solid #444;background:rgba(20,20,30,0.88);backdrop-filter:blur(4px);color:#ccc;cursor:pointer;transition:border-color 0.1s,color 0.1s;';
+    b.addEventListener('mouseover', () => { b.style.borderColor = '#666'; b.style.color = '#fff'; });
+    b.addEventListener('mouseout',  () => { b.style.borderColor = '#444'; b.style.color = '#ccc'; });
+    b.addEventListener('click', fn);
+    return b;
+  }
+  toolbarEl.appendChild(makeToolBtn('Fit',          () => { state.userTransform = false; fitToView(); }));
+  toolbarEl.appendChild(makeToolBtn('Expand All',   () => expandAll()));
+  toolbarEl.appendChild(makeToolBtn('Collapse All', () => collapseAll()));
 
   // ─── Init ─────────────────────────────────────────────────────────────
 

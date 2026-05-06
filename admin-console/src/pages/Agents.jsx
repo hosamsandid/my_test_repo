@@ -269,7 +269,7 @@ function BriefViewer({ orchestratorId, relPath }) {
   const body = useMemo(() => stripYamlFrontmatter(state.content), [state.content]);
 
   if (state.loading) {
-    return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading brief…</div>;
+    return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading…</div>;
   }
   if (state.error) {
     return (
@@ -281,7 +281,7 @@ function BriefViewer({ orchestratorId, relPath }) {
         fontSize: 'var(--eb-text-sm)',
         color: 'var(--eb-status-error)',
       }}>
-        Failed to load brief: {state.error}
+        Failed to load: {state.error}
       </div>
     );
   }
@@ -534,13 +534,13 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
         <select value={form.role} onChange={e => update('role', e.target.value)} style={inputStyle}>
           <option value="expert">Expert — responds to questions</option>
           <option value="autonomous">Autonomous — runs on schedule</option>
-          <option value="orchestrator">Orchestrator — manages BPs in a directory</option>
+          <option value="orchestrator">Orchestrator — manages missions in a directory</option>
         </select>
       </div>
 
       {form.role === 'orchestrator' && (
         <div>
-          <div style={labelStyle}>Briefings Directory</div>
+          <div style={labelStyle}>Mission Directory</div>
           <input
             style={inputStyle}
             value={form.briefingsPath}
@@ -548,7 +548,7 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
             placeholder="e.g. my-repo"
           />
           <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-            Relative path in the agent workspace. The <code>artifacts/briefings/</code> subdirectory is appended automatically. On creation, a stub is added for every BP found here.
+            Relative path in the agent workspace. The <code>artifacts/briefings/</code> subdirectory is appended automatically. On creation, a stub is added for every mission found here.
           </div>
         </div>
       )}
@@ -618,7 +618,7 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
 
       {agent.role === 'orchestrator' && (
         <div>
-          <div style={labelStyle}>Briefings Directory</div>
+          <div style={labelStyle}>Mission Directory</div>
           <input
             style={inputStyle}
             value={form.briefingsPath}
@@ -637,7 +637,7 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
             </div>
           </div>
           <div>
-            <div style={labelStyle}>Briefing Pack ID (read-only)</div>
+            <div style={labelStyle}>Mission ID (read-only)</div>
             <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
               {agent.bpId || '—'}
               {agent.bpSlug ? <span style={{ marginLeft: 8 }}>· slug: <code>{agent.bpSlug}</code></span> : null}
@@ -645,7 +645,7 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
           </div>
           {agent.briefingsPath && (
             <div>
-              <div style={labelStyle}>Briefings Directory (inherited, read-only)</div>
+              <div style={labelStyle}>Mission Directory (inherited, read-only)</div>
               <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
                 {agent.briefingsPath}
               </div>
@@ -738,8 +738,8 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
         {onOpenBrief && (
           <IconBtn
             icon={FileText}
-            label="View Briefing Pack"
-            title="View Briefing Pack file"
+            label="View mission"
+            title="View mission spec"
             onClick={() => onOpenBrief(agent)}
           />
         )}
@@ -860,12 +860,12 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
             background: 'var(--eb-bg-app)', padding: '2px 8px',
             borderRadius: 'var(--eb-radius-full)', border: '1px solid var(--eb-border-default)',
           }}>
-            {children.length} BP{children.length !== 1 ? 's' : ''}
+            {children.length} mission{children.length !== 1 ? 's' : ''}
           </span>
           <button
             onClick={() => onSyncBps(agent)}
             disabled={syncing || isStub}
-            title={isStub ? 'Activate the orchestrator first' : 'Re-scan the briefings directory'}
+            title={isStub ? 'Activate the orchestrator first' : 'Re-scan the mission directory'}
             style={{
               background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
               borderRadius: 'var(--eb-radius-md)', cursor: (syncing || isStub) ? 'not-allowed' : 'pointer',
@@ -874,7 +874,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
               opacity: (syncing || isStub) ? 0.5 : 1,
             }}
           >
-            <RefreshCw size={13} /> {syncing ? 'Syncing…' : 'Sync BPs'}
+            <RefreshCw size={13} /> {syncing ? 'Syncing…' : 'Sync'}
           </button>
           {isStub ? (
             <PrimaryBtn
@@ -914,8 +914,8 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
         children.length === 0 ? (
           <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)', textAlign: 'center', padding: 'var(--eb-space-4)' }}>
             {isStub
-              ? 'Activate the orchestrator to load its Briefing Packs.'
-              : 'No Briefing Packs found. Click Sync BPs to re-scan the directory.'}
+              ? 'Activate the orchestrator to load its missions.'
+              : 'No missions found. Click Sync to re-scan the directory.'}
           </div>
         ) : (
           treeRows.map((row) => (
@@ -946,7 +946,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
       <SidePanel
         open={!!briefTarget}
         onClose={() => setBriefTarget(null)}
-        title={briefTarget ? `Briefing Pack — ${briefTarget.agent.displayName}` : ''}
+        title={briefTarget ? briefTarget.agent.displayName : ''}
         width="640px"
       >
         {briefTarget && (
@@ -1163,7 +1163,7 @@ export default function Agents() {
         <div>
           <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>Agents</h1>
           <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', margin: 'var(--eb-space-1) 0 0' }}>
-            Each agent runs as its own Matrix user. Orchestrator agents auto-list one stub per Briefing Pack — activate to materialise.
+            Each agent runs as its own Matrix user. Orchestrator agents auto-list one stub per mission — activate to materialise.
           </p>
         </div>
         <PrimaryBtn onClick={() => openPanel('create', null)}>

@@ -71,7 +71,7 @@ export default function SystemConfig() {
           textTransform: 'uppercase',
           letterSpacing: '0.05em',
         }}>
-          ACE / Briefing Packs
+          ACE / Missions
         </div>
 
         <div style={{ padding: 'var(--eb-space-4)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>

@@ -538,7 +538,8 @@ class TriggerScheduler {
 // Sequential — overlap-guarded so a long activation doesn't pile up ticks.
 // ============================================================
 class ClaimLoopScheduler {
-  constructor(intervalMs = 30_000) {
+  constructor(client, intervalMs = 30_000) {
+    this._client = client;
     this.intervalMs = intervalMs;
     this._interval = null;
     this._running = false;
@@ -564,16 +565,80 @@ class ClaimLoopScheduler {
         return;
       }
       const data = await res.json();
-      if (data.newStubs || data.activated || (data.errors && data.errors.length)) {
+      if (data.newStubs || (data.newlyDispatched && data.newlyDispatched.length)) {
         console.log(
           `[Runner:${AGENT_ID}] Claim tick: ` +
-          `${data.newStubs || 0} new, ${data.activated || 0} activated, ${(data.errors || []).length} errors`
+          `${data.newStubs || 0} new stub(s), ` +
+          `${(data.newlyDispatched || []).length} newly dispatched`
         );
+      }
+      if (data.newlyDispatched && data.newlyDispatched.length) {
+        await this.postSuggestion(data.newlyDispatched);
       }
     } catch (err) {
       console.error(`[Runner:${AGENT_ID}] Claim tick failed: ${err.message}`);
     } finally {
       this._running = false;
+    }
+  }
+
+  async postSuggestion(items) {
+    const dmRoom = loadDmRoomId();
+    if (!dmRoom) {
+      console.log(
+        `[Runner:${AGENT_ID}] ${items.length} new dispatch(es) detected but no DM room exists yet — ` +
+        `the user must open the chat once before suggestions can be posted.`
+      );
+      return;
+    }
+
+    const list = items.map((bp) =>
+      `- **${bp.bpTitle}** (slug \`${bp.bpSlug || "—"}\`, id \`${bp.bpId}\`)\n` +
+      `  Stub agent id: \`${bp.stubId}\`\n` +
+      `  Claim with: \`curl -s -X POST http://localhost:4002/internal/agents/${bp.stubId}/claim\``
+    ).join("\n");
+
+    const prompt =
+      `SYSTEM NOTICE — claim loop tick.\n\n` +
+      `${items.length} Briefing Pack${items.length === 1 ? " has" : "s have"} just transitioned to ` +
+      `\`status: dispatched\` and ${items.length === 1 ? "is" : "are"} awaiting a claim:\n\n` +
+      `${list}\n\n` +
+      `Your task: post a brief, friendly message to the user in this chat asking whether ` +
+      `they want you to claim ${items.length === 1 ? "this BP" : "these BPs"}. ` +
+      `Keep it short. Don't run any commands yet — wait for the user's reply. If the user ` +
+      `agrees, run the curl command shown above for the BP(s) they confirmed. If the user ` +
+      `declines, just acknowledge.`;
+
+    const correlationId = `claim-suggest:${Date.now()}`;
+    try {
+      appendEvent(AGENT_ID, dmRoom, {
+        type: "claude.invoke",
+        correlationId,
+        promptChars: prompt.length,
+      });
+    } catch { /* best effort */ }
+
+    let result;
+    try {
+      result = await callClaude(prompt, { roomId: dmRoom, correlationId });
+    } catch (err) {
+      console.error(`[Runner:${AGENT_ID}] Claim suggestion Claude call failed: ${err.message}`);
+      return;
+    }
+    if (!result || !result.trim()) return;
+
+    try {
+      const eventId = await sendFormatted(this._client, dmRoom, result);
+      try {
+        appendEvent(AGENT_ID, dmRoom, {
+          type: "message.posted",
+          correlationId,
+          eventId,
+        });
+      } catch { /* best effort */ }
+      writeLastResponseAt();
+    } catch (err) {
+      console.error(`[Runner:${AGENT_ID}] Could not post claim suggestion: ${err.message}`);
     }
   }
 
@@ -765,10 +830,12 @@ async function main() {
     scheduler.start();
   }
 
-  // Orchestrator agents additionally run the auto-claim loop: scan their
-  // briefings directory and activate any stub whose BP is dispatched.
+  // Orchestrator agents additionally run the claim loop: scan their
+  // briefings directory and post a DM suggestion for each newly-dispatched
+  // BP. The actual claim happens when the user agrees and Claude runs the
+  // curl command included in the suggestion.
   if (role === "orchestrator") {
-    const claimLoop = new ClaimLoopScheduler();
+    const claimLoop = new ClaimLoopScheduler(client);
     claimLoop.start();
   }
 

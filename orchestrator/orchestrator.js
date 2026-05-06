@@ -666,6 +666,104 @@ async function setDisplayName(token, userId, displayName) {
 }
 
 // ============================================================
+// Git helpers (pull + commit + push from the orchestrator workspace)
+// ============================================================
+
+// Throttle the per-orchestrator workspace pull to at most once per
+// _PULL_THROTTLE_MS, so the 30s claim-tick can call it cheaply on every
+// iteration without hammering the remote.
+const _pullThrottles = new Map(); // orchestratorId -> last pull timestamp ms
+const _PULL_THROTTLE_MS = 60_000;
+
+// Build the GIT_SSH_COMMAND value for an env with an attached SSH key. Falls
+// back to null so the caller can leave process.env's default in place (the
+// orchestrator container ships with a baseline SSH identity mounted via
+// docker-compose).
+function buildGitSshCommand(env) {
+  const repos = Array.isArray(env?.repositories) ? env.repositories : [];
+  const sshKeyId = repos.find((r) => r && r.sshKeyId)?.sshKeyId;
+  if (!sshKeyId) return null;
+  const keyPath = path.join(SSH_KEYS_DIR, sshKeyId);
+  if (!fs.existsSync(keyPath)) return null;
+  try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
+  return `ssh -i ${keyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8`;
+}
+
+// Best-effort `git fetch && git pull --ff-only` in the orchestrator's
+// briefings workspace clone. Throttled per orchestrator. Failures are
+// logged but never throw — a stale local main is preferable to a broken
+// claim tick.
+function pullOrchestratorWorkspace(orchestratorId, briefingsPath, env) {
+  const rel = (briefingsPath || "").replace(/^\/+|\/+$/g, "");
+  const workspace = path.join("/workspace/agents", orchestratorId, rel);
+  if (!fs.existsSync(path.join(workspace, ".git"))) {
+    return { skipped: "not-a-git-repo" };
+  }
+  const last = _pullThrottles.get(orchestratorId) || 0;
+  if (Date.now() - last < _PULL_THROTTLE_MS) return { skipped: "throttled" };
+  _pullThrottles.set(orchestratorId, Date.now());
+
+  const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+  const sshCmd = buildGitSshCommand(env);
+  if (sshCmd) gitEnv.GIT_SSH_COMMAND = sshCmd;
+
+  try {
+    execFileSync("git", ["fetch", "origin"], {
+      cwd: workspace, env: gitEnv, stdio: "pipe", timeout: 30_000,
+    });
+    execFileSync("git", ["pull", "--ff-only"], {
+      cwd: workspace, env: gitEnv, stdio: "pipe", timeout: 30_000,
+    });
+    return { pulled: true };
+  } catch (err) {
+    const detail = (err.stderr || err.stdout || err.message || "").toString().trim().slice(0, 200);
+    console.warn(`[Orchestrator] Pull failed for ${orchestratorId}: ${detail}`);
+    return { failed: true, detail };
+  }
+}
+
+// Update or insert a top-level YAML key in a frontmatter block. Quotes the
+// value if it contains characters that would break unquoted YAML.
+function upsertYamlField(yaml, key, value) {
+  const v = /[:\s#"]/.test(value) ? `"${String(value).replace(/"/g, '\\"')}"` : value;
+  const re = new RegExp(`^${key}\\s*:.*$`, "m");
+  if (re.test(yaml)) return yaml.replace(re, `${key}: ${v}`);
+  return yaml.replace(/\s*$/, `\n${key}: ${v}\n`);
+}
+
+// Patch a brief.md frontmatter to record the claim. Throws if no frontmatter
+// is present (we don't auto-create one — that's a brief we don't understand).
+function patchBriefForClaim(content, stubId) {
+  const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+  if (!fmMatch) throw new Error("brief.md has no YAML frontmatter");
+  let fm = fmMatch[1];
+  fm = upsertYamlField(fm, "status", "claimed");
+  fm = upsertYamlField(fm, "agent-id", stubId);
+  fm = upsertYamlField(fm, "claimed", new Date().toISOString());
+  return content.replace(fmMatch[0], `---\n${fm.replace(/\n+$/, "")}\n---`);
+}
+
+// Persistent notified-set per orchestrator. Tracks bpIds we've already
+// surfaced to the user so the claim loop doesn't re-suggest every tick.
+function claimStateFile(orchestratorId) {
+  return path.join(agentDir(orchestratorId), ".claim-state.json");
+}
+function loadClaimState(orchestratorId) {
+  try {
+    return JSON.parse(fs.readFileSync(claimStateFile(orchestratorId), "utf8"));
+  } catch {
+    return { notified: [] };
+  }
+}
+function saveClaimState(orchestratorId, state) {
+  try {
+    fs.writeFileSync(claimStateFile(orchestratorId), JSON.stringify(state, null, 2));
+  } catch (err) {
+    console.error(`[Orchestrator] Could not save claim-state for ${orchestratorId}: ${err.message}`);
+  }
+}
+
+// ============================================================
 // BriefingPack helpers
 // ============================================================
 
@@ -755,6 +853,30 @@ function defaultSystemPromptFor(role, extra = {}) {
       ``,
       `When a human asks you questions, help them understand the state of the Briefing Packs, ` +
         `explain status transitions, and reason about individual instances.`,
+      ``,
+      `## Claiming Briefing Packs`,
+      ``,
+      `A background loop watches the briefings directory. Whenever a BP transitions to ` +
+        `\`status: dispatched\` (typically by a human or a teammate flipping the YAML ` +
+        `frontmatter and pushing), you'll receive a SYSTEM NOTICE message in this chat ` +
+        `listing the newly-dispatched BP(s) along with a \`curl\` command per BP.`,
+      ``,
+      `Your job when a SYSTEM NOTICE arrives is to **ask the user whether to claim**. ` +
+        `Don't claim on your own. Wait for the user's reply.`,
+      ``,
+      `- If the user agrees, run the \`curl\` command for the relevant BP(s). ` +
+        `Each call writes \`status: claimed\` plus your stub agent's id into the BP's ` +
+        `\`brief.md\`, commits, and pushes — making the claim visible to teammates ` +
+        `immediately. The corresponding BP-instance agent is then materialised and ` +
+        `starts work.`,
+      `- If the user declines, just acknowledge. The notice won't repeat unless the ` +
+        `BP gets re-dispatched.`,
+      `- The user may also ask you to claim a specific BP at any time (e.g. *"claim the ` +
+        `customer-migration one"*). You can run the same \`curl\` directly — the ` +
+        `endpoint is \`http://localhost:4002/internal/agents/<stub-agent-id>/claim\`.`,
+      ``,
+      `If a \`curl\` returns an HTTP 409 / "Push failed", a teammate claimed first. ` +
+        `Tell the user, then move on.`,
     ].join("\n");
   }
   return "";
@@ -774,9 +896,6 @@ class Orchestrator {
     this.adminClient = null;
     // Map of agentId → { config } (no per-agent Matrix clients — they run in containers)
     this.agentConfigs = new Map();
-    // Per-stub cooldown to avoid hot-looping on repeated activation failures.
-    // Map: stubId → epoch ms until which the claim loop will skip this stub.
-    this._claimCooldowns = new Map();
   }
 
   async init() {
@@ -960,85 +1079,104 @@ class Orchestrator {
     return present;
   }
 
-  // One iteration of the auto-claim loop for an orchestrator. Re-syncs BP
-  // stubs (so newly-added BPs get their stub immediately) and activates any
-  // stub whose BP is in status='dispatched'. Per-stub error cooldown keeps
-  // failed activations from hot-looping.
+  // One iteration of the claim loop. Pulls main (60s throttled), re-syncs
+  // BP stubs for any new BPs, and detects which dispatched BPs are
+  // newly-actionable since the last tick. Returns the deltas — actually
+  // posting the suggestion DM and performing the claim happen elsewhere
+  // (the agent-runner reads the response and drives a Claude invocation
+  // per newly-dispatched BP).
   //
   // Called periodically by the orchestrator's own agent-runner process via
   // POST /internal/orchestrators/:id/claim-tick. Manual UI activations
-  // bypass this — they go straight to enableAgent.
+  // (Activate / Deactivate) and direct user-driven claims via the chat
+  // bypass this loop.
   async runClaimTick(orchestratorId) {
     const orchCfg = loadAgentConfig(orchestratorId);
     if (!orchCfg) throw new Error(`Orchestrator '${orchestratorId}' not found`);
     if (orchCfg.role !== "orchestrator") {
       throw new Error(`Agent '${orchestratorId}' is not an orchestrator`);
     }
-    if (!orchCfg.token) {
-      // The orchestrator itself isn't materialised yet. Nothing to do —
-      // it shouldn't even be running an agent-runner process in this state.
-      return { skipped: "orchestrator-not-materialized" };
-    }
-    if (!orchCfg.briefingsPath) {
-      return { skipped: "no-briefings-path" };
-    }
+    if (!orchCfg.token) return { skipped: "orchestrator-not-materialized" };
+    if (!orchCfg.briefingsPath) return { skipped: "no-briefings-path" };
+
+    // Pull main from origin (throttled). Failures are logged but never throw.
+    const env = loadEnvironment(orchCfg.environmentId);
+    if (env) pullOrchestratorWorkspace(orchestratorId, orchCfg.briefingsPath, env);
 
     const bps = await fetchBriefingPacks(orchestratorId, orchCfg.briefingsPath);
-    let newStubs = 0;
-    let activated = 0;
-    const errors = [];
-    const now = Date.now();
 
+    // Lazy-create stubs for any BPs we haven't seen before.
+    let newStubs = 0;
     for (const bp of bps) {
       if (!bp || !bp.id) continue;
       const stubId = bpInstanceAgentId(bp);
-      let stubCfg = loadAgentConfig(stubId);
-
-      // Lazy-create the stub if missing — same shape as syncBpStubs writes.
-      if (!stubCfg) {
-        stubCfg = {
-          id: stubId,
-          displayName: bpInstanceDisplayName(bp, stubId),
-          role: "bp-instance",
-          parentOrchestratorId: orchestratorId,
-          bpId: bp.id,
-          ...(bp.slug && { bpSlug: bp.slug }),
-          briefingsPath: orchCfg.briefingsPath,
-          environmentId: orchCfg.environmentId,
-          enabled: false,
-        };
-        saveAgentConfig(stubId, stubCfg);
-        this.agentConfigs.set(stubId, { config: stubCfg });
-        newStubs += 1;
-      }
-
-      // Activate if BP is dispatched, stub isn't yet materialised, and we're
-      // not in cooldown after a previous failure.
-      if (bp.status !== "dispatched") continue;
-      if (stubCfg.token) continue;
-      const cooldownUntil = this._claimCooldowns.get(stubId);
-      if (cooldownUntil && cooldownUntil > now) continue;
-
-      try {
-        await this.enableAgent(stubId);
-        this._claimCooldowns.delete(stubId);
-        activated += 1;
-      } catch (err) {
-        // 5-minute cooldown so a recurring failure doesn't burn cycles every tick.
-        this._claimCooldowns.set(stubId, now + 5 * 60_000);
-        errors.push({ stubId, message: err.message });
-        console.error(`[Orchestrator] Auto-claim failed for ${stubId}: ${err.message}`);
-      }
+      if (loadAgentConfig(stubId)) continue;
+      const stubConfig = {
+        id: stubId,
+        displayName: bpInstanceDisplayName(bp, stubId),
+        role: "bp-instance",
+        parentOrchestratorId: orchestratorId,
+        bpId: bp.id,
+        ...(bp.slug && { bpSlug: bp.slug }),
+        briefingsPath: orchCfg.briefingsPath,
+        environmentId: orchCfg.environmentId,
+        enabled: false,
+      };
+      saveAgentConfig(stubId, stubConfig);
+      this.agentConfigs.set(stubId, { config: stubConfig });
+      newStubs += 1;
     }
 
-    if (newStubs || activated || errors.length) {
+    // Detect newly-dispatched BPs by diffing against the persistent
+    // notified-set. A BP only enters the suggestion stream once per
+    // dispatch; if its status flips away from 'dispatched' it gets
+    // removed from the set and a future re-dispatch will re-trigger.
+    const state = loadClaimState(orchestratorId);
+    const previouslyNotified = new Set(state.notified || []);
+    const dispatchedNow = new Set();
+    const newlyDispatched = [];
+
+    for (const bp of bps) {
+      if (!bp || !bp.id) continue;
+      if (bp.status !== "dispatched") continue;
+      dispatchedNow.add(bp.id);
+
+      const stubId = bpInstanceAgentId(bp);
+      const stubCfg = loadAgentConfig(stubId);
+      // If the stub is already materialised (token present), it has already
+      // been claimed (manually or otherwise) — don't re-suggest.
+      if (stubCfg && stubCfg.token) continue;
+      if (previouslyNotified.has(bp.id)) continue;
+
+      newlyDispatched.push({
+        bpId: bp.id,
+        bpSlug: bp.slug || "",
+        bpTitle: bp.title || bp.slug || bp.id,
+        stubId,
+      });
+    }
+
+    // Notified-set update: keep only currently-dispatched BPs (auto-cleanup
+    // when status flips back), plus the new ones we just surfaced.
+    const updatedNotified = new Set(
+      [...previouslyNotified].filter((id) => dispatchedNow.has(id))
+    );
+    for (const item of newlyDispatched) updatedNotified.add(item.bpId);
+    if (
+      updatedNotified.size !== previouslyNotified.size ||
+      [...updatedNotified].some((id) => !previouslyNotified.has(id))
+    ) {
+      saveClaimState(orchestratorId, { notified: [...updatedNotified] });
+    }
+
+    if (newStubs || newlyDispatched.length) {
       console.log(
         `[Orchestrator] Claim tick for ${orchestratorId}: ` +
         `${newStubs} new stub${newStubs === 1 ? "" : "s"}, ` +
-        `${activated} activated, ${errors.length} error${errors.length === 1 ? "" : "s"}`
+        `${newlyDispatched.length} newly dispatched`
       );
     }
-    return { newStubs, activated, errors };
+    return { newStubs, newlyDispatched };
   }
 
   // Materialize a stub bp-instance agent (or re-enable a previously-active
@@ -1169,6 +1307,119 @@ class Orchestrator {
 
     console.log(`[Orchestrator] Reset ${id} to stub state`);
     return { id, reset: true };
+  }
+
+  // Claim a bp-instance: write status='claimed' + agent-id + timestamp to
+  // the BP's brief.md (in the parent orchestrator's workspace clone),
+  // commit, push to origin, then materialise the stub via enableAgent.
+  //
+  // On push failure (typically non-fast-forward — a teammate claimed first)
+  // the local commit is rolled back and the call throws. The stub stays
+  // unmaterialised so the user sees the failure, can pull, and retry.
+  async claimAgent(stubId) {
+    const cfg = loadAgentConfig(stubId);
+    if (!cfg) throw new Error(`Agent '${stubId}' not found`);
+    if (cfg.role !== "bp-instance") {
+      throw new Error(`Agent '${stubId}' is not a bp-instance (role=${cfg.role})`);
+    }
+    if (cfg.token) {
+      // Already claimed and materialised. Idempotent — return current state
+      // rather than re-running the git operations.
+      return { id: stubId, alreadyClaimed: true };
+    }
+
+    const orchId = cfg.parentOrchestratorId;
+    if (!orchId) throw new Error(`Agent '${stubId}' has no parent orchestrator`);
+    const orchCfg = loadAgentConfig(orchId);
+    if (!orchCfg) throw new Error(`Parent orchestrator '${orchId}' not found`);
+    const env = loadEnvironment(orchCfg.environmentId);
+    if (!env) throw new Error(`Working Environment '${orchCfg.environmentId}' not found`);
+    if (!orchCfg.briefingsPath) {
+      throw new Error(`Parent orchestrator '${orchId}' has no briefingsPath`);
+    }
+
+    const orchWorkspace = path.join(
+      "/workspace/agents",
+      orchId,
+      orchCfg.briefingsPath.replace(/^\/+|\/+$/g, "")
+    );
+    const bpDirName = cfg.bpSlug ? `${cfg.bpId}-${cfg.bpSlug}` : cfg.bpId;
+    const briefRel = path.join("artifacts", "briefings", bpDirName, "brief.md");
+    const briefAbs = path.join(orchWorkspace, briefRel);
+
+    if (!fs.existsSync(briefAbs)) {
+      throw new Error(`brief.md not found at ${briefAbs}`);
+    }
+
+    const original = fs.readFileSync(briefAbs, "utf8");
+    const patched = patchBriefForClaim(original, stubId);
+    if (patched !== original) {
+      fs.writeFileSync(briefAbs, patched);
+    }
+
+    // git add + commit + push, with rollback on push failure
+    const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+    const sshCmd = buildGitSshCommand(env);
+    if (sshCmd) gitEnv.GIT_SSH_COMMAND = sshCmd;
+
+    const runGit = (args, timeoutMs = 15_000) =>
+      execFileSync("git", args, {
+        cwd: orchWorkspace, env: gitEnv, stdio: "pipe", timeout: timeoutMs,
+      });
+
+    let didCommit = false;
+    try {
+      runGit(["add", briefRel]);
+      // Skip commit if nothing actually changed (e.g. brief was already in claim shape)
+      let hasChanges = true;
+      try {
+        runGit(["diff", "--cached", "--quiet"]);
+        hasChanges = false;
+      } catch { hasChanges = true; }
+
+      if (hasChanges) {
+        runGit([
+          "-c", "user.name=Orchestrator",
+          "-c", "user.email=orchestrator@e-vgh-claw.local",
+          "commit",
+          "-m", `[claim] BP ${cfg.bpSlug || cfg.bpId} by ${stubId}`,
+        ]);
+        didCommit = true;
+        try {
+          runGit(["push", "origin", "HEAD"], 30_000);
+        } catch (pushErr) {
+          // Push failed — most likely non-fast-forward. Roll back our local
+          // commit so the workspace is clean for the next pull/retry, and
+          // surface a friendly error.
+          try { runGit(["reset", "--hard", "HEAD~1"]); } catch { /* best effort */ }
+          const detail = (pushErr.stderr || pushErr.stdout || pushErr.message || "")
+            .toString().trim().slice(0, 200);
+          throw new Error(
+            `Push failed (a teammate may have claimed this BP first): ${detail}`
+          );
+        }
+      }
+    } catch (err) {
+      if (didCommit && /Push failed/.test(err.message)) throw err;
+      // Pre-commit failures: restore brief.md so we don't leave it dirty
+      try { fs.writeFileSync(briefAbs, original); } catch { /* best effort */ }
+      const detail = (err.stderr || err.message || "").toString().trim().slice(0, 200);
+      throw new Error(`Git operation failed: ${detail}`);
+    }
+
+    // Brief is now committed + pushed. Materialise the stub.
+    const enableResult = await this.enableAgent(stubId);
+
+    // Drop this BP from the notified-set so a future re-dispatch (if it ever
+    // happens) gets surfaced again.
+    const state = loadClaimState(orchId);
+    const notified = new Set(state.notified || []);
+    if (notified.delete(cfg.bpId)) {
+      saveClaimState(orchId, { notified: [...notified] });
+    }
+
+    console.log(`[Orchestrator] Claimed ${stubId} (bp=${cfg.bpId})`);
+    return { id: stubId, claimed: true, ...enableResult };
   }
 
   // Materialize an existing config-only orchestrator agent (created before
@@ -1795,6 +2046,25 @@ async function main() {
         } catch (err) {
           console.error(`[Orchestrator] disableAgent error for ${id}: ${err.message}`);
           const status = /not found/i.test(err.message) ? 404 : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      })();
+      return;
+    }
+
+    const claimMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/claim$/);
+    if (claimMatch) {
+      const id = decodeURIComponent(claimMatch[1]);
+      (async () => {
+        try {
+          const result = await orchestrator.claimAgent(id);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] claimAgent error for ${id}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404 :
+                         /push failed/i.test(err.message) ? 409 : 500;
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));
         }

@@ -809,16 +809,28 @@ function bpInstanceDisplayName(bp, agentId) {
   return agentId;
 }
 
+// Compute the path to a bp-instance's brief.md, relative to the orchestrator's
+// briefingsPath root (i.e. the project root that bp-explorer scans). Prefers
+// the authoritative `bpRelPath` recorded by bp-explorer — which preserves
+// parent/child hierarchy — and falls back to the flat
+// `artifacts/briefings/<id>-<slug>/brief.md` shape for legacy stubs that
+// pre-date hierarchical support.
+function bpInstanceBriefRelPath(cfg) {
+  if (cfg.bpRelPath) return cfg.bpRelPath.replace(/^\/+/, "");
+  const bpDirName = cfg.bpSlug ? `${cfg.bpId}-${cfg.bpSlug}` : cfg.bpId;
+  return path.join("artifacts", "briefings", bpDirName, "brief.md");
+}
+
 // Build the system prompt for a bp-instance agent. Pins down the exact
-// filesystem path of the brief.md (we know it because we know the BP id,
-// slug, and the orchestrator's briefingsPath) and points at the engineering
-// skill that defines how to actually execute a Briefing Pack.
+// filesystem path of the brief.md (we know it because the orchestrator records
+// the bp-explorer-reported relative path on the stub) and points at the
+// engineering skill that defines how to actually execute a Briefing Pack.
 function bpInstanceSystemPrompt(cfg) {
   const briefingsRoot = (cfg.briefingsPath || "").replace(/^\/+|\/+$/g, "");
-  const bpDirName = cfg.bpSlug ? `${cfg.bpId}-${cfg.bpSlug}` : cfg.bpId;
+  const briefRel = bpInstanceBriefRelPath(cfg);
   const briefPath = briefingsRoot
-    ? `./${briefingsRoot}/artifacts/briefings/${bpDirName}/brief.md`
-    : `./artifacts/briefings/${bpDirName}/brief.md`;
+    ? `./${briefingsRoot}/${briefRel}`
+    : `./${briefRel}`;
   const slugDisplay = cfg.bpSlug ? ` (\`${cfg.bpSlug}\`)` : "";
 
   return [
@@ -1068,7 +1080,17 @@ class Orchestrator {
       if (!bp || !bp.id) continue;
       const stubId = bpInstanceAgentId(bp);
       present.push(stubId);
-      if (loadAgentConfig(stubId)) continue; // already a stub or activated agent
+      const existing = loadAgentConfig(stubId);
+      if (existing) {
+        // Backfill bpRelPath onto legacy stubs that pre-date hierarchical
+        // support so the prompt and claim flow find the brief.md correctly.
+        if (bp._rel_path && existing.bpRelPath !== bp._rel_path) {
+          const updated = { ...existing, bpRelPath: bp._rel_path };
+          saveAgentConfig(stubId, updated);
+          this.agentConfigs.set(stubId, { config: updated });
+        }
+        continue;
+      }
 
       const stubConfig = {
         id: stubId,
@@ -1077,6 +1099,7 @@ class Orchestrator {
         parentOrchestratorId: orchestratorId,
         bpId: bp.id,
         ...(bp.slug && { bpSlug: bp.slug }),
+        ...(bp._rel_path && { bpRelPath: bp._rel_path }),
         // Inherited from the orchestrator so the bp-instance prompt can
         // construct an exact filesystem path to its brief.md.
         briefingsPath: orchCfg.briefingsPath,
@@ -1122,12 +1145,21 @@ class Orchestrator {
 
     const bps = await fetchBriefingPacks(orchestratorId, orchCfg.briefingsPath);
 
-    // Lazy-create stubs for any BPs we haven't seen before.
+    // Lazy-create stubs for any BPs we haven't seen before, and backfill
+    // bpRelPath onto legacy stubs that pre-date hierarchical support.
     let newStubs = 0;
     for (const bp of bps) {
       if (!bp || !bp.id) continue;
       const stubId = bpInstanceAgentId(bp);
-      if (loadAgentConfig(stubId)) continue;
+      const existing = loadAgentConfig(stubId);
+      if (existing) {
+        if (bp._rel_path && existing.bpRelPath !== bp._rel_path) {
+          const updated = { ...existing, bpRelPath: bp._rel_path };
+          saveAgentConfig(stubId, updated);
+          this.agentConfigs.set(stubId, { config: updated });
+        }
+        continue;
+      }
       const stubConfig = {
         id: stubId,
         displayName: bpInstanceDisplayName(bp, stubId),
@@ -1135,6 +1167,7 @@ class Orchestrator {
         parentOrchestratorId: orchestratorId,
         bpId: bp.id,
         ...(bp.slug && { bpSlug: bp.slug }),
+        ...(bp._rel_path && { bpRelPath: bp._rel_path }),
         briefingsPath: orchCfg.briefingsPath,
         environmentId: orchCfg.environmentId,
         enabled: false,
@@ -1316,6 +1349,7 @@ class Orchestrator {
       ...(cfg.parentOrchestratorId && { parentOrchestratorId: cfg.parentOrchestratorId }),
       ...(cfg.bpId && { bpId: cfg.bpId }),
       ...(cfg.bpSlug && { bpSlug: cfg.bpSlug }),
+      ...(cfg.bpRelPath && { bpRelPath: cfg.bpRelPath }),
       ...(cfg.blueprintId && { blueprintId: cfg.blueprintId }),
       enabled: false,
     };
@@ -1360,8 +1394,7 @@ class Orchestrator {
       orchId,
       orchCfg.briefingsPath.replace(/^\/+|\/+$/g, "")
     );
-    const bpDirName = cfg.bpSlug ? `${cfg.bpId}-${cfg.bpSlug}` : cfg.bpId;
-    const briefRel = path.join("artifacts", "briefings", bpDirName, "brief.md");
+    const briefRel = bpInstanceBriefRelPath(cfg);
     const briefAbs = path.join(orchWorkspace, briefRel);
 
     if (!fs.existsSync(briefAbs)) {

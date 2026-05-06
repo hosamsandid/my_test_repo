@@ -102,7 +102,7 @@ export default function Shell({ children }) {
                 fontWeight: 'var(--eb-font-semibold)',
                 fontSize: 'var(--eb-text-md)',
                 whiteSpace: 'nowrap',
-              }}>e-vgh-claw Admin</span>
+              }}>Agentic Studio</span>
             )}
           </div>
           <button

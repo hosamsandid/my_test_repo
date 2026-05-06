@@ -2187,6 +2187,54 @@ async function main() {
       return;
     }
 
+    const resetReposMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/reset-repos$/);
+    if (resetReposMatch) {
+      const agentId = decodeURIComponent(resetReposMatch[1]);
+      const cfg = loadAgentConfig(agentId);
+      if (!cfg) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Agent not found' }));
+        return;
+      }
+      const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+      const repos = Array.isArray(env?.repositories) ? env.repositories : [];
+      const workspace = agentDir(agentId);
+      const results = [];
+      for (const repo of repos) {
+        if (!repo?.url) continue;
+        const repoName = (repo.url.split('/').pop() || 'repo').replace(/\.git$/, '');
+        const repoPath = path.join(workspace, repoName);
+        const branch = repo.branch || 'main';
+        if (!fs.existsSync(path.join(repoPath, '.git'))) {
+          results.push({ repo: repoName, skipped: 'not-a-git-repo' });
+          continue;
+        }
+        const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+        if (repo.sshKeyId) {
+          const keyPath = path.join(SSH_KEYS_DIR, repo.sshKeyId);
+          if (fs.existsSync(keyPath)) {
+            try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
+            gitEnv.GIT_SSH_COMMAND =
+              `ssh -i ${keyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null` +
+              ` -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8`;
+          }
+        }
+        try {
+          execFileSync('git', ['fetch', 'origin'], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 30_000 });
+          execFileSync('git', ['checkout', branch], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 10_000 });
+          execFileSync('git', ['reset', '--hard', `origin/${branch}`], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 10_000 });
+          results.push({ repo: repoName, branch, reset: true });
+        } catch (err) {
+          const detail = (err.stderr || err.stdout || err.message || '').toString().trim().slice(0, 200);
+          console.warn(`[Orchestrator] reset-repos ${agentId}/${repoName}: ${detail}`);
+          results.push({ repo: repoName, branch, failed: true, detail });
+        }
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, results }));
+      return;
+    }
+
     if (req.method !== 'POST' || req.url !== '/internal/agents') {
       res.writeHead(404); res.end(); return;
     }

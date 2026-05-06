@@ -1389,6 +1389,10 @@ function sessionPointerFile(agentId, roomId) {
   return path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.current.json');
 }
 
+function sessionResetFlagFile(agentId, roomId) {
+  return path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.reset.json');
+}
+
 function validSessionIds(req, res) {
   const { agentId, roomId } = req.params;
   if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
@@ -1403,35 +1407,74 @@ function validSessionIds(req, res) {
 // Returns the active Claude session id for a given (agent, room), if any.
 // The runner writes this file after every successful Claude invocation;
 // an empty / missing file means the next message starts a fresh session.
+// Also returns `resetAt` (ISO string) when the session was manually reset and
+// no new session has started yet; the UI uses this to show a persistent notice.
 app.get('/api/agents/:agentId/session/:roomId/current', (req, res) => {
   const ids = validSessionIds(req, res);
   if (!ids) return;
   const ptr = sessionPointerFile(ids.agentId, ids.roomId);
-  if (!fs.existsSync(ptr)) return res.json({ sessionId: null, updatedAt: null });
-  try {
-    const j = JSON.parse(fs.readFileSync(ptr, 'utf8'));
-    res.json({
-      sessionId: typeof j?.sessionId === 'string' ? j.sessionId : null,
-      updatedAt: typeof j?.updatedAt === 'string' ? j.updatedAt : null,
-    });
-  } catch {
-    // Corrupt pointer → treat as no session
-    res.json({ sessionId: null, updatedAt: null });
+  const flagPath = sessionResetFlagFile(ids.agentId, ids.roomId);
+
+  let sessionId = null, updatedAt = null;
+  if (fs.existsSync(ptr)) {
+    try {
+      const j = JSON.parse(fs.readFileSync(ptr, 'utf8'));
+      sessionId = typeof j?.sessionId === 'string' ? j.sessionId : null;
+      updatedAt = typeof j?.updatedAt === 'string' ? j.updatedAt : null;
+    } catch { /* corrupt pointer → treat as no session */ }
   }
+
+  let resetAt = null;
+  if (fs.existsSync(flagPath)) {
+    try {
+      const f = JSON.parse(fs.readFileSync(flagPath, 'utf8'));
+      const ra = typeof f?.resetAt === 'string' ? f.resetAt : null;
+      if (ra) {
+        // Auto-clear flag once a new session has started after the reset.
+        if (updatedAt && new Date(updatedAt) > new Date(ra)) {
+          fs.rmSync(flagPath, { force: true });
+        } else {
+          resetAt = ra;
+        }
+      }
+    } catch { /* corrupt flag → ignore */ }
+  }
+
+  res.json({ sessionId, updatedAt, resetAt });
 });
 
 // Drop the session pointer so the next message starts a fresh Claude
 // session (memory files are still re-read; only the in-conversation
-// context is discarded).
-app.delete('/api/agents/:agentId/session/:roomId/current', (req, res) => {
+// context is discarded). Also writes a reset flag (persists across navigation)
+// and triggers a best-effort git reset of all repositories in the agent's
+// working environment back to their configured default branch.
+app.delete('/api/agents/:agentId/session/:roomId/current', async (req, res) => {
   const ids = validSessionIds(req, res);
   if (!ids) return;
   try {
     fs.rmSync(sessionPointerFile(ids.agentId, ids.roomId), { force: true });
+    const flagPath = sessionResetFlagFile(ids.agentId, ids.roomId);
+    fs.mkdirSync(path.dirname(flagPath), { recursive: true });
+    writeJsonAtomic(flagPath, { resetAt: new Date().toISOString() });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
-  res.json({ ok: true });
+
+  // Best-effort repository reset — failures are logged but never block the response.
+  let repoResults = [];
+  try {
+    const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+    const r = await fetch(
+      `${orchestratorUrl}/internal/agents/${encodeURIComponent(ids.agentId)}/reset-repos`,
+      { method: 'POST' },
+    );
+    const data = await r.json();
+    repoResults = data?.results ?? [];
+  } catch (err) {
+    console.warn(`[API] reset-repos call failed for ${ids.agentId}: ${err.message}`);
+  }
+
+  res.json({ ok: true, repoResults });
 });
 
 // Send a stop-session signal to the orchestrator, which forwards it via IPC

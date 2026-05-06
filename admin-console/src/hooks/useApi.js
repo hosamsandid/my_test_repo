@@ -1,16 +1,21 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
 export function useApi(url) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // Track whether data was ever successfully loaded for this URL.
+  // On refetch we skip the loading=true flip so mounted components (e.g.
+  // OrchestratorCard) are not unmounted and don't lose their local state.
+  const hasData = useRef(false);
 
   const fetchData = useCallback(async () => {
-    setLoading(true);
+    if (!hasData.current) setLoading(true);
     setError(null);
     try {
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      hasData.current = true;
       setData(await res.json());
     } catch (e) {
       setError(e.message);
@@ -19,7 +24,11 @@ export function useApi(url) {
     }
   }, [url]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => {
+    hasData.current = false;
+    fetchData();
+  }, [fetchData]);
+
   return { data, loading, error, refetch: fetchData };
 }
 

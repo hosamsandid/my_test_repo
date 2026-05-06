@@ -332,6 +332,18 @@ export default function ChatPanel({
       const j = await r.json();
       setSessionId(j?.sessionId || null);
       setSessionUpdatedAt(j?.updatedAt || null);
+      // If the backend still has a pending reset flag, inject the separator so
+      // it stays visible even after navigating away and coming back.
+      if (j?.resetAt) {
+        setMessages(prev => {
+          if (prev.some(m => m.type === 'context-reset')) return prev;
+          return [...prev, {
+            event_id: `reset-${j.resetAt}`,
+            type: 'context-reset',
+            ts: new Date(j.resetAt).getTime(),
+          }];
+        });
+      }
     } catch {
       // Network blip — the next refetch will fix it.
     }

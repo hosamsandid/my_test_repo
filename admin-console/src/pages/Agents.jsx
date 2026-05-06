@@ -759,7 +759,15 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
 
 /* ── Orchestrator Card (with bp-instance children) ─────────────────── */
 function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDeactivate, onToggleEnabled, onEditChild, onDeleteChild, navigate, syncing, busyIds }) {
-  const [expanded, setExpanded] = useState(false);
+  const expandedKey = `aee_orc_expanded_${agent.id}`;
+  const [expanded, setExpanded] = useState(() => {
+    try { return localStorage.getItem(expandedKey) === 'true'; } catch { return false; }
+  });
+  const toggleExpanded = () => setExpanded(prev => {
+    const next = !prev;
+    try { localStorage.setItem(expandedKey, String(next)); } catch {}
+    return next;
+  });
   const [bps, setBps] = useState(null); // null = not yet loaded
   // Subtrees default to fully expanded — entries in this set are collapsed.
   const [collapsedNodes, setCollapsedNodes] = useState(() => new Set());
@@ -835,7 +843,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
         borderBottom: expanded ? '1px solid var(--eb-border-default)' : 'none',
       }}>
         <button
-          onClick={() => setExpanded(e => !e)}
+          onClick={toggleExpanded}
           style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--eb-text-secondary)', padding: 0, display: 'flex' }}
         >
           {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}

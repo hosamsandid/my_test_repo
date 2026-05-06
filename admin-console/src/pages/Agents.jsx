@@ -389,7 +389,7 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
 
 /* ── Orchestrator Card (with bp-instance children) ─────────────────── */
 function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDeactivate, onToggleEnabled, onEditChild, onDeleteChild, navigate, syncing, busyIds }) {
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
   const children = agent.children || [];
   const state = agentState(agent);
   const isStub = state === 'stub';

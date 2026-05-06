@@ -42,7 +42,13 @@ services:
       TZ: Europe/Berlin
       MATRIX_HOMESERVER: http://conduwuit:6167
       ADMIN_USER_ID: "@${ADMIN_USER:-admin}:local"
-      # Conduwuit admin (for auto-creating Matrix users)
+      # Conduwuit admin (for auto-creating Matrix users).
+      # CONDUWUIT_ADMIN_ROOM defaults to the historic value but is now
+      # overridable via .env — Continuwuity generates a fresh deterministic
+      # admin room ID per database (e.g. after a volume reset), so the old
+      # hard-coded value is wrong on freshly-bootstrapped stacks. Look up
+      # the actual ID with: curl -H "Authorization: Bearer $MATRIX_ACCESS_TOKEN" \
+      # http://localhost:${CONDUWUIT_PORT}/_matrix/client/v3/directory/room/%23admins%3Alocal
       CONDUWUIT_ADMIN_TOKEN: "${MATRIX_ACCESS_TOKEN}"
       CONDUWUIT_ADMIN_ROOM: "${CONDUWUIT_ADMIN_ROOM:-!cUxr0SyfINf9yEvBOD:local}"
       # Git identity for agents that use git (push/PR)

@@ -4851,7 +4851,11 @@ app.get('/api/matrix/rooms/:roomId/stream', async (req, res) => {
 
 /* ─── Session Log ───────────────────────────────────────────────────── */
 
-const ROOM_ID_RE = /^![a-zA-Z0-9_-]+:[a-zA-Z0-9.-]+$/;
+// Matrix room IDs come in two forms: the legacy `!opaque:server_name` shape
+// used through room version 11, and the v12+ shape (per MSC4291) which is a
+// hash with no `:server_name` suffix. Continuwuity:latest creates new rooms
+// at v12 by default, so the suffix must be optional here.
+const ROOM_ID_RE = /^![a-zA-Z0-9_-]+(?::[a-zA-Z0-9.-]+)?$/;
 
 // Session-file paths are built inline at every call site (rather than via a
 // helper) so the sanitisation gate (AGENT_ID_RE / ROOM_ID_RE tests at the

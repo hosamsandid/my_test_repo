@@ -67,7 +67,8 @@ SSH keys are stored at `/workspace/environments/_keys/<keyId>` (mode 0600) with 
 |---|---|
 | `expert` | Responds to direct messages from a human in its 1:1 DM room. |
 | `autonomous` | Runs proactively on a cron schedule. Posts results to its DM room with the admin (or a custom `roomId`). Also responds to direct messages. |
-| `orchestrator` | Backend agent bound to a BriefingPack directory (`briefingsPath`). Reserved for the upcoming claim-loop that spawns BP-instance children. |
+| `orchestrator` | Bound to a BriefingPack directory (`briefingsPath`). On creation and on every tick of its claim loop, it scans the directory and writes one stub `bp-instance` agent per BP. Stubs whose BP is in `status: dispatched` are auto-activated (Matrix user, workspace seed, agent process). Manual Activate/Deactivate via the Admin Console always wins. |
+| `bp-instance` | One per Briefing Pack under an orchestrator. Lives as a stub (no Matrix user, no workspace) until activated. The activated agent is bound to one specific BP and uses the ACE engineering skill to execute its LoopScript. |
 
 ### Autonomous Agent Triggers
 

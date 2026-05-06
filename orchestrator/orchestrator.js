@@ -761,6 +761,9 @@ class Orchestrator {
     this.adminClient = null;
     // Map of agentId → { config } (no per-agent Matrix clients — they run in containers)
     this.agentConfigs = new Map();
+    // Per-stub cooldown to avoid hot-looping on repeated activation failures.
+    // Map: stubId → epoch ms until which the claim loop will skip this stub.
+    this._claimCooldowns = new Map();
   }
 
   async init() {
@@ -942,6 +945,87 @@ class Orchestrator {
       );
     }
     return present;
+  }
+
+  // One iteration of the auto-claim loop for an orchestrator. Re-syncs BP
+  // stubs (so newly-added BPs get their stub immediately) and activates any
+  // stub whose BP is in status='dispatched'. Per-stub error cooldown keeps
+  // failed activations from hot-looping.
+  //
+  // Called periodically by the orchestrator's own agent-runner process via
+  // POST /internal/orchestrators/:id/claim-tick. Manual UI activations
+  // bypass this — they go straight to enableAgent.
+  async runClaimTick(orchestratorId) {
+    const orchCfg = loadAgentConfig(orchestratorId);
+    if (!orchCfg) throw new Error(`Orchestrator '${orchestratorId}' not found`);
+    if (orchCfg.role !== "orchestrator") {
+      throw new Error(`Agent '${orchestratorId}' is not an orchestrator`);
+    }
+    if (!orchCfg.token) {
+      // The orchestrator itself isn't materialised yet. Nothing to do —
+      // it shouldn't even be running an agent-runner process in this state.
+      return { skipped: "orchestrator-not-materialized" };
+    }
+    if (!orchCfg.briefingsPath) {
+      return { skipped: "no-briefings-path" };
+    }
+
+    const bps = await fetchBriefingPacks(orchestratorId, orchCfg.briefingsPath);
+    let newStubs = 0;
+    let activated = 0;
+    const errors = [];
+    const now = Date.now();
+
+    for (const bp of bps) {
+      if (!bp || !bp.id) continue;
+      const stubId = bpInstanceAgentId(bp);
+      let stubCfg = loadAgentConfig(stubId);
+
+      // Lazy-create the stub if missing — same shape as syncBpStubs writes.
+      if (!stubCfg) {
+        stubCfg = {
+          id: stubId,
+          displayName: bpInstanceDisplayName(bp, stubId),
+          role: "bp-instance",
+          parentOrchestratorId: orchestratorId,
+          bpId: bp.id,
+          ...(bp.slug && { bpSlug: bp.slug }),
+          briefingsPath: orchCfg.briefingsPath,
+          environmentId: orchCfg.environmentId,
+          enabled: false,
+        };
+        saveAgentConfig(stubId, stubCfg);
+        this.agentConfigs.set(stubId, { config: stubCfg });
+        newStubs += 1;
+      }
+
+      // Activate if BP is dispatched, stub isn't yet materialised, and we're
+      // not in cooldown after a previous failure.
+      if (bp.status !== "dispatched") continue;
+      if (stubCfg.token) continue;
+      const cooldownUntil = this._claimCooldowns.get(stubId);
+      if (cooldownUntil && cooldownUntil > now) continue;
+
+      try {
+        await this.enableAgent(stubId);
+        this._claimCooldowns.delete(stubId);
+        activated += 1;
+      } catch (err) {
+        // 5-minute cooldown so a recurring failure doesn't burn cycles every tick.
+        this._claimCooldowns.set(stubId, now + 5 * 60_000);
+        errors.push({ stubId, message: err.message });
+        console.error(`[Orchestrator] Auto-claim failed for ${stubId}: ${err.message}`);
+      }
+    }
+
+    if (newStubs || activated || errors.length) {
+      console.log(
+        `[Orchestrator] Claim tick for ${orchestratorId}: ` +
+        `${newStubs} new stub${newStubs === 1 ? "" : "s"}, ` +
+        `${activated} activated, ${errors.length} error${errors.length === 1 ? "" : "s"}`
+      );
+    }
+    return { newStubs, activated, errors };
   }
 
   // Materialize a stub bp-instance agent (or re-enable a previously-active
@@ -1734,6 +1818,25 @@ async function main() {
           res.end(JSON.stringify({ orchestratorId: orchId, stubs, total: stubs.length }));
         } catch (err) {
           console.error(`[Orchestrator] sync-bps error for ${orchId}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404 : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      })();
+      return;
+    }
+
+    // ── One iteration of the auto-claim loop ─────────────────────────────
+    const claimTickMatch = req.method === 'POST' && req.url.match(/^\/internal\/orchestrators\/([^/]+)\/claim-tick$/);
+    if (claimTickMatch) {
+      const orchId = decodeURIComponent(claimTickMatch[1]);
+      (async () => {
+        try {
+          const result = await orchestrator.runClaimTick(orchId);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ orchestratorId: orchId, ...result }));
+        } catch (err) {
+          console.error(`[Orchestrator] claim-tick error for ${orchId}: ${err.message}`);
           const status = /not found/i.test(err.message) ? 404 : 500;
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));

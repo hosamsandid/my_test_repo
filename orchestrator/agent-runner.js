@@ -523,6 +523,59 @@ class TriggerScheduler {
 }
 
 // ============================================================
+// Claim loop (orchestrator agents only)
+//
+// Periodically calls the orchestrator's internal claim-tick endpoint, which
+// re-syncs BP stubs and auto-activates any whose BP is status='dispatched'.
+// Sequential — overlap-guarded so a long activation doesn't pile up ticks.
+// ============================================================
+class ClaimLoopScheduler {
+  constructor(intervalMs = 30_000) {
+    this.intervalMs = intervalMs;
+    this._interval = null;
+    this._running = false;
+  }
+
+  start() {
+    // Stagger first tick by a few seconds so a freshly-spawned orchestrator
+    // doesn't hit bp-explorer before its own startup logs even land.
+    setTimeout(() => this.tick(), 5_000);
+    this._interval = setInterval(() => this.tick(), this.intervalMs);
+    console.log(`[Runner:${AGENT_ID}] Claim loop started (every ${Math.round(this.intervalMs / 1000)}s)`);
+  }
+
+  async tick() {
+    if (this._running) return;
+    this._running = true;
+    try {
+      const url = `http://localhost:4002/internal/orchestrators/${encodeURIComponent(AGENT_ID)}/claim-tick`;
+      const res = await fetch(url, { method: "POST" });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        console.error(`[Runner:${AGENT_ID}] Claim tick HTTP ${res.status}: ${detail.slice(0, 200)}`);
+        return;
+      }
+      const data = await res.json();
+      if (data.newStubs || data.activated || (data.errors && data.errors.length)) {
+        console.log(
+          `[Runner:${AGENT_ID}] Claim tick: ` +
+          `${data.newStubs || 0} new, ${data.activated || 0} activated, ${(data.errors || []).length} errors`
+        );
+      }
+    } catch (err) {
+      console.error(`[Runner:${AGENT_ID}] Claim tick failed: ${err.message}`);
+    } finally {
+      this._running = false;
+    }
+  }
+
+  stop() {
+    if (this._interval) clearInterval(this._interval);
+    this._interval = null;
+  }
+}
+
+// ============================================================
 // Main
 // ============================================================
 async function main() {
@@ -678,12 +731,16 @@ async function main() {
   await client.start();
 
   // Start trigger scheduler for autonomous and orchestrator agents.
-  // Orchestrator agents will use this scheduler for the BP claim loop
-  // (added in a follow-up); for now they just behave like an expert that
-  // can also be cron-driven.
   if (role === "autonomous" || role === "orchestrator") {
     const scheduler = new TriggerScheduler(client);
     scheduler.start();
+  }
+
+  // Orchestrator agents additionally run the auto-claim loop: scan their
+  // briefings directory and activate any stub whose BP is dispatched.
+  if (role === "orchestrator") {
+    const claimLoop = new ClaimLoopScheduler();
+    claimLoop.start();
   }
 
   console.log(`[Runner:${AGENT_ID}] Started as ${AGENT_USER_ID} (${displayName}, ${role})`);

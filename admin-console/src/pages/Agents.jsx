@@ -2,13 +2,12 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Plus, Trash2, Layers, ChevronDown, ChevronRight,
-  Eye, FileText, Edit, MessageCircle,
+  Edit, MessageCircle, RefreshCw, Power,
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
-import StatusBadge from '../components/StatusBadge';
 
 const hasRepos = (env) =>
   (Array.isArray(env?.repositories) && env.repositories.length > 0) ||
@@ -57,19 +56,22 @@ function SecondaryBtn({ children, onClick, style = {} }) {
   );
 }
 
-function IconBtn({ icon: Icon, label, onClick, danger, title }) {
+function IconBtn({ icon: Icon, label, onClick, danger, title, disabled }) {
   return (
     <button
       aria-label={label}
       title={title || label}
       onClick={onClick}
+      disabled={disabled}
       style={{
         background: 'none',
         border: `1px solid ${danger ? 'var(--eb-status-error)' : 'var(--eb-border-default)'}`,
-        borderRadius: 'var(--eb-radius-md)', cursor: 'pointer',
+        borderRadius: 'var(--eb-radius-md)',
+        cursor: disabled ? 'not-allowed' : 'pointer',
         color: danger ? 'var(--eb-status-error)' : 'var(--eb-text-secondary)',
         padding: '4px 8px', display: 'flex', alignItems: 'center', gap: 4,
         fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
+        opacity: disabled ? 0.5 : 1,
       }}
     >
       <Icon size={13} />
@@ -78,22 +80,24 @@ function IconBtn({ icon: Icon, label, onClick, danger, title }) {
 }
 
 /* ── Enable/Disable toggle ──────────────────────────────────────────── */
-function ToggleSwitch({ checked, onChange, label }) {
+function ToggleSwitch({ checked, onChange, label, disabled }) {
   return (
     <button
-      onClick={() => onChange(!checked)}
+      onClick={() => !disabled && onChange(!checked)}
       role="switch"
       aria-checked={checked}
       aria-label={label}
+      disabled={disabled}
       style={{
         width: 34, height: 18,
         borderRadius: 'var(--eb-radius-full)',
         border: 'none',
         background: checked ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)',
         position: 'relative',
-        cursor: 'pointer',
+        cursor: disabled ? 'not-allowed' : 'pointer',
         transition: 'background var(--eb-transition-fast)',
         flexShrink: 0,
+        opacity: disabled ? 0.5 : 1,
       }}
     >
       <span style={{
@@ -106,7 +110,31 @@ function ToggleSwitch({ checked, onChange, label }) {
   );
 }
 
-/* ── Agent (Blueprint) Create Form ─────────────────────────────────── */
+/* ── Agent state derivation ────────────────────────────────────────── */
+// Three states: stub (no token, never activated), active (token + enabled),
+// paused (token + disabled). Drive UI off this single function.
+function agentState(agent) {
+  if (!agent.token && agent.enabled === false) return 'stub';
+  if (agent.enabled === false) return 'paused';
+  return 'active';
+}
+
+function StateBadge({ state }) {
+  const cfg = {
+    stub:    { bg: 'var(--eb-bg-app)',         color: 'var(--eb-text-muted)',     label: 'Nicht initialisiert' },
+    paused:  { bg: 'var(--eb-status-warning-bg)', color: 'var(--eb-status-warning)', label: 'Pausiert' },
+    active:  { bg: 'var(--eb-status-success-bg)', color: 'var(--eb-status-success)', label: 'Aktiv' },
+  }[state] || { bg: 'var(--eb-bg-app)', color: 'var(--eb-text-muted)', label: state };
+  return (
+    <span style={{
+      fontSize: 'var(--eb-text-xs)', color: cfg.color, background: cfg.bg,
+      padding: '2px 8px', borderRadius: 'var(--eb-radius-full)',
+      border: `1px solid ${cfg.color}`,
+    }}>{cfg.label}</span>
+  );
+}
+
+/* ── Agent Create Form ─────────────────────────────────────────────── */
 function AgentCreateForm({ onSave, onCancel, saving, error }) {
   const [form, setForm] = useState({
     id: '', displayName: '', role: 'expert', environmentId: '', systemPrompt: '',
@@ -165,7 +193,7 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
         <select value={form.role} onChange={e => update('role', e.target.value)} style={inputStyle}>
           <option value="expert">Expert — responds to questions</option>
           <option value="autonomous">Autonomous — runs on schedule</option>
-          <option value="orchestrator">Orchestrator — holds BP tree &amp; domain memory</option>
+          <option value="orchestrator">Orchestrator — manages BPs in a directory</option>
         </select>
       </div>
 
@@ -179,7 +207,7 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
             placeholder="e.g. my-repo"
           />
           <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-            Relative path in the agent workspace. The <code>artifacts/briefings/</code> subdirectory is appended automatically — leave empty to use the workspace root.
+            Relative path in the agent workspace. The <code>artifacts/briefings/</code> subdirectory is appended automatically. On creation, a stub is added for every BP found here.
           </div>
         </div>
       )}
@@ -194,9 +222,6 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           rows={8}
           style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
         />
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-          Shared by all instances. Memory instructions are added automatically.
-        </div>
       </div>
       )}
 
@@ -214,7 +239,6 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
 function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
   const [form, setForm] = useState({
     displayName: agent.displayName || '',
-    role: agent.role || 'expert',
     briefingsPath: agent.briefingsPath || '',
   });
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
@@ -236,6 +260,13 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
       </div>
 
       <div>
+        <div style={labelStyle}>Role (read-only)</div>
+        <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
+          {agent.role}
+        </div>
+      </div>
+
+      <div>
         <div style={labelStyle}>Working Environment (read-only)</div>
         <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
           {agent.environmentId}
@@ -244,16 +275,7 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
 
       <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} />
 
-      <div>
-        <div style={labelStyle}>Role</div>
-        <select value={form.role} onChange={e => update('role', e.target.value)} style={inputStyle}>
-          <option value="expert">Expert — responds to questions</option>
-          <option value="autonomous">Autonomous — runs on schedule</option>
-          <option value="orchestrator">Orchestrator — holds BP tree &amp; domain memory</option>
-        </select>
-      </div>
-
-      {form.role === 'orchestrator' && (
+      {agent.role === 'orchestrator' && (
         <div>
           <div style={labelStyle}>Briefings Directory</div>
           <input
@@ -262,9 +284,6 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
             onChange={e => update('briefingsPath', e.target.value)}
             placeholder="e.g. my-repo"
           />
-          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-            Relative path in the agent workspace. The <code>artifacts/briefings/</code> subdirectory is appended automatically — leave empty to use the workspace root.
-          </div>
         </div>
       )}
 
@@ -278,206 +297,67 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
   );
 }
 
-/* ── Agent Prompt Editor (base system prompt) ───────────────────────── */
-function AgentPromptEditor({ agent, onClose, saving, setSaving, setError, error }) {
-  const [content, setContent] = React.useState(agent.systemPrompt || '');
-
-  async function handleSave() {
-    setSaving(true);
-    setError(null);
-    try {
-      await apiCall('PUT', `/api/blueprints/${agent.id}`, { systemPrompt: content });
-      onClose();
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)', height: '100%' }}>
-      {error && (
-        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{error}</div>
-      )}
-      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-info-bg)', border: '1px solid var(--eb-status-info)', borderRadius: 'var(--eb-radius-md)' }}>
-        Changes apply to new instances only. Existing instances already have this prompt seeded in their workspace.
-      </div>
-      <textarea
-        value={content}
-        onChange={e => setContent(e.target.value)}
-        rows={16}
-        style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', flex: 1, minHeight: 300 }}
-      />
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
-        <PrimaryBtn onClick={handleSave} saving={saving}>{saving ? 'Saving…' : 'Save Prompt'}</PrimaryBtn>
-        <SecondaryBtn onClick={onClose}>Cancel</SecondaryBtn>
-      </div>
-    </div>
-  );
-}
-
-/* ── Session Create Form ────────────────────────────────────────────── */
-function SessionCreateForm({ agent, onSave, onCancel, saving, error }) {
-  const nextNum = (agent.instances?.length ?? 0) + 1;
-  const [form, setForm] = useState({
-    instanceId: `${agent.id}-${nextNum}`,
-    displayName: `${agent.displayName} ${nextNum}`,
-  });
-  const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
-  const canSubmit = form.instanceId && form.displayName;
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      {error && (
-        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-md)' }}>
-          {error}
-        </div>
-      )}
-
-      <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-info-bg)', border: '1px solid var(--eb-status-info)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>
-        New instance of <strong>{agent.displayName}</strong>. Gets its own workspace and chat history. Memory is shared with all other instances of this agent.
-      </div>
-
-      <div>
-        <div style={labelStyle}>Instance ID <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
-        <input
-          style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }}
-          value={form.instanceId}
-          onChange={e => update('instanceId', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
-        />
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-          Becomes @id:local in Matrix.
-        </div>
-      </div>
-
-      <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} />
-
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
-        <PrimaryBtn onClick={() => onSave(form)} saving={saving} disabled={!canSubmit}>
-          {saving ? 'Creating instance…' : 'Create Instance'}
-        </PrimaryBtn>
-        <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
-      </div>
-    </div>
-  );
-}
-
-/* ── Session Edit Form ──────────────────────────────────────────────── */
-function SessionEditForm({ session, onSave, onCancel, saving, error }) {
-  const [displayName, setDisplayName] = useState(session.displayName || '');
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      {error && (
-        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-md)' }}>
-          {error}
-        </div>
-      )}
-
-      <div>
-        <div style={labelStyle}>ID (read-only)</div>
-        <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
-          {session.id}
-        </div>
-      </div>
-
-      <FormInput label="Display Name *" value={displayName} onChange={setDisplayName} />
-
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
-        <PrimaryBtn onClick={() => onSave({ displayName })} saving={saving} disabled={!displayName}>
-          {saving ? 'Saving…' : 'Save'}
-        </PrimaryBtn>
-        <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
-      </div>
-    </div>
-  );
-}
-
-/* ── Shared Memory Viewer ───────────────────────────────────────────── */
-function MemoryViewer({ agentId, onClose }) {
-  const { data: contextData, loading: loadingCtx } = useApi(`/api/blueprints/${agentId}/memory/context.md`);
-  const { data: logData, loading: loadingLog } = useApi(`/api/blueprints/${agentId}/memory/log.md`);
-
-  const [activeTab, setActiveTab] = useState('context');
-  const raw = activeTab === 'context' ? contextData : logData;
-  const content = typeof raw === 'object' && raw !== null ? raw.content : raw;
-  const loading = activeTab === 'context' ? loadingCtx : loadingLog;
-
-  const tabStyle = (tab) => ({
-    padding: 'var(--eb-space-2) var(--eb-space-3)',
-    background: activeTab === tab ? 'var(--eb-bg-selected)' : 'transparent',
-    border: 'none',
-    borderBottom: activeTab === tab ? '2px solid var(--eb-accent-primary)' : '2px solid transparent',
-    color: activeTab === tab ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
-    cursor: 'pointer',
-    fontSize: 'var(--eb-text-sm)',
-    fontFamily: 'inherit',
-  });
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', height: '100%' }}>
-      <div style={{ display: 'flex', borderBottom: '1px solid var(--eb-border-default)' }}>
-        <button style={tabStyle('context')} onClick={() => setActiveTab('context')}>context.md</button>
-        <button style={tabStyle('log')} onClick={() => setActiveTab('log')}>log.md</button>
-      </div>
-      {loading ? (
-        <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading…</div>
-      ) : (
-        <pre style={{
-          flex: 1, margin: 0,
-          padding: 'var(--eb-space-3)',
-          background: 'var(--eb-bg-app)',
-          border: '1px solid var(--eb-border-default)',
-          borderRadius: 'var(--eb-radius-md)',
-          fontSize: 'var(--eb-text-xs)',
-          fontFamily: 'var(--eb-font-mono)',
-          color: 'var(--eb-text-primary)',
-          overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-          minHeight: 200,
-        }}>
-          {(typeof content === 'string' ? content : '') || '(empty)'}
-        </pre>
-      )}
-      <SecondaryBtn onClick={onClose}>Close</SecondaryBtn>
-    </div>
-  );
-}
-
-/* ── Session Row ────────────────────────────────────────────────────── */
-function SessionRow({ session, idx, onToggleEnabled, onEdit, onDelete, navigate }) {
+/* ── Agent Row ──────────────────────────────────────────────────────── */
+function AgentRow({ agent, onActivate, onToggleEnabled, onEdit, onDelete, navigate, indent, busy }) {
+  const state = agentState(agent);
+  const isStub = state === 'stub';
   return (
     <div
       style={{
         display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
         padding: 'var(--eb-space-3) var(--eb-space-4)',
-        borderTop: idx === 0 ? 'none' : '1px solid var(--eb-border-default)',
+        paddingLeft: indent ? 'var(--eb-space-8)' : 'var(--eb-space-4)',
+        borderTop: '1px solid var(--eb-border-default)',
         background: 'var(--eb-bg-surface)',
+        opacity: isStub ? 0.85 : 1,
       }}
     >
-      <div style={{ width: 8, height: 8, borderRadius: '50%', background: session.enabled !== false ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)', flexShrink: 0 }} />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <span style={{ fontSize: 'var(--eb-text-sm)' }}>{session.displayName}</span>
-        <span style={{ marginLeft: 8, fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)' }}>@{session.id}:local</span>
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+        <span style={{ fontSize: 'var(--eb-text-sm)' }}>{agent.displayName}</span>
+        <span style={{ fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)' }}>
+          @{agent.id}:local
+        </span>
+        <StateBadge state={state} />
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-        <ToggleSwitch
-          checked={session.enabled !== false}
-          onChange={() => onToggleEnabled(session)}
-          label={`${session.enabled !== false ? 'Disable' : 'Enable'} instance`}
+        {isStub ? (
+          <PrimaryBtn
+            onClick={() => onActivate(agent)}
+            saving={busy}
+            style={{ padding: '4px 10px', fontSize: 'var(--eb-text-xs)' }}
+          >
+            <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <Power size={13} /> Aktivieren
+            </span>
+          </PrimaryBtn>
+        ) : (
+          <ToggleSwitch
+            checked={state === 'active'}
+            onChange={() => onToggleEnabled(agent)}
+            label={state === 'active' ? 'Disable' : 'Enable'}
+            disabled={busy}
+          />
+        )}
+        <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} disabled={isStub} />
+        <IconBtn
+          icon={MessageCircle}
+          label="Open chat"
+          title={isStub ? 'Stub — activate first' : 'Open chat'}
+          onClick={() => !isStub && navigate(`/chats/${agent.id}`)}
+          disabled={isStub}
         />
-        <IconBtn icon={Edit} label="Edit instance" onClick={() => onEdit(session)} />
-        <IconBtn icon={MessageCircle} label="Open chat" title="Open chat" onClick={() => navigate(`/chats/${session.id}`)} />
-        <IconBtn icon={Trash2} label="Delete instance" danger onClick={() => onDelete(session)} />
+        <IconBtn icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
       </div>
     </div>
   );
 }
 
-/* ── Agent Card ─────────────────────────────────────────────────────── */
-function AgentCard({ agent, onEdit, onEditPrompt, onViewMemory, onNewSession, onDelete, onToggleSessionEnabled, onEditSession, onDeleteSession, navigate }) {
+/* ── Orchestrator Card (with bp-instance children) ─────────────────── */
+function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onToggleEnabled, onEditChild, onDeleteChild, navigate, syncing, busyIds }) {
   const [expanded, setExpanded] = useState(true);
-  const sessions = agent.instances || [];
+  const children = agent.children || [];
+  const state = agentState(agent);
+  const isStub = state === 'stub';
 
   return (
     <div style={{
@@ -503,11 +383,13 @@ function AgentCard({ agent, onEdit, onEditPrompt, onViewMemory, onNewSession, on
         <Layers size={18} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
 
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontWeight: 'var(--eb-font-semibold)', fontSize: 'var(--eb-text-md)' }}>
+          <div style={{ fontWeight: 'var(--eb-font-semibold)', fontSize: 'var(--eb-text-md)', display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
             {agent.displayName}
+            <StateBadge state={state} />
           </div>
           <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>
-            {agent.id} · {agent.role} · env: {agent.environmentId}
+            {agent.id} · orchestrator · env: {agent.environmentId}
+            {agent.briefingsPath ? ` · path: ${agent.briefingsPath}` : ''}
           </div>
         </div>
 
@@ -517,48 +399,112 @@ function AgentCard({ agent, onEdit, onEditPrompt, onViewMemory, onNewSession, on
             background: 'var(--eb-bg-app)', padding: '2px 8px',
             borderRadius: 'var(--eb-radius-full)', border: '1px solid var(--eb-border-default)',
           }}>
-            {sessions.length} instance{sessions.length !== 1 ? 's' : ''}
+            {children.length} BP{children.length !== 1 ? 's' : ''}
           </span>
-          <IconBtn icon={Edit} label="Edit agent" title="Edit agent" onClick={() => onEdit(agent)} />
-          <IconBtn icon={FileText} label="Edit prompt" title="Edit system prompt" onClick={() => onEditPrompt(agent)} />
-          <IconBtn icon={Eye} label="View shared memory" title="View shared memory" onClick={() => onViewMemory(agent)} />
           <button
-            onClick={() => onNewSession(agent)}
+            onClick={() => onSyncBps(agent)}
+            disabled={syncing || isStub}
+            title={isStub ? 'Aktiviere den Orchestrator zuerst' : 'Briefings-Verzeichnis erneut scannen'}
             style={{
-              background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
-              border: 'none', borderRadius: 'var(--eb-radius-md)', cursor: 'pointer',
+              background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-md)', cursor: (syncing || isStub) ? 'not-allowed' : 'pointer',
               padding: '4px 10px', fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
-              display: 'flex', alignItems: 'center', gap: 4,
+              display: 'flex', alignItems: 'center', gap: 4, color: 'var(--eb-text-secondary)',
+              opacity: (syncing || isStub) ? 0.5 : 1,
             }}
           >
-            <Plus size={13} /> New Instance
+            <RefreshCw size={13} /> {syncing ? 'Syncing…' : 'BPs syncen'}
           </button>
-          <IconBtn icon={Trash2} label="Delete agent" danger onClick={() => onDelete(agent)} />
+          {isStub ? (
+            <PrimaryBtn
+              onClick={() => onActivate(agent)}
+              saving={busyIds.has(agent.id)}
+              style={{ padding: '4px 10px', fontSize: 'var(--eb-text-xs)' }}
+            >
+              <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <Power size={13} /> Aktivieren
+              </span>
+            </PrimaryBtn>
+          ) : (
+            <ToggleSwitch
+              checked={state === 'active'}
+              onChange={() => onToggleEnabled(agent)}
+              label={state === 'active' ? 'Disable' : 'Enable'}
+              disabled={busyIds.has(agent.id)}
+            />
+          )}
+          <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
+          <IconBtn icon={MessageCircle} label="Open chat" onClick={() => !isStub && navigate(`/chats/${agent.id}`)} disabled={isStub} />
+          <IconBtn icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
         </div>
       </div>
 
-      {/* Sessions */}
+      {/* Children */}
       {expanded && (
-        <div style={{ padding: sessions.length === 0 ? 'var(--eb-space-4)' : 0 }}>
-          {sessions.length === 0 ? (
-            <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)', textAlign: 'center', padding: 'var(--eb-space-4)' }}>
-              No instances yet. Click <strong>+ New Instance</strong> to create the first one.
-            </div>
-          ) : (
-            sessions.map((sess, idx) => (
-              <SessionRow
-                key={sess.id}
-                session={sess}
-                idx={idx}
-                onToggleEnabled={onToggleSessionEnabled}
-                onEdit={onEditSession}
-                onDelete={onDeleteSession}
-                navigate={navigate}
-              />
-            ))
-          )}
-        </div>
+        children.length === 0 ? (
+          <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)', textAlign: 'center', padding: 'var(--eb-space-4)' }}>
+            {isStub
+              ? 'Aktiviere den Orchestrator, um seine Briefing Packs zu laden.'
+              : 'Keine Briefing Packs gefunden. Klicke auf BPs syncen, um den Ordner erneut zu scannen.'}
+          </div>
+        ) : (
+          children.map((child) => (
+            <AgentRow
+              key={child.id}
+              agent={child}
+              indent
+              navigate={navigate}
+              busy={busyIds.has(child.id)}
+              onActivate={onActivate}
+              onToggleEnabled={onToggleEnabled}
+              onEdit={onEditChild}
+              onDelete={onDeleteChild}
+            />
+          ))
+        )
       )}
+    </div>
+  );
+}
+
+/* ── Leaf Agent Card (expert / autonomous) ─────────────────────────── */
+function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, navigate, busy }) {
+  const state = agentState(agent);
+
+  return (
+    <div style={{
+      background: 'var(--eb-bg-surface)',
+      border: '1px solid var(--eb-border-default)',
+      borderRadius: 'var(--eb-radius-lg)',
+      overflow: 'hidden',
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
+        padding: 'var(--eb-space-4)',
+        background: 'var(--eb-bg-elevated)',
+      }}>
+        <Layers size={18} style={{ color: 'var(--eb-text-secondary)', flexShrink: 0 }} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 'var(--eb-font-semibold)', fontSize: 'var(--eb-text-md)', display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+            {agent.displayName}
+            <StateBadge state={state} />
+          </div>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>
+            {agent.id} · {agent.role} · env: {agent.environmentId}
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+          <ToggleSwitch
+            checked={state === 'active'}
+            onChange={() => onToggleEnabled(agent)}
+            label={state === 'active' ? 'Disable' : 'Enable'}
+            disabled={busy}
+          />
+          <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
+          <IconBtn icon={MessageCircle} label="Open chat" onClick={() => navigate(`/chats/${agent.id}`)} />
+          <IconBtn icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
+        </div>
+      </div>
     </div>
   );
 }
@@ -566,36 +512,48 @@ function AgentCard({ agent, onEdit, onEditPrompt, onViewMemory, onNewSession, on
 /* ── Main Component ─────────────────────────────────────────────────── */
 export default function Agents() {
   const navigate = useNavigate();
-  const { data: agents, loading, error, refetch } = useApi('/api/blueprints');
+  const { data: rawAgents, loading, error, refetch } = useApi('/api/agents');
 
-  // panel mode: null | 'create' | 'edit-agent' | 'prompt' | 'session' | 'edit-session' | 'memory'
-  const [panelMode, setPanelMode] = useState(null);
+  const [panelMode, setPanelMode] = useState(null); // null | 'create' | 'edit'
   const [selectedAgent, setSelectedAgent] = useState(null);
-  const [selectedSession, setSelectedSession] = useState(null);
-  const [deleteTarget, setDeleteTarget] = useState(null); // { type: 'agent'|'session', item }
+  const [deleteTarget, setDeleteTarget] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [actionError, setActionError] = useState(null);
+  const [syncingId, setSyncingId] = useState(null);
+  const [busyIds, setBusyIds] = useState(new Set());
 
-  function openPanel(mode, agent, session = null) {
+  const agents = rawAgents || [];
+  const bpInstances = agents.filter(a => a.role === 'bp-instance');
+  const orchestrators = agents
+    .filter(a => a.role === 'orchestrator')
+    .map(o => ({ ...o, children: bpInstances.filter(c => c.parentOrchestratorId === o.id) }));
+  const leaves = agents.filter(a => a.role !== 'orchestrator' && a.role !== 'bp-instance');
+
+  function openPanel(mode, agent) {
     setSaveError(null);
     setSelectedAgent(agent);
-    setSelectedSession(session);
     setPanelMode(mode);
   }
-
   function closePanel() {
     setPanelMode(null);
     setSelectedAgent(null);
-    setSelectedSession(null);
     setSaveError(null);
+  }
+
+  function markBusy(id, busy) {
+    setBusyIds(prev => {
+      const next = new Set(prev);
+      if (busy) next.add(id); else next.delete(id);
+      return next;
+    });
   }
 
   async function handleCreateAgent(form) {
     setSaving(true);
     setSaveError(null);
     try {
-      await apiCall('POST', '/api/blueprints', form);
+      await apiCall('POST', '/api/agents', form);
       closePanel();
       refetch();
     } catch (e) {
@@ -609,7 +567,7 @@ export default function Agents() {
     setSaving(true);
     setSaveError(null);
     try {
-      await apiCall('PUT', `/api/blueprints/${selectedAgent.id}`, form);
+      await apiCall('PUT', `/api/agents/${selectedAgent.id}`, form);
       closePanel();
       refetch();
     } catch (e) {
@@ -619,50 +577,45 @@ export default function Agents() {
     }
   }
 
-  async function handleCreateSession(form) {
-    setSaving(true);
-    setSaveError(null);
+  async function handleActivate(agent) {
+    markBusy(agent.id, true);
     try {
-      await apiCall('POST', `/api/blueprints/${selectedAgent.id}/instances`, form);
-      closePanel();
-      refetch();
-    } catch (e) {
-      setSaveError(e.message);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleEditSession(form) {
-    setSaving(true);
-    setSaveError(null);
-    try {
-      await apiCall('PUT', `/api/agents/${selectedSession.id}`, form);
-      closePanel();
-      refetch();
-    } catch (e) {
-      setSaveError(e.message);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleToggleSessionEnabled(session) {
-    try {
-      await apiCall('PUT', `/api/agents/${session.id}`, { enabled: session.enabled === false });
+      await apiCall('PUT', `/api/agents/${agent.id}`, { enabled: true });
       refetch();
     } catch (e) {
       setActionError(e.message);
+    } finally {
+      markBusy(agent.id, false);
+    }
+  }
+
+  async function handleToggleEnabled(agent) {
+    markBusy(agent.id, true);
+    try {
+      await apiCall('PUT', `/api/agents/${agent.id}`, { enabled: agent.enabled === false });
+      refetch();
+    } catch (e) {
+      setActionError(e.message);
+    } finally {
+      markBusy(agent.id, false);
+    }
+  }
+
+  async function handleSyncBps(agent) {
+    setSyncingId(agent.id);
+    try {
+      await apiCall('POST', `/api/agents/${agent.id}/sync-bps`);
+      refetch();
+    } catch (e) {
+      setActionError(e.message);
+    } finally {
+      setSyncingId(null);
     }
   }
 
   async function handleDelete() {
     try {
-      if (deleteTarget.type === 'agent') {
-        await apiCall('DELETE', `/api/blueprints/${deleteTarget.item.id}`);
-      } else {
-        await apiCall('DELETE', `/api/agents/${deleteTarget.item.id}`);
-      }
+      await apiCall('DELETE', `/api/agents/${deleteTarget.id}`);
       setDeleteTarget(null);
       refetch();
     } catch (e) {
@@ -689,16 +642,15 @@ export default function Agents() {
     );
   }
 
-  const list = agents ?? [];
+  const totalCount = orchestrators.length + leaves.length;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      {/* Title bar */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
           <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>Agents</h1>
           <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', margin: 'var(--eb-space-1) 0 0' }}>
-            Define an agent once. Spin up multiple instances — each with its own workspace, all sharing memory.
+            Each agent runs as its own Matrix user. Orchestrator agents auto-list one stub per Briefing Pack — activate to materialise.
           </p>
         </div>
         <PrimaryBtn onClick={() => openPanel('create', null)}>
@@ -713,8 +665,7 @@ export default function Agents() {
         </div>
       )}
 
-      {/* Agent cards */}
-      {list.length === 0 ? (
+      {totalCount === 0 ? (
         <div style={{
           padding: 'var(--eb-space-8)', textAlign: 'center',
           background: 'var(--eb-bg-surface)', border: '1px dashed var(--eb-border-default)',
@@ -723,110 +674,60 @@ export default function Agents() {
           No agents yet. Click <strong>+ New Agent</strong> to create the first one.
         </div>
       ) : (
-        list.map(agent => (
-          <AgentCard
-            key={agent.id}
-            agent={agent}
-            navigate={navigate}
-            onEdit={a => openPanel('edit-agent', a)}
-            onEditPrompt={a => openPanel('prompt', a)}
-            onViewMemory={a => openPanel('memory', a)}
-            onNewSession={a => openPanel('session', a)}
-            onDelete={a => setDeleteTarget({ type: 'agent', item: a })}
-            onToggleSessionEnabled={handleToggleSessionEnabled}
-            onEditSession={s => {
-              const parentAgent = list.find(a => a.instances?.some(i => i.id === s.id));
-              openPanel('edit-session', parentAgent, s);
-            }}
-            onDeleteSession={s => setDeleteTarget({ type: 'session', item: s })}
-          />
-        ))
+        <>
+          {orchestrators.map(o => (
+            <OrchestratorCard
+              key={o.id}
+              agent={o}
+              navigate={navigate}
+              syncing={syncingId === o.id}
+              busyIds={busyIds}
+              onEdit={a => openPanel('edit', a)}
+              onDelete={a => setDeleteTarget(a)}
+              onSyncBps={handleSyncBps}
+              onActivate={handleActivate}
+              onToggleEnabled={handleToggleEnabled}
+              onEditChild={a => openPanel('edit', a)}
+              onDeleteChild={a => setDeleteTarget(a)}
+            />
+          ))}
+          {leaves.map(a => (
+            <LeafAgentCard
+              key={a.id}
+              agent={a}
+              navigate={navigate}
+              busy={busyIds.has(a.id)}
+              onEdit={ag => openPanel('edit', ag)}
+              onDelete={ag => setDeleteTarget(ag)}
+              onToggleEnabled={handleToggleEnabled}
+            />
+          ))}
+        </>
       )}
 
-      {/* Create agent panel */}
       <SidePanel open={panelMode === 'create'} onClose={closePanel} title="New Agent" width="540px" loading={saving}>
         <AgentCreateForm onSave={handleCreateAgent} onCancel={closePanel} saving={saving} error={saveError} />
       </SidePanel>
 
-      {/* Edit agent panel */}
       <SidePanel
-        open={panelMode === 'edit-agent' && !!selectedAgent}
+        open={panelMode === 'edit' && !!selectedAgent}
         onClose={closePanel}
         title={`Edit Agent — ${selectedAgent?.displayName ?? ''}`}
         width="480px"
         loading={saving}
       >
-        {selectedAgent && panelMode === 'edit-agent' && (
+        {selectedAgent && panelMode === 'edit' && (
           <AgentEditForm agent={selectedAgent} onSave={handleEditAgent} onCancel={closePanel} saving={saving} error={saveError} />
         )}
       </SidePanel>
 
-      {/* Edit prompt panel */}
-      <SidePanel
-        open={panelMode === 'prompt' && !!selectedAgent}
-        onClose={closePanel}
-        title={`System Prompt — ${selectedAgent?.displayName ?? ''}`}
-        width="600px"
-        loading={saving}
-      >
-        {selectedAgent && panelMode === 'prompt' && (
-          <AgentPromptEditor
-            agent={selectedAgent}
-            onClose={closePanel}
-            saving={saving}
-            setSaving={setSaving}
-            error={saveError}
-            setError={setSaveError}
-          />
-        )}
-      </SidePanel>
-
-      {/* Create session panel */}
-      <SidePanel
-        open={panelMode === 'session' && !!selectedAgent}
-        onClose={closePanel}
-        title={`New Instance — ${selectedAgent?.displayName ?? ''}`}
-        width="480px"
-        loading={saving}
-      >
-        {selectedAgent && panelMode === 'session' && (
-          <SessionCreateForm agent={selectedAgent} onSave={handleCreateSession} onCancel={closePanel} saving={saving} error={saveError} />
-        )}
-      </SidePanel>
-
-      {/* Edit session panel */}
-      <SidePanel
-        open={panelMode === 'edit-session' && !!selectedSession}
-        onClose={closePanel}
-        title={`Edit Instance — ${selectedSession?.displayName ?? ''}`}
-        width="400px"
-        loading={saving}
-      >
-        {selectedSession && panelMode === 'edit-session' && (
-          <SessionEditForm session={selectedSession} onSave={handleEditSession} onCancel={closePanel} saving={saving} error={saveError} />
-        )}
-      </SidePanel>
-
-      {/* Memory viewer panel */}
-      <SidePanel
-        open={panelMode === 'memory' && !!selectedAgent}
-        onClose={closePanel}
-        title={`Shared Memory — ${selectedAgent?.displayName ?? ''}`}
-        width="560px"
-      >
-        {selectedAgent && panelMode === 'memory' && (
-          <MemoryViewer agentId={selectedAgent.id} onClose={closePanel} />
-        )}
-      </SidePanel>
-
-      {/* Delete confirmation */}
       <ConfirmDialog
         open={!!deleteTarget}
-        title={deleteTarget?.type === 'agent' ? 'Delete Agent' : 'Delete Instance'}
+        title="Delete Agent"
         message={
-          deleteTarget?.type === 'agent'
-            ? `Delete agent "${deleteTarget.item.displayName ?? deleteTarget.item.id}"? This removes the agent and its shared memory. All instances must be deleted first.`
-            : `Delete instance "${deleteTarget?.item.displayName ?? deleteTarget?.item.id}"? This removes the workspace and all instance data.`
+          deleteTarget?.role === 'orchestrator'
+            ? `Delete orchestrator "${deleteTarget.displayName}"? Its BP-instance children must be deleted separately.`
+            : `Delete agent "${deleteTarget?.displayName ?? deleteTarget?.id}"? This removes the workspace and all associated data.`
         }
         variant="danger"
         confirmLabel="Delete"

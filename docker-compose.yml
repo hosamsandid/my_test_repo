@@ -39,9 +39,6 @@ services:
     environment:
       TZ: Europe/Berlin
       MATRIX_HOMESERVER: http://conduwuit:6167
-      MATRIX_ACCESS_TOKEN: "${ORCHESTRATOR_TOKEN}"
-      MATRIX_BOT_USER_ID: "@orchestrator:local"
-      MULTI_AGENT_ROOM: "${MULTI_AGENT_ROOM}"
       ADMIN_USER_ID: "@${ADMIN_USER:-admin}:local"
       # Conduwuit admin (for auto-creating Matrix users)
       CONDUWUIT_ADMIN_TOKEN: "${MATRIX_ACCESS_TOKEN}"

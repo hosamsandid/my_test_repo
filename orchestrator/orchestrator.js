@@ -3,20 +3,15 @@
 const {
   MatrixClient,
   SimpleFsStorageProvider,
-  AutojoinRoomsMixin,
 } = require("matrix-bot-sdk");
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
-const { marked } = require("marked");
 
 // ============================================================
 // Config
 // ============================================================
 const HOMESERVER = process.env.MATRIX_HOMESERVER;
-const POOL_TOKEN = process.env.MATRIX_ACCESS_TOKEN;
-const POOL_USER_ID = process.env.MATRIX_BOT_USER_ID;
-const MULTI_AGENT_ROOM = process.env.MULTI_AGENT_ROOM;
 const CONDUWUIT_ADMIN_TOKEN = process.env.CONDUWUIT_ADMIN_TOKEN;
 const CONDUWUIT_ADMIN_ROOM = process.env.CONDUWUIT_ADMIN_ROOM;
 
@@ -36,9 +31,6 @@ function randomHex(bytes) {
   return crypto.randomBytes(bytes).toString("hex");
 }
 const agentProcesses = new Map(); // id → ChildProcess
-
-const QUIET_DELAY = 10_000;
-const MAX_TIMEOUT = 240_000;
 
 // ============================================================
 // Process lifecycle (each agent runs as a child process)
@@ -311,7 +303,7 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null) {
       "3. Datei zurueckschreiben\n" +
       "4. Aenderungen werden automatisch innerhalb von 60 Sekunden uebernommen\n\n" +
       "### Optionale Felder\n\n" +
-      "- `roomId` — Ziel-Room fuer die Ausgabe (Standard: Multi-Agent-Room)\n" +
+      "- `roomId` — Ziel-Room fuer die Ausgabe (Standard: Direct-Message-Room mit dem Admin)\n" +
       "- `timeoutSeconds` — Max. Ausfuehrungszeit (Standard: 600)\n\n" +
       "Wenn du bei einer geplanten Ausfuehrung nichts zu berichten hast, antworte mit `[PASS]`.\n";
   }
@@ -586,21 +578,8 @@ function listAgentIds() {
 }
 
 // ============================================================
-// Matrix helpers (orchestrator posts as @orchestrator:local)
+// Matrix helpers (admin operations only — no routing identity)
 // ============================================================
-async function sendFormatted(client, roomId, text) {
-  await client.sendMessage(roomId, {
-    msgtype: "m.text",
-    body: text,
-    format: "org.matrix.custom.html",
-    formatted_body: marked.parse(text),
-  });
-}
-
-async function sendPlain(client, roomId, text) {
-  await client.sendMessage(roomId, { msgtype: "m.text", body: text });
-}
-
 async function ensureMatrixUser(adminClient, username, password) {
   await adminClient.sendMessage(CONDUWUIT_ADMIN_ROOM, {
     msgtype: "m.text",
@@ -646,77 +625,23 @@ async function setDisplayName(token, userId, displayName) {
   );
 }
 
-async function inviteAndJoin(poolClient, token, roomId) {
-  const tmp = new MatrixClient(
-    HOMESERVER,
-    token,
-    new SimpleFsStorageProvider("/tmp/.tmp-" + Date.now() + ".json")
-  );
-  try {
-    const userId = await tmp.getUserId();
-    await poolClient.inviteUser(userId, roomId);
-    await new Promise((r) => setTimeout(r, 1000));
-    await tmp.joinRoom(roomId);
-  } catch (err) {
-    console.log(`[Orchestrator] Invite/join warning: ${err.message}`);
-  }
-}
-
 // ============================================================
-// Synthesis (orchestrator calls Claude CLI for merging responses)
-// ============================================================
-const CLAUDE_TIMEOUT = 600_000;
-
-function callClaude(prompt, cwd, timeoutMs = CLAUDE_TIMEOUT) {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(
-      "claude",
-      [
-        "-p", prompt,
-        "--output-format", "json",
-        "--permission-mode", "acceptEdits",
-      ],
-      { cwd, env: { ...process.env, HOME: "/root" }, stdio: ["ignore", "pipe", "pipe"] }
-    );
-    let stdout = "", stderr = "";
-    proc.stdout.on("data", (d) => (stdout += d));
-    proc.stderr.on("data", (d) => (stderr += d));
-    const timer = setTimeout(() => { proc.kill("SIGTERM"); reject(new Error("Timeout")); }, timeoutMs);
-    proc.on("close", (code) => {
-      clearTimeout(timer);
-      if (code !== 0) return reject(new Error(stderr.substring(0, 300) || `Exit ${code}`));
-      try {
-        const lines = stdout.split("\n").filter((l) => l.trim().startsWith("{"));
-        resolve(JSON.parse(lines[lines.length - 1]).result || stdout.trim());
-      } catch { resolve(stdout.trim()); }
-    });
-    proc.on("error", (err) => { clearTimeout(timer); reject(err); });
-  });
-}
-
-// ============================================================
-// Orchestrator
+// Orchestrator (backend service — no Matrix routing identity)
+//
+// The orchestrator runs as a pure backend service: it manages the per-agent
+// child processes (agent-runner.js) and exposes an internal HTTP API for the
+// admin console. It holds an admin Matrix client to create/deactivate user
+// accounts via the Conduwuit admin room, but does not have a chat presence.
+// All human↔agent communication happens via direct messages to each agent.
 // ============================================================
 class Orchestrator {
   constructor() {
-    this.poolClient = null;
     this.adminClient = null;
     // Map of agentId → { config } (no per-agent Matrix clients — they run in containers)
     this.agentConfigs = new Map();
-    this.activeTasks = new Map(); // roomId → activeTask
-    this.roomQueues = new Map();  // roomId → [body, ...]
-    this.roomBusy = new Set();
-    this.startTime = 0;
   }
 
   async init() {
-    this.poolClient = new MatrixClient(
-      HOMESERVER,
-      POOL_TOKEN,
-      new SimpleFsStorageProvider(path.join(WORKSPACE, ".pool-state.json"))
-    );
-    AutojoinRoomsMixin.setupOnClient(this.poolClient);
-
     if (CONDUWUIT_ADMIN_TOKEN && CONDUWUIT_ADMIN_ROOM) {
       this.adminClient = new MatrixClient(
         HOMESERVER,
@@ -736,12 +661,7 @@ class Orchestrator {
     // Start all enabled agent containers
     await startAllEnabledAgents();
 
-    this.startTime = Date.now();
-    this.poolClient.on("room.message", (r, e) => this.onMessage(r, e));
-    await this.poolClient.start();
-
-    console.log(`[Orchestrator] Started as ${POOL_USER_ID}`);
-    console.log(`[Orchestrator] Room: ${MULTI_AGENT_ROOM}`);
+    console.log(`[Orchestrator] Backend service ready`);
     console.log(`[Orchestrator] Agents loaded: ${this.agentConfigs.size}`);
     for (const [id, { config }] of this.agentConfigs) {
       const schedInfo = config.schedule ? ` [${config.schedule}]` : "";
@@ -778,7 +698,6 @@ class Orchestrator {
 
     const token = await loginMatrixUser(id, password);
     await setDisplayName(token, userId, displayName);
-    await inviteAndJoin(this.poolClient, token, MULTI_AGENT_ROOM);
 
     // Seed agent workspace using the chosen environment
     const seedResult = seedAgentWorkspace(id, env);
@@ -835,7 +754,6 @@ class Orchestrator {
     if (this.adminClient) await ensureMatrixUser(this.adminClient, instanceId, password);
     const token = await loginMatrixUser(instanceId, password);
     await setDisplayName(token, userId, instanceDisplayName);
-    await inviteAndJoin(this.poolClient, token, MULTI_AGENT_ROOM);
 
     const seedResult = seedAgentWorkspaceForInstance(instanceId, env, blueprintId);
 
@@ -881,7 +799,6 @@ class Orchestrator {
     if (this.adminClient) await ensureMatrixUser(this.adminClient, newId, password);
     const token = await loginMatrixUser(newId, password);
     await setDisplayName(token, userId, newDisplayName);
-    await inviteAndJoin(this.poolClient, token, MULTI_AGENT_ROOM);
 
     // Copy workspace — skip runtime-only files
     const srcDir = agentDir(sourceId);
@@ -909,229 +826,14 @@ class Orchestrator {
     console.log(`[Orchestrator] Cloned agent ${sourceId} → ${newId}`);
     return { id: newId, userId, clonedFrom: sourceId };
   }
-
-  // ===========================================================
-  // Message routing
-  // ===========================================================
-  async onMessage(roomId, event) {
-    if (event.sender === POOL_USER_ID) return;
-    if (event.content?.msgtype !== "m.text") return;
-    if (event.origin_server_ts < this.startTime) return;
-
-    const body = event.content.body;
-    if (!body) return;
-
-    // Only process messages in the multi-agent room
-    if (MULTI_AGENT_ROOM && roomId !== MULTI_AGENT_ROOM) return;
-
-    // Collect expert responses from agent containers (watcher)
-    // Agent containers post responses as their Matrix users — we detect them by userId.
-    const agentEntry = [...this.agentConfigs.values()].find(
-      (a) => a.config.userId === event.sender
-    );
-    if (agentEntry && this.activeTasks.has(roomId)) {
-      const activeTask = this.activeTasks.get(roomId);
-      if (
-        agentEntry.config.role === "expert" &&
-        !activeTask.respondedIds.has(event.sender)
-      ) {
-        activeTask.respondedIds.add(event.sender);
-        activeTask.expertResponses.push({
-          name: agentEntry.config.displayName,
-          response: body,
-        });
-        console.log(`[Orchestrator] Expert: ${agentEntry.config.displayName} (${body.length} chars)`);
-        this.resetQuietTimer(roomId);
-      }
-      return;
-    }
-
-    // Ignore all bot messages
-    if (agentEntry) return;
-    const allBotIds = new Set([...this.agentConfigs.values()].map((a) => a.config.userId));
-    if (allBotIds.has(event.sender)) return;
-
-    // Human message
-    if (body.startsWith("!")) return;
-
-    console.log(`[Orchestrator] Human: ${body.substring(0, 80)}`);
-    if (this.roomBusy.has(roomId)) {
-      if (!this.roomQueues.has(roomId)) this.roomQueues.set(roomId, []);
-      const queue = this.roomQueues.get(roomId);
-      if (queue.length >= 5) {
-        await sendPlain(this.poolClient, roomId, "Warteschlange voll — bitte warte kurz.");
-        return;
-      }
-      queue.push(body);
-      await sendPlain(this.poolClient, roomId, `In Warteschlange (${queue.length}).`);
-      return;
-    }
-    this.roomBusy.add(roomId);
-    this.processHumanMessage(roomId, body);
-  }
-
-  async processHumanMessage(roomId, body) {
-    const allExperts = [...this.agentConfigs.values()].filter(
-      (a) => a.config.role === "expert" && a.config.enabled !== false
-    );
-
-    // @-mention detection
-    const bodyLower = body.toLowerCase();
-    const isMentioned = (a) => {
-      const name = a.config.displayName.toLowerCase();
-      const id = a.config.id.toLowerCase();
-      const userId = a.config.userId.toLowerCase();
-      return bodyLower.includes(name) || bodyLower.includes(id) || bodyLower.includes(userId);
-    };
-
-    // Mentioned autonomous agents respond outside the expert pipeline
-    const mentionedAutonomous = [...this.agentConfigs.values()].filter(
-      (a) => a.config.role === "autonomous" && a.config.enabled !== false && isMentioned(a)
-    );
-    if (mentionedAutonomous.length > 0) {
-      console.log(`[Orchestrator] Autonomous mentioned: ${mentionedAutonomous.map((a) => a.config.displayName).join(", ")}`);
-      // Send a direct Matrix message to each autonomous agent.
-      // Their containers will pick it up and respond to the room.
-      for (const { config } of mentionedAutonomous) {
-        const prompt =
-          "Der Nutzer hat dich direkt angesprochen. Antworte auf jeden Fall.\n\n" + body;
-        this.sendToAgent(config, roomId, prompt).catch((err) =>
-          console.error(`[Orchestrator] Autonomous mention send error (${config.id}): ${err.message}`)
-        );
-      }
-    }
-
-    const mentionedExperts = allExperts.filter(isMentioned);
-
-    // If only autonomous agents mentioned — no expert pipeline needed
-    if (mentionedAutonomous.length > 0 && mentionedExperts.length === 0) {
-      this.drainQueue(roomId);
-      return;
-    }
-
-    if (allExperts.length === 0) {
-      await sendPlain(this.poolClient, roomId,
-        "Keine Experten-Agenten aktiv. Lege welche in der Admin Console an.");
-      this.drainQueue(roomId);
-      return;
-    }
-
-    // Directly mentioned experts or all experts
-    const experts = mentionedExperts.length > 0 ? mentionedExperts : allExperts;
-    if (mentionedExperts.length > 0) {
-      console.log(`[Orchestrator] Mentioned: ${mentionedExperts.map((a) => a.config.displayName).join(", ")}`);
-    }
-
-    const isDirect = mentionedExperts.length > 0;
-
-    const task = {
-      originalTask: body,
-      roomId,
-      expertResponses: [],
-      respondedIds: new Set(),
-      // Track how many agents we sent to — for all-passed detection
-      sentToIds: new Set(experts.map((a) => a.config.userId)),
-      quietTimer: null,
-      maxTimer: null,
-    };
-    this.activeTasks.set(roomId, task);
-
-    // Send the message to each targeted expert agent via Matrix.
-    // The agent-runner.js in each container receives this and calls Claude,
-    // then posts the response back to the room — which we collect in onMessage.
-    for (const { config } of experts) {
-      const prompt = isDirect
-        ? `Der Nutzer hat dich direkt angesprochen. Antworte auf jeden Fall, auch wenn das Thema nicht dein Kerngebiet ist.\n\n${body}`
-        : body;
-      console.log(`[Orchestrator] Routing to: ${config.displayName}${isDirect ? " (direct)" : ""}`);
-      this.sendToAgent(config, roomId, prompt).catch((err) =>
-        console.error(`[Orchestrator] Route error (${config.id}): ${err.message}`)
-      );
-    }
-
-    task.maxTimer = setTimeout(() => this.triggerSynthesis(roomId), MAX_TIMEOUT);
-  }
-
-  // Send a routing message to an agent via Matrix (plain text, not formatted,
-  // so agent-runner can extract the prompt cleanly).
-  async sendToAgent(config, roomId, prompt) {
-    // We send as the orchestrator to the multi-agent room.
-    // The agent-runner recognizes the message is directed at it via @-mention or
-    // broadcast (no agent mentioned). Here we send a system-formatted dispatch
-    // that the runner will recognize as a routing directive.
-    //
-    // Format: ROUTE:<agentUserId>:<base64-encoded-prompt>
-    // This ensures the runner can distinguish orchestrator routing from human chat
-    // without ambiguity.
-    const encoded = Buffer.from(prompt).toString("base64");
-    await this.poolClient.sendMessage(roomId, {
-      msgtype: "m.text",
-      body: `ROUTE:${config.userId}:${encoded}`,
-    });
-  }
-
-  checkAllDone(roomId) {
-    const activeTask = this.activeTasks.get(roomId);
-    if (!activeTask) return;
-
-    // If all experts we sent to have responded (or passed via [PASS] suppression),
-    // we won't get further messages. The quietTimer handles the window.
-    // This method is kept for symmetry but the quietTimer/maxTimer drive synthesis.
-  }
-
-  drainQueue(roomId) {
-    const queue = this.roomQueues.get(roomId);
-    if (!queue || queue.length === 0) {
-      this.roomQueues.delete(roomId);
-      this.roomBusy.delete(roomId);
-      console.log(`[Orchestrator] Pipeline done for ${roomId}`);
-      return;
-    }
-    const next = queue.shift();
-    console.log(`[Orchestrator] Draining queue for ${roomId} (${queue.length} remaining)`);
-    this.processHumanMessage(roomId, next);
-  }
-
-  resetQuietTimer(roomId) {
-    const activeTask = this.activeTasks.get(roomId);
-    if (!activeTask) return;
-    if (activeTask.quietTimer) clearTimeout(activeTask.quietTimer);
-
-    const enabledExperts = [...this.agentConfigs.values()].filter(
-      (a) => a.config.role === "expert" && a.config.enabled !== false
-    );
-    const allResponded = enabledExperts.every((a) =>
-      activeTask.respondedIds.has(a.config.userId)
-    );
-    activeTask.quietTimer = setTimeout(
-      () => this.finishTask(roomId),
-      allResponded ? 5_000 : QUIET_DELAY
-    );
-  }
-
-  finishTask(roomId) {
-    const task = this.activeTasks.get(roomId);
-    if (!task) return;
-    this.activeTasks.delete(roomId);
-    if (task.quietTimer) clearTimeout(task.quietTimer);
-    if (task.maxTimer) clearTimeout(task.maxTimer);
-
-    if (task.expertResponses.length === 0) {
-      console.log("[Orchestrator] All experts passed — sending fallback");
-      sendPlain(this.poolClient, roomId,
-        "Keiner der Experten konnte zu diesem Thema beitragen. Lege einen passenden Experten in der Admin Console an.");
-    }
-
-    this.drainQueue(roomId);
-  }
 }
 
 // ============================================================
 // Main
 // ============================================================
 async function main() {
-  if (!HOMESERVER || !POOL_TOKEN) {
-    console.error("MATRIX_HOMESERVER and MATRIX_ACCESS_TOKEN required");
+  if (!HOMESERVER) {
+    console.error("MATRIX_HOMESERVER required");
     process.exit(1);
   }
   const orchestrator = new Orchestrator();
@@ -1451,7 +1153,6 @@ async function main() {
           if (orchestrator.adminClient) await ensureMatrixUser(orchestrator.adminClient, agentId, password);
           const token = await loginMatrixUser(agentId, password);
           await setDisplayName(token, userId, displayName);
-          await inviteAndJoin(orchestrator.poolClient, token, MULTI_AGENT_ROOM);
 
           const seedResult = blueprintId
             ? seedAgentWorkspaceForInstance(agentId, env, blueprintId)

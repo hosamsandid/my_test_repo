@@ -30,7 +30,7 @@ The stack runs on Podman, communicates over the Matrix protocol, and reaches its
 | **Learnable Skills** | Drop a `SKILL.md` into the central skill pool and any agent that has a Working Environment selecting it gains a new domain capability — COBOL analysis, JCL conversion, DB2 schema mapping, anything. |
 | **Git Access** | A Working Environment can clone an enterprise repository into the agent's workspace using a registered SSH key. The agent can read, analyse, commit, and open pull requests. |
 | **Autonomous Operation** | Autonomous agents have a self-managed `triggers.json` (cron + one-shot) for proactive tasks — daily standup summaries, code quality checks, sprint reports. |
-| **Multi-Agent Pool** | An orchestrator routes questions to specialist agents in parallel. A synthesiser merges their answers. Agents are managed via the Admin Console. |
+| **Direct-Message Agents** | Each agent runs as its own Matrix user; the human talks to it in a dedicated 1:1 room. Agents are managed via the Admin Console. |
 | **Compliance** | LLM endpoint is configurable — point it at a tenant-internal proxy (LiteLLM, Azure AI Foundry gateway, etc.) so no data leaves your environment. |
 
 ---
@@ -40,10 +40,16 @@ The stack runs on Podman, communicates over the Matrix protocol, and reaches its
 ```
 Admin Console chat UI (or any Matrix client, e.g. Element)
   → Conduwuit (Matrix homeserver)
-    → orchestrator (@orchestrator:local)
-        ├── Routes to dynamic agent processes (each agent-runner.js)
-        ├── Each agent: own workspace, own CLAUDE.md, own skills + repo (via Working Environment)
-        └── Synthesises expert answers when broadcast routing is used
+       │
+       └── 1:1 DM rooms — one per agent
+              ├── @cobol-expert:local      ← agent-runner.js
+              ├── @java-expert:local       ← agent-runner.js
+              └── @quality-gate:local      ← agent-runner.js (autonomous)
+
+orchestrator (backend service, no Matrix presence)
+  ├── Spawns one agent-runner.js process per enabled agent
+  ├── Each agent: own workspace, CLAUDE.md, skills + repo (via Working Environment)
+  └── Internal HTTP API for the admin console
 
 Admin Console
   └── CRUD for agents, working environments, SSH keys, skills, MCP
@@ -61,8 +67,8 @@ See [`CLAUDE.md`](./CLAUDE.md) for the full technical reference including all en
 # 1. Copy environment config and fill in the LLM endpoint + auth token
 cp .env.example .env
 
-# 2. First-time only: boot Conduwuit, register the admin + orchestrator users,
-#    create the shared room. The script prints the values to add to .env.
+# 2. First-time only: boot Conduwuit, register the admin user.
+#    The script prints the access token to add to .env.
 podman compose up -d conduwuit
 ./orchestrator/setup.sh
 

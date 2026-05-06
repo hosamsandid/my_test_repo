@@ -1,25 +1,22 @@
 'use strict';
 
 /**
- * agent-runner.js — per-agent container entry point
+ * agent-runner.js — per-agent process entry point
  *
- * One instance of this process runs inside each agent container. It:
+ * One instance of this process runs for each agent. It:
  *   - Connects to Matrix as this agent's user
- *   - Listens for routing directives from the orchestrator
- *   - Calls Claude CLI in the agent's workspace
- *   - Posts results back to the multi-agent room
+ *   - Listens for direct messages (1:1 rooms) and responds via Claude CLI
  *   - Runs the trigger scheduler for autonomous agents
  *
- * Environment variables (set by orchestrator via Podman container create):
+ * Communication is DM-only: agents talk to the human (and only the human)
+ * in dedicated 1:1 Matrix rooms. There is no shared multi-agent room and
+ * no central routing identity.
+ *
+ * Environment variables (set by orchestrator via spawn):
  *   AGENT_ID                   — agent identifier (e.g. "cobol-expert")
  *   MATRIX_ACCESS_TOKEN        — this agent's Matrix access token
  *   MATRIX_BOT_USER_ID         — this agent's Matrix user ID (e.g. "@cobol-expert:local")
  *   MATRIX_HOMESERVER          — homeserver URL
- *   MULTI_AGENT_ROOM           — the shared multi-agent room ID
- *   ORCHESTRATOR_USER_ID       — orchestrator's Matrix user ID (@orchestrator:local)
- *   CLAUDE_CODE_USE_FOUNDRY    — forwarded Azure Foundry config
- *   ANTHROPIC_FOUNDRY_RESOURCE
- *   ANTHROPIC_FOUNDRY_API_KEY
  *   ANTHROPIC_DEFAULT_SONNET_MODEL
  *   GIT_SSH_COMMAND
  */
@@ -44,8 +41,6 @@ const AGENT_ID = process.env.AGENT_ID;
 const AGENT_TOKEN = process.env.MATRIX_ACCESS_TOKEN;
 const AGENT_USER_ID = process.env.MATRIX_BOT_USER_ID;
 const HOMESERVER = process.env.MATRIX_HOMESERVER;
-const MULTI_AGENT_ROOM = process.env.MULTI_AGENT_ROOM;
-const ORCHESTRATOR_USER_ID = process.env.ORCHESTRATOR_USER_ID || "@orchestrator:local";
 
 const AGENTS_DIR = "/workspace/agents";
 const CLAUDE_TIMEOUT = 600_000;
@@ -67,6 +62,21 @@ function loadAgentConfig() {
   const p = path.join(AGENT_WORKDIR, "config.json");
   if (!fs.existsSync(p)) return null;
   return JSON.parse(fs.readFileSync(p, "utf8"));
+}
+
+// Read the persisted DM-room mapping for this agent (created lazily by the
+// admin console when a user first opens the chat). Returns null if no DM
+// has been opened yet — triggers without an explicit roomId then have no
+// destination and silently log instead of posting.
+function loadDmRoomId() {
+  const p = path.join(AGENT_WORKDIR, "dm-room.json");
+  if (!fs.existsSync(p)) return null;
+  try {
+    const data = JSON.parse(fs.readFileSync(p, "utf8"));
+    return typeof data?.roomId === "string" && data.roomId ? data.roomId : null;
+  } catch {
+    return null;
+  }
 }
 
 function loadTriggers() {
@@ -335,8 +345,8 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT,
 // Matrix helpers
 // ============================================================
 async function sendFormatted(client, roomId, text) {
-  // body stays plain markdown so the orchestrator can parse expert responses;
-  // formatted_body is rendered HTML so Matrix clients display it nicely.
+  // body stays plain markdown for accessibility; formatted_body is rendered
+  // HTML so Matrix clients display it nicely.
   // matrix-bot-sdk's sendMessage returns the Matrix event id (string).
   return await client.sendMessage(roomId, {
     msgtype: "m.text",
@@ -344,28 +354,6 @@ async function sendFormatted(client, roomId, text) {
     format: "org.matrix.custom.html",
     formatted_body: marked.parse(text),
   });
-}
-
-// ============================================================
-// Routing message parsing
-// Orchestrator sends: ROUTE:<targetUserId>:<base64-prompt>
-// ============================================================
-function parseRoute(body) {
-  if (!body.startsWith("ROUTE:")) return null;
-  const parts = body.split(":");
-  // Format: ROUTE:<userId-part1>:<userId-part2 (domain)>:<base64>
-  // userId contains a colon (@foo:local), so we need to find the base64 part carefully.
-  // We always split into at most 4 parts on the first 3 colons:
-  //   ROUTE  :  @foo  :  local  :  <base64>
-  // But userId can be @foo:local — that's 2 segments after ROUTE.
-  // Strategy: find "ROUTE:", then find the userId by reading until the next colon
-  // after the @ sign, then the rest is base64.
-  const match = body.match(/^ROUTE:(@[^:]+:[^:]+):(.+)$/);
-  if (!match) return null;
-  return {
-    targetUserId: match[1],
-    prompt: Buffer.from(match[2], "base64").toString("utf8"),
-  };
 }
 
 // ============================================================
@@ -443,7 +431,17 @@ class TriggerScheduler {
     }
     this.triggerRunning.add(trigger.id);
 
-    const roomId = trigger.roomId || MULTI_AGENT_ROOM;
+    // Default destination is the agent's DM room with the admin (created
+    // lazily when the user first opens the chat). If neither the trigger
+    // nor the agent has a DM target, skip — there's nowhere to post.
+    const roomId = trigger.roomId || loadDmRoomId();
+    if (!roomId) {
+      console.log(
+        `[Runner:${AGENT_ID}] Trigger ${trigger.id} skipped: no roomId and no DM room exists yet`
+      );
+      this.triggerRunning.delete(trigger.id);
+      return;
+    }
     const correlationId = `trigger:${trigger.id}:${Date.now()}`;
     console.log(`[Runner:${AGENT_ID}] Executing trigger: ${trigger.id}...`);
 
@@ -572,14 +570,11 @@ async function main() {
     return members;
   }
 
-  // Decide whether this room counts as a 1:1 DM with a real user (not an
-  // agent / not the orchestrator). True when the room is not the multi-agent
-  // room, has exactly two joined members (this agent + one other), and the
-  // sender is neither this agent nor the orchestrator.
+  // Decide whether this room counts as a 1:1 DM with a real user. True when
+  // the room has exactly two joined members (this agent + one other) and the
+  // sender is not this agent.
   async function isDmFromHuman(roomId, event) {
-    if (MULTI_AGENT_ROOM && roomId === MULTI_AGENT_ROOM) return false;
     if (event.sender === AGENT_USER_ID) return false;
-    if (event.sender === ORCHESTRATOR_USER_ID) return false;
     let members;
     try {
       members = await getJoinedMembersCached(roomId);
@@ -599,125 +594,29 @@ async function main() {
     const body = event.content?.body;
     if (!body) return;
 
-    // Direct 1:1 conversation: any room outside the multi-agent room with
-    // exactly two members where the other member is a real user (heuristic:
-    // not orchestrator, not self). The agent responds unconditionally —
-    // no routing protocol, no [PASS] filter.
-    const isOrchestratedRoom = MULTI_AGENT_ROOM && roomId === MULTI_AGENT_ROOM;
-    if (!isOrchestratedRoom && await isDmFromHuman(roomId, event)) {
-      if (processing) {
-        console.log(`[Runner:${AGENT_ID}] Busy — dropping direct message`);
-        return;
-      }
-      processing = true;
-      const correlationId = event.event_id || crypto.randomUUID();
-      console.log(`[Runner:${AGENT_ID}] Direct message (${body.length} chars)...`);
-
-      try {
-        appendEvent(AGENT_ID, roomId, {
-          type: "message.received",
-          correlationId,
-          from: event.sender,
-          body: body.slice(0, 4000),
-        });
-        appendEvent(AGENT_ID, roomId, {
-          type: "claude.invoke",
-          correlationId,
-          promptChars: body.length,
-        });
-      } catch (err) {
-        console.error(`[Runner:${AGENT_ID}] session-log warning: ${err.message}`);
-      }
-
-      try {
-        if (++activeInvocations === 1) writeStatus('busy');
-        let result;
-        try {
-          result = await callClaude(body, { roomId, correlationId });
-        } finally {
-          if (--activeInvocations === 0) writeStatus('idle');
-        }
-        let eventId;
-        try {
-          eventId = await sendFormatted(client, roomId, result);
-        } catch (err) {
-          try {
-            appendEvent(AGENT_ID, roomId, {
-              type: "error",
-              correlationId,
-              stage: "matrix",
-              message: err.message,
-            });
-          } catch {}
-          throw err;
-        }
-        writeLastResponseAt();
-        try {
-          appendEvent(AGENT_ID, roomId, {
-            type: "message.posted",
-            correlationId,
-            eventId,
-          });
-        } catch {}
-        console.log(`[Runner:${AGENT_ID}] Posted direct response (${result.length} chars)`);
-      } catch (err) {
-        try {
-          appendEvent(AGENT_ID, roomId, {
-            type: "error",
-            correlationId,
-            stage: "claude",
-            message: err.message,
-          });
-        } catch {}
-        console.error(`[Runner:${AGENT_ID}] Error: ${err.message}`);
-        // Surface the failure to the user so the chat doesn't hang on a typing indicator.
-        try {
-          await sendFormatted(client, roomId,
-            `⚠️ **Agent error**\n\n\`\`\`\n${String(err.message).slice(0, 800)}\n\`\`\``);
-        } catch (postErr) {
-          console.error(`[Runner:${AGENT_ID}] Could not post error to chat: ${postErr.message}`);
-        }
-      } finally {
-        processing = false;
-      }
-      return;
-    }
-
-    // Only process messages in the orchestrated room from here on
-    if (MULTI_AGENT_ROOM && roomId !== MULTI_AGENT_ROOM) return;
-    // Only accept routing messages from the orchestrator
-    if (event.sender !== ORCHESTRATOR_USER_ID) return;
-
-    // Parse the routing directive
-    const route = parseRoute(body);
-    if (!route) return;
-
-    // Check if this message is directed at us
-    if (route.targetUserId !== AGENT_USER_ID) return;
+    // Only respond in 1:1 rooms with a real user. Anything else (group rooms,
+    // bot-only rooms, our own messages) is ignored.
+    if (!(await isDmFromHuman(roomId, event))) return;
 
     if (processing) {
-      console.log(`[Runner:${AGENT_ID}] Busy — dropping message`);
+      console.log(`[Runner:${AGENT_ID}] Busy — dropping direct message`);
       return;
     }
     processing = true;
-
-    const prompt = route.prompt;
-    const isDirect = prompt.startsWith("Der Nutzer hat dich direkt angesprochen.");
     const correlationId = event.event_id || crypto.randomUUID();
-
-    console.log(`[Runner:${AGENT_ID}] Processing prompt (${prompt.length} chars)...`);
+    console.log(`[Runner:${AGENT_ID}] Direct message (${body.length} chars)...`);
 
     try {
       appendEvent(AGENT_ID, roomId, {
         type: "message.received",
         correlationId,
         from: event.sender,
-        body: prompt.slice(0, 4000),
+        body: body.slice(0, 4000),
       });
       appendEvent(AGENT_ID, roomId, {
         type: "claude.invoke",
         correlationId,
-        promptChars: prompt.length,
+        promptChars: body.length,
       });
     } catch (err) {
       console.error(`[Runner:${AGENT_ID}] session-log warning: ${err.message}`);
@@ -727,39 +626,33 @@ async function main() {
       if (++activeInvocations === 1) writeStatus('busy');
       let result;
       try {
-        result = await callClaude(prompt, { roomId, correlationId });
+        result = await callClaude(body, { roomId, correlationId });
       } finally {
         if (--activeInvocations === 0) writeStatus('idle');
       }
-
-      // [PASS] filtering: suppress output if agent has nothing to say
-      if (!isDirect && result.trim().startsWith("[PASS]")) {
-        console.log(`[Runner:${AGENT_ID}] [PASS] — not posting`);
-      } else {
-        let eventId;
-        try {
-          eventId = await sendFormatted(client, roomId, result);
-        } catch (err) {
-          try {
-            appendEvent(AGENT_ID, roomId, {
-              type: "error",
-              correlationId,
-              stage: "matrix",
-              message: err.message,
-            });
-          } catch {}
-          throw err;
-        }
-        writeLastResponseAt();
+      let eventId;
+      try {
+        eventId = await sendFormatted(client, roomId, result);
+      } catch (err) {
         try {
           appendEvent(AGENT_ID, roomId, {
-            type: "message.posted",
+            type: "error",
             correlationId,
-            eventId,
+            stage: "matrix",
+            message: err.message,
           });
         } catch {}
-        console.log(`[Runner:${AGENT_ID}] Posted response (${result.length} chars)`);
+        throw err;
       }
+      writeLastResponseAt();
+      try {
+        appendEvent(AGENT_ID, roomId, {
+          type: "message.posted",
+          correlationId,
+          eventId,
+        });
+      } catch {}
+      console.log(`[Runner:${AGENT_ID}] Posted direct response (${result.length} chars)`);
     } catch (err) {
       try {
         appendEvent(AGENT_ID, roomId, {
@@ -770,6 +663,13 @@ async function main() {
         });
       } catch {}
       console.error(`[Runner:${AGENT_ID}] Error: ${err.message}`);
+      // Surface the failure to the user so the chat doesn't hang on a typing indicator.
+      try {
+        await sendFormatted(client, roomId,
+          `⚠️ **Agent error**\n\n\`\`\`\n${String(err.message).slice(0, 800)}\n\`\`\``);
+      } catch (postErr) {
+        console.error(`[Runner:${AGENT_ID}] Could not post error to chat: ${postErr.message}`);
+      }
     } finally {
       processing = false;
     }
@@ -784,8 +684,7 @@ async function main() {
   }
 
   console.log(`[Runner:${AGENT_ID}] Started as ${AGENT_USER_ID} (${displayName}, ${role})`);
-  console.log(`[Runner:${AGENT_ID}] Room: ${MULTI_AGENT_ROOM}`);
-  console.log(`[Runner:${AGENT_ID}] Listening for routing messages from: ${ORCHESTRATOR_USER_ID}`);
+  console.log(`[Runner:${AGENT_ID}] Listening for direct messages`);
 }
 
 main().catch((err) => { console.error("Fatal:", err); process.exit(1); });

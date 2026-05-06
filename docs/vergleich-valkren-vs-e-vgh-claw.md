@@ -1,6 +1,8 @@
 # Vergleich: Valkren Starter Kit vs. e-vgh-claw
 
 > Analyse vom 2026-04-24 — Beide Systeme sind Wrapper um Claude Code für Enterprise-Arbeit.
+>
+> **Update 2026-05-06:** Das in diesem Vergleich beschriebene "Multi-Agent Pool"-Modell (Orchestrator als Router + gemeinsamer Multi-Agent-Room + Expert-Broadcast/Synthese) gibt es nicht mehr. e-vgh-claw nutzt jetzt ein DM-only-Modell: jeder Agent hat einen eigenen Matrix-User, der Mensch chattet 1:1. Die Adversarial-Review-/Synthese-Vorschläge in diesem Dokument sind damit hypothetisch — sie waren auf eine Architektur gemünzt, die zurückgebaut wurde.
 
 ## Auf abstrakter Flughöhe: Das Gemeinsame
 

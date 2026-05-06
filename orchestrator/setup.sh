@@ -3,12 +3,13 @@ set -euo pipefail
 
 # One-shot bootstrap for a fresh Conduwuit installation.
 #
-# Creates the admin (human) user and the @orchestrator:local bot via
-# conduwuit's --execute flag, then logs in via the Matrix API to obtain
-# tokens, creates the shared room, and prints the .env values.
+# Creates the admin (human) user via conduwuit's --execute flag, then logs
+# in via the Matrix API to obtain the admin access token and prints the
+# .env values.
 #
-# After this completes, manage all expert/synthesizer/autonomous agents
-# via the Admin Console.
+# After this completes, manage all agents via the Admin Console. Each agent
+# runs as its own Matrix user; conversations happen as direct messages
+# between the human and a single agent — there is no shared room.
 #
 # Compatible with bash 3.2 (macOS default).
 
@@ -21,11 +22,9 @@ fi
 HOMESERVER="${HOMESERVER:-http://localhost:${CONDUWUIT_PORT:-8448}}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASS="${ADMIN_PASS:-}"
-ORCH_USER="orchestrator"
-ORCH_PASS="${ORCH_PASS:-orch-$(date +%s)}"
 COMPOSE_FILE="${SCRIPT_DIR}/../docker-compose.yml"
 
-echo "=== Stack Bootstrap (admin user + orchestrator) ==="
+echo "=== Stack Bootstrap (admin user) ==="
 
 # --- Prerequisites ---
 if ! command -v jq &>/dev/null; then
@@ -43,7 +42,7 @@ if [ -z "$ADMIN_PASS" ]; then
   fi
 fi
 
-# --- Create users via conduwuit --execute ---
+# --- Create admin user via conduwuit --execute ---
 BOOTSTRAP_OVERRIDE=$(mktemp)
 cat > "$BOOTSTRAP_OVERRIDE" <<YAML
 services:
@@ -52,12 +51,10 @@ services:
       - /sbin/conduwuit
       - --execute
       - "users create-user ${ADMIN_USER} ${ADMIN_PASS}"
-      - --execute
-      - "users create-user ${ORCH_USER} ${ORCH_PASS}"
 YAML
 trap "rm -f '$BOOTSTRAP_OVERRIDE'" EXIT
 
-echo "Creating Matrix users via conduwuit admin console ..."
+echo "Creating admin Matrix user via conduwuit admin console ..."
 podman compose -f "${COMPOSE_FILE}" -f "${BOOTSTRAP_OVERRIDE}" up -d --no-deps conduwuit >/dev/null 2>&1
 
 echo -n "Waiting for Conduwuit to be ready ..."
@@ -75,7 +72,7 @@ for i in $(seq 1 30); do
   fi
 done
 
-# Restart without --execute immediately to avoid crash loop (users already exist on restart)
+# Restart without --execute immediately to avoid crash loop (user already exists on restart)
 echo "Restarting Conduwuit (normal mode) ..."
 podman compose -f "${COMPOSE_FILE}" up -d --no-deps conduwuit >/dev/null 2>&1
 echo -n "Waiting for Conduwuit to be ready ..."
@@ -88,7 +85,7 @@ for i in $(seq 1 30); do
   echo -n "."
 done
 
-# --- Login to get access tokens ---
+# --- Login to get the admin access token ---
 login() {
   local username="$1"
   local password="$2"
@@ -131,49 +128,6 @@ if [ -z "${ADMIN_TOKEN}" ]; then
   echo "  OK"
 fi
 
-ORCH_TOKEN=""
-if [ -n "${ORCHESTRATOR_TOKEN:-}" ]; then
-  whoami=$(curl -s "${HOMESERVER}/_matrix/client/v3/account/whoami" \
-    -H "Authorization: Bearer ${ORCHESTRATOR_TOKEN}" 2>/dev/null)
-  if echo "$whoami" | jq -e '.user_id' >/dev/null 2>&1; then
-    echo "Reusing existing orchestrator token from .env"
-    ORCH_TOKEN="${ORCHESTRATOR_TOKEN}"
-  fi
-fi
-
-if [ -z "${ORCH_TOKEN}" ]; then
-  echo "Logging in @${ORCH_USER}:local ..."
-  ORCH_TOKEN=$(login "${ORCH_USER}" "${ORCH_PASS}") || {
-    echo "ERROR: failed to login orchestrator" >&2
-    exit 1
-  }
-  echo "  OK"
-fi
-
-curl -sf -X PUT "${HOMESERVER}/_matrix/client/v3/profile/@${ORCH_USER}:local/displayname" \
-  -H "Authorization: Bearer ${ORCH_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"displayname": "Orchestrator"}' >/dev/null 2>&1 || true
-
-# --- Create collaboration room ---
-echo "Creating Multi-Agent Collaboration room ..."
-room_response=$(curl -sf -X POST "${HOMESERVER}/_matrix/client/v3/createRoom" \
-  -H "Authorization: Bearer ${ORCH_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"name\": \"Multi-Agent Collaboration\",
-    \"topic\": \"Shared room: orchestrator routes messages to expert agents\",
-    \"preset\": \"private_chat\",
-    \"invite\": [\"@${ADMIN_USER}:local\"]
-  }")
-
-ROOM_ID=$(echo "$room_response" | jq -r '.room_id // empty')
-if [ -z "$ROOM_ID" ]; then
-  echo "ERROR: Could not create room. Response: ${room_response}" >&2
-  exit 1
-fi
-echo "  Room: ${ROOM_ID}"
-
 # --- Output ---
 echo
 echo "=========================================="
@@ -183,9 +137,6 @@ cat <<EOF
 
 MATRIX_ACCESS_TOKEN=${ADMIN_TOKEN}
 MATRIX_BOT_USER_ID=@${ADMIN_USER}:local
-MATRIX_DEFAULT_ROOM=${ROOM_ID}
-MULTI_AGENT_ROOM=${ROOM_ID}
-ORCHESTRATOR_TOKEN=${ORCH_TOKEN}
 
 EOF
 echo "Then start the stack with: make up"

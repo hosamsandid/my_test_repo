@@ -1,8 +1,8 @@
 # Briefing Pack Integration Plan
 
-Integration of the ACE (Agent Command Environment) Briefing Pack system from `i-sase` into the `e-vgh-claw` Matrix multi-agent stack.
+Integration of the ACE (Agent Command Environment) Briefing Pack system from `i-sase` into the `e-vgh-claw` Matrix-based agent stack.
 
-Status: draft / planning. Nothing implemented yet.
+Status: superseded. Sections describing a "multi-agent room" or central orchestrator-as-router no longer apply — the stack is now DM-only (one Matrix user + one DM room per agent, no shared room). The next iteration of this plan will replace BP-status messages in the multi-agent room with status updates posted to the orchestrator-agent's DM room with the human, and BP-instance agents will spawn as children of an orchestrator agent rather than appearing in a shared room. Treat the rest of this document as historical context.
 
 ---
 

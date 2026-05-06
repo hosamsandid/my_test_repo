@@ -6,31 +6,37 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **e-vgh-claw** is a local Matrix-to-Claude-Code stack for an enterprise context. It provides chat-based AI agents that can be extended with domain-specific skills for **Mainframe Migration** (COBOL, JCL, DB2, IMS, etc.).
 
-The stack runs locally with Podman as a single compose file with three services:
+The stack runs locally with Podman as a single compose file with these services:
 
 1. **Conduwuit** — Matrix homeserver
-2. **Orchestrator** — dynamic agent pool with domain experts (`@orchestrator:local`)
+2. **Orchestrator** — backend service that manages per-agent processes; no Matrix chat identity of its own
 3. **Admin Console** — web UI on `:4000` for managing agents, working environments, SSH keys, skills, etc. Includes an embedded chat UI at `/chats/:agentId` for direct 1:1 conversations with each agent.
+4. **bp-explorer** — read-only viewer for ACE BriefingPack metadata
 
 The LLM backend is reached via an Anthropic-compatible proxy configured by `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` in `.env` (gitignored). Default Sonnet/Haiku models are set there too.
 
 ## Architecture
 
+All human↔agent communication happens through **direct messages**: each agent has its own Matrix user, and the human chats with that agent in a dedicated 1:1 room. There is no shared multi-agent room and no central routing identity.
+
 ```
 Admin Console chat UI (or any Matrix client, e.g. Element)
   → Conduwuit (localhost:8448)
-    → orchestrator.js (@orchestrator:local)
-        ├── Manages dynamic agents (create/update/delete via Admin Console)
-        ├── Routes human messages to expert agents in parallel
-        ├── Each expert: agent-runner.js child process with agent-specific CLAUDE.md
-        ├── @-mention filtering: mentioned agents only, or broadcast to all
-        ├── [PASS] filtering: agents stay silent when topic is outside expertise
-        └── Watcher: collects expert responses
+       │
+       └── 1:1 DM rooms (one per agent)
+              ├── @cobol-expert:local      ← agent-runner.js
+              ├── @java-expert:local       ← agent-runner.js
+              └── @quality-gate:local      ← agent-runner.js (autonomous)
+
+orchestrator.js  (backend service, no Matrix presence)
+  ├── Manages agent lifecycle (create/update/delete via Admin Console)
+  ├── Spawns one agent-runner.js child process per enabled agent
+  ├── Uses the admin Matrix client to provision new agent users
+  └── Internal HTTP API on :4002 for the admin console
 ```
 
-- **Pool identity:** `@orchestrator:local` (invisible watcher/router)
-- **Agents:** dynamically created Matrix users (e.g. `@cobol-expert:local`)
-- **Room:** `!53HsXQ24Pfdnj9WVXF:local` ("Multi-Agent Collaboration")
+- **Agents:** dynamically created Matrix users (e.g. `@cobol-expert:local`); each runs its own agent-runner.js process
+- DM room IDs persisted at `/workspace/agents/<id>/dm-room.json` (created lazily by the admin console)
 - Agent configs persisted in `/workspace/agents/<id>/` (config.json + CLAUDE.md + AGENT-PROMPT.md)
 - Each agent is bound to a **Working Environment** (see below) which defines what gets seeded into its workspace.
 - Matrix users auto-created via Conduwuit admin room
@@ -59,8 +65,9 @@ SSH keys are stored at `/workspace/environments/_keys/<keyId>` (mode 0600) with 
 
 | Role | Behavior |
 |---|---|
-| `expert` | Responds reactively to human messages. Returns `[PASS]` if topic is outside expertise. When @-mentioned directly, always responds. |
-| `autonomous` | Runs proactively on a cron schedule. Posts results to the room. Responds to @-mentions and direct messages. Does NOT participate in expert broadcast routing. |
+| `expert` | Responds to direct messages from a human in its 1:1 DM room. |
+| `autonomous` | Runs proactively on a cron schedule. Posts results to its DM room with the admin (or a custom `roomId`). Also responds to direct messages. |
+| `orchestrator` | Backend agent bound to a BriefingPack directory (`briefingsPath`). Reserved for the upcoming claim-loop that spawns BP-instance children. |
 
 ### Autonomous Agent Triggers
 
@@ -78,16 +85,7 @@ Autonomous agents are driven by **triggers** stored in a per-agent `triggers.jso
 | `cron` | `cron` (5-field expression) | Recurring execution via node-cron |
 | `once` | `at` (ISO timestamp) | One-shot, auto-removed after execution |
 
-Results are posted to the multi-agent room (or custom `roomId`); `[PASS]` suppresses output.
-
-### @-Mention Logic
-
-| Message | Who responds |
-|---|---|
-| `Vergleiche COBOL und Java` | All experts (no name mentioned) |
-| `Java Experte: was ist ein Record?` | Only Java Experte (direct mention) |
-| `quality-gate: pruefe den letzten Commit` | Only the autonomous agent (direct mention, outside expert pipeline) |
-| Direct mention + off-topic | Agent responds anyway (override [PASS]) |
+Results are posted to `trigger.roomId` if set, otherwise to the agent's DM room with the admin (read from `/workspace/agents/<id>/dm-room.json`). If neither is available — i.e. the user has not yet opened a chat with this agent — the trigger run is skipped. `[PASS]` suppresses output.
 
 ### Agent Management
 
@@ -113,7 +111,7 @@ NDJSON lines from stdout are parsed event-by-event and written, together with wr
 
 The schema is defined in `docs/agent-chat-plan.md` §4.1 and includes `assistant_text`, `tool_use`, `tool_result`, `thinking`, and `result` events. Every entry carries a `correlationId` (the originating Matrix `event_id`, or a synthetic `trigger:<id>:<ts>` for cron triggers) so the Admin Console can tie log rows to chat bubbles.
 
-**DM heuristic.** Agents now respond to direct messages from any user (not just the hardcoded admin). The rule, applied in `agent-runner.js`, is: the room is not the multi-agent room AND `getJoinedRoomMembers(roomId)` returns exactly two members (this agent + one other) AND the sender is neither this agent nor the orchestrator. Membership counts are cached for 30 s. The old `ADMIN_USER_ID` env var is no longer consulted.
+**DM heuristic.** Every message the agent receives is checked against a single rule (in `agent-runner.js`): `getJoinedRoomMembers(roomId)` returns exactly two members (this agent + one other) AND the sender is not this agent. Anything else is ignored. Membership counts are cached for 30 s.
 
 ### Agent Chat UI
 
@@ -149,12 +147,12 @@ The Admin Console embeds a Matrix client at `/chats` (and `/chats/:agentId`) so 
 | `docker-compose.yml` | All four services + volumes |
 | `.env` | Secrets: Matrix tokens, LLM proxy URL + auth token (gitignored) |
 | `Makefile` | Build + start convenience targets (`make up`, `make down`, `make logs`, ...) |
-| `orchestrator/orchestrator.js` | Dynamic agent management, routing, synthesis, environment-aware workspace seeding, internal API for the admin console |
+| `orchestrator/orchestrator.js` | Backend service: agent lifecycle, child-process spawning, environment-aware workspace seeding, internal HTTP API for the admin console |
 | `orchestrator/agent-runner.js` | Per-agent child process: Matrix client + Claude CLI invocations + trigger scheduler |
 | `orchestrator/session-log.js` | JSONL session logger: maps Claude `stream-json` NDJSON to normalized events, append-only writer |
 | `orchestrator/Dockerfile` | Node 22 + Claude Code CLI + git + openssh-client |
 | `orchestrator/CLAUDE-template.md` | Base template baked into the image as `/defaults/CLAUDE.md`, used as fallback when the skill-pool volume has no CLAUDE.md |
-| `orchestrator/setup.sh` | Initial setup: register Matrix users, create room |
+| `orchestrator/setup.sh` | Initial setup: register the admin Matrix user, print the access token |
 | `admin-console/api/api.js` | Express API: agents, environments, ssh-keys, skills, models, mcp |
 | `admin-console/src/pages/WorkingEnvironments.jsx` | UI: CRUD for environments (skills picker, optional repo + ssh key) |
 | `admin-console/src/pages/SshKeys.jsx` | UI: CRUD for SSH keys (paste private key, see fingerprint only) |
@@ -164,8 +162,7 @@ The Admin Console embeds a Matrix client at `/chats` (and `/chats/:agentId`) so 
 
 ```bash
 # First-time bootstrap (after `podman compose up -d conduwuit`):
-# registers the admin user + @orchestrator:local, creates the shared room,
-# prints the tokens to add to .env.
+# registers the admin user and prints the access token to add to .env.
 ./orchestrator/setup.sh
 
 # Start / stop / restart the full stack

@@ -4,6 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Agentic Studio</title>
+    <script>
+      // Apply theme before first paint to avoid flash
+      (function () {
+        var stored = localStorage.getItem('eb-theme');
+        var valid = ['admin-dark', 'admin-light', 'high-contrast'];
+        if (stored && valid.includes(stored)) {
+          document.documentElement.dataset.theme = stored;
+        } else if (window.matchMedia('(prefers-color-scheme: light)').matches) {
+          document.documentElement.dataset.theme = 'admin-light';
+        } else {
+          document.documentElement.dataset.theme = 'admin-dark';
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

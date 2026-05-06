@@ -4,7 +4,9 @@ import {
   LayoutDashboard, Users, Zap, Clock, Sparkles, Server,
   Database, ScrollText, ChevronLeft, ChevronRight, Bot,
   Boxes, Key, MessageCircle, Github, Layers, GitBranch, Settings,
+  Sun, Moon,
 } from 'lucide-react';
+import useTheme from '../hooks/useTheme';
 
 const NAV = [
   { section: 'OVERVIEW', items: [
@@ -63,6 +65,7 @@ export default function Shell({ children }) {
   const [collapsed, setCollapsed] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
+  const { theme, toggleLightDark } = useTheme();
 
   const sidebarWidth = collapsed ? 'var(--eb-sidebar-collapsed)' : 'var(--eb-sidebar-width)';
 
@@ -216,6 +219,32 @@ export default function Shell({ children }) {
           <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
             {breadcrumbFor(location.pathname)}
           </div>
+          <button
+            onClick={toggleLightDark}
+            title={theme === 'admin-light' ? 'Switch to Dark Mode' : 'Switch to Light Mode'}
+            aria-label={theme === 'admin-light' ? 'Switch to Dark Mode' : 'Switch to Light Mode'}
+            style={{
+              background: 'none',
+              border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-md)',
+              color: 'var(--eb-text-secondary)',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              padding: 'var(--eb-space-1) var(--eb-space-2)',
+              transition: 'background var(--eb-transition-fast), color var(--eb-transition-fast)',
+            }}
+            onMouseEnter={e => {
+              e.currentTarget.style.background = 'var(--eb-bg-hover)';
+              e.currentTarget.style.color = 'var(--eb-text-primary)';
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.background = 'none';
+              e.currentTarget.style.color = 'var(--eb-text-secondary)';
+            }}
+          >
+            {theme === 'admin-light' ? <Moon size={16} /> : <Sun size={16} />}
+          </button>
         </header>
 
         {/* Page content */}

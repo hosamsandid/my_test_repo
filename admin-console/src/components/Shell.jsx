@@ -53,7 +53,7 @@ const NAV = [
   ]},
   { section: 'CONFIGURATION', items: [
     { path: '/skills',       label: 'Skills Registry',     Icon: Zap },
-    { path: '/jobs',         label: 'Scheduled Triggers',      Icon: Clock },
+    { path: '/jobs',         label: 'Triggers',            Icon: Clock },
     { path: '/models',       label: 'Model Registry',      Icon: Sparkles },
     { path: '/mcp',          label: 'MCP Servers',         Icon: Server },
     { path: '/config',       label: 'System Config',        Icon: Settings },
@@ -72,7 +72,7 @@ const BREADCRUMBS = {
   '/ssh-keys':     'SSH Keys',
   '/github-tokens': 'GitHub Tokens',
   '/skills':       'Skills Registry',
-  '/jobs':         'Scheduled Triggers',
+  '/jobs':         'Triggers',
   '/models':       'Model Registry',
   '/mcp':          'MCP Servers',
   '/config':       'System Config',

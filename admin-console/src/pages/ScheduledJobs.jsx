@@ -1,10 +1,38 @@
 import React, { useState, useCallback } from 'react';
-import { Plus, Trash2 } from 'lucide-react';
+import { Plus, Trash2, Clock, CalendarClock, Globe, AlertCircle } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
+
+/* ── Type badge ─────────────────────────────────────────────────────── */
+function TypeBadge({ type }) {
+  const isCron = type === 'cron' || type === 'recurring';
+  const isOnce = type === 'once';
+  const isHttp = type === 'http';
+  const bg    = isCron ? 'var(--eb-accent-muted)'   : isOnce ? 'var(--eb-bg-elevated)'    : isHttp ? 'var(--eb-status-success-bg)' : 'var(--eb-status-warning-bg)';
+  const color = isCron ? 'var(--eb-accent-primary)' : isOnce ? 'var(--eb-text-secondary)' : isHttp ? 'var(--eb-status-success)'    : 'var(--eb-status-warning)';
+  const label = isCron ? 'cron'                     : isOnce ? 'once'                     : isHttp ? 'http'                        : type || 'unknown';
+  const Icon  = isCron ? Clock                      : isOnce ? CalendarClock              : isHttp ? Globe                         : AlertCircle;
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 3,
+      padding: '1px 6px', borderRadius: 'var(--eb-radius-full)',
+      fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)',
+      background: bg, color, border: `1px solid ${color}`, whiteSpace: 'nowrap',
+    }}>
+      <Icon size={10} />
+      {label}
+    </span>
+  );
+}
+
+function generateSecret() {
+  const arr = new Uint8Array(24);
+  (window.crypto || window.msCrypto).getRandomValues(arr);
+  return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
+}
 
 /* ── Toggle switch ─────────────────────────────────────────────────── */
 function ToggleSwitch({ checked, onChange, label }) {
@@ -43,11 +71,20 @@ function TriggerForm({ onSave, onCancel, agentOptions }) {
     type: 'cron',
     cron: '',
     at: '',
+    secret: '',
     description: '',
     prompt: '',
     enabled: true,
   });
   const update = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  function changeType(next) {
+    setForm(f => ({
+      ...f,
+      type: next,
+      secret: next === 'http' && !f.secret ? generateSecret() : f.secret,
+    }));
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -68,18 +105,42 @@ function TriggerForm({ onSave, onCancel, agentOptions }) {
 
       <div>
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-0-5)' }}>Type</div>
-        <select value={form.type} onChange={e => update('type', e.target.value)}
+        <select value={form.type} onChange={e => changeType(e.target.value)}
           style={{ width: '100%', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', outline: 'none' }}
         >
           <option value="cron">Cron (recurring)</option>
           <option value="once">Once (one-shot)</option>
+          <option value="http">HTTP webhook</option>
         </select>
       </div>
 
-      {form.type === 'cron' ? (
+      {form.type === 'cron' && (
         <FormInput label="Cron expression" value={form.cron} onChange={v => update('cron', v)} placeholder="0 9 * * 1-5" />
-      ) : (
+      )}
+      {form.type === 'once' && (
         <FormInput label="Run at (ISO timestamp)" value={form.at} onChange={v => update('at', v)} placeholder="2026-05-01T09:00:00Z" />
+      )}
+      {form.type === 'http' && (
+        <div style={{
+          padding: 'var(--eb-space-3)',
+          background: 'var(--eb-status-success-bg)',
+          border: '1px solid var(--eb-status-success)',
+          borderRadius: 'var(--eb-radius-md)',
+          display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+        }}>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-success)', fontWeight: 'var(--eb-font-medium)' }}>
+            Webhook endpoint (port 4003) — POST /hooks/{form.agentId || ':agentId'}/{form.id || ':id'}
+          </div>
+          <FormInput
+            label="X-Hook-Secret (auto-generated, click to edit)"
+            value={form.secret}
+            onChange={v => update('secret', v)}
+            placeholder="(required)"
+          />
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
+            Detailed view (with reveal / copy / regenerate) is available in the per-agent Triggers tab.
+          </div>
+        </div>
       )}
 
       <FormInput label="Description" value={form.description} onChange={v => update('description', v)} />
@@ -141,8 +202,12 @@ export default function ScheduledJobs() {
   const COLS = [
     { key: '_agentName', label: 'Agent' },
     { key: 'id',          label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
-    { key: 'type',        label: 'Type' },
-    { key: 'schedule',    label: 'Schedule', render: (_, row) => row.cron || row.at || '—' },
+    { key: 'type',        label: 'Type', render: v => <TypeBadge type={v} /> },
+    { key: 'schedule',    label: 'Schedule', render: (_, row) => (
+      <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
+        {row.type === 'http' ? `/hooks/${row._agentId}/${row.id}` : (row.cron || row.at || '—')}
+      </span>
+    )},
     { key: 'description', label: 'Description' },
     { key: 'enabled',     label: 'Enabled', sortable: false, render: (v, row) => (
       <ToggleSwitch
@@ -170,7 +235,7 @@ export default function ScheduledJobs() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
       <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
-        Scheduled Triggers
+        Triggers
       </h1>
 
       <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
@@ -182,7 +247,7 @@ export default function ScheduledJobs() {
       {skeleton ? (
         <div style={{ height: 200, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />
       ) : (
-        <DataTable columns={COLS} data={triggers} emptyText="No triggers configured. Add one to schedule recurring or one-shot agent runs." />
+        <DataTable columns={COLS} data={triggers} emptyText="No triggers configured. Add one to schedule recurring runs, fire one-shot tasks, or expose an HTTP webhook." />
       )}
 
       <SidePanel open={addOpen} onClose={() => setAddOpen(false)} title="Add Trigger">
@@ -190,8 +255,9 @@ export default function ScheduledJobs() {
           agentOptions={agents ?? []}
           onSave={async form => {
             const body = { id: form.id || undefined, type: form.type, description: form.description, prompt: form.prompt, enabled: form.enabled };
-            if (form.type === 'cron') body.cron = form.cron;
-            else body.at = form.at;
+            if (form.type === 'cron')      body.cron = form.cron;
+            else if (form.type === 'once') body.at   = form.at;
+            else if (form.type === 'http') body.secret = form.secret;
             await apiCall('POST', `/api/agents/${form.agentId}/triggers`, body);
             setAddOpen(false);
             loadAllTriggers(agents);

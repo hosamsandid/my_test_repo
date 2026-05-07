@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy } from 'lucide-react';
+import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
 import ConfirmDialog from '../../components/ConfirmDialog';
@@ -354,28 +354,48 @@ function TriggerRow({ trigger, agentId, onEdit, onDeleted, onToggled }) {
   );
 }
 
+/* ── Secret generator ───────────────────────────────────────────────── */
+function generateSecret() {
+  const arr = new Uint8Array(24);
+  (window.crypto || window.msCrypto).getRandomValues(arr);
+  return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 /* ── Trigger form (create & edit) ───────────────────────────────────── */
 function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
   const isEdit = !!initialValues;
+  const initialType = initialValues?.type === 'once' ? 'once' : initialValues?.type === 'http' ? 'http' : 'cron';
   const [form, setForm] = useState(() => ({
     id:          initialValues?.id          ?? '',
-    type:        initialValues?.type === 'once' ? 'once' : initialValues?.type === 'http' ? 'http' : 'cron',
+    type:        initialType,
     cron:        initialValues?.cron        ?? '0 9 * * *',
     at:          initialValues?.at          ?? '',
+    secret:      initialValues?.secret      ?? (initialType === 'http' ? '' : generateSecret()),
     description: initialValues?.description ?? '',
     prompt:      initialValues?.prompt      ?? '',
     enabled:     initialValues?.enabled !== false,
   }));
-  const [copyDone, setCopyDone] = useState(false);
+  const [copyDone, setCopyDone] = useState(null); // 'path' | 'secret' | null
+  const [secretVisible, setSecretVisible] = useState(!isEdit);
   const [formError, setFormError] = useState(null);
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
+  // Lazy-generate a secret the first time http is selected, so users get a
+  // working default without having to click "regenerate".
+  function changeType(next) {
+    setForm(f => ({
+      ...f,
+      type: next,
+      secret: next === 'http' && !f.secret ? generateSecret() : f.secret,
+    }));
+  }
+
   const webhookPath = `/hooks/${agentId}/${isEdit ? form.id : form.id.trim() || '<id>'}`;
 
-  function copyWebhookPath() {
-    navigator.clipboard?.writeText(webhookPath).then(() => {
-      setCopyDone(true);
-      setTimeout(() => setCopyDone(false), 1500);
+  function copy(text, key) {
+    navigator.clipboard?.writeText(text).then(() => {
+      setCopyDone(key);
+      setTimeout(() => setCopyDone(c => (c === key ? null : c)), 1500);
     });
   }
 
@@ -383,6 +403,7 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
     setFormError(null);
     if (form.type === 'cron' && !form.cron.trim()) { setFormError('Cron expression is required.'); return; }
     if (form.type === 'once' && !form.at.trim())   { setFormError('Run-at timestamp is required.'); return; }
+    if (form.type === 'http' && !form.secret.trim()) { setFormError('Secret is required for HTTP triggers.'); return; }
     if (!form.prompt.trim()) { setFormError('Prompt is required.'); return; }
     const body = {
       type:        form.type,
@@ -393,6 +414,7 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
     if (!isEdit) body.id = form.id.trim() || undefined;
     if (form.type === 'cron')      body.cron = form.cron.trim();
     else if (form.type === 'once') body.at   = form.at.trim();
+    else if (form.type === 'http') body.secret = form.secret.trim();
     await onSave(body);
   }
 
@@ -413,7 +435,7 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
         </div>
         <select
           value={form.type}
-          onChange={e => set('type', e.target.value)}
+          onChange={e => changeType(e.target.value)}
           disabled={isEdit}
           style={{
             width: '100%', padding: 'var(--eb-space-2) var(--eb-space-3)',
@@ -443,31 +465,90 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
           background: 'var(--eb-status-success-bg)',
           border: '1px solid var(--eb-status-success)',
           borderRadius: 'var(--eb-radius-md)',
+          display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
         }}>
-          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-success)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
-            Webhook endpoint (port 4003)
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-success)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+              Webhook endpoint (port 4003)
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+              <code style={{
+                flex: 1, fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)',
+                color: 'var(--eb-text-primary)', wordBreak: 'break-all',
+              }}>
+                POST {webhookPath}
+              </code>
+              <button
+                onClick={() => copy(webhookPath, 'path')}
+                title="Copy path"
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer', padding: 2,
+                  color: copyDone === 'path' ? 'var(--eb-status-success)' : 'var(--eb-text-muted)',
+                  flexShrink: 0,
+                }}
+              >
+                <Copy size={12} />
+              </button>
+            </div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-            <code style={{
-              flex: 1, fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)',
-              color: 'var(--eb-text-primary)', wordBreak: 'break-all',
-            }}>
-              POST {webhookPath}
-            </code>
-            <button
-              onClick={copyWebhookPath}
-              title="Copy path"
-              style={{
-                background: 'none', border: 'none', cursor: 'pointer', padding: 2,
-                color: copyDone ? 'var(--eb-status-success)' : 'var(--eb-text-muted)',
-                flexShrink: 0,
-              }}
-            >
-              <Copy size={12} />
-            </button>
+
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-success)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+              X-Hook-Secret (required)
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+              <code style={{
+                flex: 1, fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)',
+                color: 'var(--eb-text-primary)', wordBreak: 'break-all',
+                padding: 'var(--eb-space-1) var(--eb-space-2)',
+                background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-sm)',
+                minHeight: 18,
+              }}>
+                {form.secret
+                  ? (secretVisible ? form.secret : '•'.repeat(Math.min(form.secret.length, 32)))
+                  : <span style={{ color: 'var(--eb-text-muted)' }}>(empty — click ↻ to generate)</span>}
+              </code>
+              <button
+                onClick={() => setSecretVisible(v => !v)}
+                title={secretVisible ? 'Hide secret' : 'Show secret'}
+                disabled={!form.secret}
+                style={{
+                  background: 'none', border: 'none', padding: 2, flexShrink: 0,
+                  cursor: form.secret ? 'pointer' : 'not-allowed',
+                  color: 'var(--eb-text-muted)', opacity: form.secret ? 1 : 0.4,
+                }}
+              >
+                {secretVisible ? <EyeOff size={12} /> : <Eye size={12} />}
+              </button>
+              <button
+                onClick={() => copy(form.secret, 'secret')}
+                title="Copy secret"
+                disabled={!form.secret}
+                style={{
+                  background: 'none', border: 'none', padding: 2, flexShrink: 0,
+                  cursor: form.secret ? 'pointer' : 'not-allowed',
+                  color: copyDone === 'secret' ? 'var(--eb-status-success)' : 'var(--eb-text-muted)',
+                  opacity: form.secret ? 1 : 0.4,
+                }}
+              >
+                <Copy size={12} />
+              </button>
+              <button
+                onClick={() => { set('secret', generateSecret()); setSecretVisible(true); }}
+                title="Regenerate secret"
+                style={{
+                  background: 'none', border: 'none', padding: 2, flexShrink: 0,
+                  cursor: 'pointer', color: 'var(--eb-text-muted)',
+                }}
+              >
+                <RefreshCw size={12} />
+              </button>
+            </div>
           </div>
-          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-            Secure with <code style={{ fontFamily: 'var(--eb-font-mono)' }}>X-Hook-Secret</code> header via <code style={{ fontFamily: 'var(--eb-font-mono)' }}>HOOK_SECRET</code> env var.
+
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
+            Send <code style={{ fontFamily: 'var(--eb-font-mono)' }}>X-Hook-Secret</code> header with the value above.
+            Anyone with the secret can fire this trigger — copy it once, store it as a GitHub webhook secret, and rotate via the ↻ button.
           </div>
         </div>
       )}

@@ -85,7 +85,7 @@ Autonomous agents are driven by **triggers** stored in a per-agent `triggers.jso
 |---|---|---|
 | `cron` | `cron` (5-field expression) | Recurring execution via node-cron |
 | `once` | `at` (ISO timestamp) | One-shot, auto-removed after execution |
-| `http` | *(none beyond base fields)* | Fired by an external HTTP POST; see Webhook Server below |
+| `http` | `secret` (auto-generated) | Fired by an external HTTP POST; see Webhook Server below |
 
 **Webhook Server (`http` triggers)**
 
@@ -93,12 +93,12 @@ The orchestrator exposes a second HTTP server on `HOOK_PORT` (default `4003`). E
 
 ```
 POST /hooks/:agentId/:hookId
-X-Hook-Secret: <value of HOOK_SECRET>
+X-Hook-Secret: <trigger.secret>
 ```
 
 - The path components must match an existing agent id and a trigger with `type: "http"` and a matching `id` in its `triggers.json`.
 - The server enqueues the event in `/workspace/agents/:agentId/pending-triggers.json`; the agent-runner drains this queue every 5 seconds.
-- Security: set `HOOK_SECRET` in `.env` to require the `X-Hook-Secret` header. Without it, any POST fires the trigger.
+- **Security:** every HTTP trigger carries its own `secret` in `triggers.json` (auto-generated when created via the Admin Console). The webhook server validates `X-Hook-Secret` against that field; triggers without a secret are rejected with 401. There is intentionally no global "open" mode.
 - No payload processing — the POST body is ignored. The prompt defined in the trigger is what Claude receives.
 
 Results are posted to `trigger.roomId` if set, otherwise to the agent's DM room with the admin (read from `/workspace/agents/<id>/dm-room.json`). If neither is available — i.e. the user has not yet opened a chat with this agent — the trigger run is skipped. `[PASS]` suppresses output.

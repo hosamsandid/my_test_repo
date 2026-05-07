@@ -2368,23 +2368,25 @@ async function main() {
   // (GitHub, CI, etc.) and enqueues them for the target agent.
   //
   // POST /hooks/:agentId/:hookId
-  //   → validates X-Hook-Secret (if HOOK_SECRET is configured)
   //   → looks up a trigger with type="http" and matching id in
   //     /workspace/agents/:agentId/triggers.json
+  //   → validates X-Hook-Secret against the trigger's `secret` field
   //   → appends to /workspace/agents/:agentId/pending-triggers.json
   //   → agent-runner picks it up within seconds and fires the prompt
+  //
+  // Each HTTP trigger MUST carry its own `secret` (auto-generated when
+  // created via the Admin Console). Triggers without a secret are
+  // rejected with 401, since an external endpoint without auth is a
+  // footgun even on a private network.
   // ============================================================
   const HOOK_PORT = parseInt(process.env.HOOK_PORT || '4003', 10);
-  const HOOK_SECRET = process.env.HOOK_SECRET || '';
 
-  function hookSecretValid(req) {
-    if (!HOOK_SECRET) return true;
-    const provided = req.headers['x-hook-secret'] || '';
+  function constantTimeEqual(a, b) {
     try {
-      const a = Buffer.from(provided);
-      const b = Buffer.from(HOOK_SECRET);
-      if (a.length !== b.length) return false;
-      return crypto.timingSafeEqual(a, b);
+      const ba = Buffer.from(a);
+      const bb = Buffer.from(b);
+      if (ba.length !== bb.length) return false;
+      return crypto.timingSafeEqual(ba, bb);
     } catch {
       return false;
     }
@@ -2394,12 +2396,6 @@ async function main() {
     if (req.method !== 'POST') {
       res.writeHead(405, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Method not allowed' }));
-      return;
-    }
-
-    if (!hookSecretValid(req)) {
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Unauthorized' }));
       return;
     }
 
@@ -2432,6 +2428,21 @@ async function main() {
     if (!trigger) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: `HTTP trigger '${hookId}' not found for agent '${agentId}'` }));
+      return;
+    }
+
+    // Per-trigger secret check — every HTTP trigger must carry its own
+    // secret. Triggers without one are misconfigured and rejected.
+    if (!trigger.secret) {
+      console.log(`[HookServer] Rejected '${hookId}' for '${agentId}': trigger has no secret configured`);
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Trigger has no secret configured' }));
+      return;
+    }
+    const provided = req.headers['x-hook-secret'] || '';
+    if (!constantTimeEqual(provided, trigger.secret)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
       return;
     }
 

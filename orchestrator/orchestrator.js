@@ -2401,11 +2401,53 @@ async function main() {
             res.end(JSON.stringify({ error: 'Agent not found' }));
             return;
           }
+
+          // Cascade to children before deleting the parent. Without this,
+          // deleting an orchestrator (or expert-group) leaves its bp-instance
+          // (or expert-instance) stubs orphaned: they keep the now-dangling
+          // parentOrchestratorId / parentGroupId, the UI can't render them
+          // under any parent, and a future orchestrator that scans the same
+          // BP slug can't claim the deterministic agentId because the orphan
+          // already occupies it.
+          const parentCfg = loadAgentConfig(id);
+          const cascaded = [];
+          if (parentCfg) {
+            const childField = parentCfg.role === 'orchestrator' ? 'parentOrchestratorId'
+                            :  parentCfg.role === 'expert-group' ? 'parentGroupId'
+                            :  null;
+            if (childField) {
+              for (const childId of listAgentIds()) {
+                if (childId === id) continue;
+                const childCfg = loadAgentConfig(childId);
+                if (!childCfg) continue;
+                if (childCfg[childField] !== id) continue;
+                try {
+                  stopAgentProcess(childId);
+                  if (childCfg.token) {
+                    // Materialized child — best-effort Matrix cleanup.
+                    await orchestrator.deactivateMatrixUser(childId);
+                  }
+                  deleteAgentFiles(childId);
+                  orchestrator.agentConfigs.delete(childId);
+                  cascaded.push(childId);
+                } catch (err) {
+                  console.error(`[Orchestrator] cascade-delete child '${childId}' failed: ${err.message}`);
+                }
+              }
+              if (cascaded.length > 0) {
+                console.log(
+                  `[Orchestrator] Cascade-deleted ${cascaded.length} ${parentCfg.role === 'orchestrator' ? 'bp-instance' : 'expert-instance'} children of '${id}': ${cascaded.join(', ')}`
+                );
+              }
+            }
+          }
+
           stopAgentProcess(id);
           deleteAgentFiles(id);
+          orchestrator.agentConfigs.delete(id);
           await orchestrator.deactivateMatrixUser(id);
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true }));
+          res.end(JSON.stringify({ ok: true, cascaded }));
         } catch (err) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));

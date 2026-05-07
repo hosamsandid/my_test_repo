@@ -6,6 +6,52 @@ import AgentList from './agent-chat/AgentList';
 import ChatPanel from './agent-chat/ChatPanel';
 import RightRail from './agent-chat/RightRail';
 
+const LEFT_WIDTH_KEY  = 'agentChat.leftWidth';
+const RIGHT_WIDTH_KEY = 'agentChat.rightWidth';
+const LEFT_MIN  = 160;
+const LEFT_MAX  = 520;
+const RIGHT_MIN = 200;
+const RIGHT_MAX = 640;
+
+function loadPanelWidth(key, fallback) {
+  try {
+    const v = parseInt(localStorage.getItem(key), 10);
+    return Number.isFinite(v) ? v : fallback;
+  } catch { return fallback; }
+}
+
+function ResizeDivider({ onMouseDown }) {
+  const [hovered, setHovered] = React.useState(false);
+  return (
+    <div
+      onMouseDown={onMouseDown}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      title="Ziehen zum Anpassen der Breite"
+      style={{
+        width: 6,
+        flexShrink: 0,
+        cursor: 'col-resize',
+        position: 'relative',
+        zIndex: 5,
+        userSelect: 'none',
+      }}
+    >
+      <div style={{
+        position: 'absolute',
+        left: '50%',
+        top: 0,
+        bottom: 0,
+        width: 1,
+        transform: 'translateX(-50%)',
+        background: hovered ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)',
+        transition: 'background 0.15s',
+        pointerEvents: 'none',
+      }} />
+    </div>
+  );
+}
+
 const LAST_AGENT_KEY = 'agentChat.lastAgentId';
 const LAST_VIEWED_KEY = 'agentChat.lastViewed';
 const STATUS_POLL_MS = 5000;
@@ -91,6 +137,45 @@ export default function AgentChat() {
     statusTimerRef.current = setInterval(poll, STATUS_POLL_MS);
     return () => clearInterval(statusTimerRef.current);
   }, []);
+
+  // Panel widths, persisted in localStorage.
+  const [leftWidth,  setLeftWidth]  = useState(() => loadPanelWidth(LEFT_WIDTH_KEY,  260));
+  const [rightWidth, setRightWidth] = useState(() => loadPanelWidth(RIGHT_WIDTH_KEY, 380));
+  useEffect(() => { try { localStorage.setItem(LEFT_WIDTH_KEY,  String(leftWidth));  } catch {} }, [leftWidth]);
+  useEffect(() => { try { localStorage.setItem(RIGHT_WIDTH_KEY, String(rightWidth)); } catch {} }, [rightWidth]);
+
+  // Drag state for resize dividers.
+  const dragRef = useRef(null);
+
+  const startDrag = useCallback((panel) => (e) => {
+    e.preventDefault();
+    const startX     = e.clientX;
+    const startWidth = panel === 'left' ? leftWidth : rightWidth;
+    dragRef.current  = { panel, startX, startWidth };
+
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+
+    const onMove = (ev) => {
+      if (!dragRef.current) return;
+      const delta = ev.clientX - dragRef.current.startX;
+      if (dragRef.current.panel === 'left') {
+        setLeftWidth(Math.max(LEFT_MIN, Math.min(LEFT_MAX, dragRef.current.startWidth + delta)));
+      } else {
+        // Right panel grows leftward → inverse delta.
+        setRightWidth(Math.max(RIGHT_MIN, Math.min(RIGHT_MAX, dragRef.current.startWidth - delta)));
+      }
+    };
+    const onUp = () => {
+      dragRef.current = null;
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup',   onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup',   onUp);
+  }, [leftWidth, rightWidth]);
 
   // Right-rail (session log panel) toggle, persisted in localStorage so the
   // user's preference survives reload.
@@ -204,14 +289,14 @@ export default function AgentChat() {
     }}>
       {/* Left rail */}
       <div style={{
-        width: 260,
-        minWidth: 260,
+        width: leftWidth,
+        minWidth: leftWidth,
         height: '100%',
-        borderRight: '1px solid var(--eb-border-default)',
         background: 'var(--eb-bg-surface)',
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
+        flexShrink: 0,
       }}>
         <div style={{
           padding: 'var(--eb-space-4)',
@@ -310,8 +395,10 @@ export default function AgentChat() {
         `}</style>
       </div>
 
+      <ResizeDivider onMouseDown={startDrag('left')} />
+
       {/* Chat panel */}
-      <div style={{ flex: 1, height: '100%', minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+      <div style={{ flex: 1, height: '100%', minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         {selectedAgent ? (
           <ChatPanel
             key={selectedAgent.id}
@@ -329,16 +416,18 @@ export default function AgentChat() {
 
       {/* Right rail: tabbed Session Log / Workspace browser */}
       {logOpen && (
-        <div style={{
-          width: 380,
-          minWidth: 380,
-          height: '100%',
-          borderLeft: '1px solid var(--eb-border-default)',
-          background: 'var(--eb-bg-app)',
-          display: 'flex',
-          flexDirection: 'column',
-          overflow: 'hidden',
-        }}>
+        <>
+          <ResizeDivider onMouseDown={startDrag('right')} />
+          <div style={{
+            width: rightWidth,
+            minWidth: rightWidth,
+            height: '100%',
+            background: 'var(--eb-bg-app)',
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+            flexShrink: 0,
+          }}>
           <RightRail
             agentId={selectedAgent?.id || null}
             roomId={effectiveRoomId}
@@ -348,6 +437,7 @@ export default function AgentChat() {
             onCostUpdate={handleCostUpdate}
           />
         </div>
+        </>
       )}
 
       {/* Floating "Show log" button when the panel is hidden */}

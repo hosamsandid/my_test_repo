@@ -720,6 +720,7 @@ export default function ChatPanel({
         style={{
           flex: 1,
           overflowY: 'auto',
+          overflowX: 'hidden',
           padding: 'var(--eb-space-4)',
           display: 'flex',
           flexDirection: 'column',

@@ -204,6 +204,7 @@ function PreWithCollapse({ children, ...rest }) {
     borderRadius: 'var(--eb-radius-md)',
     overflow: 'hidden',
     fontSize: 'var(--eb-text-sm)',
+    maxWidth: '100%',
   };
   const preStyle = {
     margin: 0,
@@ -318,7 +319,7 @@ export default function Message({ message, agentUserId, thinking }) {
         .agent-chat-md p + p { margin-top: var(--eb-space-2); }
         .agent-chat-md ul, .agent-chat-md ol { padding-left: 1.4em; margin: var(--eb-space-1) 0; }
         .agent-chat-md li { margin: 2px 0; }
-        .agent-chat-md table { border-collapse: collapse; margin: var(--eb-space-2) 0; font-size: var(--eb-text-sm); }
+        .agent-chat-md table { border-collapse: collapse; margin: var(--eb-space-2) 0; font-size: var(--eb-text-sm); display: block; max-width: 100%; overflow-x: auto; }
         .agent-chat-md th, .agent-chat-md td { border: 1px solid var(--eb-border-default); padding: 4px 8px; text-align: left; }
         .agent-chat-md th { background: var(--eb-bg-elevated); }
         .agent-chat-md blockquote { margin: var(--eb-space-2) 0; padding-left: var(--eb-space-3); border-left: 3px solid var(--eb-border-default); color: var(--eb-text-secondary); }

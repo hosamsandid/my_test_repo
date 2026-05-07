@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Loader2, Check, X, ChevronRight } from 'lucide-react';
+import { Loader2, Check, X, ChevronRight, Circle, CircleDot } from 'lucide-react';
 
 /**
  * Collapsible tool-use / tool-result block, ported from
@@ -133,7 +133,9 @@ export default function ToolBlock({ toolUse, toolResult }) {
           overflowY: 'auto',
           background: 'var(--eb-bg-app)',
         }}>
-          {input !== undefined && (
+          {tool === 'TodoWrite' && Array.isArray(input?.todos) ? (
+            <TodoList todos={input.todos} />
+          ) : input !== undefined && (
             <>
               <div style={{
                 fontSize: 10,
@@ -154,7 +156,7 @@ export default function ToolBlock({ toolUse, toolResult }) {
             </>
           )}
 
-          {toolResult ? (
+          {tool === 'TodoWrite' ? null : toolResult ? (
             <>
               <div style={{
                 fontSize: 10,
@@ -204,11 +206,90 @@ function formatToolSummary(tool, input) {
     case 'Bash':  return input.command  || '';
     case 'Grep':  return input.pattern  || '';
     case 'Glob':  return input.pattern  || '';
+    case 'TodoWrite': return formatTodoSummary(input.todos);
     default:      return truncate(JSON.stringify(input), 80);
   }
+}
+
+function formatTodoSummary(todos) {
+  if (!Array.isArray(todos) || todos.length === 0) return '(no todos)';
+  const total = todos.length;
+  const done  = todos.filter(t => t?.status === 'completed').length;
+  const active = todos.find(t => t?.status === 'in_progress');
+  const label = active
+    ? (active.activeForm || active.content || '')
+    : (done === total ? 'all done' : (todos.find(t => t?.status === 'pending')?.content || ''));
+  return `${done}/${total} · ${truncate(label, 60)}`;
 }
 
 function truncate(s, n) {
   if (typeof s !== 'string') return '';
   return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+function TodoList({ todos }) {
+  if (!Array.isArray(todos) || todos.length === 0) {
+    return (
+      <div style={{ color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
+        (empty todo list)
+      </div>
+    );
+  }
+  return (
+    <ul style={{
+      listStyle: 'none',
+      margin: 0,
+      padding: 0,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 4,
+      fontFamily: 'var(--eb-font-sans, inherit)',
+    }}>
+      {todos.map((todo, i) => {
+        const status = todo?.status || 'pending';
+        const isDone     = status === 'completed';
+        const isActive   = status === 'in_progress';
+        const text = isActive
+          ? (todo?.activeForm || todo?.content || '')
+          : (todo?.content || todo?.activeForm || '');
+
+        let Icon = Circle;
+        let color = 'var(--eb-text-muted)';
+        if (isDone)        { Icon = Check;     color = 'var(--eb-status-success)'; }
+        else if (isActive) { Icon = CircleDot; color = 'var(--eb-accent-primary)'; }
+
+        return (
+          <li
+            key={i}
+            style={{
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: 8,
+              padding: '2px 0',
+            }}
+          >
+            <Icon
+              size={13}
+              style={{
+                color,
+                flexShrink: 0,
+                marginTop: 2,
+              }}
+            />
+            <span style={{
+              flex: 1,
+              minWidth: 0,
+              color: isDone ? 'var(--eb-text-muted)' : 'var(--eb-text-primary)',
+              textDecoration: isDone ? 'line-through' : 'none',
+              fontWeight: isActive ? 'var(--eb-font-semibold)' : 'var(--eb-font-regular, 400)',
+              wordBreak: 'break-word',
+              lineHeight: 1.4,
+            }}>
+              {text}
+            </span>
+          </li>
+        );
+      })}
+    </ul>
+  );
 }

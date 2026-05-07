@@ -55,6 +55,215 @@ function TypeBadge({ type }) {
   );
 }
 
+/* ── Cron builder ───────────────────────────────────────────────────── */
+const DOW_LABELS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+
+// Shared input style — defined at module level to avoid per-render allocation
+const FIELD_STYLE = {
+  padding: '6px 10px',
+  background: 'var(--eb-bg-elevated)',
+  border: '1px solid var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-md)',
+  color: 'var(--eb-text-primary)',
+  fontSize: 'var(--eb-text-sm)',
+  fontFamily: 'inherit',
+  outline: 'none',
+};
+
+function parseCronState(cron) {
+  const def = { hour: '9', minute: '0', interval: '5', dow: '1', dom: '1', raw: '' };
+  if (!cron) return { mode: 'daily', ...def };
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) return { mode: 'custom', ...def, raw: cron };
+  const [min, hr, dom, month, dow] = parts;
+  const everyMin = min.match(/^\*\/(\d+)$/);
+  if (everyMin && hr === '*' && dom === '*' && month === '*' && dow === '*')
+    return { mode: 'minutely', ...def, interval: everyMin[1] };
+  if (/^\d+$/.test(min) && hr === '*' && dom === '*' && month === '*' && dow === '*')
+    return { mode: 'hourly', ...def, minute: min };
+  if (/^\d+$/.test(min) && /^\d+$/.test(hr) && dom === '*' && month === '*' && dow === '*')
+    return { mode: 'daily', ...def, hour: hr, minute: min };
+  if (/^\d+$/.test(min) && /^\d+$/.test(hr) && dom === '*' && month === '*' && /^[0-6]$/.test(dow))
+    return { mode: 'weekly', ...def, hour: hr, minute: min, dow };
+  if (/^\d+$/.test(min) && /^\d+$/.test(hr) && /^\d+$/.test(dom) && month === '*' && dow === '*')
+    return { mode: 'monthly', ...def, hour: hr, minute: min, dom };
+  return { mode: 'custom', ...def, raw: cron };
+}
+
+function buildCron(s) {
+  const m = String(parseInt(s.minute) || 0);
+  const h = String(parseInt(s.hour) || 0);
+  switch (s.mode) {
+    case 'minutely': return `*/${parseInt(s.interval) || 5} * * * *`;
+    case 'hourly':   return `${m} * * * *`;
+    case 'daily':    return `${m} ${h} * * *`;
+    case 'weekly':   return `${m} ${h} * * ${s.dow || 1}`;
+    case 'monthly':  return `${m} ${h} ${parseInt(s.dom) || 1} * *`;
+    case 'custom':   return s.raw || '';
+    default:         return '';
+  }
+}
+
+function describeCron(s) {
+  const pad = n => String(parseInt(n) || 0).padStart(2, '0');
+  const time = `${pad(s.hour)}:${pad(s.minute)}`;
+  switch (s.mode) {
+    case 'minutely': return `Every ${parseInt(s.interval) || 5} minute${(parseInt(s.interval) || 5) === 1 ? '' : 's'}`;
+    case 'hourly':   return `Every hour at :${pad(s.minute)}`;
+    case 'daily':    return `Every day at ${time}`;
+    case 'weekly':   return `Every ${DOW_LABELS[parseInt(s.dow)] ?? 'Monday'} at ${time}`;
+    case 'monthly':  return `Day ${parseInt(s.dom) || 1} of every month at ${time}`;
+    default:         return '';
+  }
+}
+
+function CronBuilder({ value, onChange }) {
+  const [s, setS] = useState(() => parseCronState(value));
+
+  // Keep internal state in sync when value changes externally (e.g. edit panel reopened)
+  useEffect(() => { setS(parseCronState(value)); }, [value]);
+
+  function upd(patch) {
+    setS(prev => {
+      const next = { ...prev, ...patch };
+      onChange(buildCron(next));
+      return next;
+    });
+  }
+
+  const timeVal = `${String(parseInt(s.hour)||0).padStart(2,'0')}:${String(parseInt(s.minute)||0).padStart(2,'0')}`;
+  const setTime = v => { const [h, m] = (v || '00:00').split(':'); upd({ hour: h || '0', minute: m || '0' }); };
+
+  const description = describeCron(s);
+  const cronStr = buildCron(s);
+  const customEmpty = s.mode === 'custom' && !s.raw.trim();
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)' }}>
+        Schedule
+      </div>
+
+      {/* Frequency */}
+      <select value={s.mode} onChange={e => upd({ mode: e.target.value })} style={{ ...FIELD_STYLE, width: '100%' }}>
+        <option value="minutely">Every N minutes</option>
+        <option value="hourly">Hourly</option>
+        <option value="daily">Daily</option>
+        <option value="weekly">Weekly</option>
+        <option value="monthly">Monthly</option>
+        <option value="custom">Custom expression</option>
+      </select>
+
+      {/* Mode-specific inputs */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', minHeight: 34 }}>
+        {s.mode === 'minutely' && (<>
+          Every
+          <input type="number" min={1} max={59} value={s.interval}
+            onChange={e => upd({ interval: e.target.value })}
+            style={{ ...FIELD_STYLE, width: 60, textAlign: 'center' }} />
+          minutes
+        </>)}
+
+        {s.mode === 'hourly' && (<>
+          At minute
+          <input type="number" min={0} max={59} value={s.minute}
+            onChange={e => upd({ minute: e.target.value })}
+            style={{ ...FIELD_STYLE, width: 60, textAlign: 'center' }} />
+        </>)}
+
+        {s.mode === 'daily' && (<>
+          At <input type="time" value={timeVal} onChange={e => setTime(e.target.value)} style={FIELD_STYLE} />
+        </>)}
+
+        {s.mode === 'weekly' && (<>
+          Every
+          <select value={s.dow} onChange={e => upd({ dow: e.target.value })} style={FIELD_STYLE}>
+            {DOW_LABELS.map((d, i) => <option key={i} value={String(i)}>{d}</option>)}
+          </select>
+          at <input type="time" value={timeVal} onChange={e => setTime(e.target.value)} style={FIELD_STYLE} />
+        </>)}
+
+        {s.mode === 'monthly' && (<>
+          Day
+          <input type="number" min={1} max={31} value={s.dom}
+            onChange={e => upd({ dom: e.target.value })}
+            style={{ ...FIELD_STYLE, width: 60, textAlign: 'center' }} />
+          of every month at <input type="time" value={timeVal} onChange={e => setTime(e.target.value)} style={FIELD_STYLE} />
+        </>)}
+
+        {s.mode === 'custom' && (
+          <input type="text" value={s.raw} onChange={e => upd({ raw: e.target.value })}
+            placeholder="* * * * *  (min  hour  day  month  weekday)"
+            style={{
+              ...FIELD_STYLE, flex: 1,
+              fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)',
+              ...(customEmpty ? { border: '1px solid var(--eb-status-error)' } : {}),
+            }} />
+        )}
+      </div>
+
+      {/* Inline error for empty custom expression */}
+      {customEmpty && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>
+          <AlertCircle size={11} style={{ flexShrink: 0 }} /> Cron expression is required.
+        </div>
+      )}
+
+      {/* Summary */}
+      {s.mode !== 'custom' && cronStr && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          background: 'var(--eb-accent-muted)', borderRadius: 'var(--eb-radius-md)',
+          fontSize: 'var(--eb-text-xs)',
+        }}>
+          <Clock size={11} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+          <span style={{ color: 'var(--eb-accent-primary)', fontWeight: 'var(--eb-font-medium)', flex: 1 }}>
+            {description}
+          </span>
+          <code style={{ color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>
+            {cronStr}
+          </code>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Date-time picker (for one-shot triggers) ───────────────────────── */
+// Converts a UTC ISO string to the local YYYY-MM-DDTHH:MM format required
+// by <input type="datetime-local">, so the picker shows the user's local time.
+function toDatetimeLocal(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d)) return '';
+  // Shift from UTC to local by subtracting the timezone offset
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+
+function DateTimePicker({ value, onChange }) {
+  return (
+    <div>
+      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+        Date &amp; Time
+      </div>
+      <input
+        type="datetime-local"
+        value={toDatetimeLocal(value)}
+        // Convert the browser-local selection to UTC ISO before storing
+        onChange={e => onChange(e.target.value ? new Date(e.target.value).toISOString() : '')}
+        style={{
+          width: '100%', padding: 'var(--eb-space-2) var(--eb-space-3)',
+          background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)',
+          fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', outline: 'none',
+          colorScheme: 'dark light',
+        }}
+      />
+    </div>
+  );
+}
+
 /* ── Trigger row ────────────────────────────────────────────────────── */
 function TriggerRow({ trigger, agentId, onEdit, onDeleted, onToggled }) {
   const [toggling, setToggling] = useState(false);
@@ -147,7 +356,7 @@ function TriggerForm({ onSave, onCancel, saving, initialValues }) {
   const [form, setForm] = useState(() => ({
     id: initialValues?.id ?? '',
     type: initialValues?.type === 'once' ? 'once' : 'cron',
-    cron: initialValues?.cron ?? '',
+    cron: initialValues?.cron ?? '0 9 * * *',
     at: initialValues?.at ?? '',
     description: initialValues?.description ?? '',
     prompt: initialValues?.prompt ?? '',
@@ -203,21 +412,10 @@ function TriggerForm({ onSave, onCancel, saving, initialValues }) {
         </select>
       </div>
 
-      {form.type === 'cron' ? (
-        <FormInput
-          label="Cron expression"
-          value={form.cron}
-          onChange={v => set('cron', v)}
-          placeholder="48 * * * *  (every hour at :48)"
-        />
-      ) : (
-        <FormInput
-          label="Run at (ISO timestamp)"
-          value={form.at}
-          onChange={v => set('at', v)}
-          placeholder="2026-05-07T15:00:00"
-        />
-      )}
+      {form.type === 'cron'
+        ? <CronBuilder value={form.cron} onChange={v => set('cron', v)} />
+        : <DateTimePicker value={form.at} onChange={v => set('at', v)} />
+      }
 
       <FormInput
         label="Description (optional)"

@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm';
 import {
   Plus, Trash2, Layers, ChevronDown, ChevronRight,
   Edit, MessageCircle, RefreshCw, Power, PowerOff, FileText,
+  User, Users, Workflow, Info,
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import SidePanel from '../components/SidePanel';
@@ -370,6 +371,142 @@ const inputStyle = {
   borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)',
   fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box',
 };
+const helpTextStyle = {
+  fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
+  marginTop: 'var(--eb-space-1)', lineHeight: 1.5,
+};
+
+/* ── Role catalogue (single source of truth for labels + descriptions) ─ */
+const ROLE_INFO = {
+  'expert': {
+    icon: User,
+    title: 'Expert (standalone)',
+    short: 'A single chat agent with its own system prompt.',
+    body: (
+      <>
+        Creates one Matrix user (<code>@id:local</code>) you can talk to in a 1:1 chat.
+        The system prompt you write below shapes its persona — for example a COBOL specialist,
+        a code-review buddy, or a release manager. Add cron / GitHub triggers later to make
+        it run autonomously in addition to responding to messages.
+      </>
+    ),
+    when: 'Use this for one-of-a-kind agents — every expert is unique.',
+  },
+  'expert-group': {
+    icon: Users,
+    title: 'Expert Group',
+    short: 'A reusable template — spawn multiple identical instances on demand.',
+    body: (
+      <>
+        Stores a system-prompt template without creating a Matrix user itself. Instead you click
+        <strong> Add Instance</strong> on the group card to spawn one or more agents that all
+        share the same prompt and Working Environment, but each gets its own Matrix user,
+        workspace and chat.
+      </>
+    ),
+    when: 'Use when you need several copies of the same kind of expert — e.g. a pool of three reviewer agents working in parallel.',
+  },
+  'orchestrator': {
+    icon: Workflow,
+    title: 'Orchestrator',
+    short: 'Watches a directory of BriefingPacks and manages one agent per mission.',
+    body: (
+      <>
+        Pointed at a folder of ACE BriefingPacks. The orchestrator scans the folder, lists one
+        stub <em>bp-instance</em> per mission, and offers to materialise / claim the mission
+        when it transitions to <code>dispatched</code>. Each materialised mission becomes its
+        own agent with its own chat, executing the BriefingPack's LoopScript.
+      </>
+    ),
+    when: 'Use when you have a Briefings repository (ACE) that you want to drive end-to-end through this console.',
+  },
+};
+
+/* ── Role picker ───────────────────────────────────────────────────────
+   Card-style radio group. Single source of truth for what each role
+   means; same component is reused for the in-form info banner. */
+
+function RoleCard({ value, current, onSelect }) {
+  const info = ROLE_INFO[value];
+  if (!info) return null;
+  const Icon = info.icon;
+  const active = current === value;
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(value)}
+      style={{
+        textAlign: 'left',
+        display: 'grid',
+        gridTemplateColumns: 'auto 1fr auto',
+        gap: 'var(--eb-space-3)',
+        alignItems: 'flex-start',
+        padding: 'var(--eb-space-3)',
+        background: active ? 'var(--eb-bg-elevated)' : 'var(--eb-bg-surface)',
+        border: `1px solid ${active ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+        borderRadius: 'var(--eb-radius-md)',
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        color: 'var(--eb-text-primary)',
+        outline: active ? '2px solid var(--eb-accent-primary)' : 'none',
+        outlineOffset: -2,
+      }}
+    >
+      <span style={{
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        width: 28, height: 28, borderRadius: 'var(--eb-radius-md)',
+        background: active ? 'var(--eb-accent-primary)' : 'var(--eb-bg-app)',
+        color: active ? 'var(--eb-text-inverted)' : 'var(--eb-text-secondary)',
+        flexShrink: 0,
+      }}>
+        <Icon size={15} />
+      </span>
+      <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+        <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)' }}>
+          {info.title}
+        </span>
+        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+          {info.short}
+        </span>
+      </span>
+      <span
+        aria-hidden="true"
+        style={{
+          width: 14, height: 14, borderRadius: '50%', flexShrink: 0,
+          marginTop: 4,
+          border: `2px solid ${active ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+          background: active ? 'var(--eb-accent-primary)' : 'transparent',
+          boxShadow: active ? 'inset 0 0 0 3px var(--eb-bg-elevated)' : 'none',
+        }}
+      />
+    </button>
+  );
+}
+
+function RoleDetailBanner({ role }) {
+  const info = ROLE_INFO[role];
+  if (!info) return null;
+  return (
+    <div style={{
+      display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
+      padding: 'var(--eb-space-3)',
+      background: 'var(--eb-status-info-bg, var(--eb-bg-elevated))',
+      border: '1px solid var(--eb-status-info, var(--eb-border-default))',
+      borderRadius: 'var(--eb-radius-md)',
+      fontSize: 'var(--eb-text-xs)',
+      lineHeight: 1.6,
+      color: 'var(--eb-text-primary)',
+    }}>
+      <Info size={14} style={{ flexShrink: 0, marginTop: 2, color: 'var(--eb-status-info, var(--eb-text-secondary))' }} />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+        <div>{info.body}</div>
+        <div style={{ color: 'var(--eb-text-muted)' }}>
+          <strong style={{ color: 'var(--eb-text-secondary)' }}>When to use:</strong> {info.when}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function PrimaryBtn({ children, onClick, disabled, saving, style = {} }) {
   return (
@@ -491,8 +628,10 @@ function MissionDirectoryField({ value, onChange, repoDirs }) {
   }, [value, repoDirs]);
 
   const helpText = (
-    <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-      Relative path in the agent workspace. The <code>artifacts/briefings/</code> subdirectory is appended automatically. On creation, a stub is added for every mission found here.
+    <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+      Path inside the agent's workspace where ACE BriefingPacks live — usually the directory of a cloned briefings repository.
+      The <code>artifacts/briefings/</code> subdirectory is appended automatically.
+      On creation, the orchestrator scans this path and registers one stub <em>bp-instance</em> per mission found.
     </div>
   );
 
@@ -594,12 +733,19 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           onChange={e => update('id', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
           placeholder="e.g. cobol-expert"
         />
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-          Lowercase letters, digits, hyphens. Becomes the agent identifier.
+        <div style={helpTextStyle}>
+          Lowercase letters, digits and hyphens only. Becomes the Matrix user
+          (<code>@{form.id || 'id'}:local</code>) and the workspace folder name.
+          <strong> Cannot be changed after creation.</strong>
         </div>
       </div>
 
-      <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} placeholder="COBOL Expert" />
+      <div>
+        <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} placeholder="COBOL Expert" />
+        <div style={helpTextStyle}>
+          A short, human-readable label shown in the agents list and chat header — e.g. <em>COBOL Expert</em>.
+        </div>
+      </div>
 
       <div>
         <div style={labelStyle}>Working Environment <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
@@ -613,20 +759,34 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
             </option>
           ))}
         </select>
+        <div style={helpTextStyle}>
+          Defines the skills, repositories, GitHub token and LLM endpoint the agent receives at creation time.
+          Manage these on the <em>Working Environments</em> page. Each agent gets its own isolated workspace,
+          but the recipe is shared.
+        </div>
         {envs.length === 0 && (
-          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', marginTop: 'var(--eb-space-1)' }}>
-            No Working Environments yet — create one first.
+          <div style={{
+            marginTop: 'var(--eb-space-2)',
+            padding: 'var(--eb-space-2) var(--eb-space-3)',
+            background: 'var(--eb-status-warning-bg)',
+            border: '1px solid var(--eb-status-warning)',
+            borderRadius: 'var(--eb-radius-md)',
+            fontSize: 'var(--eb-text-xs)',
+            color: 'var(--eb-text-primary)',
+          }}>
+            No Working Environments yet — create one on the <strong>Working Environments</strong> page first.
           </div>
         )}
       </div>
 
-      <div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
         <div style={labelStyle}>Role <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
-        <select value={form.role} onChange={e => update('role', e.target.value)} style={inputStyle}>
-          <option value="expert-group">Expert Group — multiple instances, same configuration</option>
-          <option value="expert">Expert (standalone) — single instance</option>
-          <option value="orchestrator">Orchestrator — manages missions in a directory</option>
-        </select>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+          <RoleCard value="expert"        current={form.role} onSelect={v => update('role', v)} />
+          <RoleCard value="expert-group"  current={form.role} onSelect={v => update('role', v)} />
+          <RoleCard value="orchestrator"  current={form.role} onSelect={v => update('role', v)} />
+        </div>
+        <RoleDetailBanner role={form.role} />
       </div>
 
       {form.role === 'orchestrator' && (
@@ -643,16 +803,16 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           {form.role === 'expert-group' ? 'System Prompt Template' : 'System Prompt'}
           {' '}<span style={{ color: 'var(--eb-status-error)' }}>*</span>
         </div>
-        {form.role === 'expert-group' && (
-          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginBottom: 'var(--eb-space-1)' }}>
-            Applied to every instance in this group.
-          </div>
-        )}
+        <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-1)' }}>
+          {form.role === 'expert-group'
+            ? <>Stored once and reused for every instance you spawn from this group. Define the persona, expertise, and tone — each instance gets its own workspace but the same instructions.</>
+            : <>The persona Claude reads at startup. Describe the agent's role, expertise, communication style and any constraints. Markdown is fine; treat it like the <code>system</code> message in a chat completion.</>}
+        </div>
         <textarea
           value={form.systemPrompt}
           onChange={e => update('systemPrompt', e.target.value)}
-          placeholder="You are an experienced COBOL developer..."
-          rows={8}
+          placeholder={'You are an experienced COBOL developer with 20+ years working on mainframe migrations.\n\nWhen analysing code, always:\n- Identify the COBOL dialect (IBM Enterprise, GnuCOBOL, …)\n- Highlight any non-standard extensions\n- Suggest a Java equivalent for each paragraph'}
+          rows={9}
           style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
         />
       </div>
@@ -1402,15 +1562,39 @@ export default function Agents() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div>
-          <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>Agents</h1>
-          <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', margin: 'var(--eb-space-1) 0 0' }}>
-            Each agent runs as its own Matrix user. Orchestrator agents auto-list one stub per mission — activate to materialise.
-          </p>
-        </div>
+        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>Agents</h1>
         <PrimaryBtn onClick={() => openPanel('create', null)}>
           <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Plus size={15} /> New Agent</span>
         </PrimaryBtn>
+      </div>
+
+      <div style={{
+        padding: 'var(--eb-space-4)',
+        background: 'var(--eb-bg-surface)',
+        border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-md)',
+        fontSize: 'var(--eb-text-sm)',
+        color: 'var(--eb-text-secondary)',
+        display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+        lineHeight: 1.55,
+      }}>
+        <p style={{ margin: 0, fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
+          What is an agent?
+        </p>
+        <p style={{ margin: 0 }}>
+          An <strong>Agent</strong> is a long-running Claude Code instance with its own Matrix user, workspace and session history.
+          You chat with it in a 1:1 room (no shared multi-agent room exists). When you create an agent you choose:
+        </p>
+        <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+          <li><strong>A Working Environment</strong> — supplies skills, repositories, GitHub token and the LLM endpoint.</li>
+          <li><strong>A role</strong> — Expert (one chat agent), Expert Group (a template for many identical instances), or Orchestrator (drives a folder of ACE BriefingPacks).</li>
+          <li><strong>A system prompt</strong> — the persona / instructions Claude reads at startup. Orchestrators don't need one; their behaviour is fixed.</li>
+        </ul>
+        <p style={{ margin: 0 }}>
+          After creation the agent appears below as a card. <em>Active</em> agents have a Matrix user and can be chatted with;
+          <em> paused</em> agents keep their workspace but the process is stopped; <em>not initialised</em> stubs (e.g. orchestrator children) need
+          one click on <strong>Activate</strong> to come to life. You can edit, deactivate or delete each agent from its card.
+        </p>
       </div>
 
       {actionError && (
@@ -1479,7 +1663,7 @@ export default function Agents() {
         </>
       )}
 
-      <SidePanel open={panelMode === 'create'} onClose={closePanel} title="New Agent" width="540px" loading={saving}>
+      <SidePanel open={panelMode === 'create'} onClose={closePanel} title="New Agent" width="600px" loading={saving}>
         <AgentCreateForm onSave={handleCreateAgent} onCancel={closePanel} saving={saving} error={saveError} />
       </SidePanel>
 

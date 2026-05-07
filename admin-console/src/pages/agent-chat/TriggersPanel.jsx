@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Pencil, Trash2 } from 'lucide-react';
+import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
 import ConfirmDialog from '../../components/ConfirmDialog';
@@ -39,9 +39,11 @@ function ToggleSwitch({ checked, onChange }) {
 function TypeBadge({ type }) {
   const isCron = type === 'cron' || type === 'recurring';
   const isOnce = type === 'once';
-  const bg    = isCron ? 'var(--eb-accent-muted)'    : isOnce ? 'var(--eb-bg-elevated)'    : 'var(--eb-status-warning-bg)';
-  const color = isCron ? 'var(--eb-accent-primary)'  : isOnce ? 'var(--eb-text-secondary)' : 'var(--eb-status-warning)';
-  const label = isCron ? 'cron' : isOnce ? 'once' : type || 'unknown';
+  const isHttp = type === 'http';
+  const bg    = isCron ? 'var(--eb-accent-muted)'       : isOnce ? 'var(--eb-bg-elevated)'    : isHttp ? 'var(--eb-status-success-bg)' : 'var(--eb-status-warning-bg)';
+  const color = isCron ? 'var(--eb-accent-primary)'     : isOnce ? 'var(--eb-text-secondary)' : isHttp ? 'var(--eb-status-success)'    : 'var(--eb-status-warning)';
+  const label = isCron ? 'cron'                         : isOnce ? 'once'                     : isHttp ? 'http'                        : type || 'unknown';
+  const Icon  = isCron ? Clock                          : isOnce ? CalendarClock               : isHttp ? Globe                         : AlertCircle;
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 3,
@@ -49,7 +51,7 @@ function TypeBadge({ type }) {
       fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)',
       background: bg, color, border: `1px solid ${color}`, whiteSpace: 'nowrap',
     }}>
-      {isCron ? <Clock size={10} /> : <CalendarClock size={10} />}
+      <Icon size={10} />
       {label}
     </span>
   );
@@ -267,7 +269,9 @@ function DateTimePicker({ value, onChange }) {
 /* ── Trigger row ────────────────────────────────────────────────────── */
 function TriggerRow({ trigger, agentId, onEdit, onDeleted, onToggled }) {
   const [toggling, setToggling] = useState(false);
-  const schedule = trigger.cron || trigger.at || '—';
+  const schedule = trigger.type === 'http'
+    ? `/hooks/${agentId}/${trigger.id}`
+    : trigger.cron || trigger.at || '—';
 
   async function handleToggle(val) {
     setToggling(true);
@@ -351,34 +355,44 @@ function TriggerRow({ trigger, agentId, onEdit, onDeleted, onToggled }) {
 }
 
 /* ── Trigger form (create & edit) ───────────────────────────────────── */
-function TriggerForm({ onSave, onCancel, saving, initialValues }) {
+function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
   const isEdit = !!initialValues;
   const [form, setForm] = useState(() => ({
-    id: initialValues?.id ?? '',
-    type: initialValues?.type === 'once' ? 'once' : 'cron',
-    cron: initialValues?.cron ?? '0 9 * * *',
-    at: initialValues?.at ?? '',
+    id:          initialValues?.id          ?? '',
+    type:        initialValues?.type === 'once' ? 'once' : initialValues?.type === 'http' ? 'http' : 'cron',
+    cron:        initialValues?.cron        ?? '0 9 * * *',
+    at:          initialValues?.at          ?? '',
     description: initialValues?.description ?? '',
-    prompt: initialValues?.prompt ?? '',
-    enabled: initialValues?.enabled !== false,
+    prompt:      initialValues?.prompt      ?? '',
+    enabled:     initialValues?.enabled !== false,
   }));
-  const [error, setError] = useState(null);
+  const [copyDone, setCopyDone] = useState(false);
+  const [formError, setFormError] = useState(null);
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
+  const webhookPath = `/hooks/${agentId}/${isEdit ? form.id : form.id.trim() || '<id>'}`;
+
+  function copyWebhookPath() {
+    navigator.clipboard?.writeText(webhookPath).then(() => {
+      setCopyDone(true);
+      setTimeout(() => setCopyDone(false), 1500);
+    });
+  }
+
   async function submit() {
-    setError(null);
-    if (form.type === 'cron' && !form.cron.trim()) { setError('Cron expression is required.'); return; }
-    if (form.type === 'once' && !form.at.trim())   { setError('Run-at timestamp is required.'); return; }
-    if (!form.prompt.trim()) { setError('Prompt is required.'); return; }
+    setFormError(null);
+    if (form.type === 'cron' && !form.cron.trim()) { setFormError('Cron expression is required.'); return; }
+    if (form.type === 'once' && !form.at.trim())   { setFormError('Run-at timestamp is required.'); return; }
+    if (!form.prompt.trim()) { setFormError('Prompt is required.'); return; }
     const body = {
-      type: form.type,
+      type:        form.type,
       description: form.description.trim() || undefined,
-      prompt: form.prompt.trim(),
-      enabled: form.enabled,
+      prompt:      form.prompt.trim(),
+      enabled:     form.enabled,
     };
     if (!isEdit) body.id = form.id.trim() || undefined;
-    if (form.type === 'cron') body.cron = form.cron.trim();
-    else body.at = form.at.trim();
+    if (form.type === 'cron')      body.cron = form.cron.trim();
+    else if (form.type === 'once') body.at   = form.at.trim();
     await onSave(body);
   }
 
@@ -389,7 +403,7 @@ function TriggerForm({ onSave, onCancel, saving, initialValues }) {
         label={isEdit ? 'ID' : 'ID (optional)'}
         value={form.id}
         onChange={v => !isEdit && set('id', v)}
-        placeholder={isEdit ? undefined : 'e.g. daily-report (auto-generated if empty)'}
+        placeholder={isEdit ? undefined : 'e.g. gh-pr-review (auto-generated if empty)'}
         disabled={isEdit}
       />
 
@@ -400,22 +414,63 @@ function TriggerForm({ onSave, onCancel, saving, initialValues }) {
         <select
           value={form.type}
           onChange={e => set('type', e.target.value)}
+          disabled={isEdit}
           style={{
             width: '100%', padding: 'var(--eb-space-2) var(--eb-space-3)',
             background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
             borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)',
             fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', outline: 'none',
+            opacity: isEdit ? 0.6 : 1,
           }}
         >
           <option value="cron">Cron (recurring)</option>
           <option value="once">Once (one-shot)</option>
+          <option value="http">HTTP webhook</option>
         </select>
       </div>
 
-      {form.type === 'cron'
-        ? <CronBuilder value={form.cron} onChange={v => set('cron', v)} />
-        : <DateTimePicker value={form.at} onChange={v => set('at', v)} />
-      }
+      {form.type === 'cron' && (
+        <CronBuilder value={form.cron} onChange={v => set('cron', v)} />
+      )}
+
+      {form.type === 'once' && (
+        <DateTimePicker value={form.at} onChange={v => set('at', v)} />
+      )}
+
+      {form.type === 'http' && (
+        <div style={{
+          padding: 'var(--eb-space-3)',
+          background: 'var(--eb-status-success-bg)',
+          border: '1px solid var(--eb-status-success)',
+          borderRadius: 'var(--eb-radius-md)',
+        }}>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-success)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+            Webhook endpoint (port 4003)
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+            <code style={{
+              flex: 1, fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)',
+              color: 'var(--eb-text-primary)', wordBreak: 'break-all',
+            }}>
+              POST {webhookPath}
+            </code>
+            <button
+              onClick={copyWebhookPath}
+              title="Copy path"
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer', padding: 2,
+                color: copyDone ? 'var(--eb-status-success)' : 'var(--eb-text-muted)',
+                flexShrink: 0,
+              }}
+            >
+              <Copy size={12} />
+            </button>
+          </div>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+            Secure with <code style={{ fontFamily: 'var(--eb-font-mono)' }}>X-Hook-Secret</code> header via <code style={{ fontFamily: 'var(--eb-font-mono)' }}>HOOK_SECRET</code> env var.
+          </div>
+        </div>
+      )}
 
       <FormInput
         label="Description (optional)"
@@ -439,10 +494,10 @@ function TriggerForm({ onSave, onCancel, saving, initialValues }) {
         </span>
       </div>
 
-      {error && (
+      {formError && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>
           <AlertCircle size={13} style={{ flexShrink: 0 }} />
-          {error}
+          {formError}
         </div>
       )}
 
@@ -654,6 +709,7 @@ export default function TriggersPanel({ agentId, active }) {
 
       <SidePanel open={addOpen} onClose={() => setAddOpen(false)} title="Add Trigger">
         <TriggerForm
+          agentId={agentId}
           saving={saving}
           onSave={handleSave}
           onCancel={() => setAddOpen(false)}
@@ -663,6 +719,7 @@ export default function TriggersPanel({ agentId, active }) {
       <SidePanel open={!!editTarget} onClose={() => setEditTarget(null)} title="Edit Trigger">
         {editTarget && (
           <TriggerForm
+            agentId={agentId}
             initialValues={editTarget}
             saving={saving}
             onSave={handleEditSave}

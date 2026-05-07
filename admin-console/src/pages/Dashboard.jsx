@@ -91,13 +91,35 @@ function SetupNudge() {
   );
 }
 
+const LAST_VIEWED_KEY = 'agentChat.lastViewed';
+function loadLastViewed() {
+  try { return JSON.parse(localStorage.getItem(LAST_VIEWED_KEY) || '{}'); }
+  catch { return {}; }
+}
+
 const AGENT_NAME_COLS = {
-  busy:    { dotColor: 'var(--eb-status-warning)', label: 'Active',  highlight: true, maxHeight: null },
-  idle:    { dotColor: 'var(--eb-text-muted)',     label: 'Idle',    highlight: false, maxHeight: 180 },
-  offline: { dotColor: 'var(--eb-status-error)',   label: 'Offline', highlight: false, maxHeight: 180 },
+  unread:  { dotColor: 'var(--eb-status-success)', label: 'Unread',  sublabel: 'Waiting for your reply', highlight: 'success', maxHeight: null },
+  busy:    { dotColor: 'var(--eb-status-warning)', label: 'Active',  sublabel: null,                     highlight: 'warning', maxHeight: null },
+  idle:    { dotColor: 'var(--eb-text-muted)',     label: 'Idle',    sublabel: null,                     highlight: false,     maxHeight: 180 },
+  offline: { dotColor: 'var(--eb-status-error)',   label: 'Offline', sublabel: null,                     highlight: false,     maxHeight: 180 },
+};
+
+const HIGHLIGHT_BORDER = {
+  success: 'var(--eb-status-success)',
+  warning: 'var(--eb-status-warning)',
+};
+const HIGHLIGHT_BG = {
+  success: 'color-mix(in srgb, var(--eb-status-success) 6%, transparent)',
+  warning: 'color-mix(in srgb, var(--eb-status-warning) 6%, transparent)',
 };
 
 function AgentNameList({ statuses }) {
+  const viewed = loadLastViewed();
+
+  const unread = statuses
+    .filter(s => s.lastResponseAt && new Date(s.lastResponseAt).getTime() > (viewed[s.id] || 0))
+    .sort((a, b) => (a.displayName ?? '').localeCompare(b.displayName ?? ''));
+
   const busy = statuses
     .filter(s => s.activityState === 'busy')
     .sort((a, b) => (a.displayName ?? '').localeCompare(b.displayName ?? ''));
@@ -111,6 +133,7 @@ function AgentNameList({ statuses }) {
     .sort((a, b) => (a.displayName ?? '').localeCompare(b.displayName ?? ''));
 
   const sections = [
+    { key: 'unread',  agents: unread },
     { key: 'busy',    agents: busy },
     { key: 'idle',    agents: idle },
     { key: 'offline', agents: offline },
@@ -119,16 +142,18 @@ function AgentNameList({ statuses }) {
   return (
     <div style={{
       display: 'grid',
-      gridTemplateColumns: 'repeat(3, 1fr)',
+      gridTemplateColumns: 'repeat(4, 1fr)',
       gap: 'var(--eb-space-4)',
       marginTop: 'var(--eb-space-4)',
     }}>
       {sections.map(({ key, agents }) => {
-        const { dotColor, label, highlight, maxHeight } = AGENT_NAME_COLS[key];
+        const { dotColor, label, sublabel, highlight, maxHeight } = AGENT_NAME_COLS[key];
+        const borderColor = highlight ? HIGHLIGHT_BORDER[highlight] : 'var(--eb-border-default)';
+        const bgColor     = highlight && agents.length > 0 ? HIGHLIGHT_BG[highlight] : 'transparent';
         return (
           <div key={key} style={{
             background: 'var(--eb-bg-surface)',
-            border: `1px solid ${highlight ? 'var(--eb-status-warning)' : 'var(--eb-border-default)'}`,
+            border: `1px solid ${borderColor}`,
             borderRadius: 'var(--eb-radius-lg)',
             overflow: 'hidden',
           }}>
@@ -139,30 +164,44 @@ function AgentNameList({ statuses }) {
               justifyContent: 'space-between',
               padding: 'var(--eb-space-3) var(--eb-space-4)',
               borderBottom: '1px solid var(--eb-border-default)',
-              background: highlight ? 'color-mix(in srgb, var(--eb-status-warning) 6%, transparent)' : 'transparent',
+              background: bgColor,
             }}>
-              <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 'var(--eb-space-2)',
-                fontSize: 'var(--eb-text-sm)',
-                fontWeight: 'var(--eb-font-semibold)',
-                color: highlight ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
-              }}>
-                <span style={{
-                  width: 8, height: 8, borderRadius: '50%', background: dotColor, flexShrink: 0,
-                  ...(highlight && agents.length > 0 ? { animation: 'eb-status-pulse 1.4s ease-in-out infinite' } : {}),
-                }} />
-                {label}
+              <div>
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 'var(--eb-space-2)',
+                  fontSize: 'var(--eb-text-sm)',
+                  fontWeight: 'var(--eb-font-semibold)',
+                  color: highlight && agents.length > 0 ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
+                }}>
+                  <span style={{
+                    width: 8, height: 8, borderRadius: '50%', background: dotColor, flexShrink: 0,
+                    ...(highlight && agents.length > 0 ? { animation: 'eb-status-pulse 1.4s ease-in-out infinite' } : {}),
+                  }} />
+                  {label}
+                </div>
+                {sublabel && agents.length > 0 && (
+                  <div style={{
+                    marginTop: 2,
+                    marginLeft: 16,
+                    fontSize: 'var(--eb-text-xs)',
+                    color: 'var(--eb-status-success)',
+                    fontWeight: 'var(--eb-font-medium)',
+                  }}>
+                    {sublabel}
+                  </div>
+                )}
               </div>
               <span style={{
                 fontSize: 'var(--eb-text-xs)',
-                color: 'var(--eb-text-muted)',
+                color: agents.length > 0 && highlight ? HIGHLIGHT_BORDER[highlight] : 'var(--eb-text-muted)',
                 background: 'var(--eb-bg-elevated)',
                 borderRadius: 'var(--eb-radius-sm)',
                 padding: '1px 6px',
                 minWidth: 20,
                 textAlign: 'center',
+                fontWeight: agents.length > 0 && highlight ? 'var(--eb-font-semibold)' : undefined,
               }}>
                 {agents.length}
               </span>
@@ -174,7 +213,9 @@ function AgentNameList({ statuses }) {
                 padding: 'var(--eb-space-3) var(--eb-space-4)',
                 fontSize: 'var(--eb-text-xs)',
                 color: 'var(--eb-text-muted)',
-              }}>—</div>
+              }}>
+                {key === 'unread' ? 'All caught up' : '—'}
+              </div>
             ) : (
               <div style={{
                 maxHeight: maxHeight ?? undefined,
@@ -204,7 +245,11 @@ function AgentNameList({ statuses }) {
                             <Link
                               to={`/chats/${agent.id}`}
                               title={agent.displayName}
-                              style={{ color: 'var(--eb-accent-primary)', textDecoration: 'none' }}
+                              style={{
+                                color: key === 'unread' ? 'var(--eb-status-success)' : 'var(--eb-accent-primary)',
+                                textDecoration: 'none',
+                                fontWeight: key === 'unread' ? 'var(--eb-font-medium)' : undefined,
+                              }}
                               onMouseEnter={e => { e.currentTarget.style.textDecoration = 'underline'; }}
                               onMouseLeave={e => { e.currentTarget.style.textDecoration = 'none'; }}
                             >

@@ -1543,6 +1543,27 @@ class Orchestrator {
 
       // Build fan-out targets: every affected bp-instance, plus the
       // orchestrator itself for awareness (only when we routed something).
+      // For each affected leaf, classify the situation so the receiving
+      // agent can pick the right prompt:
+      //   - "kickoff"       — affected BP is `ready` and all its depends-on
+      //                       are now `completed`/`reviewed` (first run)
+      //   - "cascade-stale" — affected BP was already `completed`/`reviewed`/
+      //                       `stale` and is now potentially invalidated
+      //   - "other"         — fallback (e.g. `dispatched`/`claimed` already)
+      const classifySituation = (bpHash) => {
+        const entry = briefings[bpHash] || {};
+        const status = entry.status || "unknown";
+        const deps = Array.isArray(entry["depends-on"]) ? entry["depends-on"] : [];
+        const allDepsMet = deps.every((d) => {
+          const e = briefings[d];
+          return e && (e.status === "completed" || e.status === "reviewed");
+        });
+        if (status === "ready" && allDepsMet) return { situation: "kickoff", status };
+        if (["completed", "reviewed", "stale"].includes(status)) {
+          return { situation: "cascade-stale", status };
+        }
+        return { situation: "other", status };
+      };
       const targets = [];
       for (const [affectedBp, reasons] of perAffectedBp) {
         const dst = bpHashToStub.get(affectedBp);
@@ -1550,10 +1571,13 @@ class Orchestrator {
           skipped.push({ bp: affectedBp, reason: "no-stub-for-affected-bp" });
           continue;
         }
+        const { situation, status: affectedBpStatus } = classifySituation(affectedBp);
         targets.push({
           agentId: dst.stubId,
           role: "bp-instance",
           affectedBp,
+          affectedBpStatus,
+          situation,
           reasons,
         });
       }
@@ -1562,9 +1586,10 @@ class Orchestrator {
           agentId: orchId,
           role: "orchestrator",
           affectedBp: null,
-          reasons: [...perAffectedBp.entries()].map(([bp, rs]) => ({
-            kind: "downstream-affected", bp, reasons: rs,
-          })),
+          reasons: [...perAffectedBp.entries()].map(([bp, rs]) => {
+            const { situation } = classifySituation(bp);
+            return { kind: "downstream-affected", bp, situation, reasons: rs };
+          }),
         });
       }
 
@@ -1627,6 +1652,8 @@ class Orchestrator {
       source: source || "unknown",
       role: target.role,
       affectedBp: target.affectedBp,
+      affectedBpStatus: target.affectedBpStatus,
+      situation: target.situation,
       reasons: target.reasons,
     });
 
@@ -1635,6 +1662,7 @@ class Orchestrator {
       action: "enqueued",
       role: target.role,
       affectedBp: target.affectedBp,
+      situation: target.situation,
       materialized: isStub && mode !== "notify-only",
     };
   }

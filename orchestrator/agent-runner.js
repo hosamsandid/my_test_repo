@@ -463,9 +463,18 @@ class TriggerScheduler {
 
   // Format a bp-event-batch entry as a Matrix notification and invoke
   // Claude. The orchestrator process already decided that *this* agent
-  // cares — the prompt frames the situation and asks Claude to inspect
-  // the affected BP and decide on the right reaction (typically posting
-  // a brief lay-of-the-land message and waiting for the user).
+  // cares AND classified the situation:
+  //   - "kickoff"       — affected BP is `ready` and all upstream deps are
+  //                       now `completed`/`reviewed` (first run is now
+  //                       possible) — agent should propose a plan and ask
+  //                       the user to greenlight starting.
+  //   - "cascade-stale" — affected BP was already done and is now invalidated
+  //                       by an upstream change — agent should suggest
+  //                       /confirm-valid vs /revise.
+  //   - "other"         — defensive fallback (e.g. BP already dispatched).
+  // In every branch the prompt MUST end with an explicit question to the
+  // user, never with a bare status statement, so the chat clearly shows
+  // that the agent is waiting for input.
   async executeBpEvent(entry) {
     const dmRoom = loadDmRoomId();
     if (!dmRoom) {
@@ -478,25 +487,59 @@ class TriggerScheduler {
     const role = entry.role || 'bp-instance';
     const reasons = Array.isArray(entry.reasons) ? entry.reasons : [];
     const source = entry.source || 'unknown';
+    const situation = entry.situation || 'cascade-stale';
 
     let prompt;
     if (role === 'orchestrator') {
       // Awareness summary for the hosting orchestrator: list the affected BPs
-      // so the orchestrator agent can surface the cascade to the user.
+      // (with their situation) so the orchestrator agent can surface the
+      // cascade to the user.
       const bullets = reasons.map((r) => {
         const reasonsList = (r.reasons || []).map((x) => x.reason).join(', ');
-        return `- bp:${(r.bp || '').slice(0, 6)} — ${reasonsList || 'unspecified'}`;
+        const sit = r.situation ? ` [${r.situation}]` : '';
+        return `- bp:${(r.bp || '').slice(0, 6)}${sit} — ${reasonsList || 'unspecified'}`;
       }).join('\n');
       prompt =
         `SYSTEM NOTICE — BP-event cascade.\n\n` +
         `Source: ${source}\n` +
         `Downstream BPs in your tree are affected:\n\n${bullets}\n\n` +
         `Your task: post a brief, friendly status message in this chat letting the user ` +
-        `know the cascade is in motion. Don't run any commands — the affected bp-instance ` +
-        `agents are being notified separately.`;
+        `know the cascade is in motion (mention which BPs just became startable vs. ` +
+        `which were invalidated). Don't run any commands — the affected bp-instance ` +
+        `agents are being notified separately and will ask the user themselves.`;
+    } else if (situation === 'kickoff') {
+      // bp-instance: this BP just became startable for the first time —
+      // upstream dependencies are now satisfied. Ask the agent to read its
+      // own brief, propose a plan, and ASK the user before doing any work.
+      const reasonLines = reasons.map((r) => {
+        if (r.reason === 'depends-on') {
+          return `- depends-on bp:${(r.source || '').slice(0, 6)} just completed`;
+        }
+        if (r.reason === 'input-artifact') {
+          const paths = (r.paths || []).map(p => `\`${p}\``).join(', ');
+          return `- new input artifact(s) from bp:${(r.source || '').slice(0, 6)}: ${paths}`;
+        }
+        return `- ${r.reason || 'unknown'}`;
+      }).join('\n');
+      prompt =
+        `SYSTEM NOTICE — your Briefing Pack is now ready to start.\n\n` +
+        `Source: ${source}\n` +
+        `What changed:\n${reasonLines}\n\n` +
+        `Your task — in this exact order:\n` +
+        `1. Read your own brief.md (the BP you are an instance of) so you understand ` +
+        `what you are supposed to deliver and which inputs the upstream BP just produced.\n` +
+        `2. Post ONE message in this chat containing: (a) a 2–3 sentence summary of your ` +
+        `mission in your own words, (b) the high-level approach you would take, and ` +
+        `(c) any open question or assumption you want the user to confirm before you start.\n` +
+        `3. End that message with an EXPLICIT question — either the open question from ` +
+        `2(c), or, if everything is clear, "Soll ich jetzt loslegen?". The user must see ` +
+        `a question, not a status statement.\n\n` +
+        `Do NOT claim, do NOT run \`bp-transition.py\`, do NOT execute the LoopScript, ` +
+        `do NOT make any commits yet — wait for the user's reply.`;
     } else {
-      // bp-instance: this BP itself was affected. Frame what happened and
-      // suggest the appropriate ACE command (/confirm-valid or /revise).
+      // cascade-stale: this BP was already done and may now be invalidated.
+      // Suggest the appropriate ACE command (/confirm-valid or /revise) and
+      // ask the user which one to run.
       const affected = entry.affectedBp ? `bp:${entry.affectedBp.slice(0, 6)}` : 'this BP';
       const reasonLines = reasons.map((r) => {
         if (r.reason === 'depends-on') {
@@ -513,10 +556,11 @@ class TriggerScheduler {
         `Source: ${source}\n` +
         `Affected: ${affected}\n` +
         `Reasons:\n${reasonLines}\n\n` +
-        `Your task: post a brief lay-of-the-land message to the user in this chat — ` +
-        `summarise what changed upstream, whether your inputs/digest match, and which ACE ` +
-        `command (\`/confirm-valid\` or \`/revise\`) you would recommend. ` +
-        `Do not run \`/confirm-valid\` or \`/revise\` yet — wait for the user's reply.`;
+        `Your task: post a brief lay-of-the-land message in this chat — summarise what ` +
+        `changed upstream, whether your inputs/digest still match, and which ACE command ` +
+        `(\`/confirm-valid\` or \`/revise\`) you would recommend. End the message with an ` +
+        `EXPLICIT question to the user asking which one to run. Do NOT run ` +
+        `\`/confirm-valid\` or \`/revise\` yet — wait for the user's reply.`;
     }
 
     const correlationId = `bp-event:${Date.now()}`;

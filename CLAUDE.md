@@ -145,6 +145,14 @@ The orchestrator hosts a central ingestion endpoint that any signaling source (t
 
 **`bp-event-batch` is not a triggers.json type.** It's a `kind`-tagged entry that the agent-runner's drain loop handles inline (`executeBpEvent`) — no triggers.json registration required.
 
+**Situation classification.** Before enqueuing, the orchestrator inspects the affected BP's current status in the loaded `.index.json` and tags each `bp-event-batch` entry with one of:
+
+- `kickoff` — affected BP is `ready` and all its `depends-on` are now `completed`/`reviewed`. The receiving agent reads its brief, posts a 2–3-sentence mission summary plus its planned approach, and asks the user to greenlight starting. No claim, no LoopScript run, no commits before user OK.
+- `cascade-stale` — affected BP was already `completed`/`reviewed`/`stale` and may now be invalidated. The receiving agent posts a lay-of-the-land summary and asks whether to run `/confirm-valid` or `/revise`.
+- `other` — defensive fallback (e.g. BP already `dispatched`/`claimed`); falls through to the cascade-stale prompt.
+
+In every situation the agent's prompt requires an explicit closing question to the user, so the chat clearly shows the agent waiting for input rather than emitting a bare status statement.
+
 **Agent `bp-trigger-policy`** (optional field in `config.json`, defaults applied when absent):
 
 | Field | Values | Default | Effect |

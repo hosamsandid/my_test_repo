@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
+const { spawnSync } = require('child_process');
 const matrix = require('./matrix');
 
 const WORKSPACE = '/workspace';
@@ -2094,6 +2095,65 @@ app.get('/api/agents/:agentId/workspace/tree', (req, res) => {
   // Normalize the path we echo back — trailing slashes etc. shouldn't leak.
   const echoPath = path.relative(path.join(AGENTS_DIR, agentId), target);
   res.json({ path: echoPath, items });
+});
+
+// Git info — branch + dirty status for all git repos in the agent workspace.
+function readGitRepoInfo(repoPath) {
+  let branch = null;
+  try {
+    const headContent = fs.readFileSync(path.join(repoPath, '.git', 'HEAD'), 'utf8').trim();
+    if (headContent.startsWith('ref: refs/heads/')) {
+      branch = headContent.slice('ref: refs/heads/'.length);
+    } else if (/^[0-9a-f]{7,40}$/i.test(headContent)) {
+      branch = headContent.slice(0, 7); // detached HEAD
+    }
+  } catch { return null; }
+
+  let isDirty = false;
+  let changesCount = 0;
+  try {
+    const result = spawnSync('git', ['status', '--porcelain'], {
+      cwd: repoPath, timeout: 5000, encoding: 'utf8',
+    });
+    if (result.status === 0 && result.stdout) {
+      const lines = result.stdout.trim().split('\n').filter(Boolean);
+      changesCount = lines.length;
+      isDirty = changesCount > 0;
+    }
+  } catch { /* ignore */ }
+
+  return { branch, isDirty, changesCount };
+}
+
+function getAgentGitRepos(agentId) {
+  const agentRoot = path.join(AGENTS_DIR, agentId);
+  const repos = [];
+  // Check the workspace root itself
+  if (fs.existsSync(path.join(agentRoot, '.git', 'HEAD'))) {
+    const info = readGitRepoInfo(agentRoot);
+    if (info) repos.push({ repoPath: '.', ...info });
+  }
+  // Scan first-level subdirectories
+  let entries = [];
+  try { entries = fs.readdirSync(agentRoot, { withFileTypes: true }); } catch { return repos; }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const fullPath = path.join(agentRoot, entry.name);
+    if (fs.existsSync(path.join(fullPath, '.git', 'HEAD'))) {
+      const info = readGitRepoInfo(fullPath);
+      if (info) repos.push({ repoPath: entry.name, ...info });
+    }
+  }
+  return repos;
+}
+
+app.get('/api/agents/:agentId/git-info', (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  if (!fs.existsSync(path.join(AGENTS_DIR, agentId))) {
+    return res.status(404).json({ error: 'Agent not found' });
+  }
+  res.json({ repos: getAgentGitRepos(agentId) });
 });
 
 // Directory-only listing — delegated to BP-Explorer for orchestrator directory picker.

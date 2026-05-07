@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Wifi, WifiOff, Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Square, Cpu, Trash2 } from 'lucide-react';
+import { Wifi, WifiOff, Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Square, Cpu, Trash2, GitBranch } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
 import ConfirmDialog from '../../components/ConfirmDialog';
@@ -83,6 +83,9 @@ export default function ChatPanel({
   // whose timestamp is at or after this value.
   const learnTriggeredAtRef = useRef(0);
 
+  // Git repos info for the agent workspace (branch + dirty status).
+  const [gitInfo, setGitInfo] = useState(null);
+
   /* ─── 1. Lazy DM-room creation ───────────────────────────────────── */
   useEffect(() => {
     if (!agent || roomId) return;
@@ -99,6 +102,20 @@ export default function ChatPanel({
       .finally(() => { if (!cancelled) setCreating(false); });
     return () => { cancelled = true; };
   }, [agent, roomId, onRoomCreated]);
+
+  /* ─── 1b. Git info polling ──────────────────────────────────────── */
+  useEffect(() => {
+    if (!agent?.id) return;
+    let cancelled = false;
+    const loadGitInfo = () => {
+      apiCall('GET', `/api/agents/${agent.id}/git-info`)
+        .then(data => { if (!cancelled) setGitInfo(data?.repos ?? []); })
+        .catch(() => { if (!cancelled) setGitInfo([]); });
+    };
+    loadGitInfo();
+    const timer = setInterval(loadGitInfo, 30_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [agent?.id]);
 
   /* ─── 2. Backfill on roomId change ──────────────────────────────── */
   useEffect(() => {
@@ -579,6 +596,31 @@ export default function ChatPanel({
             }}>
               <Server size={11} />
               {agent.environmentName}
+            </div>
+          )}
+          {gitInfo && gitInfo.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 1 }}>
+              {gitInfo.map(repo => (
+                <div key={repo.repoPath} style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 3,
+                  fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
+                }}>
+                  <GitBranch size={11} />
+                  <span style={{ fontFamily: 'monospace' }}>
+                    {gitInfo.length > 1 ? `${repo.repoPath}: ` : ''}{repo.branch ?? 'detached'}
+                  </span>
+                  {repo.isDirty && (
+                    <span
+                      title={`${repo.changesCount} uncommitted change(s)`}
+                      style={{
+                        width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+                        background: 'var(--eb-color-warning, #f59e0b)',
+                        display: 'inline-block',
+                      }}
+                    />
+                  )}
+                </div>
+              ))}
             </div>
           )}
         </div>

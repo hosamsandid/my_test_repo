@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect } from 'react';
 import { X } from 'lucide-react';
 
 /**
@@ -12,7 +12,6 @@ import { X } from 'lucide-react';
  *   width    — optional override (default: var(--eb-side-panel-width))
  */
 export default function SidePanel({ open, onClose, title, children, width, loading }) {
-  const panelRef = useRef(null);
 
   /* ── Escape to close ─────────────────────────────────────────────── */
   useEffect(() => {
@@ -22,18 +21,6 @@ export default function SidePanel({ open, onClose, title, children, width, loadi
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [open, onClose]);
-
-  /* ── Click outside to close ──────────────────────────────────────── */
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e) => {
-      if (panelRef.current && !panelRef.current.contains(e.target)) {
-        onClose();
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
   }, [open, onClose]);
 
   if (!open) return null;
@@ -49,7 +36,6 @@ export default function SidePanel({ open, onClose, title, children, width, loadi
 
       {/* Panel */}
       <div
-        ref={panelRef}
         role="dialog"
         aria-label={title}
         style={{

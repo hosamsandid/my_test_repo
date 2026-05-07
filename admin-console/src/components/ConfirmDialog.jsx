@@ -64,7 +64,6 @@ export default function ConfirmDialog({
       aria-modal="true"
       aria-label={title}
       style={overlayStyle}
-      onClick={(e) => { if (e.target === e.currentTarget) onCancel?.(); }}
     >
       <div style={dialogStyle}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-3)' }}>

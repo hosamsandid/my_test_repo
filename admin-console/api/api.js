@@ -36,6 +36,19 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(STATIC_DIR));
 
+// Allowlist for ids that turn into filesystem path segments. The dotted-
+// segment pattern explicitly rejects "..", leading/trailing dots and
+// consecutive dots — without this the previous /^[\w.-]+$/ regex would
+// have accepted ".." and allowed traversal one level up out of AGENTS_DIR.
+// Inline `AGENT_ID_RE.test(x)` checks at the start of every route reading
+// an agent id from req.params/req.body/req.query are recognised by CodeQL
+// as a path-injection sanitizer (js/path-injection); helper-indirected
+// checks are not, which is why the regex is applied inline.
+const AGENT_ID_RE = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/;
+const SSH_KEY_ID_RE = /^[a-z0-9-]+$/;
+const GH_TOKEN_ID_RE = /^[a-z0-9-]+$/;
+const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
+
 /* ─── Helpers ───────────────────────────────────────────────────────── */
 
 function writeJsonAtomic(filePath, data) {
@@ -428,6 +441,7 @@ app.get('/api/agents/statuses', async (req, res) => {
 
 app.get('/api/agents/:id', (req, res) => {
   const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
   const cfg = readJsonFile(path.join(agentDir, 'config.json'), null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
@@ -437,6 +451,7 @@ app.get('/api/agents/:id', (req, res) => {
 
 app.put('/api/agents/:id', async (req, res) => {
   const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
@@ -475,6 +490,7 @@ app.put('/api/agents/:id', async (req, res) => {
 
 app.post('/api/agents/:id/deactivate', async (req, res) => {
   const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/deactivate`, {
@@ -492,6 +508,7 @@ app.post('/api/agents/:id/deactivate', async (req, res) => {
 
 app.post('/api/agents/:id/sync-bps', async (req, res) => {
   const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/orchestrators/${encodeURIComponent(id)}/sync-bps?force=1`, {
@@ -507,6 +524,7 @@ app.post('/api/agents/:id/sync-bps', async (req, res) => {
 
 app.post('/api/agents/:groupId/instances', async (req, res) => {
   const { groupId } = req.params;
+  if (!AGENT_ID_RE.test(groupId)) return res.status(400).json({ error: 'Invalid agent id' });
   if (!fs.existsSync(path.join(AGENTS_DIR, groupId))) {
     return res.status(404).json({ error: 'Agent group not found' });
   }
@@ -551,6 +569,7 @@ app.post('/api/agents', async (req, res) => {
 
 app.delete('/api/agents/:id', async (req, res) => {
   const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
@@ -572,6 +591,7 @@ app.delete('/api/agents/:id', async (req, res) => {
 
 app.post('/api/agents/:id/clone', async (req, res) => {
   const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const { newId, newDisplayName } = req.body || {};
   if (!newId || !newDisplayName) {
     return res.status(400).json({ error: 'newId and newDisplayName required' });
@@ -602,6 +622,7 @@ app.post('/api/agents/:id/clone', async (req, res) => {
 
 app.get('/api/agents/:id/prompt', (req, res) => {
   const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const promptPath = path.join(AGENTS_DIR, id, 'AGENT-PROMPT.md');
   if (!fs.existsSync(path.join(AGENTS_DIR, id))) return res.status(404).json({ error: 'Agent not found' });
   let content = '';
@@ -611,6 +632,7 @@ app.get('/api/agents/:id/prompt', (req, res) => {
 
 app.put('/api/agents/:id/prompt', (req, res) => {
   const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
   const { content } = req.body;
@@ -629,6 +651,7 @@ app.put('/api/agents/:id/prompt', (req, res) => {
 // environment-level default, and the agent-level override (if any).
 app.get('/api/agents/:id/model-options', (req, res) => {
   const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
@@ -647,6 +670,7 @@ app.get('/api/agents/:id/model-options', (req, res) => {
 
 app.patch('/api/agents/:id/model', (req, res) => {
   const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
@@ -688,6 +712,7 @@ app.patch('/api/agents/:id/model', (req, res) => {
 
 app.get('/api/agents/:id/triggers', (req, res) => {
   const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
   const triggers = readJsonFile(path.join(agentDir, 'triggers.json'), []);
@@ -702,6 +727,7 @@ function notifyTriggerReload(agentId) {
 
 app.post('/api/agents/:id/triggers', (req, res) => {
   const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
   const triggersPath = path.join(agentDir, 'triggers.json');
@@ -715,6 +741,7 @@ app.post('/api/agents/:id/triggers', (req, res) => {
 
 app.put('/api/agents/:id/triggers/:triggerId', (req, res) => {
   const { id, triggerId } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
   const triggersPath = path.join(agentDir, 'triggers.json');
@@ -729,6 +756,7 @@ app.put('/api/agents/:id/triggers/:triggerId', (req, res) => {
 
 app.delete('/api/agents/:id/triggers/:triggerId', (req, res) => {
   const { id, triggerId } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
   const triggersPath = path.join(agentDir, 'triggers.json');
@@ -780,10 +808,13 @@ app.get('/api/skills', (req, res) => {
 app.get('/api/skills/:name/content', (req, res) => {
   const { name } = req.params;
   const { source, agentId } = req.query;
+  if (!SKILL_NAME_RE.test(name)) return res.status(400).json({ error: 'Invalid skill name' });
 
   let skillPath;
-  if (source === 'agent' && agentId) {
+  if (source === 'agent' && typeof agentId === 'string' && AGENT_ID_RE.test(agentId)) {
     skillPath = path.join(AGENTS_DIR, agentId, 'skills', name, 'SKILL.md');
+  } else if (source === 'agent') {
+    return res.status(400).json({ error: 'Invalid agent id' });
   } else {
     skillPath = path.join(POOL_DIR, 'skills', name, 'SKILL.md');
   }
@@ -1435,6 +1466,10 @@ app.post('/api/ssh-keys', (req, res) => {
   if (existing.some(k => k.id === id)) {
     id = `${id}-${Date.now().toString(36)}`;
   }
+  // Re-check the derived id against the strict allowlist — the .replace
+  // chain above is correct, but the explicit regex test is what CodeQL
+  // recognises as a path-injection sanitizer.
+  if (!SSH_KEY_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid ssh key id' });
 
   const keyPath = path.join(SSH_KEYS_DIR, id);
   fs.writeFileSync(keyPath, trimmed.endsWith('\n') ? trimmed : trimmed + '\n', { mode: 0o600 });
@@ -1452,6 +1487,7 @@ app.post('/api/ssh-keys', (req, res) => {
 
 app.delete('/api/ssh-keys/:id', (req, res) => {
   const { id } = req.params;
+  if (!SSH_KEY_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid ssh key id' });
   const keys = listSshKeys();
   if (!keys.some(k => k.id === id)) return res.status(404).json({ error: 'SSH key not found' });
   const usedBy = sshKeyInUse(id);
@@ -1489,6 +1525,7 @@ app.post('/api/github-tokens', (req, res) => {
   if (existing.some(t => t.id === id)) {
     id = `${id}-${Date.now().toString(36)}`;
   }
+  if (!GH_TOKEN_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid token id' });
 
   const tokenPath = path.join(GH_TOKENS_DIR, id);
   fs.writeFileSync(tokenPath, trimmed, { mode: 0o600 });
@@ -1507,6 +1544,7 @@ app.post('/api/github-tokens', (req, res) => {
 
 app.delete('/api/github-tokens/:id', (req, res) => {
   const { id } = req.params;
+  if (!GH_TOKEN_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid token id' });
   const tokens = listGithubTokens();
   if (!tokens.some(t => t.id === id)) return res.status(404).json({ error: 'GitHub token not found' });
   const usedBy = githubTokenInUse(id);
@@ -1630,6 +1668,7 @@ async function ensureAgentDmRoom(agentId) {
 
 app.post('/api/matrix/agents/:agentId/dm', async (req, res) => {
   const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
 
   let promise = dmCreateInFlight.get(agentId);
   let leader = false;
@@ -1875,29 +1914,12 @@ app.get('/api/matrix/rooms/:roomId/stream', async (req, res) => {
 
 /* ─── Session Log ───────────────────────────────────────────────────── */
 
-const AGENT_ID_RE = /^[a-zA-Z0-9_.-]+$/;
 const ROOM_ID_RE = /^![a-zA-Z0-9_-]+:[a-zA-Z0-9.-]+$/;
 
-function sessionFile(agentId, roomId) {
-  return path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.jsonl');
-}
-
-function sessionPointerFile(agentId, roomId) {
-  return path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.current.json');
-}
-
-function sessionResetFlagFile(agentId, roomId) {
-  return path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.reset.json');
-}
-
-function validSessionIds(req, res) {
-  const { agentId, roomId } = req.params;
-  if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
-    res.status(400).json({ error: 'invalid id' });
-    return null;
-  }
-  return { agentId, roomId };
-}
+// Session-file paths are built inline at every call site (rather than via a
+// helper) so the sanitisation gate (AGENT_ID_RE / ROOM_ID_RE tests at the
+// route entry) and the path.join sit in the same function — that's the
+// shape CodeQL's js/path-injection rule recognises as a barrier.
 
 /* ─── Session pointer (Claude --resume id) ─────────────────────────── */
 
@@ -1907,10 +1929,12 @@ function validSessionIds(req, res) {
 // Also returns `resetAt` (ISO string) when the session was manually reset and
 // no new session has started yet; the UI uses this to show a persistent notice.
 app.get('/api/agents/:agentId/session/:roomId/current', (req, res) => {
-  const ids = validSessionIds(req, res);
-  if (!ids) return;
-  const ptr = sessionPointerFile(ids.agentId, ids.roomId);
-  const flagPath = sessionResetFlagFile(ids.agentId, ids.roomId);
+  const { agentId, roomId } = req.params;
+  if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  const ptr = path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.current.json');
+  const flagPath = path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.reset.json');
 
   let sessionId = null, updatedAt = null;
   if (fs.existsSync(ptr)) {
@@ -1946,11 +1970,13 @@ app.get('/api/agents/:agentId/session/:roomId/current', (req, res) => {
 // and triggers a best-effort git reset of all repositories in the agent's
 // working environment back to their configured default branch.
 app.delete('/api/agents/:agentId/session/:roomId/current', async (req, res) => {
-  const ids = validSessionIds(req, res);
-  if (!ids) return;
+  const { agentId, roomId } = req.params;
+  if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
   try {
-    fs.rmSync(sessionPointerFile(ids.agentId, ids.roomId), { force: true });
-    const flagPath = sessionResetFlagFile(ids.agentId, ids.roomId);
+    fs.rmSync(path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.current.json'), { force: true });
+    const flagPath = path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.reset.json');
     fs.mkdirSync(path.dirname(flagPath), { recursive: true });
     writeJsonAtomic(flagPath, { resetAt: new Date().toISOString() });
   } catch (err) {
@@ -1962,13 +1988,13 @@ app.delete('/api/agents/:agentId/session/:roomId/current', async (req, res) => {
   try {
     const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
     const r = await fetch(
-      `${orchestratorUrl}/internal/agents/${encodeURIComponent(ids.agentId)}/reset-repos`,
+      `${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/reset-repos`,
       { method: 'POST' },
     );
     const data = await r.json();
     repoResults = data?.results ?? [];
   } catch (err) {
-    console.warn(`[API] reset-repos call failed for ${ids.agentId}: ${err.message}`);
+    console.warn(`[API] reset-repos call failed for ${agentId}: ${err.message}`);
   }
 
   res.json({ ok: true, repoResults });
@@ -1977,12 +2003,14 @@ app.delete('/api/agents/:agentId/session/:roomId/current', async (req, res) => {
 // Send a stop-session signal to the orchestrator, which forwards it via IPC
 // to the agent-runner. The runner kills any in-flight Claude invocation.
 app.post('/api/agents/:agentId/session/:roomId/stop', async (req, res) => {
-  const ids = validSessionIds(req, res);
-  if (!ids) return;
+  const { agentId, roomId } = req.params;
+  if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(
-      `${orchestratorUrl}/internal/agents/${encodeURIComponent(ids.agentId)}/stop-session`,
+      `${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/stop-session`,
       { method: 'POST' },
     );
     const data = await resp.json();
@@ -2030,6 +2058,7 @@ function safeAgentPath(agentId, relPath) {
 // link target (best-effort) so the user understands what they're looking at.
 app.get('/api/agents/:agentId/workspace/tree', (req, res) => {
   const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const relPath = typeof req.query.path === 'string' ? req.query.path : '';
   const target = safeAgentPath(agentId, relPath);
   if (!target) return res.status(400).json({ error: 'invalid path' });
@@ -2159,6 +2188,7 @@ app.get('/api/agents/:agentId/git-info', (req, res) => {
 // Directory-only listing — delegated to BP-Explorer for orchestrator directory picker.
 app.get('/api/agents/:agentId/workspace/dirs', async (req, res) => {
   const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const relPath = typeof req.query.path === 'string' ? req.query.path : '';
   const root = path.join(AGENTS_DIR, agentId);
   // Verify agent exists
@@ -2178,6 +2208,7 @@ app.get('/api/agents/:agentId/workspace/dirs', async (req, res) => {
 // stub instead of garbled UTF-8.
 app.get('/api/agents/:agentId/workspace/file', (req, res) => {
   const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const relPath = typeof req.query.path === 'string' ? req.query.path : '';
   const target = safeAgentPath(agentId, relPath);
   if (!target) return res.status(400).json({ error: 'invalid path' });
@@ -2258,8 +2289,19 @@ const uploadFiles = (req, res, next) => {
   });
 };
 
-app.post('/api/agents/:agentId/workspace/upload', uploadFiles, (req, res) => {
+// Reject malformed agent ids before multer buffers the multipart body —
+// otherwise a bad agentId still costs us up to 500×50 MB of memory before
+// the handler responds 400. Has to run before `uploadFiles`.
+const requireAgentIdParam = (req, res, next) => {
+  if (!AGENT_ID_RE.test(req.params.agentId)) {
+    return res.status(400).json({ error: 'Invalid agent id' });
+  }
+  next();
+};
+
+app.post('/api/agents/:agentId/workspace/upload', requireAgentIdParam, uploadFiles, (req, res) => {
   const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const relDir = typeof req.body.path === 'string' ? req.body.path : '';
 
   // relativePaths may arrive as a single string (one file) or an array (multiple files).
@@ -2268,7 +2310,7 @@ app.post('/api/agents/:agentId/workspace/upload', uploadFiles, (req, res) => {
 
   // safeAgentPath validates agentId format, resolves realpath, and checks
   // path-traversal / outward-symlink containment — user-controlled input is
-  // never passed raw to fs calls (CodeQL path-expression findings are FPs here).
+  // never passed raw to fs calls.
   const targetDir = safeAgentPath(agentId, relDir);
   if (!targetDir) return res.status(400).json({ error: 'Invalid target path' });
 
@@ -2378,9 +2420,11 @@ function parseJsonlLine(line) {
 
 // Static backfill: read JSONL from `since` (default 0) up to current EOF.
 app.get('/api/agents/:agentId/session/:roomId', (req, res) => {
-  const ids = validSessionIds(req, res);
-  if (!ids) return;
-  const filepath = sessionFile(ids.agentId, ids.roomId);
+  const { agentId, roomId } = req.params;
+  if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  const filepath = path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.jsonl');
 
   if (!fs.existsSync(filepath)) {
     return res.json({ events: [], cursor: 0 });
@@ -2435,9 +2479,11 @@ app.get('/api/agents/:agentId/session/:roomId', (req, res) => {
 
 // Live tail via SSE.
 app.get('/api/agents/:agentId/session/:roomId/stream', (req, res) => {
-  const ids = validSessionIds(req, res);
-  if (!ids) return;
-  const filepath = sessionFile(ids.agentId, ids.roomId);
+  const { agentId, roomId } = req.params;
+  if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  const filepath = path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.jsonl');
   const dirpath = path.dirname(filepath);
 
   res.setHeader('Content-Type', 'text/event-stream');

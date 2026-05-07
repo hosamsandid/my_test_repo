@@ -288,6 +288,14 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
         </div>
       )}
 
+      {saving && (
+        <div style={{ padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-info-bg)', border: '1px solid var(--eb-status-info)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-info)' }}>
+          {form.role === 'orchestrator'
+            ? 'Setting up the orchestrator — provisioning the Matrix user, preparing the workspace, cloning repositories, and initializing the BriefingPack loop. This may take a minute or two, please wait.'
+            : 'Setting up the agent — provisioning the Matrix user, preparing the workspace, and cloning repositories. This may take a moment, please wait.'}
+        </div>
+      )}
+
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         <button
           onClick={() => onSave(form)}
@@ -300,14 +308,6 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           Cancel
         </button>
       </div>
-
-      {saving && (
-        <div style={{ padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-info-bg)', border: '1px solid var(--eb-status-info)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-info)' }}>
-          {form.role === 'orchestrator'
-            ? 'Setting up the orchestrator — provisioning the Matrix user, preparing the workspace, cloning repositories, and initializing the BriefingPack loop. This may take a minute or two, please wait.'
-            : 'Setting up the agent — provisioning the Matrix user, preparing the workspace, and cloning repositories. This may take a moment, please wait.'}
-        </div>
-      )}
 
       {showDirPicker && form.id && (
         <DirectoryPicker

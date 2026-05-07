@@ -409,11 +409,13 @@ app.get('/api/agents/statuses', async (req, res) => {
 
   const statuses = ids.map(id => {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (cfg.enabled === false) return { id, activityState: 'disabled' };
-    if (!runningIds.has(id)) return { id, activityState: 'offline' };
+    const displayName = cfg.displayName ?? id;
+    if (cfg.enabled === false) return { id, displayName, activityState: 'disabled' };
+    if (!runningIds.has(id)) return { id, displayName, activityState: 'offline' };
     const status = readJsonFile(path.join(AGENTS_DIR, id, 'status.json'), null);
     return {
       id,
+      displayName,
       activityState: status?.state === 'busy' ? 'busy' : 'idle',
       lastResponseAt: status?.lastResponseAt ?? null,
     };

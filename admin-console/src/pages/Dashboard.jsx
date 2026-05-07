@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import { useApi } from '../hooks/useApi';
 import StatGrid from '../components/StatGrid';
 import DataTable from '../components/DataTable';
@@ -90,6 +91,89 @@ function SetupNudge() {
   );
 }
 
+const AGENT_NAME_COLS = {
+  busy:    { dotColor: 'var(--eb-status-warning)', label: 'Active' },
+  idle:    { dotColor: 'var(--eb-text-muted)',     label: 'Idle' },
+  offline: { dotColor: 'var(--eb-status-error)',   label: 'Offline' },
+};
+
+function AgentNameList({ statuses }) {
+  const busy = statuses
+    .filter(s => s.activityState === 'busy')
+    .sort((a, b) => (a.displayName ?? '').localeCompare(b.displayName ?? ''));
+
+  const idle = statuses
+    .filter(s => s.activityState === 'idle')
+    .sort((a, b) => (a.displayName ?? '').localeCompare(b.displayName ?? ''));
+
+  const offline = statuses
+    .filter(s => s.activityState === 'offline' || s.activityState === 'disabled')
+    .sort((a, b) => (a.displayName ?? '').localeCompare(b.displayName ?? ''));
+
+  const sections = [
+    { key: 'busy',    agents: busy },
+    { key: 'idle',    agents: idle },
+    { key: 'offline', agents: offline },
+  ];
+
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: 'repeat(3, 1fr)',
+      gap: 'var(--eb-space-4)',
+      marginTop: 'var(--eb-space-4)',
+    }}>
+      {sections.map(({ key, agents }) => {
+        const { dotColor, label } = AGENT_NAME_COLS[key];
+        return (
+          <div key={key} style={{
+            background: 'var(--eb-bg-surface)',
+            border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-lg)',
+            padding: 'var(--eb-space-4)',
+          }}>
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 'var(--eb-space-2)',
+              fontSize: 'var(--eb-text-sm)',
+              fontWeight: 'var(--eb-font-semibold)',
+              color: 'var(--eb-text-secondary)',
+              marginBottom: agents.length > 0 ? 'var(--eb-space-3)' : 0,
+            }}>
+              <span style={{ width: 8, height: 8, borderRadius: '50%', background: dotColor, flexShrink: 0 }} />
+              {label}
+            </div>
+            {agents.length === 0 ? (
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>—</div>
+            ) : (
+              <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+                {agents.map(agent => (
+                  <li key={agent.id}>
+                    {key === 'offline' ? (
+                      <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
+                        {agent.displayName}
+                      </span>
+                    ) : (
+                      <Link
+                        to={`/chats/${agent.id}`}
+                        style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-accent-primary)', textDecoration: 'none' }}
+                        onMouseEnter={e => { e.currentTarget.style.textDecoration = 'underline'; }}
+                        onMouseLeave={e => { e.currentTarget.style.textDecoration = 'none'; }}
+                      >
+                        {agent.displayName}
+                      </Link>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 export default function Dashboard() {
   const { data: dash, loading: dashLoading, error: dashError } = useApi('/api/dashboard');
@@ -167,6 +251,7 @@ export default function Dashboard() {
           Live Status
         </h2>
         <StatGrid stats={activityStats} />
+        <AgentNameList statuses={statuses} />
       </section>
 
       <section>

@@ -16,6 +16,13 @@
 /* ─── Admin Dark Theme (Default) ────────────────────────────────────── */
 :root,
 :root[data-theme="admin-dark"] {
+  /* Hint OS chrome (form-control popovers, scrollbars, native dropdown
+     panel of <select>) to render in dark colors. Without this, the
+     listbox that opens on click is forced to a white background by the
+     UA on macOS / Windows even though our <option> rules below recolor
+     the items. */
+  color-scheme: dark;
+
   /* Backgrounds */
   --eb-bg-app:            oklch(0.13 0.006 293);
   --eb-bg-surface:        oklch(0.17 0.008 293);
@@ -120,6 +127,8 @@
 
 /* ─── Admin Light Theme ─────────────────────────────────────────────── */
 :root[data-theme="admin-light"] {
+  color-scheme: light;
+
   --eb-bg-app:            oklch(0.985 0.003 293);
   --eb-bg-surface:        oklch(1.0 0 0);
   --eb-bg-elevated:       oklch(1.0 0 0);
@@ -148,6 +157,8 @@
 
 /* ─── High Contrast Theme ───────────────────────────────────────────── */
 :root[data-theme="high-contrast"] {
+  color-scheme: dark;
+
   --eb-bg-app:            oklch(0 0 0);
   --eb-bg-surface:        oklch(0.10 0 0);
   --eb-bg-elevated:       oklch(0.15 0 0);
@@ -213,6 +224,72 @@ code, pre, kbd {
   outline: 2px solid var(--eb-accent-primary);
   outline-offset: 2px;
   border-radius: var(--eb-radius-sm);
+}
+
+/* ─── Native <select> styling ────────────────────────────────────────────
+   The closed control is already styled per call-site via inline tokens.
+   These rules cover the bits that inline style cannot reach: the dropdown
+   panel that opens on click (rendered by the UA), the chevron, and a
+   subtle hover affordance on the trigger.
+
+   Browser support note: Chromium, Firefox and Safari all honour
+   `background-color` / `color` on <option>. Padding / hover state on
+   options is OS-controlled and intentionally left to the UA.
+─────────────────────────────────────────────────────────────────────── */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  /* `!important` is needed because most call-sites set a `background:`
+     shorthand inline, which would otherwise reset `background-image` to
+     `none` and erase the chevron. The inline rule still wins for the
+     longhand `background-color`, so trigger colors stay per call-site. */
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--eb-text-secondary) 50%),
+    linear-gradient(-45deg, transparent 50%, var(--eb-text-secondary) 50%) !important;
+  background-position:
+    calc(100% - 14px) center,
+    calc(100% - 9px) center !important;
+  background-size: 5px 5px, 5px 5px !important;
+  background-repeat: no-repeat !important;
+  padding-right: var(--eb-space-6) !important;
+  cursor: pointer;
+  transition: border-color var(--eb-transition-fast);
+}
+
+select:hover:not(:disabled) {
+  border-color: var(--eb-border-hover) !important;
+}
+
+select:focus-visible {
+  border-color: var(--eb-accent-primary) !important;
+  outline-offset: 0;
+}
+
+select:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* The dropdown panel itself. Browsers vary in how much they honour these
+   declarations, but background+color on <option> is widely supported and
+   is what makes the listbox stop looking like a white rectangle on the
+   dark theme. */
+select option,
+select optgroup {
+  background-color: var(--eb-bg-elevated);
+  color: var(--eb-text-primary);
+  padding: var(--eb-space-1) var(--eb-space-2);
+}
+
+select option:checked,
+select option[selected] {
+  background-color: var(--eb-bg-selected);
+  color: var(--eb-text-primary);
+  font-weight: var(--eb-font-medium);
+}
+
+select option:disabled {
+  color: var(--eb-text-muted);
 }
 
 /* ─── Selection ─────────────────────────────────────────────────────── */

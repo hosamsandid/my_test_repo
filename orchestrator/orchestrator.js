@@ -24,6 +24,43 @@ const ENVIRONMENTS_DIR = "/workspace/environments";
 const SSH_KEYS_DIR = path.join(ENVIRONMENTS_DIR, "_keys");
 const SSH_KEYS_INDEX = path.join(SSH_KEYS_DIR, "index.json");
 const GH_TOKENS_DIR = path.join(ENVIRONMENTS_DIR, "_tokens");
+const LLM_ENDPOINTS_INDEX = "/workspace/llm-endpoints/index.json";
+const LLM_KEYS_DIR = "/workspace/llm-endpoints/_keys";
+
+// Resolve the LLM binding for an environment:
+//  - reads /workspace/llm-endpoints/index.json
+//  - looks up env.llmEndpointId
+//  - reads the auth token from _keys/<authTokenId>
+// Returns { baseUrl, token, defaultModelId } or null if the env has no
+// binding or the endpoint is missing — in that case the caller falls back to
+// the global ANTHROPIC_* env vars from `.env`.
+function loadLlmBindingForEnv(env) {
+  if (!env?.llmEndpointId) return null;
+  let list;
+  try {
+    list = JSON.parse(fs.readFileSync(LLM_ENDPOINTS_INDEX, "utf8"));
+  } catch {
+    return null;
+  }
+  const ep = Array.isArray(list) ? list.find(e => e.id === env.llmEndpointId) : null;
+  if (!ep) {
+    console.error(`[Orchestrator] LLM endpoint '${env.llmEndpointId}' (env=${env.id}) not found — falling back to .env`);
+    return null;
+  }
+  let token = "";
+  if (ep.authTokenId) {
+    try {
+      token = fs.readFileSync(path.join(LLM_KEYS_DIR, ep.authTokenId), "utf8").trim();
+    } catch (err) {
+      console.error(`[Orchestrator] Cannot read LLM token for endpoint ${ep.id}: ${err.message}`);
+    }
+  }
+  return {
+    baseUrl: ep.baseUrl || "",
+    token,
+    defaultModelId: env.defaultModelId || null,
+  };
+}
 
 const { spawn, execFile, execFileSync } = require("child_process");
 const crypto = require("crypto");
@@ -47,10 +84,29 @@ function startAgentProcess(config) {
     MATRIX_BOT_USER_ID: userId,
   };
 
+  // Bind the agent's process to the LLM endpoint configured on its working
+  // environment. When an environment doesn't reference an endpoint we leave
+  // the inherited ANTHROPIC_* values from `.env` in place — that keeps
+  // pre-registry environments and the bp-explorer integration working.
+  const env = environmentId ? loadEnvironment(environmentId) : null;
+  const llm = loadLlmBindingForEnv(env);
+  if (llm) {
+    if (llm.baseUrl) childEnv.ANTHROPIC_BASE_URL = llm.baseUrl;
+    if (llm.token)   childEnv.ANTHROPIC_AUTH_TOKEN = llm.token;
+    if (llm.defaultModelId) childEnv.AGENT_DEFAULT_MODEL = llm.defaultModelId;
+    console.log(`[Orchestrator] Agent ${id} → LLM endpoint=${env.llmEndpointId}, model=${llm.defaultModelId || '(endpoint default)'}`);
+  } else if (env?.llmEndpointId) {
+    console.log(`[Orchestrator] Agent ${id} → LLM endpoint binding missing for env=${env.id}, using .env fallback`);
+  }
+
+  // Per-agent override (set via the chat UI) wins over the environment's
+  // default model. Fresh-read on each spawn so an admin can edit config.json
+  // and restart to apply.
+  if (config.modelOverride) childEnv.AGENT_DEFAULT_MODEL = config.modelOverride;
+
   // If the agent's environment has a GitHub token attached, expose it as
   // GH_TOKEN so the `gh` CLI authenticates without `gh auth login`.
   // (Also exported as GITHUB_TOKEN for git-over-HTTPS pushes.)
-  const env = environmentId ? loadEnvironment(environmentId) : null;
   if (env?.githubTokenId) {
     const tokenPath = path.join(GH_TOKENS_DIR, env.githubTokenId);
     try {

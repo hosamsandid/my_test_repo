@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Wifi, WifiOff, Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Square } from 'lucide-react';
+import { Wifi, WifiOff, Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Square, Cpu } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
 import Message from './Message';
@@ -67,6 +67,13 @@ export default function ChatPanel({
   const [resetting, setResetting]     = useState(false);
   const [stopping, setStopping]       = useState(false);
   const [learnPending, setLearnPending] = useState(false);
+
+  // Per-agent model selection. `modelOptions` is the resolved snapshot from
+  // /api/agents/:id/model-options: which endpoint the agent is bound to,
+  // what catalog it offers, the env-level default, and the per-agent
+  // override. `modelSwitching` blocks rapid double-clicks during the PATCH.
+  const [modelOptions, setModelOptions] = useState(null);
+  const [modelSwitching, setModelSwitching] = useState(false);
   // Wall-clock at the moment the user clicked "Full Learn". The
   // post-message effect uses it to decide which agent reply to treat as
   // "the response to the learn prompt" — namely, the next agent message
@@ -384,6 +391,36 @@ export default function ChatPanel({
     }
   }
 
+  /* ─── Model picker ───────────────────────────────────────────────── */
+  // Fetch the resolved model options whenever the agent changes. Re-runs
+  // also after the user picks a different model (handler below) so the UI
+  // stays in sync with the persisted config.
+  useEffect(() => {
+    if (!agent?.id) { setModelOptions(null); return; }
+    let cancelled = false;
+    apiCall('GET', `/api/agents/${encodeURIComponent(agent.id)}/model-options`)
+      .then(data => { if (!cancelled) setModelOptions(data); })
+      .catch(() => { if (!cancelled) setModelOptions(null); });
+    return () => { cancelled = true; };
+  }, [agent?.id]);
+
+  async function handleModelChange(newId) {
+    if (!agent?.id || modelSwitching) return;
+    setModelSwitching(true);
+    setError(null);
+    try {
+      // Empty string from the <select> means "back to env default" — send
+      // null so the API clears the override.
+      const payload = { modelId: newId ? newId : null };
+      const resp = await apiCall('PATCH', `/api/agents/${encodeURIComponent(agent.id)}/model`, payload);
+      setModelOptions(prev => prev ? { ...prev, override: resp.override } : prev);
+    } catch (err) {
+      setError(`Model switch failed: ${err.message}`);
+    } finally {
+      setModelSwitching(false);
+    }
+  }
+
   async function handleStopSession() {
     if (!roomId || !agent?.id || stopping) return;
     setStopping(true);
@@ -582,6 +619,12 @@ export default function ChatPanel({
             Stop
           </button>
         )}
+        <ModelPicker
+          options={modelOptions}
+          switching={modelSwitching}
+          disabled={disabled}
+          onChange={handleModelChange}
+        />
         <div style={{ flex: 1 }} />
         {sessionCost !== null && sessionCost.usd > 0 && (
           <span
@@ -870,6 +913,96 @@ function SessionBadge({ active }) {
       }} />
       {active ? 'Session active' : 'New session'}
     </span>
+  );
+}
+
+function ModelPicker({ options, switching, disabled, onChange }) {
+  // Render a stable empty placeholder while the options are loading so the
+  // toolbar layout doesn't jump.
+  if (!options) return null;
+
+  const hasEndpoint = !!options.endpointId;
+  const hasModels   = (options.models || []).length > 0;
+  const effective   = options.override || options.defaultModelId || '';
+  const overridden  = !!options.override;
+  const interactionDisabled = disabled || switching || !hasEndpoint || !hasModels;
+
+  // Build a tooltip that explains the binding in one line — useful when the
+  // dropdown shows "(no endpoint)" or "(no models)" so the user knows where
+  // to fix it.
+  const tooltip = !hasEndpoint
+    ? 'No LLM endpoint bound to this environment — set one in Working Environments.'
+    : !hasModels
+      ? `Endpoint "${options.endpointName}" has no models in its catalog.`
+      : overridden
+        ? `Override active. Environment default: ${options.defaultModelId || '(none)'}.`
+        : `Environment default. Endpoint: ${options.endpointName}.`;
+
+  return (
+    <div
+      title={tooltip}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4,
+        fontSize: 'var(--eb-text-xs)',
+        color: overridden ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)',
+      }}
+    >
+      <Cpu size={11} />
+      <select
+        value={effective}
+        disabled={interactionDisabled}
+        onChange={(e) => onChange(e.target.value)}
+        style={{
+          padding: '2px 6px',
+          fontSize: 'var(--eb-text-xs)',
+          fontFamily: 'inherit',
+          color: 'inherit',
+          background: 'transparent',
+          border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-sm)',
+          cursor: interactionDisabled ? 'not-allowed' : 'pointer',
+          opacity: interactionDisabled ? 0.6 : 1,
+          maxWidth: 220,
+        }}
+      >
+        {!hasEndpoint && <option value="">(no endpoint)</option>}
+        {hasEndpoint && !hasModels && <option value="">(no models)</option>}
+        {hasModels && (
+          <option value="">
+            {options.defaultModelId
+              ? `Default: ${options.defaultModelId}`
+              : '— pick a model —'}
+          </option>
+        )}
+        {options.models?.map(m => (
+          <option key={m.id} value={m.id}>
+            {(m.displayName || m.id) + (m.kind ? ` · ${m.kind}` : '')}
+          </option>
+        ))}
+      </select>
+      {overridden && (
+        <button
+          type="button"
+          onClick={() => onChange('')}
+          disabled={switching || disabled}
+          title="Clear override and fall back to the environment default"
+          style={{
+            background: 'transparent',
+            border: 'none',
+            padding: 0,
+            color: 'var(--eb-accent-primary)',
+            cursor: switching || disabled ? 'not-allowed' : 'pointer',
+            fontSize: 'var(--eb-text-xs)',
+            textDecoration: 'underline',
+          }}
+        >
+          reset
+        </button>
+      )}
+      {switching && <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />}
+    </div>
   );
 }
 

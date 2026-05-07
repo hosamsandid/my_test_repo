@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Edit, Trash2, Plus, GitBranch, Key, Github, X, Check, AlertTriangle, Loader2 } from 'lucide-react';
+import { Edit, Trash2, Plus, GitBranch, Key, Github, X, Check, AlertTriangle, Loader2, Cpu } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
@@ -275,17 +275,38 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
     additionalContext: initial?.additionalContext || '',
     repositories: initialRepositories(initial),
     githubTokenId: initial?.githubTokenId || '',
+    llmEndpointId: initial?.llmEndpointId || '',
+    defaultModelId: initial?.defaultModelId || '',
   }));
 
   const { data: skillsData } = useApi('/api/skills');
   const { data: keysData } = useApi('/api/ssh-keys');
   const { data: tokensData } = useApi('/api/github-tokens');
+  const { data: endpointsData } = useApi('/api/llm-endpoints');
 
   const poolSkills = (skillsData || []).filter(s => s.source === 'pool').map(s => s.name);
   const sshKeys = keysData || [];
   const ghTokens = tokensData || [];
+  const llmEndpoints = endpointsData || [];
+  const selectedEndpoint = llmEndpoints.find(e => e.id === form.llmEndpointId) || null;
+  const endpointModels = selectedEndpoint?.models || [];
 
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
+
+  // When the endpoint changes, drop a default model that isn't part of the new
+  // catalog so the form never carries a stale, server-rejecting value.
+  const updateEndpoint = (newId) => {
+    setForm(f => {
+      if (newId === f.llmEndpointId) return f;
+      const ep = llmEndpoints.find(e => e.id === newId);
+      const stillValid = ep && (ep.models || []).some(m => m.id === f.defaultModelId);
+      return {
+        ...f,
+        llmEndpointId: newId,
+        defaultModelId: stillValid ? f.defaultModelId : '',
+      };
+    });
+  };
 
   const updateRepo = (idx, key, val) => {
     setForm(f => {
@@ -316,6 +337,8 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
           sshKeyId: r.sshKeyId || null,
         })),
       githubTokenId: form.githubTokenId || null,
+      llmEndpointId: form.llmEndpointId || null,
+      defaultModelId: form.defaultModelId || null,
     });
   };
 
@@ -467,6 +490,61 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
             <option key={t.id} value={t.id}>{t.name} ({t.preview})</option>
           ))}
         </select>
+      </div>
+
+      <div style={{
+        border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-md)',
+        padding: 'var(--eb-space-3)',
+        display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+          <Cpu size={14} />
+          <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
+            LLM endpoint
+          </span>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+          <div style={labelStyle}>Endpoint</div>
+          <select
+            value={form.llmEndpointId}
+            onChange={e => updateEndpoint(e.target.value)}
+            style={inputStyle}
+          >
+            <option value="">— inherit from .env —</option>
+            {llmEndpoints.map(ep => (
+              <option key={ep.id} value={ep.id}>
+                {ep.name} ({ep.baseUrl})
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+          <div style={labelStyle}>Default model</div>
+          <select
+            value={form.defaultModelId}
+            onChange={e => update('defaultModelId', e.target.value)}
+            disabled={!form.llmEndpointId}
+            style={{ ...inputStyle, opacity: form.llmEndpointId ? 1 : 0.5 }}
+          >
+            <option value="">
+              {form.llmEndpointId
+                ? endpointModels.length ? '— pick a model —' : '— no models in catalog —'
+                : '— select an endpoint first —'}
+            </option>
+            {endpointModels.map(m => (
+              <option key={m.id} value={m.id}>
+                {m.displayName || m.id}{m.kind ? ` · ${m.kind}` : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+          Agents in this environment use this endpoint and start on the chosen default model. Without a selection they fall back to <code>ANTHROPIC_BASE_URL</code> from <code>.env</code>. Manage endpoints on the Model Registry page.
+        </div>
       </div>
 
       <div>

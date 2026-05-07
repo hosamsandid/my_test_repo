@@ -211,6 +211,18 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT,
       "Memory entries may reference absolute paths like /workspace/... from a different context. " +
       "Translate these to relative paths in your current directory (e.g. /workspace/314092_foo/ becomes ./314092_foo/).";
 
+  // Per-message model selection. Re-read config.json on every invocation so a
+  // change made via the chat UI (writes `modelOverride`) is picked up without
+  // restarting the runner. Falls back to AGENT_DEFAULT_MODEL (set by the
+  // orchestrator from the environment's defaultModelId), which itself falls
+  // back to whatever the Claude CLI picks from ANTHROPIC_DEFAULT_SONNET_MODEL.
+  let modelArg = null;
+  try {
+    const cfg = loadAgentConfig();
+    if (cfg?.modelOverride) modelArg = String(cfg.modelOverride);
+  } catch { /* keep null */ }
+  if (!modelArg && process.env.AGENT_DEFAULT_MODEL) modelArg = process.env.AGENT_DEFAULT_MODEL;
+
   const baseArgs = [
     "-p", prompt,
     "--output-format", "stream-json",
@@ -221,6 +233,7 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT,
     // without prompts for the tools agents actually use.
     "--permission-mode", "acceptEdits",
     "--append-system-prompt", memoryHint,
+    ...(modelArg ? ["--model", modelArg] : []),
     "--allowedTools", "Bash(*)",
     "--allowedTools", "Read(*)",
     "--allowedTools", "Write(*)",

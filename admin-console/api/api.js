@@ -16,6 +16,9 @@ const SSH_KEYS_DIR = path.join(ENVIRONMENTS_DIR, '_keys');
 const SSH_KEYS_INDEX = path.join(SSH_KEYS_DIR, 'index.json');
 const GH_TOKENS_DIR = path.join(ENVIRONMENTS_DIR, '_tokens');
 const GH_TOKENS_INDEX = path.join(GH_TOKENS_DIR, 'index.json');
+const LLM_ENDPOINTS_DIR = path.join(WORKSPACE, 'llm-endpoints');
+const LLM_ENDPOINTS_INDEX = path.join(LLM_ENDPOINTS_DIR, 'index.json');
+const LLM_KEYS_DIR = path.join(LLM_ENDPOINTS_DIR, '_keys');
 const STATIC_DIR = path.join(__dirname, '..', 'dist');
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 const BP_EXPLORER_URL = process.env.BP_EXPLORER_URL || 'http://bp-explorer:8765';
@@ -23,6 +26,8 @@ const BP_EXPLORER_URL = process.env.BP_EXPLORER_URL || 'http://bp-explorer:8765'
 fs.mkdirSync(ENVIRONMENTS_DIR, { recursive: true });
 fs.mkdirSync(SSH_KEYS_DIR, { recursive: true });
 fs.mkdirSync(GH_TOKENS_DIR, { recursive: true });
+fs.mkdirSync(LLM_ENDPOINTS_DIR, { recursive: true });
+fs.mkdirSync(LLM_KEYS_DIR, { recursive: true });
 
 const app = express();
 app.use(cors());
@@ -166,6 +171,141 @@ function githubTokenInUse(tokenId) {
     if (env?.githubTokenId === tokenId) return envId;
   }
   return null;
+}
+
+/* ─── LLM Endpoints (helpers) ───────────────────────────────────────── */
+
+function listLlmEndpoints() {
+  return readJsonFile(LLM_ENDPOINTS_INDEX, []);
+}
+
+function saveLlmEndpointsIndex(list) {
+  writeJsonAtomic(LLM_ENDPOINTS_INDEX, list);
+}
+
+function llmTokenFingerprint(token) {
+  return 'SHA256:' + crypto.createHash('sha256').update(token).digest('base64').replace(/=+$/, '').slice(0, 16);
+}
+
+function llmTokenPreview(token) {
+  if (!token) return '';
+  const tail = token.slice(-4);
+  return `…${tail}`;
+}
+
+function readLlmEndpointToken(authTokenId) {
+  if (!authTokenId) return '';
+  try {
+    return fs.readFileSync(path.join(LLM_KEYS_DIR, authTokenId), 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
+function writeLlmEndpointToken(authTokenId, token) {
+  const p = path.join(LLM_KEYS_DIR, authTokenId);
+  fs.writeFileSync(p, token, { mode: 0o600 });
+  try { fs.chmodSync(p, 0o600); } catch { /* best effort */ }
+}
+
+function deleteLlmEndpointToken(authTokenId) {
+  if (!authTokenId) return;
+  try { fs.unlinkSync(path.join(LLM_KEYS_DIR, authTokenId)); } catch { /* ignore */ }
+}
+
+function llmEndpointInUse(endpointId) {
+  for (const envId of listEnvironmentIds()) {
+    const env = loadEnvironment(envId);
+    if (env?.llmEndpointId === endpointId) return envId;
+  }
+  return null;
+}
+
+function maskLlmEndpoint(ep) {
+  if (!ep) return ep;
+  const token = readLlmEndpointToken(ep.authTokenId);
+  const { authTokenId, ...rest } = ep;
+  return {
+    ...rest,
+    hasToken: Boolean(token),
+    tokenPreview: token ? llmTokenPreview(token) : '',
+    tokenFingerprint: token ? llmTokenFingerprint(token) : '',
+  };
+}
+
+// One-time auto-migration: if no endpoint is registered yet but the legacy
+// `.env` configures a base URL, seed a "Default (from .env)" endpoint so
+// existing setups keep working without manual UI steps.
+function ensureDefaultLlmEndpoint() {
+  const existing = listLlmEndpoints();
+  if (existing.length > 0) return;
+  const baseUrl = process.env.ANTHROPIC_BASE_URL || '';
+  if (!baseUrl) return;
+  const token = process.env.ANTHROPIC_AUTH_TOKEN || '';
+  const sonnet = process.env.ANTHROPIC_DEFAULT_SONNET_MODEL || 'claude-sonnet-4-6';
+  const haiku  = process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL  || 'claude-haiku-4-5';
+  const id = 'default';
+  const authTokenId = token ? `${id}-${Date.now().toString(36)}` : '';
+  if (token) writeLlmEndpointToken(authTokenId, token);
+  const entry = {
+    id,
+    name: 'Default (from .env)',
+    baseUrl,
+    authTokenId,
+    models: [
+      { id: sonnet, displayName: sonnet, kind: 'sonnet' },
+      { id: haiku,  displayName: haiku,  kind: 'haiku'  },
+    ],
+    createdAt: new Date().toISOString(),
+    migratedFromEnv: true,
+  };
+  saveLlmEndpointsIndex([entry]);
+  console.log(`[api] Seeded default LLM endpoint from .env (baseUrl=${baseUrl})`);
+}
+
+ensureDefaultLlmEndpoint();
+
+// Plain HTTP/HTTPS GET for proxy probing (test-connection / discover-models).
+// Returns { status, body, error }. Never throws.
+function httpGetJson(targetUrl, headers = {}, timeoutMs = 8000) {
+  return new Promise((resolve) => {
+    let parsed;
+    try {
+      parsed = new URL(targetUrl);
+    } catch (err) {
+      return resolve({ status: 0, body: null, error: `Invalid URL: ${err.message}` });
+    }
+    const lib = parsed.protocol === 'https:' ? require('https') : require('http');
+    const req = lib.request({
+      method: 'GET',
+      hostname: parsed.hostname,
+      port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+      path: parsed.pathname + parsed.search,
+      headers: { Accept: 'application/json', ...headers },
+      timeout: timeoutMs,
+    }, (res) => {
+      let data = '';
+      res.on('data', (c) => data += c);
+      res.on('end', () => {
+        let body = data;
+        try { body = data ? JSON.parse(data) : null; } catch { /* keep as string */ }
+        resolve({ status: res.statusCode, body, error: null });
+      });
+    });
+    req.on('error', (err) => resolve({ status: 0, body: null, error: err.message }));
+    req.on('timeout', () => { req.destroy(); resolve({ status: 0, body: null, error: 'timeout' }); });
+    req.end();
+  });
+}
+
+// Build the URL the LiteLLM proxy exposes its model catalog at. Accepts both
+// `https://host` and `https://host/v1` styles by appending `/v1/models` when
+// the base URL doesn't already end in /v1 or /models.
+function buildModelsUrl(baseUrl) {
+  const trimmed = baseUrl.replace(/\/+$/, '');
+  if (/\/(v1\/)?models$/.test(trimmed)) return trimmed;
+  if (/\/v\d+$/.test(trimmed)) return `${trimmed}/models`;
+  return `${trimmed}/v1/models`;
 }
 
 /* ─── Health ────────────────────────────────────────────────────────── */
@@ -437,6 +577,68 @@ app.put('/api/agents/:id/prompt', (req, res) => {
   res.json({ ok: true });
 });
 
+/* ─── Agent Model Selection ─────────────────────────────────────────── */
+
+// Resolve everything the chat UI needs to render the model picker for an
+// agent: the endpoint+catalog reachable through its working environment, the
+// environment-level default, and the agent-level override (if any).
+app.get('/api/agents/:id/model-options', (req, res) => {
+  const { id } = req.params;
+  const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
+  const cfg = readJsonFile(cfgPath, null);
+  if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+  const endpoint = env?.llmEndpointId
+    ? listLlmEndpoints().find(e => e.id === env.llmEndpointId)
+    : null;
+  res.json({
+    endpointId:    endpoint?.id || null,
+    endpointName:  endpoint?.name || null,
+    defaultModelId: env?.defaultModelId || null,
+    override:      cfg.modelOverride || null,
+    models:        endpoint?.models || [],
+  });
+});
+
+app.patch('/api/agents/:id/model', (req, res) => {
+  const { id } = req.params;
+  const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
+  const cfg = readJsonFile(cfgPath, null);
+  if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  const { modelId } = req.body || {};
+
+  // null / "" / undefined → clear override (fall back to env default)
+  if (modelId === null || modelId === undefined || modelId === '') {
+    if ('modelOverride' in cfg) {
+      delete cfg.modelOverride;
+      writeJsonAtomic(cfgPath, cfg);
+    }
+    return res.json({ override: null });
+  }
+
+  if (typeof modelId !== 'string') {
+    return res.status(400).json({ error: 'modelId must be a string or null' });
+  }
+
+  // Validate against the environment's endpoint catalog so an agent can't be
+  // pinned to a model the proxy doesn't actually serve.
+  const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+  if (!env?.llmEndpointId) {
+    return res.status(400).json({ error: 'Environment has no LLM endpoint bound — set one before overriding the model' });
+  }
+  const endpoint = listLlmEndpoints().find(e => e.id === env.llmEndpointId);
+  if (!endpoint) {
+    return res.status(400).json({ error: `LLM endpoint '${env.llmEndpointId}' not found` });
+  }
+  if (!(endpoint.models || []).some(m => m.id === modelId)) {
+    return res.status(400).json({ error: `Model '${modelId}' is not in endpoint '${endpoint.id}' catalog` });
+  }
+
+  cfg.modelOverride = modelId;
+  writeJsonAtomic(cfgPath, cfg);
+  res.json({ override: modelId });
+});
+
 /* ─── Agent Triggers ────────────────────────────────────────────────── */
 
 app.get('/api/agents/:id/triggers', (req, res) => {
@@ -582,43 +784,198 @@ app.get('/api/llm-config', (req, res) => {
   });
 });
 
-/* ─── Models ────────────────────────────────────────────────────────── */
+/* ─── LLM Endpoints ─────────────────────────────────────────────────── */
 
-const MODELS_FILE = path.join(WORKSPACE, 'models.json');
+function slugifyId(name) {
+  return String(name || '').toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+}
 
-app.get('/api/models', (req, res) => {
-  const models = readJsonFile(MODELS_FILE, null);
-  if (models) return res.json(models);
-  // Seed from env
-  res.json([{
-    id: 'default',
-    name: process.env.ANTHROPIC_DEFAULT_SONNET_MODEL || 'claude-sonnet-4-6',
-    baseUrl: process.env.ANTHROPIC_BASE_URL || '',
-  }]);
+function validateModels(models) {
+  if (!Array.isArray(models)) return 'models must be an array';
+  for (const m of models) {
+    if (!m || typeof m.id !== 'string' || !m.id.trim()) return 'every model needs a non-empty id';
+  }
+  return null;
+}
+
+app.get('/api/llm-endpoints', (req, res) => {
+  res.json(listLlmEndpoints().map(maskLlmEndpoint));
 });
 
-app.post('/api/models', (req, res) => {
-  const models = readJsonFile(MODELS_FILE, []);
-  const newModel = { id: `m${Date.now()}`, ...req.body };
-  models.push(newModel);
-  writeJsonAtomic(MODELS_FILE, models);
-  res.status(201).json(newModel);
+app.get('/api/llm-endpoints/:id', (req, res) => {
+  const ep = listLlmEndpoints().find(e => e.id === req.params.id);
+  if (!ep) return res.status(404).json({ error: 'LLM endpoint not found' });
+  res.json(maskLlmEndpoint(ep));
 });
 
-app.put('/api/models/:id', (req, res) => {
-  const models = readJsonFile(MODELS_FILE, []);
-  const idx = models.findIndex(m => m.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Model not found' });
-  models[idx] = { ...models[idx], ...req.body, id: req.params.id };
-  writeJsonAtomic(MODELS_FILE, models);
-  res.json(models[idx]);
+app.post('/api/llm-endpoints', (req, res) => {
+  const { name, baseUrl, authToken, models } = req.body || {};
+  if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
+  if (!baseUrl || typeof baseUrl !== 'string') return res.status(400).json({ error: 'baseUrl is required' });
+  try { new URL(baseUrl); } catch { return res.status(400).json({ error: 'baseUrl must be a valid URL' }); }
+  const modelList = Array.isArray(models) ? models : [];
+  const modelErr = validateModels(modelList);
+  if (modelErr) return res.status(400).json({ error: modelErr });
+
+  const existing = listLlmEndpoints();
+  let id = slugifyId(name) || `ep-${Date.now()}`;
+  if (existing.some(e => e.id === id)) id = `${id}-${Date.now().toString(36)}`;
+
+  let authTokenId = '';
+  if (authToken && typeof authToken === 'string' && authToken.trim()) {
+    authTokenId = `${id}-${Date.now().toString(36)}`;
+    writeLlmEndpointToken(authTokenId, authToken.trim());
+  }
+
+  const entry = {
+    id,
+    name,
+    baseUrl,
+    authTokenId,
+    models: modelList.map(m => ({
+      id: m.id,
+      displayName: m.displayName || m.id,
+      ...(m.kind ? { kind: m.kind } : {}),
+      ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}),
+      ...(m.notes ? { notes: m.notes } : {}),
+    })),
+    createdAt: new Date().toISOString(),
+  };
+  saveLlmEndpointsIndex([...existing, entry]);
+  res.status(201).json(maskLlmEndpoint(entry));
 });
 
-app.delete('/api/models/:id', (req, res) => {
-  const models = readJsonFile(MODELS_FILE, []);
-  const filtered = models.filter(m => m.id !== req.params.id);
-  writeJsonAtomic(MODELS_FILE, filtered);
+app.put('/api/llm-endpoints/:id', (req, res) => {
+  const list = listLlmEndpoints();
+  const idx = list.findIndex(e => e.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'LLM endpoint not found' });
+  const current = list[idx];
+  const { name, baseUrl, authToken, models } = req.body || {};
+
+  if (baseUrl !== undefined) {
+    if (typeof baseUrl !== 'string' || !baseUrl) return res.status(400).json({ error: 'baseUrl must be a non-empty string' });
+    try { new URL(baseUrl); } catch { return res.status(400).json({ error: 'baseUrl must be a valid URL' }); }
+  }
+  if (models !== undefined) {
+    const modelErr = validateModels(models);
+    if (modelErr) return res.status(400).json({ error: modelErr });
+  }
+
+  const next = { ...current };
+  if (name !== undefined)    next.name    = String(name);
+  if (baseUrl !== undefined) next.baseUrl = baseUrl;
+  if (models !== undefined)  next.models  = models.map(m => ({
+    id: m.id,
+    displayName: m.displayName || m.id,
+    ...(m.kind ? { kind: m.kind } : {}),
+    ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}),
+    ...(m.notes ? { notes: m.notes } : {}),
+  }));
+
+  // Token rotation: if `authToken` is a non-empty string, replace; if it's an
+  // empty string, clear; if undefined, leave the existing token alone.
+  if (authToken !== undefined) {
+    if (typeof authToken === 'string' && authToken.trim()) {
+      const newId = current.authTokenId || `${current.id}-${Date.now().toString(36)}`;
+      writeLlmEndpointToken(newId, authToken.trim());
+      if (newId !== current.authTokenId && current.authTokenId) {
+        deleteLlmEndpointToken(current.authTokenId);
+      }
+      next.authTokenId = newId;
+    } else {
+      if (current.authTokenId) deleteLlmEndpointToken(current.authTokenId);
+      next.authTokenId = '';
+    }
+  }
+
+  next.updatedAt = new Date().toISOString();
+  list[idx] = next;
+  saveLlmEndpointsIndex(list);
+  res.json(maskLlmEndpoint(next));
+});
+
+app.put('/api/llm-endpoints/:id/models', (req, res) => {
+  const list = listLlmEndpoints();
+  const idx = list.findIndex(e => e.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'LLM endpoint not found' });
+  const models = req.body && Array.isArray(req.body.models) ? req.body.models : req.body;
+  const modelErr = validateModels(models);
+  if (modelErr) return res.status(400).json({ error: modelErr });
+  list[idx] = {
+    ...list[idx],
+    models: models.map(m => ({
+      id: m.id,
+      displayName: m.displayName || m.id,
+      ...(m.kind ? { kind: m.kind } : {}),
+      ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}),
+      ...(m.notes ? { notes: m.notes } : {}),
+    })),
+    updatedAt: new Date().toISOString(),
+  };
+  saveLlmEndpointsIndex(list);
+  res.json(maskLlmEndpoint(list[idx]));
+});
+
+app.delete('/api/llm-endpoints/:id', (req, res) => {
+  const list = listLlmEndpoints();
+  const ep = list.find(e => e.id === req.params.id);
+  if (!ep) return res.status(404).json({ error: 'LLM endpoint not found' });
+  const usedBy = llmEndpointInUse(ep.id);
+  if (usedBy) {
+    return res.status(409).json({ error: `LLM endpoint is used by environment '${usedBy}'. Detach it first.` });
+  }
+  if (ep.authTokenId) deleteLlmEndpointToken(ep.authTokenId);
+  saveLlmEndpointsIndex(list.filter(e => e.id !== ep.id));
   res.status(204).end();
+});
+
+app.post('/api/llm-endpoints/:id/test', async (req, res) => {
+  const ep = listLlmEndpoints().find(e => e.id === req.params.id);
+  if (!ep) return res.status(404).json({ error: 'LLM endpoint not found' });
+  const token = readLlmEndpointToken(ep.authTokenId);
+  const url = buildModelsUrl(ep.baseUrl);
+  const headers = token ? { Authorization: `Bearer ${token}`, 'x-api-key': token } : {};
+  const result = await httpGetJson(url, headers);
+  const ok = result.status >= 200 && result.status < 300;
+  res.json({
+    ok,
+    url,
+    status: result.status,
+    error: result.error || (ok ? null : `HTTP ${result.status}`),
+    sample: ok && result.body && typeof result.body === 'object'
+      ? Array.isArray(result.body?.data) ? result.body.data.slice(0, 3) : result.body
+      : null,
+  });
+});
+
+app.post('/api/llm-endpoints/:id/discover-models', async (req, res) => {
+  const ep = listLlmEndpoints().find(e => e.id === req.params.id);
+  if (!ep) return res.status(404).json({ error: 'LLM endpoint not found' });
+  const token = readLlmEndpointToken(ep.authTokenId);
+  const url = buildModelsUrl(ep.baseUrl);
+  const headers = token ? { Authorization: `Bearer ${token}`, 'x-api-key': token } : {};
+  const result = await httpGetJson(url, headers);
+  if (result.error || result.status < 200 || result.status >= 300) {
+    return res.status(502).json({ error: result.error || `HTTP ${result.status}`, url, status: result.status });
+  }
+  // OpenAI-compatible shape: { data: [{ id, ... }] }; LiteLLM also exposes
+  // model_info on each entry. Normalize to our { id, displayName, kind?, … }.
+  const raw = Array.isArray(result.body?.data) ? result.body.data
+            : Array.isArray(result.body)       ? result.body
+            : [];
+  const suggested = raw
+    .map(m => {
+      const id = typeof m === 'string' ? m : m?.id;
+      if (!id) return null;
+      const lower = String(id).toLowerCase();
+      let kind;
+      if (lower.includes('opus'))   kind = 'opus';
+      else if (lower.includes('sonnet')) kind = 'sonnet';
+      else if (lower.includes('haiku'))  kind = 'haiku';
+      return { id, displayName: id, ...(kind ? { kind } : {}) };
+    })
+    .filter(Boolean);
+  res.json({ url, count: suggested.length, models: suggested });
 });
 
 /* ─── MCP Config ────────────────────────────────────────────────────── */
@@ -740,8 +1097,24 @@ app.get('/api/environments/:id', (req, res) => {
   res.json(env);
 });
 
+// Resolve and validate { llmEndpointId, defaultModelId } against the registry.
+// Returns { error } on failure, { llmEndpointId, defaultModelId } on success.
+function resolveLlmBinding(llmEndpointId, defaultModelId) {
+  if (!llmEndpointId) {
+    if (defaultModelId) return { error: 'defaultModelId requires llmEndpointId' };
+    return { llmEndpointId: null, defaultModelId: null };
+  }
+  const ep = listLlmEndpoints().find(e => e.id === llmEndpointId);
+  if (!ep) return { error: `LLM endpoint '${llmEndpointId}' not found` };
+  if (defaultModelId) {
+    const known = (ep.models || []).some(m => m.id === defaultModelId);
+    if (!known) return { error: `Model '${defaultModelId}' is not in endpoint '${ep.id}' catalog` };
+  }
+  return { llmEndpointId: ep.id, defaultModelId: defaultModelId || null };
+}
+
 app.post('/api/environments', (req, res) => {
-  const { name, description, skills, repositories, repository, additionalContext, githubTokenId } = req.body || {};
+  const { name, description, skills, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId } = req.body || {};
   const id = normalizeEnvId(req.body?.id);
   if (!id) return res.status(400).json({ error: 'id is required (a-z, 0-9, -)' });
   if (!name) return res.status(400).json({ error: 'name is required' });
@@ -762,6 +1135,9 @@ app.post('/api/environments', (req, res) => {
     }
   }
 
+  const llm = resolveLlmBinding(llmEndpointId, defaultModelId);
+  if (llm.error) return res.status(400).json({ error: llm.error });
+
   const env = {
     id,
     name,
@@ -769,6 +1145,8 @@ app.post('/api/environments', (req, res) => {
     skills: Array.isArray(skills) ? skills : [],
     repositories: normalizedRepos,
     githubTokenId: githubTokenId || null,
+    llmEndpointId: llm.llmEndpointId,
+    defaultModelId: llm.defaultModelId,
     additionalContext: additionalContext || '',
     createdAt: new Date().toISOString(),
   };
@@ -779,13 +1157,23 @@ app.post('/api/environments', (req, res) => {
 app.put('/api/environments/:id', (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
-  const { name, description, skills, repositories, repository, additionalContext, githubTokenId } = req.body || {};
+  const { name, description, skills, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId } = req.body || {};
 
   if (githubTokenId) {
     const tokens = listGithubTokens();
     if (!tokens.some(t => t.id === githubTokenId)) {
       return res.status(400).json({ error: `GitHub token '${githubTokenId}' not found` });
     }
+  }
+
+  // Only re-validate the LLM binding if either field was explicitly sent.
+  if (llmEndpointId !== undefined || defaultModelId !== undefined) {
+    const nextEndpoint = llmEndpointId !== undefined ? llmEndpointId : env.llmEndpointId;
+    const nextModel    = defaultModelId !== undefined ? defaultModelId : env.defaultModelId;
+    const llm = resolveLlmBinding(nextEndpoint, nextModel);
+    if (llm.error) return res.status(400).json({ error: llm.error });
+    env.llmEndpointId  = llm.llmEndpointId;
+    env.defaultModelId = llm.defaultModelId;
   }
 
   if (name !== undefined) env.name = name;

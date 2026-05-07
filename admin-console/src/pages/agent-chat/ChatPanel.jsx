@@ -578,26 +578,33 @@ export default function ChatPanel({
         flexShrink: 0,
       }}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{
-            fontSize: 'var(--eb-text-md)',
-            fontWeight: 'var(--eb-font-semibold)',
-            color: 'var(--eb-text-primary)',
-            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-          }}>
-            {agent.displayName || agent.id}
-          </div>
-          {agent.environmentName && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden' }}>
             <div style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 4,
-              fontSize: 'var(--eb-text-xs)',
-              color: 'var(--eb-text-muted)',
+              fontSize: 'var(--eb-text-md)',
+              fontWeight: 'var(--eb-font-semibold)',
+              color: 'var(--eb-text-primary)',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              minWidth: 0,
             }}>
-              <Server size={11} />
-              {agent.environmentName}
+              {agent.displayName || agent.id}
             </div>
-          )}
+            {agent.environmentName && (
+              <div style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 4,
+                fontSize: 'var(--eb-text-xs)',
+                color: 'var(--eb-text-muted)',
+                minWidth: 0,
+                overflow: 'hidden',
+              }}>
+                <Server size={11} style={{ flexShrink: 0 }} />
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {agent.environmentName}
+                </span>
+              </div>
+            )}
+          </div>
           {gitInfo && gitInfo.length > 0 && (
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 1 }}>
               {gitInfo.map(repo => (

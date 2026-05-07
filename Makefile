@@ -28,7 +28,7 @@ ifeq ($(COMPOSE_PROJECT_NAME),)
 SKILL_POOL_VOLUME      = vgh-claw_claude-workspace
 endif
 
-.PHONY: up down restart build update ps logs help seed-pool seed-skills
+.PHONY: up down restart build update ps logs help seed-pool seed-skills seed-memory
 
 up:
 	@echo "Starting e-vgh-claw stack..."
@@ -64,7 +64,7 @@ logs:
 	podman logs -f --tail=100 conduwuit &
 	wait
 
-seed-pool: seed-skills
+seed-pool: seed-skills seed-memory
 	@echo "Seeding pool CLAUDE.md from $(SKILL_POOL_DEFAULTS)/CLAUDE.md..."
 	@if [ ! -f "$(SKILL_POOL_DEFAULTS)/CLAUDE.md" ]; then \
 	  echo "ERROR: $(SKILL_POOL_DEFAULTS)/CLAUDE.md not found in repo" >&2; \
@@ -74,6 +74,19 @@ seed-pool: seed-skills
 	  -v $(SKILL_POOL_VOLUME):/pool \
 	  alpine sh -c 'cat > /pool/CLAUDE.md' < $(SKILL_POOL_DEFAULTS)/CLAUDE.md
 	@echo "Done."
+
+seed-memory:
+	@if [ ! -d "$(SKILL_POOL_DEFAULTS)/memory" ]; then \
+	  echo "ERROR: $(SKILL_POOL_DEFAULTS)/memory not found in repo" >&2; \
+	  exit 1; \
+	fi
+	@echo "Seeding memory templates into volume $(SKILL_POOL_VOLUME)..."
+	podman run --rm \
+	  -v $(SKILL_POOL_VOLUME):/pool \
+	  -v $(SKILL_POOL_DEFAULTS)/memory:/src:ro \
+	  alpine sh -c 'rm -rf /pool/memory && mkdir -p /pool/memory && cp -r /src/. /pool/memory/'
+	@echo "Done. Pool memory contents:"
+	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/memory/
 
 seed-skills:
 	@if [ ! -d "$(ACE_PLUGIN_SKILLS_DIR)/engineering" ]; then \
@@ -90,4 +103,4 @@ seed-skills:
 	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/skills/
 
 help:
-	@echo "Targets: up, down, restart, build, update, ps, logs, seed-pool, seed-skills"
+	@echo "Targets: up, down, restart, build, update, ps, logs, seed-pool, seed-skills, seed-memory"

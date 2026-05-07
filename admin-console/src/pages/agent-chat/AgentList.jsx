@@ -1,5 +1,5 @@
-import React from 'react';
-import { MessageCircle, Bot, Clock, Server } from 'lucide-react';
+import React, { useState } from 'react';
+import { MessageCircle, Bot, Clock, Server, MailOpen } from 'lucide-react';
 
 /**
  * Vertical list of selectable agents in the left rail.
@@ -12,7 +12,7 @@ import { MessageCircle, Bot, Clock, Server } from 'lucide-react';
  * @param {(id:string)=>void} onSelect
  * @param {Record<string,string>} statuses  Map agentId → activityState
  */
-export default function AgentList({ agents, selectedAgentId, onSelect, statuses = {} }) {
+export default function AgentList({ agents, selectedAgentId, onSelect, onMarkAsUnread, statuses = {} }) {
   const sorted = [...agents].sort((a, b) =>
     (a.displayName || a.id).localeCompare(b.displayName || b.id)
   );
@@ -24,6 +24,7 @@ export default function AgentList({ agents, selectedAgentId, onSelect, statuses 
           agent={agent}
           selected={agent.id === selectedAgentId}
           onSelect={() => onSelect(agent.id)}
+          onMarkAsUnread={onMarkAsUnread ? () => onMarkAsUnread(agent.id) : null}
           activityState={statuses[agent.id] || 'idle'}
         />
       ))}
@@ -46,9 +47,14 @@ const STATUS_DOT = {
   problem: { color: 'var(--eb-status-error)',   label: 'Nicht verfügbar',      pulse: false },
 };
 
-function AgentRow({ agent, selected, onSelect, activityState = 'idle' }) {
+function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = 'idle' }) {
   const Icon = iconForRole(agent.role);
   const dot = STATUS_DOT[activityState] ?? STATUS_DOT.problem;
+  const [hovered, setHovered] = useState(false);
+
+  // The "mark as unread" button is shown on hover when the agent is not
+  // already unread and not in an error/offline state.
+  const canMarkUnread = onMarkAsUnread && activityState !== 'unread' && activityState !== 'problem';
 
   return (
     <button
@@ -61,7 +67,7 @@ function AgentRow({ agent, selected, onSelect, activityState = 'idle' }) {
         gap: 'var(--eb-space-3)',
         width: '100%',
         padding: 'var(--eb-space-2) var(--eb-space-3)',
-        background: selected ? 'var(--eb-bg-selected)' : 'transparent',
+        background: selected ? 'var(--eb-bg-selected)' : hovered ? 'var(--eb-bg-hover)' : 'transparent',
         borderLeft: selected ? '3px solid var(--eb-accent-primary)' : '3px solid transparent',
         borderTop: 'none',
         borderRight: 'none',
@@ -72,12 +78,8 @@ function AgentRow({ agent, selected, onSelect, activityState = 'idle' }) {
         textAlign: 'left',
         transition: 'background var(--eb-transition-fast)',
       }}
-      onMouseEnter={e => {
-        if (!selected) e.currentTarget.style.background = 'var(--eb-bg-hover)';
-      }}
-      onMouseLeave={e => {
-        if (!selected) e.currentTarget.style.background = 'transparent';
-      }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
     >
       <Icon size={18} style={{ flexShrink: 0, color: selected ? 'var(--eb-accent-primary)' : 'var(--eb-text-muted)' }} />
 
@@ -110,17 +112,41 @@ function AgentRow({ agent, selected, onSelect, activityState = 'idle' }) {
         )}
       </div>
 
-      <span
-        title={dot.label}
-        className={dot.pulse ? 'eb-status-pulse' : undefined}
-        style={{
-          width: 8,
-          height: 8,
-          borderRadius: '50%',
-          background: dot.color,
-          flexShrink: 0,
-        }}
-      />
+      <span style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4 }}>
+        {hovered && canMarkUnread && (
+          <span
+            role="button"
+            title="Als ungelesen markieren"
+            onClick={e => { e.stopPropagation(); onMarkAsUnread(); }}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: 18,
+              height: 18,
+              borderRadius: 'var(--eb-radius-sm)',
+              color: 'var(--eb-text-muted)',
+              cursor: 'pointer',
+              transition: 'color var(--eb-transition-fast)',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
+            onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
+          >
+            <MailOpen size={12} />
+          </span>
+        )}
+        <span
+          title={dot.label}
+          className={dot.pulse ? 'eb-status-pulse' : undefined}
+          style={{
+            width: 8,
+            height: 8,
+            borderRadius: '50%',
+            background: dot.color,
+            flexShrink: 0,
+          }}
+        />
+      </span>
     </button>
   );
 }

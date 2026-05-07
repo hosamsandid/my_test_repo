@@ -45,6 +45,10 @@ export default function AgentChat() {
   const agentIdRef = useRef(agentId);
   useEffect(() => { agentIdRef.current = agentId; }, [agentId]);
 
+  // Tracks agents the user explicitly marked as unread. Prevents the poll
+  // from auto-stamping them as viewed while they are still in the URL.
+  const manuallyUnreadRef = useRef(new Set());
+
   // Map agentId -> effective display state
   // ('busy'|'unread'|'idle'|'problem')
   const [agentStatuses, setAgentStatuses] = useState({});
@@ -53,8 +57,9 @@ export default function AgentChat() {
     const poll = () => {
       // Always mark the currently open agent as "viewed" before computing
       // statuses so it never flips to "unread" while the user is looking at it.
+      // Exception: skip agents the user explicitly marked as unread.
       const currentId = agentIdRef.current;
-      if (currentId) {
+      if (currentId && !manuallyUnreadRef.current.has(currentId)) {
         const viewed = loadLastViewed();
         viewed[currentId] = Date.now();
         saveLastViewed(viewed);
@@ -120,11 +125,20 @@ export default function AgentChat() {
 
   const handleSelect = useCallback((id) => {
     try { localStorage.setItem(LAST_AGENT_KEY, id); } catch { /* ignore */ }
+    manuallyUnreadRef.current.delete(id);
     const viewed = loadLastViewed();
     viewed[id] = Date.now();
     saveLastViewed(viewed);
     navigate(`/chats/${id}`);
   }, [navigate]);
+
+  const handleMarkAsUnread = useCallback((id) => {
+    manuallyUnreadRef.current.add(id);
+    const viewed = loadLastViewed();
+    delete viewed[id];
+    saveLastViewed(viewed);
+    setAgentStatuses(prev => ({ ...prev, [id]: 'unread' }));
+  }, []);
 
   const handleRoomCreated = useCallback((id, roomId) => {
     setCreatedRooms(prev => prev[id] === roomId ? prev : { ...prev, [id]: roomId });
@@ -283,6 +297,7 @@ export default function AgentChat() {
               agents={agents}
               selectedAgentId={agentId || null}
               onSelect={handleSelect}
+              onMarkAsUnread={handleMarkAsUnread}
               statuses={agentStatuses}
             />
           )}

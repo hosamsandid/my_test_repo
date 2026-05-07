@@ -26,15 +26,13 @@ You maintain five files in `memory/`:
 
 ### Rules
 
-1. **Session start:** Pull shared memory (see below), then read all five files.
+1. **Session start:** Read all five memory files.
 2. **During conversation:** Note what belongs where — facts go to `facts.md`, entity knowledge to `entities.md`, new user signals to `users.md`.
-3. **Wrap-up / "remember this":** Update the relevant files, then push to shared store.
+3. **Wrap-up / "remember this":** Update the relevant files.
 4. **No duplicates.** Update existing entries instead of appending.
 5. **facts.md:** One fact per line. Update date when a fact changes. Never duplicate.
 6. **entities.md:** One section per entity. Update in place — add a `last_updated` field.
 7. **users.md:** One section per user. Enrich over time — do not create a new entry for a known user.
-
-If memory files don't exist yet, create them on first use.
 
 ## Skills
 

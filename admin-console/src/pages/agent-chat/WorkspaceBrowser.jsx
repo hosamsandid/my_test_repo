@@ -6,7 +6,7 @@ import rehypeSanitize from 'rehype-sanitize';
 import {
   ChevronRight, ChevronDown, Folder, FolderOpen, FileText, FileCode,
   Brain, Sparkles, BookOpen, Loader2, X, RefreshCw, AlertCircle, FileWarning,
-  Maximize2, Minimize2, Code2, Eye, GitBranch,
+  Maximize2, Minimize2, Code2, Eye, GitBranch, Upload,
 } from 'lucide-react';
 
 /**
@@ -33,16 +33,29 @@ export default function WorkspaceBrowser({ agentId, active }) {
   const [expanded, setExpanded] = useState(() => new Set(['']));
   const [selectedFile, setSelectedFile] = useState(null); // { path }
 
+  // Upload panel state
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [uploadDir, setUploadDir] = useState('');
+  const [uploadStatus, setUploadStatus] = useState('idle'); // 'idle' | 'uploading' | 'success' | 'error'
+  const [uploadMessage, setUploadMessage] = useState('');
+  const fileInputRef = useRef(null);
+  const uploadResetTimerRef = useRef(null);
+
   // Bump generation counter on agent change so a slow response from the
   // previous agent can't poison the new agent's cache.
   const reqIdRef = useRef(0);
 
-  /* ─── Reset on agent change ──────────────────────────────────────── */
+  /* ─── Reset on agent change; cancel any pending upload-reset timer ── */
   useEffect(() => {
     reqIdRef.current += 1;
     setDirCache(new Map());
     setExpanded(new Set(['']));
     setSelectedFile(null);
+    setUploadOpen(false);
+    setUploadDir('');
+    setUploadStatus('idle');
+    setUploadMessage('');
+    return () => { clearTimeout(uploadResetTimerRef.current); };
   }, [agentId]);
 
   const fetchDir = useCallback(async (relPath) => {
@@ -104,6 +117,41 @@ export default function WorkspaceBrowser({ agentId, active }) {
     paths.forEach(p => fetchDir(p));
   }, [agentId, expanded, fetchDir]);
 
+  const handleUpload = useCallback(async (files) => {
+    if (!files || files.length === 0) return;
+    setUploadStatus('uploading');
+    setUploadMessage('');
+    const form = new FormData();
+    form.append('path', uploadDir);
+    for (const f of files) form.append('files', f);
+    try {
+      const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/workspace/upload`, {
+        method: 'POST',
+        body: form,
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setUploadStatus('error');
+        setUploadMessage(j?.error || `HTTP ${r.status}`);
+        return;
+      }
+      const n = j?.uploaded?.length ?? 0;
+      setUploadStatus('success');
+      setUploadMessage(`${n} file${n !== 1 ? 's' : ''} uploaded`);
+      refreshAll();
+      // Auto-close the panel after a brief success indication.
+      // Timer is stored so it can be cancelled if the component unmounts first.
+      clearTimeout(uploadResetTimerRef.current);
+      uploadResetTimerRef.current = setTimeout(
+        () => { setUploadOpen(false); setUploadStatus('idle'); setUploadMessage(''); },
+        1800,
+      );
+    } catch (err) {
+      setUploadStatus('error');
+      setUploadMessage(err.message || 'Upload failed');
+    }
+  }, [agentId, uploadDir, refreshAll]);
+
   /* ─── Render ─────────────────────────────────────────────────────── */
   if (!agentId) {
     return (
@@ -121,7 +169,7 @@ export default function WorkspaceBrowser({ agentId, active }) {
         alignItems: 'center',
         gap: 'var(--eb-space-2)',
         padding: 'var(--eb-space-2) var(--eb-space-3)',
-        borderBottom: '1px solid var(--eb-border-default)',
+        borderBottom: uploadOpen ? 'none' : '1px solid var(--eb-border-default)',
         background: 'var(--eb-bg-surface)',
         flexShrink: 0,
       }}>
@@ -137,6 +185,15 @@ export default function WorkspaceBrowser({ agentId, active }) {
           /workspace/agents/{agentId}/
         </div>
         <button
+          onClick={() => { setUploadOpen(o => !o); setUploadStatus('idle'); setUploadMessage(''); }}
+          title="Upload files to workspace"
+          style={{ ...iconBtnStyle, color: uploadOpen ? 'var(--eb-accent-primary)' : 'var(--eb-text-muted)' }}
+          onMouseEnter={e => { if (!uploadOpen) e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
+          onMouseLeave={e => { if (!uploadOpen) e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
+        >
+          <Upload size={12} />
+        </button>
+        <button
           onClick={refreshAll}
           title="Reload tree"
           style={iconBtnStyle}
@@ -146,6 +203,80 @@ export default function WorkspaceBrowser({ agentId, active }) {
           <RefreshCw size={12} />
         </button>
       </div>
+
+      {/* Upload panel */}
+      {uploadOpen && (
+        <div style={{
+          borderBottom: '1px solid var(--eb-border-default)',
+          background: 'var(--eb-bg-elevated)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          flexShrink: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 'var(--eb-space-2)',
+        }}>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', flexShrink: 0 }}>Target:</span>
+            <input
+              type="text"
+              value={uploadDir}
+              onChange={e => setUploadDir(e.target.value)}
+              placeholder="workspace root"
+              disabled={uploadStatus === 'uploading'}
+              style={{
+                flex: 1,
+                fontSize: 'var(--eb-text-xs)',
+                fontFamily: 'var(--eb-font-mono)',
+                background: 'var(--eb-bg-surface)',
+                border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-sm)',
+                color: 'var(--eb-text-primary)',
+                padding: '2px 6px',
+                outline: 'none',
+              }}
+            />
+          </div>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              style={{ display: 'none' }}
+              onChange={e => { handleUpload(e.target.files); e.target.value = ''; }}
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploadStatus === 'uploading'}
+              style={{
+                fontSize: 'var(--eb-text-xs)',
+                padding: '3px 10px',
+                background: uploadStatus === 'uploading' ? 'var(--eb-bg-active)' : 'var(--eb-accent-primary)',
+                color: uploadStatus === 'uploading' ? 'var(--eb-text-muted)' : 'var(--eb-text-inverted)',
+                border: 'none',
+                borderRadius: 'var(--eb-radius-sm)',
+                cursor: uploadStatus === 'uploading' ? 'not-allowed' : 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4,
+                flexShrink: 0,
+              }}
+            >
+              {uploadStatus === 'uploading'
+                ? <><Loader2 size={10} style={{ animation: 'spin 1s linear infinite' }} /> Uploading…</>
+                : <><Upload size={10} /> Choose files</>}
+            </button>
+            {uploadMessage && (
+              <span style={{
+                fontSize: 'var(--eb-text-xs)',
+                color: uploadStatus === 'error' ? 'var(--eb-status-error)' : 'var(--eb-status-success)',
+                flex: 1,
+              }}>
+                {uploadMessage}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Tree (top) — shrinks when a file viewer is open below. */}
       <div

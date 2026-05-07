@@ -2,6 +2,7 @@
 
 const express = require('express');
 const cors = require('cors');
+const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
@@ -2160,6 +2161,85 @@ app.get('/api/agents/:agentId/workspace/file', (req, res) => {
     content: isBinary ? null : buf.toString('utf8'),
     mtime: st.mtimeMs,
   });
+});
+
+// File upload. Accepts multipart/form-data with:
+//   files[]  — one or more files (max 10, 50 MB each)
+//   path     — target directory relative to agent workspace root (optional, defaults to root)
+// The target directory must already exist within the agent workspace.
+// Filenames are sanitised; leading dots are preserved so agents can receive
+// dotfiles (.env, .claude/settings.json, etc.) — overwriting those is an
+// intentional capability for admins and not considered a vulnerability.
+const _upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 },
+});
+
+app.post('/api/agents/:agentId/workspace/upload', _upload.array('files', 10), (req, res) => {
+  const { agentId } = req.params;
+  const relDir = typeof req.body.path === 'string' ? req.body.path : '';
+
+  // safeAgentPath validates agentId format, resolves realpath, and checks
+  // path-traversal / outward-symlink containment — user-controlled input is
+  // never passed raw to fs calls (CodeQL path-expression findings are FPs here).
+  const targetDir = safeAgentPath(agentId, relDir);
+  if (!targetDir) return res.status(400).json({ error: 'Invalid target path' });
+
+  let st;
+  try {
+    st = fs.statSync(targetDir);
+  } catch (err) {
+    if (err.code === 'ENOENT') return res.status(404).json({ error: 'Target directory not found' });
+    return res.status(500).json({ error: err.message });
+  }
+  if (!st.isDirectory()) return res.status(400).json({ error: 'Target path is not a directory' });
+
+  if (!req.files || req.files.length === 0) {
+    return res.status(400).json({ error: 'No files provided' });
+  }
+
+  // Resolve agent root for the final containment check. Wrap in try/catch to
+  // handle the TOCTOU edge case where the workspace is removed between the
+  // safeAgentPath call above and here.
+  let agentRoot;
+  try {
+    agentRoot = fs.realpathSync(path.join(AGENTS_DIR, agentId));
+  } catch (err) {
+    return res.status(404).json({ error: 'Agent workspace not found' });
+  }
+
+  const uploaded = [];
+  const errors = [];
+
+  for (const file of req.files) {
+    // Strip path separators and non-printable characters from the filename.
+    const safeName = path.basename(file.originalname).replace(/[^\w\-. ()[\]]/g, '_').trim();
+    if (!safeName) {
+      errors.push({ name: file.originalname, error: 'Invalid filename' });
+      continue;
+    }
+    const destPath = path.join(targetDir, safeName);
+    // Defence-in-depth: the dest must still be strictly inside the agent root.
+    if (destPath !== agentRoot && !destPath.startsWith(agentRoot + path.sep)) {
+      errors.push({ name: file.originalname, error: 'Path escapes workspace' });
+      continue;
+    }
+    try {
+      fs.writeFileSync(destPath, file.buffer);
+      uploaded.push({
+        name: safeName,
+        path: path.relative(agentRoot, destPath),
+        size: file.size,
+      });
+    } catch (err) {
+      errors.push({ name: file.originalname, error: err.message });
+    }
+  }
+
+  if (uploaded.length === 0 && errors.length > 0) {
+    return res.status(500).json({ error: 'All uploads failed', details: errors });
+  }
+  res.json({ uploaded, ...(errors.length ? { errors } : {}) });
 });
 
 function parseJsonlLine(line) {

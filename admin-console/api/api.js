@@ -2221,7 +2221,11 @@ app.post('/api/agents/:agentId/workspace/upload', uploadFiles, (req, res) => {
   }
   if (!st.isDirectory()) return res.status(400).json({ error: 'Target path is not a directory' });
 
-  if (!req.files || req.files.length === 0) {
+  // Array.isArray narrows the type for the loop below: multer's
+  // upload.array() always returns an Array, but the explicit guard rules out
+  // tampering scenarios where a non-array value could reach this code path
+  // (CodeQL js/type-confusion-through-parameter-tampering).
+  if (!Array.isArray(req.files) || req.files.length === 0) {
     return res.status(400).json({ error: 'No files provided' });
   }
 

@@ -3,6 +3,7 @@
    Source: R47 Design System (design-system.md)
    Color space: OKLCH
    Base unit: 4px
+   Brand: Accenture — Primary Purple #A100FF (oklch 0.65 0.28 293)
    ═══════════════════════════════════════════════════════════════════════ */
 
 /* ─── Reset ─────────────────────────────────────────────────────────── */
@@ -16,28 +17,28 @@
 :root,
 :root[data-theme="admin-dark"] {
   /* Backgrounds */
-  --eb-bg-app:            oklch(0.13 0.005 260);
-  --eb-bg-surface:        oklch(0.17 0.008 260);
-  --eb-bg-elevated:       oklch(0.21 0.010 260);
-  --eb-bg-hover:          oklch(0.25 0.012 260);
-  --eb-bg-active:         oklch(0.29 0.014 260);
-  --eb-bg-selected:       oklch(0.20 0.040 230);
+  --eb-bg-app:            oklch(0.13 0.006 293);
+  --eb-bg-surface:        oklch(0.17 0.008 293);
+  --eb-bg-elevated:       oklch(0.21 0.010 293);
+  --eb-bg-hover:          oklch(0.25 0.012 293);
+  --eb-bg-active:         oklch(0.29 0.014 293);
+  --eb-bg-selected:       oklch(0.20 0.040 293);
 
   /* Borders */
-  --eb-border-default:    oklch(0.30 0.010 260);
-  --eb-border-hover:      oklch(0.38 0.012 260);
-  --eb-border-active:     oklch(0.45 0.015 260);
+  --eb-border-default:    oklch(0.30 0.010 293);
+  --eb-border-hover:      oklch(0.38 0.012 293);
+  --eb-border-active:     oklch(0.45 0.015 293);
 
   /* Text */
-  --eb-text-primary:      oklch(0.93 0.005 260);
-  --eb-text-secondary:    oklch(0.70 0.010 260);
-  --eb-text-muted:        oklch(0.55 0.008 260);
-  --eb-text-inverted:     oklch(0.13 0.005 260);
+  --eb-text-primary:      oklch(0.93 0.005 293);
+  --eb-text-secondary:    oklch(0.70 0.010 293);
+  --eb-text-muted:        oklch(0.55 0.008 293);
+  --eb-text-inverted:     oklch(0.13 0.006 293);
 
-  /* Accent (Cyan/Teal — SAP EB brand) */
-  --eb-accent-primary:    oklch(0.72 0.15 195);
-  --eb-accent-hover:      oklch(0.65 0.14 195);
-  --eb-accent-muted:      oklch(0.30 0.06 195);
+  /* Accent (Accenture Purple — #A100FF) */
+  --eb-accent-primary:    oklch(0.65 0.28 293);
+  --eb-accent-hover:      oklch(0.58 0.26 293);
+  --eb-accent-muted:      oklch(0.26 0.08 293);
 
   /* Status Colors */
   --eb-status-success:    oklch(0.72 0.18 155);
@@ -119,25 +120,25 @@
 
 /* ─── Admin Light Theme ─────────────────────────────────────────────── */
 :root[data-theme="admin-light"] {
-  --eb-bg-app:            oklch(0.985 0.002 260);
+  --eb-bg-app:            oklch(0.985 0.003 293);
   --eb-bg-surface:        oklch(1.0 0 0);
   --eb-bg-elevated:       oklch(1.0 0 0);
-  --eb-bg-hover:          oklch(0.96 0.003 260);
-  --eb-bg-active:         oklch(0.93 0.005 260);
-  --eb-bg-selected:       oklch(0.95 0.03 230);
+  --eb-bg-hover:          oklch(0.96 0.004 293);
+  --eb-bg-active:         oklch(0.93 0.006 293);
+  --eb-bg-selected:       oklch(0.93 0.030 293);
 
-  --eb-border-default:    oklch(0.88 0.005 260);
-  --eb-border-hover:      oklch(0.80 0.008 260);
-  --eb-border-active:     oklch(0.72 0.010 260);
+  --eb-border-default:    oklch(0.88 0.006 293);
+  --eb-border-hover:      oklch(0.80 0.008 293);
+  --eb-border-active:     oklch(0.72 0.012 293);
 
-  --eb-text-primary:      oklch(0.15 0.005 260);
-  --eb-text-secondary:    oklch(0.45 0.010 260);
-  --eb-text-muted:        oklch(0.60 0.008 260);
-  --eb-text-inverted:     oklch(0.98 0.002 260);
+  --eb-text-primary:      oklch(0.15 0.006 293);
+  --eb-text-secondary:    oklch(0.45 0.010 293);
+  --eb-text-muted:        oklch(0.60 0.008 293);
+  --eb-text-inverted:     oklch(0.98 0.003 293);
 
-  --eb-accent-primary:    oklch(0.60 0.18 195);
-  --eb-accent-hover:      oklch(0.55 0.17 195);
-  --eb-accent-muted:      oklch(0.95 0.03 195);
+  --eb-accent-primary:    oklch(0.52 0.30 293);
+  --eb-accent-hover:      oklch(0.46 0.28 293);
+  --eb-accent-muted:      oklch(0.94 0.04 293);
 
   --eb-status-success-bg: oklch(0.95 0.03 155);
   --eb-status-warning-bg: oklch(0.95 0.03 85);
@@ -161,8 +162,8 @@
   --eb-border-hover:      oklch(0.75 0 0);
   --eb-border-active:     oklch(0.90 0 0);
 
-  --eb-accent-primary:    oklch(0.80 0.20 195);
-  --eb-accent-hover:      oklch(0.75 0.19 195);
+  --eb-accent-primary:    oklch(0.75 0.30 293);
+  --eb-accent-hover:      oklch(0.70 0.28 293);
 }
 
 /* ─── Global Styles ─────────────────────────────────────────────────── */
@@ -216,8 +217,8 @@ code, pre, kbd {
 
 /* ─── Selection ─────────────────────────────────────────────────────── */
 ::selection {
-  background: oklch(0.45 0.12 195);
-  color: oklch(0.95 0.01 195);
+  background: oklch(0.40 0.15 293);
+  color: oklch(0.97 0.005 293);
 }
 
 /* ─── Agent status dot pulse animation ─────────────────────────────── */

@@ -377,7 +377,7 @@ def _handle_sigterm(signum: int, frame) -> None:
 # session viewer, which reads /workspace/agents/<id>/sessions/<roomId>.jsonl
 # and the per-room session pointer at <roomId>.current.json.
 
-CLAUDE_TIMEOUT_SEC = 600
+CLAUDE_TIMEOUT_SEC = 3600
 MEMBER_CACHE_TTL_SEC = 30
 
 # Module-level state shared with the SIGUSR1 handler.

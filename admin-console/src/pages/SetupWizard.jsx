@@ -638,7 +638,7 @@ export default function SetupWizard({ onComplete }) {
         flexShrink: 0,
       }}>
         <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
-          AEE Setup
+          Agentic Studio Setup
         </div>
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
           Step {current + 1} of {STEPS.length}

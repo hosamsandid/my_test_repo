@@ -120,8 +120,10 @@ export default function ChatPanel({
         if (cancelled) return;
         const chunk = Array.isArray(data?.chunk) ? data.chunk : [];
         // dir=b returns newest-first — reverse for chronological display.
+        // Exclude redacted events (unsigned.redacted_because present) to avoid
+        // empty bubbles after a Clear History operation.
         const seed = chunk
-          .filter(ev => ev.type === 'm.room.message')
+          .filter(ev => ev.type === 'm.room.message' && !ev.unsigned?.redacted_because)
           .reverse()
           .map(ev => ({
             event_id: ev.event_id,
@@ -165,7 +167,7 @@ export default function ChatPanel({
       const data = await r.json();
       const chunk = Array.isArray(data?.chunk) ? data.chunk : [];
       const older = chunk
-        .filter(ev => ev.type === 'm.room.message')
+        .filter(ev => ev.type === 'm.room.message' && !ev.unsigned?.redacted_because)
         .reverse()
         .map(ev => ({
           event_id: ev.event_id,

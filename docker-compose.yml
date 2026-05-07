@@ -26,6 +26,11 @@ services:
     restart: unless-stopped
     ports:
       - "${HOOK_PORT:-4003}:${HOOK_PORT:-4003}"
+    # Required for podman socket access on SELinux-enforcing hosts (Fedora CoreOS).
+    # Without this, container_t cannot connect to the user_tmp_t-labeled socket
+    # and the connection silently fails with EACCES (no audit log entry).
+    security_opt:
+      - label=disable
     volumes:
       - agent-pool-workspace:/workspace
       - skills-pool:/template-workspace:ro
@@ -38,8 +43,12 @@ services:
       - claude-home:/root/.claude
       - ~/.ssh/id_accenturecodefoundry:/root/.ssh/id_accenturecodefoundry:ro
       - ~/.ssh/id_accenturecodefoundry.pub:/root/.ssh/id_accenturecodefoundry.pub:ro
+      # Rootless Podman socket (core uid=501 inside VM — matches container's mapped uid).
+      # NOT :ro — orchestrator P3 spawn-container.js needs create/start/kill/wait.
+      - /run/user/501/podman/podman.sock:/var/run/podman.sock
     environment:
       TZ: Europe/Berlin
+      PODMAN_SOCK_PATH: /var/run/podman.sock
       MATRIX_HOMESERVER: http://conduwuit:6167
       ADMIN_USER_ID: "@${ADMIN_USER:-admin}:local"
       # Conduwuit admin (for auto-creating Matrix users).
@@ -93,6 +102,11 @@ services:
       context: ./admin-console
     container_name: ${COMPOSE_PROJECT_NAME}-admin-console
     restart: unless-stopped
+    # Required for podman socket access on SELinux-enforcing hosts (Fedora CoreOS).
+    # Without this, the /api/logs/stream SSE endpoint silently returns
+    # "[log error: connect EACCES /var/run/podman.sock]".
+    security_opt:
+      - label=disable
     ports:
       - "${ADMIN_PORT:-4000}:4000"
     volumes:

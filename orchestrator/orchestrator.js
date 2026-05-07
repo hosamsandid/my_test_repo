@@ -71,7 +71,8 @@ function loadLlmBindingForEnv(env) {
   };
 }
 
-const { spawn, execFile, execFileSync } = require("child_process");
+const { execFile, execFileSync } = require("child_process");
+const { spawnContainer } = require("./spawn-container");
 const crypto = require("crypto");
 
 function randomHex(bytes) {
@@ -130,10 +131,7 @@ function startAgentProcess(config) {
     }
   }
 
-  const child = spawn('node', ['/app/agent-runner.js'], {
-    env: childEnv,
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-  });
+  const child = spawnContainer({ id, env: childEnv });
 
   child.stdout.on('data', (d) =>
     d.toString().split('\n').filter(Boolean).forEach(line =>
@@ -165,6 +163,7 @@ function stopAgentProcess(id) {
 function stopAgentSession(id, sessionId) {
   const proc = agentProcesses.get(id);
   if (!proc) return false;
+  // IPC send is a no-op in container mode (P4 will redesign over Matrix or HTTP).
   try {
     proc.send(sessionId ? { type: 'stop-session', sessionId } : { type: 'stop-session' });
     console.log(`[Orchestrator] Sent stop-session to agent ${id}${sessionId ? ` (session ${sessionId})` : ''}`);

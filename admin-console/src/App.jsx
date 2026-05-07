@@ -1,6 +1,7 @@
-import React, { Suspense, lazy } from 'react';
+import React, { Suspense, lazy, useState, useEffect } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import Shell from './components/Shell';
+import SetupWizard from './pages/SetupWizard';
 
 const Dashboard           = lazy(() => import('./pages/Dashboard'));
 const Agents              = lazy(() => import('./pages/Agents'));
@@ -18,6 +19,30 @@ const Briefings           = lazy(() => import('./pages/Briefings'));
 const SystemConfig        = lazy(() => import('./pages/SystemConfig'));
 
 export default function App() {
+  const [setupComplete, setSetupComplete] = useState(null); // null = loading
+
+  useEffect(() => {
+    fetch('/api/setup/status')
+      .then(r => r.json())
+      .then(data => setSetupComplete(data.isComplete))
+      .catch(() => setSetupComplete(true)); // on error, don't block the UI
+  }, []);
+
+  if (setupComplete === null) {
+    return (
+      <div style={{
+        position: 'fixed', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: 'var(--eb-bg-app)', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)',
+      }}>
+        Loading…
+      </div>
+    );
+  }
+
+  if (setupComplete === false) {
+    return <SetupWizard onComplete={() => setSetupComplete(true)} />;
+  }
+
   return (
     <Shell>
       <Suspense fallback={<div style={{ padding: 'var(--eb-space-6)', color: 'var(--eb-text-muted)' }}>Loading...</div>}>

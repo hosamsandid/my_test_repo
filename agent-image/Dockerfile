@@ -14,6 +14,10 @@ RUN apt-get update \
 ARG CLAUDE_CODE_VERSION=2.1.121
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
+# Python deps for the in-container Matrix DM listener (P4).
+COPY requirements.txt /opt/ace/requirements.txt
+RUN pip install --no-cache-dir -r /opt/ace/requirements.txt
+
 # Copy ACE scripts (entrypoint + sase_lib + supporting scripts).
 COPY scripts/ /opt/ace/scripts/
 COPY CLAUDE.md /opt/ace/CLAUDE.md

@@ -92,6 +92,7 @@ function startAgentProcess(config) {
     AGENT_ID: id,
     MATRIX_ACCESS_TOKEN: token,
     MATRIX_BOT_USER_ID: userId,
+    MATRIX_HOMESERVER: process.env.MATRIX_HOMESERVER,
   };
 
   // Bind the agent's process to the LLM endpoint configured on its working
@@ -163,10 +164,15 @@ function stopAgentProcess(id) {
 function stopAgentSession(id, sessionId) {
   const proc = agentProcesses.get(id);
   if (!proc) return false;
-  // IPC send is a no-op in container mode (P4 will redesign over Matrix or HTTP).
+  // Stop-session is delivered via SIGUSR1; the container's Python listener
+  // catches it and terminates the active claude subprocess (the container
+  // itself keeps running and stays available for further DMs).
   try {
-    proc.send(sessionId ? { type: 'stop-session', sessionId } : { type: 'stop-session' });
-    console.log(`[Orchestrator] Sent stop-session to agent ${id}${sessionId ? ` (session ${sessionId})` : ''}`);
+    proc.kill('SIGUSR1');
+    console.log(
+      `[Orchestrator] Sent SIGUSR1 stop-session to agent ${id}` +
+      (sessionId ? ` (session ${sessionId})` : '')
+    );
     return true;
   } catch (err) {
     console.error(`[Orchestrator] stopAgentSession ${id}: ${err.message}`);

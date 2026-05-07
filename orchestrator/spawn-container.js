@@ -5,8 +5,14 @@ const { EventEmitter, PassThrough } = require('stream');
 
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 const AGENT_IMAGE = process.env.AGENT_IMAGE || 'ace-agent:latest';
+const COMPOSE_PROJECT = process.env.COMPOSE_PROJECT_NAME || 'vgh-claw-314092';
 const WORKSPACE_VOLUME = process.env.AGENT_WORKSPACE_VOLUME ||
-  `${process.env.COMPOSE_PROJECT_NAME || 'vgh-claw-314092'}_agent-pool-workspace`;
+  `${COMPOSE_PROJECT}_agent-pool-workspace`;
+// The compose stack creates the bridge network as ${project}_default. Spawned
+// agent containers must join it so they can resolve `conduwuit`, `bp-explorer`,
+// etc. by service name. Override with AGENT_NETWORK if the compose project
+// renames the network.
+const AGENT_NETWORK = process.env.AGENT_NETWORK || `${COMPOSE_PROJECT}_default`;
 
 function libpodRequest(method, urlPath, body) {
   return new Promise((resolve, reject) => {
@@ -94,6 +100,7 @@ function spawnContainer({ id, env }) {
     image: AGENT_IMAGE,
     env: envMap,
     volumes: [{ Name: WORKSPACE_VOLUME, Dest: '/workspace' }],
+    Networks: { [AGENT_NETWORK]: {} },
     remove: true,
   };
 

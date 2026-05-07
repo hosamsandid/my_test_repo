@@ -606,19 +606,29 @@ export default function ChatPanel({
             )}
           </div>
           {gitInfo && gitInfo.length > 0 && (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 1 }}>
+            <div
+              title={gitInfo.map(r =>
+                `${gitInfo.length > 1 ? r.repoPath + ': ' : ''}${r.branch ?? 'detached'}${r.isDirty ? ` (${r.changesCount} uncommitted)` : ''}`
+              ).join(' · ')}
+              style={{ display: 'flex', flexWrap: 'nowrap', gap: 6, marginTop: 1, overflow: 'hidden' }}
+            >
               {gitInfo.map(repo => (
                 <div key={repo.repoPath} style={{
                   display: 'inline-flex', alignItems: 'center', gap: 3,
                   fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
+                  minWidth: 0, flexShrink: 1, overflow: 'hidden',
                 }}>
-                  <GitBranch size={11} />
-                  <span style={{ fontFamily: 'monospace' }}>
-                    {gitInfo.length > 1 ? `${repo.repoPath}: ` : ''}{repo.branch ?? 'detached'}
+                  <GitBranch size={11} style={{ flexShrink: 0 }} />
+                  {gitInfo.length > 1 && (
+                    <span style={{ fontFamily: 'monospace', flexShrink: 0 }}>
+                      {repo.repoPath}:
+                    </span>
+                  )}
+                  <span style={{ fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {repo.branch ?? 'detached'}
                   </span>
                   {repo.isDirty && (
                     <span
-                      title={`${repo.changesCount} uncommitted change(s)`}
                       style={{
                         width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
                         background: 'var(--eb-color-warning, #f59e0b)',

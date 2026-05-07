@@ -1049,7 +1049,9 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
   useEffect(() => {
     if (!expanded || isStub || !agent.briefingsPath) return;
     let cancelled = false;
-    fetch(`/api/agents/${agent.id}/briefings`)
+    const rel = (agent.briefingsPath || '').replace(/^\/+|\/+$/g, '');
+    const workspace = `/workspace/agents/${agent.id}${rel ? `/${rel}` : ''}`;
+    fetch(`/api/bp-explorer/briefings?workspace=${encodeURIComponent(workspace)}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((data) => { if (!cancelled) setBps(Array.isArray(data) ? data : []); })
       .catch(() => { if (!cancelled) setBps([]); });

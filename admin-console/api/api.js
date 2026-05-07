@@ -23,6 +23,7 @@ const LLM_ENDPOINTS_INDEX = path.join(LLM_ENDPOINTS_DIR, 'index.json');
 const LLM_KEYS_DIR = path.join(LLM_ENDPOINTS_DIR, '_keys');
 const STATIC_DIR = path.join(__dirname, '..', 'dist');
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
+const BP_EXPLORER_URL = process.env.BP_EXPLORER_URL || 'http://bp-explorer:8765';
 
 fs.mkdirSync(ENVIRONMENTS_DIR, { recursive: true });
 fs.mkdirSync(SSH_KEYS_DIR, { recursive: true });
@@ -762,134 +763,6 @@ app.put('/api/agents/:id/prompt', (req, res) => {
   fs.writeFileSync(tmp, content, 'utf8');
   fs.renameSync(tmp, promptPath);
   res.json({ ok: true });
-});
-
-/* ─── Agent Briefings (BriefingPack file reader) ───────────────────── */
-
-// Minimal YAML frontmatter parser for brief.md files. Handles the subset
-// of YAML used by ACE BriefingPacks: simple scalars, flow sequences,
-// block sequences of scalars or shallow objects, and block scalars (|/>).
-function _briefYamlScalar(v) {
-  if (v === 'null' || v === '~') return null;
-  if (v === 'true') return true;
-  if (v === 'false') return false;
-  if (/^-?\d+$/.test(v)) return parseInt(v, 10);
-  if (/^-?\d+\.\d+$/.test(v)) return parseFloat(v);
-  if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) return v.slice(1, -1);
-  return v;
-}
-function _briefYamlFlowSeq(v) {
-  const inner = v.replace(/^\[|\]$/g, '').trim();
-  if (!inner) return [];
-  return inner.split(',').map(s => _briefYamlScalar(s.trim()));
-}
-function _parseBriefYaml(yaml) {
-  const result = {};
-  const lines = yaml.split('\n');
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
-    if (!line.trim() || line.startsWith('#')) { i++; continue; }
-    const m = line.match(/^([a-zA-Z_]\w*)\s*:\s*(.*)/);
-    if (!m) { i++; continue; }
-    const key = m[1];
-    const rest = m[2].trim();
-    if (rest === '|' || rest === '|-' || rest === '>') {
-      const chomp = rest === '|-';
-      const block = [];
-      i++;
-      while (i < lines.length && (lines[i].startsWith('  ') || lines[i] === '')) {
-        block.push(lines[i].replace(/^  /, ''));
-        i++;
-      }
-      result[key] = chomp ? block.join('\n').trimEnd() : block.join('\n');
-    } else if (rest === '' || rest === 'null' || rest === '~') {
-      let j = i + 1;
-      if (j < lines.length && /^  - /.test(lines[j])) {
-        const items = [];
-        while (j < lines.length && /^  - /.test(lines[j])) {
-          const head = lines[j].replace(/^  - /, '').trim();
-          if (head === '') {
-            // Mapping object: following lines indented ≥4 spaces
-            const obj = {};
-            j++;
-            while (j < lines.length && /^    \w/.test(lines[j])) {
-              const om = lines[j].match(/^    ([a-zA-Z_]\w*)\s*:\s*(.*)/);
-              if (om) obj[om[1]] = _briefYamlScalar(om[2].trim());
-              j++;
-            }
-            items.push(obj);
-          } else if (/^[a-zA-Z_]\w*\s*:/.test(head)) {
-            // Inline mapping on same line as dash
-            const obj = {};
-            const om = head.match(/^([a-zA-Z_]\w*)\s*:\s*(.*)/);
-            if (om) obj[om[1]] = _briefYamlScalar(om[2].trim());
-            j++;
-            while (j < lines.length && /^    \w/.test(lines[j])) {
-              const om2 = lines[j].match(/^    ([a-zA-Z_]\w*)\s*:\s*(.*)/);
-              if (om2) obj[om2[1]] = _briefYamlScalar(om2[2].trim());
-              j++;
-            }
-            items.push(obj);
-          } else {
-            items.push(_briefYamlScalar(head));
-            j++;
-          }
-        }
-        result[key] = items;
-        i = j;
-      } else {
-        result[key] = null;
-        i++;
-      }
-    } else if (rest.startsWith('[')) {
-      result[key] = _briefYamlFlowSeq(rest);
-      i++;
-    } else {
-      result[key] = _briefYamlScalar(rest);
-      i++;
-    }
-  }
-  return result;
-}
-function _extractFrontmatter(content) {
-  const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
-  return m ? m[1] : null;
-}
-function _scanBriefFiles(dir, files = []) {
-  let entries;
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return files; }
-  for (const e of entries) {
-    const full = path.join(dir, e.name);
-    if (e.isDirectory()) _scanBriefFiles(full, files);
-    else if (e.name === 'brief.md') files.push(full);
-  }
-  return files;
-}
-
-app.get('/api/agents/:id/briefings', (req, res) => {
-  const { id } = req.params;
-  const agentDir = path.join(AGENTS_DIR, id);
-  if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
-  const cfg = readJsonFile(path.join(agentDir, 'config.json'), {});
-  const rel = (cfg.briefingsPath || '').replace(/^\/+|\/+$/g, '');
-  const briefingsDir = rel ? path.join(agentDir, rel) : agentDir;
-  if (!fs.existsSync(briefingsDir)) return res.json([]);
-  const briefings = [];
-  for (const filePath of _scanBriefFiles(briefingsDir)) {
-    try {
-      const content = fs.readFileSync(filePath, 'utf8');
-      const fm = _extractFrontmatter(content);
-      if (!fm) continue;
-      const data = _parseBriefYaml(fm);
-      const relPath = path.relative(briefingsDir, filePath);
-      if (!data.id) data.id = path.basename(path.dirname(relPath));
-      data._rel_path = relPath;
-      data.archived = relPath.includes('/.archive/') || relPath.startsWith('.archive/');
-      briefings.push(data);
-    } catch { /* skip malformed */ }
-  }
-  res.json(briefings);
 });
 
 /* ─── Agent Model Selection ─────────────────────────────────────────── */
@@ -2467,22 +2340,22 @@ app.get('/api/agents/:agentId/git-info', (req, res) => {
   res.json({ repos: getAgentGitRepos(agentId) });
 });
 
-// Directory-only listing for the orchestrator directory picker.
-app.get('/api/agents/:agentId/workspace/dirs', (req, res) => {
+// Directory-only listing — delegated to BP-Explorer for orchestrator directory picker.
+app.get('/api/agents/:agentId/workspace/dirs', async (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const relPath = typeof req.query.path === 'string' ? req.query.path : '';
   const root = path.join(AGENTS_DIR, agentId);
+  // Verify agent exists
   if (!fs.existsSync(root)) return res.status(404).json({ error: 'Agent not found' });
-  const target = safeAgentPath(agentId, relPath);
-  if (!target) return res.status(400).json({ error: 'invalid path' });
-  let entries;
-  try { entries = fs.readdirSync(target, { withFileTypes: true }); } catch { return res.json([]); }
-  const dirs = entries
-    .filter(e => e.isDirectory() && !e.name.startsWith('.'))
-    .map(e => ({ name: e.name, path: path.join(relPath, e.name) }))
-    .sort((a, b) => a.name.localeCompare(b.name));
-  res.json(dirs);
+  try {
+    const qs = new URLSearchParams({ root, path: relPath }).toString();
+    const upstream = await fetch(`${BP_EXPLORER_URL}/api/workspace/tree?${qs}`);
+    const data = await upstream.json();
+    res.status(upstream.status).json(data);
+  } catch (err) {
+    res.status(502).json({ error: `BP-Explorer unreachable: ${err.message}` });
+  }
 });
 
 // File content. Caps reads at WORKSPACE_FILE_MAX_BYTES; flags binary files
@@ -2922,6 +2795,25 @@ app.get('/api/agents/:agentId/session/:roomId/stream', (req, res) => {
   });
 });
 
+/* ─── BP-Explorer Proxy ────────────────────────────────────────────── */
+// Forwards /api/bp-explorer/* → http://bp-explorer:8765/api/*
+app.all('/api/bp-explorer/*', async (req, res) => {
+  const upstreamPath = req.path.replace(/^\/api\/bp-explorer/, '/api');
+  const qs = new URLSearchParams(req.query).toString();
+  const url = `${BP_EXPLORER_URL}${upstreamPath}${qs ? '?' + qs : ''}`;
+  const opts = { method: req.method };
+  if (req.method !== 'GET' && req.method !== 'HEAD' && req.body) {
+    opts.headers = { 'Content-Type': 'application/json' };
+    opts.body = JSON.stringify(req.body);
+  }
+  try {
+    const upstream = await fetch(url, opts);
+    const data = await upstream.json();
+    res.status(upstream.status).json(data);
+  } catch (err) {
+    res.status(502).json({ error: `BP-Explorer unreachable: ${err.message}` });
+  }
+});
 
 /* ─── SPA fallback ──────────────────────────────────────────────────── */
 

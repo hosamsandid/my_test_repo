@@ -7,7 +7,7 @@ export function BPGraph({ orchestratorId, workspacePath }) {
   useEffect(() => {
     if (!viewportRef.current || !workspacePath) return;
     const cleanup = initBPGraph(viewportRef.current, {
-      apiBase:   `/api/agents/${orchestratorId}`,
+      apiBase:   '/api/bp-explorer',
       workspace: workspacePath,
     });
     return cleanup;

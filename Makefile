@@ -6,6 +6,7 @@
 #   make down      # stop the stack
 #   make restart   # down + up
 #   make build     # rebuild orchestrator image
+#   make agent-image # build the per-agent container image (ace-agent:latest)
 #   make update    # git pull + down + up (pulls latest, restarts with rebuild)
 #   make ps        # show container status
 #   make logs      # follow logs of all stack containers
@@ -28,7 +29,7 @@ ifeq ($(COMPOSE_PROJECT_NAME),)
 SKILL_POOL_VOLUME      = vgh-claw_claude-workspace
 endif
 
-.PHONY: up down restart build update ps logs help seed-pool seed-skills seed-memory seed-templates seed-mcp-servers
+.PHONY: up down restart build agent-image update ps logs help seed-pool seed-skills seed-memory seed-templates seed-mcp-servers
 
 up:
 	@echo "Starting e-vgh-claw stack..."
@@ -45,6 +46,9 @@ restart: down up
 
 build:
 	$(COMPOSE) -f $(COMPOSE_FILE) build orchestrator
+
+agent-image:
+	podman build -t ace-agent:latest -f agent-image/Dockerfile agent-image/
 
 update:
 	@echo "Pulling latest changes from git..."
@@ -129,4 +133,4 @@ seed-mcp-servers:
 	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/mcp-servers/
 
 help:
-	@echo "Targets: up, down, restart, build, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-mcp-servers"
+	@echo "Targets: up, down, restart, build, agent-image, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-mcp-servers"

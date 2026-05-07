@@ -92,9 +92,9 @@ function SetupNudge() {
 }
 
 const AGENT_NAME_COLS = {
-  busy:    { dotColor: 'var(--eb-status-warning)', label: 'Active' },
-  idle:    { dotColor: 'var(--eb-text-muted)',     label: 'Idle' },
-  offline: { dotColor: 'var(--eb-status-error)',   label: 'Offline' },
+  busy:    { dotColor: 'var(--eb-status-warning)', label: 'Active',  highlight: true, maxHeight: null },
+  idle:    { dotColor: 'var(--eb-text-muted)',     label: 'Idle',    highlight: false, maxHeight: 180 },
+  offline: { dotColor: 'var(--eb-status-error)',   label: 'Offline', highlight: false, maxHeight: 180 },
 };
 
 function AgentNameList({ statuses }) {
@@ -124,49 +124,99 @@ function AgentNameList({ statuses }) {
       marginTop: 'var(--eb-space-4)',
     }}>
       {sections.map(({ key, agents }) => {
-        const { dotColor, label } = AGENT_NAME_COLS[key];
+        const { dotColor, label, highlight, maxHeight } = AGENT_NAME_COLS[key];
         return (
           <div key={key} style={{
             background: 'var(--eb-bg-surface)',
-            border: '1px solid var(--eb-border-default)',
+            border: `1px solid ${highlight ? 'var(--eb-status-warning)' : 'var(--eb-border-default)'}`,
             borderRadius: 'var(--eb-radius-lg)',
-            padding: 'var(--eb-space-4)',
+            overflow: 'hidden',
           }}>
+            {/* Card header */}
             <div style={{
               display: 'flex',
               alignItems: 'center',
-              gap: 'var(--eb-space-2)',
-              fontSize: 'var(--eb-text-sm)',
-              fontWeight: 'var(--eb-font-semibold)',
-              color: 'var(--eb-text-secondary)',
-              marginBottom: agents.length > 0 ? 'var(--eb-space-3)' : 0,
+              justifyContent: 'space-between',
+              padding: 'var(--eb-space-3) var(--eb-space-4)',
+              borderBottom: '1px solid var(--eb-border-default)',
+              background: highlight ? 'color-mix(in srgb, var(--eb-status-warning) 6%, transparent)' : 'transparent',
             }}>
-              <span style={{ width: 8, height: 8, borderRadius: '50%', background: dotColor, flexShrink: 0 }} />
-              {label}
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--eb-space-2)',
+                fontSize: 'var(--eb-text-sm)',
+                fontWeight: 'var(--eb-font-semibold)',
+                color: highlight ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
+              }}>
+                <span style={{
+                  width: 8, height: 8, borderRadius: '50%', background: dotColor, flexShrink: 0,
+                  ...(highlight && agents.length > 0 ? { animation: 'eb-status-pulse 1.4s ease-in-out infinite' } : {}),
+                }} />
+                {label}
+              </div>
+              <span style={{
+                fontSize: 'var(--eb-text-xs)',
+                color: 'var(--eb-text-muted)',
+                background: 'var(--eb-bg-elevated)',
+                borderRadius: 'var(--eb-radius-sm)',
+                padding: '1px 6px',
+                minWidth: 20,
+                textAlign: 'center',
+              }}>
+                {agents.length}
+              </span>
             </div>
+
+            {/* Agent table */}
             {agents.length === 0 ? (
-              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>—</div>
+              <div style={{
+                padding: 'var(--eb-space-3) var(--eb-space-4)',
+                fontSize: 'var(--eb-text-xs)',
+                color: 'var(--eb-text-muted)',
+              }}>—</div>
             ) : (
-              <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
-                {agents.map(agent => (
-                  <li key={agent.id}>
-                    {key === 'offline' ? (
-                      <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
-                        {agent.displayName}
-                      </span>
-                    ) : (
-                      <Link
-                        to={`/chats/${agent.id}`}
-                        style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-accent-primary)', textDecoration: 'none' }}
-                        onMouseEnter={e => { e.currentTarget.style.textDecoration = 'underline'; }}
-                        onMouseLeave={e => { e.currentTarget.style.textDecoration = 'none'; }}
+              <div style={{
+                maxHeight: maxHeight ?? undefined,
+                overflowY: maxHeight ? 'auto' : undefined,
+              }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <tbody>
+                    {agents.map((agent, idx) => (
+                      <tr
+                        key={agent.id}
+                        style={{ background: idx % 2 === 1 ? 'var(--eb-bg-elevated)' : 'transparent' }}
                       >
-                        {agent.displayName}
-                      </Link>
-                    )}
-                  </li>
-                ))}
-              </ul>
+                        <td style={{
+                          padding: '5px var(--eb-space-4)',
+                          fontSize: 'var(--eb-text-sm)',
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          maxWidth: 0,
+                          width: '100%',
+                        }}>
+                          {key === 'offline' ? (
+                            <span style={{ color: 'var(--eb-text-muted)' }} title={agent.displayName}>
+                              {agent.displayName}
+                            </span>
+                          ) : (
+                            <Link
+                              to={`/chats/${agent.id}`}
+                              title={agent.displayName}
+                              style={{ color: 'var(--eb-accent-primary)', textDecoration: 'none' }}
+                              onMouseEnter={e => { e.currentTarget.style.textDecoration = 'underline'; }}
+                              onMouseLeave={e => { e.currentTarget.style.textDecoration = 'none'; }}
+                            >
+                              {agent.displayName}
+                            </Link>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </div>
         );

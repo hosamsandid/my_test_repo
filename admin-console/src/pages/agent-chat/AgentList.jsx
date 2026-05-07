@@ -34,7 +34,6 @@ export default function AgentList({ agents, selectedAgentId, onSelect, onMarkAsU
 
 function iconForRole(role) {
   switch (role) {
-    case 'autonomous':  return Clock;
     case 'expert':      return Bot;
     default:            return MessageCircle;
   }

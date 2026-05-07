@@ -76,7 +76,6 @@ function loadLastViewed() {
 
 function iconForRole(role) {
   switch (role) {
-    case 'autonomous': return Clock;
     case 'expert':     return Bot;
     default:           return MessageCircle;
   }

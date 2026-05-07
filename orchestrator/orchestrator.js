@@ -171,7 +171,7 @@ async function startAllEnabledAgents() {
     const config = loadAgentConfig(id);
     // Skip pure-config orchestrators (created via POST /internal/agents/create
     // without a Matrix user). Blueprint-instance orchestrators DO carry a token
-    // and need to be respawned on container restart just like experts/autonomous.
+    // and need to be respawned on container restart just like experts.
     if (config && config.enabled !== false && config.token) {
       startAgentProcess(config);
     }
@@ -336,47 +336,44 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null) {
     "Memory entries may contain absolute paths like `/workspace/...` from a shared template — " +
     "translate these to relative paths (e.g. `/workspace/314092_foo/` → `./314092_foo/`).\n";
 
-  let extra = "";
-  if (role === "autonomous") {
-    extra =
-      "\n---\n\n## Trigger-Verwaltung (triggers.json)\n\n" +
-      "Du bist ein autonomer Agent. Deine Ausfuehrungen werden durch Trigger gesteuert, " +
-      "die in `triggers.json` in deinem Workspace-Root definiert sind. " +
-      "Du kannst diese Datei selbst lesen und aendern, um deinen eigenen Zeitplan anzupassen.\n\n" +
-      "### Trigger-Typen\n\n" +
-      "**Recurring (cron):**\n" +
-      "```json\n" +
-      "{\n" +
-      '  "id": "unique-id",\n' +
-      '  "type": "cron",\n' +
-      '  "enabled": true,\n' +
-      '  "cron": "*/30 * * * *",\n' +
-      '  "description": "Beschreibung",\n' +
-      '  "prompt": "Was du bei jeder Ausfuehrung tun sollst"\n' +
-      "}\n" +
-      "```\n" +
-      "Cron-Format: `Minute Stunde Tag Monat Wochentag`\n\n" +
-      "**Einmalig (once):**\n" +
-      "```json\n" +
-      "{\n" +
-      '  "id": "unique-id",\n' +
-      '  "type": "once",\n' +
-      '  "enabled": true,\n' +
-      '  "at": "2026-04-25T09:00:00",\n' +
-      '  "description": "Beschreibung",\n' +
-      '  "prompt": "Was du tun sollst"\n' +
-      "}\n" +
-      "```\n\n" +
-      "### Trigger verwalten\n\n" +
-      "1. `triggers.json` lesen\n" +
-      "2. Trigger hinzufuegen, aendern oder entfernen\n" +
-      "3. Datei zurueckschreiben\n" +
-      "4. Aenderungen werden automatisch innerhalb von 60 Sekunden uebernommen\n\n" +
-      "### Optionale Felder\n\n" +
-      "- `roomId` — Ziel-Room fuer die Ausgabe (Standard: Direct-Message-Room mit dem Admin)\n" +
-      "- `timeoutSeconds` — Max. Ausfuehrungszeit (Standard: 3600)\n\n" +
-      "Wenn du bei einer geplanten Ausfuehrung nichts zu berichten hast, antworte mit `[PASS]`.\n";
-  }
+  const extra =
+    "\n---\n\n## Trigger-Verwaltung (triggers.json)\n\n" +
+    "Deine Ausfuehrungen koennen durch Trigger gesteuert werden, " +
+    "die in `triggers.json` in deinem Workspace-Root definiert sind. " +
+    "Du kannst diese Datei selbst lesen und aendern, um deinen Zeitplan anzupassen.\n\n" +
+    "### Trigger-Typen\n\n" +
+    "**Recurring (cron):**\n" +
+    "```json\n" +
+    "{\n" +
+    '  "id": "unique-id",\n' +
+    '  "type": "cron",\n' +
+    '  "enabled": true,\n' +
+    '  "cron": "*/30 * * * *",\n' +
+    '  "description": "Beschreibung",\n' +
+    '  "prompt": "Was du bei jeder Ausfuehrung tun sollst"\n' +
+    "}\n" +
+    "```\n" +
+    "Cron-Format: `Minute Stunde Tag Monat Wochentag`\n\n" +
+    "**Einmalig (once):**\n" +
+    "```json\n" +
+    "{\n" +
+    '  "id": "unique-id",\n' +
+    '  "type": "once",\n' +
+    '  "enabled": true,\n' +
+    '  "at": "2026-04-25T09:00:00",\n' +
+    '  "description": "Beschreibung",\n' +
+    '  "prompt": "Was du tun sollst"\n' +
+    "}\n" +
+    "```\n\n" +
+    "### Trigger verwalten\n\n" +
+    "1. `triggers.json` lesen\n" +
+    "2. Trigger hinzufuegen, aendern oder entfernen\n" +
+    "3. Datei zurueckschreiben\n" +
+    "4. Aenderungen werden automatisch innerhalb von 60 Sekunden uebernommen\n\n" +
+    "### Optionale Felder\n\n" +
+    "- `roomId` — Ziel-Room fuer die Ausgabe (Standard: Direct-Message-Room mit dem Admin)\n" +
+    "- `timeoutSeconds` — Max. Ausfuehrungszeit (Standard: 3600)\n\n" +
+    "Wenn du bei einer geplanten Ausfuehrung nichts zu berichten hast, antworte mit `[PASS]`.\n";
 
   let envSection = "";
   if (env) {
@@ -1076,7 +1073,7 @@ class Orchestrator {
     saveAgentConfig(id, config);
     saveAgentPrompt(id, effectivePrompt, role, env);
 
-    if (role === "autonomous" && extra.schedule && extra.taskPrompt) {
+    if (extra.schedule && extra.taskPrompt) {
       saveTriggers(id, [{
         id: "initial",
         type: "cron",
@@ -2007,14 +2004,14 @@ async function main() {
             displayName,
             userId,
             token,
-            role: 'autonomous',
+            role: 'expert',
             environmentId: env.id,
             ephemeral: true,
             enabled: true,
             ...(blueprintId && { blueprintId }),
           };
           saveAgentConfig(agentId, config);
-          saveAgentPrompt(agentId, systemPrompt, 'autonomous', env, blueprintId || null);
+          saveAgentPrompt(agentId, systemPrompt, 'expert', env, blueprintId || null);
 
           const triggerId = 'trigger-' + randomHex(4);
           const fireAt = new Date(Date.now() + 5000).toISOString();
@@ -2319,9 +2316,9 @@ async function main() {
           res.end(JSON.stringify({ error: 'id, displayName, role, environmentId required' }));
           return;
         }
-        if (!['expert', 'autonomous', 'orchestrator'].includes(role)) {
+        if (!['expert', 'orchestrator'].includes(role)) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: `Invalid role: ${role}. Must be one of: expert, autonomous, orchestrator` }));
+          res.end(JSON.stringify({ error: `Invalid role: ${role}. Must be one of: expert, orchestrator` }));
           return;
         }
         if (role !== 'orchestrator' && !systemPrompt) {
@@ -2336,9 +2333,8 @@ async function main() {
         }
 
         const extra =
-          role === 'autonomous' ? { schedule, taskPrompt } :
           role === 'orchestrator' ? { briefingsPath: briefingsPath || null } :
-          {};
+          { schedule, taskPrompt };
         const result = await orchestrator.createAgent(id, displayName, role, systemPrompt, environmentId, extra);
         res.writeHead(201, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));

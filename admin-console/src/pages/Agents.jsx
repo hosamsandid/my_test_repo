@@ -624,7 +624,6 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
         <div style={labelStyle}>Role <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
         <select value={form.role} onChange={e => update('role', e.target.value)} style={inputStyle}>
           <option value="expert">Expert — responds to questions</option>
-          <option value="autonomous">Autonomous — runs on schedule</option>
           <option value="orchestrator">Orchestrator — manages missions in a directory</option>
         </select>
       </div>
@@ -1056,7 +1055,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
   );
 }
 
-/* ── Leaf Agent Card (expert / autonomous) ─────────────────────────── */
+/* ── Leaf Agent Card ────────────────────────────────────────────────── */
 function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate, navigate, busy }) {
   const state = agentState(agent);
 

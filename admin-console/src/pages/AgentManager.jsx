@@ -112,7 +112,6 @@ function AgentEditForm({ agent, onSave, onCancel }) {
           }}
         >
           <option value="expert">Expert</option>
-          <option value="autonomous">Autonomous</option>
           <option value="orchestrator">Orchestrator</option>
         </select>
       </div>
@@ -224,23 +223,9 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
         <div style={labelStyle}>Role <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
         <select value={form.role} onChange={e => update('role', e.target.value)} style={inputStyle}>
           <option value="expert">Expert — responds to questions in the room</option>
-          <option value="autonomous">Autonomous — runs on its own schedule</option>
           <option value="orchestrator">Orchestrator</option>
         </select>
       </div>
-
-      {form.role === 'autonomous' && (
-        <>
-          <div>
-            <div style={labelStyle}>Cron Schedule</div>
-            <input style={inputStyle} value={form.schedule} onChange={e => update('schedule', e.target.value)} placeholder="0 8 * * 1-5 (Mon–Fri at 8 AM)" />
-          </div>
-          <div>
-            <div style={labelStyle}>Task Prompt (run on every trigger)</div>
-            <textarea value={form.taskPrompt} onChange={e => update('taskPrompt', e.target.value)} placeholder="What the agent should do on every trigger..." rows={3} style={{ ...inputStyle, resize: 'vertical' }} />
-          </div>
-        </>
-      )}
 
       {form.role === 'orchestrator' && (
         <div>

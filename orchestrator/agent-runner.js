@@ -6,7 +6,7 @@
  * One instance of this process runs for each agent. It:
  *   - Connects to Matrix as this agent's user
  *   - Listens for direct messages (1:1 rooms) and responds via Claude CLI
- *   - Runs the trigger scheduler for autonomous agents
+ *   - Runs the trigger scheduler for all agents
  *
  * Communication is DM-only: agents talk to the human (and only the human)
  * in dedicated 1:1 Matrix rooms. There is no shared multi-agent room and
@@ -378,7 +378,7 @@ async function sendFormatted(client, roomId, text) {
 }
 
 // ============================================================
-// Trigger scheduler (autonomous agents only)
+// Trigger scheduler
 // ============================================================
 class TriggerScheduler {
   constructor(agentClient) {
@@ -837,11 +837,9 @@ async function main() {
 
   await client.start();
 
-  // Start trigger scheduler for autonomous and orchestrator agents.
-  if (role === "autonomous" || role === "orchestrator") {
-    const scheduler = new TriggerScheduler(client);
-    scheduler.start();
-  }
+  // Start trigger scheduler for all agents — every agent can have triggers.
+  const scheduler = new TriggerScheduler(client);
+  scheduler.start();
 
   // Orchestrator agents additionally run the claim loop: scan their
   // briefings directory and post a DM suggestion for each newly-dispatched

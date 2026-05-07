@@ -359,16 +359,6 @@ export default function Dashboard() {
     { label: 'Skills',          value: dash.skills?.total    ?? 0 },
   ] : [];
 
-  const busyCount    = statuses.filter(s => s.activityState === 'busy').length;
-  const idleCount    = statuses.filter(s => s.activityState === 'idle').length;
-  const offlineCount = statuses.filter(s => s.activityState === 'offline' || s.activityState === 'disabled').length;
-
-  const activityStats = [
-    { label: 'Busy',    value: busyCount,    status: busyCount > 0 ? 'warning' : undefined },
-    { label: 'Idle',    value: idleCount,    dotColor: 'var(--eb-text-muted)' },
-    { label: 'Offline', value: offlineCount, status: offlineCount > 0 ? 'error' : undefined },
-  ];
-
   const statusMap = Object.fromEntries(statuses.map(s => [s.id, s.activityState]));
 
   const agentCols = [
@@ -398,7 +388,6 @@ export default function Dashboard() {
         <h2 style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-3)' }}>
           Live Status
         </h2>
-        <StatGrid stats={activityStats} />
         <AgentNameList statuses={statuses} agents={agents ?? []} />
       </section>
 

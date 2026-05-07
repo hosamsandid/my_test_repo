@@ -2463,6 +2463,24 @@ async function main() {
   hookServer.listen(HOOK_PORT, '0.0.0.0', () =>
     console.log(`[Orchestrator] Hook server listening on :${HOOK_PORT}`)
   );
+
+  // ============================================================
+  // GitHub event poller — translates GitHub Events API activity into
+  // pending-triggers entries for agents that subscribed via a
+  // type=github-event trigger. See orchestrator/github-poller.js.
+  // ============================================================
+  const { GitHubPoller } = require('./github-poller');
+  const ghPoller = new GitHubPoller({
+    loadEnvironment,
+    listEnvironmentIds: () => {
+      try {
+        return fs.readdirSync(ENVIRONMENTS_DIR).filter(n => !n.startsWith('_'));
+      } catch {
+        return [];
+      }
+    },
+  });
+  ghPoller.start();
 }
 
 main().catch((err) => { console.error("Fatal:", err); process.exit(1); });

@@ -1,11 +1,38 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff } from 'lucide-react';
+import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import FormInput from '../../components/FormInput';
 
 const POLL_MS = 30_000;
+
+// Subset of GitHub Events API event types most useful for agent workflows.
+// (The Events API does not emit every webhook action — e.g. pull_request
+// has opened/closed/reopened but not synchronize.)
+const GITHUB_EVENT_OPTIONS = [
+  { value: 'push',                                  label: 'Push' },
+  { value: 'pull_request.opened',                   label: 'PR opened' },
+  { value: 'pull_request.closed',                   label: 'PR closed' },
+  { value: 'pull_request.reopened',                 label: 'PR reopened' },
+  { value: 'pull_request_review.submitted',         label: 'PR review submitted' },
+  { value: 'pull_request_review_comment.created',   label: 'PR review comment' },
+  { value: 'issue_comment.created',                 label: 'Issue / PR comment' },
+  { value: 'issues.opened',                         label: 'Issue opened' },
+  { value: 'issues.closed',                         label: 'Issue closed' },
+  { value: 'release.published',                     label: 'Release published' },
+];
+
+// Mirrors orchestrator/github-poller.js — extracts owner/repo from the
+// repository URL stored in the working environment.
+function parseRepoFullName(url) {
+  if (!url) return null;
+  const ssh   = String(url).match(/^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/);
+  if (ssh)   return `${ssh[1]}/${ssh[2]}`;
+  const https = String(url).match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
+  if (https) return `${https[1]}/${https[2]}`;
+  return null;
+}
 
 /* ── Toggle switch ──────────────────────────────────────────────────── */
 function ToggleSwitch({ checked, onChange }) {
@@ -37,13 +64,22 @@ function ToggleSwitch({ checked, onChange }) {
 
 /* ── Type badge ─────────────────────────────────────────────────────── */
 function TypeBadge({ type }) {
-  const isCron = type === 'cron' || type === 'recurring';
-  const isOnce = type === 'once';
-  const isHttp = type === 'http';
-  const bg    = isCron ? 'var(--eb-accent-muted)'       : isOnce ? 'var(--eb-bg-elevated)'    : isHttp ? 'var(--eb-status-success-bg)' : 'var(--eb-status-warning-bg)';
-  const color = isCron ? 'var(--eb-accent-primary)'     : isOnce ? 'var(--eb-text-secondary)' : isHttp ? 'var(--eb-status-success)'    : 'var(--eb-status-warning)';
-  const label = isCron ? 'cron'                         : isOnce ? 'once'                     : isHttp ? 'http'                        : type || 'unknown';
-  const Icon  = isCron ? Clock                          : isOnce ? CalendarClock               : isHttp ? Globe                         : AlertCircle;
+  const isCron   = type === 'cron' || type === 'recurring';
+  const isOnce   = type === 'once';
+  const isHttp   = type === 'http';
+  const isGithub = type === 'github-event';
+  let bg, color, label, Icon;
+  if (isCron) {
+    bg = 'var(--eb-accent-muted)'; color = 'var(--eb-accent-primary)'; label = 'cron'; Icon = Clock;
+  } else if (isOnce) {
+    bg = 'var(--eb-bg-elevated)'; color = 'var(--eb-text-secondary)'; label = 'once'; Icon = CalendarClock;
+  } else if (isHttp) {
+    bg = 'var(--eb-status-success-bg)'; color = 'var(--eb-status-success)'; label = 'http'; Icon = Globe;
+  } else if (isGithub) {
+    bg = 'var(--eb-status-info-bg, var(--eb-accent-muted))'; color = 'var(--eb-status-info, var(--eb-accent-primary))'; label = 'github'; Icon = Github;
+  } else {
+    bg = 'var(--eb-status-warning-bg)'; color = 'var(--eb-status-warning)'; label = type || 'unknown'; Icon = AlertCircle;
+  }
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 3,
@@ -269,9 +305,15 @@ function DateTimePicker({ value, onChange }) {
 /* ── Trigger row ────────────────────────────────────────────────────── */
 function TriggerRow({ trigger, agentId, onEdit, onDeleted, onToggled }) {
   const [toggling, setToggling] = useState(false);
-  const schedule = trigger.type === 'http'
-    ? `/hooks/${agentId}/${trigger.id}`
-    : trigger.cron || trigger.at || '—';
+  let schedule;
+  if (trigger.type === 'http') {
+    schedule = `/hooks/${agentId}/${trigger.id}`;
+  } else if (trigger.type === 'github-event') {
+    const evCount = Array.isArray(trigger.events) ? trigger.events.length : 0;
+    schedule = `${trigger.repo || '?'} · ${evCount} event${evCount === 1 ? '' : 's'}`;
+  } else {
+    schedule = trigger.cron || trigger.at || '—';
+  }
 
   async function handleToggle(val) {
     setToggling(true);
@@ -364,12 +406,15 @@ function generateSecret() {
 /* ── Trigger form (create & edit) ───────────────────────────────────── */
 function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
   const isEdit = !!initialValues;
-  const initialType = initialValues?.type === 'once' ? 'once' : initialValues?.type === 'http' ? 'http' : 'cron';
+  const knownTypes = new Set(['cron', 'once', 'http', 'github-event']);
+  const initialType = knownTypes.has(initialValues?.type) ? initialValues.type : 'cron';
   const [form, setForm] = useState(() => ({
     id:          initialValues?.id          ?? '',
     type:        initialType,
     cron:        initialValues?.cron        ?? '0 9 * * *',
     at:          initialValues?.at          ?? '',
+    repo:        initialValues?.repo        ?? '',
+    events:      Array.isArray(initialValues?.events) ? initialValues.events : [],
     secret:      initialValues?.secret      ?? (initialType === 'http' ? '' : generateSecret()),
     description: initialValues?.description ?? '',
     prompt:      initialValues?.prompt      ?? '',
@@ -379,6 +424,36 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
   const [secretVisible, setSecretVisible] = useState(!isEdit);
   const [formError, setFormError] = useState(null);
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  const toggleEvent = (val) => setForm(f => ({
+    ...f,
+    events: f.events.includes(val) ? f.events.filter(e => e !== val) : [...f.events, val],
+  }));
+
+  // Repos available to this agent — sourced from the agent's working
+  // environment. Only fetched when github-event is the active type.
+  const [availableRepos, setAvailableRepos] = useState(null); // null = not loaded
+  useEffect(() => {
+    if (form.type !== 'github-event' || availableRepos !== null) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const agent = await apiCall('GET', `/api/agents/${agentId}`);
+        const envId = agent?.environmentId;
+        let repos = [];
+        if (envId) {
+          const env = await apiCall('GET', `/api/environments/${envId}`);
+          const list = Array.isArray(env?.repositories) ? env.repositories : [];
+          repos = list
+            .map(r => ({ url: r?.url, fullName: parseRepoFullName(r?.url) }))
+            .filter(r => r.fullName);
+        }
+        if (!cancelled) setAvailableRepos(repos);
+      } catch {
+        if (!cancelled) setAvailableRepos([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [form.type, agentId, availableRepos]);
 
   // Lazy-generate a secret the first time http is selected, so users get a
   // working default without having to click "regenerate".
@@ -403,6 +478,10 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
     setFormError(null);
     if (form.type === 'cron' && !form.cron.trim()) { setFormError('Cron expression is required.'); return; }
     if (form.type === 'once' && !form.at.trim())   { setFormError('Run-at timestamp is required.'); return; }
+    if (form.type === 'github-event') {
+      if (!form.repo)             { setFormError('Repository is required.'); return; }
+      if (form.events.length === 0) { setFormError('Select at least one event.'); return; }
+    }
     if (form.type === 'http' && !form.secret.trim()) { setFormError('Secret is required for HTTP triggers.'); return; }
     if (!form.prompt.trim()) { setFormError('Prompt is required.'); return; }
     const body = {
@@ -412,9 +491,13 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
       enabled:     form.enabled,
     };
     if (!isEdit) body.id = form.id.trim() || undefined;
-    if (form.type === 'cron')      body.cron = form.cron.trim();
-    else if (form.type === 'once') body.at   = form.at.trim();
-    else if (form.type === 'http') body.secret = form.secret.trim();
+    if (form.type === 'cron')              body.cron = form.cron.trim();
+    else if (form.type === 'once')         body.at   = form.at.trim();
+    else if (form.type === 'http')         body.secret = form.secret.trim();
+    else if (form.type === 'github-event') {
+      body.repo = form.repo;
+      body.events = form.events;
+    }
     await onSave(body);
   }
 
@@ -448,6 +531,7 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
           <option value="cron">Cron (recurring)</option>
           <option value="once">Once (one-shot)</option>
           <option value="http">HTTP webhook</option>
+          <option value="github-event">GitHub event</option>
         </select>
       </div>
 
@@ -457,6 +541,79 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
 
       {form.type === 'once' && (
         <DateTimePicker value={form.at} onChange={v => set('at', v)} />
+      )}
+
+      {form.type === 'github-event' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+              Repository
+            </div>
+            {availableRepos === null ? (
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', padding: 'var(--eb-space-2)' }}>
+                <Loader2 size={12} style={{ animation: 'spin 1s linear infinite', marginRight: 6, verticalAlign: 'middle' }} />
+                Loading repositories…
+              </div>
+            ) : availableRepos.length === 0 ? (
+              <div style={{
+                padding: 'var(--eb-space-3)',
+                background: 'var(--eb-status-warning-bg)',
+                border: '1px solid var(--eb-status-warning)',
+                borderRadius: 'var(--eb-radius-md)',
+                fontSize: 'var(--eb-text-xs)',
+                color: 'var(--eb-status-warning)',
+              }}>
+                The agent's working environment has no GitHub repositories with a parsable URL. Add one in <strong>Working Environments</strong> first.
+              </div>
+            ) : (
+              <select
+                value={form.repo}
+                onChange={e => set('repo', e.target.value)}
+                style={{ ...FIELD_STYLE, width: '100%' }}
+              >
+                <option value="">— Select a repository —</option>
+                {availableRepos.map(r => (
+                  <option key={r.fullName} value={r.fullName}>{r.fullName}</option>
+                ))}
+              </select>
+            )}
+          </div>
+
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+              Events
+            </div>
+            <div style={{
+              display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)',
+              padding: 'var(--eb-space-2)',
+              background: 'var(--eb-bg-elevated)',
+              border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-md)',
+              maxHeight: 200, overflowY: 'auto',
+            }}>
+              {GITHUB_EVENT_OPTIONS.map(opt => (
+                <label key={opt.value} style={{
+                  display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+                  padding: '2px 4px', cursor: 'pointer', fontSize: 'var(--eb-text-sm)',
+                  color: 'var(--eb-text-primary)',
+                }}>
+                  <input
+                    type="checkbox"
+                    checked={form.events.includes(opt.value)}
+                    onChange={() => toggleEvent(opt.value)}
+                  />
+                  <span style={{ flex: 1 }}>{opt.label}</span>
+                  <code style={{ fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)' }}>
+                    {opt.value}
+                  </code>
+                </label>
+              ))}
+            </div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+              The agent receives the full event payload as JSON appended to its prompt.
+            </div>
+          </div>
+        </div>
       )}
 
       {form.type === 'http' && (

@@ -86,6 +86,7 @@ Autonomous agents are driven by **triggers** stored in a per-agent `triggers.jso
 | `cron` | `cron` (5-field expression) | Recurring execution via node-cron |
 | `once` | `at` (ISO timestamp) | One-shot, auto-removed after execution |
 | `http` | `secret` (auto-generated) | Fired by an external HTTP POST; see Webhook Server below |
+| `github-event` | `repo` (`owner/name`), `events` (string list, e.g. `pull_request.opened`) | Fired by the GitHub poller when the GitHub Events API reports a matching event for the repo. The agent receives the trigger's `prompt` plus the full event payload as JSON. |
 
 **Webhook Server (`http` triggers)**
 
@@ -100,6 +101,17 @@ X-Hook-Secret: <trigger.secret>
 - The server enqueues the event in `/workspace/agents/:agentId/pending-triggers.json`; the agent-runner drains this queue every 5 seconds.
 - **Security:** every HTTP trigger carries its own `secret` in `triggers.json` (auto-generated when created via the Admin Console). The webhook server validates `X-Hook-Secret` against that field; triggers without a secret are rejected with 401. There is intentionally no global "open" mode.
 - No payload processing — the POST body is ignored. The prompt defined in the trigger is what Claude receives.
+
+**GitHub poller (`github-event` triggers)**
+
+`orchestrator/github-poller.js` runs inside the orchestrator process and polls the [GitHub Events API](https://docs.github.com/en/rest/activity/events) every 30 s for every repo that appears in some Working Environment with a `githubTokenId` attached. Designed for environments where GitHub cannot reach the local stack (no public ingress) — polling replaces webhooks.
+
+- **Repo discovery**: walks all environments, deduplicating repos. Picks one token per repo (first environment wins). Repos without an associated token are skipped.
+- **Bandwidth**: each request uses `If-None-Match` with the previously stored ETag, so unchanged repos cost no rate-limit budget (304 responses don't count). Effective rate is ~120 conditional GETs/h per repo.
+- **Cursor**: `lastEventId` per repo persisted to `/workspace/github-poller/state.json`. First poll only records a baseline (no event flood on startup).
+- **Fan-out**: matched events are enqueued in the same `/workspace/agents/:agentId/pending-triggers.json` that HTTP triggers write to — the agent-runner picks them up via its existing 5 s drain. Pending entries carry `github.{event, eventId, repo, actor, createdAt, payload}` and are appended to the agent's prompt as a fenced JSON block.
+- **Event keys**: `<lowercase_type_without_event>.<action>` (e.g. `pull_request.opened`, `pull_request_review.submitted`). Bare `push` (no action). The Events API does not emit every webhook action — for instance there's no `pull_request.synchronize`.
+- **Identity / loop protection**: not implemented yet. Because all agents currently share one GitHub identity (single PAT), filtering "events caused by myself" requires per-agent metadata tagging (commit author + PR-body markers) — planned as a follow-up PR.
 
 Results are posted to `trigger.roomId` if set, otherwise to the agent's DM room with the admin (read from `/workspace/agents/<id>/dm-room.json`). If neither is available — i.e. the user has not yet opened a chat with this agent — the trigger run is skipped. `[PASS]` suppresses output.
 

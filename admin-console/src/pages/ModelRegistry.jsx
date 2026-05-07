@@ -303,12 +303,27 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
             Current: {endpoint.tokenPreview} · {endpoint.tokenFingerprint}
           </div>
         )}
+        {isEdit && !endpoint.hasToken && (
+          <div style={{
+            fontSize: 'var(--eb-text-xs)',
+            color: 'var(--eb-status-warning)',
+            marginBottom: 'var(--eb-space-2)',
+          }}>
+            No token stored — Test/Discover will hit the proxy unauthenticated. Paste the token below and save.
+          </div>
+        )}
         <textarea
           value={authToken}
           disabled={clearToken}
           onChange={e => setAuthToken(e.target.value)}
           rows={2}
-          placeholder={isEdit ? 'Leave empty to keep current token' : 'sk-… (sent as Bearer token to the proxy)'}
+          placeholder={
+            isEdit
+              ? endpoint.hasToken
+                ? 'Leave empty to keep current token'
+                : 'Paste auth token (sent as Bearer to the proxy)'
+              : 'sk-… (sent as Bearer token to the proxy)'
+          }
           style={{
             width: '100%',
             padding: 'var(--eb-space-2) var(--eb-space-3)',
@@ -370,6 +385,11 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
         >
           <RefreshCw size={13} /> {probing === 'discover' ? 'Loading…' : 'Discover models'}
         </button>
+        {(authToken.trim() || clearToken) && (
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)' }}>
+            Unsaved token change — click "Save changes" first; Test/Discover use the persisted value.
+          </span>
+        )}
         {probeMsg && (
           <span style={{
             fontSize: 'var(--eb-text-xs)',

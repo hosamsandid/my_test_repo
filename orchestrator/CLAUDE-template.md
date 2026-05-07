@@ -40,6 +40,28 @@ You have specialized skills in the `skills/` directory. When the user asks about
 
 Each skill directory contains a `SKILL.md` with instructions, data point references, and usage examples.
 
+## GitHub Actions — Identity Tagging
+
+When you act on GitHub (commits, PRs, reviews, comments), you MUST tag every action with your agent identity. All agents in this stack share one GitHub PAT, so the central poller cannot tell who did what from the GitHub identity alone — it relies on these tags to skip events you caused yourself. Without them, you will eventually trigger yourself in a loop.
+
+A wrapper `gh-as-agent` is installed for this:
+
+| Action | Use |
+|---|---|
+| Commits | `gh-as-agent commit -m "msg"` (sets `--author` to your agent id) |
+| PR / review / comment body | Write the body to a file, then `gh-as-agent stamp <file>` before posting |
+
+Example for a PR review:
+```bash
+cat > /tmp/review.md <<'EOF'
+... your review text ...
+EOF
+gh-as-agent stamp /tmp/review.md
+gh pr review <NUM> --comment --body-file /tmp/review.md
+```
+
+`stamp` is idempotent (re-stamping the same file is a no-op). The marker is an HTML comment, invisible in rendered Markdown but present in the source.
+
 ## Important Notes
 
 - Do not perform destructive operations (rm -rf, deleting files, etc.) without explicit permission.

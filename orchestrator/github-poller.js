@@ -83,6 +83,41 @@ function parseRepoFullName(url) {
   return null;
 }
 
+// Loop protection: extract the originating agent id (if any) from an event.
+// Agents stamp their actions via the `gh-as-agent` wrapper:
+//   - commits get author email `<agentId>@agents.local`
+//   - PR / review / comment bodies get an HTML marker `<!-- agent: <id> -->`
+// Returns the agent id if any of those signals match, else null.
+//
+// Edge case — mixed-author push: if a PushEvent contains commits from
+// both an agent and a human, this returns the first agent id found and
+// the entire push is filtered. This is intentional: filtering more
+// aggressively is safer for loop prevention than letting a partial
+// agent-push through. Pure human pushes (no agent commits) are
+// unaffected.
+const AGENT_MARKER_RE = /<!--\s*agent:\s*([a-zA-Z0-9_.-]+)\s*-->/;
+const AGENT_EMAIL_RE = /^([a-zA-Z0-9_.-]+)@agents\.local$/;
+
+function extractOriginAgent(ev) {
+  const p = ev?.payload || {};
+  for (const body of [p.pull_request?.body, p.review?.body, p.comment?.body, p.issue?.body]) {
+    if (typeof body === 'string') {
+      const m = body.match(AGENT_MARKER_RE);
+      if (m) return m[1];
+    }
+  }
+  if (Array.isArray(p.commits)) {
+    for (const c of p.commits) {
+      const email = c?.author?.email;
+      if (typeof email === 'string') {
+        const m = email.match(AGENT_EMAIL_RE);
+        if (m) return m[1];
+      }
+    }
+  }
+  return null;
+}
+
 class GitHubPoller {
   constructor({ loadEnvironment, listEnvironmentIds }) {
     this.loadEnvironment = loadEnvironment;
@@ -287,8 +322,19 @@ class GitHubPoller {
   _fanOut(repoFullName, ghEvent, subscribers) {
     const key = eventKey(ghEvent);
     if (!key) return;
+    const originAgentId = extractOriginAgent(ghEvent);
     for (const sub of subscribers) {
       if (!sub.events.has(key)) continue;
+      if (originAgentId && originAgentId === sub.agentId) {
+        // Self-action — skip to break loops (e.g. reviewer agent
+        // reacting to its own review-comment, push-watcher reacting to
+        // its own commit). Author/marker is set by the gh-as-agent
+        // wrapper; agents that bypass the wrapper lose this protection.
+        console.log(
+          `[GH-Poller] Loop-protect: ${key} (${ghEvent.id}) origin=${originAgentId} matches subscriber — skipping`,
+        );
+        continue;
+      }
       this._enqueue(sub.agentId, sub.triggerId, key, ghEvent);
     }
   }
@@ -386,4 +432,4 @@ class GitHubPoller {
   }
 }
 
-module.exports = { GitHubPoller, parseRepoFullName, eventKey };
+module.exports = { GitHubPoller, parseRepoFullName, eventKey, extractOriginAgent };

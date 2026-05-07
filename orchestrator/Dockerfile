@@ -29,6 +29,12 @@ COPY package.json .
 RUN npm install --omit=dev
 COPY *.js .
 
+# `gh-as-agent` wrapper: tags git commits and PR/review/comment bodies
+# with the per-agent identity so the GitHub poller can filter out events
+# the agent itself caused. See orchestrator/scripts/gh-as-agent.
+COPY scripts/gh-as-agent /usr/local/bin/gh-as-agent
+RUN chmod +x /usr/local/bin/gh-as-agent
+
 # Bundled fallback template: used by orchestrator when /template-workspace/CLAUDE.md
 # is not available in the mounted skills-pool volume (e.g. fresh installation).
 COPY CLAUDE-template.md /defaults/CLAUDE.md

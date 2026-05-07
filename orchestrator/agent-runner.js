@@ -436,6 +436,14 @@ class TriggerScheduler {
     // entries for the same trigger id, and the per-id overlap guard would
     // otherwise drop all but the first.
     for (const entry of pending) {
+      // BP-event batches are routed centrally by the orchestrator process —
+      // they don't need a triggers.json entry, just a kind discriminator.
+      if (entry?.kind === 'bp-event-batch') {
+        console.log(`[Runner:${AGENT_ID}] bp-event-batch from ${entry.source || 'unknown'}`);
+        await this.executeBpEvent(entry);
+        continue;
+      }
+
       const trigger = triggers.find(
         t => t.id === entry.triggerId
           && (t.type === 'http' || t.type === 'github-event')
@@ -450,6 +458,97 @@ class TriggerScheduler {
       } else {
         console.log(`[Runner:${AGENT_ID}] Pending trigger '${entry.triggerId}' not found or disabled — skipping`);
       }
+    }
+  }
+
+  // Format a bp-event-batch entry as a Matrix notification and invoke
+  // Claude. The orchestrator process already decided that *this* agent
+  // cares — the prompt frames the situation and asks Claude to inspect
+  // the affected BP and decide on the right reaction (typically posting
+  // a brief lay-of-the-land message and waiting for the user).
+  async executeBpEvent(entry) {
+    const dmRoom = loadDmRoomId();
+    if (!dmRoom) {
+      console.log(
+        `[Runner:${AGENT_ID}] bp-event received but no DM room exists yet — skipping notification`
+      );
+      return;
+    }
+
+    const role = entry.role || 'bp-instance';
+    const reasons = Array.isArray(entry.reasons) ? entry.reasons : [];
+    const source = entry.source || 'unknown';
+
+    let prompt;
+    if (role === 'orchestrator') {
+      // Awareness summary for the hosting orchestrator: list the affected BPs
+      // so the orchestrator agent can surface the cascade to the user.
+      const bullets = reasons.map((r) => {
+        const reasonsList = (r.reasons || []).map((x) => x.reason).join(', ');
+        return `- bp:${(r.bp || '').slice(0, 6)} — ${reasonsList || 'unspecified'}`;
+      }).join('\n');
+      prompt =
+        `SYSTEM NOTICE — BP-event cascade.\n\n` +
+        `Source: ${source}\n` +
+        `Downstream BPs in your tree are affected:\n\n${bullets}\n\n` +
+        `Your task: post a brief, friendly status message in this chat letting the user ` +
+        `know the cascade is in motion. Don't run any commands — the affected bp-instance ` +
+        `agents are being notified separately.`;
+    } else {
+      // bp-instance: this BP itself was affected. Frame what happened and
+      // suggest the appropriate ACE command (/confirm-valid or /revise).
+      const affected = entry.affectedBp ? `bp:${entry.affectedBp.slice(0, 6)}` : 'this BP';
+      const reasonLines = reasons.map((r) => {
+        if (r.reason === 'depends-on') {
+          return `- depends-on bp:${(r.source || '').slice(0, 6)} — event: ${r.event?.type || '?'}`;
+        }
+        if (r.reason === 'input-artifact') {
+          const paths = (r.paths || []).map(p => `\`${p}\``).join(', ');
+          return `- input-artifact from bp:${(r.source || '').slice(0, 6)} — paths: ${paths}`;
+        }
+        return `- ${r.reason || 'unknown'}`;
+      }).join('\n');
+      prompt =
+        `SYSTEM NOTICE — your Briefing Pack may be affected.\n\n` +
+        `Source: ${source}\n` +
+        `Affected: ${affected}\n` +
+        `Reasons:\n${reasonLines}\n\n` +
+        `Your task: post a brief lay-of-the-land message to the user in this chat — ` +
+        `summarise what changed upstream, whether your inputs/digest match, and which ACE ` +
+        `command (\`/confirm-valid\` or \`/revise\`) you would recommend. ` +
+        `Do not run \`/confirm-valid\` or \`/revise\` yet — wait for the user's reply.`;
+    }
+
+    const correlationId = `bp-event:${Date.now()}`;
+    try {
+      appendEvent(AGENT_ID, dmRoom, {
+        type: 'claude.invoke',
+        correlationId,
+        promptChars: prompt.length,
+      });
+    } catch { /* best effort */ }
+
+    let result;
+    try {
+      result = await callClaude(prompt, { roomId: dmRoom, correlationId });
+    } catch (err) {
+      console.error(`[Runner:${AGENT_ID}] bp-event Claude call failed: ${err.message}`);
+      return;
+    }
+    if (!result || !result.trim()) return;
+
+    try {
+      const eventId = await sendFormatted(this.agentClient, dmRoom, result);
+      try {
+        appendEvent(AGENT_ID, dmRoom, {
+          type: 'message.posted',
+          correlationId,
+          eventId,
+        });
+      } catch { /* best effort */ }
+      writeLastResponseAt();
+    } catch (err) {
+      console.error(`[Runner:${AGENT_ID}] Could not post bp-event notification: ${err.message}`);
     }
   }
 

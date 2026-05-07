@@ -50,7 +50,22 @@ const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
 
 /* ─── Helpers ───────────────────────────────────────────────────────── */
 
+// writeJsonAtomic and readJsonFile only ever receive paths under WORKSPACE
+// (or POOL_DIR for skill files). The inline checks below refuse anything
+// else and reject '..' segments. Callers should have already validated
+// their user-supplied id segments via AGENT_ID_RE etc., so this only fires
+// on a programming bug. CodeQL recognises String.prototype.startsWith and
+// String.prototype.includes('..') as path-injection sanitiser barriers
+// when applied in the same function as the sink, so the checks are inlined
+// (not pulled into a helper) to close the cross-function js/path-injection
+// alerts that ~30 caller sites otherwise propagate into the helper body.
+
 function writeJsonAtomic(filePath, data) {
+  if (typeof filePath !== 'string' ||
+      filePath.includes('..') ||
+      !(filePath.startsWith(WORKSPACE + path.sep) || filePath.startsWith(POOL_DIR + path.sep))) {
+    throw new Error(`writeJsonAtomic: refusing path outside allowed roots: ${filePath}`);
+  }
   const tmp = filePath + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
   fs.renameSync(tmp, filePath);
@@ -73,6 +88,11 @@ function podmanRequest(method, urlPath) {
 }
 
 function readJsonFile(filePath, fallback = null) {
+  if (typeof filePath !== 'string' ||
+      filePath.includes('..') ||
+      !(filePath.startsWith(WORKSPACE + path.sep) || filePath.startsWith(POOL_DIR + path.sep))) {
+    return fallback;
+  }
   try {
     return JSON.parse(fs.readFileSync(filePath, 'utf8'));
   } catch {

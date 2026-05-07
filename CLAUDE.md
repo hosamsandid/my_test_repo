@@ -115,6 +115,47 @@ X-Hook-Secret: <trigger.secret>
 
 Results are posted to `trigger.roomId` if set, otherwise to the agent's DM room with the admin (read from `/workspace/agents/<id>/dm-room.json`). If neither is available — i.e. the user has not yet opened a chat with this agent — the trigger run is skipped. `[PASS]` suppresses output.
 
+### BP-event router
+
+The orchestrator hosts a central ingestion endpoint that any signaling source (today: ACE `bp-transition.py`; future: GitHub-poller diff path) can call to announce a Briefing Pack change. The signaler announces what changed; the orchestrator owns the routing.
+
+**Endpoint:** `POST /internal/bp-events` (port 4002, no auth — internal-only)
+
+**Payload shape:**
+
+```json
+{
+  "source": "<agent-id-or-script-identifier>",
+  "events": [
+    { "type": "bp:revised|bp:completed|bp:input-changed", "bp": "<12-char hex>", "details": { ... } }
+  ]
+}
+```
+
+**Routing algorithm (`orchestrator.routeBpEvents` + `bp-event-router.js`):**
+
+1. Build a one-shot reverse index `bpId → { stubId, parentOrchestratorId }` from the bp-instance configs.
+2. Group events by hosting orchestrator. Events whose BP is unknown to any stub are skipped with `unknown-bp`.
+3. For each orchestrator: force-pull its briefings clone (so stale local index doesn't cost the routing decision), load `<briefingsPath>/artifacts/briefings/.index.json`.
+4. For each event, compute affected BPs:
+   - **`depends-on` dependents** — any leaf BP whose `depends-on` array contains the event's BP hash.
+   - **input-artifact dependents** — any leaf BP with an `artifacts[]` entry where `direction: input` and `path` matches a `direction: output` path of the event's BP.
+5. For each affected BP, locate its bp-instance stub. Apply the agent's `bp-trigger-policy` (see below), then `enableAgent` (idempotent — materializes stubs, respawns disabled agents) and append a `bp-event-batch` entry to its `pending-triggers.json`.
+6. Add an awareness entry to the hosting orchestrator's `pending-triggers.json` listing all downstream effects.
+
+**`bp-event-batch` is not a triggers.json type.** It's a `kind`-tagged entry that the agent-runner's drain loop handles inline (`executeBpEvent`) — no triggers.json registration required.
+
+**Agent `bp-trigger-policy`** (optional field in `config.json`, defaults applied when absent):
+
+| Field | Values | Default | Effect |
+|---|---|---|---|
+| `mode` | `off` / `notify-only` / `notify-on-activate` | `notify-on-activate` | `off` ignores events; `notify-only` enqueues only when the process is already running; `notify-on-activate` materializes stubs and respawns disabled agents before enqueuing |
+| `respect-manual-disable` | `true` / `false` | `false` | When `true` and an agent was manually disabled, skip activation despite the event |
+
+**Idempotency.** Multiple events for the same `(type, bp)` within one request are deduplicated. `enableAgent` is itself idempotent. Re-firing the same signal is safe — the receiving agent simply gets one more notification entry.
+
+**Best-effort posture.** The signaler treats endpoint failures as silent (connection refused → no AEE running, fine). The endpoint never throws on routing errors per-target; failures are surfaced in the response's `routed[].error` / `skipped[]` arrays.
+
 ### Agent Management
 
 All agent lifecycle operations (create / enable / disable / edit prompt / delete) happen via the **Admin Console** at `http://localhost:4000`.

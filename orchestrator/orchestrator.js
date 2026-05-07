@@ -7,6 +7,7 @@ const {
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const bpEventRouter = require("./bp-event-router");
 
 // ============================================================
 // Config
@@ -724,9 +725,13 @@ async function setDisplayName(token, userId, displayName) {
 
 // Throttle the per-orchestrator workspace pull to at most once per
 // _PULL_THROTTLE_MS, so the 30s claim-tick can call it cheaply on every
-// iteration without hammering the remote.
+// iteration without hammering the remote. The forced variant (`{ force: true }`)
+// is for callers that need a fresh local index *now* (e.g. BP-event routing
+// against .index.json) but still coalesces same-orchestrator bursts within
+// _PULL_FORCE_THROTTLE_MS so a flurry of signals can't multiply pulls.
 const _pullThrottles = new Map(); // orchestratorId -> last pull timestamp ms
 const _PULL_THROTTLE_MS = 60_000;
+const _PULL_FORCE_THROTTLE_MS = 5_000;
 
 // Build the GIT_SSH_COMMAND value for an env with an attached SSH key. Falls
 // back to null so the caller can leave process.env's default in place (the
@@ -746,14 +751,15 @@ function buildGitSshCommand(env) {
 // briefings workspace clone. Throttled per orchestrator. Failures are
 // logged but never throw — a stale local main is preferable to a broken
 // claim tick.
-function pullOrchestratorWorkspace(orchestratorId, briefingsPath, env) {
+function pullOrchestratorWorkspace(orchestratorId, briefingsPath, env, { force = false } = {}) {
   const rel = (briefingsPath || "").replace(/^\/+|\/+$/g, "");
   const workspace = path.join("/workspace/agents", orchestratorId, rel);
   if (!fs.existsSync(path.join(workspace, ".git"))) {
     return { skipped: "not-a-git-repo" };
   }
   const last = _pullThrottles.get(orchestratorId) || 0;
-  if (Date.now() - last < _PULL_THROTTLE_MS) return { skipped: "throttled" };
+  const throttleMs = force ? _PULL_FORCE_THROTTLE_MS : _PULL_THROTTLE_MS;
+  if (Date.now() - last < throttleMs) return { skipped: "throttled" };
   _pullThrottles.set(orchestratorId, Date.now());
 
   const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
@@ -794,6 +800,31 @@ function patchBriefForClaim(content, stubId) {
   fm = upsertYamlField(fm, "agent-id", stubId);
   fm = upsertYamlField(fm, "claimed", new Date().toISOString());
   return content.replace(fmMatch[0], `---\n${fm.replace(/\n+$/, "")}\n---`);
+}
+
+// Append a bp-event-batch entry to an agent's pending-triggers.json. The
+// agent-runner drain loop picks it up by `kind` (no triggers.json entry
+// required — the routing decision was already made centrally). Creates
+// the agent dir if it doesn't exist yet (a stub being materialised at
+// the same time may not have written its dir yet).
+function enqueueBpEventBatch(agentId, payload) {
+  const pendingPath = path.join(AGENTS_DIR, agentId, "pending-triggers.json");
+  let pending = [];
+  try {
+    if (fs.existsSync(pendingPath)) pending = JSON.parse(fs.readFileSync(pendingPath, "utf8"));
+    if (!Array.isArray(pending)) pending = [];
+  } catch { /* corrupt file — start over */ }
+  pending.push({
+    kind: "bp-event-batch",
+    receivedAt: new Date().toISOString(),
+    ...payload,
+  });
+  try {
+    fs.mkdirSync(path.dirname(pendingPath), { recursive: true });
+    fs.writeFileSync(pendingPath, JSON.stringify(pending, null, 2));
+  } catch (err) {
+    console.error(`[Orchestrator] Cannot enqueue bp-event for ${agentId}: ${err.message}`);
+  }
 }
 
 // Persistent notified-set per orchestrator. Tracks bpIds we've already
@@ -918,6 +949,17 @@ function bpInstanceSystemPrompt(cfg) {
     `5. Reserve CRP escalation for ambiguity inside the brief itself. "Upstream BP X hasn't run yet" is **not** an escalation trigger — collaborate with the human to fill that gap instead.`,
     ``,
     `The brief is your map, not your cage. For coordination across multiple BPs, point the human at the orchestrator agent.`,
+    ``,
+    `## Closing the loop — always use bp-transition.py`,
+    ``,
+    `Whenever your work effectively changes the BP's lifecycle state (you finished it, or you reworked already-completed output), close the loop with the canonical ACE transition script — never edit \`brief.md\` frontmatter (\`status\`, \`revision\`, \`agent-id\`, \`completed\`, \`stale-because\`) by hand. The script regenerates \`.index.json\`, commits with the right message format, and — critically — signals the AEE orchestrator so downstream BPs (depends-on dependents and input-artifact dependents) get woken up and notified automatically.`,
+    ``,
+    `- **Finished a structured run or finished meaningful dynamic-mode work that fulfils the brief:**`,
+    `  \`python3 scripts/bp-transition.py complete ${cfg.bpId.slice(0, 6)} --push\``,
+    `- **Reworked output of an already completed/reviewed BP** (substantive change a downstream BP would care about):`,
+    `  \`python3 scripts/bp-transition.py revise ${cfg.bpId.slice(0, 6)} --reason "..." --push\``,
+    ``,
+    `If you're unsure whether your dynamic-mode change is "substantive enough" to warrant a revise: ask the user. Skipping the transition silently means downstream agents stay unaware. The signal is best-effort and never blocks — running it costs nothing, omitting it costs propagation.`,
   ].join("\n");
 }
 
@@ -1219,8 +1261,7 @@ class Orchestrator {
 
     const env = loadEnvironment(orchCfg.environmentId);
     if (env) {
-      if (force) _pullThrottles.delete(orchestratorId);
-      pullOrchestratorWorkspace(orchestratorId, orchCfg.briefingsPath, env);
+      pullOrchestratorWorkspace(orchestratorId, orchCfg.briefingsPath, env, { force });
     }
 
     const bps = await fetchBriefingPacks(orchestratorId, orchCfg.briefingsPath);
@@ -1378,6 +1419,229 @@ class Orchestrator {
       );
     }
     return { newStubs, newlyDispatched };
+  }
+
+  // Route a batch of BP events to the affected bp-instance stubs and the
+  // hosting orchestrator. The signaling agent does NOT do reverse-dep
+  // lookups itself — it just announces "I changed BP X". This method:
+  //
+  //   1. Finds which orchestrator hosts each event's BP (via the
+  //      bp-instance stub's parentOrchestratorId).
+  //   2. Reads that orchestrator's .index.json for graph + artifact data.
+  //   3. Computes affected BPs (depends-on dependents + input-artifact
+  //      dependents).
+  //   4. For each affected BP, locates the bp-instance stub.
+  //   5. Applies the agent's bp-trigger-policy:
+  //        - off                 → skip
+  //        - notify-only         → enqueue only if process is running
+  //        - notify-on-activate  → enable (materialize stub) + enqueue
+  //   6. Notifies the hosting orchestrator separately for awareness.
+  //
+  // Inputs:  { source: "<id>", events: [{ type, bp, details? }, ...] }
+  // Returns: { ok, routed: [...], skipped: [...] }
+  async routeBpEvents(payload) {
+    const { source: rawSource, events } = payload || {};
+    if (!Array.isArray(events) || events.length === 0) {
+      return { ok: true, routed: [], skipped: [], message: "no events" };
+    }
+
+    // The source field flows verbatim into a Claude prompt downstream.
+    // /internal/bp-events is container-internal but we still strip to a
+    // narrow charset + length so a malformed/hostile signaler can't inject
+    // newlines or control characters into the agent's prompt context.
+    const source = typeof rawSource === "string"
+      ? rawSource.slice(0, 200).replace(/[^\w@./:+-]/g, "")
+      : "";
+
+    // Sanitize and deduplicate events on (type, bp)
+    const seen = new Set();
+    const cleanEvents = [];
+    for (const e of events) {
+      if (!e || typeof e.type !== "string" || typeof e.bp !== "string") continue;
+      if (!/^[0-9a-f]{12}$/.test(e.bp)) continue;
+      const key = `${e.type}|${e.bp}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      cleanEvents.push({ type: e.type, bp: e.bp, details: e.details || {} });
+    }
+    if (cleanEvents.length === 0) {
+      return { ok: true, routed: [], skipped: [], message: "no valid events" };
+    }
+
+    // Build a one-shot reverse index: bpId → owning orchestrator + stub id.
+    // listAgentIds() can be in the hundreds; doing this once per call beats
+    // doing it once per event.
+    const bpHashToStub = new Map();
+    for (const id of listAgentIds()) {
+      const cfg = loadAgentConfig(id);
+      if (cfg?.role === "bp-instance" && typeof cfg.bpId === "string") {
+        bpHashToStub.set(cfg.bpId, { stubId: id, parentOrchestratorId: cfg.parentOrchestratorId });
+      }
+    }
+
+    // Group events by hosting orchestrator. Skip events whose BP we don't know.
+    const byOrchestrator = new Map(); // orchId → { events, orchCfg }
+    const skipped = [];
+
+    for (const ev of cleanEvents) {
+      const stubInfo = bpHashToStub.get(ev.bp);
+      if (!stubInfo) {
+        skipped.push({ event: ev, reason: "unknown-bp" });
+        continue;
+      }
+      const orchId = stubInfo.parentOrchestratorId;
+      if (!orchId) {
+        skipped.push({ event: ev, reason: "stub-has-no-parent-orchestrator" });
+        continue;
+      }
+      let bucket = byOrchestrator.get(orchId);
+      if (!bucket) {
+        const orchCfg = loadAgentConfig(orchId);
+        bucket = { events: [], orchCfg };
+        byOrchestrator.set(orchId, bucket);
+      }
+      bucket.events.push(ev);
+    }
+
+    const routed = [];
+
+    for (const [orchId, { events: orchEvents, orchCfg }] of byOrchestrator) {
+      if (!orchCfg) {
+        for (const ev of orchEvents) skipped.push({ event: ev, reason: "orchestrator-not-found" });
+        continue;
+      }
+
+      // .index.json lives inside the orchestrator's clone of the briefings repo.
+      // Force-pull first so a signal from a just-pushed agent isn't misrouted
+      // against a stale local index. Pull failures are non-fatal — we fall
+      // back to whatever .index.json is currently on disk. Forced pulls still
+      // coalesce within _PULL_FORCE_THROTTLE_MS so a burst of bp-events from
+      // several agents in quick succession doesn't multiply git operations.
+      const briefingsPath = (orchCfg.briefingsPath || "").replace(/^\/+|\/+$/g, "");
+      const env = loadEnvironment(orchCfg.environmentId);
+      if (env) {
+        pullOrchestratorWorkspace(orchId, briefingsPath, env, { force: true });
+      }
+
+      const indexPath = path.join(
+        AGENTS_DIR, orchId, briefingsPath, "artifacts/briefings/.index.json"
+      );
+
+      let briefings;
+      try {
+        briefings = bpEventRouter.loadIndex(indexPath);
+      } catch (err) {
+        console.warn(`[Orchestrator] BP-events: cannot load index for ${orchId}: ${err.message}`);
+        for (const ev of orchEvents) {
+          skipped.push({ event: ev, reason: "index-unavailable", detail: err.message });
+        }
+        continue;
+      }
+
+      const { perAffectedBp, unknownSources } = bpEventRouter.batchEventsByAffected(
+        orchEvents,
+        (bpHash) => bpEventRouter.findAffectedBps(briefings, bpHash),
+      );
+      for (const src of unknownSources) {
+        skipped.push({ event: { bp: src }, reason: "source-not-in-index" });
+      }
+
+      // Build fan-out targets: every affected bp-instance, plus the
+      // orchestrator itself for awareness (only when we routed something).
+      const targets = [];
+      for (const [affectedBp, reasons] of perAffectedBp) {
+        const dst = bpHashToStub.get(affectedBp);
+        if (!dst) {
+          skipped.push({ bp: affectedBp, reason: "no-stub-for-affected-bp" });
+          continue;
+        }
+        targets.push({
+          agentId: dst.stubId,
+          role: "bp-instance",
+          affectedBp,
+          reasons,
+        });
+      }
+      if (perAffectedBp.size > 0) {
+        targets.push({
+          agentId: orchId,
+          role: "orchestrator",
+          affectedBp: null,
+          reasons: [...perAffectedBp.entries()].map(([bp, rs]) => ({
+            kind: "downstream-affected", bp, reasons: rs,
+          })),
+        });
+      }
+
+      // Apply policy + execute in parallel. Promise.allSettled so one bad
+      // target doesn't sink the rest.
+      const results = await Promise.allSettled(
+        targets.map((t) => this._applyBpTriggerPolicy(t, source))
+      );
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i];
+        if (r.status === "fulfilled") routed.push(r.value);
+        else routed.push({
+          agentId: targets[i].agentId,
+          action: "error",
+          error: r.reason?.message || String(r.reason),
+        });
+      }
+    }
+
+    return { ok: true, source: source || null, routed, skipped };
+  }
+
+  // Apply a single agent's bp-trigger-policy to a fan-out target. Decides
+  // whether to enable+enqueue, enqueue-only, or skip. Always idempotent —
+  // multiple events for the same agent just append to pending-triggers.
+  async _applyBpTriggerPolicy(target, source) {
+    const cfg = loadAgentConfig(target.agentId);
+    if (!cfg) {
+      return { agentId: target.agentId, action: "skipped", reason: "agent-not-found" };
+    }
+    const policy = cfg["bp-trigger-policy"] || {};
+    const mode = policy.mode || "notify-on-activate";
+    const respectManualDisable = policy["respect-manual-disable"] === true;
+
+    if (mode === "off") {
+      return { agentId: target.agentId, action: "skipped", reason: "policy-off" };
+    }
+
+    const isStub = !cfg.token;
+    const wasManuallyDisabled = !isStub && cfg.enabled === false;
+
+    if (mode === "notify-only") {
+      const proc = agentProcesses.get(target.agentId);
+      if (!proc || proc.exitCode != null || proc.killed) {
+        return { agentId: target.agentId, action: "skipped", reason: "notify-only-and-not-running" };
+      }
+    } else {
+      // notify-on-activate (default): materialize stubs + respawn disabled
+      if (wasManuallyDisabled && respectManualDisable) {
+        return { agentId: target.agentId, action: "skipped", reason: "manually-disabled" };
+      }
+      try {
+        await this.enableAgent(target.agentId);
+      } catch (err) {
+        return { agentId: target.agentId, action: "enable-failed", error: err.message };
+      }
+    }
+
+    enqueueBpEventBatch(target.agentId, {
+      source: source || "unknown",
+      role: target.role,
+      affectedBp: target.affectedBp,
+      reasons: target.reasons,
+    });
+
+    return {
+      agentId: target.agentId,
+      action: "enqueued",
+      role: target.role,
+      affectedBp: target.affectedBp,
+      materialized: isStub && mode !== "notify-only",
+    };
   }
 
   // Materialize a stub bp-instance agent (or re-enable a previously-active
@@ -2225,6 +2489,55 @@ async function main() {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: err.message }));
       }
+      return;
+    }
+
+    // ── BP-event router ──────────────────────────────────────────────────
+    // Single ingestion point for BP signals from any source (bp-transition.py
+    // hooks, future GitHub-poller diff, etc.). The signaling agent does not
+    // do reverse-dep lookups itself — it just announces what changed. The
+    // orchestrator process decides routing, materialization, activation.
+    if (req.method === 'POST' && req.url === '/internal/bp-events') {
+      let body = '';
+      let tooLarge = false;
+      req.on('data', (d) => {
+        if (tooLarge) return;
+        body += d;
+        // Soft limit. Stop appending so memory stays bounded, but let the
+        // request finish so we can still send a proper 413. (req.destroy()
+        // would prevent the 'end' callback from firing — the client would
+        // see a connection reset instead of a structured error.)
+        if (body.length > 1_000_000) {
+          tooLarge = true;
+          body = '';
+        }
+      });
+      req.on('end', () => {
+        if (tooLarge) {
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'payload too large (max 1 MB)' }));
+          return;
+        }
+        let parsed;
+        try { parsed = JSON.parse(body || '{}'); }
+        catch { parsed = null; }
+        if (!parsed || typeof parsed !== 'object') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'invalid JSON body' }));
+          return;
+        }
+        (async () => {
+          try {
+            const result = await orchestrator.routeBpEvents(parsed);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+          } catch (err) {
+            console.error(`[Orchestrator] routeBpEvents error: ${err.message}`);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+          }
+        })();
+      });
       return;
     }
 

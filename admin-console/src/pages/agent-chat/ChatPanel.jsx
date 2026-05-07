@@ -685,7 +685,7 @@ export default function ChatPanel({
           type="button"
           onClick={() => setShowClearConfirm(true)}
           disabled={!roomId || clearingHistory || disabled}
-          title="Permanently delete all messages in this chat room"
+          title="Permanently delete all messages in this chat"
           style={{
             ...sessionBtnStyle(!roomId || clearingHistory || disabled),
             color: (!roomId || clearingHistory || disabled) ? undefined : 'var(--eb-status-error)',
@@ -961,7 +961,7 @@ export default function ChatPanel({
       <ConfirmDialog
         open={showClearConfirm}
         title="Clear Chat History"
-        message="This will permanently delete all messages in this chat room. This action cannot be undone."
+        message="This will permanently delete all messages in this chat. This action cannot be undone."
         variant="danger"
         confirmLabel="Delete All Messages"
         onConfirm={() => { setShowClearConfirm(false); handleClearHistory(); }}

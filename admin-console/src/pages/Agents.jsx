@@ -384,7 +384,7 @@ const ROLE_INFO = {
     short: 'A single chat agent with its own system prompt.',
     body: (
       <>
-        Creates one Matrix user (<code>@id:local</code>) you can talk to in a 1:1 chat.
+        Creates a single agent that you can talk to in the <strong>Agent Chat</strong>.
         The system prompt you write below shapes its persona — for example a COBOL specialist,
         a code-review buddy, or a release manager. Add cron / GitHub triggers later to make
         it run autonomously in addition to responding to messages.
@@ -398,10 +398,10 @@ const ROLE_INFO = {
     short: 'A reusable template — spawn multiple identical instances on demand.',
     body: (
       <>
-        Stores a system-prompt template without creating a Matrix user itself. Instead you click
+        Stores a system-prompt template without creating an agent itself. Instead you click
         <strong> Add Instance</strong> on the group card to spawn one or more agents that all
-        share the same prompt and Working Environment, but each gets its own Matrix user,
-        workspace and chat.
+        share the same prompt and Working Environment, but each gets its own workspace and
+        its own conversation in the Agent Chat.
       </>
     ),
     when: 'Use when you need several copies of the same kind of expert — e.g. a pool of three reviewer agents working in parallel.',
@@ -734,8 +734,8 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           placeholder="e.g. cobol-expert"
         />
         <div style={helpTextStyle}>
-          Lowercase letters, digits and hyphens only. Becomes the Matrix user
-          (<code>@{form.id || 'id'}:local</code>) and the workspace folder name.
+          Lowercase letters, digits and hyphens only. Used as the agent's URL
+          (<code>/chats/{form.id || 'id'}</code>) and the workspace folder name.
           <strong> Cannot be changed after creation.</strong>
         </div>
       </div>
@@ -971,7 +971,7 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
       <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
         <span style={{ fontSize: 'var(--eb-text-sm)' }}>{agent.displayName}</span>
         <span style={{ fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)' }}>
-          @{agent.id}:local
+          {agent.id}
         </span>
         <StateBadge state={state} />
       </div>
@@ -1582,8 +1582,8 @@ export default function Agents() {
           What is an agent?
         </p>
         <p style={{ margin: 0 }}>
-          An <strong>Agent</strong> is a long-running Claude Code instance with its own Matrix user, workspace and session history.
-          You chat with it in a 1:1 room (no shared multi-agent room exists). When you create an agent you choose:
+          An <strong>Agent</strong> is a long-running Claude Code instance with its own workspace and session history.
+          Once created, you talk to it in the <strong>Agent Chat</strong>. When you create an agent you choose:
         </p>
         <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
           <li><strong>A Working Environment</strong> — supplies skills, repositories, GitHub token and the LLM endpoint.</li>
@@ -1591,7 +1591,7 @@ export default function Agents() {
           <li><strong>A system prompt</strong> — the persona / instructions Claude reads at startup. Orchestrators don't need one; their behaviour is fixed.</li>
         </ul>
         <p style={{ margin: 0 }}>
-          After creation the agent appears below as a card. <em>Active</em> agents have a Matrix user and can be chatted with;
+          After creation the agent appears below as a card. <em>Active</em> agents are running and ready to chat;
           <em> paused</em> agents keep their workspace but the process is stopped; <em>not initialised</em> stubs (e.g. orchestrator children) need
           one click on <strong>Activate</strong> to come to life. You can edit, deactivate or delete each agent from its card.
         </p>
@@ -1700,7 +1700,7 @@ export default function Agents() {
         title="Deactivate Agent"
         message={
           `Reset "${deactivateTarget?.displayName ?? deactivateTarget?.id}" to its stub state? ` +
-          `This stops the agent process, deactivates its Matrix user, and wipes the workspace. ` +
+          `This stops the agent process and wipes the workspace. ` +
           `The stub config is kept so the agent can be reactivated later — but session history, ` +
           `cloned repositories, and any in-workspace state will be lost.`
         }

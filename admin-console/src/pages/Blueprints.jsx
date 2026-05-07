@@ -166,7 +166,7 @@ function InstanceCreateForm({ blueprint, onSave, onCancel, saving, error }) {
           onChange={e => update('instanceId', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
         />
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-          Becomes @id:local in Matrix.
+          Lowercase letters, digits and hyphens only. Identifies the agent in URLs and as the workspace folder name.
         </div>
       </div>
 
@@ -327,7 +327,7 @@ function BlueprintCard({ blueprint, onDelete, onNewInstance, onViewMemory }) {
                 <div style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--eb-accent-primary)', flexShrink: 0 }} />
                 <div style={{ flex: 1 }}>
                   <span style={{ fontSize: 'var(--eb-text-sm)' }}>{inst.displayName}</span>
-                  <span style={{ marginLeft: 8, fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)' }}>@{inst.id}:local</span>
+                  <span style={{ marginLeft: 8, fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)' }}>{inst.id}</span>
                 </div>
                 <StatusBadge enabled={inst.enabled !== false} />
               </div>

@@ -197,7 +197,7 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
       <div>
         <div style={labelStyle}>ID <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
         <input style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }} value={form.id} onChange={e => update('id', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))} placeholder="e.g. cobol-expert" />
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>Only lowercase letters, digits and hyphens. Becomes @id:local.</div>
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>Only lowercase letters, digits and hyphens. Identifies the agent in URLs and the workspace folder.</div>
       </div>
 
       <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} placeholder="COBOL Expert" />
@@ -222,7 +222,7 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
       <div>
         <div style={labelStyle}>Role <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
         <select value={form.role} onChange={e => update('role', e.target.value)} style={inputStyle}>
-          <option value="expert">Expert — responds to questions in the room</option>
+          <option value="expert">Expert — responds to questions in the agent chat</option>
           <option value="orchestrator">Orchestrator</option>
         </select>
       </div>
@@ -276,8 +276,8 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
       {saving && (
         <div style={{ padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-info-bg)', border: '1px solid var(--eb-status-info)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-info)' }}>
           {form.role === 'orchestrator'
-            ? 'Setting up the orchestrator — provisioning the Matrix user, preparing the workspace, cloning repositories, and initializing the BriefingPack loop. This may take a minute or two, please wait.'
-            : 'Setting up the agent — provisioning the Matrix user, preparing the workspace, and cloning repositories. This may take a moment, please wait.'}
+            ? 'Setting up the orchestrator — preparing the workspace, cloning repositories, and initializing the BriefingPack loop. This may take a minute or two, please wait.'
+            : 'Setting up the agent — preparing the workspace and cloning repositories. This may take a moment, please wait.'}
         </div>
       )}
 
@@ -428,7 +428,7 @@ function AgentCloneForm({ sourceAgent, onSave, onCancel, saving, error }) {
           placeholder="e.g. cobol-expert-2"
         />
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-          Only lowercase letters, digits and hyphens. Becomes @id:local.
+          Only lowercase letters, digits and hyphens. Identifies the agent in URLs and the workspace folder.
         </div>
       </div>
 

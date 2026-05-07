@@ -541,7 +541,7 @@ function EmptyState() {
           color: 'var(--eb-text-muted)',
           lineHeight: 1.5,
         }}>
-          Your messages run via Matrix and stream in real time.
+          Replies stream in real time as the agent thinks.
         </div>
       </div>
     </div>

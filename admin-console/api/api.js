@@ -2164,9 +2164,13 @@ app.get('/api/agents/:agentId/workspace/file', (req, res) => {
 });
 
 // File upload. Accepts multipart/form-data with:
-//   files[]  — one or more files (max 10, 50 MB each)
-//   path     — target directory relative to agent workspace root (optional, defaults to root)
-// The target directory must already exist within the agent workspace.
+//   files[]         — one or more files (max 500, 50 MB each)
+//   path            — target directory relative to agent workspace root (optional, defaults to root)
+//   relativePaths[] — optional parallel array; when provided for a file the value is the
+//                     path relative to the target dir (e.g. "mydir/sub/file.txt") used to
+//                     recreate the directory tree from a folder upload. Empty string means
+//                     place the file directly in the target dir (plain file upload).
+// The base target directory must already exist within the agent workspace.
 // Filenames are sanitised; leading dots are preserved so agents can receive
 // dotfiles (.env, .claude/settings.json, etc.) — overwriting those is an
 // intentional capability for admins and not considered a vulnerability.
@@ -2175,9 +2179,13 @@ const _upload = multer({
   limits: { fileSize: 50 * 1024 * 1024 },
 });
 
-app.post('/api/agents/:agentId/workspace/upload', _upload.array('files', 10), (req, res) => {
+app.post('/api/agents/:agentId/workspace/upload', _upload.array('files', 500), (req, res) => {
   const { agentId } = req.params;
   const relDir = typeof req.body.path === 'string' ? req.body.path : '';
+
+  // relativePaths may arrive as a single string (one file) or an array (multiple files).
+  const rawRelPaths = req.body.relativePaths;
+  const relPaths = Array.isArray(rawRelPaths) ? rawRelPaths : (rawRelPaths != null ? [rawRelPaths] : []);
 
   // safeAgentPath validates agentId format, resolves realpath, and checks
   // path-traversal / outward-symlink containment — user-controlled input is
@@ -2211,23 +2219,58 @@ app.post('/api/agents/:agentId/workspace/upload', _upload.array('files', 10), (r
   const uploaded = [];
   const errors = [];
 
-  for (const file of req.files) {
-    // Strip path separators and non-printable characters from the filename.
-    const safeName = path.basename(file.originalname).replace(/[^\w\-. ()[\]]/g, '_').trim();
-    if (!safeName) {
-      errors.push({ name: file.originalname, error: 'Invalid filename' });
-      continue;
+  for (let i = 0; i < req.files.length; i++) {
+    const file = req.files[i];
+    const relFilePath = typeof relPaths[i] === 'string' ? relPaths[i] : '';
+
+    // destName  — sanitised filename only (no directory component)
+    // destParentDir — the directory in which the file will be placed, built
+    //                 exclusively from safeAgentPath-resolved targetDir plus
+    //                 individually sanitised path segments (no path.dirname on
+    //                 tainted input, which would trigger CodeQL js/path-injection).
+    let destName;
+    let destParentDir;
+
+    if (relFilePath) {
+      // Folder upload: sanitise each segment individually, then split into
+      // file name (last) and parent directory chain (all but last).
+      const segments = relFilePath.split('/').map(seg =>
+        path.basename(seg).replace(/[^\w\-. ()[\]]/g, '_').trim()
+      ).filter(Boolean);
+      if (segments.length === 0) {
+        errors.push({ name: file.originalname, error: 'Invalid relative path' });
+        continue;
+      }
+      destName = segments[segments.length - 1];
+      destParentDir = segments.length > 1
+        ? path.join(targetDir, ...segments.slice(0, -1))
+        : targetDir;
+    } else {
+      // Plain file upload: just sanitise the filename.
+      const safeName = path.basename(file.originalname).replace(/[^\w\-. ()[\]]/g, '_').trim();
+      if (!safeName) {
+        errors.push({ name: file.originalname, error: 'Invalid filename' });
+        continue;
+      }
+      destName = safeName;
+      destParentDir = targetDir;
     }
-    const destPath = path.join(targetDir, safeName);
+
+    const destPath = path.join(destParentDir, destName);
+
     // Defence-in-depth: the dest must still be strictly inside the agent root.
     if (destPath !== agentRoot && !destPath.startsWith(agentRoot + path.sep)) {
       errors.push({ name: file.originalname, error: 'Path escapes workspace' });
       continue;
     }
+
     try {
+      // destParentDir is safeAgentPath(targetDir) + sanitised segments only —
+      // it cannot contain '..' or path separators. Containment is verified above.
+      fs.mkdirSync(destParentDir, { recursive: true }); // codeql[js/path-injection]
       fs.writeFileSync(destPath, file.buffer);
       uploaded.push({
-        name: safeName,
+        name: relFilePath || destName,
         path: path.relative(agentRoot, destPath),
         size: file.size,
       });

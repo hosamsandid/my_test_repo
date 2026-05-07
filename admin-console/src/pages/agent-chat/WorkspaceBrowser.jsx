@@ -39,6 +39,7 @@ export default function WorkspaceBrowser({ agentId, active }) {
   const [uploadStatus, setUploadStatus] = useState('idle'); // 'idle' | 'uploading' | 'success' | 'error'
   const [uploadMessage, setUploadMessage] = useState('');
   const fileInputRef = useRef(null);
+  const folderInputRef = useRef(null);
   const uploadResetTimerRef = useRef(null);
 
   // Bump generation counter on agent change so a slow response from the
@@ -117,13 +118,17 @@ export default function WorkspaceBrowser({ agentId, active }) {
     paths.forEach(p => fetchDir(p));
   }, [agentId, expanded, fetchDir]);
 
-  const handleUpload = useCallback(async (files) => {
+  // isFolder=true: files carry webkitRelativePath for directory tree reconstruction.
+  const handleUpload = useCallback(async (files, isFolder = false) => {
     if (!files || files.length === 0) return;
     setUploadStatus('uploading');
     setUploadMessage('');
     const form = new FormData();
     form.append('path', uploadDir);
-    for (const f of files) form.append('files', f);
+    for (const f of files) {
+      form.append('files', f);
+      form.append('relativePaths', isFolder && f.webkitRelativePath ? f.webkitRelativePath : '');
+    }
     try {
       const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/workspace/upload`, {
         method: 'POST',
@@ -136,8 +141,13 @@ export default function WorkspaceBrowser({ agentId, active }) {
         return;
       }
       const n = j?.uploaded?.length ?? 0;
+      const folderName = isFolder && files[0]?.webkitRelativePath
+        ? files[0].webkitRelativePath.split('/')[0]
+        : null;
       setUploadStatus('success');
-      setUploadMessage(`${n} file${n !== 1 ? 's' : ''} uploaded`);
+      setUploadMessage(folderName
+        ? `${n} file${n !== 1 ? 's' : ''} from "${folderName}" uploaded`
+        : `${n} file${n !== 1 ? 's' : ''} uploaded`);
       refreshAll();
       // Auto-close the panel after a brief success indication.
       // Timer is stored so it can be cancelled if the component unmounts first.
@@ -151,6 +161,14 @@ export default function WorkspaceBrowser({ agentId, active }) {
       setUploadMessage(err.message || 'Upload failed');
     }
   }, [agentId, uploadDir, refreshAll]);
+
+  // Opens the upload panel pre-targeted to a specific directory path.
+  const handleUploadToDir = useCallback((dirPath) => {
+    setUploadDir(dirPath);
+    setUploadOpen(true);
+    setUploadStatus('idle');
+    setUploadMessage('');
+  }, []);
 
   /* ─── Render ─────────────────────────────────────────────────────── */
   if (!agentId) {
@@ -185,8 +203,8 @@ export default function WorkspaceBrowser({ agentId, active }) {
           /workspace/agents/{agentId}/
         </div>
         <button
-          onClick={() => { setUploadOpen(o => !o); setUploadStatus('idle'); setUploadMessage(''); }}
-          title="Upload files to workspace"
+          onClick={() => { setUploadOpen(o => !o); setUploadStatus('idle'); setUploadMessage(''); if (!uploadOpen) setUploadDir(''); }}
+          title="Upload files or folder to workspace"
           style={{ ...iconBtnStyle, color: uploadOpen ? 'var(--eb-accent-primary)' : 'var(--eb-text-muted)' }}
           onMouseEnter={e => { if (!uploadOpen) e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
           onMouseLeave={e => { if (!uploadOpen) e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
@@ -236,13 +254,21 @@ export default function WorkspaceBrowser({ agentId, active }) {
               }}
             />
           </div>
-          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
+            {/* Hidden file inputs */}
             <input
               ref={fileInputRef}
               type="file"
               multiple
               style={{ display: 'none' }}
-              onChange={e => { handleUpload(e.target.files); e.target.value = ''; }}
+              onChange={e => { handleUpload(e.target.files, false); e.target.value = ''; }}
+            />
+            <input
+              ref={folderInputRef}
+              type="file"
+              multiple
+              style={{ display: 'none' }}
+              onChange={e => { handleUpload(e.target.files, true); e.target.value = ''; }}
             />
             <button
               onClick={() => fileInputRef.current?.click()}
@@ -263,7 +289,32 @@ export default function WorkspaceBrowser({ agentId, active }) {
             >
               {uploadStatus === 'uploading'
                 ? <><Loader2 size={10} style={{ animation: 'spin 1s linear infinite' }} /> Uploading…</>
-                : <><Upload size={10} /> Choose files</>}
+                : <><Upload size={10} /> Files</>}
+            </button>
+            <button
+              onClick={() => {
+                // webkitdirectory must be set imperatively; React doesn't forward it as a DOM attribute.
+                if (folderInputRef.current) {
+                  folderInputRef.current.setAttribute('webkitdirectory', '');
+                  folderInputRef.current.click();
+                }
+              }}
+              disabled={uploadStatus === 'uploading'}
+              style={{
+                fontSize: 'var(--eb-text-xs)',
+                padding: '3px 10px',
+                background: 'var(--eb-bg-surface)',
+                color: uploadStatus === 'uploading' ? 'var(--eb-text-muted)' : 'var(--eb-text-secondary)',
+                border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-sm)',
+                cursor: uploadStatus === 'uploading' ? 'not-allowed' : 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4,
+                flexShrink: 0,
+              }}
+            >
+              <Folder size={10} /> Folder
             </button>
             {uploadMessage && (
               <span style={{
@@ -296,6 +347,7 @@ export default function WorkspaceBrowser({ agentId, active }) {
           onToggleDir={toggleDir}
           onSelectFile={(p) => setSelectedFile({ path: p })}
           selectedFilePath={selectedFile?.path || null}
+          onUploadToDir={handleUploadToDir}
         />
       </div>
 
@@ -313,11 +365,12 @@ export default function WorkspaceBrowser({ agentId, active }) {
 
 /* ─── Tree node ───────────────────────────────────────────────────── */
 
-function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, gitBranch }) {
+function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, gitBranch, onUploadToDir }) {
   const isRoot = relPath === '';
   const isOpen = expanded.has(relPath);
   const cache  = dirCache.get(relPath);
   const indent = depth * 12;
+  const [hovered, setHovered] = useState(false);
 
   const Caret = isOpen ? ChevronDown : ChevronRight;
   const FolderIcon = isOpen ? FolderOpen : Folder;
@@ -325,18 +378,77 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
   return (
     <div>
       {!isRoot && (
-        <Row
-          indent={indent}
-          icon={
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+        <div
+          style={{ display: 'flex', alignItems: 'center', width: '100%' }}
+          onMouseEnter={() => setHovered(true)}
+          onMouseLeave={() => setHovered(false)}
+        >
+          {/* Directory toggle button — takes all available width */}
+          <button
+            type="button"
+            onClick={() => onToggleDir(relPath)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              flex: 1,
+              minWidth: 0,
+              textAlign: 'left',
+              paddingLeft: 16 + indent,
+              paddingRight: 4,
+              paddingTop: 3,
+              paddingBottom: 3,
+              background: hovered ? 'var(--eb-bg-hover)' : 'none',
+              border: 'none',
+              cursor: 'pointer',
+              fontSize: 'var(--eb-text-xs)',
+              fontFamily: 'inherit',
+              color: 'var(--eb-text-secondary)',
+            }}
+          >
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2, flexShrink: 0 }}>
               <Caret size={11} />
               <FolderIcon size={13} color="var(--eb-text-muted)" />
             </span>
-          }
-          label={name}
-          gitBranch={gitBranch}
-          onClick={() => onToggleDir(relPath)}
-        />
+            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {name}
+            </span>
+            {gitBranch && (
+              <span style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 3,
+                color: 'var(--eb-text-muted)',
+                fontFamily: 'var(--eb-font-mono)',
+                fontSize: '10px',
+                flexShrink: 0,
+                opacity: 0.8,
+              }}>
+                <GitBranch size={10} />
+                {gitBranch}
+              </span>
+            )}
+          </button>
+          {/* Per-directory upload icon — visible on hover */}
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onUploadToDir(relPath); }}
+            title={`Upload to ${relPath}/`}
+            style={{
+              ...iconBtnStyle,
+              flexShrink: 0,
+              padding: '3px 6px',
+              marginRight: 2,
+              opacity: hovered ? 1 : 0,
+              pointerEvents: hovered ? 'auto' : 'none',
+              color: 'var(--eb-text-muted)',
+              background: hovered ? 'var(--eb-bg-hover)' : 'none',
+              transition: 'opacity 0.1s',
+            }}
+          >
+            <Upload size={11} />
+          </button>
+        </div>
       )}
       {(isRoot || isOpen) && (
         <DirContents
@@ -348,13 +460,14 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
           onToggleDir={onToggleDir}
           onSelectFile={onSelectFile}
           selectedFilePath={selectedFilePath}
+          onUploadToDir={onUploadToDir}
         />
       )}
     </div>
   );
 }
 
-function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath }) {
+function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, onUploadToDir }) {
   if (!cache) {
     return null; // not yet fetched (open root state pre-fetch)
   }
@@ -417,6 +530,7 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
               onSelectFile={onSelectFile}
               selectedFilePath={selectedFilePath}
               gitBranch={item.gitBranch || null}
+              onUploadToDir={onUploadToDir}
             />
           );
         }

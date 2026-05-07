@@ -155,8 +155,109 @@ function saveSshKeysIndex(keys) {
   writeJsonAtomic(SSH_KEYS_INDEX, keys);
 }
 
+// Extract the SSH "public key blob" (length-prefixed wire form) from an
+// OpenSSH-format private-key PEM. Returns null for any other PEM format
+// (PKCS1, PKCS8, ...). Algorithm-agnostic: the caller doesn't need to know
+// whether the key is ed25519, rsa, ecdsa — the blob is the first key entry.
+function extractOpensshPubBlob(pem) {
+  const m = String(pem || '').match(/-----BEGIN OPENSSH PRIVATE KEY-----\s*([\s\S]*?)\s*-----END OPENSSH PRIVATE KEY-----/);
+  if (!m) return null;
+  let buf;
+  try { buf = Buffer.from(m[1].replace(/\s+/g, ''), 'base64'); } catch { return null; }
+  const magic = Buffer.from('openssh-key-v1\0', 'utf8');
+  if (buf.length < magic.length || !buf.subarray(0, magic.length).equals(magic)) return null;
+  let off = magic.length;
+  const readSshString = () => {
+    if (off + 4 > buf.length) throw new Error('truncated');
+    const len = buf.readUInt32BE(off); off += 4;
+    if (off + len > buf.length) throw new Error('truncated');
+    const out = buf.subarray(off, off + len);
+    off += len;
+    return out;
+  };
+  try {
+    readSshString(); readSshString(); readSshString();   // ciphername, kdfname, kdfoptions
+    if (off + 4 > buf.length) return null;
+    const numKeys = buf.readUInt32BE(off); off += 4;
+    if (numKeys < 1) return null;
+    return readSshString();   // first public key blob
+  } catch { return null; }
+}
+
+function sshFingerprintFromPubBlob(pubBlob) {
+  return 'SHA256:' + crypto.createHash('sha256').update(pubBlob).digest('base64').replace(/=+$/, '');
+}
+
+// Standard SSH fingerprint = SHA256 of the public-key wire blob, displayed
+// in base64 without padding. Matches what `ssh-keygen -lf` and GitHub show.
+// For non-OpenSSH PEMs (rare for SSH today) we fall back to a hash over the
+// raw PEM so the listing still has a stable identifier.
 function sshKeyFingerprint(privateKey) {
+  const blob = extractOpensshPubBlob(privateKey);
+  if (blob) return sshFingerprintFromPubBlob(blob);
   return 'SHA256:' + crypto.createHash('sha256').update(privateKey).digest('base64').replace(/=+$/, '');
+}
+
+// Generate an unencrypted ed25519 keypair in OpenSSH wire format. Returns
+// the PEM-armored OPENSSH PRIVATE KEY together with the matching public key
+// in `authorized_keys` form (`ssh-ed25519 <base64> <comment>`). No external
+// `ssh-keygen` binary is required — Node's crypto produces the raw 32-byte
+// seed/pubkey via PKCS8/SPKI DER, and we frame them per OpenSSH's PROTOCOL.key.
+function generateOpensshEd25519Keypair(comment) {
+  const c = String(comment || '').replace(/[\r\n]/g, ' ').trim() || 'aee-deploy-key';
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  // Last 32 bytes of the SPKI DER encoding are the raw ed25519 public key.
+  const spki = publicKey.export({ format: 'der', type: 'spki' });
+  const pub = spki.subarray(spki.length - 32);
+  // Last 32 bytes of the PKCS8 DER encoding are the raw ed25519 seed.
+  const pkcs8 = privateKey.export({ format: 'der', type: 'pkcs8' });
+  const seed = pkcs8.subarray(pkcs8.length - 32);
+  // OpenSSH stores the ed25519 secret as seed||publicKey (64 bytes total).
+  const sk = Buffer.concat([seed, pub]);
+
+  const sshString = (s) => {
+    const b = Buffer.isBuffer(s) ? s : Buffer.from(s, 'utf8');
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(b.length, 0);
+    return Buffer.concat([len, b]);
+  };
+
+  const pubBlob = Buffer.concat([sshString('ssh-ed25519'), sshString(pub)]);
+
+  const checkint = crypto.randomBytes(4);
+  let privSection = Buffer.concat([
+    checkint, checkint,
+    sshString('ssh-ed25519'),
+    sshString(pub),
+    sshString(sk),
+    sshString(c),
+  ]);
+  // Pad to a multiple of 8 (cipher block size for ciphername "none"),
+  // appending 1, 2, 3, ... so a parser can verify the trailer.
+  const pad = [];
+  for (let i = 1; (privSection.length + pad.length) % 8 !== 0; i++) pad.push(i);
+  privSection = Buffer.concat([privSection, Buffer.from(pad)]);
+
+  const numKeys = Buffer.alloc(4);
+  numKeys.writeUInt32BE(1, 0);
+  const outer = Buffer.concat([
+    Buffer.from('openssh-key-v1\0', 'utf8'),
+    sshString('none'),
+    sshString('none'),
+    sshString(''),
+    numKeys,
+    sshString(pubBlob),
+    sshString(privSection),
+  ]);
+
+  const wrapped = outer.toString('base64').match(/.{1,70}/g).join('\n');
+  const privatePem =
+    '-----BEGIN OPENSSH PRIVATE KEY-----\n' +
+    wrapped + '\n' +
+    '-----END OPENSSH PRIVATE KEY-----\n';
+  const publicSsh = `ssh-ed25519 ${pubBlob.toString('base64')} ${c}`;
+
+  return { privateKey: privatePem, publicKey: publicSsh, pubBlob };
 }
 
 function environmentInUse(envId) {
@@ -1630,6 +1731,40 @@ app.post('/api/ssh-keys', (req, res) => {
   };
   saveSshKeysIndex([...existing, entry]);
   res.status(201).json(entry);
+});
+
+// Server-side keypair generation. Returns the public key once so the user
+// can paste it into GitHub; the private key never leaves the workspace.
+app.post('/api/ssh-keys/generate', (req, res) => {
+  const { name, comment } = req.body || {};
+  if (!name || typeof name !== 'string') {
+    return res.status(400).json({ error: 'name is required' });
+  }
+  const baseId = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  let id = baseId || `key-${Date.now()}`;
+  const existing = listSshKeys();
+  if (existing.some(k => k.id === id)) {
+    id = `${id}-${Date.now().toString(36)}`;
+  }
+
+  const safeComment = (typeof comment === 'string' && comment.trim()) || `aee-${id}`;
+  const { privateKey: privText, publicKey: pubText, pubBlob } = generateOpensshEd25519Keypair(safeComment);
+
+  // Inline regex test directly before path.join so CodeQL recognises the
+  // path-injection sanitizer (same pattern as POST /api/ssh-keys above).
+  if (!SSH_KEY_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid ssh key id' });
+  const keyPath = path.join(SSH_KEYS_DIR, id);
+  fs.writeFileSync(keyPath, privText, { mode: 0o600 });
+  try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
+
+  const entry = {
+    id,
+    name,
+    fingerprint: sshFingerprintFromPubBlob(pubBlob),
+    createdAt: new Date().toISOString(),
+  };
+  saveSshKeysIndex([...existing, entry]);
+  res.status(201).json({ ...entry, publicKey: pubText });
 });
 
 app.delete('/api/ssh-keys/:id', (req, res) => {

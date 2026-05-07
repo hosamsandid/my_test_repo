@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Check, ChevronRight, PlugZap, RefreshCw, Plus, X, ArrowRight, SkipForward,
+  Copy, KeyRound, ClipboardPaste, ExternalLink,
 } from 'lucide-react';
 import { apiCall } from '../hooks/useApi';
 import FormInput from '../components/FormInput';
@@ -307,16 +308,113 @@ function StepLlm({ onNext, onSkip }) {
 
 /* ─── Step 2: SSH Key ──────────────────────────────────────────── */
 
+function PublicKeyReveal({ publicKey }) {
+  const [copied, setCopied] = useState(false);
+  const copyResetTimerRef = useRef(null);
+  useEffect(() => () => clearTimeout(copyResetTimerRef.current), []);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(publicKey);
+      setCopied(true);
+      clearTimeout(copyResetTimerRef.current);
+      copyResetTimerRef.current = setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // clipboard may be unavailable (insecure context); fall back is the
+      // textarea selection — the user can still ctrl+c manually.
+    }
+  }
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+      padding: 'var(--eb-space-3)',
+      background: 'var(--eb-bg-elevated)',
+      border: '1px solid var(--eb-status-success)',
+      borderRadius: 'var(--eb-radius-md)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', color: 'var(--eb-status-success)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
+        <Check size={15} /> Keypair generated — copy the public key to GitHub
+      </div>
+      <textarea
+        readOnly value={publicKey} rows={3}
+        onFocus={e => e.target.select()}
+        style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
+      />
+      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', flexWrap: 'wrap', alignItems: 'center' }}>
+        <button type="button" onClick={copy} style={btnGhost}>
+          <Copy size={13} /> {copied ? 'Copied' : 'Copy public key'}
+        </button>
+        <a
+          href="https://github.com/settings/ssh/new"
+          target="_blank" rel="noreferrer"
+          style={{ ...btnGhost, textDecoration: 'none' }}
+        >
+          <ExternalLink size={13} /> Open GitHub SSH settings
+        </a>
+      </div>
+      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.6 }}>
+        The matching private key is stored in the workspace (mode 600) and is never returned by the API.
+        For GitHub Enterprise, paste the key into <strong>your-host/settings/ssh/new</strong> instead.
+      </div>
+    </div>
+  );
+}
+
+function ModeTabs({ mode, onChange }) {
+  const tab = (id, label, Icon) => {
+    const active = mode === id;
+    return (
+      <button
+        type="button"
+        onClick={() => onChange(id)}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          background: active ? 'var(--eb-bg-elevated)' : 'transparent',
+          border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-md)',
+          color: active ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
+          fontSize: 'var(--eb-text-sm)', fontWeight: active ? 'var(--eb-font-medium)' : 'normal',
+          cursor: 'pointer', fontFamily: 'inherit',
+        }}
+      >
+        <Icon size={13} /> {label}
+      </button>
+    );
+  };
+  return (
+    <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+      {tab('generate', 'Generate new keypair', KeyRound)}
+      {tab('paste', 'Paste existing key', ClipboardPaste)}
+    </div>
+  );
+}
+
 function StepSshKey({ onNext, onSkip }) {
+  const [mode, setMode]           = useState('generate');
   const [name, setName]           = useState('');
   const [privateKey, setPrivateKey] = useState('');
   const [saving, setSaving]       = useState(false);
   const [error, setError]         = useState(null);
   const [saved, setSaved]         = useState(false);
+  const [publicKey, setPublicKey] = useState(null);
 
-  const canSave = name.trim() && privateKey.trim();
+  const canGenerate = mode === 'generate' && name.trim();
+  const canPaste    = mode === 'paste' && name.trim() && privateKey.trim();
 
-  async function handleSave() {
+  async function handleGenerate() {
+    setSaving(true); setError(null);
+    try {
+      const r = await apiCall('POST', '/api/ssh-keys/generate', { name: name.trim() });
+      setPublicKey(r.publicKey);
+      setSaved(true);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handlePaste() {
     setSaving(true); setError(null);
     try {
       await apiCall('POST', '/api/ssh-keys', { name: name.trim(), privateKey: privateKey.trim() });
@@ -341,7 +439,25 @@ function StepSshKey({ onNext, onSkip }) {
 
       <ErrorBanner msg={error} />
 
-      {!saved ? (
+      {!saved && <ModeTabs mode={mode} onChange={setMode} />}
+
+      {!saved && mode === 'generate' && (
+        <>
+          <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
+            We'll create a fresh ed25519 keypair on the server. The private key stays in the workspace; you'll get the public
+            key once to paste into <strong>GitHub → Settings → SSH and GPG keys → New SSH key</strong> (or your enterprise instance).
+          </div>
+
+          <FormInput label="Name" required value={name} onChange={setName} placeholder="e.g. GitHub Deploy Key" />
+
+          <button onClick={handleGenerate} disabled={saving || !canGenerate}
+            style={{ ...btnPrimary, opacity: (saving || !canGenerate) ? 0.6 : 1, cursor: saving ? 'wait' : 'pointer', alignSelf: 'flex-start' }}>
+            <KeyRound size={14} /> {saving ? 'Generating…' : 'Generate keypair'}
+          </button>
+        </>
+      )}
+
+      {!saved && mode === 'paste' && (
         <>
           <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
             Generate a key pair with <code style={{ fontFamily: 'var(--eb-font-mono)' }}>ssh-keygen -t ed25519 -C "aee-deploy-key"</code> (no passphrase),
@@ -360,12 +476,15 @@ function StepSshKey({ onNext, onSkip }) {
             />
           </div>
 
-          <button onClick={handleSave} disabled={saving || !canSave}
-            style={{ ...btnPrimary, opacity: (saving || !canSave) ? 0.6 : 1, cursor: saving ? 'wait' : 'pointer', alignSelf: 'flex-start' }}>
+          <button onClick={handlePaste} disabled={saving || !canPaste}
+            style={{ ...btnPrimary, opacity: (saving || !canPaste) ? 0.6 : 1, cursor: saving ? 'wait' : 'pointer', alignSelf: 'flex-start' }}>
             {saving ? 'Saving…' : 'Save key'}
           </button>
         </>
-      ) : (
+      )}
+
+      {saved && publicKey && <PublicKeyReveal publicKey={publicKey} />}
+      {saved && !publicKey && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-3)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-status-success)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-status-success)', fontSize: 'var(--eb-text-sm)' }}>
           <Check size={15} /> SSH key saved — only the fingerprint is retained, the private key value is not stored in plaintext.
         </div>

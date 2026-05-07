@@ -13,9 +13,12 @@ import { MessageCircle, Bot, Clock, Server } from 'lucide-react';
  * @param {Record<string,string>} statuses  Map agentId → activityState
  */
 export default function AgentList({ agents, selectedAgentId, onSelect, statuses = {} }) {
+  const sorted = [...agents].sort((a, b) =>
+    (a.displayName || a.id).localeCompare(b.displayName || b.id)
+  );
   return (
     <div role="listbox" style={{ display: 'flex', flexDirection: 'column' }}>
-      {agents.map(agent => (
+      {sorted.map(agent => (
         <AgentRow
           key={agent.id}
           agent={agent}

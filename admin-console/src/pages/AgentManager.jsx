@@ -610,7 +610,7 @@ export default function AgentManager() {
 
       <DataTable
         columns={COLUMNS}
-        data={agents ?? []}
+        data={[...(agents ?? [])].sort((a, b) => (a.displayName || a.id).localeCompare(b.displayName || b.id))}
         emptyText="No agents yet. Click 'New Agent' to create the first one."
       />
 

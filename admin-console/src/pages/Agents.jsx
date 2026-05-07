@@ -1030,11 +1030,15 @@ export default function Agents() {
   const [busyIds, setBusyIds] = useState(new Set());
 
   const agents = rawAgents || [];
+  const byName = (a, b) => (a.displayName || a.id).localeCompare(b.displayName || b.id);
   const bpInstances = agents.filter(a => a.role === 'bp-instance');
   const orchestrators = agents
     .filter(a => a.role === 'orchestrator')
+    .sort(byName)
     .map(o => ({ ...o, children: bpInstances.filter(c => c.parentOrchestratorId === o.id) }));
-  const leaves = agents.filter(a => a.role !== 'orchestrator' && a.role !== 'bp-instance');
+  const leaves = agents
+    .filter(a => a.role !== 'orchestrator' && a.role !== 'bp-instance')
+    .sort(byName);
 
   function openPanel(mode, agent) {
     setSaveError(null);

@@ -261,7 +261,7 @@ Shiki gives VS Code-grade syntax highlighting and looks markedly better than hig
 | Risk | Impact | Mitigation |
 |---|---|---|
 | Conduwuit `/sync` drift if API restarts without saved sync token | Lost messages between restarts | Persist sync token to `/workspace/admin-console/sync.json` after every batch |
-| Long Claude runs (`CLAUDE_TIMEOUT=600s`) cause SSE proxy timeouts | Chat appears stuck | 15 s heartbeat comments; client auto-reconnect with `since` offset |
+| Long Claude runs (`CLAUDE_TIMEOUT=3600s`) cause SSE proxy timeouts | Chat appears stuck | 15 s heartbeat comments; client auto-reconnect with `since` offset |
 | `claude --output-format stream-json` schema changes upstream | Log panel renders garbage | Wrap parser in try/catch per line; emit `error` event on parse failure; never crash the runner |
 | `dm-room.json` race when two API processes try to create simultaneously | Duplicate rooms | Use atomic write (`writeFile` to tmp → rename); check Matrix `joined_rooms` before creating |
 | Agent token in `config.json` becomes invalid (Conduwuit data loss) | DM fails silently | API returns 502 with diagnosis; surface in UI as "agent offline" |

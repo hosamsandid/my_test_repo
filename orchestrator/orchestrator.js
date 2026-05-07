@@ -374,7 +374,7 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null) {
       "4. Aenderungen werden automatisch innerhalb von 60 Sekunden uebernommen\n\n" +
       "### Optionale Felder\n\n" +
       "- `roomId` — Ziel-Room fuer die Ausgabe (Standard: Direct-Message-Room mit dem Admin)\n" +
-      "- `timeoutSeconds` — Max. Ausfuehrungszeit (Standard: 600)\n\n" +
+      "- `timeoutSeconds` — Max. Ausfuehrungszeit (Standard: 3600)\n\n" +
       "Wenn du bei einer geplanten Ausfuehrung nichts zu berichten hast, antworte mit `[PASS]`.\n";
   }
 

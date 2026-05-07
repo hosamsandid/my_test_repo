@@ -43,7 +43,7 @@ const AGENT_USER_ID = process.env.MATRIX_BOT_USER_ID;
 const HOMESERVER = process.env.MATRIX_HOMESERVER;
 
 const AGENTS_DIR = "/workspace/agents";
-const CLAUDE_TIMEOUT = 600_000;
+const CLAUDE_TIMEOUT = 3_600_000;
 
 if (!AGENT_ID || !AGENT_TOKEN || !AGENT_USER_ID || !HOMESERVER) {
   console.error("[Runner] AGENT_ID, MATRIX_ACCESS_TOKEN, MATRIX_BOT_USER_ID, MATRIX_HOMESERVER required");

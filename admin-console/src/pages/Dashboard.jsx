@@ -5,7 +5,7 @@ import StatGrid from '../components/StatGrid';
 import DataTable from '../components/DataTable';
 import StatusBadge from '../components/StatusBadge';
 import SetupWizard from './SetupWizard';
-import { Settings } from 'lucide-react';
+import { Settings, Bot, Clock, MessageCircle, Server } from 'lucide-react';
 
 const ACTIVITY_STATUS = {
   busy:     { color: 'var(--eb-status-warning)', label: 'Busy' },
@@ -97,6 +97,87 @@ function loadLastViewed() {
   catch { return {}; }
 }
 
+function iconForRole(role) {
+  switch (role) {
+    case 'autonomous': return Clock;
+    case 'expert':     return Bot;
+    default:           return MessageCircle;
+  }
+}
+
+function AgentCardRow({ agent, agentMeta, linkTo }) {
+  const [hovered, setHovered] = useState(false);
+  const Icon = iconForRole(agentMeta?.role);
+
+  const sharedStyle = {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 'var(--eb-space-3)',
+    padding: '6px var(--eb-space-4)',
+    background: hovered && linkTo ? 'var(--eb-bg-hover)' : 'transparent',
+    transition: 'background var(--eb-transition-fast)',
+    textDecoration: 'none',
+    color: 'inherit',
+    cursor: linkTo ? 'pointer' : 'default',
+  };
+
+  const content = (
+    <>
+      <Icon
+        size={14}
+        style={{
+          flexShrink: 0,
+          color: hovered && linkTo ? 'var(--eb-accent-primary)' : 'var(--eb-text-muted)',
+          transition: 'color var(--eb-transition-fast)',
+        }}
+      />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          fontSize: 'var(--eb-text-sm)',
+          fontWeight: 'var(--eb-font-medium)',
+          color: linkTo ? 'var(--eb-text-primary)' : 'var(--eb-text-muted)',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}>
+          {agent.displayName}
+        </div>
+        {agentMeta?.environmentName && (
+          <div style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 3,
+            marginTop: 1,
+            fontSize: 'var(--eb-text-xs)',
+            color: 'var(--eb-text-muted)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}>
+            <Server size={10} style={{ flexShrink: 0 }} />
+            {agentMeta.environmentName}
+          </div>
+        )}
+      </div>
+    </>
+  );
+
+  if (!linkTo) {
+    return <div style={sharedStyle}>{content}</div>;
+  }
+
+  return (
+    <Link
+      to={linkTo}
+      style={sharedStyle}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      {content}
+    </Link>
+  );
+}
+
 const AGENT_NAME_COLS = {
   unread:  { dotColor: 'var(--eb-status-success)', label: 'Unread',  sublabel: 'Waiting for your reply', highlight: 'success', maxHeight: null },
   busy:    { dotColor: 'var(--eb-status-warning)', label: 'Active',  sublabel: null,                     highlight: 'warning', maxHeight: null },
@@ -113,8 +194,9 @@ const HIGHLIGHT_BG = {
   warning: 'color-mix(in srgb, var(--eb-status-warning) 6%, transparent)',
 };
 
-function AgentNameList({ statuses }) {
+function AgentNameList({ statuses, agents = [] }) {
   const viewed = loadLastViewed();
+  const agentMap = Object.fromEntries(agents.map(a => [a.id, a]));
 
   const unread = statuses
     .filter(s => s.lastResponseAt && new Date(s.lastResponseAt).getTime() > (viewed[s.id] || 0))
@@ -207,7 +289,7 @@ function AgentNameList({ statuses }) {
               </span>
             </div>
 
-            {/* Agent table */}
+            {/* Agent list */}
             {agents.length === 0 ? (
               <div style={{
                 padding: 'var(--eb-space-3) var(--eb-space-4)',
@@ -220,47 +302,18 @@ function AgentNameList({ statuses }) {
               <div style={{
                 maxHeight: maxHeight ?? undefined,
                 overflowY: maxHeight ? 'auto' : undefined,
+                display: 'flex',
+                flexDirection: 'column',
+                padding: 'var(--eb-space-1) 0',
               }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                  <tbody>
-                    {agents.map((agent, idx) => (
-                      <tr
-                        key={agent.id}
-                        style={{ background: idx % 2 === 1 ? 'var(--eb-bg-elevated)' : 'transparent' }}
-                      >
-                        <td style={{
-                          padding: '5px var(--eb-space-4)',
-                          fontSize: 'var(--eb-text-sm)',
-                          whiteSpace: 'nowrap',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          maxWidth: 0,
-                          width: '100%',
-                        }}>
-                          {key === 'offline' ? (
-                            <span style={{ color: 'var(--eb-text-muted)' }} title={agent.displayName}>
-                              {agent.displayName}
-                            </span>
-                          ) : (
-                            <Link
-                              to={`/chats/${agent.id}`}
-                              title={agent.displayName}
-                              style={{
-                                color: key === 'unread' ? 'var(--eb-status-success)' : 'var(--eb-accent-primary)',
-                                textDecoration: 'none',
-                                fontWeight: key === 'unread' ? 'var(--eb-font-medium)' : undefined,
-                              }}
-                              onMouseEnter={e => { e.currentTarget.style.textDecoration = 'underline'; }}
-                              onMouseLeave={e => { e.currentTarget.style.textDecoration = 'none'; }}
-                            >
-                              {agent.displayName}
-                            </Link>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                {agents.map(agent => (
+                  <AgentCardRow
+                    key={agent.id}
+                    agent={agent}
+                    agentMeta={agentMap[agent.id]}
+                    linkTo={key !== 'offline' ? `/chats/${agent.id}` : null}
+                  />
+                ))}
               </div>
             )}
           </div>
@@ -346,7 +399,7 @@ export default function Dashboard() {
           Live Status
         </h2>
         <StatGrid stats={activityStats} />
-        <AgentNameList statuses={statuses} />
+        <AgentNameList statuses={statuses} agents={agents ?? []} />
       </section>
 
       <section>

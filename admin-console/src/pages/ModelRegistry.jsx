@@ -550,8 +550,8 @@ export default function ModelRegistry() {
     if (!editing) return;
     setSaving(true); setFormError(null);
     try {
-      const updated = await apiCall('PUT', `/api/llm-endpoints/${editing.id}`, payload);
-      setEditing(updated);
+      await apiCall('PUT', `/api/llm-endpoints/${editing.id}`, payload);
+      setEditing(null);
       refetch();
     } catch (e) {
       setFormError(e.message);

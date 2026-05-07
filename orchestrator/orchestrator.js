@@ -2362,6 +2362,96 @@ async function main() {
   internalApi.listen(4002, '0.0.0.0', () =>
     console.log('[Orchestrator] Internal API listening on :4002')
   );
+
+  // ============================================================
+  // Webhook server — receives HTTP triggers from external systems
+  // (GitHub, CI, etc.) and enqueues them for the target agent.
+  //
+  // POST /hooks/:agentId/:hookId
+  //   → validates X-Hook-Secret (if HOOK_SECRET is configured)
+  //   → looks up a trigger with type="http" and matching id in
+  //     /workspace/agents/:agentId/triggers.json
+  //   → appends to /workspace/agents/:agentId/pending-triggers.json
+  //   → agent-runner picks it up within seconds and fires the prompt
+  // ============================================================
+  const HOOK_PORT = parseInt(process.env.HOOK_PORT || '4003', 10);
+  const HOOK_SECRET = process.env.HOOK_SECRET || '';
+
+  function hookSecretValid(req) {
+    if (!HOOK_SECRET) return true;
+    const provided = req.headers['x-hook-secret'] || '';
+    try {
+      const a = Buffer.from(provided);
+      const b = Buffer.from(HOOK_SECRET);
+      if (a.length !== b.length) return false;
+      return crypto.timingSafeEqual(a, b);
+    } catch {
+      return false;
+    }
+  }
+
+  const hookServer = http.createServer((req, res) => {
+    if (req.method !== 'POST') {
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Method not allowed' }));
+      return;
+    }
+
+    if (!hookSecretValid(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return;
+    }
+
+    const match = req.url.match(/^\/hooks\/([^/]+)\/([^/]+)$/);
+    if (!match) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not found — expected /hooks/:agentId/:hookId' }));
+      return;
+    }
+
+    const agentId = match[1];
+    const hookId  = match[2];
+    const agentDir = path.join(AGENTS_DIR, agentId);
+
+    if (!fs.existsSync(agentDir)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Agent '${agentId}' not found` }));
+      return;
+    }
+
+    let triggers = [];
+    try {
+      const tp = path.join(agentDir, 'triggers.json');
+      if (fs.existsSync(tp)) triggers = JSON.parse(fs.readFileSync(tp, 'utf8'));
+    } catch {}
+
+    const trigger = Array.isArray(triggers)
+      ? triggers.find(t => t.id === hookId && t.type === 'http' && t.enabled !== false)
+      : null;
+    if (!trigger) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `HTTP trigger '${hookId}' not found for agent '${agentId}'` }));
+      return;
+    }
+
+    const pendingPath = path.join(agentDir, 'pending-triggers.json');
+    let pending = [];
+    try {
+      if (fs.existsSync(pendingPath)) pending = JSON.parse(fs.readFileSync(pendingPath, 'utf8'));
+      if (!Array.isArray(pending)) pending = [];
+    } catch {}
+    pending.push({ triggerId: hookId, receivedAt: new Date().toISOString() });
+    fs.writeFileSync(pendingPath, JSON.stringify(pending, null, 2));
+
+    console.log(`[HookServer] Queued trigger '${hookId}' for agent '${agentId}'`);
+    res.writeHead(202, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ queued: true, triggerId: hookId, agentId }));
+  });
+
+  hookServer.listen(HOOK_PORT, '0.0.0.0', () =>
+    console.log(`[Orchestrator] Hook server listening on :${HOOK_PORT}`)
+  );
 }
 
 main().catch((err) => { console.error("Fatal:", err); process.exit(1); });

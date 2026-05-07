@@ -391,7 +391,37 @@ class TriggerScheduler {
   start() {
     this.sync();
     this._interval = setInterval(() => this.sync(), 60_000);
+    this._pendingInterval = setInterval(() => this.processPending(), 5_000);
     console.log(`[Runner:${AGENT_ID}] Trigger scheduler started`);
+  }
+
+  processPending() {
+    const pendingPath = path.join(AGENT_WORKDIR, 'pending-triggers.json');
+    let pending;
+    try {
+      if (!fs.existsSync(pendingPath)) return;
+      const raw = fs.readFileSync(pendingPath, 'utf8');
+      pending = JSON.parse(raw);
+      if (!Array.isArray(pending) || pending.length === 0) return;
+    } catch {
+      return;
+    }
+
+    // Clear before firing to avoid double-execution on slow runs
+    fs.writeFileSync(pendingPath, '[]');
+
+    const triggers = loadTriggers();
+    for (const entry of pending) {
+      const trigger = triggers.find(
+        t => t.id === entry.triggerId && t.type === 'http' && t.enabled !== false
+      );
+      if (trigger) {
+        console.log(`[Runner:${AGENT_ID}] HTTP trigger received: ${entry.triggerId}`);
+        this.execute(trigger);
+      } else {
+        console.log(`[Runner:${AGENT_ID}] Pending trigger '${entry.triggerId}' not found or disabled — skipping`);
+      }
+    }
   }
 
   sync() {

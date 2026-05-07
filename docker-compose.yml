@@ -24,6 +24,8 @@ services:
       context: ./orchestrator
     container_name: ${COMPOSE_PROJECT_NAME}-orchestrator
     restart: unless-stopped
+    ports:
+      - "${HOOK_PORT:-4003}:${HOOK_PORT:-4003}"
     volumes:
       - agent-pool-workspace:/workspace
       - skills-pool:/template-workspace:ro
@@ -54,6 +56,8 @@ services:
       ACE_REPO_PATH: "${ACE_REPO_PATH:-}"
       ACE_WATCH_INTERVAL_SECONDS: "${ACE_WATCH_INTERVAL_SECONDS:-30}"
       ACE_BRIEFING_ENV_ID: "${ACE_BRIEFING_ENV_ID:-briefing-pack}"
+      HOOK_PORT: "${HOOK_PORT:-4003}"
+      HOOK_SECRET: "${HOOK_SECRET:-}"
     depends_on:
       conduwuit:
         condition: service_started

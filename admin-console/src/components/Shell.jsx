@@ -261,7 +261,7 @@ export default function Shell({ children }) {
                         }} />
                       )}
                     </span>
-                    {!collapsed && <span style={{ flex: 1 }}>{label}</span>}
+                    {!collapsed && <span>{label}</span>}
                     {/* Status badges in expanded mode */}
                     {isChat && !collapsed && (
                       <span style={{ display: 'flex', gap: 3, marginLeft: 'auto' }}>

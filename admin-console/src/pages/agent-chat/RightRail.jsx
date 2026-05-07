@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { PanelRightClose, ScrollText, FolderTree } from 'lucide-react';
+import { PanelRightClose, ScrollText, FolderTree, CalendarClock } from 'lucide-react';
 import SessionLogPanel from './SessionLogPanel';
 import WorkspaceBrowser from './WorkspaceBrowser';
+import TriggersPanel from './TriggersPanel';
 
 const TAB_KEY = 'agentChat.rightRailTab';
 
@@ -25,7 +26,7 @@ export default function RightRail({
   const [tab, setTab] = useState(() => {
     try {
       const v = localStorage.getItem(TAB_KEY);
-      if (v === 'workspace' || v === 'log') return v;
+      if (v === 'workspace' || v === 'log' || v === 'triggers') return v;
     } catch { /* ignore */ }
     return 'log';
   });
@@ -61,6 +62,12 @@ export default function RightRail({
           label="Workspace"
           active={tab === 'workspace'}
           onClick={() => setTab('workspace')}
+        />
+        <TabButton
+          icon={<CalendarClock size={13} />}
+          label="Triggers"
+          active={tab === 'triggers'}
+          onClick={() => setTab('triggers')}
         />
         <div style={{ flex: 1 }} />
         <button
@@ -98,6 +105,9 @@ export default function RightRail({
         </div>
         <div style={{ display: tab === 'workspace' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           <WorkspaceBrowser agentId={agentId} active={tab === 'workspace'} />
+        </div>
+        <div style={{ display: tab === 'triggers' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+          <TriggersPanel agentId={agentId} active={tab === 'triggers'} />
         </div>
       </div>
     </div>

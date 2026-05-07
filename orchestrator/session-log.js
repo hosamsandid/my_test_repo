@@ -103,9 +103,17 @@ function mapStreamJsonLine(line, correlationId) {
             correlationId,
           });
         } else if (block.type === 'thinking') {
+          // Claude's extended thinking returns either plain text in
+          // `thinking` (rare in practice) or — far more often — an empty
+          // `thinking` field plus a `signature` blob. The signature carries
+          // the thinking content in encrypted form; the API never exposes
+          // it as readable text. We record `hasSignature` so the UI can
+          // distinguish "no thinking happened" from "thinking happened but
+          // was summarized server-side".
           events.push({
             type: 'thinking',
-            text: block.thinking,
+            text: typeof block.thinking === 'string' ? block.thinking : '',
+            hasSignature: typeof block.signature === 'string' && block.signature.length > 0,
             correlationId,
           });
         } else {

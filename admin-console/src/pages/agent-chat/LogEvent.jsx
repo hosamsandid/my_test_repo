@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import {
   MessageCircle, Sparkles, Wrench, CheckCircle2, AlertTriangle, Brain,
-  Send, ArrowDown, Cpu, Clock, Settings2,
+  Send, ArrowDown, Cpu, Clock, Settings2, ChevronRight,
 } from 'lucide-react';
 import ToolBlock from './ToolBlock';
 
@@ -234,10 +234,47 @@ function Body({ event, expanded }) {
       );
     case 'thinking': {
       const text = event.text || '';
-      const display = expanded ? text : truncate(text, COMPACT);
+      const hasText = text.trim().length > 0;
+      const hasSignature = !!event.hasSignature;
+      // Preview line: the first non-empty line, truncated. When the API
+      // only returned a signature (no plain-text thinking) we say so up
+      // front instead of leaving the row blank.
+      const preview = hasText
+        ? truncate(text.split('\n').find(l => l.trim()) || text, COMPACT)
+        : (hasSignature ? '(summarized server-side — no readable text)' : '(no content)');
       return (
         <div style={{ ...baseStyle, color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
-          Thinking: <span style={{ whiteSpace: expanded ? 'pre-wrap' : 'normal' }}>{display}</span>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 4 }}>
+            <ChevronRight
+              size={11}
+              style={{
+                flexShrink: 0,
+                color: 'var(--eb-text-muted)',
+                transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
+                transition: 'transform 0.15s',
+                alignSelf: 'center',
+              }}
+            />
+            <span>Thinking: {!expanded && <span>{preview}</span>}</span>
+          </div>
+          {expanded && (
+            <div style={{
+              marginTop: 4,
+              paddingLeft: 15,
+              whiteSpace: 'pre-wrap',
+              fontStyle: 'normal',
+            }}>
+              {hasText
+                ? text
+                : (
+                  <span style={{ color: 'var(--eb-text-muted)' }}>
+                    {hasSignature
+                      ? 'Claude summarized this thinking step internally — only an encrypted signature was returned, no readable text.'
+                      : 'No thinking content was captured for this step.'}
+                  </span>
+                )}
+            </div>
+          )}
         </div>
       );
     }

@@ -844,7 +844,7 @@ function ContextResetSeparator({ ts }) {
         borderRadius: 'var(--eb-radius-sm)',
         background: 'var(--eb-status-warning-bg)',
       }}>
-        ↺ Neuer Kontext{label ? ` · ${label}` : ''}
+        ↺ New Context{label ? ` · ${label}` : ''}
       </span>
       <div style={{ flex: 1, height: 1, background: 'var(--eb-status-warning)' }} />
     </div>

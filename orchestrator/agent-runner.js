@@ -783,7 +783,7 @@ async function main() {
       if (err.userAborted) {
         console.log(`[Runner:${AGENT_ID}] Session stopped by user`);
         try {
-          await sendFormatted(client, roomId, '_(Ausführung abgebrochen.)_');
+          await sendFormatted(client, roomId, '_(Execution aborted.)_');
         } catch (postErr) {
           console.error(`[Runner:${AGENT_ID}] Could not post abort notice: ${postErr.message}`);
         }

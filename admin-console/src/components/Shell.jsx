@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, Users, Zap, Clock, Sparkles, Server,
-  Database, ScrollText, ChevronLeft, ChevronRight, Bot,
+  Database, ChevronLeft, ChevronRight, Bot,
   Boxes, Key, MessageCircle, Github, Layers, GitBranch, Settings,
   Sun, Moon,
 } from 'lucide-react';
@@ -30,9 +30,6 @@ const NAV = [
   { section: 'KNOWLEDGE', items: [
     { path: '/knowledge',    label: 'Knowledge Base',      Icon: Database },
   ]},
-  { section: 'OBSERVABILITY', items: [
-    { path: '/logs',         label: 'Logs',                Icon: ScrollText },
-  ]},
 ];
 
 const BREADCRUMBS = {
@@ -49,7 +46,6 @@ const BREADCRUMBS = {
   '/mcp':          'MCP Servers',
   '/config':       'System Config',
   '/knowledge':    'Knowledge Base',
-  '/logs':         'Logs',
 };
 
 function breadcrumbFor(pathname) {

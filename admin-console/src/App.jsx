@@ -14,7 +14,6 @@ const ScheduledJobs       = lazy(() => import('./pages/ScheduledJobs'));
 const ModelRegistry       = lazy(() => import('./pages/ModelRegistry'));
 const McpServers          = lazy(() => import('./pages/McpServers'));
 const KnowledgeBase       = lazy(() => import('./pages/KnowledgeBase'));
-const Logs                = lazy(() => import('./pages/Logs'));
 const Briefings           = lazy(() => import('./pages/Briefings'));
 const SystemConfig        = lazy(() => import('./pages/SystemConfig'));
 
@@ -60,7 +59,6 @@ export default function App() {
           <Route path="/models"       element={<ModelRegistry />} />
           <Route path="/mcp"          element={<McpServers />} />
           <Route path="/knowledge"    element={<KnowledgeBase />} />
-          <Route path="/logs"         element={<Logs />} />
           <Route path="/flows"         element={<Briefings />} />
           <Route path="/briefings"    element={<Navigate to="/flows" replace />} />
           <Route path="/config"       element={<SystemConfig />} />

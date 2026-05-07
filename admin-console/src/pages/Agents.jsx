@@ -623,7 +623,8 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
       <div>
         <div style={labelStyle}>Role <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
         <select value={form.role} onChange={e => update('role', e.target.value)} style={inputStyle}>
-          <option value="expert">Expert — responds to questions</option>
+          <option value="expert-group">Expert Group — multiple instances, same configuration</option>
+          <option value="expert">Expert (standalone) — single instance</option>
           <option value="orchestrator">Orchestrator — manages missions in a directory</option>
         </select>
       </div>
@@ -638,7 +639,15 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
 
       {form.role !== 'orchestrator' && (
       <div>
-        <div style={labelStyle}>System Prompt <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
+        <div style={labelStyle}>
+          {form.role === 'expert-group' ? 'System Prompt Template' : 'System Prompt'}
+          {' '}<span style={{ color: 'var(--eb-status-error)' }}>*</span>
+        </div>
+        {form.role === 'expert-group' && (
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginBottom: 'var(--eb-space-1)' }}>
+            Applied to every instance in this group.
+          </div>
+        )}
         <textarea
           value={form.systemPrompt}
           onChange={e => update('systemPrompt', e.target.value)}
@@ -742,6 +751,15 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
             </div>
           )}
         </>
+      )}
+
+      {agent.role === 'expert-instance' && (
+        <div>
+          <div style={labelStyle}>Parent Group (read-only)</div>
+          <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
+            {agent.parentGroupId || '—'}
+          </div>
+        </div>
       )}
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
@@ -1055,6 +1073,110 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
   );
 }
 
+/* ── Expert Group Card ──────────────────────────────────────────────── */
+function ExpertGroupCard({ agent, onEdit, onDelete, onAddInstance, onActivate, onDeactivate, onToggleEnabled, onEditChild, onDeleteChild, navigate, addingInstance, busyIds }) {
+  const expandedKey = `aee_eg_expanded_${agent.id}`;
+  const [expanded, setExpanded] = useState(() => {
+    try { return localStorage.getItem(expandedKey) !== 'false'; } catch { return true; }
+  });
+  const toggleExpanded = () => setExpanded(prev => {
+    const next = !prev;
+    try { localStorage.setItem(expandedKey, String(next)); } catch {}
+    return next;
+  });
+
+  const children = agent.children || [];
+
+  return (
+    <div style={{
+      background: 'var(--eb-bg-surface)',
+      border: '1px solid var(--eb-border-default)',
+      borderRadius: 'var(--eb-radius-lg)',
+      overflow: 'hidden',
+    }}>
+      {/* Header */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
+        padding: 'var(--eb-space-4)',
+        background: 'var(--eb-bg-elevated)',
+        borderBottom: expanded ? '1px solid var(--eb-border-default)' : 'none',
+      }}>
+        <button
+          onClick={toggleExpanded}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--eb-text-secondary)', padding: 0, display: 'flex' }}
+        >
+          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+        </button>
+
+        <Layers size={18} style={{ color: 'var(--eb-accent-secondary, var(--eb-accent-primary))', flexShrink: 0 }} />
+
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 'var(--eb-font-semibold)', fontSize: 'var(--eb-text-md)', display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+            {agent.displayName}
+            <span style={{
+              fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)',
+              background: 'var(--eb-bg-app)', padding: '2px 8px',
+              borderRadius: 'var(--eb-radius-full)', border: '1px solid var(--eb-accent-primary)',
+            }}>Expert Group</span>
+          </div>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>
+            {agent.id} · env: {agent.environmentId}
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+          <span style={{
+            fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
+            background: 'var(--eb-bg-app)', padding: '2px 8px',
+            borderRadius: 'var(--eb-radius-full)', border: '1px solid var(--eb-border-default)',
+          }}>
+            {children.length} instance{children.length !== 1 ? 's' : ''}
+          </span>
+          <button
+            onClick={() => onAddInstance(agent)}
+            disabled={addingInstance}
+            style={{
+              background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-md)', cursor: addingInstance ? 'not-allowed' : 'pointer',
+              padding: '4px 10px', fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
+              display: 'flex', alignItems: 'center', gap: 4, color: 'var(--eb-text-secondary)',
+              opacity: addingInstance ? 0.5 : 1,
+            }}
+          >
+            <Plus size={13} /> {addingInstance ? 'Adding…' : 'Add Instance'}
+          </button>
+          <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
+          <IconBtn icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
+        </div>
+      </div>
+
+      {/* Instances */}
+      {expanded && (
+        children.length === 0 ? (
+          <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)', textAlign: 'center', padding: 'var(--eb-space-4)' }}>
+            No instances yet. Click <strong>Add Instance</strong> to create one.
+          </div>
+        ) : (
+          children.map((child, idx) => (
+            <AgentRow
+              key={child.id}
+              agent={child}
+              tree={{ depth: 1, ancestorMore: [], isLast: idx === children.length - 1, hasChildren: false, isCollapsed: false }}
+              navigate={navigate}
+              busy={busyIds.has(child.id)}
+              onActivate={onActivate}
+              onDeactivate={onDeactivate}
+              onToggleEnabled={onToggleEnabled}
+              onEdit={onEditChild}
+              onDelete={onDeleteChild}
+            />
+          ))
+        )
+      )}
+    </div>
+  );
+}
+
 /* ── Leaf Agent Card ────────────────────────────────────────────────── */
 function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate, navigate, busy }) {
   const state = agentState(agent);
@@ -1117,17 +1239,23 @@ export default function Agents() {
   const [saveError, setSaveError] = useState(null);
   const [actionError, setActionError] = useState(null);
   const [syncingId, setSyncingId] = useState(null);
+  const [addingInstanceId, setAddingInstanceId] = useState(null);
   const [busyIds, setBusyIds] = useState(new Set());
 
   const agents = rawAgents || [];
   const byName = (a, b) => (a.displayName || a.id).localeCompare(b.displayName || b.id);
   const bpInstances = agents.filter(a => a.role === 'bp-instance');
+  const expertInstances = agents.filter(a => a.role === 'expert-instance');
   const orchestrators = agents
     .filter(a => a.role === 'orchestrator')
     .sort(byName)
     .map(o => ({ ...o, children: bpInstances.filter(c => c.parentOrchestratorId === o.id) }));
+  const expertGroups = agents
+    .filter(a => a.role === 'expert-group')
+    .sort(byName)
+    .map(g => ({ ...g, children: expertInstances.filter(i => i.parentGroupId === g.id).sort(byName) }));
   const leaves = agents
-    .filter(a => a.role !== 'orchestrator' && a.role !== 'bp-instance')
+    .filter(a => !['orchestrator', 'bp-instance', 'expert-group', 'expert-instance'].includes(a.role))
     .sort(byName);
 
   function openPanel(mode, agent) {
@@ -1213,6 +1341,18 @@ export default function Agents() {
     }
   }
 
+  async function handleAddInstance(group) {
+    setAddingInstanceId(group.id);
+    try {
+      await apiCall('POST', `/api/agents/${group.id}/instances`);
+      refetch();
+    } catch (e) {
+      setActionError(e.message);
+    } finally {
+      setAddingInstanceId(null);
+    }
+  }
+
   async function handleDelete() {
     try {
       await apiCall('DELETE', `/api/agents/${deleteTarget.id}`);
@@ -1257,7 +1397,9 @@ export default function Agents() {
     );
   }
 
-  const totalCount = orchestrators.length + leaves.length;
+  // Count agent types (groups/orchestrators/leaves), not individual instances/stubs,
+  // consistent with how bp-instances under orchestrators are also not counted separately.
+  const totalCount = orchestrators.length + expertGroups.length + leaves.length;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -1307,6 +1449,23 @@ export default function Agents() {
               onDeleteChild={a => setDeleteTarget(a)}
             />
           ))}
+          {expertGroups.map(g => (
+            <ExpertGroupCard
+              key={g.id}
+              agent={g}
+              navigate={navigate}
+              addingInstance={addingInstanceId === g.id}
+              busyIds={busyIds}
+              onEdit={a => openPanel('edit', a)}
+              onDelete={a => setDeleteTarget(a)}
+              onAddInstance={handleAddInstance}
+              onActivate={handleActivate}
+              onDeactivate={a => setDeactivateTarget(a)}
+              onToggleEnabled={handleToggleEnabled}
+              onEditChild={a => openPanel('edit', a)}
+              onDeleteChild={a => setDeleteTarget(a)}
+            />
+          ))}
           {leaves.map(a => (
             <LeafAgentCard
               key={a.id}
@@ -1344,6 +1503,8 @@ export default function Agents() {
         message={
           deleteTarget?.role === 'orchestrator'
             ? `Delete orchestrator "${deleteTarget.displayName}"? Its BP-instance children must be deleted separately.`
+            : deleteTarget?.role === 'expert-group'
+            ? `Delete expert group "${deleteTarget.displayName}"? Its instances must be deleted separately.`
             : `Delete agent "${deleteTarget?.displayName ?? deleteTarget?.id}"? This removes the workspace and all associated data.`
         }
         variant="danger"

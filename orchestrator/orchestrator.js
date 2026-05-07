@@ -1044,6 +1044,25 @@ class Orchestrator {
       throw new Error(`Working Environment not found: ${environmentId}`);
     }
 
+    // expert-group: save a template config (no Matrix user, no process) and
+    // immediately materialize the first instance.
+    if (role === "expert-group") {
+      const groupConfig = {
+        id,
+        displayName,
+        role: "expert-group",
+        environmentId: env.id,
+        systemPromptTemplate: systemPrompt || "",
+        enabled: true,
+      };
+      saveAgentConfig(id, groupConfig);
+      this.agentConfigs.set(id, { config: groupConfig });
+      console.log(`[Orchestrator] Created expert-group ${id}`);
+
+      const instance = await this.addGroupInstance(id);
+      return { id, group: true, firstInstance: instance.id };
+    }
+
     const password = `agent-${id}-${Date.now()}`;
     const userId = `@${id}:local`;
 
@@ -1106,6 +1125,73 @@ class Orchestrator {
       warnings: seedResult.warnings || [],
       clones: seedResult.clones || [],
       ...(role === "orchestrator" && { bpStubs: bpStubs.length }),
+    };
+  }
+
+  // Add a new expert-instance to an existing expert-group. The instance is
+  // immediately materialized (Matrix user + workspace + agent process).
+  // Instance IDs are auto-numbered: {groupId}-1, {groupId}-2, …
+  async addGroupInstance(groupId) {
+    const groupCfg = loadAgentConfig(groupId);
+    if (!groupCfg) throw new Error(`Expert group '${groupId}' not found`);
+    if (groupCfg.role !== "expert-group") {
+      throw new Error(`Agent '${groupId}' is not an expert-group (role=${groupCfg.role})`);
+    }
+
+    const env = loadEnvironment(groupCfg.environmentId);
+    if (!env) throw new Error(`Working Environment '${groupCfg.environmentId}' not found`);
+
+    // Determine next available instance number and immediately reserve the
+    // slot by writing a placeholder config. This prevents a TOCTOU race where
+    // two concurrent POST /instances requests both compute the same n before
+    // either saveAgentConfig call runs.
+    let n = 1;
+    while (loadAgentConfig(`${groupId}-${n}`)) n++;
+    const instanceId = `${groupId}-${n}`;
+    const instanceDisplayName = `${groupCfg.displayName} #${n}`;
+
+    saveAgentConfig(instanceId, {
+      id: instanceId,
+      displayName: instanceDisplayName,
+      role: "expert-instance",
+      parentGroupId: groupId,
+      environmentId: groupCfg.environmentId,
+      enabled: false,
+      _provisioning: true,
+    });
+
+    const password = `agent-${instanceId}-${Date.now()}`;
+    const userId = `@${instanceId}:local`;
+
+    if (this.adminClient) await ensureMatrixUser(this.adminClient, instanceId, password);
+    const token = await loginMatrixUser(instanceId, password);
+    await setDisplayName(token, userId, instanceDisplayName);
+
+    const seedResult = seedAgentWorkspace(instanceId, env);
+
+    const instanceConfig = {
+      id: instanceId,
+      displayName: instanceDisplayName,
+      userId,
+      token,
+      role: "expert-instance",
+      parentGroupId: groupId,
+      environmentId: groupCfg.environmentId,
+      enabled: true,
+    };
+    saveAgentConfig(instanceId, instanceConfig);
+    saveAgentPrompt(instanceId, groupCfg.systemPromptTemplate || "", "expert-instance", env);
+
+    this.agentConfigs.set(instanceId, { config: instanceConfig });
+    startAgentProcess(instanceConfig);
+
+    console.log(`[Orchestrator] Created expert-instance ${instanceId} (group=${groupId})`);
+    return {
+      id: instanceId,
+      userId,
+      seeded: seedResult.seeded,
+      warnings: seedResult.warnings || [],
+      clones: seedResult.clones || [],
     };
   }
 
@@ -1311,7 +1397,7 @@ class Orchestrator {
     }
 
     // Stub: full materialization.
-    if (cfg.role !== "bp-instance") {
+    if (cfg.role !== "bp-instance" && cfg.role !== "expert-instance") {
       throw new Error(`Agent '${id}' is a stub but has unexpected role '${cfg.role}'`);
     }
     const env = loadEnvironment(cfg.environmentId);
@@ -1329,7 +1415,7 @@ class Orchestrator {
     // bp-instance agents always need the ACE engineering skill — the env's
     // skills array is overridden here so the agent can actually execute the
     // BP regardless of how the user configured the Working Environment.
-    ensureEngineeringSkill(id);
+    if (cfg.role === "bp-instance") ensureEngineeringSkill(id);
 
     const updated = {
       ...cfg,
@@ -1339,15 +1425,25 @@ class Orchestrator {
     };
     saveAgentConfig(id, updated);
 
-    // Always (re)write the BP-instance prompt — the path / skill reference
-    // depends on cfg fields (bpId, bpSlug, briefingsPath) that are stable
-    // for this stub, and we want a consistent prompt across reactivations.
-    saveAgentPrompt(id, bpInstanceSystemPrompt(updated), "bp-instance", env);
+    if (cfg.role === "bp-instance") {
+      // Always (re)write the BP-instance prompt — the path / skill reference
+      // depends on cfg fields (bpId, bpSlug, briefingsPath) that are stable
+      // for this stub, and we want a consistent prompt across reactivations.
+      saveAgentPrompt(id, bpInstanceSystemPrompt(updated), "bp-instance", env);
+      console.log(`[Orchestrator] Materialized bp-instance ${id} (parent=${cfg.parentOrchestratorId}, bp=${cfg.bpId})`);
+    } else {
+      // expert-instance: restore the system prompt from the parent group template.
+      const groupCfg = cfg.parentGroupId ? loadAgentConfig(cfg.parentGroupId) : null;
+      if (!groupCfg) {
+        console.warn(`[Orchestrator] expert-instance ${id}: parent group '${cfg.parentGroupId}' not found — reactivating with empty system prompt`);
+      }
+      const template = groupCfg?.systemPromptTemplate || "";
+      saveAgentPrompt(id, template, "expert-instance", env);
+      console.log(`[Orchestrator] Materialized expert-instance ${id} (group=${cfg.parentGroupId})`);
+    }
 
     this.agentConfigs.set(id, { config: updated });
     startAgentProcess(updated);
-
-    console.log(`[Orchestrator] Materialized bp-instance ${id} (parent=${cfg.parentOrchestratorId}, bp=${cfg.bpId})`);
     return {
       id,
       materialized: true,
@@ -1412,6 +1508,7 @@ class Orchestrator {
       environmentId: cfg.environmentId,
       ...(cfg.briefingsPath && { briefingsPath: cfg.briefingsPath }),
       ...(cfg.parentOrchestratorId && { parentOrchestratorId: cfg.parentOrchestratorId }),
+      ...(cfg.parentGroupId && { parentGroupId: cfg.parentGroupId }),
       ...(cfg.bpId && { bpId: cfg.bpId }),
       ...(cfg.bpSlug && { bpSlug: cfg.bpSlug }),
       ...(cfg.bpRelPath && { bpRelPath: cfg.bpRelPath }),
@@ -2316,6 +2413,25 @@ async function main() {
       return;
     }
 
+    // POST /internal/agent-groups/:groupId/instances — add instance to group
+    const addInstanceMatch = req.method === 'POST' && req.url.match(/^\/internal\/agent-groups\/([^/]+)\/instances$/);
+    if (addInstanceMatch) {
+      const groupId = decodeURIComponent(addInstanceMatch[1]);
+      (async () => {
+        try {
+          const result = await orchestrator.addGroupInstance(groupId);
+          res.writeHead(201, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] addGroupInstance error for ${groupId}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404 : /not an expert-group/i.test(err.message) ? 400 : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      })();
+      return;
+    }
+
     if (req.method !== 'POST' || req.url !== '/internal/agents') {
       res.writeHead(404); res.end(); return;
     }
@@ -2329,9 +2445,9 @@ async function main() {
           res.end(JSON.stringify({ error: 'id, displayName, role, environmentId required' }));
           return;
         }
-        if (!['expert', 'orchestrator'].includes(role)) {
+        if (!['expert', 'orchestrator', 'expert-group'].includes(role)) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: `Invalid role: ${role}. Must be one of: expert, orchestrator` }));
+          res.end(JSON.stringify({ error: `Invalid role: ${role}. Must be one of: expert, orchestrator, expert-group` }));
           return;
         }
         if (role !== 'orchestrator' && !systemPrompt) {

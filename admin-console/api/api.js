@@ -503,6 +503,24 @@ app.post('/api/agents/:id/sync-bps', async (req, res) => {
   }
 });
 
+app.post('/api/agents/:groupId/instances', async (req, res) => {
+  const { groupId } = req.params;
+  if (!fs.existsSync(path.join(AGENTS_DIR, groupId))) {
+    return res.status(404).json({ error: 'Agent group not found' });
+  }
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/agent-groups/${encodeURIComponent(groupId)}/instances`, {
+      method: 'POST',
+    });
+    const data = await resp.json();
+    if (!resp.ok) return res.status(resp.status).json(data);
+    res.status(201).json(data);
+  } catch (err) {
+    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 app.post('/api/agents', async (req, res) => {
   const { id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt, briefingsPath } = req.body;
   if (!id || !displayName || !role || !environmentId) {

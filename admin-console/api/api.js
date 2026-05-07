@@ -2179,7 +2179,26 @@ const _upload = multer({
   limits: { fileSize: 50 * 1024 * 1024 },
 });
 
-app.post('/api/agents/:agentId/workspace/upload', _upload.array('files', 500), (req, res) => {
+// Wraps multer so its own errors (file too large, too many files, etc.) turn
+// into clean JSON responses instead of falling through to Express's default
+// HTML error page.
+const uploadFiles = (req, res, next) => {
+  _upload.array('files', 500)(req, res, (err) => {
+    if (!err) return next();
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: 'File too large', message: 'Each file must be under 50 MB', code: err.code });
+      }
+      if (err.code === 'LIMIT_FILE_COUNT' || err.code === 'LIMIT_UNEXPECTED_FILE') {
+        return res.status(400).json({ error: 'Too many files', code: err.code });
+      }
+      return res.status(400).json({ error: err.message, code: err.code });
+    }
+    return res.status(500).json({ error: err.message });
+  });
+};
+
+app.post('/api/agents/:agentId/workspace/upload', uploadFiles, (req, res) => {
   const { agentId } = req.params;
   const relDir = typeof req.body.path === 'string' ? req.body.path : '';
 

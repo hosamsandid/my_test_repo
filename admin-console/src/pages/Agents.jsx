@@ -15,6 +15,11 @@ const hasRepos = (env) =>
   (Array.isArray(env?.repositories) && env.repositories.length > 0) ||
   !!env?.repository?.url;
 
+function repoDirName(url) {
+  if (!url) return '';
+  return url.replace(/\.git$/, '').split(/[/:]/g).filter(Boolean).pop() || '';
+}
+
 /* ── BP-dependency hierarchy helpers ────────────────────────────────────
    Mirrors the topo-sort logic in admin-console/src/pages/briefings/bp-graph.js
    so the bp-instance children of an orchestrator are listed in the same
@@ -475,6 +480,75 @@ function StateBadge({ state }) {
   );
 }
 
+/* ── Mission Directory Field ─────────────────────────────────────────── */
+function MissionDirectoryField({ value, onChange, repoDirs }) {
+  const [showCustom, setShowCustom] = useState(
+    () => value !== '' && !repoDirs.includes(value)
+  );
+
+  useEffect(() => {
+    setShowCustom(value !== '' && !repoDirs.includes(value));
+  }, [value, repoDirs]);
+
+  const helpText = (
+    <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+      Relative path in the agent workspace. The <code>artifacts/briefings/</code> subdirectory is appended automatically. On creation, a stub is added for every mission found here.
+    </div>
+  );
+
+  if (repoDirs.length === 0) {
+    return (
+      <div>
+        <div style={labelStyle}>Mission Directory</div>
+        <input
+          style={inputStyle}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          placeholder="e.g. my-repo"
+        />
+        {helpText}
+      </div>
+    );
+  }
+
+  const selectValue = showCustom ? '__custom__' : value;
+
+  return (
+    <div>
+      <div style={labelStyle}>Mission Directory</div>
+      <select
+        style={inputStyle}
+        value={selectValue}
+        onChange={e => {
+          if (e.target.value === '__custom__') {
+            setShowCustom(true);
+          } else {
+            setShowCustom(false);
+            onChange(e.target.value);
+          }
+        }}
+      >
+        {!selectValue && <option value="">— please select —</option>}
+        {repoDirs.map(dir => (
+          <option key={dir} value={dir}>{dir}</option>
+        ))}
+        <option disabled value="__sep__">──────────</option>
+        <option value="__custom__">Custom path…</option>
+      </select>
+      {showCustom && (
+        <input
+          style={{ ...inputStyle, marginTop: 'var(--eb-space-2)' }}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          placeholder="e.g. my-repo"
+          autoFocus
+        />
+      )}
+      {helpText}
+    </div>
+  );
+}
+
 /* ── Agent Create Form ─────────────────────────────────────────────── */
 function AgentCreateForm({ onSave, onCancel, saving, error }) {
   const [form, setForm] = useState({
@@ -484,6 +558,23 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
   const { data: environments } = useApi('/api/environments');
   const envs = environments || [];
+
+  const repoDirs = useMemo(() => {
+    const env = envs.find(e => e.id === form.environmentId);
+    if (!env) return [];
+    const repos = Array.isArray(env.repositories)
+      ? env.repositories
+      : env.repository?.url ? [env.repository] : [];
+    return repos.map(r => repoDirName(r.url)).filter(Boolean);
+  }, [envs, form.environmentId]);
+
+  useEffect(() => {
+    if (form.role !== 'orchestrator') return;
+    if (repoDirs.length !== 1) return;
+    if (!form.briefingsPath) update('briefingsPath', repoDirs[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.role, form.environmentId, repoDirs]);
+
   const canSubmit = form.id && form.displayName && form.environmentId &&
     (form.role === 'orchestrator' || form.systemPrompt);
 
@@ -539,18 +630,11 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
       </div>
 
       {form.role === 'orchestrator' && (
-        <div>
-          <div style={labelStyle}>Mission Directory</div>
-          <input
-            style={inputStyle}
-            value={form.briefingsPath}
-            onChange={e => update('briefingsPath', e.target.value)}
-            placeholder="e.g. my-repo"
-          />
-          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-            Relative path in the agent workspace. The <code>artifacts/briefings/</code> subdirectory is appended automatically. On creation, a stub is added for every mission found here.
-          </div>
-        </div>
+        <MissionDirectoryField
+          value={form.briefingsPath}
+          onChange={val => update('briefingsPath', val)}
+          repoDirs={repoDirs}
+        />
       )}
 
       {form.role !== 'orchestrator' && (
@@ -585,6 +669,17 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
   const canSubmit = !!form.displayName;
 
+  const { data: environments } = useApi('/api/environments');
+  const repoDirs = useMemo(() => {
+    const envs = environments || [];
+    const env = envs.find(e => e.id === agent.environmentId);
+    if (!env) return [];
+    const repos = Array.isArray(env.repositories)
+      ? env.repositories
+      : env.repository?.url ? [env.repository] : [];
+    return repos.map(r => repoDirName(r.url)).filter(Boolean);
+  }, [environments, agent.environmentId]);
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
       {error && (
@@ -617,15 +712,11 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
       <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} />
 
       {agent.role === 'orchestrator' && (
-        <div>
-          <div style={labelStyle}>Mission Directory</div>
-          <input
-            style={inputStyle}
-            value={form.briefingsPath}
-            onChange={e => update('briefingsPath', e.target.value)}
-            placeholder="e.g. my-repo"
-          />
-        </div>
+        <MissionDirectoryField
+          value={form.briefingsPath}
+          onChange={val => update('briefingsPath', val)}
+          repoDirs={repoDirs}
+        />
       )}
 
       {agent.role === 'bp-instance' && (

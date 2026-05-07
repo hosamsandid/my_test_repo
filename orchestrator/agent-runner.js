@@ -822,7 +822,13 @@ async function main() {
     }
   });
 
-  // IPC: accept stop-session signal from orchestrator to kill an in-flight Claude invocation.
+  await client.start();
+
+  // Start trigger scheduler for all agents — every agent can have triggers.
+  const scheduler = new TriggerScheduler(client);
+  scheduler.start();
+
+  // IPC: accept signals from orchestrator.
   process.on('message', (msg) => {
     if (msg?.type === 'stop-session') {
       if (activeClaudeProc) {
@@ -832,14 +838,11 @@ async function main() {
       } else {
         console.log(`[Runner:${AGENT_ID}] Stop-session signal received — no active invocation`);
       }
+    } else if (msg?.type === 'reload-triggers') {
+      console.log(`[Runner:${AGENT_ID}] Reload-triggers signal received — syncing scheduler`);
+      scheduler.sync();
     }
   });
-
-  await client.start();
-
-  // Start trigger scheduler for all agents — every agent can have triggers.
-  const scheduler = new TriggerScheduler(client);
-  scheduler.start();
 
   // Orchestrator agents additionally run the claim loop: scan their
   // briefings directory and post a DM suggestion for each newly-dispatched

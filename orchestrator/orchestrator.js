@@ -2255,6 +2255,19 @@ async function main() {
       return;
     }
 
+    const reloadTriggersMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/reload-triggers$/);
+    if (reloadTriggersMatch) {
+      const id = decodeURIComponent(reloadTriggersMatch[1]);
+      const proc = agentProcesses.get(id);
+      if (proc) {
+        proc.send({ type: 'reload-triggers' });
+        console.log(`[Orchestrator] Sent reload-triggers to agent ${id}`);
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
     const resetReposMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/reset-repos$/);
     if (resetReposMatch) {
       const agentId = decodeURIComponent(resetReposMatch[1]);

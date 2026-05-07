@@ -674,6 +674,12 @@ app.get('/api/agents/:id/triggers', (req, res) => {
   res.json(Array.isArray(triggers) ? triggers : []);
 });
 
+function notifyTriggerReload(agentId) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/reload-triggers`, { method: 'POST' })
+    .catch(() => {});
+}
+
 app.post('/api/agents/:id/triggers', (req, res) => {
   const { id } = req.params;
   const agentDir = path.join(AGENTS_DIR, id);
@@ -683,6 +689,7 @@ app.post('/api/agents/:id/triggers', (req, res) => {
   const newTrigger = { id: `t${Date.now()}`, ...req.body };
   triggers.push(newTrigger);
   writeJsonAtomic(triggersPath, triggers);
+  notifyTriggerReload(id);
   res.status(201).json(newTrigger);
 });
 
@@ -696,6 +703,7 @@ app.put('/api/agents/:id/triggers/:triggerId', (req, res) => {
   if (idx === -1) return res.status(404).json({ error: 'Trigger not found' });
   triggers[idx] = { ...triggers[idx], ...req.body, id: triggerId };
   writeJsonAtomic(triggersPath, triggers);
+  notifyTriggerReload(id);
   res.json(triggers[idx]);
 });
 
@@ -707,6 +715,7 @@ app.delete('/api/agents/:id/triggers/:triggerId', (req, res) => {
   const triggers = readJsonFile(triggersPath, []);
   const filtered = triggers.filter(t => t.id !== triggerId);
   writeJsonAtomic(triggersPath, filtered);
+  notifyTriggerReload(id);
   res.status(204).end();
 });
 

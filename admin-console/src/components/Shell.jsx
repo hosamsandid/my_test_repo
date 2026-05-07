@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, Users, Zap, Clock, Sparkles, Server,
@@ -7,6 +7,37 @@ import {
   Sun, Moon,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
+
+const STATUS_POLL_MS = 5_000;
+const LAST_VIEWED_KEY = 'agentChat.lastViewed';
+
+function loadLastViewed() {
+  try { return JSON.parse(localStorage.getItem(LAST_VIEWED_KEY) || '{}'); }
+  catch { return {}; }
+}
+
+function NavBadge({ count, color }) {
+  if (!count) return null;
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      minWidth: 16,
+      height: 16,
+      borderRadius: 'var(--eb-radius-full)',
+      background: color,
+      color: 'var(--eb-bg-app)',
+      fontSize: 10,
+      fontWeight: 'var(--eb-font-semibold)',
+      lineHeight: 1,
+      padding: '0 4px',
+      flexShrink: 0,
+    }}>
+      {count > 99 ? '99+' : count}
+    </span>
+  );
+}
 
 const NAV = [
   { section: 'OVERVIEW', items: [
@@ -62,6 +93,32 @@ export default function Shell({ children }) {
   const navigate = useNavigate();
   const location = useLocation();
   const { theme, toggleLightDark } = useTheme();
+  const [chatCounts, setChatCounts] = useState({ busy: 0, unread: 0 });
+
+  useEffect(() => {
+    const poll = () => {
+      fetch('/api/agents/statuses')
+        .then(r => r.ok ? r.json() : [])
+        .then(list => {
+          const viewed = loadLastViewed();
+          let busy = 0, unread = 0;
+          for (const { id, activityState, lastResponseAt } of list) {
+            if (activityState === 'busy') {
+              busy++;
+            } else if (activityState !== 'disabled' && activityState !== 'offline') {
+              if (lastResponseAt && new Date(lastResponseAt).getTime() > (viewed[id] || 0)) {
+                unread++;
+              }
+            }
+          }
+          setChatCounts({ busy, unread });
+        })
+        .catch(() => {});
+    };
+    poll();
+    const timer = setInterval(poll, STATUS_POLL_MS);
+    return () => clearInterval(timer);
+  }, []);
 
   const sidebarWidth = collapsed ? 'var(--eb-sidebar-collapsed)' : 'var(--eb-sidebar-width)';
 
@@ -152,6 +209,12 @@ export default function Shell({ children }) {
                 const isActive = path === '/'
                   ? location.pathname === '/'
                   : location.pathname === path || location.pathname.startsWith(path + '/');
+                const isChat = path === '/chats';
+                const dotColor = chatCounts.unread > 0
+                  ? 'var(--eb-status-success)'
+                  : chatCounts.busy > 0
+                    ? 'var(--eb-status-warning)'
+                    : null;
                 return (
                   <button
                     key={path}
@@ -182,8 +245,30 @@ export default function Shell({ children }) {
                       if (!isActive) e.currentTarget.style.background = 'transparent';
                     }}
                   >
-                    <Icon size={20} style={{ flexShrink: 0 }} />
-                    {!collapsed && <span>{label}</span>}
+                    {/* Icon — with dot overlay in collapsed mode */}
+                    <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
+                      <Icon size={20} />
+                      {isChat && collapsed && dotColor && (
+                        <span style={{
+                          position: 'absolute',
+                          top: -2,
+                          right: -2,
+                          width: 7,
+                          height: 7,
+                          borderRadius: '50%',
+                          background: dotColor,
+                          border: '1.5px solid var(--eb-bg-surface)',
+                        }} />
+                      )}
+                    </span>
+                    {!collapsed && <span style={{ flex: 1 }}>{label}</span>}
+                    {/* Status badges in expanded mode */}
+                    {isChat && !collapsed && (
+                      <span style={{ display: 'flex', gap: 3, marginLeft: 'auto' }}>
+                        <NavBadge count={chatCounts.unread} color="var(--eb-status-success)" />
+                        <NavBadge count={chatCounts.busy}   color="var(--eb-status-warning)" />
+                      </span>
+                    )}
                   </button>
                 );
               })}

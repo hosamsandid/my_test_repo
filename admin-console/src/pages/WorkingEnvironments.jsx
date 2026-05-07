@@ -13,6 +13,13 @@ const labelStyle = {
   marginBottom: 'var(--eb-space-0-5)',
 };
 
+const helpTextStyle = {
+  fontSize: 'var(--eb-text-xs)',
+  color: 'var(--eb-text-muted)',
+  marginTop: 'var(--eb-space-1)',
+  lineHeight: '1.4',
+};
+
 const inputStyle = {
   width: '100%',
   padding: 'var(--eb-space-2) var(--eb-space-3)',
@@ -183,6 +190,9 @@ function RepositoryCard({ idx, repo, sshKeys, onChange, onRemove }) {
             <option key={k.id} value={k.id}>{k.name} ({k.id})</option>
           ))}
         </select>
+        <div style={helpTextStyle}>
+          Required for SSH-based URLs (e.g. <code>git@github.com:…</code>). Leave empty for HTTPS URLs. Manage SSH keys on the <em>SSH Keys</em> page.
+        </div>
       </div>
 
       <div>
@@ -215,6 +225,11 @@ function RepositoryCard({ idx, repo, sshKeys, onChange, onRemove }) {
             {check.error}
           </div>
         )}
+        {check.status !== 'error' && (
+          <div style={helpTextStyle}>
+            The repository is checked for reachability in real time. Use SSH format for private repositories.
+          </div>
+        )}
       </div>
 
       <div>
@@ -225,6 +240,9 @@ function RepositoryCard({ idx, repo, sshKeys, onChange, onRemove }) {
           onChange={e => onChange('branch', e.target.value)}
           placeholder="main"
         />
+        <div style={helpTextStyle}>
+          Leave empty to clone the repository's default branch (usually <code>main</code> or <code>master</code>).
+        </div>
       </div>
     </div>
   );
@@ -323,31 +341,47 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
           onChange={e => update('id', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
           placeholder="e.g. cobol-migration"
         />
+        <div style={helpTextStyle}>
+          A unique identifier for this environment. Use lowercase letters, numbers, and hyphens only (e.g. <code>cobol-migration</code>). <strong>Cannot be changed after creation.</strong>
+        </div>
       </div>
 
-      <FormInput label="Name *" value={form.name} onChange={v => update('name', v)} placeholder="COBOL Migration" />
+      <div>
+        <FormInput label="Name *" value={form.name} onChange={v => update('name', v)} placeholder="COBOL Migration" />
+        <div style={helpTextStyle}>
+          A short, human-readable label shown in the agent list and this overview (e.g. <em>COBOL Migration Project</em>).
+        </div>
+      </div>
 
       <div>
         <div style={labelStyle}>Description</div>
         <textarea
           value={form.description}
           onChange={e => update('description', e.target.value)}
-          placeholder="What is this working environment used for?"
+          placeholder="Briefly describe what this environment is for — for your own reference."
           rows={2}
           style={{ ...inputStyle, resize: 'vertical' }}
         />
+        <div style={helpTextStyle}>
+          Optional. Shown only in this console — not passed to the agent.
+        </div>
       </div>
 
       <div>
-        <div style={labelStyle}>Skills (from the central pool)</div>
+        <div style={{ ...labelStyle, marginBottom: 'var(--eb-space-1)' }}>
+          Skills
+          <span style={{ fontWeight: 'normal', marginLeft: 'var(--eb-space-2)' }}>
+            — {form.skills.length > 0 ? `${form.skills.length} selected` : 'none selected'}
+          </span>
+        </div>
+        <div style={{ ...helpTextStyle, marginBottom: 'var(--eb-space-2)', marginTop: 0 }}>
+          Skills are pre-built instruction sets (SKILL.md files) from the central pool. The selected skills are copied into the agent's workspace at creation time, giving it domain-specific knowledge and capabilities.
+        </div>
         <SkillPicker
           allSkills={poolSkills}
           selected={form.skills}
           onChange={v => update('skills', v)}
         />
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-          {form.skills.length} selected
-        </div>
       </div>
 
       <div style={{
@@ -359,11 +393,17 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
           <GitBranch size={14} />
           <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
-            Git repositories
+            Git Repositories
           </span>
           <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
             ({form.repositories.length})
           </span>
+        </div>
+
+        <div style={helpTextStyle}>
+          Repositories listed here are cloned into the agent's workspace when the agent is first created.
+          You can add multiple repositories — for example the main codebase and a separate documentation repo.
+          For private repositories, select an SSH key from the dropdown on each repository card.
         </div>
 
         {form.repositories.map((repo, idx) => (
@@ -395,10 +435,6 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
         >
           <Plus size={13} /> Add repository
         </button>
-
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-          Each repository is cloned into the agent workspace at creation time. Manage SSH keys on the SSH Keys page.
-        </div>
       </div>
 
       <div style={{
@@ -410,8 +446,16 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
           <Github size={14} />
           <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
-            GitHub token (gh CLI / HTTPS push)
+            GitHub Token
           </span>
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            (optional)
+          </span>
+        </div>
+        <div style={helpTextStyle}>
+          A GitHub personal access token that allows agents to interact with the GitHub API — for example to open pull requests, create issues, or push via HTTPS.
+          The token is injected into the agent's environment as <code>GH_TOKEN</code> and <code>GITHUB_TOKEN</code>.
+          Only needed if agents use the <code>gh</code> CLI or push to GitHub over HTTPS. Manage tokens on the <em>GitHub Tokens</em> page.
         </div>
         <select
           value={form.githubTokenId}
@@ -423,19 +467,21 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
             <option key={t.id} value={t.id}>{t.name} ({t.preview})</option>
           ))}
         </select>
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-          Exposed to agents in this environment as <code>GH_TOKEN</code> / <code>GITHUB_TOKEN</code>. Manage tokens on the GitHub Tokens page.
-        </div>
       </div>
 
       <div>
-        <div style={labelStyle}>Additional context (CLAUDE.md)</div>
+        <div style={labelStyle}>Additional instructions for agents (CLAUDE.md)</div>
+        <div style={helpTextStyle}>
+          Optional. The text you enter here is appended to the agent's CLAUDE.md — the instruction file Claude reads at startup.
+          Use it to provide project-specific context, coding conventions, domain terminology, or constraints that every agent in this environment should follow.
+          You can use Markdown formatting.
+        </div>
         <textarea
           value={form.additionalContext}
           onChange={e => update('additionalContext', e.target.value)}
-          placeholder="Optional instructions passed to every agent in this environment..."
-          rows={4}
-          style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
+          placeholder={`## Project context\n\nThis environment targets the COBOL migration project.\nAlways write commit messages in English.\nNever modify files in the 10-legacy/ directory.`}
+          rows={5}
+          style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', marginTop: 'var(--eb-space-2)' }}
         />
       </div>
 
@@ -581,14 +627,31 @@ export default function WorkingEnvironments() {
       </div>
 
       <div style={{
-        padding: 'var(--eb-space-3) var(--eb-space-4)',
+        padding: 'var(--eb-space-4)',
         background: 'var(--eb-bg-surface)',
         border: '1px solid var(--eb-border-default)',
         borderRadius: 'var(--eb-radius-md)',
         fontSize: 'var(--eb-text-sm)',
         color: 'var(--eb-text-secondary)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 'var(--eb-space-2)',
       }}>
-        A Working Environment defines what an agent gets in its workspace: selected skills from the pool, any number of Git repositories (each with its own SSH key), and additional context for CLAUDE.md.
+        <p style={{ margin: 0, fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
+          What is a Working Environment?
+        </p>
+        <p style={{ margin: 0 }}>
+          A <strong>Working Environment</strong> is a reusable workspace recipe that defines what every agent created from it receives:
+        </p>
+        <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+          <li><strong>Skills</strong> — pre-built instruction sets (SKILL.md files) that give the agent domain knowledge, such as COBOL analysis or Java migration patterns.</li>
+          <li><strong>Git repositories</strong> — one or more repos that are automatically cloned into the agent's workspace when it is created. Private repos use SSH keys you manage on the SSH Keys page.</li>
+          <li><strong>GitHub token</strong> — optional access token for the <code>gh</code> CLI and HTTPS pushes.</li>
+          <li><strong>Additional instructions</strong> — custom text appended to the agent's CLAUDE.md, giving it project-specific context or constraints.</li>
+        </ul>
+        <p style={{ margin: 0 }}>
+          When you create an agent, you pick one Working Environment. All agents sharing the same environment get the same tools and repositories — but each agent has its own isolated workspace.
+        </p>
       </div>
 
       {actionError && (
@@ -607,7 +670,7 @@ export default function WorkingEnvironments() {
       <SidePanel
         open={panelMode === 'create' || panelMode === 'edit'}
         onClose={() => { setPanelMode(null); setSelected(null); }}
-        title={panelMode === 'edit' ? `Edit: ${selected?.name || selected?.id}` : 'New Environment'}
+        title={panelMode === 'edit' ? `Edit: ${selected?.name || selected?.id}` : 'New Working Environment'}
         width="560px"
       >
         {(panelMode === 'create' || (panelMode === 'edit' && selected)) && (

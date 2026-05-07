@@ -9,9 +9,10 @@ import RightRail from './agent-chat/RightRail';
 const LEFT_WIDTH_KEY  = 'agentChat.leftWidth';
 const RIGHT_WIDTH_KEY = 'agentChat.rightWidth';
 const LEFT_MIN  = 160;
-const LEFT_MAX  = 520;
+const LEFT_MAX  = 800;
 const RIGHT_MIN = 200;
-const RIGHT_MAX = 640;
+const RIGHT_MAX = 1600;
+const CHAT_MIN  = 320;
 
 function loadPanelWidth(key, fallback) {
   try {
@@ -29,7 +30,7 @@ function ResizeDivider({ onMouseDown }) {
       onMouseLeave={() => setHovered(false)}
       title="Ziehen zum Anpassen der Breite"
       style={{
-        width: 6,
+        width: 12,
         flexShrink: 0,
         cursor: 'col-resize',
         position: 'relative',
@@ -42,10 +43,10 @@ function ResizeDivider({ onMouseDown }) {
         left: '50%',
         top: 0,
         bottom: 0,
-        width: 1,
+        width: hovered ? 3 : 1,
         transform: 'translateX(-50%)',
         background: hovered ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)',
-        transition: 'background 0.15s',
+        transition: 'background 0.15s, width 0.15s',
         pointerEvents: 'none',
       }} />
     </div>
@@ -138,32 +139,57 @@ export default function AgentChat() {
     return () => clearInterval(statusTimerRef.current);
   }, []);
 
+  // Right-rail (session log panel) toggle, persisted in localStorage so the
+  // user's preference survives reload. Declared early so the drag handler
+  // below can read it when computing the divider footprint.
+  const [logOpen, setLogOpen] = useState(() => {
+    try { return localStorage.getItem('agentChat.logOpen') !== 'false'; }
+    catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('agentChat.logOpen', logOpen ? 'true' : 'false'); }
+    catch { /* ignore quota / privacy mode */ }
+  }, [logOpen]);
+
   // Panel widths, persisted in localStorage.
   const [leftWidth,  setLeftWidth]  = useState(() => loadPanelWidth(LEFT_WIDTH_KEY,  260));
   const [rightWidth, setRightWidth] = useState(() => loadPanelWidth(RIGHT_WIDTH_KEY, 380));
   useEffect(() => { try { localStorage.setItem(LEFT_WIDTH_KEY,  String(leftWidth));  } catch {} }, [leftWidth]);
   useEffect(() => { try { localStorage.setItem(RIGHT_WIDTH_KEY, String(rightWidth)); } catch {} }, [rightWidth]);
 
-  // Drag state for resize dividers.
+  // Container ref so the drag handler can measure available width and cap the
+  // rail growth to leave at least CHAT_MIN px for the chat panel.
+  const containerRef = useRef(null);
   const dragRef = useRef(null);
 
   const startDrag = useCallback((panel) => (e) => {
     e.preventDefault();
     const startX     = e.clientX;
     const startWidth = panel === 'left' ? leftWidth : rightWidth;
-    dragRef.current  = { panel, startX, startWidth };
+    const otherWidth = panel === 'left' ? rightWidth : leftWidth;
+    const containerW = containerRef.current?.getBoundingClientRect().width || window.innerWidth;
+    // Both dividers (12 px each) when right rail is open; only one otherwise.
+    const dividers   = logOpen ? 24 : 12;
+    const railMin    = panel === 'left' ? LEFT_MIN : RIGHT_MIN;
+    const railMax    = panel === 'left' ? LEFT_MAX : RIGHT_MAX;
+    // Dynamic upper bound: the rail can grow until the chat panel hits CHAT_MIN.
+    const dynamicMax = Math.max(railMin, containerW - otherWidth - dividers - CHAT_MIN);
+    const upperCap   = Math.min(railMax, dynamicMax);
+    const lowerCap   = railMin;
+    dragRef.current  = { panel, startX, startWidth, lowerCap, upperCap };
 
     document.body.style.userSelect = 'none';
     document.body.style.cursor = 'col-resize';
 
     const onMove = (ev) => {
       if (!dragRef.current) return;
-      const delta = ev.clientX - dragRef.current.startX;
-      if (dragRef.current.panel === 'left') {
-        setLeftWidth(Math.max(LEFT_MIN, Math.min(LEFT_MAX, dragRef.current.startWidth + delta)));
+      const { panel: p, startX: sx, startWidth: sw, lowerCap: lo, upperCap: hi } = dragRef.current;
+      const delta = ev.clientX - sx;
+      if (p === 'left') {
+        setLeftWidth(Math.max(lo, Math.min(hi, sw + delta)));
       } else {
         // Right panel grows leftward → inverse delta.
-        setRightWidth(Math.max(RIGHT_MIN, Math.min(RIGHT_MAX, dragRef.current.startWidth - delta)));
+        setRightWidth(Math.max(lo, Math.min(hi, sw - delta)));
       }
     };
     const onUp = () => {
@@ -175,18 +201,7 @@ export default function AgentChat() {
     };
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup',   onUp);
-  }, [leftWidth, rightWidth]);
-
-  // Right-rail (session log panel) toggle, persisted in localStorage so the
-  // user's preference survives reload.
-  const [logOpen, setLogOpen] = useState(() => {
-    try { return localStorage.getItem('agentChat.logOpen') !== 'false'; }
-    catch { return true; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem('agentChat.logOpen', logOpen ? 'true' : 'false'); }
-    catch { /* ignore quota / privacy mode */ }
-  }, [logOpen]);
+  }, [leftWidth, rightWidth, logOpen]);
 
   // Cross-panel hover correlation: ChatPanel sets this when the user hovers
   // a bubble; SessionLogPanel sets it on row hover. The other side dims rows
@@ -280,13 +295,16 @@ export default function AgentChat() {
   const PAGE_HEIGHT = 'calc(100vh - var(--eb-header-height))';
 
   return (
-    <div style={{
-      display: 'flex',
-      height: PAGE_HEIGHT,
-      margin: 'calc(-1 * var(--eb-space-6))',
-      background: 'var(--eb-bg-app)',
-      overflow: 'hidden',
-    }}>
+    <div
+      ref={containerRef}
+      style={{
+        display: 'flex',
+        height: PAGE_HEIGHT,
+        margin: 'calc(-1 * var(--eb-space-6))',
+        background: 'var(--eb-bg-app)',
+        overflow: 'hidden',
+      }}
+    >
       {/* Left rail */}
       <div style={{
         width: leftWidth,

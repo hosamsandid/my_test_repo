@@ -950,16 +950,11 @@ function bpInstanceSystemPrompt(cfg) {
     ``,
     `The brief is your map, not your cage. For coordination across multiple BPs, point the human at the orchestrator agent.`,
     ``,
-    `## Closing the loop — always use bp-transition.py`,
+    `## Closing the loop — explicit hand-off`,
     ``,
-    `Whenever your work effectively changes the BP's lifecycle state (you finished it, or you reworked already-completed output), close the loop with the canonical ACE transition script — never edit \`brief.md\` frontmatter (\`status\`, \`revision\`, \`agent-id\`, \`completed\`, \`stale-because\`) by hand. The script regenerates \`.index.json\`, commits with the right message format, and — critically — signals the AEE orchestrator so downstream BPs (depends-on dependents and input-artifact dependents) get woken up and notified automatically.`,
+    `When your work on this BP is done (or far enough along that downstream BPs should pick up), tell the user explicitly and ask them to use the **Hand-off** button in this chat. The button lets the user pick which downstream agents should be activated and attaches a free-text note that arrives as a normal chat message in each downstream agent's room.`,
     ``,
-    `- **Finished a structured run or finished meaningful dynamic-mode work that fulfils the brief:**`,
-    `  \`python3 scripts/bp-transition.py complete ${cfg.bpId.slice(0, 6)} --push\``,
-    `- **Reworked output of an already completed/reviewed BP** (substantive change a downstream BP would care about):`,
-    `  \`python3 scripts/bp-transition.py revise ${cfg.bpId.slice(0, 6)} --reason "..." --push\``,
-    ``,
-    `If you're unsure whether your dynamic-mode change is "substantive enough" to warrant a revise: ask the user. Skipping the transition silently means downstream agents stay unaware. The signal is best-effort and never blocks — running it costs nothing, omitting it costs propagation.`,
+    `Do **not** edit \`brief.md\` frontmatter (\`status\`, \`revision\`, \`agent-id\`, \`completed\`) yourself, and do **not** try to run lifecycle scripts — the hand-off flow is deliberately manual and decoupled from any ACE Python tooling in this environment.`,
   ].join("\n");
 }
 
@@ -1642,6 +1637,101 @@ class Orchestrator {
       affectedBp: target.affectedBp,
       materialized: isStub && mode !== "notify-only",
     };
+  }
+
+  // Compute hand-off candidates for a bp-instance source agent.
+  // Returns:
+  //   {
+  //     source: { agentId, bpId, displayName, parentOrchestratorId, briefingsPath },
+  //     suggested: [{ agentId, displayName, role, materialized, reason, paths? }, ...],
+  //     siblings:  [{ agentId, displayName, role, materialized }, ...]   // all bp-instance siblings under the same parent orchestrator (excluding source)
+  //   }
+  // `suggested` derives from the orchestrator's .index.json — same graph the
+  // legacy bp-event router used. `siblings` lets the user pick targets the
+  // graph doesn't know about. The two lists may overlap (every suggested
+  // entry also appears in siblings).
+  handoverCandidates(id) {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) throw new Error(`Agent '${id}' not found`);
+    if (cfg.role !== "bp-instance") {
+      throw new Error(`Agent '${id}' is not a bp-instance (role=${cfg.role})`);
+    }
+    const parentId = cfg.parentOrchestratorId;
+    if (!parentId) throw new Error(`bp-instance '${id}' has no parentOrchestratorId`);
+    const orchCfg = loadAgentConfig(parentId);
+    if (!orchCfg) throw new Error(`Parent orchestrator '${parentId}' not found`);
+
+    const source = {
+      agentId: id,
+      bpId: cfg.bpId || null,
+      displayName: cfg.displayName || id,
+      parentOrchestratorId: parentId,
+      briefingsPath: orchCfg.briefingsPath || null,
+    };
+
+    // Reverse index: bpId → stubInfo, restricted to stubs sharing the same parent.
+    const bpHashToStub = new Map();
+    const siblings = [];
+    for (const otherId of listAgentIds()) {
+      if (otherId === id) continue;
+      const otherCfg = loadAgentConfig(otherId);
+      if (!otherCfg) continue;
+      if (otherCfg.role !== "bp-instance") continue;
+      if (otherCfg.parentOrchestratorId !== parentId) continue;
+      siblings.push({
+        agentId: otherId,
+        displayName: otherCfg.displayName || otherId,
+        role: "bp-instance",
+        materialized: Boolean(otherCfg.token),
+        bpId: otherCfg.bpId || null,
+      });
+      if (otherCfg.bpId) bpHashToStub.set(otherCfg.bpId, otherId);
+    }
+
+    let suggested = [];
+    if (cfg.bpId) {
+      const briefingsRel = (orchCfg.briefingsPath || "").replace(/^\/+|\/+$/g, "");
+      const indexPath = path.join(
+        AGENTS_DIR, parentId, briefingsRel, "artifacts/briefings/.index.json"
+      );
+      try {
+        const briefings = bpEventRouter.loadIndex(indexPath);
+        const affected = bpEventRouter.findAffectedBps(briefings, cfg.bpId);
+        for (const depBp of affected.dependsOn) {
+          const targetId = bpHashToStub.get(depBp);
+          if (!targetId) continue;
+          const sibling = siblings.find((s) => s.agentId === targetId);
+          suggested.push({
+            agentId: targetId,
+            displayName: sibling?.displayName || targetId,
+            role: "bp-instance",
+            materialized: Boolean(sibling?.materialized),
+            reason: "depends-on",
+          });
+        }
+        for (const ia of affected.inputArtifact) {
+          const targetId = bpHashToStub.get(ia.bp);
+          if (!targetId) continue;
+          // If already covered by depends-on, skip — depends-on is a stronger signal.
+          if (suggested.some((s) => s.agentId === targetId)) continue;
+          const sibling = siblings.find((s) => s.agentId === targetId);
+          suggested.push({
+            agentId: targetId,
+            displayName: sibling?.displayName || targetId,
+            role: "bp-instance",
+            materialized: Boolean(sibling?.materialized),
+            reason: "input-artifact",
+            paths: ia.paths,
+          });
+        }
+      } catch (err) {
+        // Missing or malformed .index.json is fine — we just return an empty
+        // suggested list and let the user pick from siblings manually.
+        console.warn(`[Orchestrator] handoverCandidates: cannot load index for ${parentId}: ${err.message}`);
+      }
+    }
+
+    return { source, suggested, siblings };
   }
 
   // Materialize a stub bp-instance agent (or re-enable a previously-active
@@ -2492,51 +2582,24 @@ async function main() {
       return;
     }
 
-    // ── BP-event router ──────────────────────────────────────────────────
-    // Single ingestion point for BP signals from any source (bp-transition.py
-    // hooks, future GitHub-poller diff, etc.). The signaling agent does not
-    // do reverse-dep lookups itself — it just announces what changed. The
-    // orchestrator process decides routing, materialization, activation.
+    // ── BP-event router (disabled) ───────────────────────────────────────
+    // The automatic Python-driven fan-out path (bp-transition.py → POST
+    // /internal/bp-events → routeBpEvents) is intentionally retired in this
+    // environment: Python isn't installed in the orchestrator/agent images,
+    // so the script-based closing-loop is unreliable. Hand-off is now an
+    // explicit user action via the bp-instance chat's Hand-off button
+    // (see /internal/agents/:id/handover below). We still answer this URL
+    // so a stray ACE script gets a clean 410 instead of a confusing 404 or
+    // a half-routed event.
     if (req.method === 'POST' && req.url === '/internal/bp-events') {
-      let body = '';
-      let tooLarge = false;
-      req.on('data', (d) => {
-        if (tooLarge) return;
-        body += d;
-        // Soft limit. Stop appending so memory stays bounded, but let the
-        // request finish so we can still send a proper 413. (req.destroy()
-        // would prevent the 'end' callback from firing — the client would
-        // see a connection reset instead of a structured error.)
-        if (body.length > 1_000_000) {
-          tooLarge = true;
-          body = '';
-        }
-      });
+      // Drain the body so the client doesn't see a connection reset.
+      req.on('data', () => {});
       req.on('end', () => {
-        if (tooLarge) {
-          res.writeHead(413, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'payload too large (max 1 MB)' }));
-          return;
-        }
-        let parsed;
-        try { parsed = JSON.parse(body || '{}'); }
-        catch { parsed = null; }
-        if (!parsed || typeof parsed !== 'object') {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'invalid JSON body' }));
-          return;
-        }
-        (async () => {
-          try {
-            const result = await orchestrator.routeBpEvents(parsed);
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify(result));
-          } catch (err) {
-            console.error(`[Orchestrator] routeBpEvents error: ${err.message}`);
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: err.message }));
-          }
-        })();
+        res.writeHead(410, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok: false,
+          error: 'bp-events ingestion is disabled — use the Hand-off button in the bp-instance chat',
+        }));
       });
       return;
     }
@@ -2575,6 +2638,31 @@ async function main() {
           res.end(JSON.stringify({ error: err.message }));
         }
       })();
+      return;
+    }
+
+    // ── Hand-off candidates for a bp-instance ────────────────────────────
+    // Returns the bp-instance stubs that should be considered as hand-off
+    // targets when the named source agent finishes its work. Suggested via
+    // .index.json (depends-on + input-artifact graph); unknown source or
+    // missing index yield empty `suggested`. The full list of sibling
+    // bp-instance agents under the same parent orchestrator is also
+    // returned so the user can hand off to siblings the graph doesn't know
+    // about (e.g. ad-hoc dynamic-mode coordination).
+    const handoverCandMatch = req.method === 'GET' && req.url.match(/^\/internal\/agents\/([^/?]+)\/handover-candidates(?:\?.*)?$/);
+    if (handoverCandMatch) {
+      const id = decodeURIComponent(handoverCandMatch[1]);
+      try {
+        const result = orchestrator.handoverCandidates(id);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        console.error(`[Orchestrator] handoverCandidates error for ${id}: ${err.message}`);
+        const status = /not found/i.test(err.message) ? 404 :
+                       /not a bp-instance/i.test(err.message) ? 409 : 500;
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
       return;
     }
 

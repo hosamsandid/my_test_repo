@@ -625,6 +625,159 @@ app.post('/api/agents/:id/deactivate', async (req, res) => {
   }
 });
 
+/* ─── BP-instance hand-off (FreeFlow) ───────────────────────────────────
+ *
+ * Replaces the legacy bp-transition.py / /internal/bp-events propagation.
+ * Entry point: a button in the bp-instance chat. Two endpoints:
+ *
+ *   GET  /api/agents/:id/handover/candidates → orchestrator computes
+ *        suggested + sibling targets from .index.json. Proxy only.
+ *   POST /api/agents/:id/handover            → fan-out is orchestrated
+ *        here (Matrix-side state lives in admin-console): for each
+ *        target we (1) materialize/enable via orchestrator, (2) ensure
+ *        a DM room with the admin, (3) send the hand-off note as a
+ *        normal m.text DM. The receiving agent's existing DM handler
+ *        picks it up like any other user message and starts working.
+ *
+ * Body shape:
+ *   {
+ *     targets: [agentId, ...],          // required, non-empty
+ *     note: string,                      // optional shared note
+ *     perTarget: { agentId: noteOverride }  // optional, overrides note for that target
+ *   }
+ */
+
+app.get('/api/agents/:id/handover/candidates', async (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/handover-candidates`);
+    const data = await resp.json();
+    if (!resp.ok) return res.status(resp.status).json(data);
+    res.json(data);
+  } catch (err) {
+    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+app.post('/api/agents/:id/handover', async (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+
+  const sourceCfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+  if (!sourceCfg) return res.status(404).json({ error: 'Agent not found' });
+  if (sourceCfg.role !== 'bp-instance') {
+    return res.status(409).json({ error: `Agent '${id}' is not a bp-instance (role=${sourceCfg.role})` });
+  }
+
+  const { targets, note, perTarget } = req.body || {};
+  if (!Array.isArray(targets) || targets.length === 0) {
+    return res.status(400).json({ error: 'targets (non-empty array of agent ids) is required' });
+  }
+  for (const t of targets) {
+    if (typeof t !== 'string' || !AGENT_ID_RE.test(t)) {
+      return res.status(400).json({ error: `Invalid target agent id: ${String(t).slice(0, 80)}` });
+    }
+  }
+  const sharedNote = typeof note === 'string' ? note.trim() : '';
+  const perTargetMap = perTarget && typeof perTarget === 'object' && !Array.isArray(perTarget) ? perTarget : {};
+
+  if (!matrix.ADMIN_TOKEN) {
+    return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
+  }
+
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  const sourceLabel = sourceCfg.displayName || id;
+  const sourceBpHash = sourceCfg.bpId ? String(sourceCfg.bpId).slice(0, 8) : null;
+  const headerLine = sourceBpHash
+    ? `Hand-off from **${sourceLabel}** (bp:${sourceBpHash}) — your upstream BP signalled it's done.`
+    : `Hand-off from **${sourceLabel}** — your upstream agent signalled it's done.`;
+
+  const results = [];
+  for (const targetId of targets) {
+    const targetCfgPath = path.join(AGENTS_DIR, targetId, 'config.json');
+    const targetCfg = readJsonFile(targetCfgPath, null);
+    if (!targetCfg) {
+      results.push({ agentId: targetId, ok: false, stage: 'lookup', error: 'target not found' });
+      continue;
+    }
+
+    // 1. Materialize / enable the target via orchestrator (idempotent).
+    try {
+      const enableResp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(targetId)}/enable`, {
+        method: 'POST',
+      });
+      const enableData = await enableResp.json().catch(() => ({}));
+      if (!enableResp.ok) {
+        results.push({ agentId: targetId, ok: false, stage: 'enable', error: enableData.error || `HTTP ${enableResp.status}` });
+        continue;
+      }
+    } catch (err) {
+      results.push({ agentId: targetId, ok: false, stage: 'enable', error: `Orchestrator unreachable: ${err.message}` });
+      continue;
+    }
+
+    // 2. Ensure DM room. enableAgent rewrites config.json with the new
+    // token, so re-read before checking matrix readiness.
+    const refreshedCfg = readJsonFile(targetCfgPath, null);
+    if (!refreshedCfg?.token) {
+      results.push({ agentId: targetId, ok: false, stage: 'enable', error: 'agent has no Matrix token after enable' });
+      continue;
+    }
+    let roomId;
+    try {
+      const dm = await ensureAgentDmRoom(targetId);
+      roomId = dm.roomId;
+    } catch (err) {
+      results.push({ agentId: targetId, ok: false, stage: 'dm', error: err.message });
+      continue;
+    }
+
+    // 3. Send the hand-off note as an m.text DM. The receiving agent's
+    // DM heuristic in agent-runner.js will pick this up like any other
+    // user message and invoke Claude with the body as the prompt.
+    const noteText = (typeof perTargetMap[targetId] === 'string' ? perTargetMap[targetId] : sharedNote).trim();
+    const body = noteText
+      ? `${headerLine}\n\n${noteText}`
+      : `${headerLine}\n\nPlease begin your part of the work.`;
+
+    const txnId = crypto.randomUUID();
+    try {
+      const sendResp = await matrix.matrixFetch(matrix.ADMIN_TOKEN,
+        `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(txnId)}`,
+        {
+          method: 'PUT',
+          body: { msgtype: 'm.text', body },
+        });
+      if (sendResp.status >= 400) {
+        results.push({ agentId: targetId, ok: false, stage: 'send', error: sendResp.data?.error || `Matrix ${sendResp.status}` });
+        continue;
+      }
+      results.push({
+        agentId: targetId,
+        ok: true,
+        roomId,
+        eventId: sendResp.data?.event_id || null,
+        displayName: refreshedCfg.displayName || targetId,
+      });
+    } catch (err) {
+      results.push({ agentId: targetId, ok: false, stage: 'send', error: `Matrix unreachable: ${err.message}` });
+    }
+  }
+
+  const okCount = results.filter((r) => r.ok).length;
+  // Always 200 — per-target outcomes are in `results`. The UI shows the
+  // breakdown; treating "0 of N succeeded" as a transport-level failure
+  // would hide that detail behind apiCall's generic error path.
+  res.status(200).json({
+    source: { agentId: id, displayName: sourceLabel, bpId: sourceCfg.bpId || null },
+    sent: okCount,
+    total: results.length,
+    results,
+  });
+});
+
 /* ─── BP stub sync ──────────────────────────────────────────────────── */
 
 app.post('/api/agents/:id/sync-bps', async (req, res) => {

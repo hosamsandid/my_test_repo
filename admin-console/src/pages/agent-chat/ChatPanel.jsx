@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Wifi, WifiOff, Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Square, Cpu, Trash2, GitBranch } from 'lucide-react';
+import { Wifi, WifiOff, Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Square, Cpu, Trash2, GitBranch, ArrowRight } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
 import ConfirmDialog from '../../components/ConfirmDialog';
+import HandoffDialog from './HandoffDialog';
 import Message from './Message';
 import MessageInput from './MessageInput';
 
@@ -70,6 +71,7 @@ export default function ChatPanel({
   const [learnPending, setLearnPending] = useState(false);
   const [clearingHistory, setClearingHistory] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [showHandoff, setShowHandoff] = useState(false);
 
   // Per-agent model selection. `modelOptions` is the resolved snapshot from
   // /api/agents/:id/model-options: which endpoint the agent is bound to,
@@ -697,6 +699,22 @@ export default function ChatPanel({
             : <Trash2 size={11} />}
           Clear History
         </button>
+        {agent?.role === 'bp-instance' && (
+          <button
+            type="button"
+            onClick={() => setShowHandoff(true)}
+            disabled={disabled}
+            title="Hand work off to downstream bp-instance agents — they receive your note as a chat message and start working"
+            style={{
+              ...sessionBtnStyle(disabled),
+              color: disabled ? undefined : 'var(--eb-accent-primary)',
+              borderColor: disabled ? undefined : 'var(--eb-accent-primary)',
+            }}
+          >
+            <ArrowRight size={11} />
+            Hand-off
+          </button>
+        )}
         {showThinking && (
           <button
             type="button"
@@ -966,6 +984,12 @@ export default function ChatPanel({
         confirmLabel="Delete All Messages"
         onConfirm={() => { setShowClearConfirm(false); handleClearHistory(); }}
         onCancel={() => setShowClearConfirm(false)}
+      />
+
+      <HandoffDialog
+        open={showHandoff}
+        agent={agent}
+        onClose={() => setShowHandoff(false)}
       />
     </div>
   );

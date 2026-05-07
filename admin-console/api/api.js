@@ -490,7 +490,7 @@ app.post('/api/agents/:id/sync-bps', async (req, res) => {
   const { id } = req.params;
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
-    const resp = await fetch(`${orchestratorUrl}/internal/orchestrators/${encodeURIComponent(id)}/sync-bps`, {
+    const resp = await fetch(`${orchestratorUrl}/internal/orchestrators/${encodeURIComponent(id)}/sync-bps?force=1`, {
       method: 'POST',
     });
     const data = await resp.json();

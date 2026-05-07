@@ -1118,7 +1118,13 @@ class Orchestrator {
   //
   // Stubs carry no Matrix identity, no token, and no seeded workspace —
   // those are materialized on first activation via enableAgent().
-  async syncBpStubs(orchestratorId) {
+  //
+  // Pulls the orchestrator's workspace clone first so the BP listing
+  // reflects current `origin/main`. Without this, a stale local working
+  // copy makes the user-initiated "Sync" button a no-op even when remote
+  // has new BPs. Pass `{ force: true }` to bypass the per-orchestrator
+  // pull throttle (used for explicit user actions).
+  async syncBpStubs(orchestratorId, { force = false } = {}) {
     const orchCfg = loadAgentConfig(orchestratorId);
     if (!orchCfg) throw new Error(`Orchestrator '${orchestratorId}' not found`);
     if (orchCfg.role !== "orchestrator") {
@@ -1126,6 +1132,12 @@ class Orchestrator {
     }
     if (!orchCfg.briefingsPath) {
       throw new Error(`Orchestrator '${orchestratorId}' has no briefingsPath configured`);
+    }
+
+    const env = loadEnvironment(orchCfg.environmentId);
+    if (env) {
+      if (force) _pullThrottles.delete(orchestratorId);
+      pullOrchestratorWorkspace(orchestratorId, orchCfg.briefingsPath, env);
     }
 
     const bps = await fetchBriefingPacks(orchestratorId, orchCfg.briefingsPath);
@@ -2197,12 +2209,15 @@ async function main() {
     }
 
     // ── Re-scan briefings directory for an orchestrator ──────────────────
-    const syncBpsMatch = req.method === 'POST' && req.url.match(/^\/internal\/orchestrators\/([^/]+)\/sync-bps$/);
+    // Accepts `?force=1` to bypass the per-orchestrator pull throttle —
+    // user-initiated Sync clicks should always reach origin.
+    const syncBpsMatch = req.method === 'POST' && req.url.match(/^\/internal\/orchestrators\/([^/]+)\/sync-bps(?:\?.*)?$/);
     if (syncBpsMatch) {
       const orchId = decodeURIComponent(syncBpsMatch[1]);
+      const force = /[?&]force=1\b/.test(req.url);
       (async () => {
         try {
-          const stubs = await orchestrator.syncBpStubs(orchId);
+          const stubs = await orchestrator.syncBpStubs(orchId, { force });
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ orchestratorId: orchId, stubs, total: stubs.length }));
         } catch (err) {

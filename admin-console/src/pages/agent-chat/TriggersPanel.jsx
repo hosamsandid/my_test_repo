@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Trash2 } from 'lucide-react';
+import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Pencil, Trash2 } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
 import ConfirmDialog from '../../components/ConfirmDialog';
@@ -56,7 +56,7 @@ function TypeBadge({ type }) {
 }
 
 /* ── Trigger row ────────────────────────────────────────────────────── */
-function TriggerRow({ trigger, agentId, onDeleted, onToggled }) {
+function TriggerRow({ trigger, agentId, onEdit, onDeleted, onToggled }) {
   const [toggling, setToggling] = useState(false);
   const schedule = trigger.cron || trigger.at || '—';
 
@@ -68,6 +68,12 @@ function TriggerRow({ trigger, agentId, onDeleted, onToggled }) {
     } catch { /* surface via refresh */ }
     finally { setToggling(false); }
   }
+
+  const iconBtn = {
+    background: 'none', border: '1px solid var(--eb-border-default)',
+    borderRadius: 'var(--eb-radius-sm)', color: 'var(--eb-text-muted)',
+    cursor: 'pointer', padding: '1px 5px', display: 'flex', alignItems: 'center', flexShrink: 0,
+  };
 
   return (
     <div style={{
@@ -90,14 +96,13 @@ function TriggerRow({ trigger, agentId, onDeleted, onToggled }) {
             ? <CheckCircle2 size={14} style={{ color: 'var(--eb-status-success)', flexShrink: 0 }} title="Enabled" />
             : <XCircle     size={14} style={{ color: 'var(--eb-text-muted)',      flexShrink: 0 }} title="Disabled" />
         }
+        <button onClick={() => onEdit(trigger)} title="Edit trigger" style={iconBtn}>
+          <Pencil size={11} />
+        </button>
         <button
           onClick={() => onDeleted(trigger)}
           title="Delete trigger"
-          style={{
-            background: 'none', border: '1px solid var(--eb-status-error)',
-            borderRadius: 'var(--eb-radius-sm)', color: 'var(--eb-status-error)',
-            cursor: 'pointer', padding: '1px 5px', display: 'flex', alignItems: 'center', flexShrink: 0,
-          }}
+          style={{ ...iconBtn, border: '1px solid var(--eb-status-error)', color: 'var(--eb-status-error)' }}
         >
           <Trash2 size={11} />
         </button>
@@ -136,12 +141,18 @@ function TriggerRow({ trigger, agentId, onDeleted, onToggled }) {
   );
 }
 
-/* ── Add-trigger form ───────────────────────────────────────────────── */
-function TriggerForm({ onSave, onCancel, saving }) {
-  const [form, setForm] = useState({
-    id: '', type: 'cron', cron: '', at: '',
-    description: '', prompt: '', enabled: true,
-  });
+/* ── Trigger form (create & edit) ───────────────────────────────────── */
+function TriggerForm({ onSave, onCancel, saving, initialValues }) {
+  const isEdit = !!initialValues;
+  const [form, setForm] = useState(() => ({
+    id: initialValues?.id ?? '',
+    type: initialValues?.type === 'once' ? 'once' : 'cron',
+    cron: initialValues?.cron ?? '',
+    at: initialValues?.at ?? '',
+    description: initialValues?.description ?? '',
+    prompt: initialValues?.prompt ?? '',
+    enabled: initialValues?.enabled !== false,
+  }));
   const [error, setError] = useState(null);
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
@@ -151,12 +162,12 @@ function TriggerForm({ onSave, onCancel, saving }) {
     if (form.type === 'once' && !form.at.trim())   { setError('Run-at timestamp is required.'); return; }
     if (!form.prompt.trim()) { setError('Prompt is required.'); return; }
     const body = {
-      id: form.id.trim() || undefined,
       type: form.type,
       description: form.description.trim() || undefined,
       prompt: form.prompt.trim(),
       enabled: form.enabled,
     };
+    if (!isEdit) body.id = form.id.trim() || undefined;
     if (form.type === 'cron') body.cron = form.cron.trim();
     else body.at = form.at.trim();
     await onSave(body);
@@ -166,10 +177,11 @@ function TriggerForm({ onSave, onCancel, saving }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
 
       <FormInput
-        label="ID (optional)"
+        label={isEdit ? 'ID' : 'ID (optional)'}
         value={form.id}
-        onChange={v => set('id', v)}
-        placeholder="e.g. daily-report (auto-generated if empty)"
+        onChange={v => !isEdit && set('id', v)}
+        placeholder={isEdit ? undefined : 'e.g. daily-report (auto-generated if empty)'}
+        disabled={isEdit}
       />
 
       <div>
@@ -251,7 +263,7 @@ function TriggerForm({ onSave, onCancel, saving }) {
           }}
         >
           {saving && <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />}
-          Add Trigger
+          {isEdit ? 'Save' : 'Add Trigger'}
         </button>
         <button
           onClick={onCancel}
@@ -280,8 +292,9 @@ export default function TriggersPanel({ agentId, active }) {
   const [loading, setLoading]     = useState(false);
   const [error, setError]         = useState(null);
 
-  const [addOpen, setAddOpen]       = useState(false);
-  const [saving, setSaving]         = useState(false);
+  const [addOpen, setAddOpen]           = useState(false);
+  const [editTarget, setEditTarget]     = useState(null);
+  const [saving, setSaving]             = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
 
   const fetchTriggers = useCallback(async (id) => {
@@ -314,7 +327,19 @@ export default function TriggersPanel({ agentId, active }) {
       setAddOpen(false);
       fetchTriggers(agentId);
     } catch (e) {
-      // Re-throw so TriggerForm can show the error
+      throw e;
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleEditSave(body) {
+    setSaving(true);
+    try {
+      await apiCall('PUT', `/api/agents/${agentId}/triggers/${editTarget.id}`, body);
+      setEditTarget(null);
+      fetchTriggers(agentId);
+    } catch (e) {
       throw e;
     } finally {
       setSaving(false);
@@ -422,6 +447,7 @@ export default function TriggersPanel({ agentId, active }) {
             key={t.id || i}
             trigger={t}
             agentId={agentId}
+            onEdit={setEditTarget}
             onDeleted={setDeleteTarget}
             onToggled={() => fetchTriggers(agentId)}
           />
@@ -434,6 +460,17 @@ export default function TriggersPanel({ agentId, active }) {
           onSave={handleSave}
           onCancel={() => setAddOpen(false)}
         />
+      </SidePanel>
+
+      <SidePanel open={!!editTarget} onClose={() => setEditTarget(null)} title="Edit Trigger">
+        {editTarget && (
+          <TriggerForm
+            initialValues={editTarget}
+            saving={saving}
+            onSave={handleEditSave}
+            onCancel={() => setEditTarget(null)}
+          />
+        )}
       </SidePanel>
 
       <ConfirmDialog

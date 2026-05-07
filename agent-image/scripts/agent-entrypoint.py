@@ -358,7 +358,14 @@ def _handle_sigterm(signum: int, frame) -> None:
                      f"[agent:{_args.agent_id}]"],
                     check=False,
                 )
-                _git_run(["push", "origin", "HEAD"], check=False)
+                push_result = _git_run(["push", "origin", "HEAD"], check=False)
+                if push_result.returncode != 0:
+                    print(
+                        f"[agent] WARN: git push failed (rc={push_result.returncode}): "
+                        f"{push_result.stderr.strip()} "
+                        f"— expected in dev when no SSH key is mounted into the container.",
+                        file=sys.stderr,
+                    )
             except Exception as exc:
                 print(f"[agent] shutdown commit failed: {exc}", file=sys.stderr)
         sys.exit(124)
@@ -1133,7 +1140,14 @@ def _run_bp_dispatch(args) -> None:
              f"[agent:{args.agent_id}]"],
             check=False,
         )
-        _git_run(["push", "origin", "HEAD"], check=False)
+        push_result = _git_run(["push", "origin", "HEAD"], check=False)
+        if push_result.returncode != 0:
+            print(
+                f"[agent] WARN: git push failed (rc={push_result.returncode}): "
+                f"{push_result.stderr.strip()} "
+                f"— expected in dev when no SSH key is mounted into the container.",
+                file=sys.stderr,
+            )
 
     print(f"[agent] Done: exit_code={exit_code}", file=sys.stderr)
     sys.exit(exit_code)

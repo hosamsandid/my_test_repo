@@ -163,6 +163,15 @@ def cmd_create(args: argparse.Namespace) -> int:
         # Git worktrees use a .git file pointing to the parent repo's
         # .git/worktrees/<name> directory. Bind-mount the parent .git
         # so git operations work inside the container.
+        #
+        # SECURITY: This is a deliberate trade-off. The :rw mount gives the
+        # container full write access to the host repo's git metadata
+        # (refs, objects, hooks, config). Required because BP-dispatch
+        # commits + pushes from inside the container, which writes to
+        # .git/worktrees/<name>/ and the shared object database.
+        # Acceptable for the dev/CI setup where the repo is cloned
+        # specifically for agent runs; not appropriate if the host repo
+        # holds untrusted upstream commits or sensitive hooks.
         host_git_dir = REPO_ROOT / ".git"
         if host_git_dir.is_dir():
             cmd.extend(["-v", f"{host_git_dir.resolve()}:{host_git_dir.resolve()}:rw"])

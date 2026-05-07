@@ -4,7 +4,11 @@ import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertC
 const POLL_MS = 30_000;
 
 function TypeBadge({ type }) {
-  const isCron = type === 'cron';
+  const isCron = type === 'cron' || type === 'recurring';
+  const isOnce = type === 'once';
+  const bg    = isCron ? 'var(--eb-accent-muted)'    : isOnce ? 'var(--eb-bg-elevated)'    : 'var(--eb-status-warning-bg)';
+  const color = isCron ? 'var(--eb-accent-primary)'  : isOnce ? 'var(--eb-text-secondary)' : 'var(--eb-status-warning)';
+  const label = isCron ? 'cron' : isOnce ? 'once' : type || 'unknown';
   return (
     <span style={{
       display: 'inline-flex',
@@ -14,13 +18,13 @@ function TypeBadge({ type }) {
       borderRadius: 'var(--eb-radius-full)',
       fontSize: 'var(--eb-text-xs)',
       fontWeight: 'var(--eb-font-medium)',
-      background: isCron ? 'var(--eb-accent-muted)' : 'var(--eb-bg-elevated)',
-      color: isCron ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)',
-      border: `1px solid ${isCron ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+      background: bg,
+      color,
+      border: `1px solid ${color}`,
       whiteSpace: 'nowrap',
     }}>
       {isCron ? <Clock size={10} /> : <CalendarClock size={10} />}
-      {isCron ? 'cron' : 'once'}
+      {label}
     </span>
   );
 }

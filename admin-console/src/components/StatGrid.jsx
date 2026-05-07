@@ -23,7 +23,7 @@ export default function StatGrid({ stats = [] }) {
   );
 }
 
-function StatCard({ label, value, trend, trendLabel, status }) {
+function StatCard({ label, value, trend, trendLabel, status, dotColor }) {
   const trendColor = trend === 'up'
     ? 'var(--eb-status-success)'
     : trend === 'down'
@@ -34,9 +34,8 @@ function StatCard({ label, value, trend, trendLabel, status }) {
     : trend === 'down' ? TrendingDown
     : Minus;
 
-  const statusDotColor = status
-    ? `var(--eb-status-${status === 'neutral' ? 'info' : status})`
-    : null;
+  const statusDotColor = dotColor
+    ?? (status ? `var(--eb-status-${status === 'neutral' ? 'info' : status})` : null);
 
   return (
     <div style={{

@@ -1,10 +1,33 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useApi } from '../hooks/useApi';
 import StatGrid from '../components/StatGrid';
 import DataTable from '../components/DataTable';
 import StatusBadge from '../components/StatusBadge';
 import SetupWizard from './SetupWizard';
 import { Settings } from 'lucide-react';
+
+const ACTIVITY_STATUS = {
+  busy:     { color: 'var(--eb-status-warning)', label: 'Busy' },
+  idle:     { color: 'var(--eb-text-muted)',     label: 'Idle' },
+  offline:  { color: 'var(--eb-status-error)',   label: 'Offline' },
+  disabled: { color: 'var(--eb-text-muted)',     label: 'Disabled' },
+};
+
+function ActivityDot({ state }) {
+  const s = ACTIVITY_STATUS[state] ?? ACTIVITY_STATUS.offline;
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+      <span style={{
+        width: 8, height: 8, borderRadius: '50%',
+        background: s.color, flexShrink: 0,
+        ...(state === 'busy' ? { animation: 'eb-status-pulse 1.4s ease-in-out infinite' } : {}),
+      }} />
+      <span style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>{s.label}</span>
+    </span>
+  );
+}
+
+const STATUS_POLL_MS = 5000;
 
 function Skeleton() {
   return (
@@ -18,13 +41,6 @@ function Skeleton() {
     </div>
   );
 }
-
-const AGENT_COLS = [
-  { key: 'id',          label: 'ID' },
-  { key: 'displayName', label: 'Name' },
-  { key: 'role',        label: 'Role' },
-  { key: 'enabled',     label: 'Status', sortable: false, render: v => <StatusBadge enabled={v !== false} /> },
-];
 
 function SetupNudge() {
   const { data: status } = useApi('/api/setup/status');
@@ -74,9 +90,24 @@ function SetupNudge() {
   );
 }
 
+
 export default function Dashboard() {
   const { data: dash, loading: dashLoading, error: dashError } = useApi('/api/dashboard');
   const { data: agents, loading: agentsLoading, error: agentsError } = useApi('/api/agents');
+  const [statuses, setStatuses] = useState([]);
+  const intervalRef = useRef(null);
+
+  useEffect(() => {
+    async function fetchStatuses() {
+      try {
+        const res = await fetch('/api/agents/statuses');
+        if (res.ok) setStatuses(await res.json());
+      } catch { /* orchestrator unreachable */ }
+    }
+    fetchStatuses();
+    intervalRef.current = setInterval(fetchStatuses, STATUS_POLL_MS);
+    return () => clearInterval(intervalRef.current);
+  }, []);
 
   if (dashLoading || agentsLoading) return <Skeleton />;
 
@@ -96,6 +127,31 @@ export default function Dashboard() {
     { label: 'Skills',          value: dash.skills?.total    ?? 0 },
   ] : [];
 
+  const busyCount    = statuses.filter(s => s.activityState === 'busy').length;
+  const idleCount    = statuses.filter(s => s.activityState === 'idle').length;
+  const offlineCount = statuses.filter(s => s.activityState === 'offline' || s.activityState === 'disabled').length;
+
+  const activityStats = [
+    { label: 'Busy',    value: busyCount,    status: busyCount > 0 ? 'warning' : undefined },
+    { label: 'Idle',    value: idleCount,    dotColor: 'var(--eb-text-muted)' },
+    { label: 'Offline', value: offlineCount, status: offlineCount > 0 ? 'error' : undefined },
+  ];
+
+  const statusMap = Object.fromEntries(statuses.map(s => [s.id, s.activityState]));
+
+  const agentCols = [
+    { key: 'id',             label: 'ID' },
+    { key: 'displayName',    label: 'Name' },
+    { key: 'role',           label: 'Role' },
+    { key: 'enabled',        label: 'Config',   sortable: false, render: v => <StatusBadge enabled={v !== false} /> },
+    { key: 'activityState',  label: 'Activity', sortable: false, render: v => <ActivityDot state={v} /> },
+  ];
+
+  const agentsWithStatus = (agents ?? []).map(a => ({
+    ...a,
+    activityState: statusMap[a.id] ?? 'offline',
+  }));
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-6)' }}>
       <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
@@ -108,6 +164,13 @@ export default function Dashboard() {
 
       <section>
         <h2 style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-3)' }}>
+          Live Status
+        </h2>
+        <StatGrid stats={activityStats} />
+      </section>
+
+      <section>
+        <h2 style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-3)' }}>
           Agents
         </h2>
         {agentsError ? (
@@ -116,8 +179,8 @@ export default function Dashboard() {
           </div>
         ) : (
           <DataTable
-            columns={AGENT_COLS}
-            data={agents ?? []}
+            columns={agentCols}
+            data={agentsWithStatus}
             emptyText="No agents found. Add agents via Agent Manager."
           />
         )}

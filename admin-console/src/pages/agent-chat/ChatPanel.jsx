@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Wifi, WifiOff, Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Square, Cpu } from 'lucide-react';
+import { Wifi, WifiOff, Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Square, Cpu, Trash2 } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
+import ConfirmDialog from '../../components/ConfirmDialog';
 import Message from './Message';
 import MessageInput from './MessageInput';
 
@@ -67,6 +68,8 @@ export default function ChatPanel({
   const [resetting, setResetting]     = useState(false);
   const [stopping, setStopping]       = useState(false);
   const [learnPending, setLearnPending] = useState(false);
+  const [clearingHistory, setClearingHistory] = useState(false);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
 
   // Per-agent model selection. `modelOptions` is the resolved snapshot from
   // /api/agents/:id/model-options: which endpoint the agent is bound to,
@@ -391,6 +394,22 @@ export default function ChatPanel({
     }
   }
 
+  async function handleClearHistory() {
+    if (!roomId || clearingHistory) return;
+    setClearingHistory(true);
+    setError(null);
+    try {
+      await apiCall('DELETE', `/api/matrix/rooms/${encodeURIComponent(roomId)}/messages`);
+      setMessages([]);
+      setEndToken(null);
+      setOlderExhausted(true);
+    } catch (err) {
+      setError(`Clear history failed: ${err.message}`);
+    } finally {
+      setClearingHistory(false);
+    }
+  }
+
   /* ─── Model picker ───────────────────────────────────────────────── */
   // Fetch the resolved model options whenever the agent changes. Re-runs
   // also after the user picks a different model (handler below) so the UI
@@ -600,6 +619,22 @@ export default function ChatPanel({
             ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
             : <RotateCcw size={11} />}
           Reset Session
+        </button>
+        <button
+          type="button"
+          onClick={() => setShowClearConfirm(true)}
+          disabled={!roomId || clearingHistory || disabled}
+          title="Permanently delete all messages in this chat room"
+          style={{
+            ...sessionBtnStyle(!roomId || clearingHistory || disabled),
+            color: (!roomId || clearingHistory || disabled) ? undefined : 'var(--eb-status-error)',
+            borderColor: (!roomId || clearingHistory || disabled) ? undefined : 'var(--eb-status-error)',
+          }}
+        >
+          {clearingHistory
+            ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
+            : <Trash2 size={11} />}
+          Clear History
         </button>
         {showThinking && (
           <button
@@ -861,6 +896,16 @@ export default function ChatPanel({
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         @keyframes dotPulse { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
       `}</style>
+
+      <ConfirmDialog
+        open={showClearConfirm}
+        title="Clear Chat History"
+        message="This will permanently delete all messages in this chat room. This action cannot be undone."
+        variant="danger"
+        confirmLabel="Delete All Messages"
+        onConfirm={() => { setShowClearConfirm(false); handleClearHistory(); }}
+        onCancel={() => setShowClearConfirm(false)}
+      />
     </div>
   );
 }

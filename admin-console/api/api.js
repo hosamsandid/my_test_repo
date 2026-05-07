@@ -1498,11 +1498,12 @@ app.delete('/api/github-tokens/:id', (req, res) => {
  * from MATRIX_ACCESS_TOKEN; per-agent tokens come from /workspace/agents/<id>/config.json.
  *
  * Routes:
- *   GET  /api/matrix/agents                          List enabled agents with Matrix identities
- *   POST /api/matrix/agents/:agentId/dm              Idempotent create/get DM room
- *   GET  /api/matrix/rooms/:roomId/messages          Paginated history (proxy)
- *   POST /api/matrix/rooms/:roomId/messages          Send m.text as admin
- *   GET  /api/matrix/rooms/:roomId/stream            SSE long-poll on /sync filtered to room
+ *   GET    /api/matrix/agents                          List enabled agents with Matrix identities
+ *   POST   /api/matrix/agents/:agentId/dm              Idempotent create/get DM room
+ *   GET    /api/matrix/rooms/:roomId/messages          Paginated history (proxy)
+ *   POST   /api/matrix/rooms/:roomId/messages          Send m.text as admin
+ *   DELETE /api/matrix/rooms/:roomId/messages          Redact all m.room.message events
+ *   GET    /api/matrix/rooms/:roomId/stream            SSE long-poll on /sync filtered to room
  */
 
 // 1. List enabled agents that have Matrix identities
@@ -1676,7 +1677,61 @@ app.post('/api/matrix/rooms/:roomId/messages', async (req, res) => {
   }
 });
 
-// 5. SSE stream — long-poll /sync filtered to this room
+// 5. Redact (delete) all m.room.message events in a room
+//
+// Paginates backward through the full timeline, collecting every m.room.message
+// event_id, then issues a Matrix redaction (PUT .../redact/...) for each one.
+// The admin token is used throughout. Events the homeserver rejects (e.g.
+// already redacted) are silently skipped so the call is idempotent.
+app.delete('/api/matrix/rooms/:roomId/messages', async (req, res) => {
+  if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
+  const { roomId } = req.params;
+
+  // Collect all m.room.message event_ids by paginating dir=b until exhausted.
+  const eventIds = [];
+  let from = undefined;
+  try {
+    while (true) {
+      const query = { dir: 'b', limit: 100 };
+      if (from) query.from = from;
+      const resp = await matrix.matrixFetch(matrix.ADMIN_TOKEN,
+        `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages`,
+        { query });
+      if (resp.status >= 400) {
+        return res.status(resp.status).json(resp.data ?? { error: `Matrix returned ${resp.status}` });
+      }
+      const chunk = Array.isArray(resp.data?.chunk) ? resp.data.chunk : [];
+      for (const ev of chunk) {
+        if (ev.type === 'm.room.message' && ev.event_id) eventIds.push(ev.event_id);
+      }
+      const next = resp.data?.end;
+      if (!next || chunk.length === 0) break;
+      from = next;
+    }
+  } catch (err) {
+    return res.status(502).json({ error: `Matrix unreachable: ${err.message}` });
+  }
+
+  // Redact each event. Failures per event are non-fatal (may already be redacted).
+  let redacted = 0;
+  let skipped  = 0;
+  for (const eventId of eventIds) {
+    const txnId = crypto.randomUUID();
+    try {
+      const r = await matrix.matrixFetch(matrix.ADMIN_TOKEN,
+        `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/redact/${encodeURIComponent(eventId)}/${encodeURIComponent(txnId)}`,
+        { method: 'PUT', body: { reason: 'Chat history cleared by admin' } });
+      if (r.status < 400) redacted++;
+      else skipped++;
+    } catch {
+      skipped++;
+    }
+  }
+
+  res.json({ redacted, skipped, total: eventIds.length });
+});
+
+// 6. SSE stream — long-poll /sync filtered to this room
 app.get('/api/matrix/rooms/:roomId/stream', async (req, res) => {
   if (!matrix.ADMIN_TOKEN) {
     return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });

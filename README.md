@@ -1,4 +1,4 @@
-# The Autonomous Enterprise Agent
+# Accenture Agentic Studio
 
 > An AI agent platform built for complex enterprise problems — with persistent memory, learnable skills, full codebase access, and a fully-featured admin console. Runs entirely within your infrastructure.
 
@@ -10,7 +10,7 @@ For a visual walkthrough of all concepts, open **[`docs/architecture-story.html`
 
 Most AI assistants are stateless. They forget what you told them yesterday. They don't know your codebase. They live in someone else's cloud.
 
-This project is different. It is a locally operated AI agent platform that:
+Accenture Agentic Studio is different. It is a locally operated AI agent platform that:
 
 - **Remembers** — across every conversation, indefinitely
 - **Learns** — new domain skills can be added without changing code

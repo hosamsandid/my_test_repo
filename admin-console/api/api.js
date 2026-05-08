@@ -628,36 +628,213 @@ app.post('/api/agents/:id/deactivate', async (req, res) => {
 /* ─── BP-instance hand-off (FreeFlow) ───────────────────────────────────
  *
  * Replaces the legacy bp-transition.py / /internal/bp-events propagation.
- * Entry point: a button in the bp-instance chat. Two endpoints:
+ * Entry point: a button in the bp-instance chat.
  *
- *   GET  /api/agents/:id/handover/candidates → orchestrator computes
+ * Routes:
+ *   GET  /api/agents/:id/handover/candidates  → orchestrator computes
  *        suggested + sibling targets from .index.json. Proxy only.
- *   POST /api/agents/:id/handover            → fan-out is orchestrated
- *        here (Matrix-side state lives in admin-console): for each
- *        target we (1) materialize/enable via orchestrator, (2) ensure
- *        a DM room with the admin, (3) send the hand-off note as a
- *        normal m.text DM. The receiving agent's existing DM handler
- *        picks it up like any other user message and starts working.
+ *   GET  /api/agents/:id/handover/git-status  → per-repo commit/push state
+ *        of the source agent's workspace, used by the dialog's pre-flight.
+ *        Proxy only.
+ *   POST /api/agents/:id/handover/nudge       → posts a canned "commit"/
+ *        "push" prompt into the source agent's own DM so the agent itself
+ *        does the git work. Keeps the audit trail in chat.
+ *   POST /api/agents/:id/handover             → fan-out. The orchestrator
+ *        re-fetches git-status server-side and refuses unless every repo
+ *        is `ready` *or* the caller passes `override: { reason }`. For
+ *        each target we (1) materialize/enable via orchestrator,
+ *        (2) ensure a DM room with the admin, (3) send a structured
+ *        m.text DM containing source-of-work coordinates + the user's
+ *        free-text note + onboarding steps. The receiving agent's DM
+ *        handler picks it up like any other user message.
  *
- * Body shape:
+ * Submit body shape:
  *   {
- *     targets: [agentId, ...],          // required, non-empty
- *     note: string,                      // optional shared note
- *     perTarget: { agentId: noteOverride }  // optional, overrides note for that target
+ *     targets: [agentId, ...],            // required, non-empty
+ *     note: string,                        // optional shared free-text
+ *     perTarget: { agentId: noteOverride } // optional, overrides note
+ *     override: { reason: string } | null  // required if any source repo is not ready
  *   }
  */
+
+const ORCH_URL = () => process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+
+async function fetchHandoverCandidates(sourceId) {
+  const resp = await fetch(`${ORCH_URL()}/internal/agents/${encodeURIComponent(sourceId)}/handover-candidates`);
+  if (!resp.ok) return null;
+  return resp.json().catch(() => null);
+}
+
+async function fetchSourceGitStatus(sourceId) {
+  const resp = await fetch(`${ORCH_URL()}/internal/agents/${encodeURIComponent(sourceId)}/workspace/git-status`);
+  if (!resp.ok) return null;
+  return resp.json().catch(() => null);
+}
+
+// Compare the source's workspace repos against a target environment's repo
+// list. Returns warning strings the target should know about (missing repo,
+// different branch, …). Pure data — never throws.
+function repoConsistencyWarnings(sourceRepos, targetEnv) {
+  const warnings = [];
+  const targetRepos = Array.isArray(targetEnv?.repositories) ? targetEnv.repositories : [];
+  for (const src of sourceRepos) {
+    if (!src?.url) continue;
+    const match = targetRepos.find((r) => r?.url === src.url);
+    if (!match) {
+      warnings.push(`Target environment does not include repo \`${src.url}\` — the receiving agent will not see this code without an env update.`);
+      continue;
+    }
+    if (src.branch && match.branch && src.branch !== match.branch) {
+      warnings.push(`Branch mismatch on \`${src.name || src.url}\`: source is on \`${src.branch}\`, target environment defaults to \`${match.branch}\`. The receiving agent will need to \`git checkout ${src.branch}\` first.`);
+    }
+  }
+  return warnings;
+}
+
+// Build the structured Markdown body that goes into a target's DM. Plain
+// text fallbacks are safe — the markdown renders in Element & the chat UI,
+// and degrades gracefully for any client that ignores it.
+function renderHandoverBody({ headerLine, repos, suggestedRow, noteText, override, consistencyWarnings }) {
+  const lines = [headerLine, ''];
+
+  const reportable = repos.filter((r) => r.exists);
+  if (reportable.length > 0) {
+    lines.push('**Source of work**');
+    for (const r of reportable) {
+      const branch = r.branchActual || r.branch || '(no branch)';
+      const head = r.headShort ? ` @ \`${r.headShort}\`` : '';
+      const subject = r.headSubject ? ` — _${r.headSubject}_` : '';
+      lines.push(`- **${r.name}** — \`${branch}\`${head}${subject}`);
+      if (r.remoteUrl) lines.push(`  - remote: \`${r.remoteUrl}\``);
+      if (r.upstream) lines.push(`  - upstream: \`${r.upstream}\` (ahead ${r.ahead ?? '?'}, behind ${r.behind ?? '?'})`);
+      if (!r.clean) {
+        const parts = [];
+        if (r.dirty.staged)    parts.push(`${r.dirty.staged} staged`);
+        if (r.dirty.unstaged)  parts.push(`${r.dirty.unstaged} unstaged`);
+        if (r.dirty.untracked) parts.push(`${r.dirty.untracked} untracked`);
+        lines.push(`  - ⚠ uncommitted: ${parts.join(', ')}`);
+      }
+    }
+    lines.push('');
+  }
+
+  if (suggestedRow?.reason === 'input-artifact' && Array.isArray(suggestedRow.paths) && suggestedRow.paths.length > 0) {
+    lines.push('**Concrete inputs (from BP graph)**');
+    for (const p of suggestedRow.paths) lines.push(`- \`${p}\``);
+    lines.push('');
+  }
+
+  if (noteText) {
+    lines.push('**Note from upstream**', noteText, '');
+  }
+
+  if (override?.reason) {
+    lines.push(`**⚠ Hand-off override** — upstream had unfinished git state. Reason: ${override.reason}`, '');
+  }
+
+  if (consistencyWarnings.length > 0) {
+    lines.push('**Heads-up**');
+    for (const w of consistencyWarnings) lines.push(`- ${w}`);
+    lines.push('');
+  }
+
+  if (reportable.length > 0) {
+    lines.push('**Before you start**');
+    let step = 1;
+    for (const r of reportable) {
+      const branch = r.branchActual || r.branch;
+      if (!branch || branch === 'HEAD') continue;
+      lines.push(`${step}. \`cd ${r.name} && git fetch && git checkout ${branch} && git pull --ff-only\``);
+      step++;
+    }
+    if (step === 1) {
+      lines.push('1. Sync your repo clones (`git fetch && git pull --ff-only`) before reading any files.');
+    }
+    lines.push(`${step}. Skim \`git log --oneline -5\` in each repo so you know exactly which commits are yours to build on.`);
+    lines.push(`${step + 1}. Read your own brief and confirm with the user before making changes.`);
+  } else {
+    lines.push('Please begin your part of the work — your brief has the full context.');
+  }
+
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
 
 app.get('/api/agents/:id/handover/candidates', async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
-    const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/handover-candidates`);
+    const resp = await fetch(`${ORCH_URL()}/internal/agents/${encodeURIComponent(id)}/handover-candidates`);
     const data = await resp.json();
     if (!resp.ok) return res.status(resp.status).json(data);
     res.json(data);
   } catch (err) {
     res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+app.get('/api/agents/:id/handover/git-status', async (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/agents/${encodeURIComponent(id)}/workspace/git-status`);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return res.status(resp.status).json(data);
+    res.json(data);
+  } catch (err) {
+    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// Post a canned "please commit" / "please push" prompt into the source
+// agent's own DM. We send it as the admin user (same path as a manually
+// typed message) so the agent picks it up via its normal DM heuristic and
+// the entire exchange — including the resulting commits — stays visible in
+// the chat history. Used by the pre-flight buttons.
+app.post('/api/agents/:id/handover/nudge', async (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
+
+  const sourceCfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+  if (!sourceCfg) return res.status(404).json({ error: 'Agent not found' });
+
+  const { kind, repos } = req.body || {};
+  if (kind !== 'commit' && kind !== 'push') {
+    return res.status(400).json({ error: "kind must be 'commit' or 'push'" });
+  }
+  const repoNames = Array.isArray(repos)
+    ? repos.filter((r) => typeof r === 'string' && /^[\w.-]+$/.test(r)).slice(0, 10)
+    : [];
+  const repoHint = repoNames.length > 0
+    ? ` (repos: ${repoNames.map((r) => `\`${r}\``).join(', ')})`
+    : '';
+
+  const body = kind === 'commit'
+    ? `Pre-handoff check: please commit and push every uncommitted change in your workspace${repoHint}.\n\n` +
+      'Use clear, scoped commit messages that explain the result of your work — downstream agents will only see the git history. ' +
+      'Once everything is on the remote branch, reply with the branch name and the head commit SHA per repo so I can hand off.'
+    : `Pre-handoff check: please push your local commits to the remote branch${repoHint}.\n\n` +
+      'Reply with the branch name and the resulting head commit SHA per repo so I can hand off.';
+
+  let roomId;
+  try {
+    const dm = await ensureAgentDmRoom(id);
+    roomId = dm.roomId;
+  } catch (err) {
+    return res.status(502).json({ error: `Could not open DM room: ${err.message}` });
+  }
+
+  const txnId = crypto.randomUUID();
+  try {
+    const sendResp = await matrix.matrixFetch(matrix.ADMIN_TOKEN,
+      `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(txnId)}`,
+      { method: 'PUT', body: { msgtype: 'm.text', body } });
+    if (sendResp.status >= 400) {
+      return res.status(502).json({ error: sendResp.data?.error || `Matrix ${sendResp.status}` });
+    }
+    res.json({ ok: true, kind, roomId, eventId: sendResp.data?.event_id || null });
+  } catch (err) {
+    res.status(502).json({ error: `Matrix unreachable: ${err.message}` });
   }
 });
 
@@ -671,7 +848,7 @@ app.post('/api/agents/:id/handover', async (req, res) => {
     return res.status(409).json({ error: `Agent '${id}' is not a bp-instance (role=${sourceCfg.role})` });
   }
 
-  const { targets, note, perTarget } = req.body || {};
+  const { targets, note, perTarget, override } = req.body || {};
   if (!Array.isArray(targets) || targets.length === 0) {
     return res.status(400).json({ error: 'targets (non-empty array of agent ids) is required' });
   }
@@ -682,12 +859,48 @@ app.post('/api/agents/:id/handover', async (req, res) => {
   }
   const sharedNote = typeof note === 'string' ? note.trim() : '';
   const perTargetMap = perTarget && typeof perTarget === 'object' && !Array.isArray(perTarget) ? perTarget : {};
+  const overrideReason = override && typeof override === 'object' && typeof override.reason === 'string'
+    ? override.reason.trim()
+    : '';
+  const overrideObj = overrideReason ? { reason: overrideReason } : null;
 
   if (!matrix.ADMIN_TOKEN) {
     return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
   }
 
-  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  // Re-fetch the source git status server-side so we cannot be tricked by a
+  // stale browser snapshot. Block unless ready or override-with-reason.
+  const gitStatus = await fetchSourceGitStatus(id);
+  if (!gitStatus) {
+    return res.status(502).json({ error: 'Could not fetch source git status from orchestrator' });
+  }
+  const sourceRepos = Array.isArray(gitStatus.repos) ? gitStatus.repos : [];
+  const sourceReady = Boolean(gitStatus.summary?.ready);
+  if (!sourceReady && !overrideObj) {
+    const issues = [];
+    for (const r of sourceRepos) {
+      if (!r.exists) { issues.push(`${r.name}: not cloned`); continue; }
+      if (!r.clean)  { issues.push(`${r.name}: uncommitted changes`); continue; }
+      if (!r.upstream) { issues.push(`${r.name}: no upstream`); continue; }
+      if ((r.ahead || 0) > 0) issues.push(`${r.name}: ${r.ahead} unpushed commit(s)`);
+    }
+    return res.status(409).json({
+      error: 'Source workspace is not hand-off-ready',
+      reason: 'git-not-ready',
+      issues,
+      gitStatus,
+      hint: 'Resolve the issues, or pass `override: { reason: "..." }` to proceed anyway.',
+    });
+  }
+
+  // Pull suggested-target metadata (input-artifact paths etc.) once so we
+  // can enrich each per-target body without re-querying the orchestrator
+  // inside the loop.
+  const candidates = await fetchHandoverCandidates(id).catch(() => null);
+  const suggestedById = new Map();
+  for (const s of (candidates?.suggested || [])) suggestedById.set(s.agentId, s);
+
+  const orchestratorUrl = ORCH_URL();
   const sourceLabel = sourceCfg.displayName || id;
   const sourceBpHash = sourceCfg.bpId ? String(sourceCfg.bpId).slice(0, 8) : null;
   const headerLine = sourceBpHash
@@ -702,6 +915,11 @@ app.post('/api/agents/:id/handover', async (req, res) => {
       results.push({ agentId: targetId, ok: false, stage: 'lookup', error: 'target not found' });
       continue;
     }
+
+    // Per-target consistency check: does the target's environment know
+    // about the source's repo URLs, and on the same default branch?
+    const targetEnv = targetCfg.environmentId ? loadEnvironment(targetCfg.environmentId) : null;
+    const consistencyWarnings = repoConsistencyWarnings(sourceRepos, targetEnv);
 
     // 1. Materialize / enable the target via orchestrator (idempotent).
     try {
@@ -734,13 +952,18 @@ app.post('/api/agents/:id/handover', async (req, res) => {
       continue;
     }
 
-    // 3. Send the hand-off note as an m.text DM. The receiving agent's
-    // DM heuristic in agent-runner.js will pick this up like any other
-    // user message and invoke Claude with the body as the prompt.
+    // 3. Build the structured DM body and send it. The receiving agent's
+    // DM heuristic in agent-runner.js picks it up like any other user
+    // message and invokes Claude with the body as the prompt.
     const noteText = (typeof perTargetMap[targetId] === 'string' ? perTargetMap[targetId] : sharedNote).trim();
-    const body = noteText
-      ? `${headerLine}\n\n${noteText}`
-      : `${headerLine}\n\nPlease begin your part of the work.`;
+    const body = renderHandoverBody({
+      headerLine,
+      repos: sourceRepos,
+      suggestedRow: suggestedById.get(targetId),
+      noteText,
+      override: overrideObj,
+      consistencyWarnings,
+    });
 
     const txnId = crypto.randomUUID();
     try {
@@ -760,6 +983,7 @@ app.post('/api/agents/:id/handover', async (req, res) => {
         roomId,
         eventId: sendResp.data?.event_id || null,
         displayName: refreshedCfg.displayName || targetId,
+        consistencyWarnings,
       });
     } catch (err) {
       results.push({ agentId: targetId, ok: false, stage: 'send', error: `Matrix unreachable: ${err.message}` });
@@ -774,6 +998,8 @@ app.post('/api/agents/:id/handover', async (req, res) => {
     source: { agentId: id, displayName: sourceLabel, bpId: sourceCfg.bpId || null },
     sent: okCount,
     total: results.length,
+    override: overrideObj,
+    gitStatus,
     results,
   });
 });

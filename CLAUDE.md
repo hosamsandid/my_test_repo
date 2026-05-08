@@ -164,6 +164,19 @@ In every situation the agent's prompt requires an explicit closing question to t
 
 **Best-effort posture.** The signaler treats endpoint failures as silent (connection refused → no AEE running, fine). The endpoint never throws on routing errors per-target; failures are surfaced in the response's `routed[].error` / `skipped[]` arrays.
 
+### BP-instance hand-off (manual)
+
+Every bp-instance chat in the Admin Console has a hand-off action that lets the user activate downstream agents at end-of-session. Because each agent has its own workspace and its own clone of the relevant repos, **the only durable bridge between them is git** — the dialog enforces this contract.
+
+**Flow:**
+
+1. Opening the dialog calls two endpoints in parallel: `GET /api/agents/:id/handover/candidates` (proxy to the orchestrator's `.index.json` graph) and `GET /api/agents/:id/handover/git-status` (per-repo `branch`, `head`, `headSubject`, `upstream`, `ahead`/`behind`, `dirty`, `pushed`, `ready`).
+2. The dialog renders a per-repo pre-flight card. The submit button is disabled while any repo is dirty or has unpushed commits, unless the user opts into an explicit override (checkbox + free-text reason that gets quoted into every target's hand-off note).
+3. Two pre-flight buttons — **Ask agent to commit & push** and **Ask agent to push pending commits** — POST `/api/agents/:id/handover/nudge` which posts a canned prompt into the source agent's own DM. The agent does the git work itself, the chat history captures the audit trail, and a **Re-check** button refreshes the git status without closing the dialog.
+4. On submit, `POST /api/agents/:id/handover` re-fetches git-status server-side and returns `409 git-not-ready` unless the workspace is ready or the override carries a reason — a stale browser snapshot cannot bypass the gate.
+5. For each target, the server materializes/enables the stub, ensures a DM room, and posts a structured Markdown body containing: the source-of-work block (per repo: name, branch, `headShort`, last-commit subject, remote URL, upstream, dirty markers), input-artifact paths from `.index.json` when present, the user's free-text note, the override reason (if any), per-target consistency warnings, and an explicit "Before you start" checklist (`cd <repo> && git fetch && git checkout <branch> && git pull --ff-only`, `git log --oneline -5`, confirm with user). The receiving agent picks the message up via the standard DM heuristic.
+6. **Repo consistency check.** Each target's environment is compared against the source repos: missing repo URLs and branch mismatches surface as warnings both inline in the DM body (so the receiving agent reads them) and in the dialog's per-target results list (so the user sees them).
+
 ### Agent Management
 
 All agent lifecycle operations (create / enable / disable / edit prompt / delete) happen via the **Admin Console** at `http://localhost:4000`.

@@ -781,6 +781,154 @@ function pullOrchestratorWorkspace(orchestratorId, briefingsPath, env, { force =
   }
 }
 
+// Inspect every repo of an agent's environment in its workspace and report
+// commit/push state. Used by the hand-off pre-flight: an agent must not push
+// uncommitted work onto downstream agents that only see the repo via git.
+//
+// For each repo entry in `env.repositories` we resolve the workspace clone,
+// run a small set of plumbing commands, and return a record with:
+//
+//   {
+//     name, url, branch, sshKeyId,
+//     path,                              // absolute path inside the orchestrator container
+//     exists,                            // false → never cloned, all other fields are null
+//     branchActual, head, headShort,
+//     headSubject, headAuthor, headDate, // last commit metadata
+//     remoteUrl,                         // `git remote get-url origin`
+//     upstream,                          // tracking branch (e.g. origin/feature/x) or null
+//     ahead, behind,                     // commits vs. upstream; null if no upstream
+//     dirty: { staged, unstaged, untracked, files: [{path, status}] },
+//     pushed,                            // true ↔ ahead === 0 && upstream !== null
+//     clean,                             // true ↔ no dirty changes anywhere
+//     ready,                             // clean && pushed — green light for hand-off
+//     warnings: [...],                   // non-fatal notes (e.g. detached HEAD, missing upstream)
+//     error,                             // present if git plumbing failed for this repo
+//   }
+//
+// Per-repo failures are caught and surfaced via the `error` field — one bad
+// repo never aborts the rest of the report.
+function inspectAgentRepoStatuses(agentId, env) {
+  const repos = Array.isArray(env?.repositories) ? env.repositories : [];
+  const workspace = agentDir(agentId);
+  const results = [];
+
+  for (const repo of repos) {
+    if (!repo?.url) continue;
+    const name = (repo.url.split("/").pop() || "repo").replace(/\.git$/, "");
+    const repoPath = path.join(workspace, name);
+    const base = {
+      name,
+      url: repo.url,
+      branch: repo.branch || null,
+      sshKeyId: repo.sshKeyId || null,
+      path: repoPath,
+      exists: false,
+      branchActual: null,
+      head: null,
+      headShort: null,
+      headSubject: null,
+      headAuthor: null,
+      headDate: null,
+      remoteUrl: null,
+      upstream: null,
+      ahead: null,
+      behind: null,
+      dirty: { staged: 0, unstaged: 0, untracked: 0, files: [] },
+      pushed: false,
+      clean: false,
+      ready: false,
+      warnings: [],
+      error: null,
+    };
+
+    if (!fs.existsSync(path.join(repoPath, ".git"))) {
+      results.push(base);
+      continue;
+    }
+    base.exists = true;
+
+    const run = (args, opts = {}) => {
+      try {
+        return execFileSync("git", args, {
+          cwd: repoPath,
+          stdio: ["ignore", "pipe", "pipe"],
+          timeout: opts.timeout || 5_000,
+          env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+        }).toString();
+      } catch (err) {
+        const detail = (err.stderr || err.stdout || err.message || "").toString().trim();
+        const e = new Error(detail.slice(0, 300) || `git ${args[0]} failed`);
+        e.code = err.status || 1;
+        throw e;
+      }
+    };
+
+    try {
+      base.branchActual = run(["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+      if (base.branchActual === "HEAD") {
+        base.warnings.push("detached HEAD — no branch checked out");
+      }
+      base.head = run(["rev-parse", "HEAD"]).trim();
+      base.headShort = base.head.slice(0, 8);
+
+      // %x1f = unit separator, safe across commit subjects.
+      const fmt = run(["log", "-1", "--pretty=format:%s%x1f%an%x1f%aI"]).split("\x1f");
+      base.headSubject = (fmt[0] || "").trim() || null;
+      base.headAuthor  = (fmt[1] || "").trim() || null;
+      base.headDate    = (fmt[2] || "").trim() || null;
+
+      try { base.remoteUrl = run(["remote", "get-url", "origin"]).trim() || null; } catch { /* no origin */ }
+
+      try {
+        base.upstream = run(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]).trim();
+      } catch {
+        base.upstream = null;
+        base.warnings.push("no upstream tracking branch");
+      }
+
+      if (base.upstream) {
+        try {
+          const counts = run(["rev-list", "--left-right", "--count", `${base.upstream}...HEAD`]).trim().split(/\s+/);
+          base.behind = Number(counts[0] || 0);
+          base.ahead  = Number(counts[1] || 0);
+        } catch {
+          base.warnings.push("could not compare against upstream — fetch may be needed");
+        }
+      }
+
+      const porcelain = run(["status", "--porcelain=v1", "--untracked-files=all"]);
+      const lines = porcelain.split("\n").filter((l) => l.length > 0);
+      const files = [];
+      for (const line of lines) {
+        // Format: XY <path>  (X = staged, Y = unstaged; "??" = untracked)
+        const code = line.slice(0, 2);
+        const file = line.slice(3);
+        let status;
+        if (code === "??") {
+          base.dirty.untracked++;
+          status = "untracked";
+        } else {
+          if (code[0] && code[0] !== " ") base.dirty.staged++;
+          if (code[1] && code[1] !== " ") base.dirty.unstaged++;
+          status = code.trim();
+        }
+        if (files.length < 25) files.push({ path: file, status });
+      }
+      base.dirty.files = files;
+
+      base.clean  = base.dirty.staged === 0 && base.dirty.unstaged === 0 && base.dirty.untracked === 0;
+      base.pushed = base.upstream !== null && base.ahead === 0;
+      base.ready  = base.clean && base.pushed;
+    } catch (err) {
+      base.error = err.message || String(err);
+    }
+
+    results.push(base);
+  }
+
+  return results;
+}
+
 // Update or insert a top-level YAML key in a frontmatter block. Quotes the
 // value if it contains characters that would break unquoted YAML.
 function upsertYamlField(yaml, key, value) {
@@ -2731,6 +2879,41 @@ async function main() {
         const status = /not found/i.test(err.message) ? 404 :
                        /not a bp-instance/i.test(err.message) ? 409 : 500;
         res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    // ── Workspace git status (hand-off pre-flight) ───────────────────────
+    // Reports per-repo commit/push state for an agent's workspace so the
+    // hand-off dialog can block on uncommitted or unpushed work. Read-only,
+    // no remote calls — relies on whatever the workspace has fetched. The
+    // `summary.ready` flag is the convenience shortcut the UI uses to decide
+    // whether to enable the submit button.
+    const gitStatusMatch = req.method === 'GET' && req.url.match(/^\/internal\/agents\/([^/?]+)\/workspace\/git-status(?:\?.*)?$/);
+    if (gitStatusMatch) {
+      const id = decodeURIComponent(gitStatusMatch[1]);
+      try {
+        const cfg = loadAgentConfig(id);
+        if (!cfg) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `Agent '${id}' not found` }));
+          return;
+        }
+        const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+        const repos = inspectAgentRepoStatuses(id, env);
+        const summary = {
+          totalRepos: repos.length,
+          missing: repos.filter((r) => !r.exists).length,
+          dirty: repos.filter((r) => r.exists && !r.clean).length,
+          ahead: repos.filter((r) => r.exists && r.upstream && (r.ahead || 0) > 0).length,
+          ready: repos.length > 0 && repos.every((r) => r.exists && r.ready),
+        };
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ agentId: id, environmentId: cfg.environmentId || null, repos, summary }));
+      } catch (err) {
+        console.error(`[Orchestrator] git-status error for ${id}: ${err.message}`);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: err.message }));
       }
       return;

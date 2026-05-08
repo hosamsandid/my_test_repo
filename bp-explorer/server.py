@@ -69,6 +69,36 @@ def find_briefings(base_dir: Path) -> list[Path]:
     return sorted(base_dir.rglob("brief.md"))
 
 
+# BP directory naming convention: "<12-hex-hash>-<slug>".
+_BP_DIR_RE = re.compile(r"^([0-9a-f]{12})-")
+
+
+def derive_parent_from_path(bp_path: Path, briefings_dir: Path) -> str | None:
+    """Return the parent BP's 12-char hash inferred from on-disk nesting.
+
+    Walks the relative path from `briefings_dir` to `bp_path` outward from
+    the BP's own directory and returns the hash of the closest ancestor
+    that is itself a BP directory (matches `<12-hex>-<slug>`). Non-BP
+    intermediates (e.g. `.archive`) are skipped without breaking the chain.
+    Returns None when the BP sits at the top level of `artifacts/briefings/`.
+
+    The directory structure is the authoritative source for the BP
+    parent-child hierarchy; frontmatter `parent:` is only consulted as a
+    fallback when nesting yields no answer.
+    """
+    try:
+        rel = bp_path.relative_to(briefings_dir)
+    except ValueError:
+        return None
+    # rel.parts ends with ("<bp-dir>", "brief.md"); strip both to get ancestors.
+    ancestors = rel.parts[:-2]
+    for part in reversed(ancestors):
+        m = _BP_DIR_RE.match(part)
+        if m:
+            return m.group(1)
+    return None
+
+
 def parse_frontmatter(text: str) -> tuple[dict, str]:
     """Parse YAML frontmatter and return (metadata_dict, markdown_body).
 
@@ -496,6 +526,23 @@ def load_all_briefings(project_root: Path) -> list[dict]:
             dir_id = bp_dir_name[:12]
             dir_slug = bp_dir_name[13:]
 
+        # Parent BP: directory nesting is the source of truth. Frontmatter
+        # `parent:` is only used as a fallback when nesting yields no parent
+        # (top-level BP). When both exist and disagree, the directory wins
+        # and we log a warning so the inconsistency is visible.
+        parent_from_dir = derive_parent_from_path(bp_path, briefings_dir)
+        parent_from_meta = meta.get("parent")
+        if parent_from_dir is not None:
+            parent = parent_from_dir
+            if parent_from_meta and parent_from_meta != parent_from_dir:
+                logger.warning(
+                    "BP %s: frontmatter parent=%s disagrees with directory "
+                    "nesting parent=%s; using directory.",
+                    bp_path, parent_from_meta, parent_from_dir,
+                )
+        else:
+            parent = parent_from_meta
+
         bp = {
             "id": meta.get("id") or dir_id,
             "slug": meta.get("slug") or dir_slug,
@@ -503,7 +550,7 @@ def load_all_briefings(project_root: Path) -> list[dict]:
             "status": meta.get("status", ""),
             "rigor": meta.get("rigor", ""),
             "created": meta.get("created", ""),
-            "parent": meta.get("parent"),
+            "parent": parent,
             "children": meta.get("children", []),
             "depends_on": meta.get("depends-on", []),
             "execution_order": meta.get("execution-order", []),

@@ -165,6 +165,10 @@ function PublicKeyReveal({ publicKey, onDone }) {
       <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.6 }}>
         The matching private key is stored in the workspace (mode 600) and is never returned by the API.
         For GitHub Enterprise, paste the key into <strong>your-host/settings/ssh/new</strong> instead.
+        <div style={{ marginTop: 4 }}>
+          <strong>SAML SSO orgs:</strong> after adding the public key, click <strong>Configure SSO</strong> next to it in the GitHub
+          SSH key list and authorise it for the relevant orgs — otherwise SSO-protected repos won't accept SSH connections.
+        </div>
       </div>
       <div style={{ paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         <button onClick={onDone} style={{
@@ -220,6 +224,10 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
             We'll create a fresh ed25519 keypair on the server. The private key stays in the workspace; you'll get the
             public key once to paste into <strong>GitHub → Settings → SSH and GPG keys → New SSH key</strong>
             (or your enterprise instance).
+            <div style={{ marginTop: 4 }}>
+              <strong>SAML SSO orgs:</strong> once GitHub has the public key, open it in the SSH key list and click
+              <strong> Configure SSO</strong> to authorise it for the relevant orgs — otherwise SSH access to SSO-protected repos is rejected.
+            </div>
           </div>
 
           <FormInput
@@ -275,6 +283,11 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
               <code style={{ fontFamily: 'var(--eb-font-mono)' }}>~/.ssh/id_ed25519</code> — the file without the{' '}
               <code style={{ fontFamily: 'var(--eb-font-mono)' }}>.pub</code> extension. It starts with{' '}
               <code style={{ fontFamily: 'var(--eb-font-mono)' }}>-----BEGIN OPENSSH PRIVATE KEY-----</code>.
+            </Step>
+            <Step n={4}>
+              <strong>If your organisation enforces SAML SSO:</strong> open the new SSH key in the GitHub key list and
+              click <strong>Configure SSO</strong> next to it, then authorise it for every org whose repos the agents
+              should clone. Without this step SSH access to SSO-protected repos is rejected.
             </Step>
             <div style={{ marginTop: 'var(--eb-space-1)', color: 'var(--eb-text-muted)', fontSize: '0.9em' }}>
               The private key is stored securely in the workspace volume (mode 600) and is never returned by the API — only its fingerprint is displayed afterwards.

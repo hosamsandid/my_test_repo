@@ -354,6 +354,10 @@ function PublicKeyReveal({ publicKey }) {
       <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.6 }}>
         The matching private key is stored in the workspace (mode 600) and is never returned by the API.
         For GitHub Enterprise, paste the key into <strong>your-host/settings/ssh/new</strong> instead.
+        <div style={{ marginTop: 4 }}>
+          <strong>SAML SSO orgs:</strong> click <strong>Configure SSO</strong> next to the new key in the GitHub SSH key list and
+          authorise it for the relevant orgs — SSO-protected repos otherwise reject the SSH connection.
+        </div>
       </div>
     </div>
   );
@@ -446,6 +450,10 @@ function StepSshKey({ onNext, onSkip }) {
           <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
             We'll create a fresh ed25519 keypair on the server. The private key stays in the workspace; you'll get the public
             key once to paste into <strong>GitHub → Settings → SSH and GPG keys → New SSH key</strong> (or your enterprise instance).
+            <div style={{ marginTop: 4 }}>
+              <strong>SAML SSO orgs:</strong> after adding the public key on GitHub, click <strong>Configure SSO</strong> next to it
+              and authorise it for the orgs the agents need to clone from.
+            </div>
           </div>
 
           <FormInput label="Name" required value={name} onChange={setName} placeholder="e.g. GitHub Deploy Key" />
@@ -462,6 +470,10 @@ function StepSshKey({ onNext, onSkip }) {
           <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
             Generate a key pair with <code style={{ fontFamily: 'var(--eb-font-mono)' }}>ssh-keygen -t ed25519 -C "aee-deploy-key"</code> (no passphrase),
             add the <strong>.pub</strong> file to your GitHub instance, then paste the private key below.
+            <div style={{ marginTop: 4 }}>
+              <strong>SAML SSO orgs:</strong> after uploading the public key, click <strong>Configure SSO</strong> next to it in
+              GitHub's SSH key list and authorise it for every org you want to clone from.
+            </div>
           </div>
 
           <FormInput label="Name" required value={name} onChange={setName} placeholder="e.g. GitHub Deploy Key" />
@@ -543,7 +555,19 @@ function StepGhToken({ onNext, onSkip }) {
       {!saved ? (
         <>
           <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
-            GitHub → Settings → Developer settings → Personal access tokens. For fine-grained tokens, grant <strong>Contents (read &amp; write)</strong>, <strong>Metadata (read)</strong>, and optionally <strong>Pull requests (read &amp; write)</strong>.
+            GitHub → <strong>Settings</strong> → <strong>Developer settings</strong> → <strong>Personal access tokens</strong>.
+            <div style={{ marginTop: 4 }}>
+              Pick <strong>Tokens (classic)</strong> — that's the path we test against — and tick these scopes:{' '}
+              <code>repo</code>, <code>workflow</code>, and <code>read:org</code> (under <code>admin:org</code>).
+            </div>
+            <div style={{ marginTop: 4, color: 'var(--eb-text-muted)' }}>
+              Fine-grained tokens also work — grant <strong>Contents</strong> (read &amp; write), <strong>Metadata</strong> (read),
+              <strong> Pull requests</strong> (read &amp; write), <strong>Workflows</strong> (read &amp; write), and <strong>Members</strong> (read).
+            </div>
+            <div style={{ marginTop: 4 }}>
+              <strong>SAML SSO orgs:</strong> after creating the token, click <strong>Configure SSO</strong> next to it in the
+              GitHub list and authorise it for every org you want the agents to reach. Without that, SSO-protected repos reject the token.
+            </div>
           </div>
 
           <FormInput label="Name" required value={name} onChange={setName} placeholder="e.g. AccentureCodeFoundry PAT" />

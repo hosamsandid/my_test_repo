@@ -103,46 +103,71 @@ function CreateForm({ onSave, onCancel, saving, error }) {
         }}>{error}</div>
       )}
 
-      <StepGuide title="How to create a GitHub Enterprise Personal Access Token" defaultOpen={true}>
+      <StepGuide title="How to create a GitHub Personal Access Token" defaultOpen={true}>
         <Step n={1}>
-          Sign in to your <strong>GitHub Enterprise</strong> instance (e.g.{' '}
-          <code style={{ fontFamily: 'var(--eb-font-mono)' }}>https://github.example.com</code>).
+          Sign in to GitHub. For GitHub Enterprise use your enterprise URL (e.g.{' '}
+          <code style={{ fontFamily: 'var(--eb-font-mono)' }}>https://github.example.com</code>);
+          for github.com use <code style={{ fontFamily: 'var(--eb-font-mono)' }}>https://github.com</code>.
         </Step>
         <Step n={2}>
-          Click your <strong>profile picture</strong> in the top-right corner, then choose <strong>Settings</strong>.
+          Click your <strong>profile picture</strong> in the top-right corner → <strong>Settings</strong> →
+          <strong> Developer settings</strong> (bottom of the left sidebar) → <strong>Personal access tokens</strong>.
         </Step>
         <Step n={3}>
-          Scroll down in the left sidebar to <strong>Developer settings</strong>, then open{' '}
-          <strong>Personal access tokens</strong>.
-          <div style={{ marginTop: 'var(--eb-space-1)', color: 'var(--eb-text-muted)' }}>
-            Choose <strong>Fine-grained tokens</strong> (recommended — more precise control) or <strong>Tokens (classic)</strong>.
+          Pick the token type. GitHub offers two tabs in the sidebar:
+          <div style={{ marginTop: 'var(--eb-space-2)', paddingLeft: 'var(--eb-space-2)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+            <div>
+              <strong>Tokens (classic)</strong> — <span style={{ color: 'var(--eb-accent-primary)', fontWeight: 'var(--eb-font-medium)' }}>recommended</span>.
+              This is what we test against. Scope selection below is straightforward and works for any repository the user can access.
+            </div>
+            <div style={{ color: 'var(--eb-text-muted)' }}>
+              <strong>Fine-grained tokens</strong> — alternative for tighter scoping. Permissions are granted per repository
+              and use a different (more granular) permission model. Use only if your org policy requires it.
+            </div>
           </div>
         </Step>
         <Step n={4}>
-          Click <strong>Generate new token</strong>. Enter a descriptive name (e.g. <em>AEE Agent Token</em>) and set an expiry date.
-          For fine-grained tokens, select the repositories the agents should have access to.
+          Click <strong>Generate new token</strong>. Enter a descriptive note (e.g. <em>AEE Agent Token</em>) and set an expiry date.
+          For fine-grained tokens, also select the repositories the agents should have access to.
         </Step>
         <Step n={5}>
-          Set the required permissions:
+          Select the required scopes / permissions:
           <div style={{ marginTop: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-1)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
-            Fine-grained token — Repository permissions:
+            Tokens (classic) — tick these scopes:
+          </div>
+          <div style={{ paddingLeft: 'var(--eb-space-2)' }}>
+            <PermissionRow scope="repo" access="Full control" note="clone, commit, push, PRs, repo metadata" />
+            <PermissionRow scope="workflow" access="Update" note="needed when agents touch GitHub Actions workflow files" />
+            <PermissionRow scope="read:org" access="Read-only" note="under admin:org — lets the gh CLI resolve org/team membership" />
+          </div>
+          <div style={{ marginTop: 'var(--eb-space-1)', color: 'var(--eb-text-muted)', fontSize: '0.9em', paddingLeft: 'var(--eb-space-2)' }}>
+            Ticking the parent <code>repo</code> box auto-selects all five sub-scopes
+            (<code>repo:status</code>, <code>repo_deployment</code>, <code>public_repo</code>, <code>repo:invite</code>, <code>security_events</code>) — leave them on.
+            <br />
+            For <code>read:org</code>: expand <code>admin:org</code> and tick only the <code>read:org</code> child — the parent and other children stay unchecked.
+          </div>
+          <div style={{ marginTop: 'var(--eb-space-3)', marginBottom: 'var(--eb-space-1)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
+            Fine-grained token — Repository permissions (alternative):
           </div>
           <div style={{ paddingLeft: 'var(--eb-space-2)' }}>
             <PermissionRow scope="Contents" access="Read & write" note="clone, commit, push" />
             <PermissionRow scope="Metadata" access="Read-only" note="required baseline" />
             <PermissionRow scope="Pull requests" access="Read & write" note="if agents open PRs" />
-            <PermissionRow scope="Workflows" access="Read & write" note="if agents trigger CI" />
+            <PermissionRow scope="Workflows" access="Read & write" note="if agents touch GitHub Actions" />
           </div>
-          <div style={{ marginTop: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-1)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
-            Classic token — select scope:
-          </div>
-          <div style={{ paddingLeft: 'var(--eb-space-2)' }}>
-            <PermissionRow scope="repo" access="Full control" note="covers all repository operations" />
+          <div style={{ marginTop: 'var(--eb-space-1)', color: 'var(--eb-text-muted)', fontSize: '0.9em', paddingLeft: 'var(--eb-space-2)' }}>
+            Plus, under <strong>Organization permissions</strong>: <code>Members</code> = <strong>Read-only</strong> (equivalent to <code>read:org</code>).
           </div>
         </Step>
         <Step n={6}>
           Click <strong>Generate token</strong>. Copy the token value immediately — GitHub will not show it again.
           Then paste it in the field below.
+        </Step>
+        <Step n={7}>
+          <strong>If your organisation enforces SAML SSO:</strong> open the token in the GitHub token list and
+          click <strong>Configure SSO</strong> next to it, then authorise the token for every org whose repos the
+          agents need to access. Without this step the token will work against personal repos but be rejected by
+          SSO-protected org repos.
         </Step>
         <div style={{ marginTop: 'var(--eb-space-1)', color: 'var(--eb-text-muted)', fontSize: '0.9em' }}>
           The token is stored securely in the workspace volume (mode 600) and is never returned by the API —

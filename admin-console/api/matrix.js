@@ -25,6 +25,13 @@ let _adminUserIdCache = null;
 const AGENTS_DIR = '/workspace/agents';
 const SYNC_TOKEN_FILE = '/workspace/admin-console/sync.json';
 
+// Defense-in-depth path-injection guard for any agentId that lands in
+// `path.join(AGENTS_DIR, agentId, ...)` below. Mirrors api.js's `AGENT_ID_RE`.
+// Inline test sites are recognised by CodeQL as path-injection sanitizers
+// (js/path-injection); helper-indirected checks from caller routes are not,
+// so we re-validate inline at every path.join site.
+const AGENT_ID_RE = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/;
+
 /**
  * Issue a request against the Matrix Client-Server API.
  *
@@ -100,6 +107,9 @@ async function resolveAdminUserId() {
  * Throws if the agent has no config or no token field.
  */
 function getAgentToken(agentId) {
+  if (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId)) {
+    throw new Error(`Invalid agent id: ${String(agentId).slice(0, 80)}`);
+  }
   const cfgPath = path.join(AGENTS_DIR, agentId, 'config.json');
   const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
   if (!cfg.token) throw new Error(`agent ${agentId} has no Matrix token`);
@@ -111,6 +121,7 @@ function getAgentToken(agentId) {
  * @returns {{ roomId: string, createdAt: string, createdBy: string } | null}
  */
 function getAgentDmRoom(agentId) {
+  if (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId)) return null;
   const p = path.join(AGENTS_DIR, agentId, 'dm-room.json');
   if (!fs.existsSync(p)) return null;
   try {
@@ -124,6 +135,9 @@ function getAgentDmRoom(agentId) {
  * Atomically persist the DM-room mapping for an agent.
  */
 function setAgentDmRoom(agentId, data) {
+  if (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId)) {
+    throw new Error(`Invalid agent id: ${String(agentId).slice(0, 80)}`);
+  }
   const p = path.join(AGENTS_DIR, agentId, 'dm-room.json');
   const tmp = p + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2));

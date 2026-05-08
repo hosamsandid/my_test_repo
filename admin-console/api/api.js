@@ -795,6 +795,10 @@ app.post('/api/agents/:id/handover/nudge', async (req, res) => {
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
 
+  // Re-validate inline at the path.join site — CodeQL recognises inline
+  // AGENT_ID_RE.test() as a path-injection sanitizer (js/path-injection)
+  // but does not propagate the route-level check through subsequent code.
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const sourceCfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
   if (!sourceCfg) return res.status(404).json({ error: 'Agent not found' });
 

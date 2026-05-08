@@ -608,7 +608,7 @@ function StepGhToken({ onNext, onSkip }) {
 
 /* ─── Step 4: Working Environment ─────────────────────────────── */
 
-function StepEnvironment({ onNext, onSkip }) {
+function StepEnvironment({ onNext, onSkip, onCreated }) {
   const [name, setName]   = useState('');
   const [desc, setDesc]   = useState('');
   const [saving, setSaving] = useState(false);
@@ -626,6 +626,7 @@ function StepEnvironment({ onNext, onSkip }) {
         skills: [], repositories: [],
       });
       setSaved(true);
+      onCreated?.(id);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -678,20 +679,41 @@ function StepEnvironment({ onNext, onSkip }) {
 
 /* ─── Step 5: First Agent ──────────────────────────────────────── */
 
-function StepAgent({ onFinish, onSkip }) {
+function StepAgent({ onFinish, onSkip, environmentIdHint }) {
   const [displayName, setDisplayName] = useState('');
+  const [environmentId, setEnvironmentId] = useState(environmentIdHint || '');
+  const [environments, setEnvironments] = useState([]);
+  const [loadingEnvs, setLoadingEnvs] = useState(true);
   const [saving, setSaving]   = useState(false);
   const [error, setError]     = useState(null);
   const [saved, setSaved]     = useState(false);
 
-  const canSave = displayName.trim();
+  useEffect(() => {
+    let cancelled = false;
+    apiCall('GET', '/api/environments')
+      .then(list => {
+        if (cancelled) return;
+        const envs = Array.isArray(list) ? list : [];
+        setEnvironments(envs);
+        setEnvironmentId(prev => {
+          if (prev && envs.some(e => e.id === prev)) return prev;
+          if (environmentIdHint && envs.some(e => e.id === environmentIdHint)) return environmentIdHint;
+          return envs[0]?.id || '';
+        });
+      })
+      .catch(e => { if (!cancelled) setError(e.message); })
+      .finally(() => { if (!cancelled) setLoadingEnvs(false); });
+    return () => { cancelled = true; };
+  }, [environmentIdHint]);
+
+  const canSave = displayName.trim() && environmentId;
 
   async function handleSave() {
     setSaving(true); setError(null);
     try {
       const id = displayName.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
       await apiCall('POST', '/api/agents', {
-        id, displayName: displayName.trim(), role: 'expert', enabled: false,
+        id, displayName: displayName.trim(), role: 'expert', environmentId, enabled: false,
       });
       setSaved(true);
     } catch (e) {
@@ -701,6 +723,8 @@ function StepAgent({ onFinish, onSkip }) {
     }
   }
 
+  const noEnvs = !loadingEnvs && environments.length === 0;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
       <div>
@@ -708,7 +732,7 @@ function StepAgent({ onFinish, onSkip }) {
           First Agent
         </h2>
         <p style={{ margin: 0, color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
-          Create your first agent. It will be created as <strong>disabled</strong> — you can configure its prompt, assign a Working Environment, and enable it via <strong>Agents</strong>.
+          Create your first agent. It will be created as <strong>disabled</strong> — you can configure its prompt and enable it via <strong>Agents</strong>.
         </p>
       </div>
 
@@ -717,6 +741,32 @@ function StepAgent({ onFinish, onSkip }) {
       {!saved ? (
         <>
           <FormInput label="Agent name" required value={displayName} onChange={setDisplayName} placeholder="e.g. My First Agent" />
+
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-1)' }}>
+              Working Environment <span style={{ color: 'var(--eb-status-error)' }}>*</span>
+            </div>
+            {noEnvs ? (
+              <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
+                No Working Environment exists yet. Go back to the previous step to create one — every agent must be bound to an environment.
+              </div>
+            ) : (
+              <select
+                value={environmentId}
+                onChange={e => setEnvironmentId(e.target.value)}
+                disabled={loadingEnvs}
+                style={inputStyle}
+              >
+                {loadingEnvs && <option value="">Loading…</option>}
+                {!loadingEnvs && !environmentId && <option value="">Select an environment…</option>}
+                {environments.map(env => (
+                  <option key={env.id} value={env.id}>
+                    {env.name || env.id}{env.id === environmentIdHint ? ' (just created)' : ''}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
 
           <button onClick={handleSave} disabled={saving || !canSave}
             style={{ ...btnPrimary, opacity: (saving || !canSave) ? 0.6 : 1, cursor: saving ? 'wait' : 'pointer', alignSelf: 'flex-start' }}>
@@ -748,6 +798,7 @@ function StepAgent({ onFinish, onSkip }) {
 export default function SetupWizard({ onComplete }) {
   const [current, setCurrent] = useState(0);
   const [done, setDone]       = useState([]);
+  const [createdEnvironmentId, setCreatedEnvironmentId] = useState(null);
 
   function markDone(id) {
     setDone(prev => prev.includes(id) ? prev : [...prev, id]);
@@ -807,8 +858,8 @@ export default function SetupWizard({ onComplete }) {
           {stepId === 'llm'         && <StepLlm         onNext={() => advance('llm')}         onSkip={skip} />}
           {stepId === 'ssh-key'     && <StepSshKey       onNext={() => advance('ssh-key')}     onSkip={skip} />}
           {stepId === 'gh-token'    && <StepGhToken      onNext={() => advance('gh-token')}    onSkip={skip} />}
-          {stepId === 'environment' && <StepEnvironment  onNext={() => advance('environment')} onSkip={skip} />}
-          {stepId === 'agent'       && <StepAgent        onFinish={() => { markDone('agent'); onComplete(); }} onSkip={onComplete} />}
+          {stepId === 'environment' && <StepEnvironment  onNext={() => advance('environment')} onSkip={skip} onCreated={setCreatedEnvironmentId} />}
+          {stepId === 'agent'       && <StepAgent        onFinish={() => { markDone('agent'); onComplete(); }} onSkip={onComplete} environmentIdHint={createdEnvironmentId} />}
         </div>
       </div>
     </div>

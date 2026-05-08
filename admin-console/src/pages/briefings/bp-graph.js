@@ -50,6 +50,34 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
       .bp-badge-rigor-high     { background:rgba(249,115,22,0.15); color:#f97316; border:1px solid rgba(249,115,22,0.4); }
       .bp-badge-rigor-standard { background:rgba(107,114,128,0.15); color:#9ca3af; border:1px solid rgba(107,114,128,0.4); }
       .bp-badge-revision       { background:rgba(99,102,241,0.15);  color:#818cf8; border:1px solid rgba(99,102,241,0.4); }
+
+      /* ── Status backgrounds (dark, default) ─────────────────────────── */
+      .bp-node-status-draft      { background: #1e1318; }
+      .bp-node-status-ready      { background: #1c1810; }
+      .bp-node-status-dispatched { background: #111827; }
+      .bp-node-status-claimed    { background: #13111e; }
+      .bp-node-status-completed  { background: #0f1e13; }
+      .bp-node-status-reviewed   { background: #0e1c19; }
+      .bp-node-status-stale      { background: #1a1028; }
+
+      /* ── Status backgrounds (light mode) ────────────────────────────── */
+      :root[data-theme="admin-light"] .bp-node-status-draft      { background: #fff5f5 !important; }
+      :root[data-theme="admin-light"] .bp-node-status-ready      { background: #fffbeb !important; }
+      :root[data-theme="admin-light"] .bp-node-status-dispatched { background: #eff6ff !important; }
+      :root[data-theme="admin-light"] .bp-node-status-claimed    { background: #f5f3ff !important; }
+      :root[data-theme="admin-light"] .bp-node-status-completed  { background: #f0fdf4 !important; }
+      :root[data-theme="admin-light"] .bp-node-status-reviewed   { background: #ecfdf5 !important; }
+      :root[data-theme="admin-light"] .bp-node-status-stale      { background: #faf5ff !important; }
+
+      /* ── Stale stripe pattern: lower opacity for light backgrounds ───── */
+      :root[data-theme="admin-light"] .bp-node-status-stale {
+        background-image: repeating-linear-gradient(-45deg,transparent,transparent 4px,rgba(168,85,247,0.06) 4px,rgba(168,85,247,0.06) 8px) !important;
+      }
+
+      /* ── Badge text: darker shades for light backgrounds ────────────── */
+      :root[data-theme="admin-light"] .bp-badge-rigor-high     { color:#c2410c; border-color:rgba(194,65,12,0.4); }
+      :root[data-theme="admin-light"] .bp-badge-rigor-standard { color:#4b5563; border-color:rgba(75,85,99,0.4); }
+      :root[data-theme="admin-light"] .bp-badge-revision       { color:#4338ca; border-color:rgba(67,56,202,0.4); }
     `;
     document.head.appendChild(style);
   }
@@ -57,13 +85,13 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
   // Loading indicator
   const loadingEl = document.createElement('div');
   loadingEl.textContent = 'Loading briefings…';
-  loadingEl.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#888;font-size:14px;pointer-events:none;';
+  loadingEl.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--eb-text-muted);font-size:14px;pointer-events:none;';
   viewport.appendChild(loadingEl);
 
   // Zoom display
   const zoomEl = document.createElement('div');
   zoomEl.textContent = '100%';
-  zoomEl.style.cssText = 'position:absolute;bottom:8px;right:12px;font-size:11px;color:#888;pointer-events:none;z-index:20;';
+  zoomEl.style.cssText = 'position:absolute;bottom:8px;right:12px;font-size:11px;color:var(--eb-text-muted);pointer-events:none;z-index:20;';
   viewport.appendChild(zoomEl);
 
   // Toolbar (buttons wired after functions are defined below)
@@ -73,14 +101,14 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
 
   // Status legend
   const legendEl = document.createElement('div');
-  legendEl.style.cssText = 'position:absolute;bottom:16px;left:50%;transform:translateX(-50%);background:rgba(20,20,30,0.88);backdrop-filter:blur(4px);border:1px solid #333;border-radius:8px;padding:6px 14px;display:flex;gap:10px;align-items:center;z-index:20;pointer-events:none;font-size:11px;white-space:nowrap;';
+  legendEl.style.cssText = 'position:absolute;bottom:16px;left:50%;transform:translateX(-50%);background:var(--eb-bg-elevated);backdrop-filter:blur(4px);border:1px solid var(--eb-border-default);border-radius:8px;padding:6px 14px;display:flex;gap:10px;align-items:center;z-index:20;pointer-events:none;font-size:11px;white-space:nowrap;';
   const _mkSwatch = (bg, label, dashed) =>
     `<span style="display:flex;align-items:center;gap:4px">` +
     `<span style="width:10px;height:10px;border-radius:2px;display:inline-block;background:${bg};` +
     (dashed ? `border:1px dashed ${bg};background-image:repeating-linear-gradient(-45deg,transparent,transparent 2px,rgba(168,85,247,0.2) 2px,rgba(168,85,247,0.2) 4px);` : '') +
-    `"></span><span style="color:#aaa">${label}</span></span>`;
+    `"></span><span style="color:var(--eb-text-secondary)">${label}</span></span>`;
   legendEl.innerHTML =
-    `<span style="color:#666;font-size:10px;margin-right:2px">Status:</span>` +
+    `<span style="color:var(--eb-text-muted);font-size:10px;margin-right:2px">Status:</span>` +
     _mkSwatch('#e05d6f', 'Draft') +
     _mkSwatch('#f59e0b', 'Ready') +
     _mkSwatch('#3b82f6', 'Dispatched') +
@@ -533,14 +561,14 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
         left:${pos.x}px;
         top:${pos.y}px;
         width:${NODE_W}px;
-        background:var(--eb-bg-surface,#1e1e2e);
-        border:1px solid var(--eb-border-default,#333);
+        background:var(--eb-bg-surface);
+        border:1px solid var(--eb-border-default);
         border-radius:8px;
         padding:10px 12px;
         box-sizing:border-box;
         font-size:12px;
-        color:var(--eb-text-primary,#e0e0e0);
-        box-shadow:0 2px 8px rgba(0,0,0,0.3);
+        color:var(--eb-text-primary);
+        box-shadow:var(--eb-shadow-sm);
       `;
       applyStatusBorderColor(node, bp.status);
       node.addEventListener('mousedown', e => e.stopPropagation());
@@ -606,7 +634,7 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
       // Details panel
       if (state.expanded.has(n.id)) {
         const details = document.createElement('div');
-        details.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid var(--eb-border-default,#333);font-size:11px;';
+        details.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid var(--eb-border-default);font-size:11px;';
 
         const rows = [];
         rows.push(detailRow('Created', bp.created));
@@ -627,11 +655,11 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
             if (typeof item === 'string') {
               return `<li>${esc(item)}</li>`;
             } else {
-              const note = item.note ? `<span style="color:#888;margin-left:4px">${esc(item.note)}</span>` : '';
+              const note = item.note ? `<span style="color:var(--eb-text-muted);margin-left:4px">${esc(item.note)}</span>` : '';
               return `<li>${esc(item.slug || item.id || JSON.stringify(item))}${note}</li>`;
             }
           }).join('');
-          rows.push(`<div style="margin:4px 0 2px;color:#888">Execution Order</div>
+          rows.push(`<div style="margin:4px 0 2px;color:var(--eb-text-muted)">Execution Order</div>
             <ol style="text-align:left;padding-left:16px;margin:0 0 4px;">${list}</ol>`);
         }
         if (bp.mentorscripts && bp.mentorscripts.length > 0) {
@@ -645,7 +673,7 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
       // Content panel
       if (state.contentVisible.has(n.id) && bp.body) {
         const body = document.createElement('div');
-        body.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid var(--eb-border-default,#333);font-size:11px;max-height:300px;overflow-y:auto;line-height:1.5;';
+        body.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid var(--eb-border-default);font-size:11px;max-height:300px;overflow-y:auto;line-height:1.5;';
         body.innerHTML = renderMarkdown(bp.body);
         body.addEventListener('wheel', e => e.stopPropagation());
         node.appendChild(body);
@@ -700,14 +728,14 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
         left:${pos.x}px;
         top:${pos.y}px;
         width:${ARTIFACT_W}px;
-        background:var(--eb-bg-surface,#1e1e2e);
-        border:1px solid var(--eb-border-default,#444);
+        background:var(--eb-bg-surface);
+        border:1px solid var(--eb-border-default);
         border-radius:6px;
         padding:8px 10px;
         box-sizing:border-box;
         font-size:11px;
-        color:var(--eb-text-primary,#e0e0e0);
-        box-shadow:0 1px 4px rgba(0,0,0,0.2);
+        color:var(--eb-text-primary);
+        box-shadow:var(--eb-shadow-xs);
       `;
       node.addEventListener('mousedown', e => e.stopPropagation());
 
@@ -718,7 +746,7 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
 
       if (reg.dir) {
         const dirEl = document.createElement('div');
-        dirEl.style.cssText = 'font-size:10px;color:#888;margin-bottom:4px;word-break:break-all;';
+        dirEl.style.cssText = 'font-size:10px;color:var(--eb-text-muted);margin-bottom:4px;word-break:break-all;';
         dirEl.textContent = reg.dir + '/';
         node.appendChild(dirEl);
       }
@@ -745,7 +773,7 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
       const desc = reg.descriptions.find(d => d && !d.startsWith('From bp:')) || reg.descriptions[0];
       if (desc) {
         const descEl = document.createElement('div');
-        descEl.style.cssText = 'font-size:10px;color:#aaa;margin-top:4px;line-height:1.4;';
+        descEl.style.cssText = 'font-size:10px;color:var(--eb-text-secondary);margin-top:4px;line-height:1.4;';
         descEl.textContent = desc.replace(/^From bp:\w+ — /, '');
         node.appendChild(descEl);
       }
@@ -764,23 +792,15 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
       reviewed:   '#34d399',
       stale:      '#a855f7',
     };
-    const bgColors = {
-      draft:      '#1e1318',
-      ready:      '#1c1810',
-      dispatched: '#111827',
-      claimed:    '#13111e',
-      completed:  '#0f1e13',
-      reviewed:   '#0e1c19',
-      stale:      '#1a1028',
-    };
     if (!status || !colors[status]) return;
 
     node.style.borderColor = colors[status];
     node.style.borderWidth = '2px';
-    node.style.background  = bgColors[status] || node.style.background;
+    // Background is handled by CSS class .bp-node-status-<status> with theme overrides.
 
     if (status === 'stale') {
       node.style.borderStyle = 'dashed';
+      // Dark default stripe; light-mode override is in bp-graph-styles CSS.
       node.style.backgroundImage = 'repeating-linear-gradient(-45deg,transparent,transparent 4px,rgba(168,85,247,0.08) 4px,rgba(168,85,247,0.08) 8px)';
     }
     if (status === 'dispatched') {
@@ -795,9 +815,9 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
       padding:2px 8px;
       font-size:11px;
       border-radius:4px;
-      border:1px solid ${active ? '#3b82f6' : 'var(--eb-border-default,#555)'};
+      border:1px solid ${active ? '#3b82f6' : 'var(--eb-border-default)'};
       background:${active ? 'rgba(59,130,246,0.2)' : 'transparent'};
-      color:${active ? '#60a5fa' : 'var(--eb-text-secondary,#aaa)'};
+      color:${active ? '#3b82f6' : 'var(--eb-text-secondary)'};
       cursor:pointer;
     `;
     return btn;
@@ -805,7 +825,7 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
 
   function detailRow(label, value) {
     return `<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:3px;">
-      <span style="color:#888;flex-shrink:0;">${esc(label)}</span>
+      <span style="color:var(--eb-text-muted);flex-shrink:0;">${esc(label)}</span>
       <span style="word-break:break-all;text-align:right;">${esc(String(value || '—'))}</span>
     </div>`;
   }
@@ -852,7 +872,7 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
         const x2 = childPos.x + NODE_W / 2;
         const y2 = childPos.y;
 
-        drawBezierEdge(x1, y1, x2, y2, '#555', 2, '', false);
+        drawBezierEdge(x1, y1, x2, y2, 'var(--eb-border-hover)', 2, '', false);
       });
     });
 
@@ -1141,14 +1161,14 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
         return line;
       }).join('\n');
       const placeholder = `\x00CB${codeBlocks.length}\x00`;
-      codeBlocks.push(`<pre style="background:#111;padding:8px;border-radius:4px;overflow-x:auto;"><code${lang ? ` data-lang="${lang}"` : ''}>${rendered}</code></pre>`);
+      codeBlocks.push(`<pre style="background:var(--eb-bg-app);border:1px solid var(--eb-border-default);padding:8px;border-radius:4px;overflow-x:auto;"><code${lang ? ` data-lang="${lang}"` : ''}>${rendered}</code></pre>`);
       return placeholder;
     });
 
     const inlineCodes = [];
     html = html.replace(/`([^`]+)`/g, (_, code) => {
       const placeholder = `\x00IC${inlineCodes.length}\x00`;
-      inlineCodes.push(`<code style="background:#111;padding:1px 4px;border-radius:3px;">${code}</code>`);
+      inlineCodes.push(`<code style="background:var(--eb-bg-app);border:1px solid var(--eb-border-default);padding:1px 4px;border-radius:3px;">${code}</code>`);
       return placeholder;
     });
 
@@ -1176,11 +1196,11 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
         return 'left';
       });
       const ths = stripOuter(header.split('|')).map((c, i) =>
-        `<th style="text-align:${aligns[i] || 'left'};padding:4px 8px;border:1px solid #333;">${c.trim()}</th>`
+        `<th style="text-align:${aligns[i] || 'left'};padding:4px 8px;border:1px solid var(--eb-border-default);">${c.trim()}</th>`
       ).join('');
       const rows = body.trim().split('\n').filter(r => r.trim()).map(row => {
         const tds = stripOuter(row.split('|')).map((c, i) =>
-          `<td style="text-align:${aligns[i] || 'left'};padding:4px 8px;border:1px solid #333;">${c.trim()}</td>`
+          `<td style="text-align:${aligns[i] || 'left'};padding:4px 8px;border:1px solid var(--eb-border-default);">${c.trim()}</td>`
         ).join('');
         return `<tr>${tds}</tr>`;
       }).join('');
@@ -1189,14 +1209,14 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
 
     html = html.replace(/(^&gt; .+(\n&gt; .+)*)/gm, (match) => {
       const content = match.replace(/^&gt; ?/gm, '');
-      return `<blockquote style="border-left:3px solid #555;padding-left:8px;color:#aaa;margin:4px 0;">${content}</blockquote>`;
+      return `<blockquote style="border-left:3px solid var(--eb-border-default);padding-left:8px;color:var(--eb-text-secondary);margin:4px 0;">${content}</blockquote>`;
     });
 
     html = html.replace(/^#### (.+)$/gm, '<h4 style="margin:6px 0 2px;">$1</h4>');
     html = html.replace(/^### (.+)$/gm,  '<h3 style="margin:6px 0 2px;">$1</h3>');
     html = html.replace(/^## (.+)$/gm,   '<h2 style="margin:6px 0 2px;">$1</h2>');
     html = html.replace(/^# (.+)$/gm,    '<h1 style="margin:6px 0 2px;">$1</h1>');
-    html = html.replace(/^---$/gm, '<hr style="border:none;border-top:1px solid #333;">');
+    html = html.replace(/^---$/gm, '<hr style="border:none;border-top:1px solid var(--eb-border-default);">');
 
     html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
     html = html.replace(/\*(.+?)\*/g,     '<em>$1</em>');
@@ -1244,7 +1264,7 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
     if (!fullId) return esc(displayText || '');
     const text = (displayText !== undefined && displayText !== null) ? displayText : fullId;
     const cls  = extraClass ? extraClass : '';
-    return `<span class="${cls}" data-bp-id="${esc(fullId)}" title="Click to copy ${esc(fullId)}" style="font-size:10px;color:#888;cursor:pointer;font-family:monospace;flex-shrink:0;" onclick="(function(e){e.stopPropagation();var el=e.currentTarget;var id=el.dataset.bpId||el.textContent.trim();if(navigator.clipboard)navigator.clipboard.writeText(id).catch(()=>{});el.style.color='#60a5fa';setTimeout(()=>el.style.color='#888',1000);})(event)">${esc(text)}</span>`;
+    return `<span class="${cls}" data-bp-id="${esc(fullId)}" title="Click to copy ${esc(fullId)}" style="font-size:10px;color:var(--eb-text-muted);cursor:pointer;font-family:monospace;flex-shrink:0;" onclick="(function(e){e.stopPropagation();var el=e.currentTarget;var id=el.dataset.bpId||el.textContent.trim();if(navigator.clipboard)navigator.clipboard.writeText(id).catch(()=>{});el.style.color='#3b82f6';setTimeout(()=>el.style.color='var(--eb-text-muted)',1000);})(event)">${esc(text)}</span>`;
   }
 
   // ─── Resize observer ─────────────────────────────────────────────────
@@ -1262,11 +1282,11 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
   function makeToolBtn(label, fn) {
     const b = document.createElement('button');
     b.textContent = label;
-    b.style.cssText = 'padding:4px 10px;font-size:11px;border-radius:4px;border:1px solid #444;background:rgba(20,20,30,0.88);backdrop-filter:blur(4px);color:#ccc;cursor:pointer;transition:border-color 0.1s,color 0.1s;';
-    b.addEventListener('mouseover', () => { b.style.borderColor = '#666'; b.style.color = '#fff'; });
+    b.style.cssText = 'padding:4px 10px;font-size:11px;border-radius:4px;border:1px solid var(--eb-border-default);background:var(--eb-bg-elevated);backdrop-filter:blur(4px);color:var(--eb-text-secondary);cursor:pointer;transition:border-color 0.1s,color 0.1s;';
+    b.addEventListener('mouseover', () => { b.style.borderColor = 'var(--eb-border-hover)'; b.style.color = 'var(--eb-text-primary)'; });
     b.addEventListener('mouseout',  () => {
-      b.style.borderColor = b._active ? '#3b82f6' : '#444';
-      b.style.color       = b._active ? '#60a5fa' : '#ccc';
+      b.style.borderColor = b._active ? '#3b82f6' : 'var(--eb-border-default)';
+      b.style.color       = b._active ? '#3b82f6' : 'var(--eb-text-secondary)';
     });
     b.addEventListener('click', fn);
     return b;
@@ -1274,9 +1294,9 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
 
   function updateArchivedBtn(btn) {
     btn._active            = state.showArchived;
-    btn.style.borderColor  = state.showArchived ? '#3b82f6' : '#444';
-    btn.style.color        = state.showArchived ? '#60a5fa' : '#ccc';
-    btn.style.background   = state.showArchived ? 'rgba(59,130,246,0.15)' : 'rgba(20,20,30,0.88)';
+    btn.style.borderColor  = state.showArchived ? '#3b82f6' : 'var(--eb-border-default)';
+    btn.style.color        = state.showArchived ? '#3b82f6' : 'var(--eb-text-secondary)';
+    btn.style.background   = state.showArchived ? 'rgba(59,130,246,0.15)' : 'var(--eb-bg-elevated)';
   }
 
   toolbarEl.appendChild(makeToolBtn('Fit',          () => { state.userTransform = false; fitToView(); }));

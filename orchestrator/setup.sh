@@ -3,13 +3,15 @@ set -euo pipefail
 
 # One-shot bootstrap for a fresh Conduwuit installation.
 #
-# Creates the admin (human) user via conduwuit's --execute flag, then logs
-# in via the Matrix API to obtain the admin access token and prints the
-# .env values.
+# Creates the admin (human) user via conduwuit's --execute flag, logs in via
+# the Matrix API to obtain the admin access token, resolves the conduwuit
+# admin room via the #admins:local alias, and writes both values directly
+# into ./.env. After this completes, `make up` brings the rest of the stack
+# up with the correct Matrix wiring already in place.
 #
-# After this completes, manage all agents via the Admin Console. Each agent
-# runs as its own Matrix user; conversations happen as direct messages
-# between the human and a single agent — there is no shared room.
+# After bootstrap, manage all agents via the Admin Console. Each agent runs
+# as its own Matrix user; conversations happen as direct messages between
+# the human and a single agent — there is no shared room.
 #
 # Compatible with bash 3.2 (macOS default).
 
@@ -128,16 +130,62 @@ if [ -z "${ADMIN_TOKEN}" ]; then
   echo "  OK"
 fi
 
-# --- Output ---
+# --- Resolve admin room ID via the #admins:<server> alias ---
+# Conduwuit creates an admin control room on first start and registers the
+# alias for it. The room ID is non-deterministic across instances, so we
+# query the alias each time and cache the result in .env.
+echo -n "Resolving admin room (#admins:local) "
+ADMIN_ROOM=""
+for i in $(seq 1 10); do
+  ADMIN_ROOM=$(curl -s "${HOMESERVER}/_matrix/client/v3/directory/room/%23admins%3Alocal" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null \
+    | jq -r '.room_id // empty' 2>/dev/null) || true
+  if [ -n "$ADMIN_ROOM" ]; then
+    echo " ${ADMIN_ROOM}"
+    break
+  fi
+  echo -n "."
+  sleep 1
+done
+if [ -z "$ADMIN_ROOM" ]; then
+  echo
+  echo "ERROR: cannot resolve #admins:local — is conduwuit fully started?" >&2
+  exit 1
+fi
+
+# --- Persist values to .env ---
+ENV_FILE="${SCRIPT_DIR}/../.env"
+if [ ! -f "$ENV_FILE" ]; then
+  echo "ERROR: ${ENV_FILE} not found. Run: cp .env.example .env" >&2
+  exit 1
+fi
+
+# Replace KEY=... line in-place, or append if missing. Portable across
+# bash 3.2 and the macOS / GNU sed split (avoids `sed -i` entirely).
+set_env_var() {
+  local key="$1" value="$2"
+  local tmp
+  tmp=$(mktemp)
+  awk -v key="$key" -v value="$value" '
+    BEGIN { found = 0 }
+    $0 ~ "^"key"=" { print key"="value; found = 1; next }
+    { print }
+    END { if (!found) print key"="value }
+  ' "$ENV_FILE" > "$tmp" && mv "$tmp" "$ENV_FILE"
+}
+
+set_env_var MATRIX_ACCESS_TOKEN "$ADMIN_TOKEN"
+set_env_var CONDUWUIT_ADMIN_ROOM "$ADMIN_ROOM"
+
 echo
 echo "=========================================="
-echo "  Add these lines to your .env file:"
+echo "  Bootstrap complete"
 echo "=========================================="
-cat <<EOF
-
-MATRIX_ACCESS_TOKEN=${ADMIN_TOKEN}
-MATRIX_BOT_USER_ID=@${ADMIN_USER}:local
-
-EOF
-echo "Then start the stack with: make up"
-echo "Manage agents at:           http://localhost:${ADMIN_PORT:-4000}"
+echo
+echo "  Admin user:    @${ADMIN_USER}:local"
+echo "  Admin room:    ${ADMIN_ROOM}"
+echo "  .env updated:  ${ENV_FILE}"
+echo "                 (MATRIX_ACCESS_TOKEN, CONDUWUIT_ADMIN_ROOM)"
+echo
+echo "Next: make up"
+echo "Then: http://localhost:${ADMIN_PORT:-4000}"

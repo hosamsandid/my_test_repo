@@ -57,8 +57,15 @@ cp .env.example .env
 podman compose up -d conduwuit
 ./orchestrator/setup.sh
 
-# 3. Start the full stack
+# 3. Build the per-agent container image. Required before any agent can spawn —
+#    `make up` does NOT build this image automatically.
+make agent-image
+
+# 4. Start the full stack
 make up
+
+# 5. Tail logs
+make logs
 ```
 
 4. Open **http://localhost:4000** in your browser.

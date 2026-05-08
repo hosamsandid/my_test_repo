@@ -2716,10 +2716,13 @@ function getAgentGitRepos(agentRoot) {
 app.get('/api/agents/:agentId/git-info', (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
-  if (!fs.existsSync(path.join(AGENTS_DIR, agentId))) {
+  // getAgentGitRepos expects an absolute, sanitised path (post-#116). Use
+  // safeAgentPath so a bare agentId can't escape the agents tree.
+  const agentRoot = safeAgentPath(agentId, '');
+  if (!agentRoot) {
     return res.status(404).json({ error: 'Agent not found' });
   }
-  res.json({ repos: getAgentGitRepos(agentId) });
+  res.json({ repos: getAgentGitRepos(agentRoot) });
 });
 
 // Directory-only listing — delegated to BP-Explorer for orchestrator directory picker.
@@ -2816,7 +2819,12 @@ const GIT_UNTRACKED_PROBE  = 1024 * 1024;     // bytes scanned for line/binary c
 // sanitizer in this module.
 function resolveAgentRepo(agentId, repoPath) {
   const wanted = typeof repoPath === 'string' && repoPath ? repoPath : '.';
-  const repos = getAgentGitRepos(agentId);
+  // getAgentGitRepos expects the sanitised absolute agent root, not the bare
+  // id. Without this, the discovery scan operates on a relative path and
+  // silently returns []  → every repo lookup misses → diff view is empty.
+  const agentRoot = safeAgentPath(agentId, '');
+  if (!agentRoot) return null;
+  const repos = getAgentGitRepos(agentRoot);
   const found = repos.find(r => r.repoPath === wanted);
   if (!found) return null;
   return safeAgentPath(agentId, found.repoPath === '.' ? '' : found.repoPath);

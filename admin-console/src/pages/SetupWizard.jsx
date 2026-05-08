@@ -681,6 +681,7 @@ function StepEnvironment({ onNext, onSkip, onCreated }) {
 
 function StepAgent({ onFinish, onSkip, environmentIdHint }) {
   const [displayName, setDisplayName] = useState('');
+  const [systemPrompt, setSystemPrompt] = useState('');
   const [environmentId, setEnvironmentId] = useState(environmentIdHint || '');
   const [environments, setEnvironments] = useState([]);
   const [loadingEnvs, setLoadingEnvs] = useState(true);
@@ -706,14 +707,15 @@ function StepAgent({ onFinish, onSkip, environmentIdHint }) {
     return () => { cancelled = true; };
   }, [environmentIdHint]);
 
-  const canSave = displayName.trim() && environmentId;
+  const canSave = displayName.trim() && environmentId && systemPrompt.trim();
 
   async function handleSave() {
     setSaving(true); setError(null);
     try {
       const id = displayName.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
       await apiCall('POST', '/api/agents', {
-        id, displayName: displayName.trim(), role: 'expert', environmentId, enabled: false,
+        id, displayName: displayName.trim(), role: 'expert',
+        systemPrompt: systemPrompt.trim(), environmentId, enabled: false,
       });
       setSaved(true);
     } catch (e) {
@@ -766,6 +768,22 @@ function StepAgent({ onFinish, onSkip, environmentIdHint }) {
                 ))}
               </select>
             )}
+          </div>
+
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-1)' }}>
+              System prompt <span style={{ color: 'var(--eb-status-error)' }}>*</span>
+            </div>
+            <textarea
+              value={systemPrompt}
+              onChange={e => setSystemPrompt(e.target.value)}
+              rows={6}
+              placeholder="You are an experienced COBOL developer…"
+              style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
+            />
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+              Stored as <code style={{ fontFamily: 'var(--eb-font-mono)' }}>AGENT-PROMPT.md</code> — you can refine it later in <strong>Agents</strong>.
+            </div>
           </div>
 
           <button onClick={handleSave} disabled={saving || !canSave}

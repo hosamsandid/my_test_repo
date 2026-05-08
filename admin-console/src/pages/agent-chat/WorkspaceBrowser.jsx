@@ -6,8 +6,11 @@ import rehypeSanitize from 'rehype-sanitize';
 import {
   ChevronRight, ChevronDown, Folder, FolderOpen, FileText, FileCode,
   Brain, Sparkles, BookOpen, Loader2, X, RefreshCw, AlertCircle, FileWarning,
-  Maximize2, Minimize2, Code2, Eye, GitBranch, Upload,
+  Maximize2, Minimize2, Code2, Eye, GitBranch, Upload, GitCompare,
 } from 'lucide-react';
+import DiffView from './DiffView';
+
+const MODE_KEY = 'agentChat.workspaceMode';
 
 /**
  * Read-only workspace browser for an agent.
@@ -32,6 +35,20 @@ export default function WorkspaceBrowser({ agentId, active }) {
   const [dirCache, setDirCache] = useState(() => new Map());
   const [expanded, setExpanded] = useState(() => new Set(['']));
   const [selectedFile, setSelectedFile] = useState(null); // { path }
+
+  // Workspace has two display modes: the file tree (default) and a git diff
+  // view. The mode is persisted across reloads but reset on agent change so
+  // that switching agents always starts with a predictable view.
+  const [mode, setMode] = useState(() => {
+    try {
+      const v = localStorage.getItem(MODE_KEY);
+      if (v === 'tree' || v === 'diff') return v;
+    } catch { /* ignore */ }
+    return 'tree';
+  });
+  useEffect(() => {
+    try { localStorage.setItem(MODE_KEY, mode); } catch { /* ignore */ }
+  }, [mode]);
 
   // Upload panel state
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -181,7 +198,37 @@ export default function WorkspaceBrowser({ agentId, active }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      {/* Toolbar */}
+      {/* Mode switch — sits above the toolbar so the path label still reads
+          left-to-right in the tree mode. */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'stretch',
+        borderBottom: '1px solid var(--eb-border-default)',
+        background: 'var(--eb-bg-surface)',
+        flexShrink: 0,
+      }}>
+        <ModeButton
+          icon={<FolderOpen size={11} />}
+          label="Tree"
+          active={mode === 'tree'}
+          onClick={() => setMode('tree')}
+        />
+        <ModeButton
+          icon={<GitCompare size={11} />}
+          label="Diff"
+          active={mode === 'diff'}
+          onClick={() => setMode('diff')}
+        />
+        <div style={{ flex: 1 }} />
+      </div>
+
+      {/* Diff mode renders its own toolbar + list + diff pane. */}
+      {mode === 'diff' && (
+        <DiffView agentId={agentId} active={active && mode === 'diff'} />
+      )}
+
+      {/* Tree-mode toolbar */}
+      {mode === 'tree' && (
       <div style={{
         display: 'flex',
         alignItems: 'center',
@@ -221,9 +268,10 @@ export default function WorkspaceBrowser({ agentId, active }) {
           <RefreshCw size={12} />
         </button>
       </div>
+      )}
 
       {/* Upload panel */}
-      {uploadOpen && (
+      {mode === 'tree' && uploadOpen && (
         <div style={{
           borderBottom: '1px solid var(--eb-border-default)',
           background: 'var(--eb-bg-elevated)',
@@ -330,29 +378,31 @@ export default function WorkspaceBrowser({ agentId, active }) {
       )}
 
       {/* Tree (top) — shrinks when a file viewer is open below. */}
-      <div
-        style={{
-          flex: selectedFile ? '0 0 40%' : '1 1 auto',
-          minHeight: 0,
-          overflowY: 'auto',
-          padding: '4px 0',
-        }}
-      >
-        <DirNode
-          relPath=""
-          name={null}
-          depth={0}
-          dirCache={dirCache}
-          expanded={expanded}
-          onToggleDir={toggleDir}
-          onSelectFile={(p) => setSelectedFile({ path: p })}
-          selectedFilePath={selectedFile?.path || null}
-          onUploadToDir={handleUploadToDir}
-        />
-      </div>
+      {mode === 'tree' && (
+        <div
+          style={{
+            flex: selectedFile ? '0 0 40%' : '1 1 auto',
+            minHeight: 0,
+            overflowY: 'auto',
+            padding: '4px 0',
+          }}
+        >
+          <DirNode
+            relPath=""
+            name={null}
+            depth={0}
+            dirCache={dirCache}
+            expanded={expanded}
+            onToggleDir={toggleDir}
+            onSelectFile={(p) => setSelectedFile({ path: p })}
+            selectedFilePath={selectedFile?.path || null}
+            onUploadToDir={handleUploadToDir}
+          />
+        </div>
+      )}
 
       {/* File viewer (bottom) */}
-      {selectedFile && (
+      {mode === 'tree' && selectedFile && (
         <FileViewer
           agentId={agentId}
           path={selectedFile.path}
@@ -360,6 +410,35 @@ export default function WorkspaceBrowser({ agentId, active }) {
         />
       )}
     </div>
+  );
+}
+
+function ModeButton({ icon, label, active, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4,
+        padding: '4px 10px',
+        background: 'none',
+        border: 'none',
+        borderBottom: `2px solid ${active ? 'var(--eb-accent-primary)' : 'transparent'}`,
+        color: active ? 'var(--eb-text-primary)' : 'var(--eb-text-muted)',
+        fontSize: 'var(--eb-text-xs)',
+        fontWeight: active ? 'var(--eb-font-semibold)' : 'var(--eb-font-medium)',
+        fontFamily: 'inherit',
+        cursor: 'pointer',
+        transition: 'color var(--eb-transition-fast), border-color var(--eb-transition-fast)',
+      }}
+      onMouseEnter={e => { if (!active) e.currentTarget.style.color = 'var(--eb-text-secondary)'; }}
+      onMouseLeave={e => { if (!active) e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
+    >
+      {icon}
+      {label}
+    </button>
   );
 }
 

@@ -2692,8 +2692,7 @@ function readGitRepoInfo(repoPath) {
   return { branch, isDirty, changesCount };
 }
 
-function getAgentGitRepos(agentId) {
-  const agentRoot = path.join(AGENTS_DIR, agentId);
+function getAgentGitRepos(agentRoot) {
   const repos = [];
   // Check the workspace root itself
   if (fs.existsSync(path.join(agentRoot, '.git', 'HEAD'))) {
@@ -2789,6 +2788,370 @@ app.get('/api/agents/:agentId/workspace/file', (req, res) => {
     binary: isBinary,
     content: isBinary ? null : buf.toString('utf8'),
     mtime: st.mtimeMs,
+  });
+});
+
+/* ─── Workspace git-diff (read-only) ───────────────────────────────────
+ *
+ * Two endpoints for the Diff tab in the Workspace browser:
+ *   GET .../workspace/git-status   — list of changed files per repo
+ *   GET .../workspace/git-diff     — unified diff for one file
+ *
+ * Comparison base for MVP-1 is fixed to working-tree-vs-HEAD; the optional
+ * `mode` query parameter is wired through but only the default is honoured.
+ */
+
+const GIT_SPAWN_TIMEOUT_MS = 5000;
+const GIT_DIFF_MAX_BUFFER  = 2 * 1024 * 1024; // 2 MB cap per `git diff` invocation
+const GIT_UNTRACKED_PROBE  = 1024 * 1024;     // bytes scanned for line/binary count
+
+// Resolve repoPath (relative to agent root) to an absolute path that contains
+// a .git/HEAD. Returns null on any failure — this lets callers reply 400/404
+// without distinguishing between traversal, missing, and non-repo cases.
+//
+// The user-supplied repoPath is never passed to a path operation directly:
+// it must match one of the repos discovered by getAgentGitRepos(), which
+// scans the agent root with stat-only filesystem reads. Once allowlisted,
+// the path is reconstructed through safeAgentPath, the canonical path
+// sanitizer in this module.
+function resolveAgentRepo(agentId, repoPath) {
+  const wanted = typeof repoPath === 'string' && repoPath ? repoPath : '.';
+  const repos = getAgentGitRepos(agentId);
+  const found = repos.find(r => r.repoPath === wanted);
+  if (!found) return null;
+  return safeAgentPath(agentId, found.repoPath === '.' ? '' : found.repoPath);
+}
+
+// Validate that a repo-relative path is safe to pass to git as a literal
+// pathspec. Rejects traversal (`..`), absolute paths, NUL bytes, leading
+// `-` (would be interpreted as a CLI option even after the `--` separator
+// in some git versions) and leading `:` (pathspec magic like `:(top)`,
+// `:!`, `:(literal)`).
+function isSafeRepoRelPath(rel) {
+  if (typeof rel !== 'string' || rel === '') return false;
+  if (rel.includes('\0')) return false;
+  if (rel.startsWith('-') || rel.startsWith(':')) return false;
+  if (path.isAbsolute(rel)) return false;
+  const norm = path.normalize(rel.replace(/^\/+/, ''));
+  if (norm === '..' || norm.startsWith('..' + path.sep)) return false;
+  if (norm.split(path.sep).some(seg => seg === '..')) return false;
+  return true;
+}
+
+function assertSafeGitCwd(cwd) {
+  if (typeof cwd !== 'string' || !cwd) throw new Error('Invalid git cwd');
+
+  let realCwd;
+  try {
+    realCwd = fs.realpathSync(cwd);
+  } catch {
+    throw new Error('Invalid git cwd');
+  }
+
+  const allowedRoots = [WORKSPACE, POOL_DIR]
+    .map(root => {
+      try {
+        return fs.realpathSync(root);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+
+  const inAllowedRoot = allowedRoots.some(root => realCwd === root || realCwd.startsWith(root + path.sep));
+  if (!inAllowedRoot) throw new Error('Invalid git cwd');
+
+  let st;
+  try {
+    st = fs.statSync(realCwd);
+  } catch {
+    throw new Error('Invalid git cwd');
+  }
+  if (!st.isDirectory()) throw new Error('Invalid git cwd');
+
+  return realCwd;
+}
+
+function runGit(args, cwd, { maxBuffer = GIT_DIFF_MAX_BUFFER } = {}) {
+  const safeCwd = assertSafeGitCwd(cwd);
+  return spawnSync('git', args, {
+    cwd: safeCwd,
+    timeout: GIT_SPAWN_TIMEOUT_MS,
+    maxBuffer,
+    encoding: 'buffer',
+    // LC_ALL=C keeps porcelain output stable across host locales.
+    env: { ...process.env, LC_ALL: 'C', GIT_OPTIONAL_LOCKS: '0' },
+  });
+}
+
+// Parse `git status --porcelain=v1 -z` output. With -z the entries are
+// NUL-separated and rename/copy entries carry an extra NUL-separated origin
+// path right after the new path. Returns one entry per file with split
+// X/Y status bytes.
+function parsePorcelainZ(buf) {
+  const out = buf.toString('utf8');
+  if (!out) return [];
+  const parts = out.split('\0');
+  if (parts[parts.length - 1] === '') parts.pop();
+  const files = [];
+  for (let i = 0; i < parts.length; i++) {
+    const entry = parts[i];
+    if (entry.length < 3) continue;
+    const X = entry[0];
+    const Y = entry[1];
+    // entry[2] is the space delimiter.
+    const filePath = entry.slice(3);
+    let renameFrom = null;
+    if (X === 'R' || X === 'C' || Y === 'R' || Y === 'C') {
+      // Origin path is the next NUL-separated field.
+      renameFrom = parts[i + 1] || null;
+      i++;
+    }
+    files.push({ X, Y, path: filePath, renameFrom });
+  }
+  return files;
+}
+
+// Parse `git diff --numstat -z` output: <add>\t<del>\t<path>\0 records.
+// Binary files report '-' instead of numbers; we surface that via `binary`.
+function parseNumstatZ(buf) {
+  const out = buf.toString('utf8');
+  if (!out) return new Map();
+  const records = out.split('\0').filter(Boolean);
+  const result = new Map();
+  for (const rec of records) {
+    const tab1 = rec.indexOf('\t');
+    if (tab1 < 0) continue;
+    const tab2 = rec.indexOf('\t', tab1 + 1);
+    if (tab2 < 0) continue;
+    const addStr = rec.slice(0, tab1);
+    const delStr = rec.slice(tab1 + 1, tab2);
+    const filePath = rec.slice(tab2 + 1);
+    if (addStr === '-' || delStr === '-') {
+      result.set(filePath, { additions: 0, deletions: 0, binary: true });
+    } else {
+      result.set(filePath, {
+        additions: Number.parseInt(addStr, 10) || 0,
+        deletions: Number.parseInt(delStr, 10) || 0,
+        binary: false,
+      });
+    }
+  }
+  return result;
+}
+
+// Cheap line + binary probe for an untracked file. Reads at most
+// GIT_UNTRACKED_PROBE bytes — far cheaper than diffing megabytes against
+// /dev/null just to populate the +/- counter in the file list.
+//
+// Path safety: the file path comes from `git status -z` and is therefore
+// repo-relative, but we still funnel it through safeAgentPath so the
+// realpath/containment guarantees in this module apply uniformly. Any
+// path that doesn't normalise inside the agent root yields zeros.
+function probeUntracked(agentId, fullRel) {
+  if (!isSafeRepoRelPath(fullRel)) return { additions: 0, deletions: 0, binary: false };
+  const absPath = safeAgentPath(agentId, fullRel);
+  if (!absPath) return { additions: 0, deletions: 0, binary: false };
+  try {
+    const st = fs.statSync(absPath);
+    if (!st.isFile()) return { additions: 0, deletions: 0, binary: false };
+    const fd = fs.openSync(absPath, 'r');
+    try {
+      const len = Math.min(st.size, GIT_UNTRACKED_PROBE);
+      const buf = Buffer.alloc(len);
+      if (len > 0) fs.readSync(fd, buf, 0, len, 0);
+      const head = buf.slice(0, Math.min(buf.length, 8192));
+      if (head.includes(0)) return { additions: 0, deletions: 0, binary: true };
+      let nl = 0;
+      for (let i = 0; i < buf.length; i++) if (buf[i] === 0x0a) nl++;
+      // Treat last partial line as a line too — matches `wc -l` only for files
+      // that end in \n, but we just want a rough indicator for the UI.
+      const additions = nl > 0 ? nl : (st.size > 0 ? 1 : 0);
+      return { additions, deletions: 0, binary: false };
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return { additions: 0, deletions: 0, binary: false };
+  }
+}
+
+// Map raw X/Y status bytes to a single display status. Worktree status wins
+// over index status when both are set, since that's the most recent change
+// the user would care about. Untracked / ignored stay distinct.
+function summarizeStatus(X, Y) {
+  if (X === '?' && Y === '?') return '??';
+  if (X === '!' && Y === '!') return '!!';
+  if (Y !== ' ' && Y !== '') return Y;
+  return X;
+}
+
+// GET /api/agents/:agentId/workspace/git-status
+// Lists changed files for every git repo in the agent workspace. Multi-repo
+// support comes for free via getAgentGitRepos().
+app.get('/api/agents/:agentId/workspace/git-status', (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  // safeAgentPath returns null for an invalid id or a missing agent dir, and
+  // produces the realpath-validated agent root in the success case. Using it
+  // here avoids a direct path.join on user input.
+  const agentRoot = safeAgentPath(agentId, '');
+  if (!agentRoot) {
+    return res.status(404).json({ error: 'Agent not found' });
+  }
+
+  const repoFilter = typeof req.query.repo === 'string' && req.query.repo
+    ? req.query.repo
+    : null;
+
+  const repos = getAgentGitRepos(agentRoot);
+  const repoEntries = repoFilter
+    ? repos.filter(r => r.repoPath === repoFilter)
+    : repos;
+
+  const result = [];
+  for (const repoMeta of repoEntries) {
+    const abs = resolveAgentRepo(agentId, repoMeta.repoPath);
+    if (!abs) continue;
+
+    // 1. Status — file list with X/Y status bytes.
+    const status = runGit(['status', '--porcelain=v1', '-z'], abs);
+    if (status.error || status.status !== 0) {
+      result.push({ ...repoMeta, error: 'git-status-failed', files: [] });
+      continue;
+    }
+    const entries = parsePorcelainZ(status.stdout);
+
+    // 2. numstat HEAD..worktree — additions/deletions for tracked changes.
+    // Combines staged + unstaged because `HEAD` (no --cached) compares the
+    // working tree against HEAD directly.
+    let numstat = new Map();
+    const numstatRun = runGit(['diff', '--numstat', '-z', 'HEAD', '--'], abs);
+    if (numstatRun.status === 0) {
+      numstat = parseNumstatZ(numstatRun.stdout);
+    }
+
+    // 3. Build per-file response. Untracked entries get a cheap line probe.
+    const files = [];
+    for (const e of entries) {
+      const display = summarizeStatus(e.X, e.Y);
+      if (display === '!!') continue; // ignored — never list these
+      let stats = numstat.get(e.path);
+      if (!stats && display === '??') {
+        // probeUntracked re-validates fullRel through safeAgentPath; we only
+        // need to give it a repo-relative join key here.
+        const fullRel = repoMeta.repoPath === '.' ? e.path : `${repoMeta.repoPath}/${e.path}`;
+        stats = probeUntracked(agentId, fullRel);
+      }
+      if (!stats) stats = { additions: 0, deletions: 0, binary: false };
+      files.push({
+        path: e.path,
+        status: display,
+        indexStatus: e.X,
+        worktreeStatus: e.Y,
+        renameFrom: e.renameFrom,
+        additions: stats.additions,
+        deletions: stats.deletions,
+        binary: stats.binary,
+      });
+    }
+
+    // Sort: modified → added → deleted → untracked → other; alphabetic within.
+    const order = { 'M': 0, 'A': 1, 'D': 2, 'R': 3, 'C': 4, 'U': 5, '??': 6 };
+    files.sort((a, b) => {
+      const oa = order[a.status] ?? 9;
+      const ob = order[b.status] ?? 9;
+      if (oa !== ob) return oa - ob;
+      return a.path.localeCompare(b.path, undefined, { sensitivity: 'base' });
+    });
+
+    result.push({
+      repoPath: repoMeta.repoPath,
+      branch: repoMeta.branch,
+      changesCount: files.length,
+      files,
+    });
+  }
+
+  res.json({ repos: result });
+});
+
+// GET /api/agents/:agentId/workspace/git-diff?repo=...&path=...&context=3
+// Returns the unified diff for a single file. Untracked files are diffed
+// against /dev/null so the UI sees a uniform `diff --git` envelope.
+app.get('/api/agents/:agentId/workspace/git-diff', (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+
+  const repoQ = typeof req.query.repo === 'string' ? req.query.repo : '.';
+  const pathQ = typeof req.query.path === 'string' ? req.query.path : '';
+  if (!pathQ) return res.status(400).json({ error: 'path query required' });
+  // Reject traversal, NUL, leading dash (CLI option), and leading colon
+  // (git pathspec magic — `:!`, `:(top)`, `:(literal)` etc.). Even with `--`
+  // before pathQ, some git versions interpret pathspec magic, so we filter.
+  if (!isSafeRepoRelPath(pathQ)) return res.status(400).json({ error: 'invalid path' });
+
+  const repoAbs = resolveAgentRepo(agentId, repoQ);
+  if (!repoAbs) return res.status(400).json({ error: 'invalid repo' });
+
+  let context = Number.parseInt(req.query.context, 10);
+  if (!Number.isFinite(context) || context < 0) context = 3;
+  if (context > 20) context = 20;
+
+  // Decide which form of `git diff` to invoke. For MVP-1 we always compare
+  // working tree against HEAD; staged/branch modes are out of scope.
+  const isUntracked = (() => {
+    const lsFiles = runGit(
+      ['ls-files', '--error-unmatch', '--', pathQ],
+      repoAbs,
+      { maxBuffer: 64 * 1024 },
+    );
+    return lsFiles.status !== 0;
+  })();
+
+  let diffRun;
+  if (isUntracked) {
+    // --no-index between /dev/null and the file produces a uniform envelope.
+    // Exit code 1 is the success-with-differences case; status 0 (identical
+    // file vs /dev/null can't really happen for an untracked file) is also
+    // accepted. Anything else is an error.
+    diffRun = runGit(
+      ['diff', '--no-color', `-U${context}`, '--no-index', '--', '/dev/null', pathQ],
+      repoAbs,
+    );
+    if (diffRun.error || (diffRun.status !== 0 && diffRun.status !== 1)) {
+      return res.status(500).json({ error: 'git-diff-failed' });
+    }
+  } else {
+    diffRun = runGit(
+      ['diff', '--no-color', `-U${context}`, 'HEAD', '--', pathQ],
+      repoAbs,
+    );
+    if (diffRun.error || diffRun.status !== 0) {
+      return res.status(500).json({ error: 'git-diff-failed' });
+    }
+  }
+
+  // Detect truncation by spawnSync's ENOBUFS surrogate (signal === null,
+  // status === null, error.code === 'ENOBUFS'). We already returned above,
+  // so if we got here the buffer was large enough — but we still cap the
+  // payload size we send back to the client.
+  const raw = (diffRun.stdout || Buffer.alloc(0)).toString('utf8');
+  const truncated = raw.length >= GIT_DIFF_MAX_BUFFER - 1024; // close to the cap
+  const diff = truncated ? raw.slice(0, GIT_DIFF_MAX_BUFFER) : raw;
+
+  // Binary files → git emits "Binary files a/foo and b/foo differ" with no
+  // hunks. Surface that to the client so it can show a placeholder instead
+  // of trying to render it.
+  const binary = /^Binary files .* differ$/m.test(diff) && !/^@@ /m.test(diff);
+
+  res.json({
+    repo: repoQ,
+    path: pathQ,
+    context,
+    truncated,
+    binary,
+    diff,
   });
 });
 

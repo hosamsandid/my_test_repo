@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { useApi } from '../hooks/useApi';
 import StatGrid from '../components/StatGrid';
 import SetupWizard from './SetupWizard';
-import { Settings, Bot, Clock, MessageCircle, Server } from 'lucide-react';
+import { Settings, Bot, Clock, MessageCircle, Server, Rocket, ArrowRight } from 'lucide-react';
 
 const STATUS_POLL_MS = 5000;
 
@@ -340,6 +340,35 @@ export default function Dashboard() {
       </h1>
 
       <SetupNudge />
+
+      <Link
+        to="/quickstart"
+        style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: 'var(--eb-space-4) var(--eb-space-5)',
+          background: 'var(--eb-bg-surface)',
+          border: '1px solid var(--eb-accent-primary)',
+          borderRadius: 'var(--eb-radius-md)',
+          textDecoration: 'none',
+          color: 'inherit',
+          transition: 'background var(--eb-transition-fast)',
+        }}
+        onMouseEnter={e => { e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
+        onMouseLeave={e => { e.currentTarget.style.background = 'var(--eb-bg-surface)'; }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
+          <Rocket size={20} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
+              Schnellstart
+            </div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginTop: 2 }}>
+              GitHub-URL eingeben → Working Environment + Agent in einem Schritt
+            </div>
+          </div>
+        </div>
+        <ArrowRight size={16} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+      </Link>
 
       <StatGrid stats={stats} />
 

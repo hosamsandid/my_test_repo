@@ -1822,6 +1822,188 @@ app.post('/api/repositories/check', async (req, res) => {
   }
 });
 
+/* ─── Quick-Start Wizard ────────────────────────────────────────────── */
+
+// Parse a GitHub URL in any of the common forms and normalize to the canonical
+// HTTPS clone URL. Returns { httpsUrl, org, repo } or throws.
+function parseGitHubUrl(input) {
+  const raw = String(input || '').trim();
+  if (!raw) throw new Error('GitHub URL is required');
+
+  // git@github.com:org/repo(.git)
+  let m = raw.match(/^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?\/?$/i);
+  if (!m) {
+    // ssh://git@github.com/org/repo(.git)
+    m = raw.match(/^ssh:\/\/git@github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/i);
+  }
+  if (!m) {
+    // https://github.com/org/repo(.git) or http(s) with optional trailing path
+    m = raw.match(/^https?:\/\/(?:www\.)?github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/i);
+  }
+  if (!m) {
+    // Bare github.com/org/repo
+    m = raw.match(/^github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/i);
+  }
+  if (!m) throw new Error('Could not parse a GitHub repository URL (expected github.com/<org>/<repo>)');
+
+  const org = m[1];
+  const repo = m[2];
+  if (!/^[A-Za-z0-9._-]+$/.test(org) || !/^[A-Za-z0-9._-]+$/.test(repo)) {
+    throw new Error('GitHub URL contains unexpected characters');
+  }
+  return {
+    org,
+    repo,
+    httpsUrl: `https://github.com/${org}/${repo}.git`,
+  };
+}
+
+function slugifyRepoSegment(s) {
+  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function findEnvByRepoUrl(httpsUrl) {
+  for (const envId of listEnvironmentIds()) {
+    const env = loadEnvironment(envId);
+    const repos = Array.isArray(env?.repositories) ? env.repositories : [];
+    if (repos.some(r => typeof r?.url === 'string' && r.url.trim() === httpsUrl)) {
+      return env;
+    }
+  }
+  return null;
+}
+
+function findExpertAgentForEnv(envId) {
+  const matches = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg || cfg.environmentId !== envId) continue;
+    if (cfg.role !== 'expert') continue;
+    matches.push(cfg);
+  }
+  matches.sort((a, b) => a.id.localeCompare(b.id));
+  return matches[0] || null;
+}
+
+function quickstartSystemPrompt(org, repo) {
+  return [
+    `You are an expert assistant for the GitHub repository **${org}/${repo}**.`,
+    ``,
+    `The repository is cloned into your workspace at \`./${repo}/\`. Use Read, Grep, Glob, and the Bash tool (git, build tools) to explore and modify the code.`,
+    ``,
+    `When the user asks a question, ground your answer in the actual repo state, not guesses. When making changes, follow the project's existing conventions and commit with a clear message.`,
+  ].join('\n');
+}
+
+// One-shot: from a GitHub URL, ensure a Working Environment exists for the
+// repo, and return (or create) a default expert agent bound to it. Reuses
+// existing artefacts when possible so repeat clicks are safe.
+app.post('/api/quickstart', async (req, res) => {
+  const { url, githubTokenId } = req.body || {};
+
+  let parsed;
+  try {
+    parsed = parseGitHubUrl(url);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+  const { org, repo, httpsUrl } = parsed;
+
+  const tokens = listGithubTokens();
+  if (tokens.length === 0) {
+    return res.status(400).json({
+      error: 'No GitHub token configured. Add one under "GitHub Tokens" first.',
+      code: 'no_token',
+    });
+  }
+  let chosenTokenId;
+  if (githubTokenId) {
+    if (!tokens.some(t => t.id === githubTokenId)) {
+      return res.status(400).json({ error: `GitHub token '${githubTokenId}' not found` });
+    }
+    chosenTokenId = githubTokenId;
+  } else {
+    chosenTokenId = tokens[0].id;
+  }
+
+  // 1. Reuse env if any references this repo URL, else create a new one.
+  let env = findEnvByRepoUrl(httpsUrl);
+  let envReused = !!env;
+
+  if (!env) {
+    const baseEnvId = `repo-${slugifyRepoSegment(org)}-${slugifyRepoSegment(repo)}` || 'repo';
+    let envId = baseEnvId;
+    let suffix = 2;
+    while (loadEnvironment(envId)) {
+      envId = `${baseEnvId}-${suffix++}`;
+    }
+    env = {
+      id: envId,
+      name: `${org}/${repo}`,
+      description: `Quick-start environment for ${org}/${repo}`,
+      skills: [],
+      repositories: [{ url: httpsUrl, branch: 'main', sshKeyId: null }],
+      githubTokenId: chosenTokenId,
+      llmEndpointId: null,
+      defaultModelId: null,
+      additionalContext: '',
+      createdAt: new Date().toISOString(),
+    };
+    saveEnvironment(envId, env);
+  } else if (!env.githubTokenId) {
+    // Existing env without a token — attach the chosen one so the clone works.
+    env.githubTokenId = chosenTokenId;
+    env.updatedAt = new Date().toISOString();
+    saveEnvironment(env.id, env);
+  }
+
+  // 2. Reuse an existing expert agent on this env, else create one.
+  const existingAgent = findExpertAgentForEnv(env.id);
+  if (existingAgent) {
+    return res.status(200).json({
+      reused: true,
+      environment: { id: env.id, name: env.name, reused: envReused },
+      agent: { id: existingAgent.id, displayName: existingAgent.displayName },
+    });
+  }
+
+  const baseAgentId = `${slugifyRepoSegment(repo)}-expert` || 'agent-expert';
+  let agentId = baseAgentId;
+  let agentSuffix = 2;
+  while (fs.existsSync(path.join(AGENTS_DIR, agentId))) {
+    agentId = `${baseAgentId}-${agentSuffix++}`;
+  }
+  const displayName = `${repo} Expert`;
+  const systemPrompt = quickstartSystemPrompt(org, repo);
+
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  let agentResp;
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/agents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: agentId,
+        displayName,
+        role: 'expert',
+        systemPrompt,
+        environmentId: env.id,
+      }),
+    });
+    agentResp = await resp.json();
+    if (!resp.ok) return res.status(resp.status).json(agentResp);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+
+  res.status(201).json({
+    reused: false,
+    environment: { id: env.id, name: env.name, reused: envReused },
+    agent: { id: agentId, displayName },
+    seed: agentResp,
+  });
+});
+
 /* ─── Blueprints ────────────────────────────────────────────────────── */
 
 app.get('/api/blueprints', async (req, res) => {

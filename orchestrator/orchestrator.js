@@ -490,7 +490,7 @@ function cloneEnvironmentRepositories(targetDir, env, warnings) {
   for (const repo of repos) {
     if (!repo?.url) continue;
     try {
-      const info = cloneRepository(targetDir, repo);
+      const info = cloneRepository(targetDir, repo, env?.githubTokenId || null);
       if (info) results.push(info);
     } catch (err) {
       warnings.push(`git clone (${repo.url}): ${err.message}`);
@@ -499,7 +499,7 @@ function cloneEnvironmentRepositories(targetDir, env, warnings) {
   return results;
 }
 
-function cloneRepository(targetDir, repository) {
+function cloneRepository(targetDir, repository, envGithubTokenId = null) {
   const { url, branch, sshKeyId } = repository;
   if (!url) return null;
 
@@ -520,7 +520,27 @@ function cloneRepository(targetDir, repository) {
     return { repoName, skipped: true };
   }
 
-  const args = ["clone"];
+  // Quick-start path: HTTPS GitHub URL + no SSH key + env-level GH token.
+  // Authenticate via a one-shot http.extraheader so the token never lands in
+  // `git remote -v` (no URL rewriting), and only for this clone invocation.
+  const isHttpsGithub = /^https?:\/\/(www\.)?github\.com\//i.test(url);
+  let extraHeaderArg = null;
+  if (!keyPath && envGithubTokenId && isHttpsGithub) {
+    const tokenPath = path.join(GH_TOKENS_DIR, envGithubTokenId);
+    try {
+      const ghToken = fs.readFileSync(tokenPath, "utf8").trim();
+      if (ghToken) {
+        const basic = Buffer.from(`x-access-token:${ghToken}`).toString("base64");
+        extraHeaderArg = `http.https://github.com/.extraheader=Authorization: Basic ${basic}`;
+      }
+    } catch (err) {
+      console.warn(`[Orchestrator] Cannot read GitHub token ${envGithubTokenId} for clone: ${err.message}`);
+    }
+  }
+
+  const args = [];
+  if (extraHeaderArg) args.push("-c", extraHeaderArg);
+  args.push("clone");
   if (branch) args.push("--branch", branch);
   args.push("--", url, repoName);
 

@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Users, Zap, Clock, Sparkles, Server,
   Database, ChevronLeft, ChevronRight, Bot,
   Boxes, Key, MessageCircle, Github, Layers, GitBranch, Settings,
-  Sun, Moon,
+  Sun, Moon, Rocket,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 
@@ -42,6 +42,7 @@ function NavBadge({ count, color }) {
 const NAV = [
   { section: 'OVERVIEW', items: [
     { path: '/',             label: 'Dashboard',           Icon: LayoutDashboard },
+    { path: '/quickstart',   label: 'Schnellstart',        Icon: Rocket },
     { path: '/agents',       label: 'Agents',              Icon: Layers },
     { path: '/flows',         label: 'Flows',               Icon: GitBranch },
     { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
@@ -65,6 +66,7 @@ const NAV = [
 
 const BREADCRUMBS = {
   '/':             'Dashboard',
+  '/quickstart':   'Schnellstart',
   '/agents':       'Agents',
   '/flows':        'Flows',
   '/chats':        'Agent Chat',

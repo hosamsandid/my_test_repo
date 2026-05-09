@@ -139,7 +139,7 @@ New file: `orchestrator/bp-agent.js`.
 
 1. Run `python3 /ace/scripts/bp-info.py <hash>` to read frontmatter and body.
 2. If `/workspace/agents/bp-<hash>/config.json` exists → return.
-3. Otherwise call the existing `createAgent({ id: 'bp-<hash>', role: 'expert', environmentId: ACE_BRIEFING_ENV_ID, … })`.
+3. Otherwise call the existing `createAgent({ id: 'bp-<hash>', role: 'agent', environmentId: ACE_BRIEFING_ENV_ID, … })`.
 4. Generate `AGENT-PROMPT.md` from BP mission, rigor, and LoopScript reference.
 5. Append a BP-specific section to `CLAUDE.md` (template below).
 6. Lazy-create the DM room when the user first opens the chat (the existing `/api/matrix/agents/:id/dm` flow already does this).

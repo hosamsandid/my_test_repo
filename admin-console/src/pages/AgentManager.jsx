@@ -61,7 +61,7 @@ function InfoBanner({ children }) {
 function AgentEditForm({ agent, onSave, onCancel }) {
   const [form, setForm] = useState({
     displayName: agent.displayName || '',
-    role: agent.role || 'expert',
+    role: agent.role || 'agent',
     enabled: agent.enabled !== false,
   });
 
@@ -111,7 +111,7 @@ function AgentEditForm({ agent, onSave, onCancel }) {
             outline: 'none',
           }}
         >
-          <option value="expert">Expert</option>
+          <option value="agent">Agent</option>
           <option value="orchestrator">Orchestrator</option>
         </select>
       </div>
@@ -159,7 +159,7 @@ function AgentEditForm({ agent, onSave, onCancel }) {
 /* ── Create form ───────────────────────────────────────────────────── */
 function AgentCreateForm({ onSave, onCancel, saving, error }) {
   const [form, setForm] = useState({
-    id: '', displayName: '', role: 'expert', environmentId: '',
+    id: '', displayName: '', role: 'agent', environmentId: '',
     systemPrompt: '', schedule: '', taskPrompt: '',
     briefingsPath: '',
   });
@@ -196,11 +196,11 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
 
       <div>
         <div style={labelStyle}>ID <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
-        <input style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }} value={form.id} onChange={e => update('id', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))} placeholder="e.g. cobol-expert" />
+        <input style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }} value={form.id} onChange={e => update('id', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))} placeholder="e.g. cobol-agent" />
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>Only lowercase letters, digits and hyphens. Identifies the agent in URLs and the workspace folder.</div>
       </div>
 
-      <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} placeholder="COBOL Expert" />
+      <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} placeholder="COBOL Agent" />
 
       <div>
         <div style={labelStyle}>Working Environment <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
@@ -222,7 +222,7 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
       <div>
         <div style={labelStyle}>Role <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
         <select value={form.role} onChange={e => update('role', e.target.value)} style={inputStyle}>
-          <option value="expert">Expert — responds to questions in the agent chat</option>
+          <option value="agent">Agent — responds to questions in the agent chat</option>
           <option value="orchestrator">Orchestrator</option>
         </select>
       </div>
@@ -425,7 +425,7 @@ function AgentCloneForm({ sourceAgent, onSave, onCancel, saving, error }) {
           style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }}
           value={form.newId}
           onChange={e => update('newId', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
-          placeholder="e.g. cobol-expert-2"
+          placeholder="e.g. cobol-agent-2"
         />
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
           Only lowercase letters, digits and hyphens. Identifies the agent in URLs and the workspace folder.
@@ -436,7 +436,7 @@ function AgentCloneForm({ sourceAgent, onSave, onCancel, saving, error }) {
         label="Display Name *"
         value={form.newDisplayName}
         onChange={v => update('newDisplayName', v)}
-        placeholder="COBOL Expert 2"
+        placeholder="COBOL Agent 2"
       />
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>

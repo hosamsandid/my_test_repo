@@ -172,7 +172,7 @@ async function startAllEnabledAgents() {
     const config = loadAgentConfig(id);
     // Skip pure-config orchestrators (created via POST /internal/agents/create
     // without a Matrix user). Blueprint-instance orchestrators DO carry a token
-    // and need to be respawned on container restart just like experts.
+    // and need to be respawned on container restart just like agents.
     if (config && config.enabled !== false && config.token) {
       startAgentProcess(config);
     }
@@ -186,16 +186,69 @@ function agentDir(id) {
   return path.join(AGENTS_DIR, id);
 }
 
+// Legacy role names used to be `expert` / `expert-group` / `expert-instance`.
+// The user-facing language is now `agent` / `team` / `team-member` and the
+// `parentGroupId` field has been renamed to `parentTeamId`. We keep a
+// translation layer here so any config that wasn't rewritten by
+// `migrateLegacyAgentConfigs()` still loads with the new shape.
+const LEGACY_ROLE_MAP = {
+  "expert": "agent",
+  "expert-group": "team",
+  "expert-instance": "team-member",
+};
+
+function normalizeRole(role) {
+  return LEGACY_ROLE_MAP[role] || role;
+}
+
+function normalizeAgentConfig(cfg) {
+  if (!cfg) return cfg;
+  const out = { ...cfg };
+  if (LEGACY_ROLE_MAP[out.role]) out.role = LEGACY_ROLE_MAP[out.role];
+  if (out.parentGroupId !== undefined && out.parentTeamId === undefined) {
+    out.parentTeamId = out.parentGroupId;
+    delete out.parentGroupId;
+  }
+  return out;
+}
+
 function loadAgentConfig(id) {
   const p = path.join(agentDir(id), "config.json");
   if (!fs.existsSync(p)) return null;
-  return JSON.parse(fs.readFileSync(p, "utf8"));
+  return normalizeAgentConfig(JSON.parse(fs.readFileSync(p, "utf8")));
 }
 
 function saveAgentConfig(id, config) {
   const dir = agentDir(id);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify(config, null, 2));
+}
+
+// One-time migration: rewrite any legacy `role` / `parentGroupId` fields on
+// disk so the new naming is the single source of truth. Idempotent — safe to
+// run on every orchestrator start.
+function migrateLegacyAgentConfigs() {
+  if (!fs.existsSync(AGENTS_DIR)) return;
+  let migrated = 0;
+  for (const id of listAgentIds()) {
+    const p = path.join(agentDir(id), "config.json");
+    let raw;
+    try {
+      raw = JSON.parse(fs.readFileSync(p, "utf8"));
+    } catch (err) {
+      console.error(`[Orchestrator] migrate: cannot parse ${p}: ${err.message}`);
+      continue;
+    }
+    const before = JSON.stringify(raw);
+    const after = normalizeAgentConfig(raw);
+    if (JSON.stringify(after) !== before) {
+      fs.writeFileSync(p, JSON.stringify(after, null, 2));
+      migrated++;
+    }
+  }
+  if (migrated > 0) {
+    console.log(`[Orchestrator] Migrated ${migrated} legacy agent config(s) to agent/team/team-member naming`);
+  }
 }
 
 function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
@@ -1249,23 +1302,23 @@ class Orchestrator {
       throw new Error(`Working Environment not found: ${environmentId}`);
     }
 
-    // expert-group: save a template config (no Matrix user, no process) and
-    // immediately materialize the first instance.
-    if (role === "expert-group") {
-      const groupConfig = {
+    // team: save a template config (no Matrix user, no process) and
+    // immediately materialize the first member.
+    if (role === "team") {
+      const teamConfig = {
         id,
         displayName,
-        role: "expert-group",
+        role: "team",
         environmentId: env.id,
         systemPromptTemplate: systemPrompt || "",
         enabled: true,
       };
-      saveAgentConfig(id, groupConfig);
-      this.agentConfigs.set(id, { config: groupConfig });
-      console.log(`[Orchestrator] Created expert-group ${id}`);
+      saveAgentConfig(id, teamConfig);
+      this.agentConfigs.set(id, { config: teamConfig });
+      console.log(`[Orchestrator] Created team ${id}`);
 
-      const instance = await this.addGroupInstance(id);
-      return { id, group: true, firstInstance: instance.id };
+      const member = await this.addTeamMember(id);
+      return { id, team: true, firstMember: member.id };
     }
 
     const password = `agent-${id}-${Date.now()}`;
@@ -1333,66 +1386,66 @@ class Orchestrator {
     };
   }
 
-  // Add a new expert-instance to an existing expert-group. The instance is
-  // immediately materialized (Matrix user + workspace + agent process).
-  // Instance IDs are auto-numbered: {groupId}-1, {groupId}-2, …
-  async addGroupInstance(groupId) {
-    const groupCfg = loadAgentConfig(groupId);
-    if (!groupCfg) throw new Error(`Expert group '${groupId}' not found`);
-    if (groupCfg.role !== "expert-group") {
-      throw new Error(`Agent '${groupId}' is not an expert-group (role=${groupCfg.role})`);
+  // Add a new team-member to an existing team. The member is immediately
+  // materialized (Matrix user + workspace + agent process).
+  // Member IDs are auto-numbered: {teamId}-1, {teamId}-2, …
+  async addTeamMember(teamId) {
+    const teamCfg = loadAgentConfig(teamId);
+    if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
+    if (teamCfg.role !== "team") {
+      throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
     }
 
-    const env = loadEnvironment(groupCfg.environmentId);
-    if (!env) throw new Error(`Working Environment '${groupCfg.environmentId}' not found`);
+    const env = loadEnvironment(teamCfg.environmentId);
+    if (!env) throw new Error(`Working Environment '${teamCfg.environmentId}' not found`);
 
-    // Determine next available instance number and immediately reserve the
+    // Determine next available member number and immediately reserve the
     // slot by writing a placeholder config. This prevents a TOCTOU race where
-    // two concurrent POST /instances requests both compute the same n before
+    // two concurrent POST /members requests both compute the same n before
     // either saveAgentConfig call runs.
     let n = 1;
-    while (loadAgentConfig(`${groupId}-${n}`)) n++;
-    const instanceId = `${groupId}-${n}`;
-    const instanceDisplayName = `${groupCfg.displayName} #${n}`;
+    while (loadAgentConfig(`${teamId}-${n}`)) n++;
+    const memberId = `${teamId}-${n}`;
+    const memberDisplayName = `${teamCfg.displayName} #${n}`;
 
-    saveAgentConfig(instanceId, {
-      id: instanceId,
-      displayName: instanceDisplayName,
-      role: "expert-instance",
-      parentGroupId: groupId,
-      environmentId: groupCfg.environmentId,
+    saveAgentConfig(memberId, {
+      id: memberId,
+      displayName: memberDisplayName,
+      role: "team-member",
+      parentTeamId: teamId,
+      environmentId: teamCfg.environmentId,
       enabled: false,
       _provisioning: true,
     });
 
-    const password = `agent-${instanceId}-${Date.now()}`;
-    const userId = `@${instanceId}:local`;
+    const password = `agent-${memberId}-${Date.now()}`;
+    const userId = `@${memberId}:local`;
 
-    if (this.adminClient) await ensureMatrixUser(this.adminClient, instanceId, password);
-    const token = await loginMatrixUser(instanceId, password);
-    await setDisplayName(token, userId, instanceDisplayName);
+    if (this.adminClient) await ensureMatrixUser(this.adminClient, memberId, password);
+    const token = await loginMatrixUser(memberId, password);
+    await setDisplayName(token, userId, memberDisplayName);
 
-    const seedResult = seedAgentWorkspace(instanceId, env);
+    const seedResult = seedAgentWorkspace(memberId, env);
 
-    const instanceConfig = {
-      id: instanceId,
-      displayName: instanceDisplayName,
+    const memberConfig = {
+      id: memberId,
+      displayName: memberDisplayName,
       userId,
       token,
-      role: "expert-instance",
-      parentGroupId: groupId,
-      environmentId: groupCfg.environmentId,
+      role: "team-member",
+      parentTeamId: teamId,
+      environmentId: teamCfg.environmentId,
       enabled: true,
     };
-    saveAgentConfig(instanceId, instanceConfig);
-    saveAgentPrompt(instanceId, groupCfg.systemPromptTemplate || "", "expert-instance", env);
+    saveAgentConfig(memberId, memberConfig);
+    saveAgentPrompt(memberId, teamCfg.systemPromptTemplate || "", "team-member", env);
 
-    this.agentConfigs.set(instanceId, { config: instanceConfig });
-    startAgentProcess(instanceConfig);
+    this.agentConfigs.set(memberId, { config: memberConfig });
+    startAgentProcess(memberConfig);
 
-    console.log(`[Orchestrator] Created expert-instance ${instanceId} (group=${groupId})`);
+    console.log(`[Orchestrator] Created team-member ${memberId} (team=${teamId})`);
     return {
-      id: instanceId,
+      id: memberId,
       userId,
       seeded: seedResult.seeded,
       warnings: seedResult.warnings || [],
@@ -1947,7 +2000,7 @@ class Orchestrator {
     }
 
     // Stub: full materialization.
-    if (cfg.role !== "bp-instance" && cfg.role !== "expert-instance") {
+    if (cfg.role !== "bp-instance" && cfg.role !== "team-member") {
       throw new Error(`Agent '${id}' is a stub but has unexpected role '${cfg.role}'`);
     }
     const env = loadEnvironment(cfg.environmentId);
@@ -1982,14 +2035,14 @@ class Orchestrator {
       saveAgentPrompt(id, bpInstanceSystemPrompt(updated), "bp-instance", env);
       console.log(`[Orchestrator] Materialized bp-instance ${id} (parent=${cfg.parentOrchestratorId}, bp=${cfg.bpId})`);
     } else {
-      // expert-instance: restore the system prompt from the parent group template.
-      const groupCfg = cfg.parentGroupId ? loadAgentConfig(cfg.parentGroupId) : null;
-      if (!groupCfg) {
-        console.warn(`[Orchestrator] expert-instance ${id}: parent group '${cfg.parentGroupId}' not found — reactivating with empty system prompt`);
+      // team-member: restore the system prompt from the parent team template.
+      const teamCfg = cfg.parentTeamId ? loadAgentConfig(cfg.parentTeamId) : null;
+      if (!teamCfg) {
+        console.warn(`[Orchestrator] team-member ${id}: parent team '${cfg.parentTeamId}' not found — reactivating with empty system prompt`);
       }
-      const template = groupCfg?.systemPromptTemplate || "";
-      saveAgentPrompt(id, template, "expert-instance", env);
-      console.log(`[Orchestrator] Materialized expert-instance ${id} (group=${cfg.parentGroupId})`);
+      const template = teamCfg?.systemPromptTemplate || "";
+      saveAgentPrompt(id, template, "team-member", env);
+      console.log(`[Orchestrator] Materialized team-member ${id} (team=${cfg.parentTeamId})`);
     }
 
     this.agentConfigs.set(id, { config: updated });
@@ -2058,7 +2111,7 @@ class Orchestrator {
       environmentId: cfg.environmentId,
       ...(cfg.briefingsPath && { briefingsPath: cfg.briefingsPath }),
       ...(cfg.parentOrchestratorId && { parentOrchestratorId: cfg.parentOrchestratorId }),
-      ...(cfg.parentGroupId && { parentGroupId: cfg.parentGroupId }),
+      ...(cfg.parentTeamId && { parentTeamId: cfg.parentTeamId }),
       ...(cfg.bpId && { bpId: cfg.bpId }),
       ...(cfg.bpSlug && { bpSlug: cfg.bpSlug }),
       ...(cfg.bpRelPath && { bpRelPath: cfg.bpRelPath }),
@@ -2320,6 +2373,8 @@ async function main() {
     console.error("MATRIX_HOMESERVER required");
     process.exit(1);
   }
+  migrateLegacyAgentConfigs();
+
   const orchestrator = new Orchestrator();
   await orchestrator.init();
 
@@ -2599,9 +2654,9 @@ async function main() {
           }
 
           // Cascade to children before deleting the parent. Without this,
-          // deleting an orchestrator (or expert-group) leaves its bp-instance
-          // (or expert-instance) stubs orphaned: they keep the now-dangling
-          // parentOrchestratorId / parentGroupId, the UI can't render them
+          // deleting an orchestrator (or team) leaves its bp-instance
+          // (or team-member) stubs orphaned: they keep the now-dangling
+          // parentOrchestratorId / parentTeamId, the UI can't render them
           // under any parent, and a future orchestrator that scans the same
           // BP slug can't claim the deterministic agentId because the orphan
           // already occupies it.
@@ -2609,7 +2664,7 @@ async function main() {
           const cascaded = [];
           if (parentCfg) {
             const childField = parentCfg.role === 'orchestrator' ? 'parentOrchestratorId'
-                            :  parentCfg.role === 'expert-group' ? 'parentGroupId'
+                            :  parentCfg.role === 'team' ? 'parentTeamId'
                             :  null;
             if (childField) {
               for (const childId of listAgentIds()) {
@@ -2632,7 +2687,7 @@ async function main() {
               }
               if (cascaded.length > 0) {
                 console.log(
-                  `[Orchestrator] Cascade-deleted ${cascaded.length} ${parentCfg.role === 'orchestrator' ? 'bp-instance' : 'expert-instance'} children of '${id}': ${cascaded.join(', ')}`
+                  `[Orchestrator] Cascade-deleted ${cascaded.length} ${parentCfg.role === 'orchestrator' ? 'bp-instance' : 'team-member'} children of '${id}': ${cascaded.join(', ')}`
                 );
               }
             }
@@ -2693,14 +2748,14 @@ async function main() {
             displayName,
             userId,
             token,
-            role: 'expert',
+            role: 'agent',
             environmentId: env.id,
             ephemeral: true,
             enabled: true,
             ...(blueprintId && { blueprintId }),
           };
           saveAgentConfig(agentId, config);
-          saveAgentPrompt(agentId, systemPrompt, 'expert', env, blueprintId || null);
+          saveAgentPrompt(agentId, systemPrompt, 'agent', env, blueprintId || null);
 
           const triggerId = 'trigger-' + randomHex(4);
           const fireAt = new Date(Date.now() + 5000).toISOString();
@@ -3087,18 +3142,18 @@ async function main() {
       return;
     }
 
-    // POST /internal/agent-groups/:groupId/instances — add instance to group
-    const addInstanceMatch = req.method === 'POST' && req.url.match(/^\/internal\/agent-groups\/([^/]+)\/instances$/);
-    if (addInstanceMatch) {
-      const groupId = decodeURIComponent(addInstanceMatch[1]);
+    // POST /internal/teams/:teamId/members — add member to team
+    const addMemberMatch = req.method === 'POST' && req.url.match(/^\/internal\/teams\/([^/]+)\/members$/);
+    if (addMemberMatch) {
+      const teamId = decodeURIComponent(addMemberMatch[1]);
       (async () => {
         try {
-          const result = await orchestrator.addGroupInstance(groupId);
+          const result = await orchestrator.addTeamMember(teamId);
           res.writeHead(201, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(result));
         } catch (err) {
-          console.error(`[Orchestrator] addGroupInstance error for ${groupId}: ${err.message}`);
-          const status = /not found/i.test(err.message) ? 404 : /not an expert-group/i.test(err.message) ? 400 : 500;
+          console.error(`[Orchestrator] addTeamMember error for ${teamId}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404 : /not a team/i.test(err.message) ? 400 : 500;
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));
         }
@@ -3119,9 +3174,9 @@ async function main() {
           res.end(JSON.stringify({ error: 'id, displayName, role, environmentId required' }));
           return;
         }
-        if (!['expert', 'orchestrator', 'expert-group'].includes(role)) {
+        if (!['agent', 'orchestrator', 'team'].includes(role)) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: `Invalid role: ${role}. Must be one of: expert, orchestrator, expert-group` }));
+          res.end(JSON.stringify({ error: `Invalid role: ${role}. Must be one of: agent, orchestrator, team` }));
           return;
         }
         if (role !== 'orchestrator' && !systemPrompt) {

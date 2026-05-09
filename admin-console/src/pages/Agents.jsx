@@ -378,9 +378,9 @@ const helpTextStyle = {
 
 /* ── Role catalogue (single source of truth for labels + descriptions) ─ */
 const ROLE_INFO = {
-  'expert': {
+  'agent': {
     icon: User,
-    title: 'Expert (standalone)',
+    title: 'Agent (standalone)',
     short: 'A single chat agent with its own system prompt.',
     body: (
       <>
@@ -390,21 +390,21 @@ const ROLE_INFO = {
         it run autonomously in addition to responding to messages.
       </>
     ),
-    when: 'Use this for one-of-a-kind agents — every expert is unique.',
+    when: 'Use this for one-of-a-kind agents that act on their own.',
   },
-  'expert-group': {
+  'team': {
     icon: Users,
-    title: 'Expert Group',
-    short: 'A reusable template — spawn multiple identical instances on demand.',
+    title: 'Team',
+    short: 'A reusable template — spawn multiple team members from one prompt.',
     body: (
       <>
         Stores a system-prompt template without creating an agent itself. Instead you click
-        <strong> Add Instance</strong> on the group card to spawn one or more agents that all
+        <strong> Add Member</strong> on the team card to spawn one or more agents that all
         share the same prompt and Working Environment, but each gets its own workspace and
         its own conversation in the Agent Chat.
       </>
     ),
-    when: 'Use when you need several copies of the same kind of expert — e.g. a pool of three reviewer agents working in parallel.',
+    when: 'Use when you need several copies of the same kind of agent — e.g. a pool of three reviewer agents working in parallel.',
   },
   'orchestrator': {
     icon: Workflow,
@@ -691,7 +691,7 @@ function MissionDirectoryField({ value, onChange, repoDirs }) {
 /* ── Agent Create Form ─────────────────────────────────────────────── */
 function AgentCreateForm({ onSave, onCancel, saving, error }) {
   const [form, setForm] = useState({
-    id: '', displayName: '', role: 'expert', environmentId: '', systemPrompt: '',
+    id: '', displayName: '', role: 'agent', environmentId: '', systemPrompt: '',
     briefingsPath: '',
   });
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
@@ -731,7 +731,7 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }}
           value={form.id}
           onChange={e => update('id', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
-          placeholder="e.g. cobol-expert"
+          placeholder="e.g. cobol-agent"
         />
         <div style={helpTextStyle}>
           Lowercase letters, digits and hyphens only. Used as the agent's URL
@@ -741,9 +741,9 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
       </div>
 
       <div>
-        <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} placeholder="COBOL Expert" />
+        <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} placeholder="COBOL Agent" />
         <div style={helpTextStyle}>
-          A short, human-readable label shown in the agents list and chat header — e.g. <em>COBOL Expert</em>.
+          A short, human-readable label shown in the agents list and chat header — e.g. <em>COBOL Agent</em>.
         </div>
       </div>
 
@@ -782,8 +782,8 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
         <div style={labelStyle}>Role <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
-          <RoleCard value="expert"        current={form.role} onSelect={v => update('role', v)} />
-          <RoleCard value="expert-group"  current={form.role} onSelect={v => update('role', v)} />
+          <RoleCard value="agent"         current={form.role} onSelect={v => update('role', v)} />
+          <RoleCard value="team"          current={form.role} onSelect={v => update('role', v)} />
           <RoleCard value="orchestrator"  current={form.role} onSelect={v => update('role', v)} />
         </div>
         <RoleDetailBanner role={form.role} />
@@ -800,12 +800,12 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
       {form.role !== 'orchestrator' && (
       <div>
         <div style={labelStyle}>
-          {form.role === 'expert-group' ? 'System Prompt Template' : 'System Prompt'}
+          {form.role === 'team' ? 'System Prompt Template' : 'System Prompt'}
           {' '}<span style={{ color: 'var(--eb-status-error)' }}>*</span>
         </div>
         <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-1)' }}>
-          {form.role === 'expert-group'
-            ? <>Stored once and reused for every instance you spawn from this group. Define the persona, expertise, and tone — each instance gets its own workspace but the same instructions.</>
+          {form.role === 'team'
+            ? <>Stored once and reused for every member you spawn from this team. Define the persona, expertise, and tone — each member gets its own workspace but the same instructions.</>
             : <>The persona Claude reads at startup. Describe the agent's role, expertise, communication style and any constraints. Markdown is fine; treat it like the <code>system</code> message in a chat completion.</>}
         </div>
         <textarea
@@ -913,11 +913,11 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
         </>
       )}
 
-      {agent.role === 'expert-instance' && (
+      {agent.role === 'team-member' && (
         <div>
-          <div style={labelStyle}>Parent Group (read-only)</div>
+          <div style={labelStyle}>Parent Team (read-only)</div>
           <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
-            {agent.parentGroupId || '—'}
+            {agent.parentTeamId || '—'}
           </div>
         </div>
       )}
@@ -1233,9 +1233,9 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
   );
 }
 
-/* ── Expert Group Card ──────────────────────────────────────────────── */
-function ExpertGroupCard({ agent, onEdit, onDelete, onAddInstance, onActivate, onDeactivate, onToggleEnabled, onEditChild, onDeleteChild, navigate, addingInstance, busyIds }) {
-  const expandedKey = `aee_eg_expanded_${agent.id}`;
+/* ── Team Card ──────────────────────────────────────────────────────── */
+function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactivate, onToggleEnabled, onEditChild, onDeleteChild, navigate, addingMember, busyIds }) {
+  const expandedKey = `aee_team_expanded_${agent.id}`;
   const [expanded, setExpanded] = useState(() => {
     try { return localStorage.getItem(expandedKey) !== 'false'; } catch { return true; }
   });
@@ -1277,7 +1277,7 @@ function ExpertGroupCard({ agent, onEdit, onDelete, onAddInstance, onActivate, o
               fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)',
               background: 'var(--eb-bg-app)', padding: '2px 8px',
               borderRadius: 'var(--eb-radius-full)', border: '1px solid var(--eb-accent-primary)',
-            }}>Expert Group</span>
+            }}>Team</span>
           </div>
           <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>
             {agent.id} · env: {agent.environmentId}
@@ -1290,31 +1290,31 @@ function ExpertGroupCard({ agent, onEdit, onDelete, onAddInstance, onActivate, o
             background: 'var(--eb-bg-app)', padding: '2px 8px',
             borderRadius: 'var(--eb-radius-full)', border: '1px solid var(--eb-border-default)',
           }}>
-            {children.length} instance{children.length !== 1 ? 's' : ''}
+            {children.length} member{children.length !== 1 ? 's' : ''}
           </span>
           <button
-            onClick={() => onAddInstance(agent)}
-            disabled={addingInstance}
+            onClick={() => onAddMember(agent)}
+            disabled={addingMember}
             style={{
               background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
-              borderRadius: 'var(--eb-radius-md)', cursor: addingInstance ? 'not-allowed' : 'pointer',
+              borderRadius: 'var(--eb-radius-md)', cursor: addingMember ? 'not-allowed' : 'pointer',
               padding: '4px 10px', fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
               display: 'flex', alignItems: 'center', gap: 4, color: 'var(--eb-text-secondary)',
-              opacity: addingInstance ? 0.5 : 1,
+              opacity: addingMember ? 0.5 : 1,
             }}
           >
-            <Plus size={13} /> {addingInstance ? 'Adding…' : 'Add Instance'}
+            <Plus size={13} /> {addingMember ? 'Adding…' : 'Add Member'}
           </button>
           <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
           <IconBtn icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
         </div>
       </div>
 
-      {/* Instances */}
+      {/* Members */}
       {expanded && (
         children.length === 0 ? (
           <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)', textAlign: 'center', padding: 'var(--eb-space-4)' }}>
-            No instances yet. Click <strong>Add Instance</strong> to create one.
+            No members yet. Click <strong>Add Member</strong> to create one.
           </div>
         ) : (
           children.map((child, idx) => (
@@ -1399,23 +1399,23 @@ export default function Agents() {
   const [saveError, setSaveError] = useState(null);
   const [actionError, setActionError] = useState(null);
   const [syncingId, setSyncingId] = useState(null);
-  const [addingInstanceId, setAddingInstanceId] = useState(null);
+  const [addingMemberId, setAddingMemberId] = useState(null);
   const [busyIds, setBusyIds] = useState(new Set());
 
   const agents = rawAgents || [];
   const byName = (a, b) => (a.displayName || a.id).localeCompare(b.displayName || b.id);
   const bpInstances = agents.filter(a => a.role === 'bp-instance');
-  const expertInstances = agents.filter(a => a.role === 'expert-instance');
+  const teamMembers = agents.filter(a => a.role === 'team-member');
   const orchestrators = agents
     .filter(a => a.role === 'orchestrator')
     .sort(byName)
     .map(o => ({ ...o, children: bpInstances.filter(c => c.parentOrchestratorId === o.id) }));
-  const expertGroups = agents
-    .filter(a => a.role === 'expert-group')
+  const teams = agents
+    .filter(a => a.role === 'team')
     .sort(byName)
-    .map(g => ({ ...g, children: expertInstances.filter(i => i.parentGroupId === g.id).sort(byName) }));
+    .map(t => ({ ...t, children: teamMembers.filter(m => m.parentTeamId === t.id).sort(byName) }));
   const leaves = agents
-    .filter(a => !['orchestrator', 'bp-instance', 'expert-group', 'expert-instance'].includes(a.role))
+    .filter(a => !['orchestrator', 'bp-instance', 'team', 'team-member'].includes(a.role))
     .sort(byName);
 
   function openPanel(mode, agent) {
@@ -1501,15 +1501,15 @@ export default function Agents() {
     }
   }
 
-  async function handleAddInstance(group) {
-    setAddingInstanceId(group.id);
+  async function handleAddMember(team) {
+    setAddingMemberId(team.id);
     try {
-      await apiCall('POST', `/api/agents/${group.id}/instances`);
+      await apiCall('POST', `/api/agents/${team.id}/members`);
       refetch();
     } catch (e) {
       setActionError(e.message);
     } finally {
-      setAddingInstanceId(null);
+      setAddingMemberId(null);
     }
   }
 
@@ -1557,9 +1557,9 @@ export default function Agents() {
     );
   }
 
-  // Count agent types (groups/orchestrators/leaves), not individual instances/stubs,
+  // Count agent types (teams/orchestrators/leaves), not individual members/stubs,
   // consistent with how bp-instances under orchestrators are also not counted separately.
-  const totalCount = orchestrators.length + expertGroups.length + leaves.length;
+  const totalCount = orchestrators.length + teams.length + leaves.length;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -1589,7 +1589,7 @@ export default function Agents() {
         </p>
         <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
           <li><strong>A Working Environment</strong> — supplies skills, repositories, GitHub token and the LLM endpoint.</li>
-          <li><strong>A role</strong> — Expert (one chat agent), Expert Group (a template for many identical instances), or Orchestrator (drives a folder of ACE BriefingPacks).</li>
+          <li><strong>A role</strong> — Agent (one chat agent), Team (a template for many identical members), or Orchestrator (drives a folder of ACE BriefingPacks).</li>
           <li><strong>A system prompt</strong> — the persona / instructions Claude reads at startup. Orchestrators don't need one; their behaviour is fixed.</li>
         </ul>
         <p style={{ margin: 0 }}>
@@ -1633,16 +1633,16 @@ export default function Agents() {
               onDeleteChild={a => setDeleteTarget(a)}
             />
           ))}
-          {expertGroups.map(g => (
-            <ExpertGroupCard
-              key={g.id}
-              agent={g}
+          {teams.map(t => (
+            <TeamCard
+              key={t.id}
+              agent={t}
               navigate={navigate}
-              addingInstance={addingInstanceId === g.id}
+              addingMember={addingMemberId === t.id}
               busyIds={busyIds}
               onEdit={a => openPanel('edit', a)}
               onDelete={a => setDeleteTarget(a)}
-              onAddInstance={handleAddInstance}
+              onAddMember={handleAddMember}
               onActivate={handleActivate}
               onDeactivate={a => setDeactivateTarget(a)}
               onToggleEnabled={handleToggleEnabled}
@@ -1687,8 +1687,8 @@ export default function Agents() {
         message={
           deleteTarget?.role === 'orchestrator'
             ? `Delete orchestrator "${deleteTarget.displayName}"? Its BP-instance children must be deleted separately.`
-            : deleteTarget?.role === 'expert-group'
-            ? `Delete expert group "${deleteTarget.displayName}"? Its instances must be deleted separately.`
+            : deleteTarget?.role === 'team'
+            ? `Delete team "${deleteTarget.displayName}"? Its members must be deleted separately.`
             : `Delete agent "${deleteTarget?.displayName ?? deleteTarget?.id}"? This removes the workspace and all associated data.`
         }
         variant="danger"

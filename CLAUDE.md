@@ -24,8 +24,8 @@ Admin Console chat UI (or any Matrix client, e.g. Element)
   → Conduwuit (localhost:8448)
        │
        └── 1:1 DM rooms (one per agent)
-              ├── @cobol-expert:local      ← agent-runner.js
-              ├── @java-expert:local       ← agent-runner.js
+              ├── @cobol-agent:local       ← agent-runner.js
+              ├── @java-agent:local        ← agent-runner.js
               └── @quality-gate:local      ← agent-runner.js (autonomous)
 
 orchestrator.js  (backend service, no Matrix presence)
@@ -35,7 +35,7 @@ orchestrator.js  (backend service, no Matrix presence)
   └── Internal HTTP API on :4002 for the admin console
 ```
 
-- **Agents:** dynamically created Matrix users (e.g. `@cobol-expert:local`); each runs its own agent-runner.js process
+- **Agents:** dynamically created Matrix users (e.g. `@cobol-agent:local`); each runs its own agent-runner.js process
 - DM room IDs persisted at `/workspace/agents/<id>/dm-room.json` (created lazily by the admin console)
 - Agent configs persisted in `/workspace/agents/<id>/` (config.json + CLAUDE.md + AGENT-PROMPT.md)
 - Each agent is bound to a **Working Environment** (see below) which defines what gets seeded into its workspace.
@@ -80,10 +80,13 @@ The setup wizard and the SSH-keys / GitHub-tokens admin pages explain this ratio
 
 | Role | Behavior |
 |---|---|
-| `expert` | Responds to direct messages from a human in its 1:1 DM room. |
-| `autonomous` | Runs proactively on a cron schedule. Posts results to its DM room with the admin (or a custom `roomId`). Also responds to direct messages. |
+| `agent` | A standalone agent. Responds to direct messages from a human in its 1:1 DM room. With cron / GitHub triggers it can also run autonomously. |
+| `team` | A reusable system-prompt template that doesn't host an agent itself. Use **Add Member** on the team card to spawn one or more `team-member` agents that share the prompt and Working Environment but each get their own workspace and chat. |
+| `team-member` | A single member spawned from a team. Behaves like a standalone agent but inherits the team's system prompt; the parent team is recorded in `parentTeamId`. |
 | `orchestrator` | Bound to a BriefingPack directory (`briefingsPath`). On creation and on every tick of its claim loop (~30s), it pulls main (60s-throttled), scans the directory, and writes one stub `bp-instance` agent per BP. When a BP transitions to `status: dispatched`, the orchestrator posts a DM suggestion to the user; on user confirmation the orchestrator agent runs a `curl` against `/internal/agents/:id/claim` which patches the BP's `brief.md` (status, agent-id, claimed timestamp), commits + pushes to make the claim visible to teammates, and then materialises the bp-instance. Manual Activate / Deactivate via the Admin Console bypasses the suggest flow. |
 | `bp-instance` | One per Briefing Pack under an orchestrator. Lives as a stub (no Matrix user, no workspace) until claimed or activated. The activated agent is bound to one specific BP and uses the ACE engineering skill to execute its LoopScript. |
+
+> **Legacy roles.** Earlier versions used `expert` / `expert-group` / `expert-instance`. The orchestrator rewrites these to `agent` / `team` / `team-member` (and renames `parentGroupId` → `parentTeamId`) on startup; reads also normalize on the fly, so any unmigrated config is loaded with the new shape.
 
 ### Autonomous Agent Triggers
 

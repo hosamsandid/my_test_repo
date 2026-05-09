@@ -1026,15 +1026,23 @@ app.post('/api/agents/:id/sync-bps', async (req, res) => {
   }
 });
 
-app.post('/api/agents/:groupId/instances', async (req, res) => {
-  const { groupId } = req.params;
-  if (!AGENT_ID_RE.test(groupId)) return res.status(400).json({ error: 'Invalid agent id' });
-  if (!fs.existsSync(path.join(AGENTS_DIR, groupId))) {
-    return res.status(404).json({ error: 'Agent group not found' });
+app.post('/api/agents/:teamId/members', async (req, res) => {
+  const { teamId } = req.params;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid agent id' });
+
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const teamDir = path.resolve(agentsBaseDir, teamId);
+  const rel = path.relative(agentsBaseDir, teamDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    return res.status(400).json({ error: 'Invalid agent id' });
+  }
+
+  if (!fs.existsSync(teamDir)) {
+    return res.status(404).json({ error: 'Team not found' });
   }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
-    const resp = await fetch(`${orchestratorUrl}/internal/agent-groups/${encodeURIComponent(groupId)}/instances`, {
+    const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(teamId)}/members`, {
       method: 'POST',
     });
     const data = await resp.json();
@@ -1873,12 +1881,13 @@ function findEnvByRepoUrl(httpsUrl) {
   return null;
 }
 
-function findExpertAgentForEnv(envId) {
+function findStandaloneAgentForEnv(envId) {
   const matches = [];
   for (const id of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
     if (!cfg || cfg.environmentId !== envId) continue;
-    if (cfg.role !== 'expert') continue;
+    // Accept legacy 'expert' configs that haven't been migrated yet.
+    if (cfg.role !== 'agent' && cfg.role !== 'expert') continue;
     matches.push(cfg);
   }
   matches.sort((a, b) => a.id.localeCompare(b.id));
@@ -1887,7 +1896,7 @@ function findExpertAgentForEnv(envId) {
 
 function quickstartSystemPrompt(org, repo) {
   return [
-    `You are an expert assistant for the GitHub repository **${org}/${repo}**.`,
+    `You are an assistant for the GitHub repository **${org}/${repo}**.`,
     ``,
     `The repository is cloned into your workspace at \`./${repo}/\`. Use Read, Grep, Glob, and the Bash tool (git, build tools) to explore and modify the code.`,
     ``,
@@ -1896,7 +1905,7 @@ function quickstartSystemPrompt(org, repo) {
 }
 
 // One-shot: from a GitHub URL, ensure a Working Environment exists for the
-// repo, and return (or create) a default expert agent bound to it. Reuses
+// repo, and return (or create) a default agent bound to it. Reuses
 // existing artefacts when possible so repeat clicks are safe.
 app.post('/api/quickstart', async (req, res) => {
   const { url, githubTokenId } = req.body || {};
@@ -1957,8 +1966,8 @@ app.post('/api/quickstart', async (req, res) => {
     saveEnvironment(env.id, env);
   }
 
-  // 2. Reuse an existing expert agent on this env, else create one.
-  const existingAgent = findExpertAgentForEnv(env.id);
+  // 2. Reuse an existing standalone agent on this env, else create one.
+  const existingAgent = findStandaloneAgentForEnv(env.id);
   if (existingAgent) {
     return res.status(200).json({
       reused: true,
@@ -1967,13 +1976,13 @@ app.post('/api/quickstart', async (req, res) => {
     });
   }
 
-  const baseAgentId = `${slugifyRepoSegment(repo)}-expert` || 'agent-expert';
+  const baseAgentId = `${slugifyRepoSegment(repo)}-agent` || 'repo-agent';
   let agentId = baseAgentId;
   let agentSuffix = 2;
   while (fs.existsSync(path.join(AGENTS_DIR, agentId))) {
     agentId = `${baseAgentId}-${agentSuffix++}`;
   }
-  const displayName = `${repo} Expert`;
+  const displayName = `${repo} Agent`;
   const systemPrompt = quickstartSystemPrompt(org, repo);
 
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
@@ -1985,7 +1994,7 @@ app.post('/api/quickstart', async (req, res) => {
       body: JSON.stringify({
         id: agentId,
         displayName,
-        role: 'expert',
+        role: 'agent',
         systemPrompt,
         environmentId: env.id,
       }),
@@ -2307,7 +2316,7 @@ app.get('/api/matrix/agents', (req, res) => {
     out.push({
       id,
       displayName: cfg.displayName || id,
-      role: cfg.role || 'expert',
+      role: cfg.role || 'agent',
       userId: cfg.userId || `@${id}:local`,
       enabled: cfg.enabled !== false,
       dmRoomId: dm?.roomId || null,

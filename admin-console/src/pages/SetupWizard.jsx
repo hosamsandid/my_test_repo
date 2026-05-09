@@ -730,7 +730,7 @@ function StepAgent({ onFinish, onSkip, environmentIdHint }) {
     try {
       const id = displayName.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
       await apiCall('POST', '/api/agents', {
-        id, displayName: displayName.trim(), role: 'expert',
+        id, displayName: displayName.trim(), role: 'agent',
         systemPrompt: systemPrompt.trim(), environmentId, enabled: false,
       });
       setSaved(true);

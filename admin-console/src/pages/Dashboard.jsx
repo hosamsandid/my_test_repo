@@ -76,8 +76,9 @@ function loadLastViewed() {
 
 function iconForRole(role) {
   switch (role) {
-    case 'expert':     return Bot;
-    default:           return MessageCircle;
+    case 'agent':       return Bot;
+    case 'team-member': return Bot;
+    default:            return MessageCircle;
   }
 }
 

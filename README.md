@@ -31,8 +31,8 @@ Admin Console  (http://localhost:4000)
   └── Chat UI  →  Conduwuit (Matrix homeserver, localhost:8448)
                        │
                        └── 1:1 DM rooms — one per agent
-                              ├── @cobol-expert:local      ← agent-runner.js
-                              ├── @java-expert:local       ← agent-runner.js
+                              ├── @cobol-agent:local       ← agent-runner.js
+                              ├── @java-agent:local        ← agent-runner.js
                               └── @quality-gate:local      ← agent-runner.js (autonomous)
 
 orchestrator  (backend service, no Matrix presence)
@@ -110,10 +110,13 @@ Each agent has a **role** that defines how it behaves:
 
 | Role | Behavior |
 |---|---|
-| **expert** | Responds to direct messages from a human in its dedicated 1:1 Matrix room. |
-| **autonomous** | Runs proactively on a schedule (cron, one-shot, webhook, or GitHub event). Also responds to direct messages. Posts results to its DM room or a configured target room. |
+| **agent** | A standalone agent that responds to direct messages from a human in its dedicated 1:1 Matrix room. With cron / GitHub triggers it can also run autonomously. |
+| **team** | A reusable system-prompt template — does not host an agent itself. Use *Add Member* on the team card to spawn one or more `team-member` agents that share the same prompt and Working Environment but each get their own workspace and chat. |
+| **team-member** | A single member spawned from a team. Behaves like a standalone agent but inherits the team's prompt; the parent team is recorded in `parentTeamId`. |
 | **orchestrator** | Bound to a BriefingPack directory. Polls the directory every ~30 s, writes one `bp-instance` stub per BP, and suggests dispatching them to users via chat. |
 | **bp-instance** | One per BriefingPack under an orchestrator. Lives as a stub until claimed or activated; when active, executes the BP's LoopScript via the ACE engineering skill. |
+
+> Earlier versions used `expert` / `expert-group` / `expert-instance`. The orchestrator rewrites these to `agent` / `team` / `team-member` (and renames `parentGroupId` → `parentTeamId`) on startup, so existing deployments upgrade silently.
 
 ---
 

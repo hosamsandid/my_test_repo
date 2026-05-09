@@ -34,7 +34,8 @@ export default function AgentList({ agents, selectedAgentId, onSelect, onMarkAsU
 
 function iconForRole(role) {
   switch (role) {
-    case 'expert':      return Bot;
+    case 'agent':       return Bot;
+    case 'team-member': return Bot;
     default:            return MessageCircle;
   }
 }

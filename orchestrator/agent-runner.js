@@ -13,9 +13,9 @@
  * no central routing identity.
  *
  * Environment variables (set by orchestrator via spawn):
- *   AGENT_ID                   — agent identifier (e.g. "cobol-expert")
+ *   AGENT_ID                   — agent identifier (e.g. "cobol-agent")
  *   MATRIX_ACCESS_TOKEN        — this agent's Matrix access token
- *   MATRIX_BOT_USER_ID         — this agent's Matrix user ID (e.g. "@cobol-expert:local")
+ *   MATRIX_BOT_USER_ID         — this agent's Matrix user ID (e.g. "@cobol-agent:local")
  *   MATRIX_HOMESERVER          — homeserver URL
  *   ANTHROPIC_DEFAULT_SONNET_MODEL
  *   GIT_SSH_COMMAND
@@ -896,7 +896,7 @@ async function main() {
   }
 
   const displayName = config.displayName || AGENT_ID;
-  const role = config.role || "expert";
+  const role = config.role || "agent";
   BLUEPRINT_ID = config.blueprintId || null;
   if (BLUEPRINT_ID) {
     console.log(`[Runner:${AGENT_ID}] Blueprint instance: ${BLUEPRINT_ID}`);

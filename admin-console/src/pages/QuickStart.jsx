@@ -247,7 +247,7 @@ export default function QuickStart() {
         lineHeight: 1.6,
       }}>
         <strong>What happens here:</strong> If no Working Environment exists yet for this repository, a new one is created
-        with branch <code>main</code>, the current GitHub token, and no additional skills. A default expert agent is then
+        with branch <code>main</code>, the current GitHub token, and no additional skills. A default agent is then
         created on top of it. Both can be fine-tuned later under{' '}
         <Link to="/environments" style={{ color: 'var(--eb-accent-primary)' }}>Working Environments</Link> and{' '}
         <Link to="/agents" style={{ color: 'var(--eb-accent-primary)' }}>Agents</Link>.

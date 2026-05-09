@@ -56,7 +56,7 @@ function SecondaryBtn({ children, onClick, style = {} }) {
 /* ── Blueprint Create Form ─────────────────────────────────────────── */
 function BlueprintCreateForm({ onSave, onCancel, saving, error }) {
   const [form, setForm] = useState({
-    id: '', displayName: '', role: 'expert', environmentId: '', systemPrompt: '',
+    id: '', displayName: '', role: 'agent', environmentId: '', systemPrompt: '',
   });
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
   const { data: environments } = useApi('/api/environments');
@@ -77,14 +77,14 @@ function BlueprintCreateForm({ onSave, onCancel, saving, error }) {
           style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }}
           value={form.id}
           onChange={e => update('id', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
-          placeholder="e.g. cobol-expert"
+          placeholder="e.g. cobol-agent"
         />
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
           Lowercase letters, digits, hyphens. Becomes the agent identifier.
         </div>
       </div>
 
-      <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} placeholder="COBOL Expert" />
+      <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} placeholder="COBOL Agent" />
 
       <div>
         <div style={labelStyle}>Working Environment <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
@@ -108,7 +108,7 @@ function BlueprintCreateForm({ onSave, onCancel, saving, error }) {
       <div>
         <div style={labelStyle}>Role <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
         <select value={form.role} onChange={e => update('role', e.target.value)} style={inputStyle}>
-          <option value="expert">Expert — responds to questions</option>
+          <option value="agent">Agent — responds to questions</option>
         </select>
       </div>
 

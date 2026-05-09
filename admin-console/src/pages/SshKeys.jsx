@@ -478,6 +478,13 @@ export default function SshKeys() {
         You register the <em>private</em> key here; the corresponding <em>public</em> key must be added to the Git host (e.g. GitHub → Settings → SSH and GPG keys).
         Each Working Environment can be linked to one key per repository.
         The private key is stored securely in the workspace volume and is <strong>never</strong> returned by the API — only its fingerprint is shown afterwards.
+        <div style={{ marginTop: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-2)', borderTop: '1px solid var(--eb-border-default)', color: 'var(--eb-text-muted)' }}>
+          <strong>Why both an SSH key and a GitHub Token?</strong> Defense-in-depth: the SSH key handles repo
+          read (clone / fetch) and can be a per-repo read-only deploy key; the GitHub Token handles API
+          actions and writes (push, PR creation, event polling). Splitting them keeps the blast radius of
+          a leaked credential narrow — a stolen deploy key can't merge PRs, a stolen PAT didn't already
+          grant the initial clone.
+        </div>
       </div>
 
       {actionError && (

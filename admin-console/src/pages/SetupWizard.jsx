@@ -441,6 +441,14 @@ function StepSshKey({ onNext, onSkip }) {
         </p>
       </div>
 
+      <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
+        <strong>Two credentials by design.</strong> The SSH key (this step) handles repo <em>read</em> — clone
+        and fetch — and can be a per-repo read-only deploy key. The GitHub Token (next step) handles API
+        actions and <em>writes</em> — push, PR creation, event polling. Keeping them separate is
+        defense-in-depth: a leaked deploy key can't merge PRs, a leaked PAT didn't already grant the
+        initial clone.
+      </div>
+
       <ErrorBanner msg={error} />
 
       {!saved && <ModeTabs mode={mode} onChange={setMode} />}
@@ -548,6 +556,14 @@ function StepGhToken({ onNext, onSkip }) {
           A Personal Access Token allows agents to push commits, open pull requests, and use the <code>gh</code> CLI.
           Skip if you don't need GitHub API access yet.
         </p>
+      </div>
+
+      <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
+        <strong>Companion to the SSH key, not a replacement.</strong> The SSH key (previous step) handles
+        repo <em>read</em>; this token handles API actions and <em>writes</em> — push, PR creation,
+        GitHub Events polling. Both can technically be replaced by a token-only flow, but splitting
+        them keeps the blast radius of a leaked credential narrow and lets you scope the SSH side
+        to a per-repo read-only deploy key.
       </div>
 
       <ErrorBanner msg={error} />

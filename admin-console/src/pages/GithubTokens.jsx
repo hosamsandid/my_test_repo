@@ -340,6 +340,13 @@ export default function GithubTokens() {
         <strong>GitHub Personal Access Tokens (PAT)</strong> allow agents to interact with GitHub — for example to push commits, open pull requests, or use the <code>gh</code> CLI.
         Once a token is linked to a Working Environment it is injected as <code>GH_TOKEN</code> / <code>GITHUB_TOKEN</code> into every agent process in that environment.
         The raw token value is stored securely and is <strong>never</strong> returned by the API after creation — only a preview (prefix + last 4 characters) and a fingerprint are displayed.
+        <div style={{ marginTop: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-2)', borderTop: '1px solid var(--eb-border-default)', color: 'var(--eb-text-muted)' }}>
+          <strong>Why both a GitHub Token and an SSH key?</strong> Defense-in-depth: the SSH key handles repo
+          read (clone / fetch) and can be a per-repo read-only deploy key; the PAT handles API actions and
+          writes (push, PR creation, event polling) — broader scope, higher blast radius. Keeping the two
+          separate means a leaked PAT didn't already grant the initial clone, and a leaked deploy key
+          can't merge PRs.
+        </div>
       </div>
 
       {actionError && (

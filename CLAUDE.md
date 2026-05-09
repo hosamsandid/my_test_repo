@@ -61,6 +61,21 @@ When an agent is created via the Admin Console, the orchestrator:
 
 SSH keys are stored at `/workspace/environments/_keys/<keyId>` (mode 0600) with metadata in `_keys/index.json`. The private key value is **never** returned by the API after creation; only its fingerprint.
 
+#### Why both an SSH key and a GitHub PAT?
+
+The two credentials are kept deliberately separate as **defense-in-depth** — they are not redundant.
+
+| | SSH key | GitHub PAT |
+|---|---|---|
+| `git clone` / `fetch` at workspace seed | ✅ via `GIT_SSH_COMMAND` | — |
+| `git ls-remote` probe (env editor) | ✅ | — |
+| GitHub Events API polling (`github-poller.js`) | — | ✅ Bearer auth |
+| `gh pr create` / commit / review (`gh-as-agent`) | — | ✅ via `GH_TOKEN` / `GITHUB_TOKEN` |
+
+**Blast-radius separation.** The SSH key can be a per-repo, read-only deploy key — its scope is "clone this one repo". The PAT carries higher privileges (push, PR creation, API actions across everything the account can reach). Splitting them means a leaked SSH key can't merge PRs and a leaked PAT didn't already grant the initial repo clone path. Collapsing the two into a token-only flow is technically possible (HTTPS clone with `GITHUB_TOKEN` injection), but would put repo I/O and API write actions on the same credential — undesirable in this enterprise context.
+
+The setup wizard and the SSH-keys / GitHub-tokens admin pages explain this rationale inline so that operators understand why both are required.
+
 ### Agent Roles
 
 | Role | Behavior |

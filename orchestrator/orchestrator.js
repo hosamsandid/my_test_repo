@@ -2421,12 +2421,18 @@ async function main() {
         }
         execFile(
           'git',
-          ['ls-remote', '--exit-code', '--heads', '--', url],
+          ['ls-remote', '--exit-code', '--symref', '--', url, 'HEAD'],
           { env: cmdEnv, timeout: 12_000, maxBuffer: 1024 * 1024 },
-          (err, _stdout, stderr) => {
+          (err, stdout, stderr) => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             if (!err) {
-              res.end(JSON.stringify({ ok: true }));
+              // First line is the symref pointing HEAD at the default branch:
+              //   "ref: refs/heads/<branch>\tHEAD". Resolve so the caller can
+              //   record the actual default rather than guessing "main".
+              const firstLine = (stdout || '').toString().split('\n')[0] || '';
+              const m = firstLine.match(/^ref:\s+refs\/heads\/([^\s]+)\s+HEAD/);
+              const branch = m ? m[1] : null;
+              res.end(JSON.stringify({ ok: true, branch }));
               return;
             }
             const detail = (stderr || err.message || '').toString().trim();

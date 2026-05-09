@@ -1974,7 +1974,32 @@ app.post('/api/quickstart', async (req, res) => {
     chosenSshKeyId = sshKeys[0].id;
   }
 
-  // 1. Reuse env if any references this repo URL, else create a new one.
+  // 1. Probe the remote: validates SSH auth + reachability, and resolves the
+  // default branch so we don't assume "main" (a previous version did, which
+  // silently failed on repos defaulting to master/release/etc.).
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  let resolvedBranch = 'main';
+  try {
+    const probeResp = await fetch(`${orchestratorUrl}/internal/repository-check`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: sshUrl, sshKeyId: chosenSshKeyId }),
+    });
+    const probe = await probeResp.json().catch(() => ({}));
+    if (!probe.ok) {
+      return res.status(400).json({
+        error: probe.error
+          ? `Cannot reach repository over SSH: ${probe.error}`
+          : 'Cannot reach repository over SSH (check the SSH key has access).',
+        code: 'repo_unreachable',
+      });
+    }
+    if (probe.branch) resolvedBranch = probe.branch;
+  } catch (err) {
+    return res.status(502).json({ error: `Repository probe failed: ${err.message}` });
+  }
+
+  // 2. Reuse env if any references this repo URL, else create a new one.
   let env = findEnvByRepoUrl(sshUrl);
   let envReused = !!env;
 
@@ -1990,7 +2015,7 @@ app.post('/api/quickstart', async (req, res) => {
       name: `${org}/${repo}`,
       description: `Quick-start environment for ${org}/${repo}`,
       skills: [],
-      repositories: [{ url: sshUrl, branch: 'main', sshKeyId: chosenSshKeyId }],
+      repositories: [{ url: sshUrl, branch: resolvedBranch, sshKeyId: chosenSshKeyId }],
       githubTokenId: chosenTokenId,
       llmEndpointId: null,
       defaultModelId: null,
@@ -2024,7 +2049,6 @@ app.post('/api/quickstart', async (req, res) => {
   const displayName = `${repo} Agent`;
   const systemPrompt = quickstartSystemPrompt(org, repo);
 
-  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   let agentResp;
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/agents`, {

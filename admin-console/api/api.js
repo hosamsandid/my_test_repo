@@ -1832,8 +1832,8 @@ app.post('/api/repositories/check', async (req, res) => {
 
 /* ─── Quick-Start Wizard ────────────────────────────────────────────── */
 
-// Parse a GitHub URL in any of the common forms and normalize to the canonical
-// HTTPS clone URL. Returns { httpsUrl, org, repo } or throws.
+// Parse a GitHub URL in any of the common forms and normalize to both an SSH
+// and an HTTPS clone URL. Returns { sshUrl, httpsUrl, org, repo } or throws.
 function parseGitHubUrl(input) {
   const raw = String(input || '').trim();
   if (!raw) throw new Error('GitHub URL is required');
@@ -1862,21 +1862,40 @@ function parseGitHubUrl(input) {
   return {
     org,
     repo,
+    sshUrl: `git@github.com:${org}/${repo}.git`,
     httpsUrl: `https://github.com/${org}/${repo}.git`,
   };
+}
+
+// Reduce any GitHub URL form to a canonical "<org>/<repo>" string for
+// equality checks across SSH/HTTPS variants. Returns null for unparseable
+// input so callers can fall back to literal comparison.
+function githubRepoKey(url) {
+  try {
+    const { org, repo } = parseGitHubUrl(url);
+    return `${org.toLowerCase()}/${repo.toLowerCase()}`;
+  } catch {
+    return null;
+  }
 }
 
 function slugifyRepoSegment(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
-function findEnvByRepoUrl(httpsUrl) {
+function findEnvByRepoUrl(targetUrl) {
+  const targetKey = githubRepoKey(targetUrl);
   for (const envId of listEnvironmentIds()) {
     const env = loadEnvironment(envId);
     const repos = Array.isArray(env?.repositories) ? env.repositories : [];
-    if (repos.some(r => typeof r?.url === 'string' && r.url.trim() === httpsUrl)) {
-      return env;
-    }
+    const match = repos.some(r => {
+      const u = typeof r?.url === 'string' ? r.url.trim() : '';
+      if (!u) return false;
+      if (u === targetUrl) return true;
+      const k = githubRepoKey(u);
+      return targetKey && k && k === targetKey;
+    });
+    if (match) return env;
   }
   return null;
 }
@@ -1908,7 +1927,7 @@ function quickstartSystemPrompt(org, repo) {
 // repo, and return (or create) a default agent bound to it. Reuses
 // existing artefacts when possible so repeat clicks are safe.
 app.post('/api/quickstart', async (req, res) => {
-  const { url, githubTokenId } = req.body || {};
+  const { url, githubTokenId, sshKeyId } = req.body || {};
 
   let parsed;
   try {
@@ -1916,7 +1935,7 @@ app.post('/api/quickstart', async (req, res) => {
   } catch (err) {
     return res.status(400).json({ error: err.message });
   }
-  const { org, repo, httpsUrl } = parsed;
+  const { org, repo, sshUrl } = parsed;
 
   const tokens = listGithubTokens();
   if (tokens.length === 0) {
@@ -1935,8 +1954,28 @@ app.post('/api/quickstart', async (req, res) => {
     chosenTokenId = tokens[0].id;
   }
 
+  // SSH key is required because we clone via SSH (git@github.com:...). The
+  // GitHub PAT above stays the credential for API actions (gh-as-agent,
+  // event polling); the two are deliberately split — see CLAUDE.md.
+  const sshKeys = listSshKeys();
+  if (sshKeys.length === 0) {
+    return res.status(400).json({
+      error: 'No SSH key configured. Add one under "SSH Keys" first.',
+      code: 'no_ssh_key',
+    });
+  }
+  let chosenSshKeyId;
+  if (sshKeyId) {
+    if (!sshKeys.some(k => k.id === sshKeyId)) {
+      return res.status(400).json({ error: `SSH key '${sshKeyId}' not found` });
+    }
+    chosenSshKeyId = sshKeyId;
+  } else {
+    chosenSshKeyId = sshKeys[0].id;
+  }
+
   // 1. Reuse env if any references this repo URL, else create a new one.
-  let env = findEnvByRepoUrl(httpsUrl);
+  let env = findEnvByRepoUrl(sshUrl);
   let envReused = !!env;
 
   if (!env) {
@@ -1951,7 +1990,7 @@ app.post('/api/quickstart', async (req, res) => {
       name: `${org}/${repo}`,
       description: `Quick-start environment for ${org}/${repo}`,
       skills: [],
-      repositories: [{ url: httpsUrl, branch: 'main', sshKeyId: null }],
+      repositories: [{ url: sshUrl, branch: 'main', sshKeyId: chosenSshKeyId }],
       githubTokenId: chosenTokenId,
       llmEndpointId: null,
       defaultModelId: null,

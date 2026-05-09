@@ -40,9 +40,11 @@ function Card({ children, accent }) {
 export default function QuickStart() {
   const navigate = useNavigate();
   const { data: tokens, loading: tokensLoading } = useApi('/api/github-tokens');
+  const { data: sshKeys, loading: sshKeysLoading } = useApi('/api/ssh-keys');
 
   const [url, setUrl] = useState('');
   const [tokenId, setTokenId] = useState('');
+  const [sshKeyId, setSshKeyId] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
   const [errorCode, setErrorCode] = useState(null);
@@ -50,6 +52,9 @@ export default function QuickStart() {
 
   const hasTokens = !tokensLoading && Array.isArray(tokens) && tokens.length > 0;
   const showTokenPicker = Array.isArray(tokens) && tokens.length > 1;
+  const hasSshKeys = !sshKeysLoading && Array.isArray(sshKeys) && sshKeys.length > 0;
+  const showSshKeyPicker = Array.isArray(sshKeys) && sshKeys.length > 1;
+  const ready = hasTokens && hasSshKeys;
 
   async function onSubmit(e) {
     e.preventDefault();
@@ -64,6 +69,7 @@ export default function QuickStart() {
         body: JSON.stringify({
           url: url.trim(),
           githubTokenId: tokenId || undefined,
+          sshKeyId: sshKeyId || undefined,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -110,9 +116,28 @@ export default function QuickStart() {
                 No GitHub token configured
               </div>
               <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-                Quick Start needs a GitHub PAT to clone the repository.{' '}
+                Quick Start needs a GitHub PAT for API actions (PR creation, event polling).{' '}
                 <Link to="/github-tokens" style={{ color: 'var(--eb-accent-primary)' }}>
                   Create token →
+                </Link>
+              </div>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {!sshKeysLoading && !hasSshKeys && (
+        <Card accent="var(--eb-status-warning)">
+          <div style={{ display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'flex-start' }}>
+            <AlertCircle size={20} style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2 }} />
+            <div>
+              <div style={{ fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)', marginBottom: 'var(--eb-space-1)' }}>
+                No SSH key configured
+              </div>
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+                Quick Start clones via SSH (<code>git@github.com:…</code>).{' '}
+                <Link to="/ssh-keys" style={{ color: 'var(--eb-accent-primary)' }}>
+                  Add SSH key →
                 </Link>
               </div>
             </div>
@@ -137,7 +162,7 @@ export default function QuickStart() {
                 placeholder="https://github.com/org/repo"
                 value={url}
                 onChange={e => setUrl(e.target.value)}
-                disabled={submitting || !hasTokens}
+                disabled={submitting || !ready}
                 autoFocus
                 style={{ ...inputStyle, paddingLeft: 'var(--eb-space-10)' }}
               />
@@ -147,9 +172,29 @@ export default function QuickStart() {
               color: 'var(--eb-text-muted)',
               marginTop: 'var(--eb-space-2)',
             }}>
-              HTTPS or SSH — we normalise to HTTPS and clone with the GitHub token.
+              HTTPS or SSH — we normalise to SSH (<code>git@github.com:…</code>) and clone with the SSH key.
             </div>
           </div>
+
+          {showSshKeyPicker && (
+            <div>
+              <label htmlFor="quickstart-ssh-key" style={labelStyle}>
+                SSH Key
+              </label>
+              <select
+                id="quickstart-ssh-key"
+                value={sshKeyId}
+                onChange={e => setSshKeyId(e.target.value)}
+                disabled={submitting}
+                style={{ ...inputStyle, fontFamily: 'inherit' }}
+              >
+                <option value="">{sshKeys[0].name} (default)</option>
+                {sshKeys.map(k => (
+                  <option key={k.id} value={k.id}>{k.name} — {k.fingerprint}</option>
+                ))}
+              </select>
+            </div>
+          )}
 
           {showTokenPicker && (
             <div>
@@ -191,6 +236,13 @@ export default function QuickStart() {
                     </Link>
                   </div>
                 )}
+                {errorCode === 'no_ssh_key' && (
+                  <div style={{ marginTop: 'var(--eb-space-2)' }}>
+                    <Link to="/ssh-keys" style={{ color: 'var(--eb-accent-primary)' }}>
+                      Add SSH key →
+                    </Link>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -220,7 +272,7 @@ export default function QuickStart() {
 
           <button
             type="submit"
-            disabled={submitting || !hasTokens || !url.trim()}
+            disabled={submitting || !ready || !url.trim()}
             style={{
               display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--eb-space-2)',
               padding: 'var(--eb-space-3) var(--eb-space-4)',
@@ -231,8 +283,8 @@ export default function QuickStart() {
               fontSize: 'var(--eb-text-md)',
               fontWeight: 'var(--eb-font-medium)',
               fontFamily: 'inherit',
-              cursor: (submitting || !hasTokens || !url.trim()) ? 'not-allowed' : 'pointer',
-              opacity: (submitting || !hasTokens || !url.trim()) ? 0.5 : 1,
+              cursor: (submitting || !ready || !url.trim()) ? 'not-allowed' : 'pointer',
+              opacity: (submitting || !ready || !url.trim()) ? 0.5 : 1,
             }}
           >
             {submitting ? 'Creating agent…' : 'Create agent & start chatting'}
@@ -247,8 +299,8 @@ export default function QuickStart() {
         lineHeight: 1.6,
       }}>
         <strong>What happens here:</strong> If no Working Environment exists yet for this repository, a new one is created
-        with branch <code>main</code>, the current GitHub token, and no additional skills. A default agent is then
-        created on top of it. Both can be fine-tuned later under{' '}
+        with branch <code>main</code>, the selected SSH key (for cloning), the current GitHub token (for API actions),
+        and no additional skills. A default agent is then created on top of it. Both can be fine-tuned later under{' '}
         <Link to="/environments" style={{ color: 'var(--eb-accent-primary)' }}>Working Environments</Link> and{' '}
         <Link to="/agents" style={{ color: 'var(--eb-accent-primary)' }}>Agents</Link>.
       </div>

@@ -42,7 +42,7 @@ function NavBadge({ count, color }) {
 const NAV = [
   { section: 'OVERVIEW', items: [
     { path: '/',             label: 'Dashboard',           Icon: LayoutDashboard },
-    { path: '/quickstart',   label: 'Schnellstart',        Icon: Rocket },
+    { path: '/quickstart',   label: 'Quick Start',         Icon: Rocket },
     { path: '/agents',       label: 'Agents',              Icon: Layers },
     { path: '/flows',         label: 'Flows',               Icon: GitBranch },
     { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
@@ -66,7 +66,7 @@ const NAV = [
 
 const BREADCRUMBS = {
   '/':             'Dashboard',
-  '/quickstart':   'Schnellstart',
+  '/quickstart':   'Quick Start',
   '/agents':       'Agents',
   '/flows':        'Flows',
   '/chats':        'Agent Chat',

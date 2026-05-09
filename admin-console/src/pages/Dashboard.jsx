@@ -360,10 +360,10 @@ export default function Dashboard() {
           <Rocket size={20} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
           <div>
             <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
-              Schnellstart
+              Quick Start
             </div>
             <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginTop: 2 }}>
-              GitHub-URL eingeben → Working Environment + Agent in einem Schritt
+              Paste a GitHub URL → Working Environment + Agent in one step
             </div>
           </div>
         </div>

@@ -90,14 +90,14 @@ export default function QuickStart() {
           fontWeight: 'var(--eb-font-semibold)',
           margin: 0,
           color: 'var(--eb-text-primary)',
-        }}>Schnellstart</h1>
+        }}>Quick Start</h1>
         <p style={{
           fontSize: 'var(--eb-text-md)',
           color: 'var(--eb-text-secondary)',
           marginTop: 'var(--eb-space-2)',
           marginBottom: 0,
         }}>
-          GitHub-URL eingeben, Enter drücken, sofort chatten. Working Environment und Agent werden automatisch angelegt.
+          Paste a GitHub URL, hit Enter, start chatting. The Working Environment and Agent are created automatically.
         </p>
       </div>
 
@@ -107,12 +107,12 @@ export default function QuickStart() {
             <AlertCircle size={20} style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2 }} />
             <div>
               <div style={{ fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)', marginBottom: 'var(--eb-space-1)' }}>
-                Kein GitHub-Token hinterlegt
+                No GitHub token configured
               </div>
               <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-                Der Schnellstart braucht einen GitHub-PAT, um das Repository zu klonen.{' '}
+                Quick Start needs a GitHub PAT to clone the repository.{' '}
                 <Link to="/github-tokens" style={{ color: 'var(--eb-accent-primary)' }}>
-                  Token anlegen →
+                  Create token →
                 </Link>
               </div>
             </div>
@@ -139,7 +139,7 @@ export default function QuickStart() {
                 onChange={e => setUrl(e.target.value)}
                 disabled={submitting || !hasTokens}
                 autoFocus
-                style={{ ...inputStyle, paddingLeft: 'var(--eb-space-9)' }}
+                style={{ ...inputStyle, paddingLeft: 'var(--eb-space-10)' }}
               />
             </div>
             <div style={{
@@ -147,7 +147,7 @@ export default function QuickStart() {
               color: 'var(--eb-text-muted)',
               marginTop: 'var(--eb-space-2)',
             }}>
-              HTTPS oder SSH — wir normalisieren auf HTTPS und klonen mit dem GitHub-Token.
+              HTTPS or SSH — we normalise to HTTPS and clone with the GitHub token.
             </div>
           </div>
 
@@ -163,7 +163,7 @@ export default function QuickStart() {
                 disabled={submitting}
                 style={{ ...inputStyle, fontFamily: 'inherit' }}
               >
-                <option value="">{tokens[0].name} (Standard)</option>
+                <option value="">{tokens[0].name} (default)</option>
                 {tokens.map(t => (
                   <option key={t.id} value={t.id}>{t.name} — {t.preview}</option>
                 ))}
@@ -187,7 +187,7 @@ export default function QuickStart() {
                 {errorCode === 'no_token' && (
                   <div style={{ marginTop: 'var(--eb-space-2)' }}>
                     <Link to="/github-tokens" style={{ color: 'var(--eb-accent-primary)' }}>
-                      Token anlegen →
+                      Create token →
                     </Link>
                   </div>
                 )}
@@ -208,11 +208,11 @@ export default function QuickStart() {
               <CheckCircle size={16} style={{ color: 'var(--eb-status-success)', flexShrink: 0, marginTop: 2 }} />
               <div>
                 <div style={{ fontWeight: 'var(--eb-font-medium)' }}>
-                  {result.reused ? 'Agent wiederverwendet' : 'Agent angelegt'}: {result.agent.displayName}
+                  {result.reused ? 'Agent reused' : 'Agent created'}: {result.agent.displayName}
                 </div>
                 <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginTop: 2 }}>
                   Working Environment: {result.environment.name}
-                  {result.environment.reused ? ' (wiederverwendet)' : ' (neu)'} · weiterleiten zum Chat …
+                  {result.environment.reused ? ' (reused)' : ' (new)'} · redirecting to chat …
                 </div>
               </div>
             </div>
@@ -235,7 +235,7 @@ export default function QuickStart() {
               opacity: (submitting || !hasTokens || !url.trim()) ? 0.5 : 1,
             }}
           >
-            {submitting ? 'Lege Agent an…' : 'Agent anlegen & loschatten'}
+            {submitting ? 'Creating agent…' : 'Create agent & start chatting'}
             {!submitting && <ArrowRight size={16} />}
           </button>
         </form>
@@ -246,11 +246,11 @@ export default function QuickStart() {
         color: 'var(--eb-text-muted)',
         lineHeight: 1.6,
       }}>
-        <strong>Was passiert hier:</strong> Falls für das Repository noch keine Working Environment existiert, wird eine neue
-        mit Branch <code>main</code>, dem aktuellen GitHub-Token und ohne zusätzliche Skills angelegt. Anschließend wird ein
-        Default-Expert-Agent darauf erstellt. Beides lässt sich später unter{' '}
-        <Link to="/environments" style={{ color: 'var(--eb-accent-primary)' }}>Working Environments</Link> bzw.{' '}
-        <Link to="/agents" style={{ color: 'var(--eb-accent-primary)' }}>Agents</Link> feinjustieren.
+        <strong>What happens here:</strong> If no Working Environment exists yet for this repository, a new one is created
+        with branch <code>main</code>, the current GitHub token, and no additional skills. A default expert agent is then
+        created on top of it. Both can be fine-tuned later under{' '}
+        <Link to="/environments" style={{ color: 'var(--eb-accent-primary)' }}>Working Environments</Link> and{' '}
+        <Link to="/agents" style={{ color: 'var(--eb-accent-primary)' }}>Agents</Link>.
       </div>
     </div>
   );

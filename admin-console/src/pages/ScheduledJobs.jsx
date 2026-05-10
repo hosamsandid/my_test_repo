@@ -447,7 +447,12 @@ export default function ScheduledJobs() {
       {skeleton ? (
         <div style={{ height: 200, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />
       ) : (
-        <DataTable columns={COLS} data={triggers} emptyText="No triggers configured. Add one to schedule recurring runs, fire one-shot tasks, expose an HTTP webhook, or react to GitHub events." />
+        <DataTable
+          columns={COLS}
+          data={triggers}
+          getRowKey={r => `${r._agentId}/${r.id}`}
+          emptyText="No triggers configured. Add one to schedule recurring runs, fire one-shot tasks, expose an HTTP webhook, or react to GitHub events."
+        />
       )}
 
       <SidePanel open={addOpen} onClose={() => setAddOpen(false)} title="Add Trigger">

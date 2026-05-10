@@ -10,6 +10,11 @@ import { ChevronUp, ChevronDown, ChevronsUpDown, ChevronLeft, ChevronRight } fro
  *   pageSize    — Rows per page (default 10)
  *   onRowClick  — Optional (row) => void
  *   emptyText   — Shown when data is empty
+ *   getRowKey   — Optional (row, index) => string. Override when `row.id`
+ *                 is not unique across the dataset (e.g. composite domain
+ *                 keys). Duplicate React keys make the reconciler keep
+ *                 stale DOM nodes across pagination, leading to phantom
+ *                 rows leaking between pages.
  */
 export default function DataTable({
   columns = [],
@@ -18,6 +23,7 @@ export default function DataTable({
   onRowClick,
   onRowDoubleClick,
   emptyText = 'No data found',
+  getRowKey,
 }) {
   const [sortKey, setSortKey] = useState(null);
   const [sortDir, setSortDir] = useState('asc');
@@ -162,7 +168,7 @@ export default function DataTable({
             ) : (
               pageData.map((row, rowIdx) => (
                 <tr
-                  key={row.id || rowIdx}
+                  key={getRowKey ? getRowKey(row, rowIdx) : (row.id ?? rowIdx)}
                   onClick={() => onRowClick?.(row)}
                   onDoubleClick={() => onRowDoubleClick?.(row)}
                   style={{

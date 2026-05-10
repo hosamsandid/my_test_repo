@@ -836,20 +836,30 @@ function RoleCard({ template, selected, count, onToggle, onCountChange }) {
   );
 }
 
-// Roles that actually consume the ready-label (BA writes it, Developer
-// and Quality Engineer react to it, Roadmap Reporter cites it as
-// "waiting for a slot"). Other roles never see the label, so the input
-// is pointless when the team has none of these. Keep this in sync with
-// the `{{readyLabel}}` placeholders inside the role JSON files under
-// orchestrator/skill-pool/agent-templates/.
+// Roles whose configuration depends on the ready-label being settable —
+// BA writes it, QE reacts to it, Dispatcher reads its candidate queue
+// from it, Roadmap Reporter cites it, and Developer reacts to it
+// indirectly via the `{{dispatchLabel}}` fallback (when no Dispatcher is
+// selected, the backend collapses `{{dispatchLabel}}` → `readyLabel`, so
+// a Developer-only team still needs the ready-label input).
+// Keep this in sync with the `{{readyLabel}}` placeholders inside the
+// role JSON files under orchestrator/skill-pool/agent-templates/.
 const READY_LABEL_ROLES = new Set([
-  'business-analyst', 'developer', 'quality-engineer', 'roadmap-reporter',
+  'business-analyst', 'developer', 'dispatcher', 'quality-engineer', 'roadmap-reporter',
 ]);
+// Roles whose presence requires the dispatch-label + WIP-cap inputs to
+// be configurable. Only the Dispatcher produces the dispatch label
+// (the Developer also consumes it via the trigger label filter, but
+// without a Dispatcher in the team the backend collapses
+// `{{dispatchLabel}}` to `readyLabel`, so the Developer alone doesn't
+// warrant exposing the field).
+const DISPATCH_LABEL_ROLES = new Set(['dispatcher']);
 
 function StepTeam({ form, setForm, templates, roleConfig, setRoleConfig, error, extendMode, existingRoles }) {
   if (!templates) return <Card>Loading templates…</Card>;
   const existingSet = new Set(extendMode ? (existingRoles || []) : []);
   const showReadyLabel = roleConfig.some(r => READY_LABEL_ROLES.has(r.id));
+  const showDispatchControls = roleConfig.some(r => DISPATCH_LABEL_ROLES.has(r.id));
 
   function isSelected(id) { return roleConfig.some(r => r.id === id); }
   function getCount(id) { return (roleConfig.find(r => r.id === id) || {}).count || 1; }
@@ -947,7 +957,47 @@ function StepTeam({ form, setForm, templates, roleConfig, setRoleConfig, error, 
             style={inputStyle}
           />
           <div style={hintStyle}>
-            GitHub issue label that triggers the Developer. The Business Analyst applies this label once the acceptance criteria are settled — the Developer only reacts to this exact label. Freely chosen (e.g. <code>ready</code>, <code>dev-ready</code>, <code>greenlight</code>).
+            Human greenlight signal. The Business Analyst applies this label once the acceptance criteria are settled.
+            {showDispatchControls
+              ? <> The Dispatcher reads its candidate queue from this label and decides what goes next.</>
+              : <> The Developer reacts directly to this label (no Dispatcher selected).</>}
+            {' '}Freely chosen (e.g. <code>ready</code>, <code>dev-ready</code>, <code>greenlight</code>).
+          </div>
+        </div>
+      )}
+
+      {showDispatchControls && (
+        <div style={{ marginTop: 'var(--eb-space-5)', paddingTop: 'var(--eb-space-4)', borderTop: '1px solid var(--eb-border-default)' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 140px', gap: 'var(--eb-space-4)' }}>
+            <div>
+              <label htmlFor="ts-dispatch-label" style={labelStyle}>Dispatch label</label>
+              <input
+                id="ts-dispatch-label"
+                type="text"
+                placeholder="dispatch"
+                value={form.dispatchLabel}
+                onChange={e => setForm(f => ({ ...f, dispatchLabel: e.target.value }))}
+                style={inputStyle}
+              />
+            </div>
+            <div>
+              <label htmlFor="ts-max-parallel" style={labelStyle}>Max in flight</label>
+              <input
+                id="ts-max-parallel"
+                type="number"
+                min={1}
+                max={50}
+                value={form.maxParallel}
+                onChange={e => {
+                  const n = parseInt(e.target.value, 10);
+                  setForm(f => ({ ...f, maxParallel: Number.isFinite(n) ? n : 1 }));
+                }}
+                style={inputStyle}
+              />
+            </div>
+          </div>
+          <div style={hintStyle}>
+            The Dispatcher applies this label to release a queued issue to the Developer team. The Developer reacts only to this label — not to <code>{form.readyLabel || 'ready'}</code> directly. <strong>Max in flight</strong> is the WIP cap: how many dispatched, not-yet-merged issues the team handles in parallel.
           </div>
         </div>
       )}
@@ -967,6 +1017,7 @@ function StepReview({ form, templates, sshKeys, githubTokens, mcpServers, mcpCre
   const newRoles = allSelected.filter(t => !existingSet.has(t.id));
   const keptRoles = allSelected.filter(t => existingSet.has(t.id));
   const showReadyLabel = roleConfig.some(r => READY_LABEL_ROLES.has(r.id));
+  const showDispatchControls = roleConfig.some(r => DISPATCH_LABEL_ROLES.has(r.id));
   const knowledge = (form.mcpSelections || []).filter(s => s.serverId);
 
   function countFor(id) { return (roleConfig.find(r => r.id === id) || {}).count || 1; }
@@ -984,6 +1035,12 @@ function StepReview({ form, templates, sshKeys, githubTokens, mcpServers, mcpCre
           <>
             <ReviewRow label="Repository" value={`${form.repoUrl} @ ${form.branch || 'main'}`} />
             {showReadyLabel && <ReviewRow label="Ready label" value={form.readyLabel || 'ready'} />}
+            {showDispatchControls && (
+              <>
+                <ReviewRow label="Dispatch label" value={form.dispatchLabel || 'dispatch'} />
+                <ReviewRow label="Max in flight" value={String(form.maxParallel || 1)} />
+              </>
+            )}
             <ReviewRow label="SSH Key" value={sshKey ? sshKey.name : '—'} />
             <ReviewRow label="GitHub Token" value={ghToken ? ghToken.name : '—'} />
             <div>
@@ -1187,6 +1244,8 @@ export default function TeamSetup() {
     repoUrl: '',
     branch: 'main',
     readyLabel: 'ready',
+    dispatchLabel: 'dispatch',
+    maxParallel: 1,
     sshKeyId: '',
     githubTokenId: '',
     roleConfig: [],  // Array<{ id: string, count: number }>
@@ -1363,6 +1422,8 @@ export default function TeamSetup() {
       repository: { url: form.repoUrl.trim(), branch: form.branch.trim() || 'main', sshKeyId: form.sshKeyId },
       githubTokenId: form.githubTokenId,
       readyLabel: (form.readyLabel || 'ready').trim() || 'ready',
+      dispatchLabel: (form.dispatchLabel || 'dispatch').trim() || 'dispatch',
+      maxParallel: Number.isInteger(form.maxParallel) ? form.maxParallel : 1,
       roles: effectiveRoleConfig,
       mcpServers: (form.mcpSelections || []).filter(s => s.serverId),
       mode: effectiveMode,

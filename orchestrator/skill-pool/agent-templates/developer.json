@@ -2,23 +2,23 @@
   "templateSchemaVersion": 1,
   "id": "developer",
   "displayName": "Developer",
-  "description": "Picks up `ready`-labeled issues, implements them, opens PRs.",
+  "description": "Picks up dispatched issues, implements them, opens PRs.",
   "icon": "code",
   "category": "reactive",
   "envSuffix": "dev",
   "sessionPolicy": "per-invocation",
   "skills": [],
   "additionalContextSnippet": "Branch naming: `feature/<issue-number>-<short-slug>`. Commit messages: present tense, terse. PR body links the issue with `Closes #N`.",
-  "promptTemplate": "You are the Developer on team **{{teamName}}** working on the repo `{{repoFullName}}`.\n\nYour responsibility:\n- Pick up issues with greenlight label `{{readyLabel}}` and implement them cleanly.\n- Work on a feature branch and open a PR via `gh-as-agent pr create`.\n- Add tests where the repo expects them; stay conservative in scope — no unsolicited refactors.\n- If the acceptance criteria are unclear or contradictory: comment on the issue with your questions instead of guessing.\n\nYou receive tasks primarily through GitHub triggers (issue label `{{readyLabel}}`). DMs are the exception for ad-hoc requests.",
+  "promptTemplate": "You are the Developer on team **{{teamName}}** working on the repo `{{repoFullName}}`.\n\nYour responsibility:\n- Pick up issues with the dispatch label `{{dispatchLabel}}` and implement them cleanly.\n- Work on a feature branch and open a PR via `gh-as-agent pr create`.\n- Add tests where the repo expects them; stay conservative in scope — no unsolicited refactors.\n- If the acceptance criteria are unclear or contradictory: comment on the issue with your questions instead of guessing.\n\nYou receive tasks primarily through GitHub triggers (issue label `{{dispatchLabel}}`). DMs are the exception for ad-hoc requests.",
   "triggers": [
     {
       "id": "developer-issue-ready",
       "type": "github-event",
       "events": ["issues.labeled"],
       "from": "any-except-self",
-      "labelFilter": "{{readyLabel}}",
+      "labelFilter": "{{dispatchLabel}}",
       "enabled": true,
-      "promptTemplate": "An issue in repo `{{repoFullName}}` was labeled `{{readyLabel}}`. If no open PR already references this issue: implement it according to the acceptance criteria in the issue description. Use `gh-as-agent` for the branch, commits and PR creation; put `Closes #<issue-number>` in the PR body. If a PR already exists: reply `[PASS]`."
+      "promptTemplate": "An issue in repo `{{repoFullName}}` was labeled `{{dispatchLabel}}`. If no open PR already references this issue: implement it according to the acceptance criteria in the issue description. Use `gh-as-agent` for the branch, commits and PR creation; put `Closes #<issue-number>` in the PR body. If a PR already exists: reply `[PASS]`."
     },
     {
       "id": "developer-bid-loop",

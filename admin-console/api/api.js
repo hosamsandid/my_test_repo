@@ -2545,6 +2545,14 @@ function defaultTeamPrompt(vars) {
 // chars, no leading/trailing whitespace, and our prompt embedding wants a
 // plain identifier (no quotes / backticks / template syntax).
 const READY_LABEL_RE = /^[^\s`"'{}<>][^\s`"'{}<>]{0,49}$/;
+// Same shape for the dispatcher's output label — the Dispatcher applies
+// this to issues it releases to the Developer team.
+const DISPATCH_LABEL_RE = READY_LABEL_RE;
+// WIP cap the Dispatcher enforces. Allow 1–50 — beyond that the load on
+// the LLM / git side becomes a real concern and we'd want an explicit
+// product decision rather than a slider.
+const MAX_PARALLEL_MIN = 1;
+const MAX_PARALLEL_MAX = 50;
 
 // The wizard doesn't surface an LLM endpoint chooser yet. Without binding
 // one on the env, the in-chat model picker shows "(no endpoint)" disabled
@@ -2603,6 +2611,35 @@ app.post('/api/teams', async (req, res) => {
   if (!READY_LABEL_RE.test(readyLabel)) {
     return res.status(400).json({
       error: 'readyLabel must be 1–50 chars and contain no whitespace or quote/brace characters',
+    });
+  }
+  const dispatchLabel = (typeof body.dispatchLabel === 'string' && body.dispatchLabel.trim())
+    ? body.dispatchLabel.trim()
+    : 'dispatch';
+  if (!DISPATCH_LABEL_RE.test(dispatchLabel)) {
+    return res.status(400).json({
+      error: 'dispatchLabel must be 1–50 chars and contain no whitespace or quote/brace characters',
+    });
+  }
+  // GitHub label names are case-insensitive — `Dispatch` and `dispatch`
+  // would collide despite passing a strict `===` check.
+  if (dispatchLabel.toLowerCase() === readyLabel.toLowerCase()) {
+    return res.status(400).json({
+      error: 'dispatchLabel and readyLabel must differ — the Dispatcher needs a distinct label to release issues to the Developer',
+    });
+  }
+  // Reject non-integer / out-of-range explicitly rather than silently
+  // coercing — a stray `"3"` or `1.5` from the caller would otherwise be
+  // swallowed and turned into the default, with no feedback.
+  if (body.maxParallel !== undefined && !Number.isInteger(body.maxParallel)) {
+    return res.status(400).json({
+      error: `maxParallel must be an integer in [${MAX_PARALLEL_MIN}, ${MAX_PARALLEL_MAX}]`,
+    });
+  }
+  const maxParallel = body.maxParallel ?? 1;
+  if (maxParallel < MAX_PARALLEL_MIN || maxParallel > MAX_PARALLEL_MAX) {
+    return res.status(400).json({
+      error: `maxParallel must be an integer in [${MAX_PARALLEL_MIN}, ${MAX_PARALLEL_MAX}]`,
     });
   }
 
@@ -2738,6 +2775,12 @@ app.post('/api/teams', async (req, res) => {
   const adoptOrphanEnv = mode === 'create' && envExists;
 
   // ── 5. Substitution variables for templates ───────────────────────
+  // When the team includes a Dispatcher, the Developer is wired to react
+  // to the dispatch label. Without a Dispatcher, `{{dispatchLabel}}` falls
+  // back to the ready label so the Developer still works on bare `ready`-
+  // labeled issues (legacy single-stage flow).
+  const hasDispatcher = normalizedRoles.some(r => r.id === 'dispatcher');
+  const effectiveDispatchLabel = hasDispatcher ? dispatchLabel : readyLabel;
   const vars = {
     teamName,
     teamId,
@@ -2747,6 +2790,8 @@ app.post('/api/teams', async (req, res) => {
     repoUrl: repository.url,
     branch,
     readyLabel,
+    dispatchLabel: effectiveDispatchLabel,
+    maxParallel,
   };
 
   // ── 6. Atomic create with rollback ────────────────────────────────
@@ -2979,10 +3024,31 @@ app.post('/api/teams/stream', async (req, res) => {
   const readyLabel = (typeof body.readyLabel === 'string' && body.readyLabel.trim())
     ? body.readyLabel.trim()
     : 'ready';
+  const dispatchLabel = (typeof body.dispatchLabel === 'string' && body.dispatchLabel.trim())
+    ? body.dispatchLabel.trim()
+    : 'dispatch';
 
   // ── 1. Validate input ─────────────────────────────────────────────
   if (!READY_LABEL_RE.test(readyLabel)) {
     return fail(400, 'readyLabel must be 1–50 chars and contain no whitespace or quote/brace characters');
+  }
+  if (!DISPATCH_LABEL_RE.test(dispatchLabel)) {
+    return fail(400, 'dispatchLabel must be 1–50 chars and contain no whitespace or quote/brace characters');
+  }
+  // GitHub label names are case-insensitive — `Dispatch` and `dispatch`
+  // would collide despite passing a strict `===` check.
+  if (dispatchLabel.toLowerCase() === readyLabel.toLowerCase()) {
+    return fail(400, 'dispatchLabel and readyLabel must differ — the Dispatcher needs a distinct label to release issues to the Developer');
+  }
+  // Reject non-integer / out-of-range explicitly rather than silently
+  // coercing — a stray `"3"` or `1.5` from the caller would otherwise be
+  // swallowed and turned into the default, with no feedback.
+  if (body.maxParallel !== undefined && !Number.isInteger(body.maxParallel)) {
+    return fail(400, `maxParallel must be an integer in [${MAX_PARALLEL_MIN}, ${MAX_PARALLEL_MAX}]`);
+  }
+  const maxParallel = body.maxParallel ?? 1;
+  if (maxParallel < MAX_PARALLEL_MIN || maxParallel > MAX_PARALLEL_MAX) {
+    return fail(400, `maxParallel must be an integer in [${MAX_PARALLEL_MIN}, ${MAX_PARALLEL_MAX}]`);
   }
   if (typeof teamId !== 'string' || !TEAM_ID_RE.test(teamId)) {
     return fail(400, 'teamId must be a lowercase slug, 1–40 chars, [a-z0-9-]');
@@ -3117,12 +3183,20 @@ app.post('/api/teams/stream', async (req, res) => {
   }
 
   // ── 3. Substitution variables for templates ───────────────────────
+  // When the team includes a Dispatcher, the Developer is wired to react
+  // to the dispatch label. Without a Dispatcher, `{{dispatchLabel}}` falls
+  // back to the ready label so the Developer still works on bare `ready`-
+  // labeled issues (legacy single-stage flow).
+  const hasDispatcher = normalizedRoles.some(r => r.id === 'dispatcher');
+  const effectiveDispatchLabel = hasDispatcher ? dispatchLabel : readyLabel;
   const vars = {
     teamName, teamId,
     repoFullName: `${parsed.org}/${parsed.repo}`,
     repoOwner: parsed.org, repoName: parsed.repo,
     repoUrl: repository.url,
     branch, readyLabel,
+    dispatchLabel: effectiveDispatchLabel,
+    maxParallel,
   };
 
   // Adopt-orphan: in mode:create the env may already exist as a leftover

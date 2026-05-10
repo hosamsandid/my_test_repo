@@ -2,8 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, Users, Zap, Clock, Sparkles, Server,
-  Database, ChevronLeft, ChevronRight, Bot,
-  Boxes, Key, MessageCircle, Github, Layers, GitBranch, Settings,
+  ChevronLeft, ChevronRight, Bot,
+  Boxes, Key, MessageCircle, Github, Layers, GitBranch,
   Sun, Moon, Rocket, Users2,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
@@ -58,10 +58,6 @@ const NAV = [
     { path: '/jobs',         label: 'Triggers',            Icon: Clock },
     { path: '/models',       label: 'Model Registry',      Icon: Sparkles },
     { path: '/mcp',          label: 'MCP Servers',         Icon: Server },
-    { path: '/config',       label: 'System Config',        Icon: Settings },
-  ]},
-  { section: 'KNOWLEDGE', items: [
-    { path: '/knowledge',    label: 'Knowledge Base',      Icon: Database },
   ]},
 ];
 
@@ -79,8 +75,6 @@ const BREADCRUMBS = {
   '/jobs':         'Triggers',
   '/models':       'Model Registry',
   '/mcp':          'MCP Servers',
-  '/config':       'System Config',
-  '/knowledge':    'Knowledge Base',
 };
 
 function breadcrumbFor(pathname) {

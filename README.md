@@ -100,7 +100,6 @@ The Admin Console at `http://localhost:4000` is the central management interface
 | **Model Registry** | `/models` | Register and test LLM endpoints; discover available models; set per-agent model overrides |
 | **MCP Servers** | `/mcp` | View Model Context Protocol servers configured in `.claude/settings.json` |
 | **Flows** | `/flows` | BriefingPack graph: visualize BP dependencies, claim/activate/deactivate orchestrator-managed BPs |
-| **System Config** | `/config` | Global settings (e.g. ACE repository path) |
 
 ---
 

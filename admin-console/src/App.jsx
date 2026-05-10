@@ -15,9 +15,7 @@ const SkillsRegistry      = lazy(() => import('./pages/SkillsRegistry'));
 const ScheduledJobs       = lazy(() => import('./pages/ScheduledJobs'));
 const ModelRegistry       = lazy(() => import('./pages/ModelRegistry'));
 const McpServers          = lazy(() => import('./pages/McpServers'));
-const KnowledgeBase       = lazy(() => import('./pages/KnowledgeBase'));
 const Briefings           = lazy(() => import('./pages/Briefings'));
-const SystemConfig        = lazy(() => import('./pages/SystemConfig'));
 
 export default function App() {
   const [setupComplete, setSetupComplete] = useState(null); // null = loading
@@ -62,10 +60,8 @@ export default function App() {
           <Route path="/jobs"         element={<ScheduledJobs />} />
           <Route path="/models"       element={<ModelRegistry />} />
           <Route path="/mcp"          element={<McpServers />} />
-          <Route path="/knowledge"    element={<KnowledgeBase />} />
           <Route path="/flows"         element={<Briefings />} />
           <Route path="/briefings"    element={<Navigate to="/flows" replace />} />
-          <Route path="/config"       element={<SystemConfig />} />
         </Routes>
       </Suspense>
     </Shell>

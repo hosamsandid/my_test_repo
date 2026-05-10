@@ -28,7 +28,7 @@ ifeq ($(COMPOSE_PROJECT_NAME),)
 SKILL_POOL_VOLUME      = vgh-claw_claude-workspace
 endif
 
-.PHONY: up down restart build update ps logs help seed-pool seed-skills seed-memory seed-templates
+.PHONY: up down restart build update ps logs help seed-pool seed-skills seed-memory seed-templates seed-mcp-servers
 
 up:
 	@echo "Starting e-vgh-claw stack..."
@@ -64,7 +64,7 @@ logs:
 	podman logs -f --tail=100 conduwuit &
 	wait
 
-seed-pool: seed-skills seed-memory seed-templates
+seed-pool: seed-skills seed-memory seed-templates seed-mcp-servers
 	@echo "Seeding pool CLAUDE.md from $(SKILL_POOL_DEFAULTS)/CLAUDE.md..."
 	@if [ ! -f "$(SKILL_POOL_DEFAULTS)/CLAUDE.md" ]; then \
 	  echo "ERROR: $(SKILL_POOL_DEFAULTS)/CLAUDE.md not found in repo" >&2; \
@@ -115,5 +115,18 @@ seed-templates:
 	@echo "Done. Pool agent-templates contents:"
 	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/agent-templates/
 
+seed-mcp-servers:
+	@if [ ! -d "$(CURDIR)/mcp-servers" ]; then \
+	  echo "ERROR: $(CURDIR)/mcp-servers not found in repo" >&2; \
+	  exit 1; \
+	fi
+	@echo "Seeding mcp-servers into volume $(SKILL_POOL_VOLUME)..."
+	podman run --rm \
+	  -v $(SKILL_POOL_VOLUME):/pool \
+	  -v $(CURDIR)/mcp-servers:/src:ro \
+	  alpine sh -c 'rm -rf /pool/mcp-servers && mkdir -p /pool/mcp-servers && cp -r /src/. /pool/mcp-servers/'
+	@echo "Done. Pool mcp-servers contents:"
+	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/mcp-servers/
+
 help:
-	@echo "Targets: up, down, restart, build, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates"
+	@echo "Targets: up, down, restart, build, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-mcp-servers"

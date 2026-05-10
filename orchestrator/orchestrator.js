@@ -27,6 +27,8 @@ const SSH_KEYS_INDEX = path.join(SSH_KEYS_DIR, "index.json");
 const GH_TOKENS_DIR = path.join(ENVIRONMENTS_DIR, "_tokens");
 const LLM_ENDPOINTS_INDEX = "/workspace/llm-endpoints/index.json";
 const LLM_KEYS_DIR = "/workspace/llm-endpoints/_keys";
+const MCP_SERVERS_DIR = "/workspace/mcp-servers";
+const MCP_CREDENTIALS_KEYS_DIR = "/workspace/mcp-credentials/_keys";
 
 // Resolve the LLM binding for an environment:
 //  - reads /workspace/llm-endpoints/index.json
@@ -530,11 +532,21 @@ function seedAgentWorkspace(id, env, opts = {}) {
   // 3. Patch absolute /workspace/ paths in seeded memory
   patchSeededPaths(dest);
 
-  // 4. Optional git clone(s)
+  // 4. Materialize MCP server config into the agent's own .claude/settings.json.
+  //    Team-members may override the team-env's MCP list — pass `opts.mcpServersOverride`
+  //    (an array of { serverId, credentialId }) to use it instead of `env.mcpServers`.
+  //    The override is verbatim, no merge.
+  const mcpRefs = Array.isArray(opts.mcpServersOverride)
+    ? opts.mcpServersOverride
+    : ((env && Array.isArray(env.mcpServers)) ? env.mcpServers : []);
+  const mcpSeeded = seedAgentMcpServers(dest, mcpRefs, warnings);
+
+  // 5. Optional git clone(s)
   const clones = cloneEnvironmentRepositories(dest, env, warnings);
 
   const cloneSummary = clones.length > 0 ? `, repos=${clones.map(c => c.repoName).join(",")}` : "";
-  console.log(`[Orchestrator] Seeded workspace for ${id} (env=${env?.id || "none"}, skills=${selectedSkills.length}${cloneSummary})`);
+  const mcpSummary = mcpSeeded.length > 0 ? `, mcp=${mcpSeeded.join(",")}` : "";
+  console.log(`[Orchestrator] Seeded workspace for ${id} (env=${env?.id || "none"}, skills=${selectedSkills.length}${mcpSummary}${cloneSummary})`);
   // Warnings (failed clones, missing skills, etc.) used to be silently
   // dropped into the response object — invisible from the logs unless the
   // caller surfaced them. Log them prominently so a clone failure during
@@ -543,6 +555,100 @@ function seedAgentWorkspace(id, env, opts = {}) {
     console.warn(`[Orchestrator] Seed warning for ${id}: ${w}`);
   }
   return { seeded: true, warnings, clones };
+}
+
+// For each {serverId, credentialId} ref attached to the environment (or its
+// team-member override), load the server.json template, substitute the
+// `${credential}` placeholder with the secret read from the credentials store,
+// and write the merged stanza into the agent's own `.claude/settings.json`
+// under `mcpServers[<serverId>]`. Per-agent isolation: pool-level MCP config
+// is no longer consulted at runtime.
+function seedAgentMcpServers(dest, mcpRefs, warnings) {
+  const seeded = [];
+  if (!Array.isArray(mcpRefs) || mcpRefs.length === 0) return seeded;
+
+  const settingsPath = path.join(dest, ".claude", "settings.json");
+  let settings = {};
+  try {
+    if (fs.existsSync(settingsPath)) {
+      settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")) || {};
+    }
+  } catch (err) {
+    warnings.push(`mcp: cannot parse existing .claude/settings.json — overwriting (${err.message})`);
+    settings = {};
+  }
+  if (!settings.mcpServers || typeof settings.mcpServers !== "object") settings.mcpServers = {};
+
+  for (const ref of mcpRefs) {
+    const serverId = ref?.serverId;
+    const credId = ref?.credentialId || null;
+    if (!serverId || !/^[a-z0-9-]+$/.test(serverId)) {
+      warnings.push(`mcp: invalid serverId in env ref: ${JSON.stringify(ref)}`);
+      continue;
+    }
+    const serverPath = path.join(MCP_SERVERS_DIR, serverId, "server.json");
+    let server;
+    try {
+      server = JSON.parse(fs.readFileSync(serverPath, "utf8"));
+    } catch (err) {
+      warnings.push(`mcp: server '${serverId}' not found in registry (${err.message})`);
+      continue;
+    }
+
+    let secret = "";
+    if (credId) {
+      if (!/^[a-z0-9-]+$/.test(credId)) {
+        warnings.push(`mcp: invalid credentialId for server '${serverId}': ${credId}`);
+        continue;
+      }
+      try {
+        secret = fs.readFileSync(path.join(MCP_CREDENTIALS_KEYS_DIR, credId), "utf8").trim();
+      } catch (err) {
+        warnings.push(`mcp: cannot read credential '${credId}' for server '${serverId}' (${err.message})`);
+        continue;
+      }
+    }
+
+    const resolvedEnv = {};
+    const envTpl = (server.env && typeof server.env === "object") ? server.env : {};
+    let placeholderUsed = false;
+    for (const [k, v] of Object.entries(envTpl)) {
+      if (typeof v !== "string") { resolvedEnv[k] = v; continue; }
+      if (v.includes("${credential}")) {
+        placeholderUsed = true;
+        if (!secret) {
+          warnings.push(`mcp: server '${serverId}' env key '${k}' uses \${credential} but no credential is bound`);
+          // Drop the key rather than leak the literal placeholder into the agent.
+          continue;
+        }
+        resolvedEnv[k] = v.split("${credential}").join(secret);
+      } else {
+        resolvedEnv[k] = v;
+      }
+    }
+    if (!placeholderUsed && credId) {
+      warnings.push(`mcp: server '${serverId}' has a credential bound but no \${credential} placeholder in env — credential ignored`);
+    }
+
+    const stanza = (server.transport === "http")
+      ? { transport: "http", url: server.url, env: resolvedEnv }
+      : {
+          transport: "stdio",
+          command: server.command,
+          args: Array.isArray(server.args) ? server.args : [],
+          env: resolvedEnv,
+        };
+    settings.mcpServers[serverId] = stanza;
+    seeded.push(serverId);
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+  } catch (err) {
+    warnings.push(`mcp: cannot write .claude/settings.json (${err.message})`);
+  }
+  return seeded;
 }
 
 // Clone every repository attached to an environment. Errors are pushed to the
@@ -1505,6 +1611,9 @@ class Orchestrator {
   //                            `systemPromptTemplate`.
   //   - skillsOverride      — replace env.skills for this member's workspace.
   //                            Absent = inherit env.skills.
+  //   - mcpServersOverride  — replace env.mcpServers for this member. Same
+  //                            shape as env.mcpServers ([{serverId, credentialId}]).
+  //                            Absent = inherit env.mcpServers.
   //   - sessionPolicy       — `per-invocation` | `persistent` (default).
   //                            Persisted on the member config.
   //   - triggers            — full triggers.json array, written verbatim.
@@ -1555,6 +1664,7 @@ class Orchestrator {
 
     const seedResult = seedAgentWorkspace(memberId, env, {
       skillsOverride: Array.isArray(opts.skillsOverride) ? opts.skillsOverride : undefined,
+      mcpServersOverride: Array.isArray(opts.mcpServersOverride) ? opts.mcpServersOverride : undefined,
     });
 
     // Resolve effective values once, here. The member's config records ONLY
@@ -1575,6 +1685,7 @@ class Orchestrator {
       ...(typeof opts.systemPromptOverride === 'string' && opts.systemPromptOverride.length > 0
         ? { systemPrompt: opts.systemPromptOverride } : {}),
       ...(Array.isArray(opts.skillsOverride) ? { skillsOverride: opts.skillsOverride } : {}),
+      ...(Array.isArray(opts.mcpServersOverride) ? { mcpServersOverride: opts.mcpServersOverride } : {}),
       ...(opts.sessionPolicy === 'per-invocation' ? { sessionPolicy: 'per-invocation' } : {}),
       enabled: true,
     };
@@ -2195,7 +2306,10 @@ class Orchestrator {
     const token = await loginMatrixUser(id, password);
     await setDisplayName(token, userId, cfg.displayName);
 
-    const seedResult = seedAgentWorkspace(id, env);
+    const seedResult = seedAgentWorkspace(id, env, {
+      skillsOverride: Array.isArray(cfg.skillsOverride) ? cfg.skillsOverride : undefined,
+      mcpServersOverride: Array.isArray(cfg.mcpServersOverride) ? cfg.mcpServersOverride : undefined,
+    });
 
     // bp-instance agents always need the ACE engineering skill — the env's
     // skills array is overridden here so the agent can actually execute the

@@ -1,60 +1,423 @@
-import React from 'react';
-import { useApi } from '../hooks/useApi';
+import React, { useState } from 'react';
+import { Trash2, Plus, KeyRound, Server } from 'lucide-react';
+import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
+import SidePanel from '../components/SidePanel';
+import ConfirmDialog from '../components/ConfirmDialog';
+import FormInput from '../components/FormInput';
 
-export default function McpServers() {
-  const { data: mcpServers, loading, error } = useApi('/api/mcp');
+const inputStyle = {
+  width: '100%',
+  padding: 'var(--eb-space-2) var(--eb-space-3)',
+  background: 'var(--eb-bg-elevated)',
+  border: '1px solid var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-md)',
+  color: 'var(--eb-text-primary)',
+  fontSize: 'var(--eb-text-sm)',
+  fontFamily: 'inherit',
+  outline: 'none',
+  boxSizing: 'border-box',
+};
 
-  // mcpServers is an object keyed by server name
-  const rows = mcpServers
-    ? Object.entries(mcpServers).map(([name, cfg]) => ({
-        name,
-        command: Array.isArray(cfg.command) ? cfg.command[0] : (cfg.command || cfg.cmd || '—'),
-        args: Array.isArray(cfg.args) ? cfg.args.length : (Array.isArray(cfg.command) ? cfg.command.length - 1 : 0),
-        transport: cfg.transport || 'stdio',
-      }))
-    : [];
+const monoStyle = { fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' };
 
-  const COLS = [
-    { key: 'name',      label: 'Server Name', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)' }}>{v}</span> },
-    { key: 'command',   label: 'Command' },
-    { key: 'args',      label: 'Args count', align: 'right' },
-    { key: 'transport', label: 'Transport' },
-  ];
+function CreateServerForm({ onSave, onCancel, saving, error }) {
+  const [id, setId] = useState('');
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [transport, setTransport] = useState('stdio');
+  const [command, setCommand] = useState('node');
+  const [argsText, setArgsText] = useState('/template-workspace/mcp-servers/wiki/server.js');
+  const [url, setUrl] = useState('');
+  const [envText, setEnvText] = useState('WIKI_BASE_URL=https://wiki.example/api\nWIKI_TOKEN=${credential}');
 
-  if (loading) {
-    return <div style={{ height: 200, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />;
+  function parseEnv(text) {
+    const out = {};
+    for (const line of (text || '').split('\n')) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const eq = t.indexOf('=');
+      if (eq < 1) continue;
+      out[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
+    }
+    return out;
   }
 
-  if (error) {
-    return (
-      <div role="alert" style={{ padding: 'var(--eb-space-6)', color: 'var(--eb-status-error)' }}>
-        Failed to load MCP config: {error}
-      </div>
-    );
-  }
+  const canSave = id.trim() && name.trim() && (
+    transport === 'http' ? url.trim() : command.trim()
+  );
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
-        MCP Servers
-      </h1>
+      {error && (
+        <div role="alert" style={{
+          color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-md)',
+        }}>{error}</div>
+      )}
 
-      <div style={{
-        padding: 'var(--eb-space-3) var(--eb-space-4)',
-        background: 'var(--eb-status-info-bg)',
-        border: '1px solid var(--eb-status-info)',
-        borderRadius: 'var(--eb-radius-md)',
-        fontSize: 'var(--eb-text-sm)',
-        color: 'var(--eb-text-primary)',
-      }}>
-        MCP configuration lives in the pool volume at <code style={{ fontFamily: 'var(--eb-font-mono)' }}>.claude/settings.json</code>. This view is read-only.
+      <FormInput label="ID *" value={id} onChange={setId} placeholder="wiki" hint="Lowercase letters, digits, dashes. Used as the key in .claude/settings.json mcpServers." />
+      <FormInput label="Name *" value={name} onChange={setName} placeholder="Wiki search" />
+      <FormInput label="Description" value={description} onChange={setDescription} placeholder="What agents use this server for" />
+
+      <div>
+        <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-1)' }}>
+          Transport
+        </div>
+        <select value={transport} onChange={e => setTransport(e.target.value)} style={inputStyle}>
+          <option value="stdio">stdio (local subprocess)</option>
+          <option value="http">http (remote endpoint)</option>
+        </select>
       </div>
 
-      <DataTable
-        columns={COLS}
-        data={rows}
-        emptyText="No MCP servers configured or settings.json not found."
+      {transport === 'stdio' ? (
+        <>
+          <FormInput label="Command *" value={command} onChange={setCommand} placeholder="node" />
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-1)' }}>
+              Args (one per line)
+            </div>
+            <textarea
+              value={argsText}
+              onChange={e => setArgsText(e.target.value)}
+              rows={3}
+              style={{ ...inputStyle, ...monoStyle, resize: 'vertical' }}
+            />
+          </div>
+        </>
+      ) : (
+        <FormInput label="URL *" value={url} onChange={setUrl} placeholder="https://mcp.example/api" />
+      )}
+
+      <div>
+        <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-1)' }}>
+          Environment template
+        </div>
+        <textarea
+          value={envText}
+          onChange={e => setEnvText(e.target.value)}
+          rows={5}
+          placeholder="KEY=value (one per line)"
+          style={{ ...inputStyle, ...monoStyle, resize: 'vertical' }}
+        />
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+          Use <code style={monoStyle}>${'${credential}'}</code> as the placeholder for the bound credential's secret —
+          the orchestrator substitutes it per-agent at seed time.
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+        <button
+          onClick={() => onSave({
+            id: id.trim(),
+            name: name.trim(),
+            description: description.trim(),
+            transport,
+            ...(transport === 'stdio'
+              ? { command: command.trim(), args: argsText.split('\n').map(s => s.trim()).filter(Boolean) }
+              : { url: url.trim() }),
+            env: parseEnv(envText),
+          })}
+          disabled={saving || !canSave}
+          style={{
+            padding: 'var(--eb-space-2) var(--eb-space-4)',
+            background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+            border: 'none', borderRadius: 'var(--eb-radius-md)',
+            fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+            cursor: saving ? 'wait' : 'pointer', fontFamily: 'inherit',
+            opacity: (saving || !canSave) ? 0.6 : 1,
+          }}
+        >
+          {saving ? 'Saving…' : 'Save server'}
+        </button>
+        <button onClick={onCancel} style={{
+          padding: 'var(--eb-space-2) var(--eb-space-4)',
+          background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-secondary)',
+          cursor: 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+        }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function CreateCredentialForm({ servers, onSave, onCancel, saving, error }) {
+  const [name, setName] = useState('');
+  const [serverId, setServerId] = useState('');
+  const [secret, setSecret] = useState('');
+
+  const canSave = name.trim() && secret.trim();
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      {error && (
+        <div role="alert" style={{
+          color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-md)',
+        }}>{error}</div>
+      )}
+
+      <FormInput label="Name *" value={name} onChange={setName} placeholder="Confluence team-A bot token" hint="A descriptive label so operators can identify which credential is bound where." />
+
+      <div>
+        <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-1)' }}>
+          Default server (optional)
+        </div>
+        <select value={serverId} onChange={e => setServerId(e.target.value)} style={inputStyle}>
+          <option value="">— unbound —</option>
+          {(servers || []).map(s => <option key={s.id} value={s.id}>{s.name} ({s.id})</option>)}
+        </select>
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+          A hint only. Environments may pair this credential with any compatible server.
+        </div>
+      </div>
+
+      <div>
+        <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-1)' }}>
+          Secret <span style={{ color: 'var(--eb-status-error)' }}>*</span>
+        </div>
+        <textarea
+          value={secret}
+          onChange={e => setSecret(e.target.value)}
+          rows={4}
+          placeholder="API token, bearer token, etc."
+          style={{ ...inputStyle, ...monoStyle, resize: 'vertical' }}
+        />
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+          Stored at <code style={monoStyle}>/workspace/mcp-credentials/_keys/&lt;id&gt;</code> with mode 0600.
+          The value is never returned by the API — only its fingerprint.
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+        <button
+          onClick={() => onSave({ name: name.trim(), serverId: serverId || null, secret: secret.trim() })}
+          disabled={saving || !canSave}
+          style={{
+            padding: 'var(--eb-space-2) var(--eb-space-4)',
+            background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+            border: 'none', borderRadius: 'var(--eb-radius-md)',
+            fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+            cursor: saving ? 'wait' : 'pointer', fontFamily: 'inherit',
+            opacity: (saving || !canSave) ? 0.6 : 1,
+          }}
+        >
+          {saving ? 'Saving…' : 'Save credential'}
+        </button>
+        <button onClick={onCancel} style={{
+          padding: 'var(--eb-space-2) var(--eb-space-4)',
+          background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-secondary)',
+          cursor: 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+        }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function DeleteButton({ onClick }) {
+  return (
+    <button
+      aria-label="Delete"
+      onClick={onClick}
+      title="Delete"
+      style={{
+        display: 'flex', alignItems: 'center',
+        padding: 'var(--eb-space-1) var(--eb-space-2)',
+        background: 'var(--eb-bg-elevated)',
+        border: '1px solid var(--eb-status-error)',
+        borderRadius: 'var(--eb-radius-md)',
+        color: 'var(--eb-status-error)',
+        cursor: 'pointer', fontSize: 'var(--eb-text-xs)',
+      }}
+    >
+      <Trash2 size={13} />
+    </button>
+  );
+}
+
+export default function McpServers() {
+  const { data: servers, loading: serversLoading, error: serversError, refetch: refetchServers } = useApi('/api/mcp-servers');
+  const { data: credentials, loading: credsLoading, error: credsError, refetch: refetchCreds } = useApi('/api/mcp-credentials');
+  const [creatingServer, setCreatingServer] = useState(false);
+  const [creatingCred, setCreatingCred] = useState(false);
+  const [deleteServer, setDeleteServer] = useState(null);
+  const [deleteCred, setDeleteCred] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState(null);
+  const [actionError, setActionError] = useState(null);
+
+  async function handleSaveServer(data) {
+    setSaving(true); setFormError(null);
+    try {
+      await apiCall('POST', '/api/mcp-servers', data);
+      setCreatingServer(false);
+      refetchServers();
+    } catch (e) { setFormError(e.message); }
+    finally { setSaving(false); }
+  }
+
+  async function handleSaveCred(data) {
+    setSaving(true); setFormError(null);
+    try {
+      await apiCall('POST', '/api/mcp-credentials', data);
+      setCreatingCred(false);
+      refetchCreds();
+    } catch (e) { setFormError(e.message); }
+    finally { setSaving(false); }
+  }
+
+  async function doDeleteServer() {
+    try {
+      await apiCall('DELETE', `/api/mcp-servers/${deleteServer.id}`);
+      setDeleteServer(null);
+      refetchServers();
+    } catch (e) { setActionError(e.message); setDeleteServer(null); }
+  }
+
+  async function doDeleteCred() {
+    try {
+      await apiCall('DELETE', `/api/mcp-credentials/${deleteCred.id}`);
+      setDeleteCred(null);
+      refetchCreds();
+    } catch (e) { setActionError(e.message); setDeleteCred(null); }
+  }
+
+  const SERVER_COLUMNS = [
+    { key: 'id', label: 'ID', render: v => <span style={monoStyle}>{v}</span> },
+    { key: 'name', label: 'Name' },
+    { key: 'transport', label: 'Transport' },
+    { key: 'command', label: 'Command/URL', render: (_, r) => (
+      <span style={monoStyle}>
+        {r.transport === 'http' ? r.url : [r.command, ...(r.args || [])].join(' ')}
+      </span>
+    )},
+    { key: 'requiresCredential', label: 'Credential', render: v => v ? 'required' : '—' },
+    { key: '_actions', label: '', sortable: false, render: (_, row) => (
+      <div onClick={e => e.stopPropagation()}><DeleteButton onClick={() => setDeleteServer(row)} /></div>
+    )},
+  ];
+
+  const CRED_COLUMNS = [
+    { key: 'id', label: 'ID', render: v => <span style={monoStyle}>{v}</span> },
+    { key: 'name', label: 'Name' },
+    { key: 'serverId', label: 'Default server', render: v => v ? <span style={monoStyle}>{v}</span> : '—' },
+    { key: 'fingerprint', label: 'Fingerprint', render: v => <span style={{ ...monoStyle, color: 'var(--eb-text-secondary)' }}>{v}</span> },
+    { key: 'createdAt', label: 'Added', render: v => v ? new Date(v).toLocaleString() : '—' },
+    { key: '_actions', label: '', sortable: false, render: (_, row) => (
+      <div onClick={e => e.stopPropagation()}><DeleteButton onClick={() => setDeleteCred(row)} /></div>
+    )},
+  ];
+
+  if (serversLoading || credsLoading) {
+    return <div aria-busy="true" style={{ height: 200, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />;
+  }
+  const loadError = serversError || credsError;
+  if (loadError) {
+    return <div role="alert" style={{ padding: 'var(--eb-space-6)', color: 'var(--eb-status-error)' }}>Failed to load: {loadError}</div>;
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-6)' }}>
+      <div>
+        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>MCP Servers</h1>
+        <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 'var(--eb-space-2)', marginBottom: 0, lineHeight: 1.6 }}>
+          Configure runtime knowledge sources (wiki, vector store, graph DB, …) that agents can query through the
+          Model Context Protocol. Servers describe <em>how</em> to launch a backend; credentials carry the secrets;
+          a Working Environment pairs a server with a credential, and the orchestrator materializes the merged
+          config into each agent's own <code style={monoStyle}>.claude/settings.json</code> at workspace seed time.
+        </p>
+      </div>
+
+      {actionError && (
+        <div role="alert" style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-error-bg)', border: '1px solid var(--eb-status-error)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>
+          {actionError}
+          <button onClick={() => setActionError(null)} style={{ marginLeft: 'var(--eb-space-3)', background: 'none', border: 'none', color: 'var(--eb-status-error)', cursor: 'pointer' }}>Dismiss</button>
+        </div>
+      )}
+
+      <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h2 style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-lg)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
+            <Server size={16} /> Servers
+          </h2>
+          <button
+            onClick={() => { setCreatingServer(true); setFormError(null); }}
+            style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit' }}
+          >
+            <Plus size={15} /> New server
+          </button>
+        </div>
+        <DataTable columns={SERVER_COLUMNS} data={servers ?? []} emptyText="No MCP servers configured yet." />
+      </section>
+
+      <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h2 style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-lg)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
+            <KeyRound size={16} /> Credentials
+          </h2>
+          <button
+            onClick={() => { setCreatingCred(true); setFormError(null); }}
+            style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit' }}
+          >
+            <Plus size={15} /> New credential
+          </button>
+        </div>
+        <DataTable columns={CRED_COLUMNS} data={credentials ?? []} emptyText="No credentials stored yet." />
+      </section>
+
+      <SidePanel
+        open={creatingServer}
+        onClose={() => { setCreatingServer(false); setFormError(null); }}
+        title="New MCP server"
+        width="640px"
+      >
+        {creatingServer && (
+          <CreateServerForm
+            onSave={handleSaveServer}
+            onCancel={() => { setCreatingServer(false); setFormError(null); }}
+            saving={saving}
+            error={formError}
+          />
+        )}
+      </SidePanel>
+
+      <SidePanel
+        open={creatingCred}
+        onClose={() => { setCreatingCred(false); setFormError(null); }}
+        title="New MCP credential"
+        width="560px"
+      >
+        {creatingCred && (
+          <CreateCredentialForm
+            servers={servers}
+            onSave={handleSaveCred}
+            onCancel={() => { setCreatingCred(false); setFormError(null); }}
+            saving={saving}
+            error={formError}
+          />
+        )}
+      </SidePanel>
+
+      <ConfirmDialog
+        open={!!deleteServer}
+        title="Delete MCP server"
+        message={`Really delete "${deleteServer?.name || deleteServer?.id}"? Working Environments using it must detach it first.`}
+        variant="danger"
+        confirmLabel="Delete"
+        onConfirm={doDeleteServer}
+        onCancel={() => setDeleteServer(null)}
+      />
+      <ConfirmDialog
+        open={!!deleteCred}
+        title="Delete MCP credential"
+        message={`Really delete "${deleteCred?.name || deleteCred?.id}"? Working Environments using it must detach it first.`}
+        variant="danger"
+        confirmLabel="Delete"
+        onConfirm={doDeleteCred}
+        onCancel={() => setDeleteCred(null)}
       />
     </div>
   );

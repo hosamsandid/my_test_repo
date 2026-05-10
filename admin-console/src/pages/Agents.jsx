@@ -836,6 +836,16 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
     && !(typeof agent.systemPrompt === 'string' && agent.systemPrompt.length > 0);
   const initialInheritSkills = agent.role === 'team-member'
     && !Array.isArray(agent.skillsOverride);
+  const initialInheritMcp = agent.role === 'team-member'
+    && !Array.isArray(agent.mcpServersOverride);
+
+  // MCP overrides are stored as [{serverId, credentialId|null}, ...]. We
+  // serialize them for editing as one entry per line — `serverId:credentialId`,
+  // or just `serverId` when no credential is bound. Same idea as the
+  // skillsOverrideText field above; trades polish for less form scaffolding.
+  const initialMcpText = Array.isArray(agent.mcpServersOverride)
+    ? agent.mcpServersOverride.map(m => m.credentialId ? `${m.serverId}:${m.credentialId}` : m.serverId).join('\n')
+    : '';
 
   const [form, setForm] = useState({
     displayName: agent.displayName || '',
@@ -849,6 +859,8 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
     skillsOverrideText: Array.isArray(agent.skillsOverride)
       ? agent.skillsOverride.join(', ')
       : '',
+    inheritMcp: initialInheritMcp,
+    mcpOverrideText: initialMcpText,
   });
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
   const canSubmit = !!form.displayName;
@@ -891,6 +903,20 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
             .split(',')
             .map(s => s.trim())
             .filter(Boolean);
+      // MCP override: parse "serverId[:credentialId]" lines into the
+      // {serverId, credentialId} array shape the API expects. Empty / bare
+      // server lines are kept (credentialId null) so the API can return a
+      // clear "credential missing" error instead of silently dropping them.
+      submit.mcpServersOverride = form.inheritMcp
+        ? null
+        : form.mcpOverrideText
+            .split('\n')
+            .map(s => s.trim())
+            .filter(Boolean)
+            .map(line => {
+              const [serverId, credentialId] = line.split(':').map(p => p.trim());
+              return { serverId, credentialId: credentialId || null };
+            });
     }
     return submit;
   }
@@ -1009,6 +1035,22 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
             customValue={form.skillsOverrideText}
             onCustomChange={v => update('skillsOverrideText', v)}
             customPlaceholder="comma-separated skill names, e.g. cobol-analysis, jcl-converter"
+          />
+
+          <InheritOrCustom
+            label="MCP Servers"
+            inherit={form.inheritMcp}
+            onToggle={v => update('inheritMcp', v)}
+            inheritedPreview={
+              parentTeam && parentTeam.environmentId
+                ? `(team env: ${parentTeam.environmentId})`
+                : ''
+            }
+            inheritedLabel="Inherited from team's environment"
+            customValue={form.mcpOverrideText}
+            onCustomChange={v => update('mcpOverrideText', v)}
+            customPlaceholder={'one per line: serverId[:credentialId]\ne.g. wiki:wiki-team-a'}
+            customMultiline
           />
         </>
       )}

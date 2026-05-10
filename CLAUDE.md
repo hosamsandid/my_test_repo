@@ -51,13 +51,16 @@ A **Working Environment** is a reusable workspace recipe. It lives at `/workspac
 | `id`, `name`, `description` | Identity |
 | `skills` | Names of skills (from the central pool at `/template-workspace/skills/`) to copy into the agent workspace |
 | `repository` | Optional `{ url, branch, sshKeyId }` — orchestrator clones it into the agent's workspace at creation time |
+| `mcpServers` | Optional list of `{ serverId, credentialId }` refs into the central MCP registry — see *MCP Servers* below |
 | `additionalContext` | Optional text appended to the agent's CLAUDE.md |
 
 When an agent is created via the Admin Console, the orchestrator:
 1. Always seeds `.claude/` and `memory/` from the skill-pool volume (or bundled defaults if empty)
 2. Copies only the skills the env lists (from `/template-workspace/skills/`)
-3. If the env has a repository, runs `git clone` with `GIT_SSH_COMMAND` pointing at the env's SSH key (`/workspace/environments/_keys/<sshKeyId>`)
-4. Builds a merged CLAUDE.md: base template + env section + agent prompt
+3. Patches absolute `/workspace/` paths in seeded memory
+4. Materializes the env's MCP server refs into the agent's own `.claude/settings.json` (substituting credentials per-agent — see *MCP Servers*)
+5. If the env has a repository, runs `git clone` with `GIT_SSH_COMMAND` pointing at the env's SSH key (`/workspace/environments/_keys/<sshKeyId>`)
+6. Builds a merged CLAUDE.md: base template + env section + agent prompt
 
 SSH keys are stored at `/workspace/environments/_keys/<keyId>` (mode 0600) with metadata in `_keys/index.json`. The private key value is **never** returned by the API after creation; only its fingerprint.
 
@@ -76,13 +79,33 @@ The two credentials are kept deliberately separate as **defense-in-depth** — t
 
 The setup wizard and the SSH-keys / GitHub-tokens admin pages explain this rationale inline so that operators understand why both are required.
 
+### MCP Servers
+
+Static skills live in the agent's workspace; **MCP servers** are how agents reach things they need to query at *runtime* — wikis, vector stores, graph DBs. The pattern intentionally mirrors the SSH-key / GitHub-PAT split: a *catalog* of servers, a *separate* credential store, and an environment that pairs the two.
+
+| Path | Role |
+|---|---|
+| `mcp-servers/<id>/server.js` (repo) | Reference implementations baked into the orchestrator image. The shipped `wiki/` server is a single-file stdio MCP that hits a configurable REST backend. |
+| `/template-workspace/mcp-servers/<id>/` | Where `make seed-mcp-servers` lays down those reference implementations inside the orchestrator. The server registry's default `command` / `args` reference these paths. |
+| `/workspace/mcp-servers/<id>/server.json` | Server **registry** — operator-managed catalog. Fields: `id, name, description, transport (stdio\|http), command, args, url, env`. The `env` map can reference `${credential}` as a placeholder for the bound credential's secret. |
+| `/workspace/mcp-credentials/_keys/<credId>` | Raw secret (mode 0600). Never returned by the API after creation. |
+| `/workspace/mcp-credentials/_keys/index.json` | Credential metadata (`id, name, serverId, fingerprint, createdAt`). |
+
+**Per-agent isolation.** At seed time the orchestrator reads `env.mcpServers` (or the team-member's `mcpServersOverride`), loads each `server.json`, substitutes `${credential}` from the bound credential, and writes the merged stanza into **the agent's own** `.claude/settings.json` under `mcpServers[<serverId>]`. There is no longer a pool-wide MCP config — every agent sees only the servers and credentials its environment grants. The legacy `/api/mcp` endpoint that wrote `/pool/.claude/settings.json` has been replaced by `/api/mcp-servers` + `/api/mcp-credentials`.
+
+**Why a separate credential store?** Same logic as SSH-key vs. PAT: the registry says "this team can talk to the wiki"; the credentials say "with these tokens". Splitting them lets you rotate a Confluence token without touching the registry, and keeps the secret out of every environment editor's payload. Credentials are global (one Confluence token can back two environments) — the analogue of how SSH keys are global, not per-env.
+
+**Per-member override.** A team-member may carry an `mcpServersOverride` array (same `[{serverId, credentialId}, ...]` shape as `env.mcpServers`); when present it replaces the env's MCP set verbatim for that one member, parallel to `skillsOverride`. Absent = inherit. Edit it via the **MCP Servers** field on the agent edit form.
+
+**Team-Setup wizard.** The "Knowledge sources" step (between Credentials and Team) selects the team-wide MCP set. Servers that declare a `${credential}` placeholder require a credential to be bound at this step; servers without one accept "(none)".
+
 ### Agent Roles
 
 | Role | Behavior |
 |---|---|
 | `agent` | A standalone agent. Responds to direct messages from a human in its 1:1 DM room. With cron / GitHub triggers it can also run autonomously. |
 | `team` | A reusable system-prompt template + shared Working Environment that doesn't host an agent itself. Use **Add Member** on the team card (or the Team-Setup wizard) to spawn one or more `team-member` agents. |
-| `team-member` | A single member spawned from a team. Inherits the team's `systemPromptTemplate` and the env's skills by default. Records its parent in `parentTeamId`. May override either or both: `systemPrompt` (string) overrides the team prompt; `skillsOverride` (array of skill names) replaces the env's skill set for this member's workspace. Absence of either field = inherit. Editing the team's `systemPromptTemplate` eagerly rewrites every inheriting member's `AGENT-PROMPT.md` / `CLAUDE.md`; skill changes on the team's env are picked up at the next member rebuild. |
+| `team-member` | A single member spawned from a team. Inherits the team's `systemPromptTemplate`, the env's skills, and the env's `mcpServers` by default. Records its parent in `parentTeamId`. May override any or all of: `systemPrompt` (string) overrides the team prompt; `skillsOverride` (array of skill names) replaces the env's skill set; `mcpServersOverride` (array of `{serverId, credentialId}` refs) replaces the env's MCP set. Absence of a field = inherit. Editing the team's `systemPromptTemplate` eagerly rewrites every inheriting member's `AGENT-PROMPT.md` / `CLAUDE.md`; skill and MCP changes on the team's env are picked up at the next member rebuild. |
 | `orchestrator` | Bound to a BriefingPack directory (`briefingsPath`). On creation and on every tick of its claim loop (~30s), it pulls main (60s-throttled), scans the directory, and writes one stub `bp-instance` agent per BP. When a BP transitions to `status: dispatched`, the orchestrator posts a DM suggestion to the user; on user confirmation the orchestrator agent runs a `curl` against `/internal/agents/:id/claim` which patches the BP's `brief.md` (status, agent-id, claimed timestamp), commits + pushes to make the claim visible to teammates, and then materialises the bp-instance. Manual Activate / Deactivate via the Admin Console bypasses the suggest flow. |
 | `bp-instance` | One per Briefing Pack under an orchestrator. Lives as a stub (no Matrix user, no workspace) until claimed or activated. The activated agent is bound to one specific BP and uses the ACE engineering skill to execute its LoopScript. |
 
@@ -354,3 +377,13 @@ Matrix users are managed via the Conduwuit admin room (`!cUxr0SyfINf9yEvBOD:loca
 Skills are added to the skill-pool volume (`vgh-claw_claude-workspace`) under `skills/<name>/SKILL.md`. They appear in the Admin Console's Working Environment skill picker.
 
 The intended domain is **Mainframe Migration** — skills will cover COBOL analysis, JCL conversion, DB2 schema mapping, IMS/VSAM migration patterns, and related topics.
+
+## MCP Servers (operator notes)
+
+Reference servers ship in-repo under `mcp-servers/<id>/`. `make seed-mcp-servers` (chained from `make seed-pool`) syncs them into the pool volume at `/template-workspace/mcp-servers/`. Operators add new servers through the **MCP Servers** admin page (catalog + credentials), and Working Environments / team-members reference them by id. Adding a new backend (vector store, graph DB) is a matter of:
+
+1. Drop a new server under `mcp-servers/<id>/` (any single-file MCP, stdio or http).
+2. `make seed-mcp-servers` to copy it into the pool.
+3. Register it via the admin UI; bind a credential; attach to environments.
+
+The wiki reference server is intentionally tiny and dependency-free so that "what's the contract" is readable at a glance — clone it as a starting point for the next backend.

@@ -22,6 +22,10 @@ const GH_TOKENS_INDEX = path.join(GH_TOKENS_DIR, 'index.json');
 const LLM_ENDPOINTS_DIR = path.join(WORKSPACE, 'llm-endpoints');
 const LLM_ENDPOINTS_INDEX = path.join(LLM_ENDPOINTS_DIR, 'index.json');
 const LLM_KEYS_DIR = path.join(LLM_ENDPOINTS_DIR, '_keys');
+const MCP_SERVERS_DIR = path.join(WORKSPACE, 'mcp-servers');
+const MCP_CREDENTIALS_DIR = path.join(WORKSPACE, 'mcp-credentials');
+const MCP_CREDENTIALS_KEYS_DIR = path.join(MCP_CREDENTIALS_DIR, '_keys');
+const MCP_CREDENTIALS_INDEX = path.join(MCP_CREDENTIALS_KEYS_DIR, 'index.json');
 const STATIC_DIR = path.join(__dirname, '..', 'dist');
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 const BP_EXPLORER_URL = process.env.BP_EXPLORER_URL || 'http://bp-explorer:8765';
@@ -31,6 +35,8 @@ fs.mkdirSync(SSH_KEYS_DIR, { recursive: true });
 fs.mkdirSync(GH_TOKENS_DIR, { recursive: true });
 fs.mkdirSync(LLM_ENDPOINTS_DIR, { recursive: true });
 fs.mkdirSync(LLM_KEYS_DIR, { recursive: true });
+fs.mkdirSync(MCP_SERVERS_DIR, { recursive: true });
+fs.mkdirSync(MCP_CREDENTIALS_KEYS_DIR, { recursive: true });
 
 const app = express();
 app.use(cors());
@@ -49,6 +55,8 @@ const AGENT_ID_RE = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/;
 const SSH_KEY_ID_RE = /^[a-z0-9-]+$/;
 const GH_TOKEN_ID_RE = /^[a-z0-9-]+$/;
 const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
+const MCP_SERVER_ID_RE = /^[a-z0-9-]+$/;
+const MCP_CREDENTIAL_ID_RE = /^[a-z0-9-]+$/;
 
 /* ─── Helpers ───────────────────────────────────────────────────────── */
 
@@ -306,6 +314,62 @@ function githubTokenInUse(tokenId) {
   for (const envId of listEnvironmentIds()) {
     const env = loadEnvironment(envId);
     if (env?.githubTokenId === tokenId) return envId;
+  }
+  return null;
+}
+
+/* ─── MCP servers + credentials (helpers) ───────────────────────────── */
+
+function listMcpServerIds() {
+  try {
+    return fs.readdirSync(MCP_SERVERS_DIR).filter(name => {
+      if (name.startsWith('_') || name.startsWith('.')) return false;
+      const p = path.join(MCP_SERVERS_DIR, name);
+      return fs.statSync(p).isDirectory() && fs.existsSync(path.join(p, 'server.json'));
+    });
+  } catch {
+    return [];
+  }
+}
+
+function loadMcpServer(serverId) {
+  if (!MCP_SERVER_ID_RE.test(serverId)) return null;
+  return readJsonFile(path.join(MCP_SERVERS_DIR, serverId, 'server.json'), null);
+}
+
+function saveMcpServer(serverId, data) {
+  const dir = path.join(MCP_SERVERS_DIR, serverId);
+  fs.mkdirSync(dir, { recursive: true });
+  writeJsonAtomic(path.join(dir, 'server.json'), data);
+}
+
+function mcpServerInUse(serverId) {
+  // Returns the first environment id that references this server, or null.
+  for (const envId of listEnvironmentIds()) {
+    const env = loadEnvironment(envId);
+    const refs = Array.isArray(env?.mcpServers) ? env.mcpServers : [];
+    if (refs.some(r => r?.serverId === serverId)) return envId;
+  }
+  return null;
+}
+
+function listMcpCredentials() {
+  return readJsonFile(MCP_CREDENTIALS_INDEX, []);
+}
+
+function saveMcpCredentialsIndex(list) {
+  writeJsonAtomic(MCP_CREDENTIALS_INDEX, list);
+}
+
+function mcpCredentialFingerprint(secret) {
+  return 'SHA256:' + crypto.createHash('sha256').update(String(secret)).digest('base64').replace(/=+$/, '').slice(0, 16);
+}
+
+function mcpCredentialInUse(credId) {
+  for (const envId of listEnvironmentIds()) {
+    const env = loadEnvironment(envId);
+    const refs = Array.isArray(env?.mcpServers) ? env.mcpServers : [];
+    if (refs.some(r => r?.credentialId === credId)) return envId;
   }
   return null;
 }
@@ -577,7 +641,7 @@ app.put('/api/agents/:id', async (req, res) => {
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skillsOverride } = req.body;
+  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skillsOverride, mcpServersOverride } = req.body;
 
   // Enable/disable goes through the orchestrator so stubs (no token yet)
   // get fully materialized — Matrix user, workspace seeding, agent-runner
@@ -636,6 +700,15 @@ app.put('/api/agents/:id', async (req, res) => {
       delete fresh.skillsOverride;
     } else if (Array.isArray(skillsOverride)) {
       fresh.skillsOverride = skillsOverride;
+    }
+    if (mcpServersOverride === null) {
+      delete fresh.mcpServersOverride;
+    } else if (mcpServersOverride !== undefined) {
+      try {
+        fresh.mcpServersOverride = normalizeMcpServersInput(mcpServersOverride);
+      } catch (err) {
+        return res.status(400).json({ error: err.message });
+      }
     }
   }
 
@@ -1617,22 +1690,157 @@ app.post('/api/llm-endpoints/:id/discover-models', async (req, res) => {
   res.json({ url, count: suggested.length, models: suggested });
 });
 
-/* ─── MCP Config ────────────────────────────────────────────────────── */
+/* ─── MCP server registry ───────────────────────────────────────────── */
 
-const MCP_SETTINGS_FILE = path.join(POOL_DIR, '.claude', 'settings.json');
+// The legacy pool-wide /api/mcp endpoints (which wrote /pool/.claude/settings.json
+// directly) have been replaced by a per-environment registry. Each entry lives at
+// /workspace/mcp-servers/<id>/server.json; environments reference servers by id
+// and pair them with a credential, and the orchestrator materializes the merged
+// MCP block into each agent's own .claude/settings.json at seed time.
 
-app.get('/api/mcp', (req, res) => {
-  const settings = readJsonFile(MCP_SETTINGS_FILE, {});
-  res.json(settings.mcpServers || {});
+app.get('/api/mcp-servers', (req, res) => {
+  const out = listMcpServerIds()
+    .map(id => loadMcpServer(id))
+    .filter(Boolean)
+    .map(s => ({
+      id: s.id,
+      name: s.name || s.id,
+      description: s.description || '',
+      transport: s.transport || 'stdio',
+      command: s.command || null,
+      args: Array.isArray(s.args) ? s.args : [],
+      url: s.url || null,
+      envKeys: s.env && typeof s.env === 'object' ? Object.keys(s.env) : [],
+      requiresCredential: serverNeedsCredential(s),
+    }));
+  res.json(out);
 });
 
-app.put('/api/mcp/:name', (req, res) => {
-  const settings = readJsonFile(MCP_SETTINGS_FILE, {});
-  if (!settings.mcpServers) settings.mcpServers = {};
-  settings.mcpServers[req.params.name] = { ...settings.mcpServers[req.params.name], ...req.body };
-  writeJsonAtomic(MCP_SETTINGS_FILE, settings);
-  res.json(settings.mcpServers[req.params.name]);
+app.get('/api/mcp-servers/:id', (req, res) => {
+  const { id } = req.params;
+  if (!MCP_SERVER_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid server id' });
+  const s = loadMcpServer(id);
+  if (!s) return res.status(404).json({ error: 'MCP server not found' });
+  res.json(s);
 });
+
+app.post('/api/mcp-servers', (req, res) => {
+  const { id, name, description, transport, command, args, url, env } = req.body || {};
+  if (!id || !MCP_SERVER_ID_RE.test(id)) {
+    return res.status(400).json({ error: 'id required, lowercase letters/digits/dashes only' });
+  }
+  if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
+  const t = transport || 'stdio';
+  if (!['stdio', 'http'].includes(t)) return res.status(400).json({ error: "transport must be 'stdio' or 'http'" });
+  if (t === 'stdio' && !command) return res.status(400).json({ error: 'command is required for stdio transport' });
+  if (t === 'http'  && !url)     return res.status(400).json({ error: 'url is required for http transport' });
+  if (loadMcpServer(id))         return res.status(409).json({ error: `MCP server '${id}' already exists` });
+
+  const data = {
+    id,
+    name,
+    description: description || '',
+    transport: t,
+    ...(t === 'stdio' ? { command, args: Array.isArray(args) ? args : [] } : { url }),
+    env: env && typeof env === 'object' ? env : {},
+    createdAt: new Date().toISOString(),
+  };
+  saveMcpServer(id, data);
+  res.status(201).json(data);
+});
+
+app.put('/api/mcp-servers/:id', (req, res) => {
+  const { id } = req.params;
+  if (!MCP_SERVER_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid server id' });
+  const existing = loadMcpServer(id);
+  if (!existing) return res.status(404).json({ error: 'MCP server not found' });
+  const { name, description, transport, command, args, url, env } = req.body || {};
+  const merged = {
+    ...existing,
+    ...(name !== undefined        ? { name } : {}),
+    ...(description !== undefined ? { description } : {}),
+    ...(transport !== undefined   ? { transport } : {}),
+    ...(command !== undefined     ? { command } : {}),
+    ...(args !== undefined        ? { args: Array.isArray(args) ? args : [] } : {}),
+    ...(url !== undefined         ? { url } : {}),
+    ...(env !== undefined         ? { env: env && typeof env === 'object' ? env : {} } : {}),
+    updatedAt: new Date().toISOString(),
+  };
+  saveMcpServer(id, merged);
+  res.json(merged);
+});
+
+app.delete('/api/mcp-servers/:id', (req, res) => {
+  const { id } = req.params;
+  if (!MCP_SERVER_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid server id' });
+  if (!loadMcpServer(id)) return res.status(404).json({ error: 'MCP server not found' });
+  const usedBy = mcpServerInUse(id);
+  if (usedBy) return res.status(409).json({ error: `MCP server is used by environment '${usedBy}'. Detach it first.` });
+  try { fs.rmSync(path.join(MCP_SERVERS_DIR, id), { recursive: true, force: true }); } catch { /* ignore */ }
+  res.status(204).end();
+});
+
+/* ─── MCP credentials ───────────────────────────────────────────────── */
+
+app.get('/api/mcp-credentials', (req, res) => {
+  // Metadata only — never the raw secret.
+  res.json(listMcpCredentials());
+});
+
+app.post('/api/mcp-credentials', (req, res) => {
+  const { name, serverId, secret } = req.body || {};
+  if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
+  if (!secret || typeof secret !== 'string') return res.status(400).json({ error: 'secret (string) is required' });
+  if (serverId !== undefined && serverId !== null && !MCP_SERVER_ID_RE.test(serverId)) {
+    return res.status(400).json({ error: 'Invalid serverId' });
+  }
+  if (serverId && !loadMcpServer(serverId)) {
+    return res.status(400).json({ error: `MCP server '${serverId}' does not exist` });
+  }
+
+  const baseId = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  let id = baseId || `cred-${Date.now()}`;
+  const existing = listMcpCredentials();
+  if (existing.some(c => c.id === id)) {
+    id = `${id}-${Date.now().toString(36)}`;
+  }
+  if (!MCP_CREDENTIAL_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid credential id' });
+
+  const credPath = path.join(MCP_CREDENTIALS_KEYS_DIR, id);
+  fs.writeFileSync(credPath, secret, { mode: 0o600 });
+  try { fs.chmodSync(credPath, 0o600); } catch { /* best effort */ }
+
+  const entry = {
+    id,
+    name,
+    serverId: serverId || null,
+    fingerprint: mcpCredentialFingerprint(secret),
+    createdAt: new Date().toISOString(),
+  };
+  saveMcpCredentialsIndex([...existing, entry]);
+  res.status(201).json(entry);
+});
+
+app.delete('/api/mcp-credentials/:id', (req, res) => {
+  const { id } = req.params;
+  if (!MCP_CREDENTIAL_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid credential id' });
+  const creds = listMcpCredentials();
+  if (!creds.some(c => c.id === id)) return res.status(404).json({ error: 'MCP credential not found' });
+  const usedBy = mcpCredentialInUse(id);
+  if (usedBy) return res.status(409).json({ error: `MCP credential is used by environment '${usedBy}'. Detach it first.` });
+  try { fs.unlinkSync(path.join(MCP_CREDENTIALS_KEYS_DIR, id)); } catch { /* ignore */ }
+  saveMcpCredentialsIndex(creds.filter(c => c.id !== id));
+  res.status(204).end();
+});
+
+// True iff at least one entry in the server's `env` template references the
+// `${credential}` placeholder. Servers without the placeholder don't need a
+// credential and the env editor can offer "(none)" in the credential dropdown.
+function serverNeedsCredential(server) {
+  const env = server?.env;
+  if (!env || typeof env !== 'object') return false;
+  return Object.values(env).some(v => typeof v === 'string' && v.includes('${credential}'));
+}
 
 /* ─── Containers ────────────────────────────────────────────────────── */
 
@@ -1725,6 +1933,31 @@ function normalizeRepositoriesInput(repositories, legacyRepository) {
   return cleaned;
 }
 
+// Validate the MCP server refs an environment carries: each entry must point at
+// a known server id; credentialId is optional but, when present, must exist.
+// Throws on validation failure so the caller can surface a 400.
+function normalizeMcpServersInput(input) {
+  if (input === undefined || input === null) return [];
+  if (!Array.isArray(input)) throw new Error('mcpServers must be an array');
+  const knownCreds = listMcpCredentials();
+  const cleaned = [];
+  for (const entry of input) {
+    if (!entry || typeof entry !== 'object') continue;
+    const serverId = typeof entry.serverId === 'string' ? entry.serverId.trim() : '';
+    if (!serverId) continue;
+    if (!MCP_SERVER_ID_RE.test(serverId)) throw new Error(`Invalid mcpServers.serverId: ${serverId}`);
+    if (!loadMcpServer(serverId)) throw new Error(`MCP server '${serverId}' not found`);
+    let credentialId = null;
+    if (entry.credentialId) {
+      credentialId = String(entry.credentialId).trim();
+      if (!MCP_CREDENTIAL_ID_RE.test(credentialId)) throw new Error(`Invalid mcpServers.credentialId: ${credentialId}`);
+      if (!knownCreds.some(c => c.id === credentialId)) throw new Error(`MCP credential '${credentialId}' not found`);
+    }
+    cleaned.push({ serverId, credentialId });
+  }
+  return cleaned;
+}
+
 app.get('/api/environments', (req, res) => {
   const envs = listEnvironmentIds().map(loadEnvironment).filter(Boolean);
   res.json(envs);
@@ -1753,7 +1986,7 @@ function resolveLlmBinding(llmEndpointId, defaultModelId) {
 }
 
 app.post('/api/environments', (req, res) => {
-  const { name, description, skills, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId } = req.body || {};
+  const { name, description, skills, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers } = req.body || {};
   const id = normalizeEnvId(req.body?.id);
   if (!id) return res.status(400).json({ error: 'id is required (a-z, 0-9, -)' });
   if (!name) return res.status(400).json({ error: 'name is required' });
@@ -1774,6 +2007,13 @@ app.post('/api/environments', (req, res) => {
     }
   }
 
+  let normalizedMcp;
+  try {
+    normalizedMcp = normalizeMcpServersInput(mcpServers);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+
   const llm = resolveLlmBinding(llmEndpointId, defaultModelId);
   if (llm.error) return res.status(400).json({ error: llm.error });
 
@@ -1784,6 +2024,7 @@ app.post('/api/environments', (req, res) => {
     skills: Array.isArray(skills) ? skills : [],
     repositories: normalizedRepos,
     githubTokenId: githubTokenId || null,
+    mcpServers: normalizedMcp,
     llmEndpointId: llm.llmEndpointId,
     defaultModelId: llm.defaultModelId,
     additionalContext: additionalContext || '',
@@ -1796,7 +2037,7 @@ app.post('/api/environments', (req, res) => {
 app.put('/api/environments/:id', (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
-  const { name, description, skills, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId } = req.body || {};
+  const { name, description, skills, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers } = req.body || {};
 
   if (githubTokenId) {
     const tokens = listGithubTokens();
@@ -1827,6 +2068,13 @@ app.put('/api/environments/:id', (req, res) => {
     delete env.repository;
   }
   if (githubTokenId !== undefined) env.githubTokenId = githubTokenId || null;
+  if (mcpServers !== undefined) {
+    try {
+      env.mcpServers = normalizeMcpServersInput(mcpServers);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+  }
   if (additionalContext !== undefined) env.additionalContext = additionalContext;
   env.updatedAt = new Date().toISOString();
   saveEnvironment(env.id, env);
@@ -2239,7 +2487,7 @@ function defaultLlmEndpointForTeam() {
 
 app.post('/api/teams', async (req, res) => {
   const body = req.body || {};
-  const { teamId, teamName, repository, githubTokenId, roles } = body;
+  const { teamId, teamName, repository, githubTokenId, roles, mcpServers } = body;
   const mode = body.mode === 'extend' ? 'extend' : 'create';
   const readyLabel = (typeof body.readyLabel === 'string' && body.readyLabel.trim())
     ? body.readyLabel.trim()
@@ -2276,6 +2524,15 @@ app.post('/api/teams', async (req, res) => {
   }
   if (typeof githubTokenId !== 'string' || !listGithubTokens().some(t => t.id === githubTokenId)) {
     return res.status(400).json({ error: `GitHub token '${githubTokenId}' not found` });
+  }
+
+  // MCP refs are validated up-front so a bad serverId/credentialId aborts the
+  // request before any agent/env/Matrix-user has been created.
+  let normalizedMcpServers;
+  try {
+    normalizedMcpServers = normalizeMcpServersInput(mcpServers);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
   }
 
   // ── 3. Roles must map to known templates ──────────────────────────
@@ -2435,6 +2692,7 @@ app.post('/api/teams', async (req, res) => {
         skills: [],
         repositories: [{ url: parsed.httpsUrl, branch, sshKeyId: repository.sshKeyId }],
         githubTokenId,
+        mcpServers: normalizedMcpServers,
         ...defaultLlmEndpointForTeam(),
         additionalContext: '',
         createdAt: new Date().toISOString(),
@@ -2600,7 +2858,7 @@ app.post('/api/teams/stream', async (req, res) => {
   }
 
   const body = req.body || {};
-  const { teamId, teamName, repository, githubTokenId, roles } = body;
+  const { teamId, teamName, repository, githubTokenId, roles, mcpServers } = body;
   const mode = body.mode === 'extend' ? 'extend' : 'create';
   const readyLabel = (typeof body.readyLabel === 'string' && body.readyLabel.trim())
     ? body.readyLabel.trim()
@@ -2634,6 +2892,12 @@ app.post('/api/teams/stream', async (req, res) => {
   }
   if (typeof githubTokenId !== 'string' || !listGithubTokens().some(t => t.id === githubTokenId)) {
     return fail(400, `GitHub token '${githubTokenId}' not found`);
+  }
+  let normalizedMcpServers;
+  try {
+    normalizedMcpServers = normalizeMcpServersInput(mcpServers);
+  } catch (err) {
+    return fail(400, err.message);
   }
   if (!Array.isArray(roles) || roles.length === 0) {
     return fail(400, 'roles must be a non-empty array of template ids');
@@ -2805,6 +3069,7 @@ app.post('/api/teams/stream', async (req, res) => {
         skills: [],
         repositories: [{ url: parsed.httpsUrl, branch, sshKeyId: repository.sshKeyId }],
         githubTokenId,
+        mcpServers: normalizedMcpServers,
         ...defaultLlmEndpointForTeam(),
         additionalContext: '',
         createdAt: new Date().toISOString(),

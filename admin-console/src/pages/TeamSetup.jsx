@@ -5,6 +5,7 @@ import {
   Compass, Code, Search, Shield, FlaskConical, Book, Tag, User,
   Loader2, Circle, XCircle,
   Network, ClipboardCheck, Gauge, Rocket, MessageCircle, TrendingUp,
+  Server, KeyRound,
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 
@@ -74,7 +75,7 @@ function ErrorBox({ message }) {
   );
 }
 
-const STEPS = ['Team', 'Working Environment', 'Members', 'Review'];
+const STEPS = ['Team', 'Working Environment', 'Knowledge', 'Members', 'Review'];
 
 function StepIndicator({ current }) {
   return (
@@ -461,7 +462,146 @@ function StepEnvironment({
   );
 }
 
-// ─── Step 3 — Team composition ────────────────────────────────────────
+// ─── Step 3 — Knowledge sources (MCP servers) ────────────────────────
+function StepKnowledge({ form, setForm, mcpServers, mcpServersLoading, mcpCredentials, mcpCredentialsLoading, error }) {
+  const selections = form.mcpSelections || [];
+  const isSelected = id => selections.some(s => s.serverId === id);
+  const credFor = id => {
+    const sel = selections.find(s => s.serverId === id);
+    return sel ? (sel.credentialId || '') : '';
+  };
+
+  function toggle(serverId) {
+    setForm(f => {
+      const cur = f.mcpSelections || [];
+      const exists = cur.some(s => s.serverId === serverId);
+      return {
+        ...f,
+        mcpSelections: exists
+          ? cur.filter(s => s.serverId !== serverId)
+          : [...cur, { serverId, credentialId: null }],
+      };
+    });
+  }
+
+  function setCred(serverId, credentialId) {
+    setForm(f => ({
+      ...f,
+      mcpSelections: (f.mcpSelections || []).map(s =>
+        s.serverId === serverId ? { ...s, credentialId: credentialId || null } : s),
+    }));
+  }
+
+  if (mcpServersLoading || mcpCredentialsLoading) {
+    return <Card>Loading MCP registry…</Card>;
+  }
+
+  const servers = mcpServers || [];
+  const creds = mcpCredentials || [];
+
+  return (
+    <Card>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
+          Pick the MCP servers your team should be able to query at runtime — wiki, vector store, graph DB, etc.
+          Each member of the team inherits the team-wide selection by default; per-member overrides come later via
+          the agent edit form. Skip if no shared knowledge sources are needed.
+        </div>
+
+        {servers.length === 0 ? (
+          <div style={{
+            padding: 'var(--eb-space-4)',
+            border: '1px dashed var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-md)',
+            color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)',
+          }}>
+            No MCP servers registered yet. You can add some at{' '}
+            <Link to="/mcp" target="_blank" style={{ color: 'var(--eb-accent-primary)' }}>MCP Servers →</Link>{' '}
+            and come back, or skip this step entirely.
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+            {servers.map(s => {
+              const selected = isSelected(s.id);
+              const matchingCreds = creds.filter(c => !c.serverId || c.serverId === s.id);
+              return (
+                <div key={s.id} style={{
+                  display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+                  padding: 'var(--eb-space-4)',
+                  background: selected ? 'var(--eb-bg-surface)' : 'var(--eb-bg-app)',
+                  border: `2px solid ${selected ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+                  borderRadius: 'var(--eb-radius-lg)',
+                }}>
+                  <button
+                    type="button"
+                    onClick={() => toggle(s.id)}
+                    style={{
+                      textAlign: 'left',
+                      display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'flex-start',
+                      background: 'transparent', border: 'none', padding: 0,
+                      color: 'var(--eb-text-primary)', cursor: 'pointer', fontFamily: 'inherit',
+                    }}
+                  >
+                    <div style={{
+                      flexShrink: 0, width: 36, height: 36,
+                      borderRadius: 'var(--eb-radius-md)',
+                      background: selected ? 'var(--eb-accent-primary)' : 'var(--eb-bg-elevated)',
+                      color: selected ? 'var(--eb-text-inverted)' : 'var(--eb-text-primary)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}>
+                      <Server size={18} />
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)' }}>
+                        {s.name} <span style={{ fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)' }}>({s.id})</span>
+                      </div>
+                      {s.description && (
+                        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 'var(--eb-space-1)', lineHeight: 1.4 }}>
+                          {s.description}
+                        </div>
+                      )}
+                    </div>
+                  </button>
+
+                  {selected && s.requiresCredential && (
+                    <div style={{ paddingLeft: 'calc(36px + var(--eb-space-3))' }}>
+                      <label style={{ ...labelStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+                        <KeyRound size={13} /> Credential
+                      </label>
+                      {matchingCreds.length === 0 ? (
+                        <div style={hintStyle}>
+                          No credentials for this server. Add one at{' '}
+                          <Link to="/mcp" target="_blank" style={{ color: 'var(--eb-accent-primary)' }}>MCP Servers →</Link>.
+                        </div>
+                      ) : (
+                        <select
+                          value={credFor(s.id)}
+                          onChange={e => setCred(s.id, e.target.value)}
+                          style={{ ...inputStyle, fontFamily: 'inherit' }}
+                        >
+                          <option value="">— pick a credential —</option>
+                          {matchingCreds.map(c => (
+                            <option key={c.id} value={c.id}>
+                              {c.name}{c.fingerprint ? ` (${c.fingerprint})` : ''}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <ErrorBox message={error} />
+      </div>
+    </Card>
+  );
+}
+
+// ─── Step 4 — Team composition ────────────────────────────────────────
 function RoleCard({ template, selected, onToggle }) {
   const Icon = ROLE_ICONS[template.icon] || User;
   return (
@@ -589,12 +729,13 @@ function StepTeam({ form, setForm, templates, selectedRoles, setSelectedRoles, e
   );
 }
 
-// ─── Step 4 — Review ─────────────────────────────────────────────────
-function StepReview({ form, templates, sshKeys, githubTokens, error }) {
+// ─── Step 5 — Review ─────────────────────────────────────────────────
+function StepReview({ form, templates, sshKeys, githubTokens, mcpServers, mcpCredentials, error }) {
   const sshKey = sshKeys?.find(k => k.id === form.sshKeyId);
   const ghToken = githubTokens?.find(t => t.id === form.githubTokenId);
   const selected = (templates || []).filter(t => form.selectedRoles.includes(t.id));
   const showReadyLabel = form.selectedRoles.some(r => READY_LABEL_ROLES.has(r));
+  const knowledge = (form.mcpSelections || []).filter(s => s.serverId);
   return (
     <Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -603,6 +744,25 @@ function StepReview({ form, templates, sshKeys, githubTokens, error }) {
         {showReadyLabel && <ReviewRow label="Ready label" value={form.readyLabel || 'ready'} />}
         <ReviewRow label="SSH Key" value={sshKey ? sshKey.name : '—'} />
         <ReviewRow label="GitHub Token" value={ghToken ? ghToken.name : '—'} />
+        <div>
+          <div style={labelStyle}>Knowledge sources ({knowledge.length})</div>
+          {knowledge.length === 0 ? (
+            <div style={{ ...hintStyle, marginTop: 0 }}>None</div>
+          ) : (
+            <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
+              {knowledge.map(k => {
+                const srv = (mcpServers || []).find(s => s.id === k.serverId);
+                const cred = (mcpCredentials || []).find(c => c.id === k.credentialId);
+                return (
+                  <li key={k.serverId}>
+                    <strong style={{ color: 'var(--eb-text-primary)' }}>{srv?.name || k.serverId}</strong>
+                    {' '}— credential {cred ? cred.name : '—'}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
         <div>
           <div style={labelStyle}>Roles ({selected.length})</div>
           <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
@@ -735,11 +895,14 @@ export default function TeamSetup() {
     sshKeyId: '',
     githubTokenId: '',
     selectedRoles: [],
+    mcpSelections: [],
   });
 
   const { data: templatesResp, loading: tplLoading } = useApi('/api/agent-templates');
   const { data: sshKeys, loading: keysLoading, refetch: refetchKeys } = useApi('/api/ssh-keys');
   const { data: githubTokens, loading: tokensLoading } = useApi('/api/github-tokens');
+  const { data: mcpServers, loading: mcpServersLoading } = useApi('/api/mcp-servers');
+  const { data: mcpCredentials, loading: mcpCredentialsLoading } = useApi('/api/mcp-credentials');
 
   const templates = templatesResp?.templates || null;
 
@@ -766,6 +929,19 @@ export default function TeamSetup() {
       return null;
     }
     if (step === 2) {
+      // Knowledge step is optional, but every selected server that requires a
+      // credential must have one bound — otherwise the seed step writes an
+      // unauthorized server stanza into every agent.
+      const sel = form.mcpSelections || [];
+      for (const s of sel) {
+        const def = (mcpServers || []).find(x => x.id === s.serverId);
+        if (def?.requiresCredential && !s.credentialId) {
+          return `MCP server '${s.serverId}' requires a credential — pick one or remove it`;
+        }
+      }
+      return null;
+    }
+    if (step === 3) {
       if (form.selectedRoles.length === 0) return 'Pick at least one role';
       return null;
     }
@@ -806,6 +982,7 @@ export default function TeamSetup() {
       githubTokenId: form.githubTokenId,
       readyLabel: (form.readyLabel || 'ready').trim() || 'ready',
       roles: form.selectedRoles,
+      mcpServers: (form.mcpSelections || []).filter(s => s.serverId),
       mode,
     };
 
@@ -923,6 +1100,16 @@ export default function TeamSetup() {
         />
       )}
       {step === 2 && (
+        <StepKnowledge
+          {...stepProps}
+          mcpServers={mcpServers}
+          mcpServersLoading={mcpServersLoading}
+          mcpCredentials={mcpCredentials}
+          mcpCredentialsLoading={mcpCredentialsLoading}
+          error={stepError}
+        />
+      )}
+      {step === 3 && (
         <StepTeam
           form={form}
           setForm={setForm}
@@ -932,12 +1119,14 @@ export default function TeamSetup() {
           error={stepError}
         />
       )}
-      {step === 3 && (
+      {step === 4 && (
         <StepReview
           form={form}
           templates={templates}
           sshKeys={sshKeys}
           githubTokens={githubTokens}
+          mcpServers={mcpServers}
+          mcpCredentials={mcpCredentials}
           error={stepError}
         />
       )}

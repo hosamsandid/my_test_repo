@@ -1,9 +1,9 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, Link, useSearchParams, useLocation } from 'react-router-dom';
 import {
   ArrowLeft, ArrowRight, Check, AlertCircle, CheckCircle, Github,
   Compass, Code, Search, Shield, FlaskConical, Book, Tag, User,
-  Loader2, Circle, XCircle,
+  Loader2, Circle, XCircle, Lock,
   Network, ClipboardCheck, Gauge, Rocket, MessageCircle, TrendingUp,
   Server, KeyRound,
 } from 'lucide-react';
@@ -123,6 +123,79 @@ function StepIndicator({ current }) {
 
 function slugify(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+}
+
+function ExtendReadOnlyBanner({ children }) {
+  return (
+    <div style={{
+      padding: 'var(--eb-space-3) var(--eb-space-4)',
+      background: 'var(--eb-bg-elevated)',
+      border: '1px solid var(--eb-border-default)',
+      borderRadius: 'var(--eb-radius-md)',
+      display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
+      fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
+    }}>
+      <Lock size={14} style={{ flexShrink: 0, marginTop: 2, color: 'var(--eb-text-muted)' }} />
+      <div>{children}</div>
+    </div>
+  );
+}
+
+function StepProjectReadOnly({ form }) {
+  return (
+    <Card>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <ExtendReadOnlyBanner>Read-only in extend mode — team identity cannot be changed.</ExtendReadOnlyBanner>
+        <ReviewRow label="Team Name" value={form.teamName} />
+        <ReviewRow label="Team ID" value={form.teamId} />
+      </div>
+    </Card>
+  );
+}
+
+function StepEnvironmentReadOnly({ form, sshKeys, githubTokens }) {
+  const sshKey = (sshKeys || []).find(k => k.id === form.sshKeyId);
+  const ghToken = (githubTokens || []).find(t => t.id === form.githubTokenId);
+  return (
+    <Card>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <ExtendReadOnlyBanner>Read-only in extend mode — working environment is shared across all team members.</ExtendReadOnlyBanner>
+        <ReviewRow label="SSH Deploy Key" value={sshKey ? sshKey.name : '—'} />
+        <ReviewRow label="GitHub Token" value={ghToken ? ghToken.name : '—'} />
+        <ReviewRow label="Repository" value={form.repoUrl ? `${form.repoUrl} @ ${form.branch || 'main'}` : '—'} />
+      </div>
+    </Card>
+  );
+}
+
+function StepKnowledgeReadOnly({ form, mcpServers, mcpCredentials }) {
+  const knowledge = (form.mcpSelections || []).filter(s => s.serverId);
+  return (
+    <Card>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <ExtendReadOnlyBanner>Read-only in extend mode — knowledge sources are shared across all team members.</ExtendReadOnlyBanner>
+        <div>
+          <div style={labelStyle}>Knowledge sources ({knowledge.length})</div>
+          {knowledge.length === 0 ? (
+            <div style={{ ...hintStyle, marginTop: 0 }}>None</div>
+          ) : (
+            <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
+              {knowledge.map(k => {
+                const srv = (mcpServers || []).find(s => s.id === k.serverId);
+                const cred = (mcpCredentials || []).find(c => c.id === k.credentialId);
+                return (
+                  <li key={k.serverId}>
+                    <strong style={{ color: 'var(--eb-text-primary)' }}>{srv?.name || k.serverId}</strong>
+                    {' '}— credential {cred ? cred.name : '—'}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      </div>
+    </Card>
+  );
 }
 
 // ─── Step 1 — Team basics (name + id only) ────────────────────────────
@@ -684,24 +757,80 @@ const READY_LABEL_ROLES = new Set([
   'business-analyst', 'developer', 'quality-engineer', 'roadmap-reporter',
 ]);
 
-function StepTeam({ form, setForm, templates, selectedRoles, setSelectedRoles, error }) {
+function StepTeam({ form, setForm, templates, selectedRoles, setSelectedRoles, error, extendMode, existingRoles }) {
   if (!templates) return <Card>Loading templates…</Card>;
+  const existingSet = new Set(extendMode ? (existingRoles || []) : []);
   const showReadyLabel = selectedRoles.some(r => READY_LABEL_ROLES.has(r));
   return (
     <Card>
+      {extendMode && (
+        <div style={{ marginBottom: 'var(--eb-space-4)' }}>
+          <ExtendReadOnlyBanner>
+            Roles with the lock icon are already configured. Toggle at least one new role to extend the team.
+          </ExtendReadOnlyBanner>
+        </div>
+      )}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 'var(--eb-space-3)' }}>
-        {templates.map(t => (
-          <RoleCard
-            key={t.id}
-            template={t}
-            selected={selectedRoles.includes(t.id)}
-            onToggle={() => {
-              setSelectedRoles(prev => prev.includes(t.id)
-                ? prev.filter(x => x !== t.id)
-                : [...prev, t.id]);
-            }}
-          />
-        ))}
+        {templates.map(t => {
+          if (extendMode && existingSet.has(t.id)) {
+            const Icon = ROLE_ICONS[t.icon] || User;
+            return (
+              <div key={t.id} style={{
+                display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'flex-start',
+                padding: 'var(--eb-space-4)',
+                background: 'var(--eb-bg-elevated)',
+                border: '2px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-lg)',
+                opacity: 0.7,
+              }}>
+                <div style={{
+                  flexShrink: 0, width: 36, height: 36,
+                  borderRadius: 'var(--eb-radius-md)',
+                  background: 'var(--eb-bg-app)',
+                  color: 'var(--eb-text-muted)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  position: 'relative',
+                }}>
+                  <Icon size={18} />
+                  <Lock size={10} style={{
+                    position: 'absolute', bottom: 2, right: 2,
+                    color: 'var(--eb-text-muted)',
+                  }} />
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 'var(--eb-space-2)' }}>
+                    <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-muted)' }}>
+                      {t.displayName}
+                    </div>
+                    <span style={{
+                      fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
+                      background: 'var(--eb-bg-app)', padding: '1px 6px',
+                      borderRadius: 'var(--eb-radius-sm)', border: '1px solid var(--eb-border-default)',
+                      flexShrink: 0,
+                    }}>
+                      Already configured
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.4 }}>
+                    {t.description}
+                  </div>
+                </div>
+              </div>
+            );
+          }
+          return (
+            <RoleCard
+              key={t.id}
+              template={t}
+              selected={selectedRoles.includes(t.id)}
+              onToggle={() => {
+                setSelectedRoles(prev => prev.includes(t.id)
+                  ? prev.filter(x => x !== t.id)
+                  : [...prev, t.id]);
+              }}
+            />
+          );
+        })}
       </div>
       <div style={{ ...hintStyle, marginTop: 'var(--eb-space-4)' }}>
         Pick at least one role. Reactive roles (Code Reviewer, etc.) start fresh per trigger; the Business Analyst keeps a chat session.
@@ -730,50 +859,91 @@ function StepTeam({ form, setForm, templates, selectedRoles, setSelectedRoles, e
 }
 
 // ─── Step 5 — Review ─────────────────────────────────────────────────
-function StepReview({ form, templates, sshKeys, githubTokens, mcpServers, mcpCredentials, error }) {
+function StepReview({ form, templates, sshKeys, githubTokens, mcpServers, mcpCredentials, error, extendMode, existingRoles }) {
+  const existingSet = new Set(extendMode ? (existingRoles || []) : []);
   const sshKey = sshKeys?.find(k => k.id === form.sshKeyId);
   const ghToken = githubTokens?.find(t => t.id === form.githubTokenId);
-  const selected = (templates || []).filter(t => form.selectedRoles.includes(t.id));
+  const allSelected = (templates || []).filter(t => form.selectedRoles.includes(t.id));
+  const newRoles = allSelected.filter(t => !existingSet.has(t.id));
+  const keptRoles = allSelected.filter(t => existingSet.has(t.id));
   const showReadyLabel = form.selectedRoles.some(r => READY_LABEL_ROLES.has(r));
   const knowledge = (form.mcpSelections || []).filter(s => s.serverId);
   return (
     <Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
         <ReviewRow label="Team" value={`${form.teamName} (${form.teamId})`} />
-        <ReviewRow label="Repository" value={`${form.repoUrl} @ ${form.branch || 'main'}`} />
-        {showReadyLabel && <ReviewRow label="Ready label" value={form.readyLabel || 'ready'} />}
-        <ReviewRow label="SSH Key" value={sshKey ? sshKey.name : '—'} />
-        <ReviewRow label="GitHub Token" value={ghToken ? ghToken.name : '—'} />
-        <div>
-          <div style={labelStyle}>Knowledge sources ({knowledge.length})</div>
-          {knowledge.length === 0 ? (
-            <div style={{ ...hintStyle, marginTop: 0 }}>None</div>
-          ) : (
+        {!extendMode && (
+          <>
+            <ReviewRow label="Repository" value={`${form.repoUrl} @ ${form.branch || 'main'}`} />
+            {showReadyLabel && <ReviewRow label="Ready label" value={form.readyLabel || 'ready'} />}
+            <ReviewRow label="SSH Key" value={sshKey ? sshKey.name : '—'} />
+            <ReviewRow label="GitHub Token" value={ghToken ? ghToken.name : '—'} />
+            <div>
+              <div style={labelStyle}>Knowledge sources ({knowledge.length})</div>
+              {knowledge.length === 0 ? (
+                <div style={{ ...hintStyle, marginTop: 0 }}>None</div>
+              ) : (
+                <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
+                  {knowledge.map(k => {
+                    const srv = (mcpServers || []).find(s => s.id === k.serverId);
+                    const cred = (mcpCredentials || []).find(c => c.id === k.credentialId);
+                    return (
+                      <li key={k.serverId}>
+                        <strong style={{ color: 'var(--eb-text-primary)' }}>{srv?.name || k.serverId}</strong>
+                        {' '}— credential {cred ? cred.name : '—'}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          </>
+        )}
+        {extendMode ? (
+          <>
+            <div>
+              <div style={labelStyle}>Will be added ({newRoles.length})</div>
+              {newRoles.length === 0 ? (
+                <div style={{ ...hintStyle, marginTop: 0 }}>No new roles selected.</div>
+              ) : (
+                <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
+                  {newRoles.map(t => (
+                    <li key={t.id}>
+                      <strong style={{ color: 'var(--eb-status-success)' }}>{t.displayName}</strong>
+                      {' '}— agent <code>{form.teamId}-{t.id}</code>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            {keptRoles.length > 0 && (
+              <div>
+                <div style={labelStyle}>Already exists ({keptRoles.length})</div>
+                <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
+                  {keptRoles.map(t => (
+                    <li key={t.id}>
+                      <Lock size={11} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+                      <span style={{ color: 'var(--eb-text-muted)' }}>{t.displayName}</span>
+                      {' '}— <code>{form.teamId}-{t.id}</code>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </>
+        ) : (
+          <div>
+            <div style={labelStyle}>Roles ({allSelected.length})</div>
             <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
-              {knowledge.map(k => {
-                const srv = (mcpServers || []).find(s => s.id === k.serverId);
-                const cred = (mcpCredentials || []).find(c => c.id === k.credentialId);
-                return (
-                  <li key={k.serverId}>
-                    <strong style={{ color: 'var(--eb-text-primary)' }}>{srv?.name || k.serverId}</strong>
-                    {' '}— credential {cred ? cred.name : '—'}
-                  </li>
-                );
-              })}
+              {allSelected.map(t => (
+                <li key={t.id}>
+                  <strong style={{ color: 'var(--eb-text-primary)' }}>{t.displayName}</strong>
+                  {' '}— agent <code>{form.teamId}-{t.id}</code>
+                </li>
+              ))}
             </ul>
-          )}
-        </div>
-        <div>
-          <div style={labelStyle}>Roles ({selected.length})</div>
-          <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
-            {selected.map(t => (
-              <li key={t.id}>
-                <strong style={{ color: 'var(--eb-text-primary)' }}>{t.displayName}</strong>
-                {' '}— agent <code>{form.teamId}-{t.id}</code>
-              </li>
-            ))}
-          </ul>
-        </div>
+          </div>
+        )}
         <ErrorBox message={error} />
       </div>
     </Card>
@@ -874,16 +1044,23 @@ function ProgressCard({ steps, error }) {
 // ─── Main wizard ─────────────────────────────────────────────────────
 export default function TeamSetup() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const location = useLocation();
   const [step, setStep] = useState(0);
   const [stepError, setStepError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [collisionInfo, setCollisionInfo] = useState(null);
   const [result, setResult] = useState(null);
-  // Live progress from the streaming endpoint. `progressSteps` is the
-  // ordered list announced by the server as a `plan` event; each later
-  // `step` event flips one entry's status.
   const [progressSteps, setProgressSteps] = useState(null);
   const [progressError, setProgressError] = useState(null);
+
+  // Extend mode state
+  const [extendMode, setExtendMode] = useState(false);
+  const [existingRoles, setExistingRoles] = useState([]);
+  const [extendLoading, setExtendLoading] = useState(false);
+  const [extendError, setExtendError] = useState(null);
+  // Toast shown when navigated here with a state message (e.g. team not found)
+  const [infoMessage, setInfoMessage] = useState(() => location.state?.toastMessage || null);
 
   const [form, setForm] = useState({
     teamName: '',
@@ -906,21 +1083,94 @@ export default function TeamSetup() {
 
   const templates = templatesResp?.templates || null;
 
-  // Pre-select all templates the first time the catalog loads.
+  // Pre-select all templates the first time the catalog loads (create mode only).
   useEffect(() => {
-    if (templates && form.selectedRoles.length === 0) {
+    if (!extendMode && templates && form.selectedRoles.length === 0) {
       setForm(f => ({ ...f, selectedRoles: templates.map(t => t.id) }));
     }
-  }, [templates]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [templates, extendMode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Load existing team config when URL has ?team=<id>&mode=extend.
+  useEffect(() => {
+    const teamId = searchParams.get('team');
+    const mode = searchParams.get('mode');
+    if (!teamId || mode !== 'extend') return;
+
+    setExtendMode(true);
+    setExtendLoading(true);
+    setExtendError(null);
+
+    (async () => {
+      try {
+        // Fetch team config and all agents in parallel
+        const [teamRes, agentsRes] = await Promise.all([
+          fetch(`/api/agents/${encodeURIComponent(teamId)}`),
+          fetch('/api/agents'),
+        ]);
+
+        if (!teamRes.ok) {
+          navigate('/team-setup', { state: { toastMessage: `Team "${teamId}" not found — starting fresh.` } });
+          return;
+        }
+        if (!agentsRes.ok) {
+          throw new Error('Failed to load team members — please try again.');
+        }
+
+        const [teamCfg, agentList] = await Promise.all([teamRes.json(), agentsRes.json()]);
+
+        // Fetch environment config (depends on teamCfg)
+        let env = null;
+        if (teamCfg.environmentId) {
+          const envRes = await fetch(`/api/environments/${encodeURIComponent(teamCfg.environmentId)}`);
+          if (envRes.ok) env = await envRes.json();
+        }
+
+        const members = (Array.isArray(agentList) ? agentList : (agentList.agents || []))
+          .filter(a => a.parentTeamId === teamId && a.role === 'team-member');
+
+        // Derive existing role IDs: prefer explicit roleId/templateId, fall back to ID surgery.
+        const prefix = `${teamId}-`;
+        const roles = members.map(m => {
+          if (m.roleId) return m.roleId;
+          if (m.templateId) return m.templateId;
+          if (m.id.startsWith(prefix)) return m.id.slice(prefix.length);
+          console.warn(`[TeamSetup] Member "${m.id}" does not follow "${prefix}<roleId>" convention — skipping`);
+          return null;
+        }).filter(Boolean);
+        setExistingRoles(roles);
+
+        // Pre-populate form from existing team + env
+        const repo = env?.repositories?.[0] || env?.repository || null;
+        setForm(f => ({
+          ...f,
+          teamName: teamCfg.displayName || teamId,
+          teamId,
+          teamIdManuallyEdited: true,
+          repoUrl: repo?.url || '',
+          branch: repo?.branch || 'main',
+          sshKeyId: repo?.sshKeyId || '',
+          githubTokenId: env?.githubTokenId || '',
+          readyLabel: 'ready',
+          mcpSelections: (env?.mcpServers || []).map(s => ({ serverId: s.serverId, credentialId: s.credentialId || null })),
+          selectedRoles: roles,
+        }));
+      } catch (err) {
+        setExtendError(err.message || String(err));
+      } finally {
+        setExtendLoading(false);
+      }
+    })();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   function validateStep() {
-    // Step 0 = Team basics (name + slug). Repo is on step 1 now.
+    // In extend mode, steps 0–2 are read-only — no validation needed.
+    if (extendMode && step <= 2) return null;
+
     if (step === 0) {
       if (!form.teamName.trim()) return 'Team name required';
       if (!/^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/.test(form.teamId)) return 'Team ID must be 1–40 chars, [a-z0-9-]';
       return null;
     }
-    // Step 1 = Working environment (credentials → URL → branch).
     if (step === 1) {
       if (!form.sshKeyId) return 'SSH key required';
       if (!form.githubTokenId) return 'GitHub token required';
@@ -929,9 +1179,6 @@ export default function TeamSetup() {
       return null;
     }
     if (step === 2) {
-      // Knowledge step is optional, but every selected server that requires a
-      // credential must have one bound — otherwise the seed step writes an
-      // unauthorized server stanza into every agent.
       const sel = form.mcpSelections || [];
       for (const s of sel) {
         const def = (mcpServers || []).find(x => x.id === s.serverId);
@@ -942,7 +1189,13 @@ export default function TeamSetup() {
       return null;
     }
     if (step === 3) {
-      if (form.selectedRoles.length === 0) return 'Pick at least one role';
+      if (extendMode) {
+        const existingSet = new Set(existingRoles);
+        const hasNew = form.selectedRoles.some(r => !existingSet.has(r));
+        if (!hasNew) return 'Select at least one new role to add';
+      } else {
+        if (form.selectedRoles.length === 0) return 'Pick at least one role';
+      }
       return null;
     }
     return null;
@@ -975,15 +1228,22 @@ export default function TeamSetup() {
     setProgressSteps(null);
     setSubmitting(true);
 
+    // In extend mode, send only the delta (roles not yet in the team).
+    const effectiveMode = extendMode ? 'extend' : mode;
+    const existingSet = new Set(existingRoles);
+    const effectiveRoles = extendMode
+      ? form.selectedRoles.filter(r => !existingSet.has(r))
+      : form.selectedRoles;
+
     const body = {
       teamId: form.teamId,
       teamName: form.teamName.trim(),
       repository: { url: form.repoUrl.trim(), branch: form.branch.trim() || 'main', sshKeyId: form.sshKeyId },
       githubTokenId: form.githubTokenId,
       readyLabel: (form.readyLabel || 'ready').trim() || 'ready',
-      roles: form.selectedRoles,
+      roles: effectiveRoles,
       mcpServers: (form.mcpSelections || []).filter(s => s.serverId),
-      mode,
+      mode: effectiveMode,
     };
 
     let res;
@@ -1066,6 +1326,16 @@ export default function TeamSetup() {
   const stepProps = { form, setForm };
   const isLast = step === STEPS.length - 1;
 
+  if (extendLoading) {
+    return (
+      <div style={{ maxWidth: 880, margin: '0 auto', display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', color: 'var(--eb-text-secondary)', paddingTop: 'var(--eb-space-8)' }}>
+        <Loader2 size={18} style={{ animation: 'team-setup-spin 0.9s linear infinite' }} />
+        <style>{`@keyframes team-setup-spin { to { transform: rotate(360deg); } }`}</style>
+        Loading team configuration…
+      </div>
+    );
+  }
+
   return (
     <div style={{ maxWidth: 880, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-5)' }}>
       <div>
@@ -1074,40 +1344,76 @@ export default function TeamSetup() {
           fontWeight: 'var(--eb-font-semibold)',
           margin: 0,
           color: 'var(--eb-text-primary)',
-        }}>Team Setup</h1>
+        }}>
+          {extendMode ? `Extend team: ${form.teamName || form.teamId}` : 'Team Setup'}
+        </h1>
         <p style={{
           fontSize: 'var(--eb-text-md)',
           color: 'var(--eb-text-secondary)',
           marginTop: 'var(--eb-space-2)',
           marginBottom: 0,
         }}>
-          Spin up a complete agent team — Business Analyst, Developer, Reviewers, and more — bound to one repository, in one shot.
+          {extendMode
+            ? 'Add new roles to an existing team. Existing members and configuration are unchanged.'
+            : 'Spin up a complete agent team — Business Analyst, Developer, Reviewers, and more — bound to one repository, in one shot.'}
         </p>
       </div>
 
+      {infoMessage && (
+        <div style={{
+          padding: 'var(--eb-space-3) var(--eb-space-4)',
+          background: 'var(--eb-bg-elevated)',
+          border: '1px solid var(--eb-status-warning)',
+          borderRadius: 'var(--eb-radius-md)',
+          fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)',
+          display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center',
+        }}>
+          <AlertCircle size={15} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
+          <span style={{ flex: 1 }}>{infoMessage}</span>
+          <button
+            onClick={() => setInfoMessage(null)}
+            aria-label="Dismiss"
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--eb-text-muted)', display: 'flex', alignItems: 'center', padding: 0, flexShrink: 0 }}
+          >
+            <XCircle size={15} />
+          </button>
+        </div>
+      )}
+
+      {extendError && <ErrorBox message={extendError} />}
+
       <StepIndicator current={step} />
 
-      {step === 0 && <StepProject {...stepProps} error={stepError} />}
-      {step === 1 && (
-        <StepEnvironment
-          {...stepProps}
-          sshKeys={sshKeys}
-          sshKeysLoading={keysLoading}
-          githubTokens={githubTokens}
-          tokensLoading={tokensLoading}
-          error={stepError}
-          refetchKeys={refetchKeys}
-        />
+      {step === 0 && (extendMode
+        ? <StepProjectReadOnly form={form} />
+        : <StepProject {...stepProps} error={stepError} />
       )}
-      {step === 2 && (
-        <StepKnowledge
-          {...stepProps}
-          mcpServers={mcpServers}
-          mcpServersLoading={mcpServersLoading}
-          mcpCredentials={mcpCredentials}
-          mcpCredentialsLoading={mcpCredentialsLoading}
-          error={stepError}
-        />
+      {step === 1 && (extendMode
+        ? <StepEnvironmentReadOnly form={form} sshKeys={sshKeys} githubTokens={githubTokens} />
+        : (
+          <StepEnvironment
+            {...stepProps}
+            sshKeys={sshKeys}
+            sshKeysLoading={keysLoading}
+            githubTokens={githubTokens}
+            tokensLoading={tokensLoading}
+            error={stepError}
+            refetchKeys={refetchKeys}
+          />
+        )
+      )}
+      {step === 2 && (extendMode
+        ? <StepKnowledgeReadOnly form={form} mcpServers={mcpServers} mcpCredentials={mcpCredentials} />
+        : (
+          <StepKnowledge
+            {...stepProps}
+            mcpServers={mcpServers}
+            mcpServersLoading={mcpServersLoading}
+            mcpCredentials={mcpCredentials}
+            mcpCredentialsLoading={mcpCredentialsLoading}
+            error={stepError}
+          />
+        )
       )}
       {step === 3 && (
         <StepTeam
@@ -1117,6 +1423,8 @@ export default function TeamSetup() {
           selectedRoles={form.selectedRoles}
           setSelectedRoles={fn => setForm(f => ({ ...f, selectedRoles: typeof fn === 'function' ? fn(f.selectedRoles) : fn }))}
           error={stepError}
+          extendMode={extendMode}
+          existingRoles={existingRoles}
         />
       )}
       {step === 4 && (
@@ -1128,6 +1436,8 @@ export default function TeamSetup() {
           mcpServers={mcpServers}
           mcpCredentials={mcpCredentials}
           error={stepError}
+          extendMode={extendMode}
+          existingRoles={existingRoles}
         />
       )}
 
@@ -1192,12 +1502,14 @@ export default function TeamSetup() {
 
           {!isLast && (
             <button type="button" onClick={next} disabled={tplLoading || submitting} style={primaryButtonStyle(submitting || tplLoading)}>
-              Next <ArrowRight size={16} />
+              {extendMode && step < 3 ? 'Continue' : 'Next'} <ArrowRight size={16} />
             </button>
           )}
           {isLast && (
             <button type="button" onClick={() => submit('create')} disabled={submitting} style={primaryButtonStyle(submitting)}>
-              {submitting ? 'Creating team…' : 'Create team'}
+              {submitting
+                ? (extendMode ? 'Extending team…' : 'Creating team…')
+                : (extendMode ? 'Extend team' : 'Create team')}
               {!submitting && <ArrowRight size={16} />}
             </button>
           )}

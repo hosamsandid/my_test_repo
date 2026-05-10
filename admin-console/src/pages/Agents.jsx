@@ -5,7 +5,7 @@ import remarkGfm from 'remark-gfm';
 import {
   Plus, Trash2, Layers, ChevronDown, ChevronRight,
   Edit, MessageCircle, RefreshCw, Power, PowerOff, FileText,
-  User, Users, Workflow, Info,
+  User, Users, Workflow, Info, GitMerge,
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import SidePanel from '../components/SidePanel';
@@ -1485,6 +1485,17 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
           }}>
             {children.length} member{children.length !== 1 ? 's' : ''}
           </span>
+          <button
+            onClick={() => navigate(`/team-setup?team=${encodeURIComponent(agent.id)}&mode=extend`)}
+            style={{
+              background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-md)', cursor: 'pointer',
+              padding: '4px 10px', fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
+              display: 'flex', alignItems: 'center', gap: 4, color: 'var(--eb-text-secondary)',
+            }}
+          >
+            <GitMerge size={13} /> Extend team
+          </button>
           <button
             onClick={() => onAddMember(agent)}
             disabled={addingMember}

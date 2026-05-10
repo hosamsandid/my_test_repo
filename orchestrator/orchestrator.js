@@ -37,6 +37,11 @@ const MCP_CREDENTIALS_KEYS_DIR = "/workspace/mcp-credentials/_keys";
 // Returns { baseUrl, token, defaultModelId } or null if the env has no
 // binding or the endpoint is missing — in that case the caller falls back to
 // the global ANTHROPIC_* env vars from `.env`.
+//
+// Model resolution order: env.defaultModelId (explicit pin) → endpoint
+// registry default → null (lets the Claude CLI pick from .env). The endpoint
+// fallback exists so legacy envs that never picked a model still inherit the
+// operator-configured default once one is set in the Model Registry.
 function loadLlmBindingForEnv(env) {
   if (!env?.llmEndpointId) return null;
   let list;
@@ -61,7 +66,7 @@ function loadLlmBindingForEnv(env) {
   return {
     baseUrl: ep.baseUrl || "",
     token,
-    defaultModelId: env.defaultModelId || null,
+    defaultModelId: env.defaultModelId || ep.defaultModelId || null,
   };
 }
 

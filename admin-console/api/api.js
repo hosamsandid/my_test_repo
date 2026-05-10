@@ -1289,7 +1289,9 @@ app.get('/api/agents/:id/model-options', (req, res) => {
   res.json({
     endpointId:    endpoint?.id || null,
     endpointName:  endpoint?.name || null,
-    defaultModelId: env?.defaultModelId || null,
+    // env-level pin wins; otherwise show whatever the registry default is so
+    // the picker label matches what the agent will actually use.
+    defaultModelId: env?.defaultModelId || endpoint?.defaultModelId || null,
     override:      cfg.modelOverride || null,
     models:        endpoint?.models || [],
   });
@@ -1510,6 +1512,33 @@ function validateModels(models) {
   return null;
 }
 
+// Normalize an endpoint-level defaultModelId against a models list:
+//   - undefined / null / '' → null (no default chosen)
+//   - non-empty string      → must match an entry's id, otherwise error
+function normalizeEndpointDefaultModel(defaultModelId, models) {
+  if (defaultModelId === undefined || defaultModelId === null || defaultModelId === '') {
+    return { defaultModelId: null };
+  }
+  if (typeof defaultModelId !== 'string') {
+    return { error: 'defaultModelId must be a string or null' };
+  }
+  const trimmed = defaultModelId.trim();
+  if (!Array.isArray(models) || !models.some(m => m.id === trimmed)) {
+    return { error: `defaultModelId '${trimmed}' is not in the endpoint's models list` };
+  }
+  return { defaultModelId: trimmed };
+}
+
+// The endpoint's effective default — operator-chosen value, or first model as
+// a backstop so callers that don't yet pick one explicitly still get something
+// usable (mirrors the previous models[0] behaviour).
+function pickEndpointDefaultModel(ep) {
+  if (!ep) return null;
+  if (ep.defaultModelId) return ep.defaultModelId;
+  const first = (ep.models || [])[0];
+  return first?.id || null;
+}
+
 app.get('/api/llm-endpoints', (req, res) => {
   res.json(listLlmEndpoints().map(maskLlmEndpoint));
 });
@@ -1521,13 +1550,22 @@ app.get('/api/llm-endpoints/:id', (req, res) => {
 });
 
 app.post('/api/llm-endpoints', (req, res) => {
-  const { name, baseUrl, authToken, models } = req.body || {};
+  const { name, baseUrl, authToken, models, defaultModelId } = req.body || {};
   if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
   if (!baseUrl || typeof baseUrl !== 'string') return res.status(400).json({ error: 'baseUrl is required' });
   try { new URL(baseUrl); } catch { return res.status(400).json({ error: 'baseUrl must be a valid URL' }); }
   const modelList = Array.isArray(models) ? models : [];
   const modelErr = validateModels(modelList);
   if (modelErr) return res.status(400).json({ error: modelErr });
+  const normalizedModels = modelList.map(m => ({
+    id: m.id,
+    displayName: m.displayName || m.id,
+    ...(m.kind ? { kind: m.kind } : {}),
+    ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}),
+    ...(m.notes ? { notes: m.notes } : {}),
+  }));
+  const def = normalizeEndpointDefaultModel(defaultModelId, normalizedModels);
+  if (def.error) return res.status(400).json({ error: def.error });
 
   const existing = listLlmEndpoints();
   let id = slugifyId(name) || `ep-${Date.now()}`;
@@ -1544,13 +1582,8 @@ app.post('/api/llm-endpoints', (req, res) => {
     name,
     baseUrl,
     authTokenId,
-    models: modelList.map(m => ({
-      id: m.id,
-      displayName: m.displayName || m.id,
-      ...(m.kind ? { kind: m.kind } : {}),
-      ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}),
-      ...(m.notes ? { notes: m.notes } : {}),
-    })),
+    models: normalizedModels,
+    defaultModelId: def.defaultModelId,
     createdAt: new Date().toISOString(),
   };
   saveLlmEndpointsIndex([...existing, entry]);
@@ -1562,7 +1595,7 @@ app.put('/api/llm-endpoints/:id', (req, res) => {
   const idx = list.findIndex(e => e.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'LLM endpoint not found' });
   const current = list[idx];
-  const { name, baseUrl, authToken, models } = req.body || {};
+  const { name, baseUrl, authToken, models, defaultModelId } = req.body || {};
 
   if (baseUrl !== undefined) {
     if (typeof baseUrl !== 'string' || !baseUrl) return res.status(400).json({ error: 'baseUrl must be a non-empty string' });
@@ -1583,6 +1616,19 @@ app.put('/api/llm-endpoints/:id', (req, res) => {
     ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}),
     ...(m.notes ? { notes: m.notes } : {}),
   }));
+
+  // Validate the default against the *resulting* models list. If the request
+  // sends a new defaultModelId, use it; otherwise re-check the existing one
+  // against any new model list (so dropping a model that was the default
+  // either errors or, if not sent, is silently cleared).
+  if (defaultModelId !== undefined) {
+    const def = normalizeEndpointDefaultModel(defaultModelId, next.models);
+    if (def.error) return res.status(400).json({ error: def.error });
+    next.defaultModelId = def.defaultModelId;
+  } else if (models !== undefined && current.defaultModelId) {
+    const stillThere = (next.models || []).some(m => m.id === current.defaultModelId);
+    next.defaultModelId = stillThere ? current.defaultModelId : null;
+  }
 
   // Token rotation: if `authToken` is a non-empty string, replace; if it's an
   // empty string, clear; if undefined, leave the existing token alone.
@@ -1613,15 +1659,20 @@ app.put('/api/llm-endpoints/:id/models', (req, res) => {
   const models = req.body && Array.isArray(req.body.models) ? req.body.models : req.body;
   const modelErr = validateModels(models);
   if (modelErr) return res.status(400).json({ error: modelErr });
+  const normalizedModels = models.map(m => ({
+    id: m.id,
+    displayName: m.displayName || m.id,
+    ...(m.kind ? { kind: m.kind } : {}),
+    ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}),
+    ...(m.notes ? { notes: m.notes } : {}),
+  }));
+  // Drop a stale defaultModelId if the new model list no longer contains it.
+  const prevDefault = list[idx].defaultModelId || null;
+  const stillValid = prevDefault && normalizedModels.some(m => m.id === prevDefault);
   list[idx] = {
     ...list[idx],
-    models: models.map(m => ({
-      id: m.id,
-      displayName: m.displayName || m.id,
-      ...(m.kind ? { kind: m.kind } : {}),
-      ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}),
-      ...(m.notes ? { notes: m.notes } : {}),
-    })),
+    models: normalizedModels,
+    defaultModelId: stillValid ? prevDefault : null,
     updatedAt: new Date().toISOString(),
   };
   saveLlmEndpointsIndex(list);
@@ -2018,6 +2069,11 @@ app.get('/api/environments/:id', (req, res) => {
 
 // Resolve and validate { llmEndpointId, defaultModelId } against the registry.
 // Returns { error } on failure, { llmEndpointId, defaultModelId } on success.
+//
+// When the caller binds an endpoint but doesn't explicitly pick a model,
+// inherit the endpoint's registry-level default. That makes "set the default
+// once in the Model Registry → every new env starts on it" the default flow,
+// without forcing every form to know about the endpoint catalogue.
 function resolveLlmBinding(llmEndpointId, defaultModelId) {
   if (!llmEndpointId) {
     if (defaultModelId) return { error: 'defaultModelId requires llmEndpointId' };
@@ -2028,8 +2084,9 @@ function resolveLlmBinding(llmEndpointId, defaultModelId) {
   if (defaultModelId) {
     const known = (ep.models || []).some(m => m.id === defaultModelId);
     if (!known) return { error: `Model '${defaultModelId}' is not in endpoint '${ep.id}' catalog` };
+    return { llmEndpointId: ep.id, defaultModelId };
   }
-  return { llmEndpointId: ep.id, defaultModelId: defaultModelId || null };
+  return { llmEndpointId: ep.id, defaultModelId: pickEndpointDefaultModel(ep) };
 }
 
 app.post('/api/environments', (req, res) => {
@@ -2519,16 +2576,16 @@ const READY_LABEL_RE = /^[^\s`"'{}<>][^\s`"'{}<>]{0,49}$/;
 // one on the env, the in-chat model picker shows "(no endpoint)" disabled
 // for every team-member — which is how teams looked broken compared to
 // hand-created agents (where the user picks an endpoint via the env editor).
-// Pick the first registered endpoint as a silent default; its first model
-// becomes the env-level default. The user can change either later.
+// Pick the first registered endpoint as a silent default; its operator-set
+// default model (or, as a backstop, the first entry in its catalogue) becomes
+// the env-level default. The user can change either later.
 function defaultLlmEndpointForTeam() {
   const endpoints = listLlmEndpoints();
   if (endpoints.length === 0) return { llmEndpointId: null, defaultModelId: null };
   const ep = endpoints[0];
-  const firstModel = (ep.models || [])[0];
   return {
     llmEndpointId: ep.id,
-    defaultModelId: firstModel?.id || null,
+    defaultModelId: pickEndpointDefaultModel(ep),
   };
 }
 

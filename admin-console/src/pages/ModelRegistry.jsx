@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Trash2, Plus, Pencil, Check, X, RefreshCw, PlugZap } from 'lucide-react';
+import { Trash2, Plus, Pencil, Check, X, RefreshCw, PlugZap, Star } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
@@ -47,25 +47,30 @@ const buttonGhost = {
 
 /* ─────────────────── Sub: per-endpoint model editor ─────────────────── */
 
-function ModelEditor({ models, onChange }) {
+function ModelEditor({ models, defaultModelId, onChange, onDefaultChange }) {
   const update = (i, patch) => {
     const next = models.map((m, idx) => idx === i ? { ...m, ...patch } : m);
     onChange(next);
   };
-  const remove = (i) => onChange(models.filter((_, idx) => idx !== i));
+  const remove = (i) => {
+    const removedId = models[i]?.id;
+    onChange(models.filter((_, idx) => idx !== i));
+    if (removedId && removedId === defaultModelId) onDefaultChange('');
+  };
   const add = () => onChange([...models, { id: '', displayName: '', kind: '' }]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
       <div style={{
         display: 'grid',
-        gridTemplateColumns: '1fr 1fr 110px 32px',
+        gridTemplateColumns: '32px 1fr 1fr 110px 32px',
         gap: 'var(--eb-space-2)',
         fontSize: 'var(--eb-text-xs)',
         color: 'var(--eb-text-muted)',
         textTransform: 'uppercase',
         letterSpacing: '0.04em',
       }}>
+        <div title="Default">Def</div>
         <div>Model ID</div>
         <div>Display name</div>
         <div>Kind</div>
@@ -85,13 +90,38 @@ function ModelEditor({ models, onChange }) {
         </div>
       )}
 
-      {models.map((m, i) => (
+      {models.map((m, i) => {
+        const isDefault = !!m.id && m.id === defaultModelId;
+        return (
         <div key={i} style={{
           display: 'grid',
-          gridTemplateColumns: '1fr 1fr 110px 32px',
+          gridTemplateColumns: '32px 1fr 1fr 110px 32px',
           gap: 'var(--eb-space-2)',
           alignItems: 'center',
         }}>
+          <button
+            type="button"
+            onClick={() => onDefaultChange(isDefault ? '' : (m.id || ''))}
+            disabled={!m.id || !m.id.trim()}
+            aria-label={isDefault ? 'Clear default' : 'Make default'}
+            title={
+              !m.id || !m.id.trim()
+                ? 'Set a model ID before marking it as the default'
+                : isDefault ? 'Clear default (click to unset)' : 'Make this the default model'
+            }
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              width: 32, height: 32,
+              background: isDefault ? 'var(--eb-accent-primary)' : 'transparent',
+              border: `1px solid ${isDefault ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+              color: isDefault ? 'var(--eb-text-inverted)' : 'var(--eb-text-muted)',
+              borderRadius: 'var(--eb-radius-md)',
+              cursor: (!m.id || !m.id.trim()) ? 'not-allowed' : 'pointer',
+              opacity: (!m.id || !m.id.trim()) ? 0.4 : 1,
+            }}
+          >
+            <Star size={14} fill={isDefault ? 'currentColor' : 'none'} />
+          </button>
           <input
             value={m.id || ''}
             onChange={e => update(i, { id: e.target.value })}
@@ -157,7 +187,7 @@ function ModelEditor({ models, onChange }) {
             <X size={14} />
           </button>
         </div>
-      ))}
+      );})}
 
       <button
         type="button"
@@ -179,6 +209,16 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
   const [authToken, setAuthToken] = useState('');         // empty = leave as-is on edit
   const [clearToken, setClearToken] = useState(false);
   const [models, setModels] = useState(endpoint?.models ?? []);
+  const [defaultModelId, setDefaultModelId] = useState(endpoint?.defaultModelId ?? '');
+
+  // If the user removes the default model from the list (without using the
+  // star toggle), drop the dangling pointer so we don't ship a server-rejected
+  // value on save.
+  useEffect(() => {
+    if (defaultModelId && !models.some(m => m.id === defaultModelId)) {
+      setDefaultModelId('');
+    }
+  }, [models, defaultModelId]);
 
   // test / discover state — only meaningful for an existing (saved) endpoint
   const [probing, setProbing] = useState(null);            // 'test' | 'discover' | null
@@ -239,16 +279,23 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
   }
 
   function submit() {
+    const cleanedModels = models
+      .filter(m => m.id && m.id.trim())
+      .map(m => ({
+        id: m.id.trim(),
+        displayName: (m.displayName || m.id).trim(),
+        ...(m.kind ? { kind: m.kind } : {}),
+      }));
     const payload = {
       name: name.trim(),
       baseUrl: baseUrl.trim(),
-      models: models
-        .filter(m => m.id && m.id.trim())
-        .map(m => ({
-          id: m.id.trim(),
-          displayName: (m.displayName || m.id).trim(),
-          ...(m.kind ? { kind: m.kind } : {}),
-        })),
+      models: cleanedModels,
+      // Always send defaultModelId — '' clears it on the server, a real id
+      // sets/updates it. Skipping the field would leave the server's cached
+      // value alone, which is wrong when the user just unstarred a model.
+      defaultModelId: defaultModelId && cleanedModels.some(m => m.id === defaultModelId)
+        ? defaultModelId
+        : '',
     };
     if (clearToken)        payload.authToken = '';
     else if (authToken.trim()) payload.authToken = authToken.trim();
@@ -425,14 +472,35 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
 
       <div>
         <div style={{
-          fontSize: 'var(--eb-text-sm)',
-          fontWeight: 'var(--eb-font-medium)',
-          color: 'var(--eb-text-secondary)',
-          marginBottom: 'var(--eb-space-2)',
+          display: 'flex', alignItems: 'baseline', justifyContent: 'space-between',
+          marginBottom: 'var(--eb-space-2)', gap: 'var(--eb-space-3)',
         }}>
-          Models
+          <div style={{
+            fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-medium)',
+            color: 'var(--eb-text-secondary)',
+          }}>
+            Models
+          </div>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            {defaultModelId
+              ? <>Default: <code style={{ fontFamily: 'var(--eb-font-mono)' }}>{defaultModelId}</code></>
+              : 'No default — new agents fall back to the first model.'}
+          </div>
         </div>
-        <ModelEditor models={models} onChange={setModels} />
+        <ModelEditor
+          models={models}
+          defaultModelId={defaultModelId}
+          onChange={setModels}
+          onDefaultChange={setDefaultModelId}
+        />
+        <div style={{
+          fontSize: 'var(--eb-text-xs)',
+          color: 'var(--eb-text-muted)',
+          marginTop: 'var(--eb-space-2)',
+        }}>
+          Click the star to mark one model as the registry-level default. New environments and agents bound to this endpoint start on that model unless they override it explicitly.
+        </div>
       </div>
 
       <div style={{
@@ -487,7 +555,26 @@ export default function ModelRegistry() {
     {
       key: 'models',
       label: 'Models',
-      render: v => <span style={{ fontSize: 'var(--eb-text-xs)' }}>{Array.isArray(v) ? v.length : 0}</span>,
+      render: (v, row) => {
+        const count = Array.isArray(v) ? v.length : 0;
+        const def = row.defaultModelId;
+        return (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)' }}>
+            <span>{count}</span>
+            {def
+              ? <span title={`Default model: ${def}`} style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                  padding: '0 var(--eb-space-2)', borderRadius: 'var(--eb-radius-sm)',
+                  background: 'var(--eb-bg-elevated)',
+                  color: 'var(--eb-text-secondary)',
+                  fontFamily: 'var(--eb-font-mono)',
+                }}>
+                  <Star size={11} fill="currentColor" /> {def}
+                </span>
+              : <span style={{ color: 'var(--eb-text-muted)' }}>(no default)</span>}
+          </span>
+        );
+      },
     },
     { key: 'createdAt', label: 'Added', render: v => v ? new Date(v).toLocaleString() : '—' },
     {
@@ -600,7 +687,7 @@ export default function ModelRegistry() {
         fontSize: 'var(--eb-text-sm)',
         color: 'var(--eb-text-secondary)',
       }}>
-        Anthropic-compatible LLM endpoints (typically a LiteLLM proxy). Working Environments pick one endpoint and a default model from its catalog; agents inherit both at startup.
+        Anthropic-compatible LLM endpoints (typically a LiteLLM proxy). Each endpoint can mark one model as its registry-level default — Working Environments and new agents inherit that model unless they pin their own.
       </div>
 
       {actionError && (

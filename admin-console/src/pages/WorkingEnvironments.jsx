@@ -293,17 +293,22 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
 
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
 
-  // When the endpoint changes, drop a default model that isn't part of the new
-  // catalog so the form never carries a stale, server-rejecting value.
+  // When the endpoint changes, prefer the endpoint's registry-level default —
+  // the user opted into "use whatever is chosen for this proxy". If they had
+  // already pinned a different model that's still in the new catalogue, keep
+  // it; otherwise fall back to the endpoint default (or blank as a backstop).
   const updateEndpoint = (newId) => {
     setForm(f => {
       if (newId === f.llmEndpointId) return f;
       const ep = llmEndpoints.find(e => e.id === newId);
       const stillValid = ep && (ep.models || []).some(m => m.id === f.defaultModelId);
+      const epDefault = ep?.defaultModelId
+        && (ep.models || []).some(m => m.id === ep.defaultModelId)
+        ? ep.defaultModelId : '';
       return {
         ...f,
         llmEndpointId: newId,
-        defaultModelId: stillValid ? f.defaultModelId : '',
+        defaultModelId: stillValid ? f.defaultModelId : epDefault,
       };
     });
   };
@@ -543,7 +548,7 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
         </div>
 
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-          Agents in this environment use this endpoint and start on the chosen default model. Without a selection they fall back to <code>ANTHROPIC_BASE_URL</code> from <code>.env</code>. Manage endpoints on the Model Registry page.
+          Agents in this environment use this endpoint and start on the chosen default model. Leave the model blank to inherit the endpoint's registry-level default; without an endpoint they fall back to <code>ANTHROPIC_BASE_URL</code> from <code>.env</code>. Manage endpoints and their default model on the Model Registry page.
         </div>
       </div>
 

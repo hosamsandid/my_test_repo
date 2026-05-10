@@ -404,6 +404,31 @@ async function sendFormatted(client, roomId, text) {
   });
 }
 
+async function postTriggerNotice(client, trigger, ctx, roomId) {
+  const desc = trigger.description ? ` — ${trigger.description}` : '';
+  let body;
+  if (trigger.type === 'cron') {
+    body = `⚡ Trigger fired (cron: \`${trigger.id}\`)${desc} — starting work…`;
+  } else if (trigger.type === 'github-event') {
+    const eventKey = ctx?.github?.event || trigger.id;
+    const repo = ctx?.github?.repo || '';
+    body = `⚡ Trigger fired (GitHub: \`${eventKey}\` on \`${repo}\`)${desc} — starting work…`;
+  } else if (trigger.type === 'http') {
+    body = `⚡ Trigger fired (HTTP: \`${trigger.id}\`)${desc} — starting work…`;
+  } else {
+    body = `⚡ Trigger fired (${trigger.type}: \`${trigger.id}\`)${desc} — starting work…`;
+  }
+  await client.sendMessage(roomId, {
+    msgtype: 'm.notice',
+    body,
+    'io.aee.trigger': {
+      triggerId: trigger.id,
+      triggerType: trigger.type,
+      event: ctx?.github?.event || null,
+    },
+  });
+}
+
 // ============================================================
 // Pre-check script runner
 // ============================================================
@@ -849,6 +874,11 @@ class TriggerScheduler {
       }
 
       if (++activeInvocations === 1) writeStatus('busy');
+      try {
+        await postTriggerNotice(this.agentClient, trigger, ctx, roomId);
+      } catch (err) {
+        console.error(`[Runner:${AGENT_ID}] Could not post trigger notice for ${trigger.id}: ${err.message}`);
+      }
       let result;
       try {
         result = await callClaude(prompt, {

@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypePrettyCode from 'rehype-pretty-code';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
-import { Bot } from 'lucide-react';
+import { Bot, Zap } from 'lucide-react';
 
 /**
  * Defensive markdown wrapper.
@@ -252,7 +252,49 @@ function countCodeLines(children) {
   return n;
 }
 
+function NoticeMessage({ message }) {
+  const time = formatMessageTime(message.ts);
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'flex-start',
+      gap: 'var(--eb-space-2)',
+      padding: 'var(--eb-space-1) 0',
+    }}>
+      <div style={{
+        width: 28, height: 28,
+        borderRadius: '50%',
+        background: 'var(--eb-bg-surface)',
+        border: '1px solid var(--eb-border-default)',
+        color: 'var(--eb-text-muted)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        flexShrink: 0,
+      }}>
+        <Zap size={14} />
+      </div>
+      <div style={{
+        background: 'var(--eb-bg-surface)',
+        borderLeft: '3px solid var(--eb-text-muted)',
+        padding: 'var(--eb-space-1) var(--eb-space-3)',
+        borderRadius: 'var(--eb-radius-md)',
+        fontSize: 'var(--eb-text-sm)',
+        color: 'var(--eb-text-muted)',
+        maxWidth: 'min(720px, 75%)',
+      }}>
+        {/* Plain text only — intentionally scoped to AEE trigger notices, not general Matrix m.notice rendering */}
+        <span>{message.body}</span>
+        <div style={{ fontSize: 'var(--eb-text-xs)', marginTop: 'var(--eb-space-0-5)', opacity: 0.7 }}>
+          {time}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Message({ message, agentUserId, thinking }) {
+  if (message.msgtype === 'm.notice') {
+    return <NoticeMessage message={message} />;
+  }
   const isAgent = message.sender === agentUserId;
   const align = isAgent ? 'flex-start' : 'flex-end';
   const bubbleColor = isAgent

@@ -2019,8 +2019,9 @@ app.post('/api/quickstart', async (req, res) => {
   // 1. Probe the remote: validates SSH auth + reachability, and resolves the
   // default branch so we don't assume "main" (a previous version did, which
   // silently failed on repos defaulting to master/release/etc.).
+  // null means "let git use whatever HEAD the remote advertises at clone time".
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
-  let resolvedBranch = 'main';
+  let resolvedBranch = null;
   try {
     const probeResp = await fetch(`${orchestratorUrl}/internal/repository-check`, {
       method: 'POST',

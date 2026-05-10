@@ -3329,7 +3329,7 @@ async function main() {
         if (!repo?.url) continue;
         const repoName = (repo.url.split('/').pop() || 'repo').replace(/\.git$/, '');
         const repoPath = path.join(workspace, repoName);
-        const branch = repo.branch || 'main';
+        let branch = repo.branch || null;
         if (!fs.existsSync(path.join(repoPath, '.git'))) {
           results.push({ repo: repoName, skipped: 'not-a-git-repo' });
           continue;
@@ -3346,6 +3346,18 @@ async function main() {
         }
         try {
           execFileSync('git', ['fetch', 'origin'], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 30_000 });
+          if (!branch) {
+            // No branch configured — resolve the remote's HEAD so we don't
+            // assume 'main'. Falls back to the locally checked-out branch if
+            // the remote HEAD ref isn't available (e.g. older git servers).
+            try {
+              execFileSync('git', ['remote', 'set-head', 'origin', '--auto'], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 10_000 });
+              branch = execFileSync('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 5_000 })
+                .toString().trim().replace(/^origin\//, '');
+            } catch {
+              branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 5_000 }).toString().trim();
+            }
+          }
           execFileSync('git', ['checkout', branch], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 10_000 });
           execFileSync('git', ['reset', '--hard', `origin/${branch}`], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 10_000 });
           results.push({ repo: repoName, branch, reset: true });

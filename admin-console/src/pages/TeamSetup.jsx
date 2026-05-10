@@ -165,7 +165,7 @@ function StepProject({ form, setForm, error }) {
             onChange={e => setForm(f => ({ ...f, teamId: slugify(e.target.value), teamIdManuallyEdited: true }))}
             style={inputStyle}
           />
-          <div style={hintStyle}>Lowercase, dashes only. 1–40 chars. Resources will be named <code>{form.teamId || '&lt;slug&gt;'}-developer</code>, etc.</div>
+          <div style={hintStyle}>Lowercase, dashes only. 1–40 chars. Resources will be named <code>{form.teamId || '<slug>'}-developer</code>, etc.</div>
         </div>
 
         <ErrorBox message={error} />

@@ -2563,9 +2563,39 @@ function defaultLlmEndpointForTeam() {
   };
 }
 
+// Normalize the `roles` payload: accepts string[] (legacy/backward-compat)
+// or Array<{id, count}> (new multi-instance shape). Returns an array of
+// {id, count} objects with count clamped to [1, 10].
+function normalizeRolesInput(raw) {
+  if (!Array.isArray(raw)) return null;
+  return raw.map(r => {
+    if (typeof r === 'string') return { id: r, count: 1 };
+    const id = typeof r.id === 'string' ? r.id : null;
+    const count = Number.isInteger(r.count) && r.count >= 1 && r.count <= 10 ? r.count : 1;
+    return { id, count };
+  });
+}
+
+// Expand normalized roles into planned member entries. count=1 keeps the
+// legacy `<teamId>-<roleId>` id; count>1 produces numbered suffixes.
+function planMembers(teamId, normalizedRoles, loadTemplate) {
+  const planned = [];
+  for (const { id: roleId, count } of normalizedRoles) {
+    const t = loadTemplate(roleId);
+    if (count === 1) {
+      planned.push({ roleId, template: t, memberId: `${teamId}-${roleId}`, instanceIndex: null });
+    } else {
+      for (let i = 1; i <= count; i++) {
+        planned.push({ roleId, template: t, memberId: `${teamId}-${roleId}-${i}`, instanceIndex: i });
+      }
+    }
+  }
+  return planned;
+}
+
 app.post('/api/teams', async (req, res) => {
   const body = req.body || {};
-  const { teamId, teamName, repository, githubTokenId, roles, mcpServers } = body;
+  const { teamId, teamName, repository, githubTokenId, mcpServers } = body;
   const mode = body.mode === 'extend' ? 'extend' : 'create';
   const readyLabel = (typeof body.readyLabel === 'string' && body.readyLabel.trim())
     ? body.readyLabel.trim()
@@ -2614,33 +2644,32 @@ app.post('/api/teams', async (req, res) => {
   }
 
   // ── 3. Roles must map to known templates ──────────────────────────
-  if (!Array.isArray(roles) || roles.length === 0) {
+  const normalizedRoles = normalizeRolesInput(body.roles);
+  if (!normalizedRoles || normalizedRoles.length === 0) {
     return res.status(400).json({ error: 'roles must be a non-empty array of template ids' });
   }
   const knownIds = new Set(listAgentTemplateIds());
-  const unknown = roles.filter(r => !knownIds.has(r));
+  const unknown = normalizedRoles.map(r => r.id).filter(id => !knownIds.has(id));
   if (unknown.length) {
     return res.status(400).json({
       error: `Unknown roles: ${unknown.join(', ')}`,
       knownRoles: [...knownIds],
     });
   }
+  const seenRoleIds = new Set();
+  for (const r of normalizedRoles) {
+    if (seenRoleIds.has(r.id)) return res.status(400).json({ error: `Duplicate role id: ${r.id}` });
+    seenRoleIds.add(r.id);
+  }
 
   // ── 4. Plan resource ids ──────────────────────────────────────────
   // v2 shape: 1 env + 1 team agent + N team-members. Naming:
   //   env id        = teamId
   //   team agent id = teamId
-  //   member id     = `<teamId>-<roleId>`  (one per selected role template)
+  //   member id     = `<teamId>-<roleId>` (count=1) or `<teamId>-<roleId>-N` (count>1)
   const envId = teamId;
   const teamAgentId = teamId;
-  const planned = roles.map(roleId => {
-    const t = loadAgentTemplate(roleId);
-    return {
-      roleId,
-      template: t,
-      memberId: `${teamId}-${t.id}`,
-    };
-  });
+  const planned = planMembers(teamId, normalizedRoles, loadAgentTemplate);
   for (const p of planned) {
     if (!AGENT_ID_RE.test(p.memberId)) {
       return res.status(400).json({ error: `Computed memberId '${p.memberId}' is invalid` });
@@ -2945,7 +2974,7 @@ app.post('/api/teams/stream', async (req, res) => {
   }
 
   const body = req.body || {};
-  const { teamId, teamName, repository, githubTokenId, roles, mcpServers } = body;
+  const { teamId, teamName, repository, githubTokenId, mcpServers } = body;
   const mode = body.mode === 'extend' ? 'extend' : 'create';
   const readyLabel = (typeof body.readyLabel === 'string' && body.readyLabel.trim())
     ? body.readyLabel.trim()
@@ -2986,22 +3015,25 @@ app.post('/api/teams/stream', async (req, res) => {
   } catch (err) {
     return fail(400, err.message);
   }
-  if (!Array.isArray(roles) || roles.length === 0) {
+  const normalizedRoles = normalizeRolesInput(body.roles);
+  if (!normalizedRoles || normalizedRoles.length === 0) {
     return fail(400, 'roles must be a non-empty array of template ids');
   }
   const knownIds = new Set(listAgentTemplateIds());
-  const unknown = roles.filter(r => !knownIds.has(r));
+  const unknown = normalizedRoles.map(r => r.id).filter(id => !knownIds.has(id));
   if (unknown.length) {
     return fail(400, `Unknown roles: ${unknown.join(', ')}`);
+  }
+  const seenRoleIds = new Set();
+  for (const r of normalizedRoles) {
+    if (seenRoleIds.has(r.id)) return fail(400, `Duplicate role id: ${r.id}`);
+    seenRoleIds.add(r.id);
   }
 
   // ── 2. Plan ───────────────────────────────────────────────────────
   const envId = teamId;
   const teamAgentId = teamId;
-  const planned = roles.map(roleId => {
-    const t = loadAgentTemplate(roleId);
-    return { roleId, template: t, memberId: `${teamId}-${t.id}` };
-  });
+  const planned = planMembers(teamId, normalizedRoles, loadAgentTemplate);
   for (const p of planned) {
     if (!AGENT_ID_RE.test(p.memberId)) {
       return fail(400, `Computed memberId '${p.memberId}' is invalid`);

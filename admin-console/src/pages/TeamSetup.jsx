@@ -675,12 +675,37 @@ function StepKnowledge({ form, setForm, mcpServers, mcpServersLoading, mcpCreden
 }
 
 // ─── Step 4 — Team composition ────────────────────────────────────────
-function RoleCard({ template, selected, onToggle }) {
+// Business Analyst is a persistent chat agent; multiple instances would
+// conflict (shared DM session). All other roles support reactive triggers
+// and can be scaled to multiple instances.
+const SINGLE_INSTANCE_ROLES = new Set(['business-analyst']);
+
+function RoleCard({ template, selected, count, onToggle, onCountChange }) {
   const Icon = ROLE_ICONS[template.icon] || User;
+  const multiAllowed = !SINGLE_INSTANCE_ROLES.has(template.id);
+
+  function handleMinus(e) {
+    e.stopPropagation();
+    if (count > 1) onCountChange(count - 1);
+    else onToggle(); // deselect when decrementing below 1
+  }
+  function handlePlus(e) {
+    e.stopPropagation();
+    if (count < 10) onCountChange(count + 1);
+  }
+  function handleCountChange(e) {
+    e.stopPropagation();
+    const v = parseInt(e.target.value, 10);
+    if (!isNaN(v) && v >= 1 && v <= 10) onCountChange(v);
+  }
+
   return (
-    <button
-      type="button"
+    <div
       onClick={onToggle}
+      role="checkbox"
+      aria-checked={selected}
+      tabIndex={0}
+      onKeyDown={e => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); onToggle(); } }}
       style={{
         textAlign: 'left',
         background: selected ? 'var(--eb-bg-surface)' : 'var(--eb-bg-app)',
@@ -691,59 +716,123 @@ function RoleCard({ template, selected, onToggle }) {
         fontFamily: 'inherit',
         color: 'var(--eb-text-primary)',
         display: 'flex',
-        gap: 'var(--eb-space-3)',
-        alignItems: 'flex-start',
+        flexDirection: 'column',
+        gap: 'var(--eb-space-2)',
         transition: 'border-color 0.1s',
+        userSelect: 'none',
       }}
     >
-      <div style={{
-        flexShrink: 0,
-        width: 36, height: 36,
-        borderRadius: 'var(--eb-radius-md)',
-        background: selected ? 'var(--eb-accent-primary)' : 'var(--eb-bg-elevated)',
-        color: selected ? 'var(--eb-text-inverted)' : 'var(--eb-text-primary)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-      }}>
-        <Icon size={18} />
-      </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 'var(--eb-space-2)' }}>
-          <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)' }}>
-            {template.displayName}
-          </div>
-          <div style={{
-            fontSize: 'var(--eb-text-xs)',
-            color: 'var(--eb-text-muted)',
-            fontFamily: 'var(--eb-font-mono)',
-            flexShrink: 0,
-          }}>
-            {template.sessionPolicy === 'per-invocation' ? 'reactive' : 'chat'}
-          </div>
+      <div style={{ display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'flex-start' }}>
+        <div style={{
+          flexShrink: 0,
+          width: 36, height: 36,
+          borderRadius: 'var(--eb-radius-md)',
+          background: selected ? 'var(--eb-accent-primary)' : 'var(--eb-bg-elevated)',
+          color: selected ? 'var(--eb-text-inverted)' : 'var(--eb-text-primary)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <Icon size={18} />
         </div>
-        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 'var(--eb-space-1)', lineHeight: 1.4 }}>
-          {template.description}
-        </div>
-        {template.triggerSummary && template.triggerSummary.length > 0 && (
-          <div style={{
-            marginTop: 'var(--eb-space-2)',
-            fontSize: 'var(--eb-text-xs)',
-            color: 'var(--eb-text-muted)',
-            display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-2)',
-          }}>
-            {template.triggerSummary.map(t => (
-              <span key={t.id} style={{
-                padding: '1px 6px',
-                background: 'var(--eb-bg-elevated)',
-                borderRadius: 'var(--eb-radius-sm)',
-                fontFamily: 'var(--eb-font-mono)',
-              }}>
-                {t.type === 'cron' ? `cron ${t.cron}` : (t.events || []).join(', ')}
-              </span>
-            ))}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 'var(--eb-space-2)' }}>
+            <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)' }}>
+              {template.displayName}
+            </div>
+            <div style={{
+              fontSize: 'var(--eb-text-xs)',
+              color: 'var(--eb-text-muted)',
+              fontFamily: 'var(--eb-font-mono)',
+              flexShrink: 0,
+            }}>
+              {template.sessionPolicy === 'per-invocation' ? 'reactive' : 'chat'}
+            </div>
           </div>
-        )}
+          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 'var(--eb-space-1)', lineHeight: 1.4 }}>
+            {template.description}
+          </div>
+          {template.triggerSummary && template.triggerSummary.length > 0 && (
+            <div style={{
+              marginTop: 'var(--eb-space-2)',
+              fontSize: 'var(--eb-text-xs)',
+              color: 'var(--eb-text-muted)',
+              display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-2)',
+            }}>
+              {template.triggerSummary.map(t => (
+                <span key={t.id} style={{
+                  padding: '1px 6px',
+                  background: 'var(--eb-bg-elevated)',
+                  borderRadius: 'var(--eb-radius-sm)',
+                  fontFamily: 'var(--eb-font-mono)',
+                }}>
+                  {t.type === 'cron' ? `cron ${t.cron}` : (t.events || []).join(', ')}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
-    </button>
+
+      {selected && multiAllowed && (
+        <div
+          onClick={e => e.stopPropagation()}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+            paddingTop: 'var(--eb-space-2)',
+            borderTop: '1px solid var(--eb-border-default)',
+          }}
+        >
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginRight: 'var(--eb-space-1)' }}>
+            Instances:
+          </span>
+          <button
+            type="button"
+            onClick={handleMinus}
+            style={{
+              width: 26, height: 26, borderRadius: 'var(--eb-radius-sm)',
+              background: 'var(--eb-bg-elevated)',
+              border: '1px solid var(--eb-border-default)',
+              color: 'var(--eb-text-primary)',
+              cursor: 'pointer', fontFamily: 'inherit',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 'var(--eb-text-md)', lineHeight: 1,
+            }}
+          >−</button>
+          <input
+            type="number"
+            value={count}
+            min={1}
+            max={10}
+            onClick={e => e.stopPropagation()}
+            onChange={handleCountChange}
+            style={{
+              width: 44, textAlign: 'center',
+              padding: 'var(--eb-space-1)',
+              background: 'var(--eb-bg-elevated)',
+              border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-sm)',
+              color: 'var(--eb-text-primary)',
+              fontSize: 'var(--eb-text-sm)',
+              fontFamily: 'var(--eb-font-mono)',
+            }}
+          />
+          <button
+            type="button"
+            onClick={handlePlus}
+            disabled={count >= 10}
+            style={{
+              width: 26, height: 26, borderRadius: 'var(--eb-radius-sm)',
+              background: 'var(--eb-bg-elevated)',
+              border: '1px solid var(--eb-border-default)',
+              color: count >= 10 ? 'var(--eb-text-muted)' : 'var(--eb-text-primary)',
+              cursor: count >= 10 ? 'not-allowed' : 'pointer',
+              fontFamily: 'inherit',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 'var(--eb-text-md)', lineHeight: 1,
+            }}
+          >+</button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -757,10 +846,22 @@ const READY_LABEL_ROLES = new Set([
   'business-analyst', 'developer', 'quality-engineer', 'roadmap-reporter',
 ]);
 
-function StepTeam({ form, setForm, templates, selectedRoles, setSelectedRoles, error, extendMode, existingRoles }) {
+function StepTeam({ form, setForm, templates, roleConfig, setRoleConfig, error, extendMode, existingRoles }) {
   if (!templates) return <Card>Loading templates…</Card>;
   const existingSet = new Set(extendMode ? (existingRoles || []) : []);
-  const showReadyLabel = selectedRoles.some(r => READY_LABEL_ROLES.has(r));
+  const showReadyLabel = roleConfig.some(r => READY_LABEL_ROLES.has(r.id));
+
+  function isSelected(id) { return roleConfig.some(r => r.id === id); }
+  function getCount(id) { return (roleConfig.find(r => r.id === id) || {}).count || 1; }
+  function toggle(id) {
+    setRoleConfig(prev => prev.some(r => r.id === id)
+      ? prev.filter(r => r.id !== id)
+      : [...prev, { id, count: 1 }]);
+  }
+  function setCount(id, count) {
+    setRoleConfig(prev => prev.map(r => r.id === id ? { ...r, count } : r));
+  }
+
   return (
     <Card>
       {extendMode && (
@@ -822,12 +923,10 @@ function StepTeam({ form, setForm, templates, selectedRoles, setSelectedRoles, e
             <RoleCard
               key={t.id}
               template={t}
-              selected={selectedRoles.includes(t.id)}
-              onToggle={() => {
-                setSelectedRoles(prev => prev.includes(t.id)
-                  ? prev.filter(x => x !== t.id)
-                  : [...prev, t.id]);
-              }}
+              selected={isSelected(t.id)}
+              count={getCount(t.id)}
+              onToggle={() => toggle(t.id)}
+              onCountChange={c => setCount(t.id, c)}
             />
           );
         })}
@@ -863,11 +962,20 @@ function StepReview({ form, templates, sshKeys, githubTokens, mcpServers, mcpCre
   const existingSet = new Set(extendMode ? (existingRoles || []) : []);
   const sshKey = sshKeys?.find(k => k.id === form.sshKeyId);
   const ghToken = githubTokens?.find(t => t.id === form.githubTokenId);
-  const allSelected = (templates || []).filter(t => form.selectedRoles.includes(t.id));
+  const roleConfig = form.roleConfig || [];
+  const allSelected = (templates || []).filter(t => roleConfig.some(r => r.id === t.id));
   const newRoles = allSelected.filter(t => !existingSet.has(t.id));
   const keptRoles = allSelected.filter(t => existingSet.has(t.id));
-  const showReadyLabel = form.selectedRoles.some(r => READY_LABEL_ROLES.has(r));
+  const showReadyLabel = roleConfig.some(r => READY_LABEL_ROLES.has(r.id));
   const knowledge = (form.mcpSelections || []).filter(s => s.serverId);
+
+  function countFor(id) { return (roleConfig.find(r => r.id === id) || {}).count || 1; }
+  function agentIds(id) {
+    const c = countFor(id);
+    if (c === 1) return [`${form.teamId}-${id}`];
+    return Array.from({ length: c }, (_, i) => `${form.teamId}-${id}-${i + 1}`);
+  }
+
   return (
     <Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -907,12 +1015,17 @@ function StepReview({ form, templates, sshKeys, githubTokens, mcpServers, mcpCre
                 <div style={{ ...hintStyle, marginTop: 0 }}>No new roles selected.</div>
               ) : (
                 <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
-                  {newRoles.map(t => (
-                    <li key={t.id}>
-                      <strong style={{ color: 'var(--eb-status-success)' }}>{t.displayName}</strong>
-                      {' '}— agent <code>{form.teamId}-{t.id}</code>
-                    </li>
-                  ))}
+                  {newRoles.map(t => {
+                    const c = countFor(t.id);
+                    const ids = agentIds(t.id);
+                    return (
+                      <li key={t.id}>
+                        <strong style={{ color: 'var(--eb-status-success)' }}>{t.displayName}</strong>
+                        {c > 1 && <span style={{ color: 'var(--eb-accent-primary)', marginLeft: 4 }}>× {c}</span>}
+                        {' '}— {ids.map((id, i) => <React.Fragment key={id}>{i > 0 && ', '}<code>{id}</code></React.Fragment>)}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>
@@ -935,12 +1048,17 @@ function StepReview({ form, templates, sshKeys, githubTokens, mcpServers, mcpCre
           <div>
             <div style={labelStyle}>Roles ({allSelected.length})</div>
             <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
-              {allSelected.map(t => (
-                <li key={t.id}>
-                  <strong style={{ color: 'var(--eb-text-primary)' }}>{t.displayName}</strong>
-                  {' '}— agent <code>{form.teamId}-{t.id}</code>
-                </li>
-              ))}
+              {allSelected.map(t => {
+                const c = countFor(t.id);
+                const ids = agentIds(t.id);
+                return (
+                  <li key={t.id}>
+                    <strong style={{ color: 'var(--eb-text-primary)' }}>{t.displayName}</strong>
+                    {c > 1 && <span style={{ color: 'var(--eb-accent-primary)', marginLeft: 4 }}>× {c}</span>}
+                    {' '}— {ids.map((id, i) => <React.Fragment key={id}>{i > 0 && ', '}<code>{id}</code></React.Fragment>)}
+                  </li>
+                );
+              })}
             </ul>
           </div>
         )}
@@ -1071,7 +1189,7 @@ export default function TeamSetup() {
     readyLabel: 'ready',
     sshKeyId: '',
     githubTokenId: '',
-    selectedRoles: [],
+    roleConfig: [],  // Array<{ id: string, count: number }>
     mcpSelections: [],
   });
 
@@ -1085,8 +1203,8 @@ export default function TeamSetup() {
 
   // Pre-select all templates the first time the catalog loads (create mode only).
   useEffect(() => {
-    if (!extendMode && templates && form.selectedRoles.length === 0) {
-      setForm(f => ({ ...f, selectedRoles: templates.map(t => t.id) }));
+    if (!extendMode && templates && form.roleConfig.length === 0) {
+      setForm(f => ({ ...f, roleConfig: templates.map(t => ({ id: t.id, count: 1 })) }));
     }
   }, [templates, extendMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1107,6 +1225,7 @@ export default function TeamSetup() {
           fetch(`/api/agents/${encodeURIComponent(teamId)}`),
           fetch('/api/agents'),
         ]);
+
 
         if (!teamRes.ok) {
           navigate('/team-setup', { state: { toastMessage: `Team "${teamId}" not found — starting fresh.` } });
@@ -1133,7 +1252,10 @@ export default function TeamSetup() {
         const roles = members.map(m => {
           if (m.roleId) return m.roleId;
           if (m.templateId) return m.templateId;
-          if (m.id.startsWith(prefix)) return m.id.slice(prefix.length);
+          if (m.id.startsWith(prefix)) {
+            // Strip instance-number suffix so "teamId-developer-1" → "developer"
+            return m.id.slice(prefix.length).replace(/-\d+$/, '');
+          }
           console.warn(`[TeamSetup] Member "${m.id}" does not follow "${prefix}<roleId>" convention — skipping`);
           return null;
         }).filter(Boolean);
@@ -1152,7 +1274,7 @@ export default function TeamSetup() {
           githubTokenId: env?.githubTokenId || '',
           readyLabel: 'ready',
           mcpSelections: (env?.mcpServers || []).map(s => ({ serverId: s.serverId, credentialId: s.credentialId || null })),
-          selectedRoles: roles,
+          roleConfig: roles.map(id => ({ id, count: 1 })),
         }));
       } catch (err) {
         setExtendError(err.message || String(err));
@@ -1191,10 +1313,10 @@ export default function TeamSetup() {
     if (step === 3) {
       if (extendMode) {
         const existingSet = new Set(existingRoles);
-        const hasNew = form.selectedRoles.some(r => !existingSet.has(r));
+        const hasNew = form.roleConfig.some(r => !existingSet.has(r.id));
         if (!hasNew) return 'Select at least one new role to add';
       } else {
-        if (form.selectedRoles.length === 0) return 'Pick at least one role';
+        if (form.roleConfig.length === 0) return 'Pick at least one role';
       }
       return null;
     }
@@ -1231,9 +1353,9 @@ export default function TeamSetup() {
     // In extend mode, send only the delta (roles not yet in the team).
     const effectiveMode = extendMode ? 'extend' : mode;
     const existingSet = new Set(existingRoles);
-    const effectiveRoles = extendMode
-      ? form.selectedRoles.filter(r => !existingSet.has(r))
-      : form.selectedRoles;
+    const effectiveRoleConfig = extendMode
+      ? form.roleConfig.filter(r => !existingSet.has(r.id))
+      : form.roleConfig;
 
     const body = {
       teamId: form.teamId,
@@ -1241,7 +1363,7 @@ export default function TeamSetup() {
       repository: { url: form.repoUrl.trim(), branch: form.branch.trim() || 'main', sshKeyId: form.sshKeyId },
       githubTokenId: form.githubTokenId,
       readyLabel: (form.readyLabel || 'ready').trim() || 'ready',
-      roles: effectiveRoles,
+      roles: effectiveRoleConfig,
       mcpServers: (form.mcpSelections || []).filter(s => s.serverId),
       mode: effectiveMode,
     };
@@ -1420,8 +1542,8 @@ export default function TeamSetup() {
           form={form}
           setForm={setForm}
           templates={templates}
-          selectedRoles={form.selectedRoles}
-          setSelectedRoles={fn => setForm(f => ({ ...f, selectedRoles: typeof fn === 'function' ? fn(f.selectedRoles) : fn }))}
+          roleConfig={form.roleConfig}
+          setRoleConfig={fn => setForm(f => ({ ...f, roleConfig: typeof fn === 'function' ? fn(f.roleConfig) : fn }))}
           error={stepError}
           extendMode={extendMode}
           existingRoles={existingRoles}

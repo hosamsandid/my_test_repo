@@ -9,19 +9,37 @@ const POLL_MS = 30_000;
 
 // Subset of GitHub Events API event types most useful for agent workflows.
 // (The Events API does not emit every webhook action — e.g. pull_request
-// has opened/closed/reopened but not synchronize.)
+// has opened/closed/reopened but not synchronize. It also splits closed
+// PRs: `closed` for non-merged closes, `merged` for merged ones — so a
+// "react to merge" trigger MUST subscribe to `pull_request.merged` even
+// though webhooks call it `closed` with `merged: true`.)
 const GITHUB_EVENT_OPTIONS = [
   { value: 'push',                                  label: 'Push' },
   { value: 'pull_request.opened',                   label: 'PR opened' },
-  { value: 'pull_request.closed',                   label: 'PR closed' },
+  { value: 'pull_request.closed',                   label: 'PR closed (without merge)' },
+  { value: 'pull_request.merged',                   label: 'PR merged' },
   { value: 'pull_request.reopened',                 label: 'PR reopened' },
+  { value: 'pull_request.labeled',                  label: 'PR labeled' },
+  { value: 'pull_request.unlabeled',                label: 'PR unlabeled' },
   { value: 'pull_request_review.submitted',         label: 'PR review submitted' },
   { value: 'pull_request_review_comment.created',   label: 'PR review comment' },
   { value: 'issue_comment.created',                 label: 'Issue / PR comment' },
   { value: 'issues.opened',                         label: 'Issue opened' },
   { value: 'issues.closed',                         label: 'Issue closed' },
+  { value: 'issues.labeled',                        label: 'Issue labeled' },
+  { value: 'issues.unlabeled',                      label: 'Issue unlabeled' },
   { value: 'release.published',                     label: 'Release published' },
 ];
+
+// Events that carry a `payload.label.name` GitHub sends — the only ones
+// where a label-name filter makes sense. Used by the form to decide
+// whether to show the label-name input.
+const LABEL_FILTERABLE_EVENTS = new Set([
+  'issues.labeled',
+  'issues.unlabeled',
+  'pull_request.labeled',
+  'pull_request.unlabeled',
+]);
 
 // Mirrors orchestrator/github-poller.js — extracts owner/repo from the
 // repository URL stored in the working environment.
@@ -310,7 +328,8 @@ function TriggerRow({ trigger, agentId, onEdit, onDeleted, onToggled }) {
     schedule = `/hooks/${agentId}/${trigger.id}`;
   } else if (trigger.type === 'github-event') {
     const evCount = Array.isArray(trigger.events) ? trigger.events.length : 0;
-    schedule = `${trigger.repo || '?'} · ${evCount} event${evCount === 1 ? '' : 's'}`;
+    const labelTag = trigger.labelFilter ? ` · label="${trigger.labelFilter}"` : '';
+    schedule = `${trigger.repo || '?'} · ${evCount} event${evCount === 1 ? '' : 's'}${labelTag}`;
   } else {
     schedule = trigger.cron || trigger.at || '—';
   }
@@ -415,11 +434,17 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
     at:          initialValues?.at          ?? '',
     repo:        initialValues?.repo        ?? '',
     events:      Array.isArray(initialValues?.events) ? initialValues.events : [],
+    // Optional label-name filter for *.labeled / *.unlabeled events.
+    // Empty string = match any label (legacy behavior). The poller treats
+    // missing or empty as no filter, so the wire format is `string | undefined`.
+    labelFilter: initialValues?.labelFilter ?? '',
     secret:      initialValues?.secret      ?? (initialType === 'http' ? '' : generateSecret()),
     description: initialValues?.description ?? '',
     prompt:      initialValues?.prompt      ?? '',
     enabled:     initialValues?.enabled !== false,
   }));
+  const showLabelFilter = form.type === 'github-event'
+    && form.events.some(e => LABEL_FILTERABLE_EVENTS.has(e));
   const [copyDone, setCopyDone] = useState(null); // 'path' | 'secret' | null
   const [secretVisible, setSecretVisible] = useState(!isEdit);
   const [formError, setFormError] = useState(null);
@@ -497,6 +522,13 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
     else if (form.type === 'github-event') {
       body.repo = form.repo;
       body.events = form.events;
+      // Persist the label-name filter only when it's relevant to the
+      // selected events AND the user actually entered something. Sending
+      // an empty string would round-trip back into the form as "no
+      // filter" anyway, but the explicit `null` here also makes the PUT
+      // path clear an existing filter when the user blanks the field.
+      const lf = (form.labelFilter || '').trim();
+      body.labelFilter = (showLabelFilter && lf) ? lf : null;
     }
     await onSave(body);
   }
@@ -613,6 +645,24 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
               The agent receives the full event payload as JSON appended to its prompt.
             </div>
           </div>
+
+          {showLabelFilter && (
+            <div>
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+                Label name filter
+              </div>
+              <input
+                type="text"
+                value={form.labelFilter}
+                onChange={e => set('labelFilter', e.target.value)}
+                placeholder="e.g. ready (leave empty to fire for any label)"
+                style={{ ...FIELD_STYLE, width: '100%' }}
+              />
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                Only fire when the {form.events.includes('issues.unlabeled') || form.events.includes('pull_request.unlabeled') ? 'removed' : 'added'} label matches this name exactly. Saves a Claude invocation on every other label change.
+              </div>
+            </div>
+          )}
         </div>
       )}
 

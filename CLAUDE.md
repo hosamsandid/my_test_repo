@@ -81,8 +81,8 @@ The setup wizard and the SSH-keys / GitHub-tokens admin pages explain this ratio
 | Role | Behavior |
 |---|---|
 | `agent` | A standalone agent. Responds to direct messages from a human in its 1:1 DM room. With cron / GitHub triggers it can also run autonomously. |
-| `team` | A reusable system-prompt template that doesn't host an agent itself. Use **Add Member** on the team card to spawn one or more `team-member` agents that share the prompt and Working Environment but each get their own workspace and chat. |
-| `team-member` | A single member spawned from a team. Behaves like a standalone agent but inherits the team's system prompt; the parent team is recorded in `parentTeamId`. |
+| `team` | A reusable system-prompt template + shared Working Environment that doesn't host an agent itself. Use **Add Member** on the team card (or the Team-Setup wizard) to spawn one or more `team-member` agents. |
+| `team-member` | A single member spawned from a team. Inherits the team's `systemPromptTemplate` and the env's skills by default. Records its parent in `parentTeamId`. May override either or both: `systemPrompt` (string) overrides the team prompt; `skillsOverride` (array of skill names) replaces the env's skill set for this member's workspace. Absence of either field = inherit. Editing the team's `systemPromptTemplate` eagerly rewrites every inheriting member's `AGENT-PROMPT.md` / `CLAUDE.md`; skill changes on the team's env are picked up at the next member rebuild. |
 | `orchestrator` | Bound to a BriefingPack directory (`briefingsPath`). On creation and on every tick of its claim loop (~30s), it pulls main (60s-throttled), scans the directory, and writes one stub `bp-instance` agent per BP. When a BP transitions to `status: dispatched`, the orchestrator posts a DM suggestion to the user; on user confirmation the orchestrator agent runs a `curl` against `/internal/agents/:id/claim` which patches the BP's `brief.md` (status, agent-id, claimed timestamp), commits + pushes to make the claim visible to teammates, and then materialises the bp-instance. Manual Activate / Deactivate via the Admin Console bypasses the suggest flow. |
 | `bp-instance` | One per Briefing Pack under an orchestrator. Lives as a stub (no Matrix user, no workspace) until claimed or activated. The activated agent is bound to one specific BP and uses the ACE engineering skill to execute its LoopScript. |
 
@@ -104,7 +104,7 @@ Autonomous agents are driven by **triggers** stored in a per-agent `triggers.jso
 | `cron` | `cron` (5-field expression) | Recurring execution via node-cron |
 | `once` | `at` (ISO timestamp) | One-shot, auto-removed after execution |
 | `http` | `secret` (auto-generated) | Fired by an external HTTP POST; see Webhook Server below |
-| `github-event` | `repo` (`owner/name`), `events` (string list, e.g. `pull_request.opened`) | Fired by the GitHub poller when the GitHub Events API reports a matching event for the repo. The agent receives the trigger's `prompt` plus the full event payload as JSON. |
+| `github-event` | `repo` (`owner/name`), `events` (string list, e.g. `pull_request.opened`), optional `from` (origin filter — see *Layered loop protection* below) | Fired by the GitHub poller when the GitHub Events API reports a matching event for the repo. The agent receives the trigger's `prompt` plus the full event payload as JSON. |
 
 **Webhook Server (`http` triggers)**
 
@@ -129,9 +129,21 @@ X-Hook-Secret: <trigger.secret>
 - **Cursor**: `lastEventId` per repo persisted to `/workspace/github-poller/state.json`. First poll only records a baseline (no event flood on startup).
 - **Fan-out**: matched events are enqueued in the same `/workspace/agents/:agentId/pending-triggers.json` that HTTP triggers write to — the agent-runner picks them up via its existing 5 s drain. Pending entries carry `github.{event, eventId, repo, actor, createdAt, payload}` and are appended to the agent's prompt as a fenced JSON block.
 - **Event keys**: `<lowercase_type_without_event>.<action>` (e.g. `pull_request.opened`, `pull_request_review.submitted`). Bare `push` (no action). The Events API does not emit every webhook action — for instance there's no `pull_request.synchronize`.
-- **Identity / loop protection**: agents share one GitHub PAT, so the actor field in events is the same for everyone. Loop protection works via metadata tags applied by the `gh-as-agent` wrapper (`/usr/local/bin/gh-as-agent` in the orchestrator image): `commit` sets the author email to `<agentId>@agents.local`; `stamp <file>` appends `<!-- agent: <id> -->` to a body file before posting via `gh pr create / review / comment`. The poller's `extractOriginAgent` reads either signal from incoming events; if the origin matches the destination agent, the event is dropped before fan-out. Agents that bypass the wrapper lose this protection.
+- **Identity**: agents share one GitHub PAT, so the actor field in events is the same for everyone. Per-agent attribution comes from metadata tags applied by the `gh-as-agent` wrapper (`/usr/local/bin/gh-as-agent` in the orchestrator image): `commit` sets the author email to `<agentId>@agents.local`; `stamp <file>` appends `<!-- agent: <id> -->` to a body file before posting via `gh pr create / review / comment`. The poller's `extractOriginAgent` reads either signal from incoming events. Agents that bypass the wrapper lose attribution and the loop-protection layers below.
+
+**Layered loop protection.** Three layers stack — every event must pass them in order before reaching an agent's queue:
+
+| Layer | Where | What it blocks |
+|---|---|---|
+| 0 — Self-loop | `_fanOut` | Origin matches destination. Unconditional, no spec value disables it. |
+| 2 — `from` filter | `applyFromFilter` | Per-trigger origin filter. Values: `any-except-self` (default), `humans`, `agents`, `team` (origin in same `team` as subscriber, read from `config.json`), `["agent-id", ...]` allowlist (with `"humans"` as a special token), `{ exclude: [...] }` blocklist. Unknown specs fail-closed. |
+| 3 — Conversation throttle | `_checkAndIncThrottle` | Per `(agent, conversationKey)` sliding window — default 5 events/h. `conversationKey` groups by PR/issue/branch (`pr:42`, `issue:99`, `push:refs/heads/x`, …). On the first over-threshold drop the poller writes a `kind: "throttle-warning"` entry to `pending-triggers.json`; the agent-runner posts a plain DM warning (no Claude call) and then drops further events silently until the window resets. Buckets persist in `/workspace/github-poller/throttle-state.json` and self-prune at 2× the window. |
+
+Layer 1 (template discipline — narrowly scoped events per role) lives in the role templates themselves, not in code, so it isn't a runtime layer.
 
 Results are posted to `trigger.roomId` if set, otherwise to the agent's DM room with the admin (read from `/workspace/agents/<id>/dm-room.json`). If neither is available — i.e. the user has not yet opened a chat with this agent — the trigger run is skipped. `[PASS]` suppresses output.
+
+**Session policy on triggered runs.** Agents may declare `sessionPolicy: per-invocation` in `config.json`. When set, *triggered* runs (`github-event`, `cron`, `http`) start with a fresh Claude session (no `--resume`) and don't write the session pointer at run end — the DM session continuity is preserved untouched. The trigger prompt also gets a learn-hint instructing Claude to extract reusable lessons into `memory/log.md` before responding, so persona persists even though the conversational context doesn't. DM messages are unaffected: chat continuity is always honoured. Agents without the field default to `persistent` (legacy behaviour).
 
 ### BP-event router
 
@@ -199,6 +211,38 @@ Every bp-instance chat in the Admin Console has a hand-off action that lets the 
 
 All agent lifecycle operations (create / enable / disable / edit prompt / delete) happen via the **Admin Console** at `http://localhost:4000`.
 
+### Team-Setup wizard
+
+`POST /api/teams` (driven by the **Team Setup** wizard at `/team-setup`) materialises a team-shaped agent group in one atomic-with-rollback transaction. The wizard sits on top of the existing `team` / `team-member` machinery — the result is identical in shape to a manually-created team plus members. Inputs: a `teamId` slug, team name, repository (URL, branch, `sshKeyId`), `githubTokenId`, and a list of role templates.
+
+Role templates live as JSON files under `/template-workspace/agent-templates/` (seeded from `orchestrator/skill-pool/agent-templates/` via `make seed-templates`). The initial catalog ships with seven roles:
+
+| Role | Session | Trigger | `from` |
+|---|---|---|---|
+| `business-analyst` | persistent | — (DM only) | — |
+| `developer` | per-invocation | `issues.labeled` (`ready` gate) | any-except-self |
+| `code-reviewer` | per-invocation | `pull_request.opened/reopened` | any-except-self |
+| `security-reviewer` | per-invocation | `pull_request.opened/reopened` | any-except-self |
+| `test-reviewer` | per-invocation | `pull_request.opened/reopened` | any-except-self |
+| `documentation-sync` | per-invocation | `pull_request.closed` (merged) | any-except-self |
+| `issue-triage` | per-invocation | `issues.opened` | humans |
+
+Each `per-invocation` role also ships a weekly self-curation cron (staggered 5min apart) that reviews and prunes the agent's `memory/`.
+
+**Materialisation flow:**
+1. One Working Environment id `<teamId>` carrying the shared repo, SSH key, PAT, and the team-default skill set (empty in v1).
+2. One `team` agent id `<teamId>` with a generic shared `systemPromptTemplate` and `skipFirstMember: true` (so the wizard adds members itself with role overrides instead of getting an auto-numbered `<teamId>-1`).
+3. One `team-member` agent per selected role, id `<teamId>-<roleId>`. Each member carries:
+   - `systemPrompt` = role-specific prompt from the template (override against the team default).
+   - `skillsOverride` deliberately omitted in v1 — members inherit the team-env's empty skill list. Once role-specific skill packs ship they slot in here.
+   - `sessionPolicy: per-invocation` (for reactive roles).
+   - Full `triggers.json` rendered from the template (`{{repoFullName}}` substituted), with `from` filter and `repo` set to the team's repo.
+4. One DM room pre-created per member (best-effort — failure here doesn't roll back the team).
+
+On any failure the wizard rolls back members (`DELETE /internal/agents/:id`), then the team agent, then the env, in reverse creation order. `mode: "extend"` keeps a pre-existing team and adds only the missing role-members; `mode: "create"` (default) returns 409 if the env or team or any member already exists.
+
+Members can be edited later via the standard agent edit form: System Prompt and Skills each toggle between **Inherit from team** (override field cleared) and **Custom** (override stored on the member). Editing the team's prompt-template eagerly pushes the new value to every inheriting member; skill changes on the team's env are picked up at the next member rebuild (lazy push, by design).
+
 ### Direct Messages & Session Log
 
 Each agent runs the Claude CLI as:
@@ -256,15 +300,18 @@ The Admin Console embeds a Matrix client at `/chats` (and `/chats/:agentId`) so 
 | `.env` | Secrets: Matrix tokens, LLM proxy URL + auth token (gitignored) |
 | `Makefile` | Build + start convenience targets (`make up`, `make down`, `make logs`, ...) |
 | `orchestrator/orchestrator.js` | Backend service: agent lifecycle, child-process spawning, environment-aware workspace seeding, internal HTTP API for the admin console |
-| `orchestrator/agent-runner.js` | Per-agent child process: Matrix client + Claude CLI invocations + trigger scheduler |
+| `orchestrator/agent-runner.js` | Per-agent child process: Matrix client + Claude CLI invocations + trigger scheduler. Honors `sessionPolicy: per-invocation` and posts plain-text throttle warnings on `kind: throttle-warning` queue entries. |
+| `orchestrator/github-poller.js` | Polls the GitHub Events API; applies Layer-0 self-loop, Layer-2 `from` filter, Layer-3 conversation throttle before fanning events out to per-agent `pending-triggers.json`. |
 | `orchestrator/session-log.js` | JSONL session logger: maps Claude `stream-json` NDJSON to normalized events, append-only writer |
 | `orchestrator/Dockerfile` | Node 22 + Claude Code CLI + git + openssh-client |
 | `orchestrator/CLAUDE-template.md` | Base template baked into the image as `/defaults/CLAUDE.md`, used as fallback when the skill-pool volume has no CLAUDE.md |
+| `orchestrator/skill-pool/agent-templates/` | Role-template JSON files for the Team-Setup wizard (seeded into `/template-workspace/agent-templates/` via `make seed-templates`). |
 | `orchestrator/setup.sh` | Initial setup: register the admin Matrix user, print the access token |
-| `admin-console/api/api.js` | Express API: agents, environments, ssh-keys, skills, models, mcp |
+| `admin-console/api/api.js` | Express API: agents, environments, ssh-keys, skills, models, mcp, **`POST /api/teams`** (Team-Setup wizard backend), `GET /api/agent-templates`. |
 | `admin-console/src/pages/WorkingEnvironments.jsx` | UI: CRUD for environments (skills picker, optional repo + ssh key) |
 | `admin-console/src/pages/SshKeys.jsx` | UI: CRUD for SSH keys (paste private key, see fingerprint only) |
-| `admin-console/src/pages/AgentManager.jsx` | UI: CRUD for agents (with required environment dropdown) |
+| `admin-console/src/pages/Agents.jsx` | UI: CRUD for agents (env dropdown, role-aware cards, team-member edit form with inherit/override toggles for `systemPrompt` and `skillsOverride`). |
+| `admin-console/src/pages/TeamSetup.jsx` | UI: 4-step wizard (Project → Credentials → Team → Review) that drives `POST /api/teams`. |
 
 ## Commands
 

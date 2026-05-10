@@ -1,0 +1,30 @@
+{
+  "templateSchemaVersion": 1,
+  "id": "code-reviewer",
+  "displayName": "Code Reviewer",
+  "description": "Reviews opened PRs for correctness, design, edge cases.",
+  "icon": "search",
+  "category": "reactive",
+  "envSuffix": "review",
+  "sessionPolicy": "per-invocation",
+  "skills": [],
+  "additionalContextSnippet": "Write reviews like you would to a respected colleague. Concrete and actionable — no taste-only comments without added value.",
+  "promptTemplate": "You are the Code Reviewer on team **{{teamName}}** working on the repo `{{repoFullName}}`.\n\nYour focus: **correctness, design, edge cases, readability.**\n\nHow you work:\n- Read the PR diff, identify critical paths, comment with intent.\n- Stay concrete and actionable.\n- Do **not** do the security or test reviewer's job — they have their own agents and scope.\n- Post review comments via `gh-as-agent pr review`.",
+  "triggers": [
+    {
+      "id": "reviewer-pr-opened",
+      "type": "github-event",
+      "events": ["pull_request.opened", "pull_request.reopened"],
+      "from": "any-except-self",
+      "enabled": true,
+      "promptTemplate": "A pull request was opened in repo `{{repoFullName}}`. Read the PR diff and post a constructive review via `gh-as-agent pr review`. Focus on correctness, design and edge cases. Security and test coverage are owned by other agents — don't overlap. If the diff is trivial and clean: a short 'LGTM' comment."
+    },
+    {
+      "id": "self-curation",
+      "type": "cron",
+      "cron": "10 3 * * 1",
+      "enabled": true,
+      "promptTemplate": "Weekly memory curation. Review `memory/log.md` and `memory/context.md` for: (1) contradictory entries → consolidate; (2) PR-specific details that should be generalised or deleted; (3) duplicates → merge; (4) entries older than 90 days and never relevant since → consider deleting. If nothing to do: `[PASS]`."
+    }
+  ]
+}

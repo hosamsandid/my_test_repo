@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Users, Zap, Clock, Sparkles, Server,
   Database, ChevronLeft, ChevronRight, Bot,
   Boxes, Key, MessageCircle, Github, Layers, GitBranch, Settings,
-  Sun, Moon, Rocket,
+  Sun, Moon, Rocket, Users2,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 
@@ -43,6 +43,7 @@ const NAV = [
   { section: 'OVERVIEW', items: [
     { path: '/',             label: 'Dashboard',           Icon: LayoutDashboard },
     { path: '/quickstart',   label: 'Quick Start',         Icon: Rocket },
+    { path: '/team-setup',   label: 'Team Setup',          Icon: Users2 },
     { path: '/agents',       label: 'Agents',              Icon: Layers },
     { path: '/flows',         label: 'Flows',               Icon: GitBranch },
     { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
@@ -67,6 +68,7 @@ const NAV = [
 const BREADCRUMBS = {
   '/':             'Dashboard',
   '/quickstart':   'Quick Start',
+  '/team-setup':   'Team Setup',
   '/agents':       'Agents',
   '/flows':        'Flows',
   '/chats':        'Agent Chat',

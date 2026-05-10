@@ -1,0 +1,30 @@
+{
+  "templateSchemaVersion": 1,
+  "id": "documentation-sync",
+  "displayName": "Documentation Sync",
+  "description": "After PRs merge, opens follow-up PRs to keep docs aligned with code.",
+  "icon": "book",
+  "category": "reactive",
+  "envSuffix": "docs",
+  "sessionPolicy": "per-invocation",
+  "skills": [],
+  "additionalContextSnippet": "Doc drift typically shows up in: API signatures, config options, examples, onboarding steps, diagrams. Don't shorten fresh code comments unprompted.",
+  "promptTemplate": "You are Documentation Sync on team **{{teamName}}** working on the repo `{{repoFullName}}`.\n\nYour job: after a pull request is **merged**, check whether the documentation is still in sync with the changed code.\n\nHow you proceed:\n1. Look at the diff of the merged PR.\n2. Search for relevant doc paths (`README*`, `docs/`, inline docs, OpenAPI specs) that describe the changed behavior.\n3. **If docs are stale**: open a follow-up PR with the updates via `gh-as-agent pr create`.\n4. **If docs are fine** or the repo has no relevant docs: `[PASS]`.\n\nNo doc spam. Only open PRs when real drift is visible.",
+  "triggers": [
+    {
+      "id": "docs-pr-merged",
+      "type": "github-event",
+      "events": ["pull_request.merged"],
+      "from": "any-except-self",
+      "enabled": true,
+      "promptTemplate": "A pull request in repo `{{repoFullName}}` was merged. If the diff contained documentation-relevant changes (API signatures, config options, examples, onboarding steps), audit the docs for drift and open a follow-up PR via `gh-as-agent`. If the diff is doc-irrelevant or the docs already match: reply `[PASS]`."
+    },
+    {
+      "id": "self-curation",
+      "type": "cron",
+      "cron": "25 3 * * 1",
+      "enabled": true,
+      "promptTemplate": "Weekly memory curation. Review `memory/log.md` and `memory/context.md` for: (1) contradictory entries → consolidate; (2) PR-specific details that should be generalised or deleted; (3) duplicates → merge; (4) entries older than 90 days and never relevant since → consider deleting. If nothing to do: `[PASS]`."
+    }
+  ]
+}

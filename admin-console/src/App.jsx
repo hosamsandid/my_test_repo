@@ -7,6 +7,7 @@ const Dashboard           = lazy(() => import('./pages/Dashboard'));
 const Agents              = lazy(() => import('./pages/Agents'));
 const AgentChat           = lazy(() => import('./pages/AgentChat'));
 const QuickStart          = lazy(() => import('./pages/QuickStart'));
+const TeamSetup           = lazy(() => import('./pages/TeamSetup'));
 const WorkingEnvironments = lazy(() => import('./pages/WorkingEnvironments'));
 const SshKeys             = lazy(() => import('./pages/SshKeys'));
 const GithubTokens        = lazy(() => import('./pages/GithubTokens'));
@@ -53,6 +54,7 @@ export default function App() {
           <Route path="/chats"           element={<AgentChat />} />
           <Route path="/chats/:agentId"  element={<AgentChat />} />
           <Route path="/quickstart"   element={<QuickStart />} />
+          <Route path="/team-setup"   element={<TeamSetup />} />
           <Route path="/environments" element={<WorkingEnvironments />} />
           <Route path="/ssh-keys"     element={<SshKeys />} />
           <Route path="/github-tokens" element={<GithubTokens />} />

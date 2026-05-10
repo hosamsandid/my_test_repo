@@ -2,13 +2,13 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Folder, FolderOpen, ChevronRight, ChevronLeft, Check } from 'lucide-react';
 
 /**
- * DirectoryPicker — Modal zum Navigieren und Auswählen eines Verzeichnisses
- * im Agenten-Workspace.
+ * DirectoryPicker — modal for navigating and selecting a directory
+ * inside the agent workspace.
  *
  * Props:
- *   agentId   — ID des Agenten (für API-Aufrufe)
- *   onSelect  — Callback(path: string) mit dem gewählten relativen Pfad
- *   onClose   — Callback zum Schließen ohne Auswahl
+ *   agentId   — agent id (used for API calls)
+ *   onSelect  — callback(path: string) with the selected relative path
+ *   onClose   — callback to close without selecting
  */
 export default function DirectoryPicker({ agentId, onSelect, onClose }) {
   const [currentPath, setCurrentPath] = useState('');
@@ -21,7 +21,7 @@ export default function DirectoryPicker({ agentId, onSelect, onClose }) {
     loadDirs(currentPath);
   }, [currentPath]);
 
-  // Escape-Taste schließt den Picker
+  // Escape closes the picker
   useEffect(() => {
     function handleKeyDown(e) {
       if (e.key === 'Escape') onClose();
@@ -38,7 +38,7 @@ export default function DirectoryPicker({ agentId, onSelect, onClose }) {
       const resp = await fetch(`/api/agents/${agentId}/workspace/dirs${qs}`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
-      // Der Endpunkt gibt { path, items } zurück — wir filtern nur Verzeichnisse
+      // The endpoint returns { path, items } — keep only directories
       const items = Array.isArray(data) ? data : (data.items || []);
       setDirs(items.filter(item => item.type === 'dir'));
     } catch (err) {
@@ -60,14 +60,14 @@ export default function DirectoryPicker({ agentId, onSelect, onClose }) {
     setCurrentPath(newPath);
   }
 
-  // Breadcrumb-Segmente
+  // Breadcrumb segments
   const breadcrumbParts = currentPath ? currentPath.split('/').filter(Boolean) : [];
 
   return (
     <div
       role="dialog"
       aria-modal="true"
-      aria-label="Verzeichnis auswählen"
+      aria-label="Select directory"
       style={overlayStyle}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
@@ -75,11 +75,11 @@ export default function DirectoryPicker({ agentId, onSelect, onClose }) {
         {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--eb-space-4)' }}>
           <h3 style={{ margin: 0, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
-            Verzeichnis auswählen
+            Select directory
           </h3>
           <button
             onClick={onClose}
-            aria-label="Schließen"
+            aria-label="Close"
             style={{
               background: 'none', border: 'none', cursor: 'pointer',
               color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-lg)',
@@ -107,7 +107,7 @@ export default function DirectoryPicker({ agentId, onSelect, onClose }) {
           <button
             onClick={() => setCurrentPath('')}
             style={breadcrumbBtnStyle}
-            title="Wurzelverzeichnis"
+            title="Root directory"
           >
             /
           </button>
@@ -124,7 +124,7 @@ export default function DirectoryPicker({ agentId, onSelect, onClose }) {
           ))}
         </div>
 
-        {/* Navigation: Zurück-Button */}
+        {/* Navigation: Up button */}
         {currentPath && (
           <button
             onClick={navigateUp}
@@ -144,11 +144,11 @@ export default function DirectoryPicker({ agentId, onSelect, onClose }) {
             }}
           >
             <ChevronLeft size={15} />
-            Zurück
+            Up
           </button>
         )}
 
-        {/* Verzeichnisliste */}
+        {/* Directory list */}
         <div style={{
           border: '1px solid var(--eb-border-default)',
           borderRadius: 'var(--eb-radius-md)',
@@ -159,20 +159,20 @@ export default function DirectoryPicker({ agentId, onSelect, onClose }) {
         }}>
           {loading && (
             <div style={stateRowStyle}>
-              <span style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Laden…</span>
+              <span style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading…</span>
             </div>
           )}
           {error && (
             <div style={stateRowStyle}>
               <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>
-                Fehler: {error}
+                Error: {error}
               </span>
             </div>
           )}
           {!loading && !error && dirs.length === 0 && (
             <div style={stateRowStyle}>
               <span style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
-                Keine Unterverzeichnisse vorhanden.
+                No subdirectories.
               </span>
             </div>
           )}
@@ -211,14 +211,14 @@ export default function DirectoryPicker({ agentId, onSelect, onClose }) {
           </div>
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)', flexShrink: 0 }}>
             <button onClick={onClose} style={cancelBtnStyle}>
-              Abbrechen
+              Cancel
             </button>
             <button
               onClick={() => onSelect(currentPath)}
               style={confirmBtnStyle}
             >
               <Check size={14} />
-              Dieses Verzeichnis wählen
+              Select this directory
             </button>
           </div>
         </div>

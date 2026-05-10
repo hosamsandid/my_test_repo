@@ -7,7 +7,8 @@ import { AlertTriangle, Info } from 'lucide-react';
  * Props:
  *   open       - boolean, whether the dialog is visible
  *   title      - string, dialog title
- *   message    - string, confirmation message body
+ *   message    - string OR ReactNode, confirmation message body. Strings are wrapped in a <p>;
+ *                ReactNodes are rendered as-is so callers can include lists, emphasis, etc.
  *   variant    - 'danger' | 'warning' | 'info' (default: 'warning')
  *   confirmLabel - string (default: 'Confirm')
  *   cancelLabel  - string (default: 'Cancel')
@@ -25,6 +26,7 @@ export default function ConfirmDialog({
   onConfirm,
   onCancel,
   alertOnly = false,
+  maxWidth = 440,
 }) {
   const dialogRef = useRef(null);
   const confirmRef = useRef(null);
@@ -65,16 +67,22 @@ export default function ConfirmDialog({
       aria-label={title}
       style={overlayStyle}
     >
-      <div style={dialogStyle}>
+      <div style={{ ...dialogStyle, maxWidth }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-3)' }}>
           <Icon size={20} style={{ color: iconColor, flexShrink: 0, marginTop: 2 }} />
           <div style={{ flex: 1 }}>
             <h3 style={{ margin: 0, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
               {title}
             </h3>
-            <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
-              {message}
-            </p>
+            {typeof message === 'string' ? (
+              <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+                {message}
+              </p>
+            ) : (
+              <div style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+                {message}
+              </div>
+            )}
           </div>
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-4)' }}>

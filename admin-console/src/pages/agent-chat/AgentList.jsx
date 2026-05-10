@@ -41,10 +41,10 @@ function iconForRole(role) {
 }
 
 const STATUS_DOT = {
-  busy:    { color: 'var(--eb-status-warning)', label: 'Verarbeitet…',        pulse: true  },
-  unread:  { color: 'var(--eb-status-success)', label: 'Neue Nachricht',       pulse: false },
-  idle:    { color: 'var(--eb-text-muted)',     label: 'Wartet auf Eingabe',  pulse: false },
-  problem: { color: 'var(--eb-status-error)',   label: 'Nicht verfügbar',      pulse: false },
+  busy:    { color: 'var(--eb-status-warning)', label: 'Working…',          pulse: true  },
+  unread:  { color: 'var(--eb-status-success)', label: 'New message',       pulse: false },
+  idle:    { color: 'var(--eb-text-muted)',     label: 'Waiting for input', pulse: false },
+  problem: { color: 'var(--eb-status-error)',   label: 'Unavailable',       pulse: false },
 };
 
 function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = 'idle' }) {

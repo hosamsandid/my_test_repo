@@ -12,6 +12,7 @@ const matrix = require('./matrix');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
+const AGENT_TEMPLATES_DIR = path.join(POOL_DIR, 'agent-templates');
 const AGENTS_DIR = path.join(WORKSPACE, 'agents');
 const ENVIRONMENTS_DIR = path.join(WORKSPACE, 'environments');
 const SSH_KEYS_DIR = path.join(ENVIRONMENTS_DIR, '_keys');
@@ -576,7 +577,7 @@ app.put('/api/agents/:id', async (req, res) => {
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, briefingsPath } = req.body;
+  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skillsOverride } = req.body;
 
   // Enable/disable goes through the orchestrator so stubs (no token yet)
   // get fully materialized — Matrix user, workspace seeding, agent-runner
@@ -597,12 +598,47 @@ app.put('/api/agents/:id', async (req, res) => {
     }
   }
 
+  // Team prompt edit: route through the orchestrator so the new template gets
+  // pushed to all inheriting members in the same call (their AGENT-PROMPT.md
+  // and CLAUDE.md are rewritten in place — see updateTeamPrompt).
+  if (cfg.role === 'team' && typeof systemPromptTemplate === 'string') {
+    const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+    try {
+      const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(id)}/prompt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ systemPromptTemplate }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) return res.status(resp.status).json(data);
+    } catch (err) {
+      return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+    }
+  }
+
   // Apply the rest of the field updates directly to the on-disk config.
-  // (The orchestrator's enable/disable already wrote enabled itself.)
+  // (The orchestrator's enable/disable already wrote enabled itself; the
+  // team-prompt branch above also wrote canonically.)
   const fresh = readJsonFile(cfgPath, cfg);
   if (displayName !== undefined) fresh.displayName = displayName;
   if (role !== undefined) fresh.role = role;
   if (briefingsPath !== undefined) fresh.briefingsPath = briefingsPath;
+
+  // Team-member inheritance toggles. `null` means "switch to inherit"
+  // (delete the field); a string / array means "set the override".
+  if (fresh.role === 'team-member') {
+    if (systemPrompt === null) {
+      delete fresh.systemPrompt;
+    } else if (typeof systemPrompt === 'string') {
+      fresh.systemPrompt = systemPrompt;
+    }
+    if (skillsOverride === null) {
+      delete fresh.skillsOverride;
+    } else if (Array.isArray(skillsOverride)) {
+      fresh.skillsOverride = skillsOverride;
+    }
+  }
+
   writeJsonAtomic(cfgPath, fresh);
   res.json({ id, ...fresh });
 });
@@ -1029,21 +1065,27 @@ app.post('/api/agents/:id/sync-bps', async (req, res) => {
 app.post('/api/agents/:teamId/members', async (req, res) => {
   const { teamId } = req.params;
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid agent id' });
-
+  // Containment check: AGENT_ID_RE already excludes traversal segments,
+  // but CodeQL doesn't always recognise the regex as a sanitiser when the
+  // value travels through a destructure first. Re-check with path.relative.
   const agentsBaseDir = path.resolve(AGENTS_DIR);
   const teamDir = path.resolve(agentsBaseDir, teamId);
   const rel = path.relative(agentsBaseDir, teamDir);
   if (rel.startsWith('..') || path.isAbsolute(rel)) {
     return res.status(400).json({ error: 'Invalid agent id' });
   }
-
   if (!fs.existsSync(teamDir)) {
     return res.status(404).json({ error: 'Team not found' });
   }
+  // Body is optional. When present it carries the override / config fields
+  // the orchestrator's addTeamMember now accepts: { id, displayName,
+  // systemPromptOverride, skillsOverride, sessionPolicy, triggers }.
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(teamId)}/members`, {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body || {}),
     });
     const data = await resp.json();
     if (!resp.ok) return res.status(resp.status).json(data);
@@ -2074,6 +2116,806 @@ app.post('/api/quickstart', async (req, res) => {
     agent: { id: agentId, displayName },
     seed: agentResp,
   });
+});
+
+/* ─── Team-Setup wizard ────────────────────────────────────────────────
+ *
+ * One-shot endpoint that materialises an entire team of role-specialised
+ * agents from a small wizard payload. Reads role templates from the pool
+ * (/pool/agent-templates/*.json), then in-order:
+ *
+ *   1. Validates input + checks credentials exist.
+ *   2. Computes per-role envId/agentId from the team slug.
+ *   3. Pre-flight collision check. mode="create" (default) refuses any
+ *      pre-existing resource; mode="extend" skips them and adds the rest.
+ *   4. Creates N envs (one per role) — saveEnvironment writes to disk.
+ *   5. For each role, POSTs to orchestrator /internal/agents (extended
+ *      protocol — accepts `team`, `sessionPolicy`, `triggers`).
+ *   6. Pre-creates DM rooms with the admin user so trigger-driven runs
+ *      have a destination from minute one.
+ *   7. On any failure: rollback created envs + agents in reverse order.
+ *
+ * The orchestrator-side createAgent already handles the heavy lifting:
+ * Matrix user provisioning, repo clone, workspace seeding, runner spawn.
+ * This endpoint just orchestrates the *team-shaped* sequence around it.
+ */
+
+const TEAM_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
+
+function listAgentTemplateIds() {
+  try {
+    return fs.readdirSync(AGENT_TEMPLATES_DIR)
+      .filter(f => f.endsWith('.json') && /^[a-z0-9][a-z0-9-]*\.json$/.test(f))
+      .map(f => f.slice(0, -5))
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+function loadAgentTemplate(id) {
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) return null;
+  const p = path.join(AGENT_TEMPLATES_DIR, id + '.json');
+  try {
+    if (!fs.existsSync(p)) return null;
+    return JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch (err) {
+    console.error(`[Team] Cannot load template ${id}: ${err.message}`);
+    return null;
+  }
+}
+
+// Substitute `{{varname}}` placeholders. Unknown vars stay literal so a
+// rogue template field doesn't silently disappear into "undefined".
+function applyTemplateVars(s, vars) {
+  if (typeof s !== 'string') return s;
+  return s.replace(/\{\{(\w+)\}\}/g, (_m, k) =>
+    vars[k] !== undefined ? String(vars[k]) : `{{${k}}}`,
+  );
+}
+
+// Read-only template summary for the wizard's role-cards step. Strips the
+// long prompt text to keep the response small — wizard doesn't need it,
+// the backend reads the canonical version at create time.
+app.get('/api/agent-templates', (_req, res) => {
+  const out = [];
+  for (const id of listAgentTemplateIds()) {
+    const t = loadAgentTemplate(id);
+    if (!t) continue;
+    out.push({
+      id: t.id,
+      displayName: t.displayName,
+      description: t.description,
+      icon: t.icon,
+      category: t.category,
+      sessionPolicy: t.sessionPolicy,
+      envSuffix: t.envSuffix,
+      defaultEnabled: t.defaultEnabled !== false,
+      triggerSummary: (t.triggers || []).map(tr => ({
+        id: tr.id,
+        type: tr.type,
+        events: tr.events || null,
+        cron: tr.cron || null,
+      })),
+    });
+  }
+  res.json({ templates: out });
+});
+
+// Generic, role-agnostic team prompt. Each member can override this with
+// its role-specific prompt; members that don't override inherit this text
+// and pick up edits via /api/agents/:id PUT (systemPromptTemplate).
+function defaultTeamPrompt(vars) {
+  return [
+    `You are a member of the team **${vars.teamName}**, which collaborates on the repository \`${vars.repoFullName}\`.`,
+    ``,
+    `Other team members may have different responsibilities (requirements gathering, implementation, reviews, documentation). Stay in your own role and do not overlap with the others.`,
+    `When you create PRs, issues or comments on GitHub, use \`gh-as-agent\` so your identity is stamped cleanly.`,
+  ].join('\n');
+}
+
+// GitHub label names accept basically anything except they must be 1–50
+// chars, no leading/trailing whitespace, and our prompt embedding wants a
+// plain identifier (no quotes / backticks / template syntax).
+const READY_LABEL_RE = /^[^\s`"'{}<>][^\s`"'{}<>]{0,49}$/;
+
+app.post('/api/teams', async (req, res) => {
+  const body = req.body || {};
+  const { teamId, teamName, repository, githubTokenId, roles } = body;
+  const mode = body.mode === 'extend' ? 'extend' : 'create';
+  const readyLabel = (typeof body.readyLabel === 'string' && body.readyLabel.trim())
+    ? body.readyLabel.trim()
+    : 'ready';
+  if (!READY_LABEL_RE.test(readyLabel)) {
+    return res.status(400).json({
+      error: 'readyLabel must be 1–50 chars and contain no whitespace or quote/brace characters',
+    });
+  }
+
+  // ── 1. Validate input ─────────────────────────────────────────────
+  if (typeof teamId !== 'string' || !TEAM_ID_RE.test(teamId)) {
+    return res.status(400).json({ error: 'teamId must be a lowercase slug, 1–40 chars, [a-z0-9-]' });
+  }
+  if (typeof teamName !== 'string' || !teamName.trim()) {
+    return res.status(400).json({ error: 'teamName required' });
+  }
+  if (!repository?.url || !repository?.sshKeyId) {
+    return res.status(400).json({ error: 'repository.url and repository.sshKeyId required' });
+  }
+  let parsed;
+  try {
+    parsed = parseGitHubUrl(repository.url);
+  } catch (err) {
+    return res.status(400).json({ error: `Invalid repository URL: ${err.message}` });
+  }
+  const branch = typeof repository.branch === 'string' && /^[A-Za-z0-9._/-]+$/.test(repository.branch)
+    ? repository.branch
+    : 'main';
+
+  // ── 2. Credentials must already exist (Pre-Flight) ────────────────
+  if (!listSshKeys().some(k => k.id === repository.sshKeyId)) {
+    return res.status(400).json({ error: `SSH key '${repository.sshKeyId}' not found` });
+  }
+  if (typeof githubTokenId !== 'string' || !listGithubTokens().some(t => t.id === githubTokenId)) {
+    return res.status(400).json({ error: `GitHub token '${githubTokenId}' not found` });
+  }
+
+  // ── 3. Roles must map to known templates ──────────────────────────
+  if (!Array.isArray(roles) || roles.length === 0) {
+    return res.status(400).json({ error: 'roles must be a non-empty array of template ids' });
+  }
+  const knownIds = new Set(listAgentTemplateIds());
+  const unknown = roles.filter(r => !knownIds.has(r));
+  if (unknown.length) {
+    return res.status(400).json({
+      error: `Unknown roles: ${unknown.join(', ')}`,
+      knownRoles: [...knownIds],
+    });
+  }
+
+  // ── 4. Plan resource ids ──────────────────────────────────────────
+  // v2 shape: 1 env + 1 team agent + N team-members. Naming:
+  //   env id        = teamId
+  //   team agent id = teamId
+  //   member id     = `<teamId>-<roleId>`  (one per selected role template)
+  const envId = teamId;
+  const teamAgentId = teamId;
+  const planned = roles.map(roleId => {
+    const t = loadAgentTemplate(roleId);
+    return {
+      roleId,
+      template: t,
+      memberId: `${teamId}-${t.id}`,
+    };
+  });
+  for (const p of planned) {
+    if (!AGENT_ID_RE.test(p.memberId)) {
+      return res.status(400).json({ error: `Computed memberId '${p.memberId}' is invalid` });
+    }
+  }
+
+  const envExists = !!loadEnvironment(envId);
+  // Inspect the existing agent (if any) so we can distinguish "an actual
+  // team blocks this id" from "some unrelated agent (orchestrator,
+  // bp-instance, plain agent) blocks this id". The first case is a real
+  // collision the user can resolve via extend; the second is an id
+  // conflict and `mode: extend` would be a lie.
+  const existingTeamCfg = fs.existsSync(path.join(AGENTS_DIR, teamAgentId))
+    ? readJsonFile(path.join(AGENTS_DIR, teamAgentId, 'config.json'), null)
+    : null;
+  const teamExists = !!existingTeamCfg && existingTeamCfg.role === 'team';
+  const teamIdTakenByOther = !!existingTeamCfg && existingTeamCfg.role !== 'team';
+  const existingMembers = planned
+    .filter(p => fs.existsSync(path.join(AGENTS_DIR, p.memberId)))
+    .map(p => p.memberId);
+
+  if (teamIdTakenByOther) {
+    return res.status(409).json({
+      error: `Cannot use teamId '${teamId}': an agent with this id already exists ` +
+        `with role '${existingTeamCfg.role}'. Pick a different teamId or delete ` +
+        `the existing agent first.`,
+    });
+  }
+
+  let toCreate;
+  if (mode === 'extend') {
+    if (!teamExists) {
+      return res.status(409).json({
+        error: `Cannot extend: team '${teamId}' does not exist yet. Use mode: "create" first.`,
+      });
+    }
+    toCreate = planned.filter(p => !existingMembers.includes(p.memberId));
+    if (toCreate.length === 0) {
+      return res.status(200).json({
+        teamId,
+        teamName,
+        created: [],
+        skipped: planned.map(p => p.memberId),
+        message: 'All requested roles already exist on this team; nothing to do.',
+      });
+    }
+  } else {
+    // Real collision = team or members exist. An env-only orphan is a
+    // recoverable left-over from a prior aborted run (or an out-of-band
+    // delete that didn't reap the env); silently reuse/overwrite it
+    // instead of stranding the caller — same recovery the streaming
+    // endpoint applies, kept in parity here.
+    if (teamExists || existingMembers.length) {
+      return res.status(409).json({
+        error: 'Resources for this team already exist',
+        existing: {
+          env: envExists ? envId : null,
+          team: teamExists ? teamAgentId : null,
+          members: existingMembers,
+        },
+        suggestion: 'Pass `mode: "extend"` to add only the missing roles.',
+      });
+    }
+    toCreate = planned;
+  }
+  const adoptOrphanEnv = mode === 'create' && envExists;
+
+  // ── 5. Substitution variables for templates ───────────────────────
+  const vars = {
+    teamName,
+    teamId,
+    repoFullName: `${parsed.org}/${parsed.repo}`,
+    repoOwner: parsed.org,
+    repoName: parsed.repo,
+    repoUrl: repository.url,
+    branch,
+    readyLabel,
+  };
+
+  // ── 6. Atomic create with rollback ────────────────────────────────
+  // Track everything we created so we can undo cleanly. `extend` mode
+  // tracks NOTHING from before our call — pre-existing env/team are
+  // preserved on rollback even if the new members fail.
+  const created = { env: null, team: null, members: [], dms: [] };
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+
+  const rollback = async (reason) => {
+    console.warn(`[Team] Rolling back ${teamId}: ${reason}`);
+    for (const memberId of [...created.members].reverse()) {
+      try {
+        await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(memberId)}`, { method: 'DELETE' });
+      } catch (err) {
+        console.error(`[Team] Rollback: failed to delete member ${memberId}: ${err.message}`);
+      }
+    }
+    if (created.team) {
+      try {
+        await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(created.team)}`, { method: 'DELETE' });
+      } catch (err) {
+        console.error(`[Team] Rollback: failed to delete team ${created.team}: ${err.message}`);
+      }
+    }
+    if (created.env) {
+      try {
+        const environmentsRoot = path.resolve(ENVIRONMENTS_DIR);
+        const envPath = path.resolve(environmentsRoot, String(created.env));
+        if (envPath === environmentsRoot || envPath.startsWith(environmentsRoot + path.sep)) {
+          fs.rmSync(envPath, { recursive: true, force: true });
+        } else {
+          console.error(`[Team] Rollback: refused to delete env outside root: ${created.env}`);
+        }
+      } catch (err) {
+        console.error(`[Team] Rollback: failed to delete env ${created.env}: ${err.message}`);
+      }
+    }
+  };
+
+  try {
+    // Phase A — single shared environment. Carries the repo, SSH key, PAT,
+    // and the team-default skill set (empty in v1; the wizard's first
+    // shipped Skill packs go here later).
+    if (!envExists || adoptOrphanEnv) {
+      const env = {
+        id: envId,
+        name: teamName,
+        description: `Working environment for team '${teamName}'.`,
+        skills: [],
+        repositories: [{ url: parsed.httpsUrl, branch, sshKeyId: repository.sshKeyId }],
+        githubTokenId,
+        llmEndpointId: null,
+        defaultModelId: null,
+        additionalContext: '',
+        createdAt: new Date().toISOString(),
+      };
+      saveEnvironment(envId, env);
+      created.env = envId;
+    }
+
+    // Phase B — the team agent itself. Generic shared prompt; suppress the
+    // first-member auto-create (the wizard adds members itself with role
+    // overrides in Phase C).
+    if (!teamExists) {
+      const teamPrompt = defaultTeamPrompt(vars);
+      const resp = await fetch(`${orchestratorUrl}/internal/agents`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: teamAgentId,
+          displayName: teamName,
+          role: 'team',
+          systemPrompt: teamPrompt,
+          environmentId: envId,
+          skipFirstMember: true,
+        }),
+      });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        throw new Error(`Team agent ${teamAgentId}: ${data.error || `HTTP ${resp.status}`}`);
+      }
+      created.team = teamAgentId;
+    }
+
+    // Phase C — team-members, one per selected role. Each one carries a
+    // role-specific prompt override (so the team's generic prompt stays
+    // useful as a fallback) and the role's full triggers.json.
+    for (const p of toCreate) {
+      const promptText = applyTemplateVars(p.template.promptTemplate, vars);
+      const triggersOut = (p.template.triggers || []).map(tr => {
+        const out = {
+          id: tr.id,
+          type: tr.type,
+          enabled: tr.enabled !== false,
+          description: tr.description || `${p.template.displayName} — ${tr.id}`,
+          prompt: applyTemplateVars(tr.promptTemplate || '', vars),
+        };
+        if (tr.type === 'github-event') {
+          out.events = tr.events || [];
+          out.from = tr.from || 'any-except-self';
+          out.repo = vars.repoFullName;
+          // Carry the optional label-name filter through if the template
+          // defines one (e.g. developer.json pins it to the wizard's
+          // {{readyLabel}} so the trigger fires only on that label).
+          if (typeof tr.labelFilter === 'string' && tr.labelFilter.trim()) {
+            out.labelFilter = applyTemplateVars(tr.labelFilter, vars);
+          }
+        } else if (tr.type === 'cron') {
+          out.cron = tr.cron;
+        }
+        return out;
+      });
+
+      const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(teamAgentId)}/members`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: p.memberId,
+          displayName: `${teamName} · ${p.template.displayName}`,
+          systemPromptOverride: promptText,
+          // skillsOverride deliberately omitted in v1 — members inherit the
+          // team-env's empty skill list. Once we ship role-specific Skill
+          // packs they'll plug in here.
+          sessionPolicy: p.template.sessionPolicy === 'per-invocation' ? 'per-invocation' : undefined,
+          triggers: triggersOut,
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(`Member ${p.memberId}: ${data.error || `HTTP ${resp.status}`}`);
+      }
+      // Same clone-warning-as-fatal treatment as the streaming endpoint —
+      // a wizard-created team without its repo is a broken setup, not a
+      // graceful degradation.
+      const cloneWarning = (data.warnings || []).find(w => /^git clone /.test(w));
+      if (cloneWarning) {
+        created.members.push(p.memberId);
+        throw new Error(`Member ${p.memberId}: ${cloneWarning}`);
+      }
+      created.members.push(p.memberId);
+    }
+
+    // Phase D — DM rooms (best-effort). Members without DMs miss trigger
+    // output until a chat is opened; we keep going on failure.
+    for (const p of toCreate) {
+      try {
+        const r = await ensureAgentDmRoom(p.memberId);
+        created.dms.push({ agentId: p.memberId, roomId: r.roomId });
+      } catch (err) {
+        console.warn(`[Team] DM pre-create skipped for ${p.memberId}: ${err.message}`);
+      }
+    }
+
+    res.status(201).json({
+      teamId,
+      teamName,
+      env: envId,
+      team: teamAgentId,
+      created: created.members,
+      skipped: planned
+        .filter(p => !toCreate.some(c => c.memberId === p.memberId))
+        .map(p => p.memberId),
+      dms: created.dms,
+    });
+  } catch (err) {
+    await rollback(err.message);
+    res.status(500).json({ error: `Team creation failed: ${err.message}` });
+  }
+});
+
+/* ─── Team setup — streaming variant ────────────────────────────────────
+   Same input/output as POST /api/teams, but emits NDJSON progress events
+   as the materialization proceeds. The frontend uses this for the live
+   progress UI in the Team-Setup wizard. */
+
+app.post('/api/teams/stream', async (req, res) => {
+  // Plain NDJSON over chunked transfer; no SSE wrapping. The wizard reads
+  // chunks via the fetch streams API and parses one JSON object per line.
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');
+  // Send headers + open the chunked body NOW. Without this, Node holds the
+  // response open until enough body bytes accumulate, so the wizard sees no
+  // events for the entire ~10s the team-agent clone takes — and then every
+  // queued event arrives in one burst when the request ends.
+  res.flushHeaders();
+  // Keep the underlying socket free of Nagle batching so each per-step
+  // write hits the wire immediately instead of waiting up to 200ms for a
+  // companion packet that never comes (every event is its own short line).
+  if (typeof res.socket?.setNoDelay === 'function') {
+    res.socket.setNoDelay(true);
+  }
+
+  // Track whether the *socket* is gone, not whether the request body has
+  // been fully consumed. `req.on('close')` fires as soon as Node finishes
+  // reading the body — which happens right after `express.json()` runs,
+  // i.e. before our handler even reaches the first await. Listening on it
+  // would short-circuit every write past that point. `res.on('close')`
+  // fires only on actual client disconnect (or after we've called res.end
+  // ourselves), which is what we actually want.
+  let aborted = false;
+  res.on('close', () => {
+    if (!res.writableEnded) aborted = true;
+  });
+
+  function emit(ev) {
+    if (aborted) return;
+    try {
+      res.write(JSON.stringify(ev) + '\n');
+    } catch { /* socket gone */ }
+  }
+  function fail(status, errorMsg) {
+    emit({ type: 'error', status, error: errorMsg });
+    if (!aborted) res.end();
+  }
+
+  const body = req.body || {};
+  const { teamId, teamName, repository, githubTokenId, roles } = body;
+  const mode = body.mode === 'extend' ? 'extend' : 'create';
+  const readyLabel = (typeof body.readyLabel === 'string' && body.readyLabel.trim())
+    ? body.readyLabel.trim()
+    : 'ready';
+
+  // ── 1. Validate input ─────────────────────────────────────────────
+  if (!READY_LABEL_RE.test(readyLabel)) {
+    return fail(400, 'readyLabel must be 1–50 chars and contain no whitespace or quote/brace characters');
+  }
+  if (typeof teamId !== 'string' || !TEAM_ID_RE.test(teamId)) {
+    return fail(400, 'teamId must be a lowercase slug, 1–40 chars, [a-z0-9-]');
+  }
+  if (typeof teamName !== 'string' || !teamName.trim()) {
+    return fail(400, 'teamName required');
+  }
+  if (!repository?.url || !repository?.sshKeyId) {
+    return fail(400, 'repository.url and repository.sshKeyId required');
+  }
+  let parsed;
+  try {
+    parsed = parseGitHubUrl(repository.url);
+  } catch (err) {
+    return fail(400, `Invalid repository URL: ${err.message}`);
+  }
+  const branch = typeof repository.branch === 'string' && /^[A-Za-z0-9._/-]+$/.test(repository.branch)
+    ? repository.branch
+    : 'main';
+
+  if (!listSshKeys().some(k => k.id === repository.sshKeyId)) {
+    return fail(400, `SSH key '${repository.sshKeyId}' not found`);
+  }
+  if (typeof githubTokenId !== 'string' || !listGithubTokens().some(t => t.id === githubTokenId)) {
+    return fail(400, `GitHub token '${githubTokenId}' not found`);
+  }
+  if (!Array.isArray(roles) || roles.length === 0) {
+    return fail(400, 'roles must be a non-empty array of template ids');
+  }
+  const knownIds = new Set(listAgentTemplateIds());
+  const unknown = roles.filter(r => !knownIds.has(r));
+  if (unknown.length) {
+    return fail(400, `Unknown roles: ${unknown.join(', ')}`);
+  }
+
+  // ── 2. Plan ───────────────────────────────────────────────────────
+  const envId = teamId;
+  const teamAgentId = teamId;
+  const planned = roles.map(roleId => {
+    const t = loadAgentTemplate(roleId);
+    return { roleId, template: t, memberId: `${teamId}-${t.id}` };
+  });
+  for (const p of planned) {
+    if (!AGENT_ID_RE.test(p.memberId)) {
+      return fail(400, `Computed memberId '${p.memberId}' is invalid`);
+    }
+  }
+
+  const envExists = !!loadEnvironment(envId);
+  // Distinguish "the id is taken by an actual team" (extend can recover)
+  // from "the id is taken by some unrelated agent role" (extend is a lie,
+  // surface the real conflict).
+  const agentsRoot = path.resolve(AGENTS_DIR);
+  const teamAgentPath = path.resolve(agentsRoot, teamAgentId);
+  if (!(teamAgentPath === agentsRoot || teamAgentPath.startsWith(agentsRoot + path.sep))) {
+    return fail(400, 'Invalid teamId path');
+  }
+  const existingTeamCfg = fs.existsSync(teamAgentPath)
+    ? readJsonFile(path.join(teamAgentPath, 'config.json'), null)
+    : null;
+  const teamExists = !!existingTeamCfg && existingTeamCfg.role === 'team';
+  const teamIdTakenByOther = !!existingTeamCfg && existingTeamCfg.role !== 'team';
+  const existingMembers = planned
+    .filter((p) => {
+      const memberPath = path.resolve(agentsRoot, p.memberId);
+      const inAgentsDir =
+        memberPath === agentsRoot || memberPath.startsWith(agentsRoot + path.sep);
+      if (!inAgentsDir) {
+        fail(400, `Computed memberId '${p.memberId}' resolves outside AGENTS_DIR`);
+        return false;
+      }
+      return fs.existsSync(memberPath);
+    })
+    .map(p => p.memberId);
+
+  if (teamIdTakenByOther) {
+    return fail(409,
+      `Cannot use teamId '${teamId}': an agent with this id already exists ` +
+      `with role '${existingTeamCfg.role}'. Pick a different teamId or delete ` +
+      `the existing agent first.`);
+  }
+
+  let toCreate;
+  if (mode === 'extend') {
+    if (!teamExists) {
+      return fail(409, `Cannot extend: team '${teamId}' does not exist yet. Use mode: "create" first.`);
+    }
+    toCreate = planned.filter(p => !existingMembers.includes(p.memberId));
+    if (toCreate.length === 0) {
+      emit({
+        type: 'complete',
+        result: {
+          teamId, teamName,
+          created: [],
+          skipped: planned.map(p => p.memberId),
+          message: 'All requested roles already exist on this team; nothing to do.',
+        },
+      });
+      return res.end();
+    }
+  } else {
+    // Real collision = team or members already exist (the user actually
+    // has a working team to deal with). An ENV-ONLY orphan is a different
+    // beast: it's left over from a prior aborted create / out-of-band
+    // delete and there's no UI path to clean it up. Blocking mode:create
+    // on it strands the user (the original wizard freeze report). Recover
+    // by reusing/overwriting it instead — the user's freshly submitted
+    // settings win, and we adopt the env so rollback removes it cleanly
+    // if the rest of the create fails.
+    if (teamExists || existingMembers.length) {
+      emit({
+        type: 'collision',
+        existing: {
+          env: envExists ? envId : null,
+          team: teamExists ? teamAgentId : null,
+          members: existingMembers,
+        },
+        suggestion: 'Pass `mode: "extend"` to add only the missing roles.',
+      });
+      return res.end();
+    }
+    toCreate = planned;
+  }
+
+  // ── 3. Substitution variables for templates ───────────────────────
+  const vars = {
+    teamName, teamId,
+    repoFullName: `${parsed.org}/${parsed.repo}`,
+    repoOwner: parsed.org, repoName: parsed.repo,
+    repoUrl: repository.url,
+    branch, readyLabel,
+  };
+
+  // Adopt-orphan: in mode:create the env may already exist as a leftover
+  // (no team, no members). Treat it as a step we own — overwrite with the
+  // user's submitted settings and include it in the rollback set.
+  const adoptOrphanEnv = mode === 'create' && envExists;
+
+  // ── 4. Announce the plan up front so the wizard can render every
+  // step as `pending` — gives the user the full progress shape, not a
+  // tickertape that only reveals work as it happens.
+  const plan = [];
+  if (!envExists || adoptOrphanEnv) {
+    plan.push({
+      id: 'env',
+      label: adoptOrphanEnv
+        ? `Reuse working environment (${envId})`
+        : `Create working environment (${envId})`,
+    });
+  }
+  if (!teamExists) plan.push({ id: 'team', label: `Create team agent (${teamAgentId})` });
+  for (const p of toCreate) {
+    plan.push({ id: `member:${p.memberId}`, label: `Create member: ${p.template.displayName}` });
+  }
+  if (toCreate.length > 0) plan.push({ id: 'dms', label: 'Pre-create DM rooms' });
+  emit({ type: 'plan', steps: plan });
+
+  // ── 5. Atomic create with rollback ────────────────────────────────
+  const created = { env: null, team: null, members: [], dms: [] };
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+
+  const rollback = async (reason) => {
+    console.warn(`[Team:stream] Rolling back ${teamId}: ${reason}`);
+    for (const memberId of [...created.members].reverse()) {
+      try {
+        await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(memberId)}`, { method: 'DELETE' });
+      } catch (err) {
+        console.error(`[Team:stream] Rollback: failed to delete member ${memberId}: ${err.message}`);
+      }
+    }
+    if (created.team) {
+      try {
+        await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(created.team)}`, { method: 'DELETE' });
+      } catch (err) {
+        console.error(`[Team:stream] Rollback: failed to delete team ${created.team}: ${err.message}`);
+      }
+    }
+    if (created.env) {
+      try {
+        fs.rmSync(path.join(ENVIRONMENTS_DIR, created.env), { recursive: true, force: true });
+      } catch (err) {
+        console.error(`[Team:stream] Rollback: failed to delete env ${created.env}: ${err.message}`);
+      }
+    }
+  };
+
+  try {
+    if (!envExists || adoptOrphanEnv) {
+      emit({ type: 'step', id: 'env', status: 'running' });
+      const env = {
+        id: envId,
+        name: teamName,
+        description: `Working environment for team '${teamName}'.`,
+        skills: [],
+        repositories: [{ url: parsed.httpsUrl, branch, sshKeyId: repository.sshKeyId }],
+        githubTokenId,
+        llmEndpointId: null,
+        defaultModelId: null,
+        additionalContext: '',
+        createdAt: new Date().toISOString(),
+      };
+      saveEnvironment(envId, env);
+      created.env = envId;
+      emit({ type: 'step', id: 'env', status: 'done' });
+    }
+
+    if (!teamExists) {
+      emit({ type: 'step', id: 'team', status: 'running' });
+      const teamPrompt = defaultTeamPrompt(vars);
+      const resp = await fetch(`${orchestratorUrl}/internal/agents`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: teamAgentId,
+          displayName: teamName,
+          role: 'team',
+          systemPrompt: teamPrompt,
+          environmentId: envId,
+          skipFirstMember: true,
+        }),
+      });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        throw new Error(`Team agent ${teamAgentId}: ${data.error || `HTTP ${resp.status}`}`);
+      }
+      created.team = teamAgentId;
+      emit({ type: 'step', id: 'team', status: 'done' });
+    }
+
+    for (const p of toCreate) {
+      const stepId = `member:${p.memberId}`;
+      emit({ type: 'step', id: stepId, status: 'running' });
+      const promptText = applyTemplateVars(p.template.promptTemplate, vars);
+      const triggersOut = (p.template.triggers || []).map(tr => {
+        const out = {
+          id: tr.id,
+          type: tr.type,
+          enabled: tr.enabled !== false,
+          description: tr.description || `${p.template.displayName} — ${tr.id}`,
+          prompt: applyTemplateVars(tr.promptTemplate || '', vars),
+        };
+        if (tr.type === 'github-event') {
+          out.events = tr.events || [];
+          out.from = tr.from || 'any-except-self';
+          out.repo = vars.repoFullName;
+          // Carry the optional label-name filter through if the template
+          // defines one (e.g. developer.json pins it to the wizard's
+          // {{readyLabel}} so the trigger fires only on that label).
+          if (typeof tr.labelFilter === 'string' && tr.labelFilter.trim()) {
+            out.labelFilter = applyTemplateVars(tr.labelFilter, vars);
+          }
+        } else if (tr.type === 'cron') {
+          out.cron = tr.cron;
+        }
+        return out;
+      });
+
+      const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(teamAgentId)}/members`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: p.memberId,
+          displayName: `${teamName} · ${p.template.displayName}`,
+          systemPromptOverride: promptText,
+          sessionPolicy: p.template.sessionPolicy === 'per-invocation' ? 'per-invocation' : undefined,
+          triggers: triggersOut,
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        emit({ type: 'step', id: stepId, status: 'error', error: data.error || `HTTP ${resp.status}` });
+        throw new Error(`Member ${p.memberId}: ${data.error || `HTTP ${resp.status}`}`);
+      }
+      // The orchestrator's seedAgentWorkspace catches clone failures into a
+      // `warnings` array rather than throwing, because some seed steps are
+      // genuinely optional (skill copies, missing template files). For a
+      // wizard-created team though, the repo IS load-bearing — an agent
+      // without its repo is a mute box. Treat any clone warning as fatal
+      // so the user gets a real error in the progress card and the
+      // half-baked team gets rolled back, instead of a green "ready" with
+      // empty workspaces.
+      const cloneWarning = (data.warnings || []).find(w => /^git clone /.test(w));
+      if (cloneWarning) {
+        emit({ type: 'step', id: stepId, status: 'error', error: cloneWarning });
+        // Track the member so rollback removes its half-built state.
+        created.members.push(p.memberId);
+        throw new Error(`Member ${p.memberId}: ${cloneWarning}`);
+      }
+      created.members.push(p.memberId);
+      emit({ type: 'step', id: stepId, status: 'done' });
+    }
+
+    if (toCreate.length > 0) {
+      emit({ type: 'step', id: 'dms', status: 'running' });
+      for (const p of toCreate) {
+        try {
+          const r = await ensureAgentDmRoom(p.memberId);
+          created.dms.push({ agentId: p.memberId, roomId: r.roomId });
+        } catch (err) {
+          console.warn(`[Team:stream] DM pre-create skipped for ${p.memberId}: ${err.message}`);
+        }
+      }
+      emit({ type: 'step', id: 'dms', status: 'done' });
+    }
+
+    emit({
+      type: 'complete',
+      result: {
+        teamId, teamName,
+        env: envId,
+        team: teamAgentId,
+        created: created.members,
+        skipped: planned
+          .filter(p => !toCreate.some(c => c.memberId === p.memberId))
+          .map(p => p.memberId),
+        dms: created.dms,
+      },
+    });
+    res.end();
+  } catch (err) {
+    await rollback(err.message);
+    emit({ type: 'error', status: 500, error: `Team creation failed: ${err.message}` });
+    if (!aborted) res.end();
+  }
 });
 
 /* ─── Blueprints ────────────────────────────────────────────────────── */

@@ -207,12 +207,17 @@ let userStopRequested = false;
  *   - timeoutMs      (optional) — defaults to CLAUDE_TIMEOUT
  *   - resume         (optional, default true) — set false to force a fresh
  *                                 session even if a pointer exists
+ *   - persistSession (optional, default true) — set false to skip writing
+ *                                 the session pointer at run end. Used by
+ *                                 reactive roles with `sessionPolicy:
+ *                                 per-invocation` so trigger runs don't
+ *                                 leak into the agent's DM continuity.
  *
  * Resolves with the final assistant text (the `result` field of the last
  * `result` event, or a concatenation of all `assistant_text` events as a
  * fallback). Rejects on timeout or non-zero exit.
  */
-function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT, resume = true } = {}) {
+function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT, resume = true, persistSession = true } = {}) {
   const memoryHint = BLUEPRINT_ID
     ? `This agent is an instance of blueprint '${BLUEPRINT_ID}'. ` +
       `Memory is SHARED across all instances of this blueprint. ` +
@@ -343,8 +348,9 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT,
       }
       // Persist the freshest session id we observed. With `--resume`, this is
       // typically the same id (Claude keeps it stable); without it, this is
-      // the brand-new id that future messages should resume into.
-      if (roomId && observedSessionId) {
+      // the brand-new id that future messages should resume into. Skipped
+      // entirely when persistSession is false — see the option doc above.
+      if (roomId && observedSessionId && persistSession) {
         writeSessionPointer(roomId, observedSessionId);
       }
       if (finalResult !== null) return resolve(finalResult);
@@ -444,6 +450,18 @@ class TriggerScheduler {
         continue;
       }
 
+      // Layer-3 loop-protection notice from the github-poller. We post a
+      // plain DM (no Claude call) so the user sees the clamp without paying
+      // for a model invocation. One per window — the poller dedupes.
+      if (entry?.kind === 'throttle-warning') {
+        console.log(
+          `[Runner:${AGENT_ID}] throttle-warning conv=${entry.convKey} ` +
+          `count=${entry.count}/${entry.threshold}/h`,
+        );
+        await this.executeThrottleWarning(entry);
+        continue;
+      }
+
       const trigger = triggers.find(
         t => t.id === entry.triggerId
           && (t.type === 'http' || t.type === 'github-event')
@@ -458,6 +476,36 @@ class TriggerScheduler {
       } else {
         console.log(`[Runner:${AGENT_ID}] Pending trigger '${entry.triggerId}' not found or disabled — skipping`);
       }
+    }
+  }
+
+  // Layer-3 loop-protection: post a plain DM warning when the github-poller
+  // has clamped this agent against a (conversation, agent) bucket. Pure
+  // Matrix send — no Claude invocation, no token spend, no learn-hint.
+  async executeThrottleWarning(entry) {
+    const dmRoom = loadDmRoomId();
+    if (!dmRoom) {
+      console.log(
+        `[Runner:${AGENT_ID}] throttle-warning ${entry.convKey} but no DM room — logging only`,
+      );
+      return;
+    }
+    const ends = entry.windowEndsAt
+      ? new Date(entry.windowEndsAt).toLocaleString('en-GB', { timeZone: 'Europe/Berlin' })
+      : 'in about 1 hour';
+    const body =
+      `⚠️ **Loop protection active**\n\n` +
+      `I have reacted ${entry.count} times to \`${entry.convKey}\` in the last hour — ` +
+      `that exceeds the threshold of **${entry.threshold}/h**. ` +
+      `Further triggers for this conversation will be ignored until approximately **${ends}** ` +
+      `to prevent an infinite loop.\n\n` +
+      `If this is unexpected, please review the trigger configuration ` +
+      `(event selection and \`from\` filter) or message me about what's going on.`;
+    try {
+      await sendFormatted(this.agentClient, dmRoom, body);
+      writeLastResponseAt();
+    } catch (err) {
+      console.error(`[Runner:${AGENT_ID}] Could not post throttle warning: ${err.message}`);
     }
   }
 
@@ -668,7 +716,18 @@ class TriggerScheduler {
     const correlationId = ctx?.github?.eventId
       ? `trigger:${trigger.id}:gh:${ctx.github.eventId}`
       : `trigger:${trigger.id}:${Date.now()}`;
-    console.log(`[Runner:${AGENT_ID}] Executing trigger: ${trigger.id}...`);
+
+    // Session policy decides whether trigger runs share session continuity
+    // with the DM (`persistent`, current behavior) or start fresh and skip
+    // the pointer write so DM history stays intact (`per-invocation`, used
+    // by reactive wizard roles like reviewer / security / docs-sync).
+    const cfg = loadAgentConfig();
+    const sessionPolicy = cfg?.sessionPolicy === 'per-invocation' ? 'per-invocation' : 'persistent';
+    const isPerInvocation = sessionPolicy === 'per-invocation';
+
+    console.log(
+      `[Runner:${AGENT_ID}] Executing trigger: ${trigger.id} (session=${sessionPolicy})...`
+    );
 
     try {
       let task = trigger.prompt;
@@ -690,10 +749,25 @@ class TriggerScheduler {
           JSON.stringify(clamped, null, 2) +
           "\n</external-event>";
       }
+
+      // Per-invocation runs end with no session memory, so the only thing
+      // that survives is what lands in memory/. Invite a tight, signal-only
+      // write at the end of the run. Phrased to discourage dumping per-PR
+      // detail into memory, since that bloats every future invocation.
+      const learnHint = isPerInvocation
+        ? "\n\n---\nAfter finishing the task, before you send your final reply:\n" +
+          "- If this run produced a REUSABLE insight (project convention, " +
+          "recurring pattern, recurring pitfall that matters for future runs of your role), " +
+          "append a brief note to memory/log.md.\n" +
+          "- No PR/issue-specific details — only lessons that hold *beyond* this single run.\n" +
+          "- One or two lines per lesson, no code dump.\n" +
+          "- If there is nothing to learn: skip, write nothing."
+        : "";
+
       const prompt =
-        "Du fuehrst eine geplante autonome Aufgabe aus. " +
-        "Poste deine Ergebnisse. Falls es nichts zu berichten gibt, antworte mit [PASS].\n\n" +
-        `Aufgabe: ${task}`;
+        "You are executing a scheduled autonomous task. " +
+        "Post your results. If there is nothing to report, reply with [PASS].\n\n" +
+        `Task: ${task}${learnHint}`;
 
       const timeoutMs = trigger.timeoutSeconds ? trigger.timeoutSeconds * 1000 : CLAUDE_TIMEOUT;
 
@@ -717,7 +791,15 @@ class TriggerScheduler {
       if (++activeInvocations === 1) writeStatus('busy');
       let result;
       try {
-        result = await callClaude(prompt, { roomId, correlationId, timeoutMs });
+        result = await callClaude(prompt, {
+          roomId,
+          correlationId,
+          timeoutMs,
+          // per-invocation: never resume a prior session, never persist this
+          // run's session id — the DM pointer (if any) stays untouched.
+          resume: !isPerInvocation,
+          persistSession: !isPerInvocation,
+        });
       } catch (err) {
         try {
           appendEvent(AGENT_ID, roomId, {

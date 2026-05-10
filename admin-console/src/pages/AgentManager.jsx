@@ -229,19 +229,19 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
 
       {form.role === 'orchestrator' && (
         <div>
-          <div style={labelStyle}>Briefings-Verzeichnis</div>
+          <div style={labelStyle}>Briefings directory</div>
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
             <input
               style={{ ...inputStyle, flex: 1 }}
               value={form.briefingsPath}
               onChange={e => update('briefingsPath', e.target.value)}
-              placeholder="z.B. briefings/"
+              placeholder="e.g. briefings/"
             />
             <button
               type="button"
               onClick={() => setShowDirPicker(true)}
               disabled={!form.id}
-              title={form.id ? 'Verzeichnis auswählen' : 'Bitte zuerst eine Agent-ID eingeben'}
+              title={form.id ? 'Select directory' : 'Enter an agent ID first'}
               style={{
                 display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
                 padding: 'var(--eb-space-2) var(--eb-space-3)',
@@ -257,11 +257,11 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
               }}
             >
               <Folder size={15} />
-              Durchsuchen
+              Browse
             </button>
           </div>
           <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-            Pfad im Agenten-Workspace, in dem BriefingPacks abgelegt werden.
+            Path inside the agent workspace where BriefingPacks live.
           </div>
         </div>
       )}
@@ -420,7 +420,7 @@ function AgentCloneForm({ sourceAgent, onSave, onCancel, saving, error }) {
       </InfoBanner>
 
       <div>
-        <div style={labelStyle}>Neue ID <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
+        <div style={labelStyle}>New ID <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
         <input
           style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }}
           value={form.newId}

@@ -391,11 +391,10 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null) {
     "translate these to relative paths (e.g. `/workspace/314092_foo/` → `./314092_foo/`).\n";
 
   const extra =
-    "\n---\n\n## Trigger-Verwaltung (triggers.json)\n\n" +
-    "Deine Ausfuehrungen koennen durch Trigger gesteuert werden, " +
-    "die in `triggers.json` in deinem Workspace-Root definiert sind. " +
-    "Du kannst diese Datei selbst lesen und aendern, um deinen Zeitplan anzupassen.\n\n" +
-    "### Trigger-Typen\n\n" +
+    "\n---\n\n## Trigger management (triggers.json)\n\n" +
+    "Your runs can be driven by triggers defined in `triggers.json` at your workspace root. " +
+    "You can read and edit this file yourself to adjust your own schedule.\n\n" +
+    "### Trigger types\n\n" +
     "**Recurring (cron):**\n" +
     "```json\n" +
     "{\n" +
@@ -403,31 +402,31 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null) {
     '  "type": "cron",\n' +
     '  "enabled": true,\n' +
     '  "cron": "*/30 * * * *",\n' +
-    '  "description": "Beschreibung",\n' +
-    '  "prompt": "Was du bei jeder Ausfuehrung tun sollst"\n' +
+    '  "description": "Description",\n' +
+    '  "prompt": "What you should do on each run"\n' +
     "}\n" +
     "```\n" +
-    "Cron-Format: `Minute Stunde Tag Monat Wochentag`\n\n" +
-    "**Einmalig (once):**\n" +
+    "Cron format: `Minute Hour Day Month Weekday`\n\n" +
+    "**One-shot (once):**\n" +
     "```json\n" +
     "{\n" +
     '  "id": "unique-id",\n' +
     '  "type": "once",\n' +
     '  "enabled": true,\n' +
     '  "at": "2026-04-25T09:00:00",\n' +
-    '  "description": "Beschreibung",\n' +
-    '  "prompt": "Was du tun sollst"\n' +
+    '  "description": "Description",\n' +
+    '  "prompt": "What you should do"\n' +
     "}\n" +
     "```\n\n" +
-    "### Trigger verwalten\n\n" +
-    "1. `triggers.json` lesen\n" +
-    "2. Trigger hinzufuegen, aendern oder entfernen\n" +
-    "3. Datei zurueckschreiben\n" +
-    "4. Aenderungen werden automatisch innerhalb von 60 Sekunden uebernommen\n\n" +
-    "### Optionale Felder\n\n" +
-    "- `roomId` — Ziel-Room fuer die Ausgabe (Standard: Direct-Message-Room mit dem Admin)\n" +
-    "- `timeoutSeconds` — Max. Ausfuehrungszeit (Standard: 3600)\n\n" +
-    "Wenn du bei einer geplanten Ausfuehrung nichts zu berichten hast, antworte mit `[PASS]`.\n";
+    "### Managing triggers\n\n" +
+    "1. Read `triggers.json`\n" +
+    "2. Add, modify or remove triggers\n" +
+    "3. Write the file back\n" +
+    "4. Changes are picked up automatically within 60 seconds\n\n" +
+    "### Optional fields\n\n" +
+    "- `roomId` — target room for the output (default: direct-message room with the admin)\n" +
+    "- `timeoutSeconds` — max execution time (default: 3600)\n\n" +
+    "If a scheduled run has nothing to report, reply with `[PASS]`.\n";
 
   let envSection = "";
   if (env) {
@@ -437,11 +436,11 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null) {
     const repos = Array.isArray(env.repositories) ? env.repositories : [];
     if (repos.length === 1) {
       const repoName = (repos[0].url.split("/").pop() || "repo").replace(/\.git$/, "");
-      parts.push(`**Repository:** \`${repos[0].url}\` — geklont nach \`./${repoName}/\``);
+      parts.push(`**Repository:** \`${repos[0].url}\` — cloned to \`./${repoName}/\``);
     } else if (repos.length > 1) {
       const lines = repos.map(r => {
         const repoName = (r.url.split("/").pop() || "repo").replace(/\.git$/, "");
-        return `- \`${r.url}\` — geklont nach \`./${repoName}/\``;
+        return `- \`${r.url}\` — cloned to \`./${repoName}/\``;
       });
       parts.push(`**Repositories:**\n${lines.join("\n")}`);
     }
@@ -480,7 +479,7 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null) {
   return `${base}\n\n---\n\n${pathNote}${envSection}\n---\n\n## Agent Role\n\n${agentPrompt}${extra}${blueprintSection}`;
 }
 
-function seedAgentWorkspace(id, env) {
+function seedAgentWorkspace(id, env, opts = {}) {
   const dest = agentDir(id);
   fs.mkdirSync(dest, { recursive: true });
 
@@ -503,8 +502,12 @@ function seedAgentWorkspace(id, env) {
     }
   }
 
-  // 2. Copy selected skills from the central pool
-  const selectedSkills = (env && Array.isArray(env.skills)) ? env.skills : [];
+  // 2. Copy selected skills from the central pool. Team-members may override
+  // the team-env's skill list — pass `opts.skillsOverride` (an array) to use
+  // it instead of `env.skills`. The override is verbatim, no merge.
+  const selectedSkills = Array.isArray(opts.skillsOverride)
+    ? opts.skillsOverride
+    : ((env && Array.isArray(env.skills)) ? env.skills : []);
   if (selectedSkills.length > 0) {
     const skillsSrc = path.join(TEMPLATE_WORKSPACE, "skills");
     const skillsDst = path.join(dest, "skills");
@@ -532,6 +535,13 @@ function seedAgentWorkspace(id, env) {
 
   const cloneSummary = clones.length > 0 ? `, repos=${clones.map(c => c.repoName).join(",")}` : "";
   console.log(`[Orchestrator] Seeded workspace for ${id} (env=${env?.id || "none"}, skills=${selectedSkills.length}${cloneSummary})`);
+  // Warnings (failed clones, missing skills, etc.) used to be silently
+  // dropped into the response object — invisible from the logs unless the
+  // caller surfaced them. Log them prominently so a clone failure during
+  // team-member seeding is immediately visible to the operator.
+  for (const w of warnings) {
+    console.warn(`[Orchestrator] Seed warning for ${id}: ${w}`);
+  }
   return { seeded: true, warnings, clones };
 }
 
@@ -543,7 +553,7 @@ function cloneEnvironmentRepositories(targetDir, env, warnings) {
   for (const repo of repos) {
     if (!repo?.url) continue;
     try {
-      const info = cloneRepository(targetDir, repo, env?.githubTokenId || null);
+      const info = cloneRepository(targetDir, repo, env?.githubTokenId || null, env?.id || null);
       if (info) results.push(info);
     } catch (err) {
       warnings.push(`git clone (${repo.url}): ${err.message}`);
@@ -552,12 +562,47 @@ function cloneEnvironmentRepositories(targetDir, env, warnings) {
   return results;
 }
 
-function cloneRepository(targetDir, repository, envGithubTokenId = null) {
+// Per-env clone cache. The first agent in an env triggers a real `git clone`
+// into <envDir>/_repo-cache/<repoName>; subsequent agents in the same env
+// `cp -r` from that cache instead of paying the network round-trip again.
+// Each agent still ends up with its own independent working copy — the cache
+// is only used as the source of the copy, never shared at runtime.
+function envRepoCachePath(envId, repoName) {
+  if (!envId || !repoName) return null;
+  return path.join(ENVIRONMENTS_DIR, envId, "_repo-cache", repoName);
+}
+
+function isUsableRepoCache(cacheDir) {
+  if (!cacheDir || !fs.existsSync(cacheDir)) return false;
+  // Validate the cache holds a complete clone — partial / interrupted clones
+  // would silently propagate to every member otherwise.
+  try {
+    return fs.existsSync(path.join(cacheDir, ".git", "HEAD"));
+  } catch {
+    return false;
+  }
+}
+
+function cloneRepository(targetDir, repository, envGithubTokenId = null, envId = null) {
   const { url, branch, sshKeyId } = repository;
   if (!url) return null;
 
+  // The transport choice is driven by the URL, not by which credentials
+  // the env carries. HTTPS URLs need PAT-based Basic auth; SSH URLs need
+  // GIT_SSH_COMMAND with the deploy key. The wizard sets BOTH credentials
+  // by default (defense-in-depth) and writes the env's `repositories[].url`
+  // as HTTPS — so an SSH key being present alongside an HTTPS URL is
+  // expected, and we must not let it pre-empt the token path. Pick the
+  // right one for the URL and warn loudly when nothing fits.
+  const isHttpsGithub = /^https?:\/\/(www\.)?github\.com\//i.test(url);
+  const isSshUrl = /^(ssh:\/\/|git@)/.test(url);
+
   let keyPath = null;
-  if (sshKeyId) {
+  // Resolve the SSH key only when we actually intend to use it. For HTTPS
+  // URLs the key is irrelevant — verifying its existence here would fail
+  // the whole clone for envs whose key was rotated/removed long ago even
+  // though the HTTPS+token path would have worked fine.
+  if (isSshUrl && sshKeyId) {
     keyPath = path.join(SSH_KEYS_DIR, sshKeyId);
     if (!fs.existsSync(keyPath)) {
       throw new Error(`SSH key not found: ${sshKeyId}`);
@@ -573,12 +618,28 @@ function cloneRepository(targetDir, repository, envGithubTokenId = null) {
     return { repoName, skipped: true };
   }
 
-  // Quick-start path: HTTPS GitHub URL + no SSH key + env-level GH token.
-  // Authenticate via a one-shot http.extraheader so the token never lands in
-  // `git remote -v` (no URL rewriting), and only for this clone invocation.
-  const isHttpsGithub = /^https?:\/\/(www\.)?github\.com\//i.test(url);
+  // Cache fast-path: if a sibling agent in this env already cloned the repo
+  // we can copy that working tree instead of running `git clone` again.
+  const cacheDir = envRepoCachePath(envId, repoName);
+  if (isUsableRepoCache(cacheDir)) {
+    try {
+      fs.cpSync(cacheDir, repoDir, { recursive: true });
+      console.log(`[Orchestrator] Copied ${repoName} from env cache → ${repoDir}`);
+      return { repoName, skipped: false, fromCache: true };
+    } catch (err) {
+      // Fall through to a fresh clone if the copy fails — the cache may be
+      // corrupted or hit a permission edge case. Don't let the optimisation
+      // fail seeding outright.
+      console.warn(`[Orchestrator] Cache copy for ${repoName} failed (${err.message}); falling back to git clone`);
+    }
+  }
+
+  // For HTTPS GitHub URLs, authenticate via a one-shot http.extraheader so
+  // the token never lands in `git remote -v` (no URL rewriting), and only
+  // for this clone invocation. The presence of an SSH key in the env spec
+  // does NOT block this — SSH keys are no help for HTTPS transport.
   let extraHeaderArg = null;
-  if (!keyPath && envGithubTokenId && isHttpsGithub) {
+  if (isHttpsGithub && envGithubTokenId) {
     const tokenPath = path.join(GH_TOKENS_DIR, envGithubTokenId);
     try {
       const ghToken = fs.readFileSync(tokenPath, "utf8").trim();
@@ -589,6 +650,16 @@ function cloneRepository(targetDir, repository, envGithubTokenId = null) {
     } catch (err) {
       console.warn(`[Orchestrator] Cannot read GitHub token ${envGithubTokenId} for clone: ${err.message}`);
     }
+  }
+  // Refuse the clone proactively when no auth can possibly work. Without
+  // this, git would block on a username prompt (no TTY → fatal: could not
+  // read Username) and the failure would surface as a cryptic stderr line.
+  if (isHttpsGithub && !extraHeaderArg) {
+    throw new Error(
+      `HTTPS clone of ${url} needs a GitHub PAT, but the env has no usable githubTokenId ` +
+      `(SSH keys do not authenticate HTTPS transports). Either add a PAT to the env or ` +
+      `change the repository URL to its SSH form.`
+    );
   }
 
   const args = [];
@@ -610,12 +681,27 @@ function cloneRepository(targetDir, repository, envGithubTokenId = null) {
       timeout: 120_000,
     });
     console.log(`[Orchestrator] Cloned ${url} → ${repoDir}`);
-    return { repoName, skipped: false };
   } catch (err) {
     const stderr = (err.stderr || "").toString();
     const msg = stderr.substring(0, 400) || err.message;
     throw new Error(`git clone failed: ${msg}`);
   }
+
+  // Seed the env-level cache so the next member in the same env can skip
+  // the network round-trip. Failure here is non-fatal: subsequent members
+  // simply re-clone instead of copying.
+  if (cacheDir) {
+    try {
+      fs.mkdirSync(path.dirname(cacheDir), { recursive: true });
+      if (!fs.existsSync(cacheDir)) {
+        fs.cpSync(repoDir, cacheDir, { recursive: true });
+      }
+    } catch (err) {
+      console.warn(`[Orchestrator] Cache seed for ${repoName} failed (${err.message}) — siblings will re-clone`);
+    }
+  }
+
+  return { repoName, skipped: false, fromCache: false };
 }
 
 // Force-copy the ACE engineering skill into an agent's workspace, regardless
@@ -1303,7 +1389,9 @@ class Orchestrator {
     }
 
     // team: save a template config (no Matrix user, no process) and
-    // immediately materialize the first member.
+    // immediately materialize the first member — unless `extra.skipFirstMember`
+    // is set (used by the Team-Setup wizard, which then adds members itself
+    // with role-specific overrides).
     if (role === "team") {
       const teamConfig = {
         id,
@@ -1317,6 +1405,9 @@ class Orchestrator {
       this.agentConfigs.set(id, { config: teamConfig });
       console.log(`[Orchestrator] Created team ${id}`);
 
+      if (extra.skipFirstMember) {
+        return { id, team: true, firstMember: null };
+      }
       const member = await this.addTeamMember(id);
       return { id, team: true, firstMember: member.id };
     }
@@ -1345,12 +1436,26 @@ class Orchestrator {
       role,
       environmentId: env.id,
       ...(role === "orchestrator" && extra.briefingsPath && { briefingsPath: extra.briefingsPath }),
+      // Optional fields written by the Team-Setup wizard. `team` ties the
+      // agent to its sibling team-mates (used by the Layer-2 `from: team`
+      // filter and by the Admin Console's team grouping). `sessionPolicy:
+      // per-invocation` makes triggered runs ephemeral — see the agent-runner
+      // for the runtime behavior.
+      ...(extra.team ? { team: String(extra.team) } : {}),
+      ...(extra.sessionPolicy === 'per-invocation' ? { sessionPolicy: 'per-invocation' } : {}),
       enabled: true,
     };
     saveAgentConfig(id, config);
     saveAgentPrompt(id, effectivePrompt, role, env);
 
-    if (extra.schedule && extra.taskPrompt) {
+    // Two ways to provide an initial trigger set, mutually exclusive:
+    // - extra.triggers — full array, written verbatim. Used by the Team-Setup
+    //   wizard which renders templates into multiple triggers per agent.
+    // - extra.schedule + extra.taskPrompt — legacy single-cron path used by
+    //   ad-hoc agent creation flows. Kept for backward compatibility.
+    if (Array.isArray(extra.triggers) && extra.triggers.length > 0) {
+      saveTriggers(id, extra.triggers);
+    } else if (extra.schedule && extra.taskPrompt) {
       saveTriggers(id, [{
         id: "initial",
         type: "cron",
@@ -1388,8 +1493,22 @@ class Orchestrator {
 
   // Add a new team-member to an existing team. The member is immediately
   // materialized (Matrix user + workspace + agent process).
-  // Member IDs are auto-numbered: {teamId}-1, {teamId}-2, …
-  async addTeamMember(teamId) {
+  //
+  // Without opts: member id auto-numbered (`{teamId}-1`, `{teamId}-2`, …),
+  // prompt + skills inherited from the team / its env.
+  //
+  // With opts (used by the Team-Setup wizard):
+  //   - id                  — pin the member id (`<teamId>-developer`, etc.)
+  //   - displayName         — override the auto-generated `Team #n`
+  //   - systemPromptOverride — role-specific prompt; member config records
+  //                            it in `systemPrompt`. Absent = inherit team's
+  //                            `systemPromptTemplate`.
+  //   - skillsOverride      — replace env.skills for this member's workspace.
+  //                            Absent = inherit env.skills.
+  //   - sessionPolicy       — `per-invocation` | `persistent` (default).
+  //                            Persisted on the member config.
+  //   - triggers            — full triggers.json array, written verbatim.
+  async addTeamMember(teamId, opts = {}) {
     const teamCfg = loadAgentConfig(teamId);
     if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
     if (teamCfg.role !== "team") {
@@ -1399,14 +1518,23 @@ class Orchestrator {
     const env = loadEnvironment(teamCfg.environmentId);
     if (!env) throw new Error(`Working Environment '${teamCfg.environmentId}' not found`);
 
-    // Determine next available member number and immediately reserve the
-    // slot by writing a placeholder config. This prevents a TOCTOU race where
-    // two concurrent POST /members requests both compute the same n before
-    // either saveAgentConfig call runs.
-    let n = 1;
-    while (loadAgentConfig(`${teamId}-${n}`)) n++;
-    const memberId = `${teamId}-${n}`;
-    const memberDisplayName = `${teamCfg.displayName} #${n}`;
+    let memberId, memberDisplayName;
+    if (opts.id) {
+      if (loadAgentConfig(opts.id)) {
+        throw new Error(`Agent '${opts.id}' already exists`);
+      }
+      memberId = opts.id;
+      memberDisplayName = opts.displayName || opts.id;
+    } else {
+      // Determine next available member number and immediately reserve the
+      // slot by writing a placeholder config. This prevents a TOCTOU race where
+      // two concurrent POST /members requests both compute the same n before
+      // either saveAgentConfig call runs.
+      let n = 1;
+      while (loadAgentConfig(`${teamId}-${n}`)) n++;
+      memberId = `${teamId}-${n}`;
+      memberDisplayName = opts.displayName || `${teamCfg.displayName} #${n}`;
+    }
 
     saveAgentConfig(memberId, {
       id: memberId,
@@ -1425,7 +1553,16 @@ class Orchestrator {
     const token = await loginMatrixUser(memberId, password);
     await setDisplayName(token, userId, memberDisplayName);
 
-    const seedResult = seedAgentWorkspace(memberId, env);
+    const seedResult = seedAgentWorkspace(memberId, env, {
+      skillsOverride: Array.isArray(opts.skillsOverride) ? opts.skillsOverride : undefined,
+    });
+
+    // Resolve effective values once, here. The member's config records ONLY
+    // the override fields (when present); absence is the inherit signal that
+    // team-edit propagation reads later.
+    const effectivePrompt = (typeof opts.systemPromptOverride === 'string' && opts.systemPromptOverride.length > 0)
+      ? opts.systemPromptOverride
+      : (teamCfg.systemPromptTemplate || "");
 
     const memberConfig = {
       id: memberId,
@@ -1435,15 +1572,28 @@ class Orchestrator {
       role: "team-member",
       parentTeamId: teamId,
       environmentId: teamCfg.environmentId,
+      ...(typeof opts.systemPromptOverride === 'string' && opts.systemPromptOverride.length > 0
+        ? { systemPrompt: opts.systemPromptOverride } : {}),
+      ...(Array.isArray(opts.skillsOverride) ? { skillsOverride: opts.skillsOverride } : {}),
+      ...(opts.sessionPolicy === 'per-invocation' ? { sessionPolicy: 'per-invocation' } : {}),
       enabled: true,
     };
     saveAgentConfig(memberId, memberConfig);
-    saveAgentPrompt(memberId, teamCfg.systemPromptTemplate || "", "team-member", env);
+    saveAgentPrompt(memberId, effectivePrompt, "team-member", env);
+
+    if (Array.isArray(opts.triggers) && opts.triggers.length > 0) {
+      saveTriggers(memberId, opts.triggers);
+    }
 
     this.agentConfigs.set(memberId, { config: memberConfig });
     startAgentProcess(memberConfig);
 
-    console.log(`[Orchestrator] Created team-member ${memberId} (team=${teamId})`);
+    console.log(
+      `[Orchestrator] Created team-member ${memberId} (team=${teamId}` +
+      `${memberConfig.systemPrompt ? ', prompt=override' : ', prompt=inherit'}` +
+      `${memberConfig.skillsOverride ? ', skills=override' : ', skills=inherit'}` +
+      `${memberConfig.sessionPolicy ? `, session=${memberConfig.sessionPolicy}` : ''})`
+    );
     return {
       id: memberId,
       userId,
@@ -1451,6 +1601,38 @@ class Orchestrator {
       warnings: seedResult.warnings || [],
       clones: seedResult.clones || [],
     };
+  }
+
+  // Update a team's `systemPromptTemplate` and eagerly push the new value
+  // to all members that inherit it (i.e. don't carry their own
+  // `systemPrompt` override). Skill changes on the team's env are NOT
+  // pushed — those wait for the next member rebuild (sync-on-restart).
+  async updateTeamPrompt(teamId, newTemplate) {
+    const teamCfg = loadAgentConfig(teamId);
+    if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
+    if (teamCfg.role !== "team") {
+      throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
+    }
+    const env = loadEnvironment(teamCfg.environmentId);
+    if (!env) throw new Error(`Working Environment '${teamCfg.environmentId}' not found`);
+
+    teamCfg.systemPromptTemplate = typeof newTemplate === 'string' ? newTemplate : '';
+    saveAgentConfig(teamId, teamCfg);
+    this.agentConfigs.set(teamId, { config: teamCfg });
+
+    let propagated = 0;
+    for (const id of listAgentIds()) {
+      const cfg = loadAgentConfig(id);
+      if (!cfg || cfg.role !== "team-member" || cfg.parentTeamId !== teamId) continue;
+      // Skip members with their own prompt override.
+      if (typeof cfg.systemPrompt === 'string' && cfg.systemPrompt.length > 0) continue;
+      saveAgentPrompt(id, teamCfg.systemPromptTemplate, "team-member", env);
+      propagated++;
+    }
+    console.log(
+      `[Orchestrator] Team ${teamId} prompt updated; pushed to ${propagated} inheriting member(s)`
+    );
+    return { teamId, propagated };
   }
 
   // Scan an orchestrator agent's briefings directory and ensure a disabled
@@ -2703,8 +2885,38 @@ async function main() {
           deleteAgentFiles(id);
           orchestrator.agentConfigs.delete(id);
           await orchestrator.deactivateMatrixUser(id);
+
+          // Reap the env if no agent references it anymore. The Team-Setup
+          // wizard creates one env per team (env id = team id) and there is
+          // no other way to clean it up from the UI, so without this every
+          // wizard-created team leaves behind an orphan env that blocks the
+          // next create-team-with-the-same-id attempt with "Some resources
+          // for team … already exist". Manually managed envs survive because
+          // they're either shared between agents or reused after a delete —
+          // we only delete envs whose last referencing agent just went away.
+          let reapedEnv = null;
+          if (parentCfg?.environmentId) {
+            const envId = parentCfg.environmentId;
+            const stillReferenced = listAgentIds().some(otherId => {
+              const cfg = loadAgentConfig(otherId);
+              return cfg && cfg.environmentId === envId;
+            });
+            if (!stillReferenced) {
+              const envDir = path.join(ENVIRONMENTS_DIR, envId);
+              try {
+                if (fs.existsSync(envDir)) {
+                  fs.rmSync(envDir, { recursive: true, force: true });
+                  reapedEnv = envId;
+                  console.log(`[Orchestrator] Reaped now-unused environment '${envId}' after deleting '${id}'`);
+                }
+              } catch (err) {
+                console.error(`[Orchestrator] Failed to reap env '${envId}': ${err.message}`);
+              }
+            }
+          }
+
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, cascaded }));
+          res.end(JSON.stringify({ ok: true, cascaded, reapedEnv }));
         } catch (err) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));
@@ -3149,21 +3361,73 @@ async function main() {
     }
 
     // POST /internal/teams/:teamId/members — add member to team
+    // Body (all optional): { id, displayName, systemPromptOverride,
+    //   skillsOverride, sessionPolicy, triggers }
     const addMemberMatch = req.method === 'POST' && req.url.match(/^\/internal\/teams\/([^/]+)\/members$/);
     if (addMemberMatch) {
       const teamId = decodeURIComponent(addMemberMatch[1]);
-      (async () => {
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        let opts = {};
+        if (body) {
+          try { opts = JSON.parse(body) || {}; }
+          catch (err) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `Invalid JSON body: ${err.message}` }));
+            return;
+          }
+        }
         try {
-          const result = await orchestrator.addTeamMember(teamId);
+          const result = await orchestrator.addTeamMember(teamId, opts);
           res.writeHead(201, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(result));
         } catch (err) {
           console.error(`[Orchestrator] addTeamMember error for ${teamId}: ${err.message}`);
-          const status = /not found/i.test(err.message) ? 404 : /not a team/i.test(err.message) ? 400 : 500;
+          const status = /not found/i.test(err.message) ? 404
+            : /not a team/i.test(err.message) ? 400
+            : /already exists/i.test(err.message) ? 409
+            : 500;
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));
         }
-      })();
+      });
+      return;
+    }
+
+    // POST /internal/teams/:teamId/prompt — update team's systemPromptTemplate
+    // and push it to all inheriting members.
+    const teamPromptMatch = req.method === 'POST' && req.url.match(/^\/internal\/teams\/([^/]+)\/prompt$/);
+    if (teamPromptMatch) {
+      const teamId = decodeURIComponent(teamPromptMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        let payload;
+        try { payload = JSON.parse(body || '{}'); }
+        catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `Invalid JSON body: ${err.message}` }));
+          return;
+        }
+        if (typeof payload?.systemPromptTemplate !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'systemPromptTemplate (string) required' }));
+          return;
+        }
+        try {
+          const result = await orchestrator.updateTeamPrompt(teamId, payload.systemPromptTemplate);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] updateTeamPrompt error for ${teamId}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404
+            : /not a team/i.test(err.message) ? 400
+            : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
       return;
     }
 
@@ -3174,7 +3438,15 @@ async function main() {
     req.on('data', d => body += d);
     req.on('end', async () => {
       try {
-        const { id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt, briefingsPath } = JSON.parse(body);
+        const {
+          id, displayName, role, systemPrompt, environmentId,
+          schedule, taskPrompt, briefingsPath,
+          // Team-Setup wizard fields (all optional, additive):
+          team, sessionPolicy, triggers,
+          // For role: 'team' — suppress the auto-numbered first member
+          // (the wizard adds members itself with role overrides instead).
+          skipFirstMember,
+        } = JSON.parse(body);
         if (!id || !displayName || !role || !environmentId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'id, displayName, role, environmentId required' }));
@@ -3199,6 +3471,11 @@ async function main() {
         const extra =
           role === 'orchestrator' ? { briefingsPath: briefingsPath || null } :
           { schedule, taskPrompt };
+        // Wizard-side extras layered on top of the legacy fields.
+        if (team) extra.team = team;
+        if (sessionPolicy) extra.sessionPolicy = sessionPolicy;
+        if (Array.isArray(triggers)) extra.triggers = triggers;
+        if (skipFirstMember) extra.skipFirstMember = true;
         const result = await orchestrator.createAgent(id, displayName, role, systemPrompt, environmentId, extra);
         res.writeHead(201, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));

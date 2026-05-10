@@ -185,8 +185,8 @@ export default function Briefings() {
                   textAlign: 'center',
                   lineHeight: 1.5,
                 }}>
-                  Kein Orchestrator-Agent vorhanden.<br />
-                  Lege einen Agenten mit Rolle <strong>Orchestrator</strong> an.
+                  No orchestrator agent yet.<br />
+                  Create an agent with role <strong>Orchestrator</strong>.
                 </div>
               ) : (
                 orchestrators.map(a => (
@@ -204,14 +204,14 @@ export default function Briefings() {
         )}
       </div>
 
-      {/* Rechte Fläche: Graph */}
+      {/* Right pane: graph */}
       <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
         {!selectedAgent ? (
           <div style={{
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             height: '100%', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)',
           }}>
-            Flow auswählen
+            Select a flow
           </div>
         ) : (
           <BPGraph

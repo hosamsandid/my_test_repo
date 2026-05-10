@@ -830,9 +830,25 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
 
 /* ── Agent Edit Form ────────────────────────────────────────────────── */
 function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
+  // Initial values for the inheritance toggles. `agent.systemPrompt` /
+  // `agent.skillsOverride` absent === inheriting from the parent team.
+  const initialInheritPrompt = agent.role === 'team-member'
+    && !(typeof agent.systemPrompt === 'string' && agent.systemPrompt.length > 0);
+  const initialInheritSkills = agent.role === 'team-member'
+    && !Array.isArray(agent.skillsOverride);
+
   const [form, setForm] = useState({
     displayName: agent.displayName || '',
     briefingsPath: agent.briefingsPath || '',
+    // team-only field
+    systemPromptTemplate: agent.systemPromptTemplate || '',
+    // team-member override fields
+    inheritPrompt: initialInheritPrompt,
+    promptOverride: agent.systemPrompt || '',
+    inheritSkills: initialInheritSkills,
+    skillsOverrideText: Array.isArray(agent.skillsOverride)
+      ? agent.skillsOverride.join(', ')
+      : '',
   });
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
   const canSubmit = !!form.displayName;
@@ -847,6 +863,37 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
       : env.repository?.url ? [env.repository] : [];
     return repos.map(r => repoDirName(r.url)).filter(Boolean);
   }, [environments, agent.environmentId]);
+
+  // For team-members: fetch the parent team's config to display its
+  // current systemPromptTemplate as a preview when inheriting.
+  const parentTeamUrl = agent.role === 'team-member' && agent.parentTeamId
+    ? `/api/agents/${encodeURIComponent(agent.parentTeamId)}`
+    : null;
+  const { data: parentTeam } = useApi(parentTeamUrl || '/api/agents');
+  const parentTeamPrompt = parentTeamUrl && parentTeam?.role === 'team'
+    ? (parentTeam.systemPromptTemplate || '')
+    : '';
+
+  function buildSubmit() {
+    const submit = {
+      displayName: form.displayName,
+      briefingsPath: form.briefingsPath,
+    };
+    if (agent.role === 'team') {
+      submit.systemPromptTemplate = form.systemPromptTemplate;
+    }
+    if (agent.role === 'team-member') {
+      // null = clear override (= switch to inherit). The API knows the convention.
+      submit.systemPrompt = form.inheritPrompt ? null : form.promptOverride;
+      submit.skillsOverride = form.inheritSkills
+        ? null
+        : form.skillsOverrideText
+            .split(',')
+            .map(s => s.trim())
+            .filter(Boolean);
+    }
+    return submit;
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -887,6 +934,22 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
         />
       )}
 
+      {agent.role === 'team' && (
+        <div>
+          <label style={labelStyle}>
+            Team Default Prompt
+            <span style={{ marginLeft: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-normal)' }}>
+              — saved here propagates to every member that inherits.
+            </span>
+          </label>
+          <textarea
+            value={form.systemPromptTemplate}
+            onChange={e => update('systemPromptTemplate', e.target.value)}
+            style={{ ...inputStyle, minHeight: 160, fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-sm)' }}
+          />
+        </div>
+      )}
+
       {agent.role === 'bp-instance' && (
         <>
           <div>
@@ -914,16 +977,44 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
       )}
 
       {agent.role === 'team-member' && (
-        <div>
-          <div style={labelStyle}>Parent Team (read-only)</div>
-          <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
-            {agent.parentTeamId || '—'}
+        <>
+          <div>
+            <div style={labelStyle}>Parent Team (read-only)</div>
+            <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
+              {agent.parentTeamId || '—'}
+            </div>
           </div>
-        </div>
+
+          <InheritOrCustom
+            label="System Prompt"
+            inherit={form.inheritPrompt}
+            onToggle={v => update('inheritPrompt', v)}
+            inheritedPreview={parentTeamPrompt}
+            inheritedLabel="Inherited from team"
+            customValue={form.promptOverride}
+            onCustomChange={v => update('promptOverride', v)}
+            customMultiline
+          />
+
+          <InheritOrCustom
+            label="Skills"
+            inherit={form.inheritSkills}
+            onToggle={v => update('inheritSkills', v)}
+            inheritedPreview={
+              parentTeam && parentTeam.environmentId
+                ? `(team env: ${parentTeam.environmentId})`
+                : ''
+            }
+            inheritedLabel="Inherited from team's environment"
+            customValue={form.skillsOverrideText}
+            onCustomChange={v => update('skillsOverrideText', v)}
+            customPlaceholder="comma-separated skill names, e.g. cobol-analysis, jcl-converter"
+          />
+        </>
       )}
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
-        <PrimaryBtn onClick={() => onSave(form)} saving={saving} disabled={!canSubmit}>
+        <PrimaryBtn onClick={() => onSave(buildSubmit())} saving={saving} disabled={!canSubmit}>
           {saving ? 'Saving…' : 'Save Changes'}
         </PrimaryBtn>
         <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
@@ -931,6 +1022,66 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
     </div>
   );
 }
+
+// Reusable inherit/override widget for team-member fields. Single source
+// of truth for the toggle styling so the prompt and skills sections look
+// identical.
+function InheritOrCustom({
+  label, inherit, onToggle,
+  inheritedPreview, inheritedLabel,
+  customValue, onCustomChange, customMultiline, customPlaceholder,
+}) {
+  return (
+    <div>
+      <div style={labelStyle}>{label}</div>
+      <div style={{ display: 'flex', gap: 'var(--eb-space-3)', marginBottom: 'var(--eb-space-2)' }}>
+        <label style={radioLabelStyle}>
+          <input type="radio" checked={inherit} onChange={() => onToggle(true)} /> Inherit from team
+        </label>
+        <label style={radioLabelStyle}>
+          <input type="radio" checked={!inherit} onChange={() => onToggle(false)} /> Custom
+        </label>
+      </div>
+      {inherit ? (
+        <div style={{
+          ...inputStyle,
+          background: 'var(--eb-bg-app)',
+          color: 'var(--eb-text-muted)',
+          fontFamily: 'var(--eb-font-mono)',
+          fontSize: 'var(--eb-text-sm)',
+          minHeight: customMultiline ? 100 : 'auto',
+          whiteSpace: customMultiline ? 'pre-wrap' : 'normal',
+        }}>
+          {inheritedPreview ? inheritedPreview : <em>({inheritedLabel || 'inheriting'})</em>}
+        </div>
+      ) : customMultiline ? (
+        <textarea
+          value={customValue}
+          onChange={e => onCustomChange(e.target.value)}
+          placeholder={customPlaceholder || ''}
+          style={{ ...inputStyle, minHeight: 140, fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-sm)' }}
+        />
+      ) : (
+        <input
+          type="text"
+          value={customValue}
+          onChange={e => onCustomChange(e.target.value)}
+          placeholder={customPlaceholder || ''}
+          style={inputStyle}
+        />
+      )}
+    </div>
+  );
+}
+
+const radioLabelStyle = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 'var(--eb-space-2)',
+  fontSize: 'var(--eb-text-sm)',
+  color: 'var(--eb-text-primary)',
+  cursor: 'pointer',
+};
 
 /* ── Agent Row ──────────────────────────────────────────────────────── */
 function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, onOpenBrief, navigate, tree, busy }) {
@@ -1386,6 +1537,35 @@ function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate,
   );
 }
 
+function OrphanCard({ agent, onDelete }) {
+  const reason =
+    agent.role === 'team-member'
+      ? `parent team "${agent.parentTeamId}" is gone`
+      : agent.role === 'bp-instance'
+      ? `parent orchestrator "${agent.parentOrchestratorId}" is gone`
+      : 'parent agent is gone';
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
+      padding: 'var(--eb-space-3) var(--eb-space-4)',
+      background: 'var(--eb-bg-surface)',
+      border: '1px solid var(--eb-status-warning)',
+      borderRadius: 'var(--eb-radius-md)',
+    }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontWeight: 'var(--eb-font-medium)', fontSize: 'var(--eb-text-sm)' }}>
+          {agent.displayName ?? agent.id}
+        </div>
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>
+          {agent.id} · {agent.role} · {reason}
+        </div>
+      </div>
+      <IconBtn icon={Trash2} label="Delete orphan" danger onClick={() => onDelete(agent)} />
+    </div>
+  );
+}
+
 /* ── Main Component ─────────────────────────────────────────────────── */
 export default function Agents() {
   const navigate = useNavigate();
@@ -1406,6 +1586,8 @@ export default function Agents() {
   const byName = (a, b) => (a.displayName || a.id).localeCompare(b.displayName || b.id);
   const bpInstances = agents.filter(a => a.role === 'bp-instance');
   const teamMembers = agents.filter(a => a.role === 'team-member');
+  const orchestratorIds = new Set(agents.filter(a => a.role === 'orchestrator').map(a => a.id));
+  const teamIds = new Set(agents.filter(a => a.role === 'team').map(a => a.id));
   const orchestrators = agents
     .filter(a => a.role === 'orchestrator')
     .sort(byName)
@@ -1417,6 +1599,13 @@ export default function Agents() {
   const leaves = agents
     .filter(a => !['orchestrator', 'bp-instance', 'team', 'team-member'].includes(a.role))
     .sort(byName);
+  // Orphans: members/instances whose parent is gone. Must be rendered explicitly,
+  // otherwise they vanish from the UI entirely (filtered out of leaves above and
+  // not nested under any parent card) and the only way to delete them is via SSH.
+  const orphans = [
+    ...teamMembers.filter(m => !m.parentTeamId || !teamIds.has(m.parentTeamId)),
+    ...bpInstances.filter(b => !b.parentOrchestratorId || !orchestratorIds.has(b.parentOrchestratorId)),
+  ].sort(byName);
 
   function openPanel(mode, agent) {
     setSaveError(null);
@@ -1559,7 +1748,8 @@ export default function Agents() {
 
   // Count agent types (teams/orchestrators/leaves), not individual members/stubs,
   // consistent with how bp-instances under orchestrators are also not counted separately.
-  const totalCount = orchestrators.length + teams.length + leaves.length;
+  // Orphans count too — otherwise the page shows the empty state while orphans still need cleanup.
+  const totalCount = orchestrators.length + teams.length + leaves.length + orphans.length;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -1662,6 +1852,29 @@ export default function Agents() {
               onToggleEnabled={handleToggleEnabled}
             />
           ))}
+          {orphans.length > 0 && (
+            <div style={{
+              padding: 'var(--eb-space-4)',
+              background: 'var(--eb-bg-surface)',
+              border: '1px solid var(--eb-status-warning)',
+              borderRadius: 'var(--eb-radius-lg)',
+              display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)',
+            }}>
+              <div>
+                <div style={{ fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-status-warning)', fontSize: 'var(--eb-text-md)' }}>
+                  Orphaned agents ({orphans.length})
+                </div>
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 2 }}>
+                  These agents reference a parent that no longer exists. Delete each one to remove its workspace and Matrix user.
+                </div>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+                {orphans.map(o => (
+                  <OrphanCard key={o.id} agent={o} onDelete={ag => setDeleteTarget(ag)} />
+                ))}
+              </div>
+            </div>
+          )}
         </>
       )}
 
@@ -1683,16 +1896,27 @@ export default function Agents() {
 
       <ConfirmDialog
         open={!!deleteTarget}
-        title="Delete Agent"
-        message={
-          deleteTarget?.role === 'orchestrator'
-            ? `Delete orchestrator "${deleteTarget.displayName}"? Its BP-instance children must be deleted separately.`
-            : deleteTarget?.role === 'team'
-            ? `Delete team "${deleteTarget.displayName}"? Its members must be deleted separately.`
-            : `Delete agent "${deleteTarget?.displayName ?? deleteTarget?.id}"? This removes the workspace and all associated data.`
+        title={
+          deleteTarget?.role === 'team'
+            ? `Delete team "${deleteTarget.displayName}"?`
+            : deleteTarget?.role === 'orchestrator'
+            ? `Delete orchestrator "${deleteTarget.displayName}"?`
+            : 'Delete agent?'
         }
+        message={renderDeleteMessage(deleteTarget)}
         variant="danger"
-        confirmLabel="Delete"
+        confirmLabel={
+          (deleteTarget?.role === 'team' || deleteTarget?.role === 'orchestrator') &&
+          (deleteTarget?.children?.length ?? 0) > 0
+            ? `Delete team and ${deleteTarget.children.length} ${deleteTarget.role === 'team' ? 'member' : 'mission'}${deleteTarget.children.length !== 1 ? 's' : ''}`
+            : 'Delete'
+        }
+        maxWidth={
+          (deleteTarget?.role === 'team' || deleteTarget?.role === 'orchestrator') &&
+          (deleteTarget?.children?.length ?? 0) > 0
+            ? 560
+            : 440
+        }
         onConfirm={handleDelete}
         onCancel={() => setDeleteTarget(null)}
       />
@@ -1713,4 +1937,71 @@ export default function Agents() {
       />
     </div>
   );
+}
+
+function renderDeleteMessage(target) {
+  if (!target) return '';
+
+  if (target.role === 'team' || target.role === 'orchestrator') {
+    const children = Array.isArray(target.children) ? target.children : [];
+    const childNoun = target.role === 'team' ? 'member' : 'mission';
+    const childNounPlural = target.role === 'team' ? 'members' : 'missions';
+    const parentNoun = target.role === 'team' ? 'team' : 'orchestrator';
+
+    if (children.length === 0) {
+      return (
+        <>
+          <p style={{ margin: 0 }}>
+            Delete this {parentNoun}? It currently has no {childNounPlural} attached.
+            The workspace, configuration and Matrix user will be removed permanently.
+          </p>
+        </>
+      );
+    }
+
+    return (
+      <>
+        <div style={{
+          padding: 'var(--eb-space-3)',
+          background: 'var(--eb-status-error-bg)',
+          border: '1px solid var(--eb-status-error)',
+          borderRadius: 'var(--eb-radius-md)',
+          color: 'var(--eb-text-primary)',
+          fontWeight: 'var(--eb-font-semibold)',
+          fontSize: 'var(--eb-text-sm)',
+        }}>
+          ⚠ This will permanently delete the {parentNoun} <strong>and all {children.length} {children.length === 1 ? childNoun : childNounPlural}</strong> below.
+          Workspaces, session histories and Matrix users for every listed agent will be removed. This cannot be undone.
+        </div>
+        <p style={{ margin: 'var(--eb-space-3) 0 var(--eb-space-1)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
+          {childNounPlural[0].toUpperCase() + childNounPlural.slice(1)} that will be deleted:
+        </p>
+        <ul style={{
+          margin: 0,
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          maxHeight: 220,
+          overflowY: 'auto',
+          background: 'var(--eb-bg-app)',
+          border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-md)',
+          listStyle: 'none',
+          fontFamily: 'var(--eb-font-mono)',
+          fontSize: 'var(--eb-text-xs)',
+        }}>
+          {children.map((c) => (
+            <li key={c.id} style={{ padding: '2px 0', display: 'flex', justifyContent: 'space-between', gap: 'var(--eb-space-2)' }}>
+              <span style={{ color: 'var(--eb-text-primary)' }}>{c.id}</span>
+              {c.displayName && c.displayName !== c.id && (
+                <span style={{ color: 'var(--eb-text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {c.displayName}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      </>
+    );
+  }
+
+  return `Delete agent "${target.displayName ?? target.id}"? This removes the workspace and all associated data.`;
 }

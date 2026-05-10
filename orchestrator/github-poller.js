@@ -25,9 +25,21 @@ const https = require('https');
 const POLL_INTERVAL_MS = 30_000;
 const STATE_DIR = '/workspace/github-poller';
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
+const THROTTLE_STATE_FILE = path.join(STATE_DIR, 'throttle-state.json');
 const AGENTS_DIR = '/workspace/agents';
 const ENVIRONMENTS_DIR = '/workspace/environments';
 const GH_TOKENS_DIR = path.join(ENVIRONMENTS_DIR, '_tokens');
+
+// Layer-3 loop protection: per (agent, conversation-key) sliding window.
+// If an agent has reacted more than THROTTLE_THRESHOLD times to the same
+// PR/issue within THROTTLE_WINDOW_MS, further events are dropped until the
+// window resets, and a one-shot warning is posted to the agent's DM.
+//
+// Defaults err on the side of "loud rather than silent": 5 reactions / hour
+// per conversation is generous for normal review cycles but cheap to trip
+// on a real loop.
+const THROTTLE_WINDOW_MS = 60 * 60_000;
+const THROTTLE_THRESHOLD = 5;
 
 // Backoff bounds for repos that consistently fail (e.g. expired token,
 // repo deleted, network outage). Capped at 30m so a once-flaky token
@@ -69,6 +81,26 @@ function eventKey(ev) {
   if (!base) return null;
   const action = ev.payload?.action;
   return action ? `${base}.${action}` : base;
+}
+
+// Conversation key for the Layer-3 throttle: groups events that belong to
+// the same logical thread (one PR, one issue, one branch, …). The throttle
+// counts events per (agent, conversationKey), not raw events — so legitimate
+// activity across many PRs doesn't trip the limit, but a back-and-forth on
+// a single PR does.
+function conversationKey(ghEvent) {
+  const p = ghEvent?.payload || {};
+  if (p.pull_request?.number != null) return `pr:${p.pull_request.number}`;
+  // issue_comment on a PR carries `payload.issue` with `pull_request` set —
+  // treat it as PR scope so it shares a bucket with the PR's own events.
+  if (p.issue?.pull_request) return `pr:${p.issue.number}`;
+  if (p.issue?.number != null) return `issue:${p.issue.number}`;
+  if (ghEvent?.type === 'PushEvent' && p.ref) return `push:${p.ref}`;
+  if (p.check_run?.name) return `check:${p.check_run.name}`;
+  if (p.release?.id != null) return `release:${p.release.id}`;
+  // Fallback — coarse but bounded; events without a natural thread (fork,
+  // watch, …) don't realistically loop, so the imprecision is acceptable.
+  return ghEvent?.type || 'misc';
 }
 
 // Accepts SSH (`git@github.com:owner/repo.git`) and HTTPS
@@ -118,11 +150,82 @@ function extractOriginAgent(ev) {
   return null;
 }
 
+// Apply the trigger's `from` filter to a candidate event. Returns
+// `{ deliver, reason }` — `reason` is for logs only, never user-facing.
+//
+// Self-loops are blocked unconditionally before any spec applies (there is
+// no spec value that re-enables self-routing — by design).
+//
+// Spec values:
+//   undefined | null | 'any-except-self' → default. Allow anything except
+//     self-loops. This is the existing pre-`from` behavior.
+//   'humans' → only events without an agent origin (no <!-- agent: -->,
+//     no <id>@agents.local commit author).
+//   'agents' → only events with an agent origin.
+//   'team'   → events from a human OR an agent in the same team as the
+//     subscriber. Origin and subscriber teams come from each agent's
+//     config.json `team` field via the `lookupTeam` callback.
+//   ['<id>', ...] → explicit allowlist. The string 'humans' is a special
+//     token in the array meaning "humans pass too".
+//   { exclude: ['<id>', ...] } → blocklist of agent ids. Humans always pass.
+//
+// Unknown / malformed specs fail-closed (drop) and surface in logs so a
+// typo in triggers.json doesn't silently degrade to "everything passes".
+function applyFromFilter(originAgentId, subscriberAgentId, fromSpec, lookupTeam) {
+  if (originAgentId && originAgentId === subscriberAgentId) {
+    return { deliver: false, reason: 'self-loop' };
+  }
+  if (!fromSpec || fromSpec === 'any-except-self') {
+    return { deliver: true, reason: 'any-except-self' };
+  }
+  if (fromSpec === 'humans') {
+    return originAgentId === null
+      ? { deliver: true, reason: 'humans-only:human' }
+      : { deliver: false, reason: 'humans-only:agent' };
+  }
+  if (fromSpec === 'agents') {
+    return originAgentId !== null
+      ? { deliver: true, reason: 'agents-only:agent' }
+      : { deliver: false, reason: 'agents-only:human' };
+  }
+  if (fromSpec === 'team') {
+    if (originAgentId === null) return { deliver: true, reason: 'team:human-passes' };
+    const subTeam = lookupTeam ? lookupTeam(subscriberAgentId) : null;
+    const origTeam = lookupTeam ? lookupTeam(originAgentId) : null;
+    if (!subTeam || !origTeam) {
+      return { deliver: false, reason: 'team:no-team-info' };
+    }
+    return subTeam === origTeam
+      ? { deliver: true, reason: 'team:match' }
+      : { deliver: false, reason: 'team:mismatch' };
+  }
+  if (Array.isArray(fromSpec)) {
+    if (originAgentId === null) {
+      return fromSpec.includes('humans')
+        ? { deliver: true, reason: 'allowlist:human-token' }
+        : { deliver: false, reason: 'allowlist:human-not-listed' };
+    }
+    return fromSpec.includes(originAgentId)
+      ? { deliver: true, reason: 'allowlist:match' }
+      : { deliver: false, reason: 'allowlist:no-match' };
+  }
+  if (fromSpec && typeof fromSpec === 'object' && Array.isArray(fromSpec.exclude)) {
+    if (originAgentId === null) return { deliver: true, reason: 'blocklist:human-passes' };
+    return fromSpec.exclude.includes(originAgentId)
+      ? { deliver: false, reason: 'blocklist:match' }
+      : { deliver: true, reason: 'blocklist:no-match' };
+  }
+  return { deliver: false, reason: `unknown-spec:${JSON.stringify(fromSpec)}` };
+}
+
 class GitHubPoller {
   constructor({ loadEnvironment, listEnvironmentIds }) {
     this.loadEnvironment = loadEnvironment;
     this.listEnvironmentIds = listEnvironmentIds;
     this.state = this._loadState();
+    // In-memory throttle buckets, hydrated from disk at startup. Saved
+    // back to disk after each fan-out tick (cheap — file is tiny).
+    this.throttleBuckets = this._loadThrottleState();
     this.timer = null;
     this.running = false;
   }
@@ -205,6 +308,17 @@ class GitHubPoller {
           agentId,
           triggerId: t.id,
           events: new Set(t.events),
+          // Layer-2 loop protection: the per-trigger `from` filter. Pass it
+          // through unchanged — applyFromFilter() understands all spec shapes
+          // (string keyword / array allowlist / { exclude } blocklist / null).
+          from: t.from || null,
+          // Optional exact-match filter on payload.label.name for *.labeled
+          // and *.unlabeled events. Empty / null / undefined = no filter
+          // (legacy behavior — fire on any label change). When set, the
+          // poller drops events whose label name doesn't match before they
+          // ever wake the agent — saves a Claude invocation per unrelated
+          // label change.
+          labelFilter: (typeof t.labelFilter === 'string' && t.labelFilter.trim()) || null,
         });
       }
     }
@@ -323,20 +437,88 @@ class GitHubPoller {
     const key = eventKey(ghEvent);
     if (!key) return;
     const originAgentId = extractOriginAgent(ghEvent);
+
+    // Cache `team` lookups for the duration of this fan-out call. A burst of
+    // events to the same subscribers would otherwise re-read the same
+    // config.json files repeatedly. The cache is intentionally per-call so
+    // late team renames don't get stuck behind stale data — the next event
+    // re-reads.
+    const teamCache = new Map();
+    const lookupTeam = (agentId) => {
+      if (teamCache.has(agentId)) return teamCache.get(agentId);
+      let team = null;
+      try {
+        const cfg = JSON.parse(
+          fs.readFileSync(path.join(AGENTS_DIR, agentId, 'config.json'), 'utf8'),
+        );
+        if (typeof cfg?.team === 'string' && cfg.team) team = cfg.team;
+      } catch { /* missing or unreadable config = no team */ }
+      teamCache.set(agentId, team);
+      return team;
+    };
+
+    const convKey = conversationKey(ghEvent);
+    let throttleStateDirty = false;
+
     for (const sub of subscribers) {
       if (!sub.events.has(key)) continue;
-      if (originAgentId && originAgentId === sub.agentId) {
-        // Self-action — skip to break loops (e.g. reviewer agent
-        // reacting to its own review-comment, push-watcher reacting to
-        // its own commit). Author/marker is set by the gh-as-agent
-        // wrapper; agents that bypass the wrapper lose this protection.
-        console.log(
-          `[GH-Poller] Loop-protect: ${key} (${ghEvent.id}) origin=${originAgentId} matches subscriber — skipping`,
-        );
+
+      // Label-name filter for *.labeled / *.unlabeled events. The action
+      // payload carries the affected label as `payload.label.name`. When
+      // the subscriber pinned a label name, drop everything that doesn't
+      // match before any other layer runs — this is the cheap pre-filter
+      // that saves the Claude wake-up; the from-filter and throttle still
+      // apply afterward. No-op for non-label events.
+      if (sub.labelFilter) {
+        const labelName = ghEvent.payload?.label?.name;
+        if (labelName !== sub.labelFilter) {
+          console.log(
+            `[GH-Poller] label-filter: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
+            `(label='${labelName ?? '?'}', want='${sub.labelFilter}')`,
+          );
+          continue;
+        }
+      }
+
+      const decision = applyFromFilter(originAgentId, sub.agentId, sub.from, lookupTeam);
+      if (!decision.deliver) {
+        if (decision.reason === 'self-loop') {
+          // Preserve the existing log line shape so operators with grep
+          // habits / log dashboards keep working.
+          console.log(
+            `[GH-Poller] Loop-protect: ${key} (${ghEvent.id}) origin=${originAgentId} matches subscriber — skipping`,
+          );
+        } else {
+          console.log(
+            `[GH-Poller] from-filter: ${key} (${ghEvent.id}) origin=${originAgentId || 'human'} → ${sub.agentId} dropped (${decision.reason})`,
+          );
+        }
         continue;
       }
+
+      // Layer-3 throttle: count per (agent, conversation). Drops further
+      // reactions once the threshold is exceeded; the very first drop also
+      // schedules a one-shot DM warning so the user sees the clamp.
+      const t = this._checkAndIncThrottle(sub.agentId, convKey);
+      throttleStateDirty = true;
+      if (t.drop) {
+        console.log(
+          `[GH-Poller] throttle: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
+          `(conv=${convKey}, count=${t.count}/${t.threshold}/h, window-ends=${t.windowEndsAt})`,
+        );
+        if (t.justWarned) {
+          this._enqueueThrottleWarning(sub.agentId, convKey, t);
+          console.log(
+            `[GH-Poller] throttle: warning queued for ${sub.agentId} (conv=${convKey})`,
+          );
+        }
+        continue;
+      }
+
       this._enqueue(sub.agentId, sub.triggerId, key, ghEvent);
     }
+
+    if (throttleStateDirty) this._saveThrottleState();
   }
 
   _enqueue(agentId, triggerId, key, ghEvent) {
@@ -430,6 +612,117 @@ class GitHubPoller {
       console.error(`[GH-Poller] Cannot save state: ${err.message}`);
     }
   }
+
+  // ─── Layer-3 throttle ────────────────────────────────────────────────
+  // The state file is a flat map of `<agentId>:<convKey>` → bucket. Buckets
+  // older than 2× the window are pruned at load time so the file doesn't
+  // grow unbounded as old PRs go quiet.
+  _loadThrottleState() {
+    try {
+      if (!fs.existsSync(THROTTLE_STATE_FILE)) return {};
+      const raw = JSON.parse(fs.readFileSync(THROTTLE_STATE_FILE, 'utf8')) || {};
+      const buckets = raw.buckets || {};
+      const now = Date.now();
+      const pruned = {};
+      for (const [k, b] of Object.entries(buckets)) {
+        if (!b?.windowStart) continue;
+        const age = now - new Date(b.windowStart).getTime();
+        if (age <= 2 * THROTTLE_WINDOW_MS) pruned[k] = b;
+      }
+      return pruned;
+    } catch (err) {
+      console.error(`[GH-Poller] Cannot load throttle state: ${err.message}`);
+      return {};
+    }
+  }
+
+  _saveThrottleState() {
+    try {
+      fs.mkdirSync(STATE_DIR, { recursive: true });
+      fs.writeFileSync(
+        THROTTLE_STATE_FILE,
+        JSON.stringify({ buckets: this.throttleBuckets }, null, 2),
+      );
+    } catch (err) {
+      console.error(`[GH-Poller] Cannot save throttle state: ${err.message}`);
+    }
+  }
+
+  // Increments the bucket for (agent, convKey). Returns:
+  //   { drop: bool, justWarned: bool, count, threshold, windowEndsAt }
+  // `justWarned` is true exactly once per window — when the count first
+  // crosses the threshold — so the agent gets one DM, not one per dropped
+  // event.
+  _checkAndIncThrottle(agentId, convKey) {
+    const k = `${agentId}:${convKey}`;
+    const now = Date.now();
+    let bucket = this.throttleBuckets[k];
+    if (!bucket || now - new Date(bucket.windowStart).getTime() > THROTTLE_WINDOW_MS) {
+      bucket = { count: 1, windowStart: new Date(now).toISOString(), warned: false };
+      this.throttleBuckets[k] = bucket;
+      return {
+        drop: false,
+        justWarned: false,
+        count: 1,
+        threshold: THROTTLE_THRESHOLD,
+        windowEndsAt: new Date(now + THROTTLE_WINDOW_MS).toISOString(),
+      };
+    }
+    bucket.count++;
+    let justWarned = false;
+    let drop = false;
+    if (bucket.count > THROTTLE_THRESHOLD) {
+      drop = true;
+      if (!bucket.warned) {
+        bucket.warned = true;
+        justWarned = true;
+      }
+    }
+    const windowEndsAt = new Date(
+      new Date(bucket.windowStart).getTime() + THROTTLE_WINDOW_MS,
+    ).toISOString();
+    return {
+      drop,
+      justWarned,
+      count: bucket.count,
+      threshold: THROTTLE_THRESHOLD,
+      windowEndsAt,
+    };
+  }
+
+  // Append a one-shot warning entry to the agent's pending-triggers.json.
+  // The agent-runner picks this up in its drain loop and posts a plain
+  // (non-Claude) DM so the user sees a loop has been clamped.
+  _enqueueThrottleWarning(agentId, convKey, decision) {
+    const pendingPath = path.join(AGENTS_DIR, agentId, 'pending-triggers.json');
+    let pending = [];
+    try {
+      if (fs.existsSync(pendingPath)) pending = JSON.parse(fs.readFileSync(pendingPath, 'utf8'));
+      if (!Array.isArray(pending)) pending = [];
+    } catch { /* fall through with empty list */ }
+    pending.push({
+      kind: 'throttle-warning',
+      receivedAt: new Date().toISOString(),
+      convKey,
+      count: decision.count,
+      threshold: decision.threshold,
+      windowEndsAt: decision.windowEndsAt,
+    });
+    try {
+      fs.writeFileSync(pendingPath, JSON.stringify(pending, null, 2));
+    } catch (err) {
+      console.error(`[GH-Poller] Cannot write throttle-warning for ${agentId}: ${err.message}`);
+    }
+  }
 }
 
-module.exports = { GitHubPoller, parseRepoFullName, eventKey, extractOriginAgent };
+module.exports = {
+  GitHubPoller,
+  parseRepoFullName,
+  eventKey,
+  conversationKey,
+  extractOriginAgent,
+  applyFromFilter,
+  THROTTLE_THRESHOLD,
+  THROTTLE_WINDOW_MS,
+};

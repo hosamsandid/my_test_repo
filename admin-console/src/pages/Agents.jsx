@@ -1950,7 +1950,7 @@ export default function Agents() {
         confirmLabel={
           (deleteTarget?.role === 'team' || deleteTarget?.role === 'orchestrator') &&
           (deleteTarget?.children?.length ?? 0) > 0
-            ? `Delete team and ${deleteTarget.children.length} ${deleteTarget.role === 'team' ? 'member' : 'mission'}${deleteTarget.children.length !== 1 ? 's' : ''}`
+            ? `Delete ${deleteTarget.role === 'team' ? 'team' : 'orchestrator'} and ${deleteTarget.children.length} ${deleteTarget.role === 'team' ? 'member' : 'mission'}${deleteTarget.children.length !== 1 ? 's' : ''}`
             : 'Delete'
         }
         maxWidth={
@@ -2031,10 +2031,26 @@ function renderDeleteMessage(target) {
           fontSize: 'var(--eb-text-xs)',
         }}>
           {children.map((c) => (
-            <li key={c.id} style={{ padding: '2px 0', display: 'flex', justifyContent: 'space-between', gap: 'var(--eb-space-2)' }}>
-              <span style={{ color: 'var(--eb-text-primary)' }}>{c.id}</span>
+            // Stacked layout: id on top, displayName underneath. Side-by-side
+            // didn't survive long ids + long titles — the row blew the dialog
+            // open even with min-width:0 on the parent because both spans
+            // wanted full width. Stacking is robust regardless of length and
+            // keeps the visual hierarchy (mono id, muted title).
+            <li key={c.id} style={{
+              padding: '4px 0',
+              display: 'flex', flexDirection: 'column', gap: 1,
+              borderBottom: '1px solid var(--eb-border-subtle, transparent)',
+            }}>
+              <span style={{ color: 'var(--eb-text-primary)', wordBreak: 'break-all' }}>
+                {c.id}
+              </span>
               {c.displayName && c.displayName !== c.id && (
-                <span style={{ color: 'var(--eb-text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                <span style={{
+                  color: 'var(--eb-text-muted)',
+                  fontFamily: 'var(--eb-font-sans, inherit)',
+                  fontSize: '11px',
+                  wordBreak: 'break-word',
+                }}>
                   {c.displayName}
                 </span>
               )}

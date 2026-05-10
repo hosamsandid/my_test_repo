@@ -70,7 +70,12 @@ export default function ConfirmDialog({
       <div style={{ ...dialogStyle, maxWidth }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-3)' }}>
           <Icon size={20} style={{ color: iconColor, flexShrink: 0, marginTop: 2 }} />
-          <div style={{ flex: 1 }}>
+          {/* `min-width: 0` is the classic fix for flex children whose
+              content is wider than their flex track — without it the
+              child's `min-width: auto` lets it grow past the dialog,
+              and any inner overflow / text-ellipsis rules silently fail
+              because there's no width constraint for them to act on. */}
+          <div style={{ flex: 1, minWidth: 0 }}>
             <h3 style={{ margin: 0, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
               {title}
             </h3>

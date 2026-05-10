@@ -2220,6 +2220,23 @@ function defaultTeamPrompt(vars) {
 // plain identifier (no quotes / backticks / template syntax).
 const READY_LABEL_RE = /^[^\s`"'{}<>][^\s`"'{}<>]{0,49}$/;
 
+// The wizard doesn't surface an LLM endpoint chooser yet. Without binding
+// one on the env, the in-chat model picker shows "(no endpoint)" disabled
+// for every team-member — which is how teams looked broken compared to
+// hand-created agents (where the user picks an endpoint via the env editor).
+// Pick the first registered endpoint as a silent default; its first model
+// becomes the env-level default. The user can change either later.
+function defaultLlmEndpointForTeam() {
+  const endpoints = listLlmEndpoints();
+  if (endpoints.length === 0) return { llmEndpointId: null, defaultModelId: null };
+  const ep = endpoints[0];
+  const firstModel = (ep.models || [])[0];
+  return {
+    llmEndpointId: ep.id,
+    defaultModelId: firstModel?.id || null,
+  };
+}
+
 app.post('/api/teams', async (req, res) => {
   const body = req.body || {};
   const { teamId, teamName, repository, githubTokenId, roles } = body;
@@ -2418,8 +2435,7 @@ app.post('/api/teams', async (req, res) => {
         skills: [],
         repositories: [{ url: parsed.httpsUrl, branch, sshKeyId: repository.sshKeyId }],
         githubTokenId,
-        llmEndpointId: null,
-        defaultModelId: null,
+        ...defaultLlmEndpointForTeam(),
         additionalContext: '',
         createdAt: new Date().toISOString(),
       };
@@ -2789,8 +2805,7 @@ app.post('/api/teams/stream', async (req, res) => {
         skills: [],
         repositories: [{ url: parsed.httpsUrl, branch, sshKeyId: repository.sshKeyId }],
         githubTokenId,
-        llmEndpointId: null,
-        defaultModelId: null,
+        ...defaultLlmEndpointForTeam(),
         additionalContext: '',
         createdAt: new Date().toISOString(),
       };

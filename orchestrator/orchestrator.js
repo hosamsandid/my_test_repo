@@ -609,35 +609,56 @@ function seedAgentMcpServers(dest, mcpRefs, warnings) {
       }
     }
 
-    const resolvedEnv = {};
-    const envTpl = (server.env && typeof server.env === "object") ? server.env : {};
+    // Different transports carry the substitution template under different
+    // keys: stdio servers get `env` (process environment), http/sse servers
+    // get `headers` (HTTP request headers). The substitution mechanics are
+    // identical — only the destination key changes.
+    const transport = server.transport || "stdio";
+    if (!["stdio", "http", "sse"].includes(transport)) {
+      warnings.push(`mcp: server '${serverId}' has unsupported transport '${transport}'`);
+      continue;
+    }
+    const tplKey = transport === "stdio" ? "env" : "headers";
+    const template = (server[tplKey] && typeof server[tplKey] === "object") ? server[tplKey] : {};
+
+    const resolved = {};
     let placeholderUsed = false;
-    for (const [k, v] of Object.entries(envTpl)) {
-      if (typeof v !== "string") { resolvedEnv[k] = v; continue; }
+    for (const [k, v] of Object.entries(template)) {
+      if (typeof v !== "string") { resolved[k] = v; continue; }
       if (v.includes("${credential}")) {
         placeholderUsed = true;
         if (!secret) {
-          warnings.push(`mcp: server '${serverId}' env key '${k}' uses \${credential} but no credential is bound`);
+          warnings.push(`mcp: server '${serverId}' ${tplKey} key '${k}' uses \${credential} but no credential is bound`);
           // Drop the key rather than leak the literal placeholder into the agent.
           continue;
         }
-        resolvedEnv[k] = v.split("${credential}").join(secret);
+        resolved[k] = v.split("${credential}").join(secret);
       } else {
-        resolvedEnv[k] = v;
+        resolved[k] = v;
       }
     }
     if (!placeholderUsed && credId) {
-      warnings.push(`mcp: server '${serverId}' has a credential bound but no \${credential} placeholder in env — credential ignored`);
+      warnings.push(`mcp: server '${serverId}' has a credential bound but no \${credential} placeholder in ${tplKey} — credential ignored`);
     }
 
-    const stanza = (server.transport === "http")
-      ? { transport: "http", url: server.url, env: resolvedEnv }
-      : {
-          transport: "stdio",
-          command: server.command,
-          args: Array.isArray(server.args) ? server.args : [],
-          env: resolvedEnv,
-        };
+    // Stanza shape per Claude Code's MCP config schema:
+    //   stdio   → { command, args, env }                  (no `type` field — stdio is the default)
+    //   http    → { type: "http", url, headers }
+    //   sse     → { type: "sse",  url, headers }
+    let stanza;
+    if (transport === "stdio") {
+      stanza = {
+        command: server.command,
+        args: Array.isArray(server.args) ? server.args : [],
+        env: resolved,
+      };
+    } else {
+      stanza = {
+        type: transport,
+        url: server.url,
+        headers: resolved,
+      };
+    }
     settings.mcpServers[serverId] = stanza;
     seeded.push(serverId);
   }
@@ -918,22 +939,9 @@ function loadTriggers(id) {
 }
 
 function saveTriggers(id, triggers) {
-  // Stamp `createdAt` on every github-event trigger that lacks one. The
-  // poller uses this as a per-subscriber history horizon: events with
-  // `created_at < trigger.createdAt` are dropped at fan-out time so a
-  // newly-added agent never reacts to activity that predates it. Existing
-  // values are preserved on edit.
-  const now = new Date().toISOString();
-  const stamped = Array.isArray(triggers)
-    ? triggers.map(t =>
-        t && t.type === 'github-event' && !t.createdAt
-          ? { ...t, createdAt: now }
-          : t
-      )
-    : triggers;
   fs.writeFileSync(
     path.join(agentDir(id), "triggers.json"),
-    JSON.stringify(stamped, null, 2)
+    JSON.stringify(triggers, null, 2)
   );
 }
 

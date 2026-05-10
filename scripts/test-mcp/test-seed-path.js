@@ -69,12 +69,20 @@ function setupRegistry(tmpRoot) {
     env: { READ_ONLY: 'true' },
   }, null, 2));
 
-  // server: http transport
+  // server: http transport — auth lives in headers, not env
   fs.mkdirSync(path.join(tmpRoot, 'mcp-servers', 'remote'), { recursive: true });
   fs.writeFileSync(path.join(tmpRoot, 'mcp-servers', 'remote', 'server.json'), JSON.stringify({
     id: 'remote', name: 'Remote', transport: 'http',
     url: 'https://mcp.example/api',
-    env: { AUTH: 'Bearer ${credential}' },
+    headers: { Authorization: 'Bearer ${credential}' },
+  }, null, 2));
+
+  // server: sse transport (same shape as http)
+  fs.mkdirSync(path.join(tmpRoot, 'mcp-servers', 'sse-remote'), { recursive: true });
+  fs.writeFileSync(path.join(tmpRoot, 'mcp-servers', 'sse-remote', 'server.json'), JSON.stringify({
+    id: 'sse-remote', name: 'SSE Remote', transport: 'sse',
+    url: 'https://mcp.example/sse',
+    headers: { Authorization: 'Bearer ${credential}', 'X-Source': 'aee' },
   }, null, 2));
 
   // credential
@@ -114,6 +122,9 @@ try {
   }
 
   // Test 2: one server with credential → settings.json contains substituted secret.
+  // For stdio servers, Claude Code expects {command, args, env} with NO `type` /
+  // `transport` field — stdio is the implicit default. Verify that explicitly so
+  // a future regression that adds `transport: "stdio"` back gets caught.
   {
     const dest = freshAgent(tmpRoot, 'a2');
     const warnings = [];
@@ -123,11 +134,13 @@ try {
       assert.strictEqual(warnings.length, 0, 'no warnings');
       const s = readSettings(dest);
       assert.ok(s.mcpServers?.wiki, 'wiki entry present');
-      assert.strictEqual(s.mcpServers.wiki.transport, 'stdio');
+      assert.ok(!('type' in s.mcpServers.wiki), "stdio entry has no `type` field");
+      assert.ok(!('transport' in s.mcpServers.wiki), "stdio entry has no `transport` field");
       assert.strictEqual(s.mcpServers.wiki.command, 'node');
+      assert.deepStrictEqual(s.mcpServers.wiki.args, ['/template-workspace/mcp-servers/wiki/server.js']);
       assert.strictEqual(s.mcpServers.wiki.env.WIKI_TOKEN, 'TOP_SECRET');
       assert.strictEqual(s.mcpServers.wiki.env.WIKI_BASE_URL, 'https://wiki/api');
-      ok('credential placeholder substituted into env');
+      ok('stdio: credential placeholder substituted into env, no type field emitted');
     } catch (e) { bad('basic substitution', e.message); }
   }
 
@@ -161,7 +174,9 @@ try {
     } catch (e) { bad('missing credential', e.message); }
   }
 
-  // Test 5: http transport carries url, no command/args.
+  // Test 5: http transport — Claude Code expects {type: "http", url, headers},
+  // not {transport: "http", url, env}. The placeholder lives in `headers`,
+  // gets substituted, and lands in `headers` on the wire.
   {
     const dest = freshAgent(tmpRoot, 'a5');
     const warnings = [];
@@ -169,12 +184,30 @@ try {
     try {
       assert.deepStrictEqual(out, ['remote']);
       const s = readSettings(dest);
-      assert.strictEqual(s.mcpServers.remote.transport, 'http');
+      assert.strictEqual(s.mcpServers.remote.type, 'http', 'type field set to http');
+      assert.ok(!('transport' in s.mcpServers.remote), 'no `transport` field on the wire');
       assert.strictEqual(s.mcpServers.remote.url, 'https://mcp.example/api');
-      assert.ok(!('command' in s.mcpServers.remote), 'no command field');
-      assert.strictEqual(s.mcpServers.remote.env.AUTH, 'Bearer remote-bearer');
-      ok('http transport materialized correctly with substituted bearer');
+      assert.ok(!('command' in s.mcpServers.remote), 'no command field for http');
+      assert.ok(!('env' in s.mcpServers.remote), 'no env field for http — auth is in headers');
+      assert.strictEqual(s.mcpServers.remote.headers.Authorization, 'Bearer remote-bearer');
+      ok('http: emits {type, url, headers} per Claude Code MCP schema');
     } catch (e) { bad('http transport', e.message); }
+  }
+
+  // Test 5b: sse transport — same wire shape as http but type=sse.
+  {
+    const dest = freshAgent(tmpRoot, 'a5b');
+    const warnings = [];
+    const out = seed(dest, [{ serverId: 'sse-remote', credentialId: 'remote-key' }], warnings);
+    try {
+      assert.deepStrictEqual(out, ['sse-remote']);
+      const s = readSettings(dest);
+      assert.strictEqual(s.mcpServers['sse-remote'].type, 'sse');
+      assert.strictEqual(s.mcpServers['sse-remote'].url, 'https://mcp.example/sse');
+      assert.strictEqual(s.mcpServers['sse-remote'].headers.Authorization, 'Bearer remote-bearer');
+      assert.strictEqual(s.mcpServers['sse-remote'].headers['X-Source'], 'aee', 'non-credential headers passed through verbatim');
+      ok('sse: emits {type:"sse", url, headers} with non-credential headers preserved');
+    } catch (e) { bad('sse transport', e.message); }
   }
 
   // Test 6: unknown server id → warning, ref skipped.

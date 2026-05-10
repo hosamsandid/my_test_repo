@@ -29,23 +29,28 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
   const [command, setCommand] = useState('node');
   const [argsText, setArgsText] = useState('/template-workspace/mcp-servers/wiki/server.js');
   const [url, setUrl] = useState('');
+  // Stdio servers use process env (KEY=value); http/sse servers use HTTP
+  // headers (Header: value). Same template + ${credential} substitution
+  // semantics, but the wire format differs, so we keep two parsers and let
+  // the user enter whichever idiom matches the transport.
   const [envText, setEnvText] = useState('WIKI_BASE_URL=https://wiki.example/api\nWIKI_TOKEN=${credential}');
+  const [headersText, setHeadersText] = useState('Authorization: Bearer ${credential}\nContent-Type: application/json');
 
-  function parseEnv(text) {
+  const isHttp = transport === 'http' || transport === 'sse';
+
+  function parseKeyValue(text, sep) {
     const out = {};
     for (const line of (text || '').split('\n')) {
       const t = line.trim();
       if (!t || t.startsWith('#')) continue;
-      const eq = t.indexOf('=');
-      if (eq < 1) continue;
-      out[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
+      const idx = t.indexOf(sep);
+      if (idx < 1) continue;
+      out[t.slice(0, idx).trim()] = t.slice(idx + sep.length).trim();
     }
     return out;
   }
 
-  const canSave = id.trim() && name.trim() && (
-    transport === 'http' ? url.trim() : command.trim()
-  );
+  const canSave = id.trim() && name.trim() && (isHttp ? url.trim() : command.trim());
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -67,11 +72,12 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
         </div>
         <select value={transport} onChange={e => setTransport(e.target.value)} style={inputStyle}>
           <option value="stdio">stdio (local subprocess)</option>
-          <option value="http">http (remote endpoint)</option>
+          <option value="http">http (remote endpoint, streamable HTTP)</option>
+          <option value="sse">sse (remote endpoint, Server-Sent Events)</option>
         </select>
       </div>
 
-      {transport === 'stdio' ? (
+      {!isHttp ? (
         <>
           <FormInput label="Command *" value={command} onChange={setCommand} placeholder="node" />
           <div>
@@ -92,18 +98,20 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
 
       <div>
         <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-1)' }}>
-          Environment template
+          {isHttp ? 'HTTP headers template' : 'Environment template'}
         </div>
         <textarea
-          value={envText}
-          onChange={e => setEnvText(e.target.value)}
+          value={isHttp ? headersText : envText}
+          onChange={e => (isHttp ? setHeadersText(e.target.value) : setEnvText(e.target.value))}
           rows={5}
-          placeholder="KEY=value (one per line)"
+          placeholder={isHttp ? 'Header: value (one per line)' : 'KEY=value (one per line)'}
           style={{ ...inputStyle, ...monoStyle, resize: 'vertical' }}
         />
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
           Use <code style={monoStyle}>${'${credential}'}</code> as the placeholder for the bound credential's secret —
-          the orchestrator substitutes it per-agent at seed time.
+          the orchestrator substitutes it per-agent at seed time. {isHttp
+            ? <>For http/sse the rendered values become HTTP request headers (e.g. <code style={monoStyle}>Authorization: Bearer …</code>).</>
+            : <>For stdio they're injected as process environment variables.</>}
         </div>
       </div>
 
@@ -114,10 +122,13 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
             name: name.trim(),
             description: description.trim(),
             transport,
-            ...(transport === 'stdio'
-              ? { command: command.trim(), args: argsText.split('\n').map(s => s.trim()).filter(Boolean) }
-              : { url: url.trim() }),
-            env: parseEnv(envText),
+            ...(isHttp
+              ? { url: url.trim(), headers: parseKeyValue(headersText, ':') }
+              : {
+                  command: command.trim(),
+                  args: argsText.split('\n').map(s => s.trim()).filter(Boolean),
+                  env: parseKeyValue(envText, '='),
+                }),
           })}
           disabled={saving || !canSave}
           style={{
@@ -291,7 +302,7 @@ export default function McpServers() {
     { key: 'transport', label: 'Transport' },
     { key: 'command', label: 'Command/URL', render: (_, r) => (
       <span style={monoStyle}>
-        {r.transport === 'http' ? r.url : [r.command, ...(r.args || [])].join(' ')}
+        {(r.transport === 'http' || r.transport === 'sse') ? r.url : [r.command, ...(r.args || [])].join(' ')}
       </span>
     )},
     { key: 'requiresCredential', label: 'Credential', render: v => v ? 'required' : '—' },

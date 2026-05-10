@@ -144,26 +144,75 @@ async function api(method, url, body) {
       ok('http transport without url rejected');
     } catch (e) { bad('http without url', e.message); }
 
+    // env on an http server is a category error — must be rejected with a 400
+    // so the operator doesn't fill the wrong template field and silently get
+    // an unauthenticated request.
+    r = await api('POST', '/api/mcp-servers', {
+      id: 'remote-bad-env', name: 'Bad', transport: 'http', url: 'https://x',
+      env: { AUTH: 'Bearer ${credential}' },
+    });
+    try {
+      assert.strictEqual(r.status, 400);
+      assert.match(JSON.stringify(r.body), /don't accept .*env/);
+      ok('http transport rejects `env` field (must use headers)');
+    } catch (e) { bad('http with env', e.message); }
+
+    // Symmetric: stdio with headers should also fail.
+    r = await api('POST', '/api/mcp-servers', {
+      id: 'stdio-bad-hdr', name: 'Bad', transport: 'stdio', command: 'node',
+      headers: { Authorization: 'Bearer x' },
+    });
+    try {
+      assert.strictEqual(r.status, 400);
+      assert.match(JSON.stringify(r.body), /don't accept .*headers/);
+      ok('stdio transport rejects `headers` field (must use env)');
+    } catch (e) { bad('stdio with headers', e.message); }
+
     r = await api('POST', '/api/mcp-servers', {
       id: 'remote', name: 'Remote', transport: 'http', url: 'https://mcp/remote',
-      env: { AUTH: 'Bearer ${credential}' },
+      headers: { Authorization: 'Bearer ${credential}' },
     });
     try {
       assert.strictEqual(r.status, 201);
       assert.strictEqual(r.body.transport, 'http');
-      ok('POST /api/mcp-servers creates an http server');
+      assert.deepStrictEqual(r.body.headers, { Authorization: 'Bearer ${credential}' });
+      ok('POST /api/mcp-servers creates an http server with headers');
     } catch (e) { bad('POST http server', e.message); }
+
+    // SSE: same shape as http but transport='sse'.
+    r = await api('POST', '/api/mcp-servers', {
+      id: 'sse-remote', name: 'SSE', transport: 'sse', url: 'https://mcp/sse',
+      headers: { Authorization: 'Bearer ${credential}' },
+    });
+    try {
+      assert.strictEqual(r.status, 201);
+      assert.strictEqual(r.body.transport, 'sse');
+      ok('POST /api/mcp-servers creates an sse server');
+    } catch (e) { bad('POST sse server', e.message); }
+
+    r = await api('POST', '/api/mcp-servers', {
+      id: 'bad-transport', name: 'Bad', transport: 'websocket', command: 'node',
+    });
+    try {
+      assert.strictEqual(r.status, 400);
+      assert.match(JSON.stringify(r.body), /must be 'stdio'/);
+      ok('unknown transport rejected');
+    } catch (e) { bad('unknown transport', e.message); }
 
     r = await api('GET', '/api/mcp-servers');
     try {
       assert.strictEqual(r.status, 200);
       const ids = r.body.map(s => s.id).sort();
-      assert.deepStrictEqual(ids, ['remote', 'wiki']);
+      assert.deepStrictEqual(ids, ['remote', 'sse-remote', 'wiki']);
       const wiki = r.body.find(s => s.id === 'wiki');
-      assert.strictEqual(wiki.requiresCredential, true, 'wiki has ${credential} placeholder');
+      assert.strictEqual(wiki.requiresCredential, true, 'wiki has ${credential} placeholder in env');
+      assert.strictEqual(wiki.templateField, 'env');
       const remote = r.body.find(s => s.id === 'remote');
-      assert.strictEqual(remote.requiresCredential, true, 'remote has ${credential} placeholder');
-      ok('GET /api/mcp-servers lists registered servers and flags credential need');
+      assert.strictEqual(remote.requiresCredential, true, 'remote has ${credential} placeholder in headers');
+      assert.strictEqual(remote.templateField, 'headers');
+      const sse = r.body.find(s => s.id === 'sse-remote');
+      assert.strictEqual(sse.templateField, 'headers', 'sse template lives under headers too');
+      ok('GET /api/mcp-servers reports templateField + flags credential need across transports');
     } catch (e) { bad('GET list', e.message); }
 
     r = await api('PUT', '/api/mcp-servers/wiki', { description: 'updated description' });

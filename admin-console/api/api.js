@@ -1360,12 +1360,6 @@ app.post('/api/agents/:id/triggers', (req, res) => {
   const triggersPath = path.join(agentDir, 'triggers.json');
   const triggers = readJsonFile(triggersPath, []);
   const newTrigger = { id: `t${Date.now()}`, ...req.body };
-  // Stamp `createdAt` on github-event triggers — the poller uses it as a
-  // history horizon so newly-added subscribers don't replay pre-existing
-  // activity. Mirrors orchestrator/saveTriggers().
-  if (newTrigger.type === 'github-event' && !newTrigger.createdAt) {
-    newTrigger.createdAt = new Date().toISOString();
-  }
   triggers.push(newTrigger);
   writeJsonAtomic(triggersPath, triggers);
   notifyTriggerReload(id);
@@ -1708,17 +1702,23 @@ app.get('/api/mcp-servers', (req, res) => {
   const out = listMcpServerIds()
     .map(id => loadMcpServer(id))
     .filter(Boolean)
-    .map(s => ({
-      id: s.id,
-      name: s.name || s.id,
-      description: s.description || '',
-      transport: s.transport || 'stdio',
-      command: s.command || null,
-      args: Array.isArray(s.args) ? s.args : [],
-      url: s.url || null,
-      envKeys: s.env && typeof s.env === 'object' ? Object.keys(s.env) : [],
-      requiresCredential: serverNeedsCredential(s),
-    }));
+    .map(s => {
+      const transport = s.transport || 'stdio';
+      const tplKey = transport === 'stdio' ? 'env' : 'headers';
+      const template = (s[tplKey] && typeof s[tplKey] === 'object') ? s[tplKey] : {};
+      return {
+        id: s.id,
+        name: s.name || s.id,
+        description: s.description || '',
+        transport,
+        command: s.command || null,
+        args: Array.isArray(s.args) ? s.args : [],
+        url: s.url || null,
+        templateKeys: Object.keys(template),
+        templateField: tplKey,
+        requiresCredential: serverNeedsCredential(s),
+      };
+    });
   res.json(out);
 });
 
@@ -1730,25 +1730,70 @@ app.get('/api/mcp-servers/:id', (req, res) => {
   res.json(s);
 });
 
+// Validation lives in one place so POST and PUT agree on what's a legal stanza.
+// Transport-specific:
+//   stdio   → command (required), args (optional), env (template)
+//   http    → url (required), headers (template)
+//   sse     → url (required), headers (template)
+// `env` and `headers` are mutually exclusive on the wire — supplying the wrong
+// one for the chosen transport is a 400 so operators don't silently set keys
+// that the seed step won't propagate.
+function buildMcpServerStanza({ existing, body }) {
+  const merged = { ...(existing || {}) };
+  const transport = body.transport !== undefined ? body.transport : (existing?.transport || 'stdio');
+  if (!['stdio', 'http', 'sse'].includes(transport)) {
+    return { error: "transport must be 'stdio', 'http' or 'sse'" };
+  }
+  merged.transport = transport;
+
+  if (body.name !== undefined) merged.name = body.name;
+  if (body.description !== undefined) merged.description = body.description;
+
+  if (transport === 'stdio') {
+    if (body.command !== undefined) merged.command = body.command;
+    if (body.args !== undefined) merged.args = Array.isArray(body.args) ? body.args : [];
+    if (body.env !== undefined) merged.env = (body.env && typeof body.env === 'object') ? body.env : {};
+    if (body.url !== undefined || body.headers !== undefined) {
+      return { error: "stdio servers don't accept `url` or `headers` — use command/args/env" };
+    }
+    delete merged.url;
+    delete merged.headers;
+    if (!merged.command) return { error: 'command is required for stdio transport' };
+  } else {
+    if (body.url !== undefined) merged.url = body.url;
+    if (body.headers !== undefined) merged.headers = (body.headers && typeof body.headers === 'object') ? body.headers : {};
+    if (body.command !== undefined || body.args !== undefined || body.env !== undefined) {
+      return { error: `${transport} servers don't accept \`command\`/\`args\`/\`env\` — use url/headers` };
+    }
+    delete merged.command;
+    delete merged.args;
+    delete merged.env;
+    if (!merged.url) return { error: `url is required for ${transport} transport` };
+  }
+
+  return { stanza: merged };
+}
+
 app.post('/api/mcp-servers', (req, res) => {
-  const { id, name, description, transport, command, args, url, env } = req.body || {};
+  const body = req.body || {};
+  const { id, name } = body;
   if (!id || !MCP_SERVER_ID_RE.test(id)) {
     return res.status(400).json({ error: 'id required, lowercase letters/digits/dashes only' });
   }
   if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
-  const t = transport || 'stdio';
-  if (!['stdio', 'http'].includes(t)) return res.status(400).json({ error: "transport must be 'stdio' or 'http'" });
-  if (t === 'stdio' && !command) return res.status(400).json({ error: 'command is required for stdio transport' });
-  if (t === 'http'  && !url)     return res.status(400).json({ error: 'url is required for http transport' });
-  if (loadMcpServer(id))         return res.status(409).json({ error: `MCP server '${id}' already exists` });
+  if (loadMcpServer(id)) return res.status(409).json({ error: `MCP server '${id}' already exists` });
+
+  const built = buildMcpServerStanza({ existing: null, body });
+  if (built.error) return res.status(400).json({ error: built.error });
 
   const data = {
     id,
     name,
-    description: description || '',
-    transport: t,
-    ...(t === 'stdio' ? { command, args: Array.isArray(args) ? args : [] } : { url }),
-    env: env && typeof env === 'object' ? env : {},
+    description: built.stanza.description || '',
+    transport: built.stanza.transport,
+    ...(built.stanza.transport === 'stdio'
+      ? { command: built.stanza.command, args: built.stanza.args || [], env: built.stanza.env || {} }
+      : { url: built.stanza.url, headers: built.stanza.headers || {} }),
     createdAt: new Date().toISOString(),
   };
   saveMcpServer(id, data);
@@ -1760,18 +1805,11 @@ app.put('/api/mcp-servers/:id', (req, res) => {
   if (!MCP_SERVER_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid server id' });
   const existing = loadMcpServer(id);
   if (!existing) return res.status(404).json({ error: 'MCP server not found' });
-  const { name, description, transport, command, args, url, env } = req.body || {};
-  const merged = {
-    ...existing,
-    ...(name !== undefined        ? { name } : {}),
-    ...(description !== undefined ? { description } : {}),
-    ...(transport !== undefined   ? { transport } : {}),
-    ...(command !== undefined     ? { command } : {}),
-    ...(args !== undefined        ? { args: Array.isArray(args) ? args : [] } : {}),
-    ...(url !== undefined         ? { url } : {}),
-    ...(env !== undefined         ? { env: env && typeof env === 'object' ? env : {} } : {}),
-    updatedAt: new Date().toISOString(),
-  };
+
+  const built = buildMcpServerStanza({ existing, body: req.body || {} });
+  if (built.error) return res.status(400).json({ error: built.error });
+
+  const merged = { ...built.stanza, updatedAt: new Date().toISOString() };
   saveMcpServer(id, merged);
   res.json(merged);
 });
@@ -1839,13 +1877,16 @@ app.delete('/api/mcp-credentials/:id', (req, res) => {
   res.status(204).end();
 });
 
-// True iff at least one entry in the server's `env` template references the
-// `${credential}` placeholder. Servers without the placeholder don't need a
-// credential and the env editor can offer "(none)" in the credential dropdown.
+// True iff at least one entry in the server's substitution template references
+// the `${credential}` placeholder. The template lives under `env` for stdio
+// servers and `headers` for http/sse — check whichever is present so the
+// answer doesn't depend on whether the operator picked the right field name.
 function serverNeedsCredential(server) {
-  const env = server?.env;
-  if (!env || typeof env !== 'object') return false;
-  return Object.values(env).some(v => typeof v === 'string' && v.includes('${credential}'));
+  if (!server) return false;
+  const transport = server.transport || 'stdio';
+  const tpl = transport === 'stdio' ? server.env : server.headers;
+  if (!tpl || typeof tpl !== 'object') return false;
+  return Object.values(tpl).some(v => typeof v === 'string' && v.includes('${credential}'));
 }
 
 /* ─── Containers ────────────────────────────────────────────────────── */

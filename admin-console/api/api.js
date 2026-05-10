@@ -3191,6 +3191,82 @@ app.delete('/api/github-tokens/:id', (req, res) => {
   res.status(204).end();
 });
 
+/* ─── GitHub repo probe — wizard helper ───────────────────────────────
+   POST /api/github/probe { url, githubTokenId } → { ok, repo, defaultBranch,
+                                                     branches: [name, …] }
+   Used by the Team-Setup wizard to (a) verify the URL is reachable with
+   the picked token before the user commits to it, and (b) populate the
+   branch dropdown with the repo's actual branches instead of a free-text
+   field. Falls back to { ok: false, error } on parse / auth / 404 — the
+   wizard surfaces that to the user. */
+
+app.post('/api/github/probe', async (req, res) => {
+  const { url, githubTokenId } = req.body || {};
+  let parsed;
+  try {
+    parsed = parseGitHubUrl(url);
+  } catch (err) {
+    return res.json({ ok: false, error: err.message });
+  }
+  if (typeof githubTokenId !== 'string' || !GH_TOKEN_ID_RE.test(githubTokenId)) {
+    return res.json({ ok: false, error: 'githubTokenId required' });
+  }
+  if (!listGithubTokens().some(t => t.id === githubTokenId)) {
+    return res.json({ ok: false, error: `GitHub token '${githubTokenId}' not found` });
+  }
+  let token;
+  try {
+    token = fs.readFileSync(path.join(GH_TOKENS_DIR, githubTokenId), 'utf8').trim();
+  } catch (err) {
+    return res.json({ ok: false, error: `Cannot read token: ${err.message}` });
+  }
+  if (!token) return res.json({ ok: false, error: 'Token file is empty' });
+
+  const headers = {
+    'Authorization': `Bearer ${token}`,
+    'Accept': 'application/vnd.github+json',
+    'User-Agent': 'e-vgh-claw-wizard',
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
+  const apiBase = `https://api.github.com/repos/${encodeURIComponent(parsed.org)}/${encodeURIComponent(parsed.repo)}`;
+  try {
+    const repoResp = await fetch(apiBase, { headers });
+    if (repoResp.status === 404) {
+      return res.json({ ok: false, error: 'Repository not found (or token has no access).' });
+    }
+    if (repoResp.status === 401 || repoResp.status === 403) {
+      return res.json({ ok: false, error: `GitHub auth failed (HTTP ${repoResp.status}). Check the token's scopes — needs at least repo:read.` });
+    }
+    if (!repoResp.ok) {
+      return res.json({ ok: false, error: `GitHub API HTTP ${repoResp.status}` });
+    }
+    const repoMeta = await repoResp.json();
+
+    // Pull up to 200 branches (2 pages of 100). Repos with more branches
+    // than that don't fit a dropdown well anyway — surface a hint and let
+    // the user type a name manually if they need a deeper one.
+    const branches = [];
+    let truncated = false;
+    for (let page = 1; page <= 2; page++) {
+      const r = await fetch(`${apiBase}/branches?per_page=100&page=${page}`, { headers });
+      if (!r.ok) break;
+      const list = await r.json();
+      branches.push(...list.map(b => b.name));
+      if (list.length < 100) break;
+      if (page === 2 && list.length === 100) truncated = true;
+    }
+    return res.json({
+      ok: true,
+      repo: `${repoMeta.full_name}`,
+      defaultBranch: repoMeta.default_branch,
+      branches,
+      truncated,
+    });
+  } catch (err) {
+    return res.json({ ok: false, error: `Network: ${err.message}` });
+  }
+});
+
 /* ─── Matrix Proxy ──────────────────────────────────────────────────── */
 
 /*

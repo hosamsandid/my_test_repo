@@ -74,7 +74,7 @@ function ErrorBox({ message }) {
   );
 }
 
-const STEPS = ['Project', 'Credentials', 'Team', 'Review'];
+const STEPS = ['Team', 'Working Environment', 'Members', 'Review'];
 
 function StepIndicator({ current }) {
   return (
@@ -124,7 +124,10 @@ function slugify(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
 }
 
-// ─── Step 1 — Project ────────────────────────────────────────────────
+// ─── Step 1 — Team basics (name + id only) ────────────────────────────
+// The repo URL and branch moved to Step 2 because they can only be
+// verified once the credentials are picked — entering them up-front meant
+// the user committed to a URL the wizard couldn't validate yet.
 function StepProject({ form, setForm, error }) {
   return (
     <Card>
@@ -164,43 +167,18 @@ function StepProject({ form, setForm, error }) {
           <div style={hintStyle}>Lowercase, dashes only. 1–40 chars. Resources will be named <code>{form.teamId || '&lt;slug&gt;'}-developer</code>, etc.</div>
         </div>
 
-        <div>
-          <label htmlFor="ts-repo-url" style={labelStyle}>GitHub Repository URL</label>
-          <div style={{ position: 'relative' }}>
-            <Github size={18} style={{
-              position: 'absolute', left: 'var(--eb-space-3)', top: '50%', transform: 'translateY(-50%)',
-              color: 'var(--eb-text-muted)', pointerEvents: 'none',
-            }} />
-            <input
-              id="ts-repo-url"
-              type="text"
-              placeholder="git@github.com:org/repo.git or https://github.com/org/repo"
-              value={form.repoUrl}
-              onChange={e => setForm(f => ({ ...f, repoUrl: e.target.value }))}
-              style={{ ...inputStyle, paddingLeft: 'var(--eb-space-10)' }}
-            />
-          </div>
-        </div>
-
-        <div>
-          <label htmlFor="ts-branch" style={labelStyle}>Branch</label>
-          <input
-            id="ts-branch"
-            type="text"
-            placeholder="main"
-            value={form.branch}
-            onChange={e => setForm(f => ({ ...f, branch: e.target.value }))}
-            style={inputStyle}
-          />
-        </div>
-
         <ErrorBox message={error} />
       </div>
     </Card>
   );
 }
 
-// ─── Step 2 — Credentials ────────────────────────────────────────────
+// ─── Step 2 — Working Environment (credentials → URL → branch) ───────
+// Order is deliberate: credentials first means the wizard can verify the
+// repo URL against the PAT (saves the user from picking a misspelt URL),
+// and the verified probe call also returns the actual branch list — so
+// the branch field becomes a dropdown of real branches instead of a
+// free-text "main"-by-default input.
 function CredentialPicker({ label, items, value, onChange, emptyHelp, generateLabel, onGenerate, generating, generateHint }) {
   return (
     <div>
@@ -245,9 +223,17 @@ function CredentialPicker({ label, items, value, onChange, emptyHelp, generateLa
   );
 }
 
-function StepCredentials({ form, setForm, sshKeys, sshKeysLoading, githubTokens, tokensLoading, error, refetchKeys, refetchTokens }) {
+function StepEnvironment({
+  form, setForm, sshKeys, sshKeysLoading, githubTokens, tokensLoading, error, refetchKeys,
+}) {
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState(null);
+  // Probe state: idle | probing | ok | error. Driven by the URL+token
+  // pair — clears whenever either changes so the user never trusts a
+  // stale "verified" badge from a previous combination.
+  const [probeState, setProbeState] = useState('idle');
+  const [probeResult, setProbeResult] = useState(null); // { repo, defaultBranch, branches, truncated }
+  const [probeError, setProbeError] = useState(null);
 
   async function generateKey() {
     setGenError(null);
@@ -264,9 +250,59 @@ function StepCredentials({ form, setForm, sshKeys, sshKeysLoading, githubTokens,
     }
   }
 
+  // Reset probe state on dependency changes.
+  useEffect(() => {
+    setProbeState('idle');
+    setProbeResult(null);
+    setProbeError(null);
+  }, [form.repoUrl, form.githubTokenId]);
+
+  async function probeRepo() {
+    if (!form.repoUrl.trim() || !form.githubTokenId) return;
+    setProbeState('probing');
+    setProbeError(null);
+    try {
+      const res = await fetch('/api/github/probe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: form.repoUrl.trim(), githubTokenId: form.githubTokenId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!data.ok) {
+        setProbeState('error');
+        setProbeError(data.error || `HTTP ${res.status}`);
+        setProbeResult(null);
+        return;
+      }
+      setProbeResult({
+        repo: data.repo,
+        defaultBranch: data.defaultBranch,
+        branches: Array.isArray(data.branches) ? data.branches : [],
+        truncated: !!data.truncated,
+      });
+      setProbeState('ok');
+      // Snap the form's branch to the default if the user hadn't picked
+      // one yet, or to the closest match if their existing pick is gone.
+      setForm(f => {
+        const has = (data.branches || []).includes(f.branch);
+        if (!f.branch || !has) {
+          return { ...f, branch: data.defaultBranch };
+        }
+        return f;
+      });
+    } catch (err) {
+      setProbeState('error');
+      setProbeError(err.message || String(err));
+      setProbeResult(null);
+    }
+  }
+
+  const canProbe = !!form.repoUrl.trim() && !!form.githubTokenId;
+
   return (
     <Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-5)' }}>
+        {/* ── Credentials first ────────────────────────────────────── */}
         <CredentialPicker
           label="SSH Deploy Key"
           items={sshKeysLoading ? [] : (sshKeys || [])}
@@ -301,6 +337,110 @@ function StepCredentials({ form, setForm, sshKeys, sshKeysLoading, githubTokens,
           }
         />
 
+        {/* ── Repository URL with verify button ────────────────────── */}
+        <div>
+          <label htmlFor="ts-repo-url" style={labelStyle}>GitHub Repository URL</label>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'stretch' }}>
+            <div style={{ position: 'relative', flex: 1 }}>
+              <Github size={18} style={{
+                position: 'absolute', left: 'var(--eb-space-3)', top: '50%', transform: 'translateY(-50%)',
+                color: 'var(--eb-text-muted)', pointerEvents: 'none',
+              }} />
+              <input
+                id="ts-repo-url"
+                type="text"
+                placeholder="git@github.com:org/repo.git or https://github.com/org/repo"
+                value={form.repoUrl}
+                onChange={e => setForm(f => ({ ...f, repoUrl: e.target.value }))}
+                onBlur={() => { if (canProbe && probeState === 'idle') probeRepo(); }}
+                style={{ ...inputStyle, paddingLeft: 'var(--eb-space-10)' }}
+              />
+            </div>
+            <button
+              type="button"
+              onClick={probeRepo}
+              disabled={!canProbe || probeState === 'probing'}
+              style={{
+                padding: 'var(--eb-space-2) var(--eb-space-4)',
+                background: probeState === 'ok' ? 'var(--eb-status-success-bg)' : 'var(--eb-bg-elevated)',
+                border: `1px solid ${probeState === 'ok' ? 'var(--eb-status-success)' : 'var(--eb-border-default)'}`,
+                borderRadius: 'var(--eb-radius-md)',
+                color: probeState === 'ok' ? 'var(--eb-status-success)' : 'var(--eb-text-primary)',
+                fontSize: 'var(--eb-text-sm)',
+                fontFamily: 'inherit',
+                cursor: !canProbe || probeState === 'probing' ? 'not-allowed' : 'pointer',
+                opacity: !canProbe ? 0.5 : 1,
+                whiteSpace: 'nowrap',
+                display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
+              }}
+            >
+              {probeState === 'probing' && <Loader2 size={13} style={{ animation: 'team-setup-spin 0.9s linear infinite' }} />}
+              {probeState === 'ok' && <CheckCircle size={13} />}
+              {probeState === 'error' && <AlertCircle size={13} style={{ color: 'var(--eb-status-error)' }} />}
+              {probeState === 'probing' ? 'Verifying…'
+                : probeState === 'ok' ? 'Verified'
+                : probeState === 'error' ? 'Retry'
+                : 'Verify'}
+            </button>
+          </div>
+          {!canProbe && (
+            <div style={hintStyle}>Pick the credentials first — the wizard verifies the URL against the GitHub token before you commit to it.</div>
+          )}
+          {probeState === 'ok' && probeResult && (
+            <div style={{
+              marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)',
+              color: 'var(--eb-text-muted)',
+            }}>
+              <code style={{ color: 'var(--eb-status-success)' }}>{probeResult.repo}</code>
+              {' — '}
+              {probeResult.branches.length} branch{probeResult.branches.length === 1 ? '' : 'es'}
+              {probeResult.truncated && ' (showing first 200, type below for more)'}
+            </div>
+          )}
+          {probeState === 'error' && (
+            <div style={{
+              marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)',
+              color: 'var(--eb-status-error)',
+              display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-1)',
+            }}>
+              <AlertCircle size={12} style={{ flexShrink: 0, marginTop: 2 }} /> {probeError}
+            </div>
+          )}
+        </div>
+
+        {/* ── Branch picker (dropdown of probed branches, falls back to text) */}
+        <div>
+          <label htmlFor="ts-branch" style={labelStyle}>Branch</label>
+          {probeState === 'ok' && probeResult && probeResult.branches.length > 0 ? (
+            <select
+              id="ts-branch"
+              value={form.branch}
+              onChange={e => setForm(f => ({ ...f, branch: e.target.value }))}
+              style={{ ...inputStyle, fontFamily: 'inherit' }}
+            >
+              {probeResult.branches.map(b => (
+                <option key={b} value={b}>
+                  {b}{b === probeResult.defaultBranch ? '  (default)' : ''}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              id="ts-branch"
+              type="text"
+              placeholder="main"
+              value={form.branch}
+              onChange={e => setForm(f => ({ ...f, branch: e.target.value }))}
+              style={inputStyle}
+            />
+          )}
+          <div style={hintStyle}>
+            {probeState === 'ok'
+              ? 'Picked from the actual branches in the repo.'
+              : 'Verify the repository above to pick from a list of real branches.'}
+          </div>
+        </div>
+
         <div style={{
           padding: 'var(--eb-space-3)',
           background: 'var(--eb-bg-elevated)',
@@ -310,9 +450,9 @@ function StepCredentials({ form, setForm, sshKeys, sshKeysLoading, githubTokens,
           color: 'var(--eb-text-muted)',
           lineHeight: 1.6,
         }}>
-          <strong>Why both?</strong> The SSH key clones the repo (per-repo, read-only deploy key works).
-          The PAT runs <code>gh-as-agent</code> for PR/issue/comment actions. Splitting them is
-          defense-in-depth — see the credential pages for details.
+          <strong>Why two credentials?</strong> The SSH key clones the repo (per-repo, read-only deploy key works).
+          The PAT runs <code>gh-as-agent</code> for PR / issue / comment actions and is what the wizard uses
+          right above to verify the URL. Splitting them is defense-in-depth — see the credential pages for details.
         </div>
 
         <ErrorBox message={error} />
@@ -599,7 +739,7 @@ export default function TeamSetup() {
 
   const { data: templatesResp, loading: tplLoading } = useApi('/api/agent-templates');
   const { data: sshKeys, loading: keysLoading, refetch: refetchKeys } = useApi('/api/ssh-keys');
-  const { data: githubTokens, loading: tokensLoading, refetch: refetchTokens } = useApi('/api/github-tokens');
+  const { data: githubTokens, loading: tokensLoading } = useApi('/api/github-tokens');
 
   const templates = templatesResp?.templates || null;
 
@@ -611,15 +751,18 @@ export default function TeamSetup() {
   }, [templates]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function validateStep() {
+    // Step 0 = Team basics (name + slug). Repo is on step 1 now.
     if (step === 0) {
       if (!form.teamName.trim()) return 'Team name required';
       if (!/^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/.test(form.teamId)) return 'Team ID must be 1–40 chars, [a-z0-9-]';
-      if (!form.repoUrl.trim()) return 'Repository URL required';
       return null;
     }
+    // Step 1 = Working environment (credentials → URL → branch).
     if (step === 1) {
       if (!form.sshKeyId) return 'SSH key required';
       if (!form.githubTokenId) return 'GitHub token required';
+      if (!form.repoUrl.trim()) return 'Repository URL required';
+      if (!form.branch.trim()) return 'Branch required';
       return null;
     }
     if (step === 2) {
@@ -769,7 +912,7 @@ export default function TeamSetup() {
 
       {step === 0 && <StepProject {...stepProps} error={stepError} />}
       {step === 1 && (
-        <StepCredentials
+        <StepEnvironment
           {...stepProps}
           sshKeys={sshKeys}
           sshKeysLoading={keysLoading}
@@ -777,7 +920,6 @@ export default function TeamSetup() {
           tokensLoading={tokensLoading}
           error={stepError}
           refetchKeys={refetchKeys}
-          refetchTokens={refetchTokens}
         />
       )}
       {step === 2 && (

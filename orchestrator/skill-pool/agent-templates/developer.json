@@ -21,6 +21,15 @@
       "promptTemplate": "An issue in repo `{{repoFullName}}` was labeled `{{readyLabel}}`. If no open PR already references this issue: implement it according to the acceptance criteria in the issue description. Use `gh-as-agent` for the branch, commits and PR creation; put `Closes #<issue-number>` in the PR body. If a PR already exists: reply `[PASS]`."
     },
     {
+      "id": "developer-bid-loop",
+      "type": "cron",
+      "cron": "*/3 * * * *",
+      "enabled": true,
+      "preCheckScript": "/usr/local/bin/multi-agent-bid",
+      "preCheckEnv": { "GH_REPO": "{{repoFullName}}" },
+      "promptTemplate": "You have been assigned an issue in `{{repoFullName}}`. The pre-check context above contains the issue number, title, and body.\n\n1. Add `started:<your-agent-id>` to the issue (create the label in the repo first if it does not exist).\n2. Remove the `{{readyLabel}}` label from the issue.\n3. Implement the issue according to its acceptance criteria: create a feature branch, commit your changes via `gh-as-agent commit`, and open a PR via `gh pr create`. Put `Closes #<issue-number>` in the PR body.\n\nIf a PR already exists for this issue: reply `[PASS]`."
+    },
+    {
       "id": "self-curation",
       "type": "cron",
       "cron": "5 3 * * 1",

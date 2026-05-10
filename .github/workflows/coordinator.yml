@@ -1,0 +1,152 @@
+name: Multi-agent Coordinator
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: coordinator
+  cancel-in-progress: false
+
+permissions:
+  issues: write
+
+env:
+  ASSIGN_TIMEOUT_MINUTES: '10'
+
+jobs:
+  coordinate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assign bidders and recover timed-out assignments
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # ── Phase 1: Assign bidders ──────────────────────────────────────────
+          # Collect issue numbers that carry at least one bid:* label.
+          bid_issues=$(gh issue list \
+            --repo "$REPO" \
+            --state open \
+            --json number,labels \
+            --limit 200 \
+            | jq -r '
+                .[]
+                | .number as $n
+                | .labels[].name
+                | select(test("^bid:"))
+                | "\($n)"
+              ' | sort -u)
+
+          for issue_num in $bid_issues; do
+            # Re-fetch the current label set for this issue.
+            current_labels=$(gh issue view "$issue_num" \
+              --repo "$REPO" \
+              --json labels \
+              | jq -r '.labels[].name')
+
+            bid_labels=$(echo "$current_labels" | grep -E '^bid:' || true)
+            if [[ -z "$bid_labels" ]]; then
+              continue
+            fi
+
+            # Skip issues that already have an assigned:* label — a previous
+            # coordinator run may have handled this issue already.
+            if echo "$current_labels" | grep -qE '^assigned:'; then
+              continue
+            fi
+
+            # Pick one bidder at random.
+            chosen=$(echo "$bid_labels" | shuf -n 1)
+            agent_id="${chosen#bid:}"
+            assigned_label="assigned:${agent_id}"
+
+            # Create the assigned label in the repo if it does not exist yet.
+            if ! gh label list \
+                --repo "$REPO" \
+                --json name \
+                --limit 500 \
+                | jq -r '.[].name' | grep -qxF "$assigned_label"; then
+              gh label create "$assigned_label" \
+                --repo "$REPO" \
+                --color "0075ca" \
+                --description "Assigned to agent ${agent_id}" \
+                2>/dev/null || true
+            fi
+
+            # Add the assigned label.
+            gh issue edit "$issue_num" \
+              --repo "$REPO" \
+              --add-label "$assigned_label"
+
+            # Remove all bid:* labels from this issue.
+            while IFS= read -r bid; do
+              gh issue edit "$issue_num" \
+                --repo "$REPO" \
+                --remove-label "$bid" \
+                2>/dev/null || true
+            done <<< "$bid_labels"
+
+            echo "Assigned issue #${issue_num} to ${agent_id}"
+          done
+
+          # ── Phase 2: Timeout recovery ────────────────────────────────────────
+          # Find issues with assigned:* but no started:*. If the issue has not
+          # been updated since ASSIGN_TIMEOUT_MINUTES ago (i.e. the agent has
+          # not acted since assignment), return it to the ready pool.
+          cutoff_ts=$(date -d "${ASSIGN_TIMEOUT_MINUTES} minutes ago" --iso-8601=seconds)
+
+          gh issue list \
+            --repo "$REPO" \
+            --state open \
+            --json number,labels,updatedAt \
+            --limit 200 \
+            | jq -r --arg cutoff "$cutoff_ts" '
+                .[]
+                | select(
+                    (.labels | map(.name) | any(test("^assigned:")))
+                    and (.labels | map(.name) | any(test("^started:")) | not)
+                    and (.updatedAt <= $cutoff)
+                  )
+                | .number
+              ' \
+            | while read -r issue_num; do
+              assigned_label=$(gh issue view "$issue_num" \
+                --repo "$REPO" \
+                --json labels \
+                | jq -r '.labels[].name | select(test("^assigned:"))' \
+                | head -1)
+
+              if [[ -z "$assigned_label" ]]; then
+                continue
+              fi
+
+              agent_id="${assigned_label#assigned:}"
+
+              # Remove the assigned:* label.
+              gh issue edit "$issue_num" \
+                --repo "$REPO" \
+                --remove-label "$assigned_label" \
+                2>/dev/null || true
+
+              # Re-add ready if it is no longer present.
+              has_ready=$(gh issue view "$issue_num" \
+                --repo "$REPO" \
+                --json labels \
+                | jq -r '[.labels[].name] | any(. == "ready")' )
+              if [[ "$has_ready" != "true" ]]; then
+                gh issue edit "$issue_num" \
+                  --repo "$REPO" \
+                  --add-label "ready"
+              fi
+
+              # Post a recovery comment.
+              gh issue comment "$issue_num" \
+                --repo "$REPO" \
+                --body "Assignment to ${agent_id} timed out — returned to ready pool."
+
+              echo "Timeout recovery: issue #${issue_num} (was assigned to ${agent_id})"
+            done

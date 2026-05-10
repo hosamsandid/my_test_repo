@@ -2829,6 +2829,15 @@ app.post('/api/teams', async (req, res) => {
         } else if (tr.type === 'cron') {
           out.cron = tr.cron;
         }
+        // Carry pre-check script fields (used by the bid-loop cron trigger).
+        if (tr.preCheckScript) {
+          out.preCheckScript = tr.preCheckScript;
+        }
+        if (tr.preCheckEnv && typeof tr.preCheckEnv === 'object') {
+          out.preCheckEnv = Object.fromEntries(
+            Object.entries(tr.preCheckEnv).map(([k, v]) => [k, applyTemplateVars(v, vars)])
+          );
+        }
         return out;
       });
 
@@ -3204,6 +3213,15 @@ app.post('/api/teams/stream', async (req, res) => {
           }
         } else if (tr.type === 'cron') {
           out.cron = tr.cron;
+        }
+        // Carry pre-check script fields (used by the bid-loop cron trigger).
+        if (tr.preCheckScript) {
+          out.preCheckScript = tr.preCheckScript;
+        }
+        if (tr.preCheckEnv && typeof tr.preCheckEnv === 'object') {
+          out.preCheckEnv = Object.fromEntries(
+            Object.entries(tr.preCheckEnv).map(([k, v]) => [k, applyTemplateVars(v, vars)])
+          );
         }
         return out;
       });

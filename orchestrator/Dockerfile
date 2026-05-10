@@ -35,6 +35,11 @@ COPY *.js .
 COPY scripts/gh-as-agent /usr/local/bin/gh-as-agent
 RUN chmod +x /usr/local/bin/gh-as-agent
 
+# `multi-agent-bid` pre-check script: runs on every Developer agent cron tick
+# to bid on ready issues and detect assignments without an LLM call.
+COPY scripts/multi-agent-bid.sh /usr/local/bin/multi-agent-bid
+RUN chmod +x /usr/local/bin/multi-agent-bid
+
 # Bundled fallback template: used by orchestrator when /template-workspace/CLAUDE.md
 # is not available in the mounted skills-pool volume (e.g. fresh installation).
 COPY CLAUDE-template.md /defaults/CLAUDE.md

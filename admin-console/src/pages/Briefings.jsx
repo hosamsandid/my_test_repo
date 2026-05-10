@@ -28,7 +28,7 @@ function HelpPanel({ onClose }) {
     <div
       onClick={e => { if (e.target === e.currentTarget) onClose(); }}
       style={{
-        position: 'absolute', inset: 0, zIndex: 20,
+        position: 'fixed', inset: 0, zIndex: 200,
         display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-end',
         background: 'rgba(0,0,0,0.35)',
       }}
@@ -258,6 +258,7 @@ export default function Briefings() {
   }, []);
 
   const closeHelp = useCallback(() => setHelpOpen(false), []);
+
 
   const selectedAgent = orchestrators.find(a => a.id === selectedFlow);
 

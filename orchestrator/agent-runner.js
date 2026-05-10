@@ -405,6 +405,44 @@ async function sendFormatted(client, roomId, text) {
 }
 
 // ============================================================
+// Pre-check script runner
+// ============================================================
+// Runs an optional shell script before a trigger's LLM invocation.
+// Exit 0  → caller should proceed with the LLM; stdout is returned as context.
+// Non-zero → caller should skip the LLM (pure-shell work done, or nothing to do).
+function runPreCheck(scriptPath, env = {}) {
+  return new Promise((resolve) => {
+    const proc = spawn(scriptPath, [], {
+      env: { ...process.env, ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    proc.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    const timeoutMs = Number(process.env.PRECHECK_TIMEOUT_MS) || 30_000;
+    const timer = setTimeout(() => {
+      proc.kill();
+      console.error(`[Runner:${AGENT_ID}] preCheck timed out after ${timeoutMs}ms`);
+      resolve({ exitCode: 1, stdout: "" });
+    }, timeoutMs).unref();
+
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      if (stderr) {
+        console.log(`[Runner:${AGENT_ID}] preCheck stderr: ${stderr.slice(0, 400)}`);
+      }
+      resolve({ exitCode: code ?? 1, stdout: stdout.slice(0, 4000) });
+    });
+    proc.on("error", (err) => {
+      clearTimeout(timer);
+      console.error(`[Runner:${AGENT_ID}] preCheck spawn error: ${err.message}`);
+      resolve({ exitCode: 1, stdout: "" });
+    });
+  });
+}
+
+// ============================================================
 // Trigger scheduler
 // ============================================================
 class TriggerScheduler {
@@ -702,6 +740,25 @@ class TriggerScheduler {
     }
     this.triggerRunning.add(trigger.id);
 
+    // Optional pre-check script: runs before any LLM call.
+    // Exit 0  → proceed with LLM; stdout is appended to the prompt as context.
+    // Non-zero → skip LLM (pure-shell work done, or nothing to do).
+    let preCheckOutput = null;
+    if (trigger.preCheckScript) {
+      const pcEnv = trigger.preCheckEnv && typeof trigger.preCheckEnv === "object"
+        ? trigger.preCheckEnv
+        : {};
+      const pc = await runPreCheck(trigger.preCheckScript, pcEnv);
+      if (pc.exitCode !== 0) {
+        console.log(
+          `[Runner:${AGENT_ID}] Trigger ${trigger.id}: preCheck exited ${pc.exitCode} — skipping LLM`
+        );
+        this.triggerRunning.delete(trigger.id);
+        return;
+      }
+      preCheckOutput = pc.stdout || null;
+    }
+
     // Default destination is the agent's DM room with the admin (created
     // lazily when the user first opens the chat). If neither the trigger
     // nor the agent has a DM target, skip — there's nowhere to post.
@@ -731,6 +788,9 @@ class TriggerScheduler {
 
     try {
       let task = trigger.prompt;
+      if (preCheckOutput) {
+        task += `\n\nPre-check context:\n${preCheckOutput}`;
+      }
       if (ctx?.github) {
         // The GitHub event payload contains attacker-controlled fields (PR
         // titles, bodies, commit messages, comment text). Wrap it in a

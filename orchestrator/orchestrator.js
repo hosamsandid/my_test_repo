@@ -1300,6 +1300,16 @@ async function fetchBriefingPacks(orchestratorId, briefingsPath) {
   const url = `${BP_EXPLORER_URL}/api/briefings?workspace=${encodeURIComponent(workspace)}`;
   const res = await fetch(url);
   if (!res.ok) {
+    if (res.status === 404) {
+      // artifacts/briefings/ not yet present in the cloned workspace — the
+      // repo may need a pull to pick up the latest commit. Return empty so
+      // the sync tick can complete cleanly; the next pull will surface BPs.
+      console.warn(
+        `[Orchestrator] No briefings directory found for ${orchestratorId} at ${workspace}` +
+        ` — will retry after next git pull`
+      );
+      return [];
+    }
     const detail = await res.text().catch(() => "");
     throw new Error(`bp-explorer ${res.status}: ${detail.slice(0, 200)}`);
   }

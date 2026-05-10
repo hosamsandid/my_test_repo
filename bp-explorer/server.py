@@ -1733,6 +1733,8 @@ async def serve_briefings(workspace: str):
             None, load_all_briefings, project_root
         )
         return _json_response(data, indent=2)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -1754,6 +1756,8 @@ async def serve_phases(workspace: str):
             None, partial(build_phases, briefings, project_root)
         )
         return _json_response(data, indent=2)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

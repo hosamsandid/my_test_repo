@@ -43,6 +43,7 @@ function iconForRole(role) {
 const STATUS_DOT = {
   busy:    { color: 'var(--eb-status-warning)', label: 'Working…',          pulse: true  },
   unread:  { color: 'var(--eb-status-success)', label: 'New message',       pulse: false },
+  active:  { color: 'var(--eb-status-info)',    label: 'Active session',    pulse: false },
   idle:    { color: 'var(--eb-text-muted)',     label: 'Waiting for input', pulse: false },
   problem: { color: 'var(--eb-status-error)',   label: 'Unavailable',       pulse: false },
 };

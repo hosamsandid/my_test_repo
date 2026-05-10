@@ -117,7 +117,7 @@ export default function AgentChat() {
         .then(list => {
           const viewed = loadLastViewed();
           const map = {};
-          for (const { id, activityState, lastResponseAt } of list) {
+          for (const { id, activityState, lastResponseAt, hasSession } of list) {
             let effective;
             if (activityState === 'disabled' || activityState === 'offline') {
               effective = 'problem';
@@ -125,6 +125,8 @@ export default function AgentChat() {
               effective = 'busy';
             } else if (lastResponseAt && new Date(lastResponseAt).getTime() > (viewed[id] || 0)) {
               effective = 'unread';
+            } else if (hasSession) {
+              effective = 'active';
             } else {
               effective = 'idle';
             }

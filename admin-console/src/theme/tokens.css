@@ -149,6 +149,7 @@
   --eb-accent-hover:      oklch(0.46 0.28 293);
   --eb-accent-muted:      oklch(0.94 0.04 293);
 
+  --eb-status-info:       oklch(0.50 0.22 230);
   --eb-status-success-bg: oklch(0.95 0.03 155);
   --eb-status-warning-bg: oklch(0.95 0.03 85);
   --eb-status-error-bg:   oklch(0.95 0.03 25);

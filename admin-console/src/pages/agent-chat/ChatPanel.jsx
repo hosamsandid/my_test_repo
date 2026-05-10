@@ -688,11 +688,7 @@ export default function ChatPanel({
           onClick={() => setShowClearConfirm(true)}
           disabled={!roomId || clearingHistory || disabled}
           title="Permanently delete all messages in this chat"
-          style={{
-            ...sessionBtnStyle(!roomId || clearingHistory || disabled),
-            color: (!roomId || clearingHistory || disabled) ? undefined : 'var(--eb-status-error)',
-            borderColor: (!roomId || clearingHistory || disabled) ? undefined : 'var(--eb-status-error)',
-          }}
+          style={sessionBtnStyle(!roomId || clearingHistory || disabled)}
         >
           {clearingHistory
             ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />

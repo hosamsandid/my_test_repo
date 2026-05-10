@@ -1360,6 +1360,12 @@ app.post('/api/agents/:id/triggers', (req, res) => {
   const triggersPath = path.join(agentDir, 'triggers.json');
   const triggers = readJsonFile(triggersPath, []);
   const newTrigger = { id: `t${Date.now()}`, ...req.body };
+  // Stamp `createdAt` on github-event triggers — the poller uses it as a
+  // history horizon so newly-added subscribers don't replay pre-existing
+  // activity. Mirrors orchestrator/saveTriggers().
+  if (newTrigger.type === 'github-event' && !newTrigger.createdAt) {
+    newTrigger.createdAt = new Date().toISOString();
+  }
   triggers.push(newTrigger);
   writeJsonAtomic(triggersPath, triggers);
   notifyTriggerReload(id);

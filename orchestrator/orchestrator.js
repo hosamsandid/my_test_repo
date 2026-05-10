@@ -918,9 +918,22 @@ function loadTriggers(id) {
 }
 
 function saveTriggers(id, triggers) {
+  // Stamp `createdAt` on every github-event trigger that lacks one. The
+  // poller uses this as a per-subscriber history horizon: events with
+  // `created_at < trigger.createdAt` are dropped at fan-out time so a
+  // newly-added agent never reacts to activity that predates it. Existing
+  // values are preserved on edit.
+  const now = new Date().toISOString();
+  const stamped = Array.isArray(triggers)
+    ? triggers.map(t =>
+        t && t.type === 'github-event' && !t.createdAt
+          ? { ...t, createdAt: now }
+          : t
+      )
+    : triggers;
   fs.writeFileSync(
     path.join(agentDir(id), "triggers.json"),
-    JSON.stringify(triggers, null, 2)
+    JSON.stringify(stamped, null, 2)
   );
 }
 

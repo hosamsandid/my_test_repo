@@ -286,8 +286,14 @@ class GitHubPoller {
       const triggersPath = path.join(AGENTS_DIR, agentId, 'triggers.json');
       if (!fs.existsSync(triggersPath)) continue;
       let triggers;
+      let triggersMtime = null;
       try {
         triggers = JSON.parse(fs.readFileSync(triggersPath, 'utf8'));
+        // mtime is the legacy fallback for the per-trigger history horizon
+        // (see `createdAt` below) — pre-existing triggers from before the
+        // horizon was introduced have no stamp, but the file's mtime is a
+        // reasonable proxy for "when this agent's triggers landed".
+        triggersMtime = fs.statSync(triggersPath).mtime.toISOString();
       } catch {
         continue;
       }
@@ -312,6 +318,12 @@ class GitHubPoller {
           // through unchanged — applyFromFilter() understands all spec shapes
           // (string keyword / array allowlist / { exclude } blocklist / null).
           from: t.from || null,
+          // Per-subscriber history horizon: events with `created_at` strictly
+          // older than this stamp are dropped before any other layer fires,
+          // so a freshly-added agent never reacts to activity that predates
+          // it (e.g. PRs that were already open when the team was set up).
+          // Falls back to the triggers.json mtime for legacy triggers.
+          createdAt: t.createdAt || triggersMtime,
           // Optional exact-match filter on payload.label.name for *.labeled
           // and *.unlabeled events. Empty / null / undefined = no filter
           // (legacy behavior — fire on any label change). When set, the
@@ -462,6 +474,20 @@ class GitHubPoller {
 
     for (const sub of subscribers) {
       if (!sub.events.has(key)) continue;
+
+      // History horizon: skip events older than the subscriber's createdAt.
+      // Cheapest check, runs before everything else — a brand-new agent
+      // never reads (let alone reacts to) activity that pre-dates its own
+      // creation, even when the per-repo cursor is stale (e.g. another
+      // agent already advanced it past those events). String compare on
+      // ISO-8601 UTC timestamps is correct.
+      if (sub.createdAt && ghEvent.created_at && ghEvent.created_at < sub.createdAt) {
+        console.log(
+          `[GH-Poller] history-horizon: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
+          `(event=${ghEvent.created_at}, sub-since=${sub.createdAt})`,
+        );
+        continue;
+      }
 
       // Label-name filter for *.labeled / *.unlabeled events. The action
       // payload carries the affected label as `payload.label.name`. When

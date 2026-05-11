@@ -30,6 +30,9 @@
 #   DISPATCH_LABEL — label the Dispatcher applies (e.g. "dispatch"). Required for
 #                    BID_MODE=both and BID_MODE=bid. Ignored for BID_MODE=safetynet.
 #   BID_MODE       — "both" (default), "safetynet", or "bid".
+#   COORDINATOR_WORKFLOW — workflow file name to dispatch after a successful bid
+#                    (default: "coordinator.yml"). Set to "" to disable. Failures
+#                    are ignored — the scheduled cron remains as a safety net.
 #   GH_TOKEN       — GitHub PAT (typically already present in the container env).
 
 set -euo pipefail
@@ -85,6 +88,30 @@ if [[ "$MODE" == "both" || "$MODE" == "safetynet" ]]; then
   fi
 fi
 
+# ── Self-busy guard: don't bid if I already hold work in flight ──────────────
+# Skips bidding when *this* agent already has an open issue carrying
+# `assigned:<AID>` or `started:<AID>`. Without this guard a Developer that's
+# currently implementing one issue would still bid on every newly dispatched
+# one — and might win and end up double-booked.
+#
+# Phase 1 (above) already catches `assigned:<AID>` in `both` mode, but the
+# `bid` mode skips Phase 1, so the check has to live here too. Closed issues
+# never count: a finished PR's `started:<AID>` rides into the closed state and
+# must not block future bids.
+self_busy=$(gh issue list \
+  --repo "$REPO" \
+  --state open \
+  --json labels \
+  --limit 200 \
+  2>/dev/null \
+  || echo "[]")
+self_busy=$(echo "$self_busy" | jq --arg me "$AID" '[.[] | select(
+    .labels | map(.name) | any(. == ("assigned:" + $me) or . == ("started:" + $me))
+  )] | length')
+if [[ "${self_busy:-0}" -gt 0 ]]; then
+  exit 1
+fi
+
 # ── Phase 2: Bid on dispatched issues ─────────────────────────────────────────
 ready_issues=$(gh issue list \
   --repo "$REPO" \
@@ -128,5 +155,22 @@ echo "$biddable" | jq -r '.[].number' | while read -r issue_num; do
     --add-label "$BID_LABEL" \
     2>/dev/null || true
 done
+
+# Wake the coordinator workflow immediately via workflow_dispatch instead of
+# waiting for the scheduled cron tick. GitHub schedules scheduled workflows on
+# a best-effort basis — measured gaps of 60–80 min are common on private repos
+# under load. A workflow_dispatch trigger typically queues in seconds. The
+# scheduled `*/5 * * * *` remains as a safety net for missed dispatches.
+#
+# Idempotent: if two Developers fire workflow_dispatch concurrently, the
+# coordinator handles both runs; the second sees `assigned:*` already in place
+# and exits as a no-op. Failures are swallowed by design — the scheduled cron
+# will catch up later.
+# Use ${VAR-default} (no colon) so an explicitly empty COORDINATOR_WORKFLOW=""
+# disables the trigger; only an *unset* variable falls back to coordinator.yml.
+WORKFLOW="${COORDINATOR_WORKFLOW-coordinator.yml}"
+if [[ -n "$WORKFLOW" ]]; then
+  gh workflow run "$WORKFLOW" --repo "$REPO" 2>/dev/null || true
+fi
 
 exit 1  # Bidding is pure shell — no LLM call needed.

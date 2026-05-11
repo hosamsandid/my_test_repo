@@ -938,6 +938,126 @@ function RoleCard({ template, selected, count, onToggle, onCountChange }) {
   );
 }
 
+function ExtendExistingRoleCard({ template, existingCount, count, onCountChange }) {
+  const Icon = ROLE_ICONS[template.icon] || User;
+  const delta = count - existingCount;
+  const atFloor = count <= existingCount;
+  const multiAllowed = !SINGLE_INSTANCE_ROLES.has(template.id);
+
+  function handleMinus(e) {
+    e.stopPropagation();
+    if (count > existingCount) onCountChange(count - 1);
+  }
+  function handlePlus(e) {
+    e.stopPropagation();
+    if (count < 10) onCountChange(count + 1);
+  }
+
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+      padding: 'var(--eb-space-4)',
+      background: delta > 0 ? 'var(--eb-bg-surface)' : 'var(--eb-bg-elevated)',
+      border: `2px solid ${delta > 0 ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+      borderRadius: 'var(--eb-radius-lg)',
+    }}>
+      <div style={{ display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'flex-start' }}>
+        <div style={{
+          flexShrink: 0, width: 36, height: 36,
+          borderRadius: 'var(--eb-radius-md)',
+          background: delta > 0 ? 'var(--eb-accent-primary)' : 'var(--eb-bg-app)',
+          color: delta > 0 ? 'var(--eb-text-inverted)' : 'var(--eb-text-muted)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          position: 'relative',
+        }}>
+          <Icon size={18} />
+          {atFloor && (
+            <Lock size={10} style={{ position: 'absolute', bottom: 2, right: 2, color: 'var(--eb-text-muted)' }} />
+          )}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 'var(--eb-space-2)' }}>
+            <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: delta > 0 ? 'var(--eb-text-primary)' : 'var(--eb-text-muted)' }}>
+              {template.displayName}
+            </div>
+            <span style={{
+              fontSize: 'var(--eb-text-xs)',
+              color: delta > 0 ? 'var(--eb-accent-primary)' : 'var(--eb-text-muted)',
+              background: 'var(--eb-bg-app)', padding: '1px 6px',
+              borderRadius: 'var(--eb-radius-sm)', border: '1px solid var(--eb-border-default)',
+              flexShrink: 0,
+            }}>
+              {delta > 0 ? `+${delta} instance${delta !== 1 ? 's' : ''}` : 'Already configured'}
+            </span>
+          </div>
+          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.4 }}>
+            {template.description}
+          </div>
+        </div>
+      </div>
+      {multiAllowed && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+          paddingTop: 'var(--eb-space-2)',
+          borderTop: '1px solid var(--eb-border-default)',
+          opacity: atFloor ? 0.6 : 1,
+        }}>
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginRight: 'var(--eb-space-1)' }}>
+            Instances:
+          </span>
+          <button
+            type="button"
+            onClick={handleMinus}
+            disabled={atFloor}
+            style={{
+              width: 26, height: 26, borderRadius: 'var(--eb-radius-sm)',
+              background: 'var(--eb-bg-elevated)',
+              border: '1px solid var(--eb-border-default)',
+              color: atFloor ? 'var(--eb-text-muted)' : 'var(--eb-text-primary)',
+              cursor: atFloor ? 'not-allowed' : 'pointer',
+              fontFamily: 'inherit',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 'var(--eb-text-md)', lineHeight: 1,
+            }}
+          >−</button>
+          <div style={{
+            width: 44, textAlign: 'center',
+            padding: 'var(--eb-space-1)',
+            background: 'var(--eb-bg-elevated)',
+            border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-sm)',
+            color: 'var(--eb-text-primary)',
+            fontSize: 'var(--eb-text-sm)',
+            fontFamily: 'var(--eb-font-mono)',
+          }}>
+            {count}
+          </div>
+          <button
+            type="button"
+            onClick={handlePlus}
+            disabled={count >= 10}
+            style={{
+              width: 26, height: 26, borderRadius: 'var(--eb-radius-sm)',
+              background: 'var(--eb-bg-elevated)',
+              border: '1px solid var(--eb-border-default)',
+              color: count >= 10 ? 'var(--eb-text-muted)' : 'var(--eb-text-primary)',
+              cursor: count >= 10 ? 'not-allowed' : 'pointer',
+              fontFamily: 'inherit',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 'var(--eb-text-md)', lineHeight: 1,
+            }}
+          >+</button>
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            {delta > 0
+              ? `(${existingCount} existing + ${delta} new)`
+              : `(${existingCount} existing — click + to add more)`}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Roles whose configuration depends on the ready-label being settable —
 // BA writes it, QE reacts to it, Dispatcher reads its candidate queue
 // from it, Roadmap Reporter cites it, and Developer reacts to it
@@ -957,9 +1077,10 @@ const READY_LABEL_ROLES = new Set([
 // warrant exposing the field).
 const DISPATCH_LABEL_ROLES = new Set(['dispatcher']);
 
-function StepTeam({ form, setForm, templates, roleConfig, setRoleConfig, error, extendMode, existingRoles }) {
+function StepTeam({ form, setForm, templates, roleConfig, setRoleConfig, error, extendMode, existingRoles, existingRoleCounts }) {
   if (!templates) return <Card>Loading templates…</Card>;
   const existingSet = new Set(extendMode ? (existingRoles || []) : []);
+  const counts = existingRoleCounts || {};
   const showReadyLabel = roleConfig.some(r => READY_LABEL_ROLES.has(r.id));
   const showDispatchControls = roleConfig.some(r => DISPATCH_LABEL_ROLES.has(r.id));
 
@@ -979,56 +1100,21 @@ function StepTeam({ form, setForm, templates, roleConfig, setRoleConfig, error, 
       {extendMode && (
         <div style={{ marginBottom: 'var(--eb-space-4)' }}>
           <ExtendReadOnlyBanner>
-            Roles with the lock icon are already configured. Toggle at least one new role to extend the team.
+            Existing roles show their current instance count — use the stepper to add more. Toggle new roles to add them to the team.
           </ExtendReadOnlyBanner>
         </div>
       )}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 'var(--eb-space-3)' }}>
         {templates.map(t => {
           if (extendMode && existingSet.has(t.id)) {
-            const Icon = ROLE_ICONS[t.icon] || User;
             return (
-              <div key={t.id} style={{
-                display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'flex-start',
-                padding: 'var(--eb-space-4)',
-                background: 'var(--eb-bg-elevated)',
-                border: '2px solid var(--eb-border-default)',
-                borderRadius: 'var(--eb-radius-lg)',
-                opacity: 0.7,
-              }}>
-                <div style={{
-                  flexShrink: 0, width: 36, height: 36,
-                  borderRadius: 'var(--eb-radius-md)',
-                  background: 'var(--eb-bg-app)',
-                  color: 'var(--eb-text-muted)',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  position: 'relative',
-                }}>
-                  <Icon size={18} />
-                  <Lock size={10} style={{
-                    position: 'absolute', bottom: 2, right: 2,
-                    color: 'var(--eb-text-muted)',
-                  }} />
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 'var(--eb-space-2)' }}>
-                    <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-muted)' }}>
-                      {t.displayName}
-                    </div>
-                    <span style={{
-                      fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
-                      background: 'var(--eb-bg-app)', padding: '1px 6px',
-                      borderRadius: 'var(--eb-radius-sm)', border: '1px solid var(--eb-border-default)',
-                      flexShrink: 0,
-                    }}>
-                      Already configured
-                    </span>
-                  </div>
-                  <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.4 }}>
-                    {t.description}
-                  </div>
-                </div>
-              </div>
+              <ExtendExistingRoleCard
+                key={t.id}
+                template={t}
+                existingCount={counts[t.id] || 1}
+                count={getCount(t.id)}
+                onCountChange={c => setCount(t.id, c)}
+              />
             );
           }
           return (
@@ -1116,14 +1202,16 @@ function repoSlug(url) {
   return m ? m[1] : null;
 }
 
-function StepReview({ form, templates, sshKeys, githubTokens, mcpServers, mcpCredentials, error, extendMode, existingRoles }) {
+function StepReview({ form, templates, sshKeys, githubTokens, mcpServers, mcpCredentials, error, extendMode, existingRoles, existingRoleCounts }) {
   const existingSet = new Set(extendMode ? (existingRoles || []) : []);
+  const counts = existingRoleCounts || {};
   const sshKey = sshKeys?.find(k => k.id === form.sshKeyId);
   const ghToken = githubTokens?.find(t => t.id === form.githubTokenId);
   const roleConfig = form.roleConfig || [];
   const allSelected = (templates || []).filter(t => roleConfig.some(r => r.id === t.id));
   const newRoles = allSelected.filter(t => !existingSet.has(t.id));
-  const keptRoles = allSelected.filter(t => existingSet.has(t.id));
+  const increasedRoles = allSelected.filter(t => existingSet.has(t.id) && countFor(t.id) > (counts[t.id] || 0));
+  const keptRoles = allSelected.filter(t => existingSet.has(t.id) && countFor(t.id) <= (counts[t.id] || 0));
   const showReadyLabel = roleConfig.some(r => READY_LABEL_ROLES.has(r.id));
   const showDispatchControls = roleConfig.some(r => DISPATCH_LABEL_ROLES.has(r.id));
   const knowledge = (form.mcpSelections || []).filter(s => s.serverId);
@@ -1216,9 +1304,9 @@ function StepReview({ form, templates, sshKeys, githubTokens, mcpServers, mcpCre
         {extendMode ? (
           <>
             <div>
-              <div style={labelStyle}>Will be added ({newRoles.length})</div>
-              {newRoles.length === 0 ? (
-                <div style={{ ...hintStyle, marginTop: 0 }}>No new roles selected.</div>
+              <div style={labelStyle}>Will be added ({newRoles.length + increasedRoles.length})</div>
+              {newRoles.length === 0 && increasedRoles.length === 0 ? (
+                <div style={{ ...hintStyle, marginTop: 0 }}>No new roles or increases selected.</div>
               ) : (
                 <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
                   {newRoles.map(t => {
@@ -1229,6 +1317,21 @@ function StepReview({ form, templates, sshKeys, githubTokens, mcpServers, mcpCre
                         <strong style={{ color: 'var(--eb-status-success)' }}>{t.displayName}</strong>
                         {c > 1 && <span style={{ color: 'var(--eb-accent-primary)', marginLeft: 4 }}>× {c}</span>}
                         {' '}— {ids.map((id, i) => <React.Fragment key={id}>{i > 0 && ', '}<code>{id}</code></React.Fragment>)}
+                      </li>
+                    );
+                  })}
+                  {increasedRoles.map(t => {
+                    const newTotal = countFor(t.id);
+                    const existingCount = counts[t.id] || 0;
+                    const delta = newTotal - existingCount;
+                    const newIds = Array.from({ length: delta }, (_, i) =>
+                      `${form.teamId}-${t.id}-${existingCount + i + 1}`
+                    );
+                    return (
+                      <li key={t.id}>
+                        <strong style={{ color: 'var(--eb-status-success)' }}>{t.displayName}</strong>
+                        <span style={{ color: 'var(--eb-accent-primary)', marginLeft: 4 }}>+{delta}</span>
+                        {' '}— {newIds.map((id, i) => <React.Fragment key={id}>{i > 0 && ', '}<code>{id}</code></React.Fragment>)}
                       </li>
                     );
                   })}
@@ -1443,6 +1546,7 @@ export default function TeamSetup() {
   // Extend mode state
   const [extendMode, setExtendMode] = useState(false);
   const [existingRoles, setExistingRoles] = useState([]);
+  const [existingRoleCounts, setExistingRoleCounts] = useState({});
   const [extendLoading, setExtendLoading] = useState(false);
   const [extendError, setExtendError] = useState(null);
   // Toast shown when navigated here with a state message (e.g. team not found)
@@ -1517,19 +1621,20 @@ export default function TeamSetup() {
         const members = (Array.isArray(agentList) ? agentList : (agentList.agents || []))
           .filter(a => a.parentTeamId === teamId && a.role === 'team-member');
 
-        // Derive existing role IDs: prefer explicit roleId/templateId, fall back to ID surgery.
+        // Derive existing role IDs + instance counts from member list.
         const prefix = `${teamId}-`;
-        const roles = members.map(m => {
-          if (m.roleId) return m.roleId;
-          if (m.templateId) return m.templateId;
-          if (m.id.startsWith(prefix)) {
-            // Strip instance-number suffix so "teamId-developer-1" → "developer"
-            return m.id.slice(prefix.length).replace(/-\d+$/, '');
-          }
-          console.warn(`[TeamSetup] Member "${m.id}" does not follow "${prefix}<roleId>" convention — skipping`);
-          return null;
-        }).filter(Boolean);
-        setExistingRoles(roles);
+        const roleCountMap = {};
+        members.forEach(m => {
+          let roleId = null;
+          if (m.roleId) roleId = m.roleId;
+          else if (m.templateId) roleId = m.templateId;
+          else if (m.id.startsWith(prefix)) roleId = m.id.slice(prefix.length).replace(/-\d+$/, '');
+          else console.warn(`[TeamSetup] Member "${m.id}" does not follow "${prefix}<roleId>" convention — skipping`);
+          if (roleId) roleCountMap[roleId] = (roleCountMap[roleId] || 0) + 1;
+        });
+        const uniqueRoles = Object.keys(roleCountMap);
+        setExistingRoles(uniqueRoles);
+        setExistingRoleCounts(roleCountMap);
 
         // Pre-populate form from existing team + env
         const repo = env?.repositories?.[0] || env?.repository || null;
@@ -1544,7 +1649,7 @@ export default function TeamSetup() {
           githubTokenId: env?.githubTokenId || '',
           readyLabel: 'ready',
           mcpSelections: (env?.mcpServers || []).map(s => ({ serverId: s.serverId, credentialId: s.credentialId || null })),
-          roleConfig: roles.map(id => ({ id, count: 1 })),
+          roleConfig: uniqueRoles.map(id => ({ id, count: roleCountMap[id] })),
         }));
         setStep(3);
       } catch (err) {
@@ -1585,7 +1690,8 @@ export default function TeamSetup() {
       if (extendMode) {
         const existingSet = new Set(existingRoles);
         const hasNew = form.roleConfig.some(r => !existingSet.has(r.id));
-        if (!hasNew) return 'Select at least one new role to add';
+        const hasIncrease = form.roleConfig.some(r => existingSet.has(r.id) && r.count > (existingRoleCounts[r.id] || 0));
+        if (!hasNew && !hasIncrease) return 'Select at least one new role or increase an existing role count';
       } else {
         if (form.roleConfig.length === 0) return 'Pick at least one role';
       }
@@ -1621,11 +1727,18 @@ export default function TeamSetup() {
     setProgressSteps(null);
     setSubmitting(true);
 
-    // In extend mode, send only the delta (roles not yet in the team).
+    // In extend mode, send only the delta (new roles at full count; existing roles at delta count).
     const effectiveMode = extendMode ? 'extend' : mode;
     const existingSet = new Set(existingRoles);
     const effectiveRoleConfig = extendMode
-      ? form.roleConfig.filter(r => !existingSet.has(r.id))
+      ? [
+          // New roles: send full count as before
+          ...form.roleConfig.filter(r => !existingSet.has(r.id)),
+          // Existing roles with delta > 0: send the delta as count so the backend creates only new members
+          ...form.roleConfig
+            .filter(r => existingSet.has(r.id) && r.count > (existingRoleCounts[r.id] || 0))
+            .map(r => ({ ...r, count: r.count - (existingRoleCounts[r.id] || 0) })),
+        ]
       : form.roleConfig;
 
     const body = {
@@ -1673,14 +1786,25 @@ export default function TeamSetup() {
           ? prev.map(s => s.id === ev.id ? { ...s, status: ev.status, error: ev.error || s.error } : s)
           : prev);
       } else if (ev.type === 'collision') {
-        // Derive existing role ids from the member-id list in the collision payload.
+        // Derive existing role ids + counts from the member-id list in the collision payload.
         const prefix = form.teamId + '-';
-        const collisionRoles = (ev.existing?.members || []).map(m => {
-          if (typeof m !== 'string') return null;
-          if (m.startsWith(prefix)) return m.slice(prefix.length).replace(/-\d+$/, '');
-          return null;
-        }).filter(Boolean);
+        const collisionCountMap = {};
+        (ev.existing?.members || []).forEach(m => {
+          if (typeof m !== 'string') return;
+          if (!m.startsWith(prefix)) return;
+          const roleId = m.slice(prefix.length).replace(/-\d+$/, '');
+          if (roleId) collisionCountMap[roleId] = (collisionCountMap[roleId] || 0) + 1;
+        });
+        const collisionRoles = Object.keys(collisionCountMap);
         setExistingRoles(collisionRoles);
+        setExistingRoleCounts(collisionCountMap);
+        setForm(f => ({
+          ...f,
+          roleConfig: [
+            ...collisionRoles.map(id => ({ id, count: collisionCountMap[id] })),
+            ...f.roleConfig.filter(r => !collisionCountMap[r.id]),
+          ],
+        }));
         setExtendMode(true);
         setCollisionInfo({ existing: ev.existing, suggestion: ev.suggestion });
         setProgressSteps(null);
@@ -1834,6 +1958,7 @@ export default function TeamSetup() {
           error={stepError}
           extendMode={extendMode}
           existingRoles={existingRoles}
+          existingRoleCounts={existingRoleCounts}
         />
       )}
       {step === 4 && (
@@ -1847,6 +1972,7 @@ export default function TeamSetup() {
           error={stepError}
           extendMode={extendMode}
           existingRoles={existingRoles}
+          existingRoleCounts={existingRoleCounts}
         />
       )}
 

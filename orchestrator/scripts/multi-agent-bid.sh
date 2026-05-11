@@ -12,9 +12,10 @@
 #   exit 0 so agent-runner proceeds to LLM invocation.
 #
 # Phase 2 (Bidding):
-#   List open issues labelled `ready` that have no `assigned:*` or `started:*`
-#   label. For each: create `bid:<AGENT_ID>` in the repo (if absent) and add
-#   it to the issue. Exit 1 — bidding is pure shell, no LLM needed.
+#   List open issues labelled `$DISPATCH_LABEL` (the label the Dispatcher
+#   applies to release work) that have no `assigned:*` or `started:*` label.
+#   For each: create `bid:<AGENT_ID>` in the repo (if absent) and add it to
+#   the issue. Exit 1 — bidding is pure shell, no LLM needed.
 #
 # Environment (all required):
 #   GH_REPO        — owner/repo (e.g. "acme/my-repo")

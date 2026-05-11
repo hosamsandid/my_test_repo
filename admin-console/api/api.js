@@ -1094,28 +1094,39 @@ app.post('/api/agents/:id/handover', async (req, res) => {
       consistencyWarnings,
     });
 
-    const txnId = crypto.randomUUID();
+    // Enqueue the handover message in the target agent's pending-triggers.json
+    // rather than sending a direct Matrix DM. This avoids the race condition
+    // where the DM arrives before the agent-runner's Matrix client has finished
+    // its first sync after being enabled. The agent-runner drains the queue
+    // within 5 s of startup, by which time the client is always ready.
+    const pendingPath = path.join(AGENTS_DIR, targetId, 'pending-triggers.json');
+    let pending = [];
     try {
-      const sendResp = await matrix.matrixFetch(matrix.ADMIN_TOKEN,
-        `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(txnId)}`,
-        {
-          method: 'PUT',
-          body: { msgtype: 'm.text', body },
-        });
-      if (sendResp.status >= 400) {
-        results.push({ agentId: targetId, ok: false, stage: 'send', error: sendResp.data?.error || `Matrix ${sendResp.status}` });
-        continue;
+      if (fs.existsSync(pendingPath)) {
+        const raw = fs.readFileSync(pendingPath, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) pending = parsed;
       }
+    } catch { /* corrupt file — start fresh */ }
+    pending.push({
+      kind: 'handover-dm',
+      roomId,
+      body,
+      enqueuedAt: new Date().toISOString(),
+    });
+    try {
+      fs.mkdirSync(path.dirname(pendingPath), { recursive: true });
+      fs.writeFileSync(pendingPath, JSON.stringify(pending, null, 2));
       results.push({
         agentId: targetId,
         ok: true,
         roomId,
-        eventId: sendResp.data?.event_id || null,
+        eventId: null,
         displayName: refreshedCfg.displayName || targetId,
         consistencyWarnings,
       });
     } catch (err) {
-      results.push({ agentId: targetId, ok: false, stage: 'send', error: `Matrix unreachable: ${err.message}` });
+      results.push({ agentId: targetId, ok: false, stage: 'send', error: `Could not enqueue handover: ${err.message}` });
     }
   }
 

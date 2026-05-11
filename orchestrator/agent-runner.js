@@ -505,6 +505,15 @@ class TriggerScheduler {
     // entries for the same trigger id, and the per-id overlap guard would
     // otherwise drop all but the first.
     for (const entry of pending) {
+      // Handover DMs are written by the admin-console API after enabling the
+      // target agent. Delivering via the queue avoids the race where the DM
+      // arrives before the agent's Matrix client has completed its first sync.
+      if (entry?.kind === 'handover-dm') {
+        console.log(`[Runner:${AGENT_ID}] handover-dm from queue`);
+        await this.executeHandoverDm(entry);
+        continue;
+      }
+
       // BP-event batches are routed centrally by the orchestrator process —
       // they don't need a triggers.json entry, just a kind discriminator.
       if (entry?.kind === 'bp-event-batch') {
@@ -569,6 +578,56 @@ class TriggerScheduler {
       writeLastResponseAt();
     } catch (err) {
       console.error(`[Runner:${AGENT_ID}] Could not post throttle warning: ${err.message}`);
+    }
+  }
+
+  // Process a handover-dm entry: call Claude with the handover body and
+  // post the response to the DM room. The entry is written by the admin-
+  // console API instead of sending a direct Matrix DM, so that delivery
+  // is deferred until the agent-runner's Matrix client is ready.
+  async executeHandoverDm(entry) {
+    const roomId = entry.roomId || loadDmRoomId();
+    if (!roomId) {
+      console.log(`[Runner:${AGENT_ID}] handover-dm: no DM room available — skipping`);
+      return;
+    }
+
+    const prompt = entry.body;
+    if (!prompt || !prompt.trim()) {
+      console.log(`[Runner:${AGENT_ID}] handover-dm: empty body — skipping`);
+      return;
+    }
+
+    const correlationId = `handover-dm:${Date.now()}`;
+    try {
+      appendEvent(AGENT_ID, roomId, {
+        type: 'claude.invoke',
+        correlationId,
+        promptChars: prompt.length,
+      });
+    } catch { /* best effort */ }
+
+    let result;
+    try {
+      result = await callClaude(prompt, { roomId, correlationId });
+    } catch (err) {
+      console.error(`[Runner:${AGENT_ID}] handover-dm Claude call failed: ${err.message}`);
+      return;
+    }
+    if (!result || !result.trim()) return;
+
+    try {
+      const eventId = await sendFormatted(this.agentClient, roomId, result);
+      try {
+        appendEvent(AGENT_ID, roomId, {
+          type: 'message.posted',
+          correlationId,
+          eventId,
+        });
+      } catch { /* best effort */ }
+      writeLastResponseAt();
+    } catch (err) {
+      console.error(`[Runner:${AGENT_ID}] Could not post handover-dm response: ${err.message}`);
     }
   }
 

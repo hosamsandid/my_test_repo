@@ -1024,6 +1024,18 @@ const _pullThrottles = new Map(); // orchestratorId -> last pull timestamp ms
 const _PULL_THROTTLE_MS = 60_000;
 const _PULL_FORCE_THROTTLE_MS = 5_000;
 
+// Throttle the "workspace not a git repo" warning so a broken orchestrator
+// in the 30s claim-loop emits the diagnostic once every few minutes rather
+// than 120 times an hour. Resets when the workspace is fixed (entry deleted).
+const _missingWorkspaceWarns = new Map(); // orchestratorId -> last warn ms
+const _MISSING_WORKSPACE_WARN_MS = 5 * 60_000;
+function shouldWarnMissingWorkspace(orchestratorId) {
+  const last = _missingWorkspaceWarns.get(orchestratorId) || 0;
+  if (Date.now() - last < _MISSING_WORKSPACE_WARN_MS) return false;
+  _missingWorkspaceWarns.set(orchestratorId, Date.now());
+  return true;
+}
+
 // Build the GIT_SSH_COMMAND value for an env with an attached SSH key. Falls
 // back to null so the caller can leave process.env's default in place (the
 // orchestrator container ships with a baseline SSH identity mounted via
@@ -1046,7 +1058,16 @@ function pullOrchestratorWorkspace(orchestratorId, briefingsPath, env, { force =
   const rel = (briefingsPath || "").replace(/^\/+|\/+$/g, "");
   const workspace = path.join("/workspace/agents", orchestratorId, rel);
   if (!fs.existsSync(path.join(workspace, ".git"))) {
-    return { skipped: "not-a-git-repo" };
+    // Log the skip so a misconfigured briefings clone isn't invisible — but
+    // throttle so the 30s claim-loop doesn't carpet the orchestrator log
+    // with the same line. `force: true` (operator-triggered sync) always
+    // logs so the user sees feedback from their explicit action.
+    if (force || shouldWarnMissingWorkspace(orchestratorId)) {
+      console.warn(
+        `[Orchestrator] Pull skipped for ${orchestratorId}: ${workspace} is not a git checkout`
+      );
+    }
+    return { skipped: "not-a-git-repo", path: workspace };
   }
   const last = _pullThrottles.get(orchestratorId) || 0;
   const throttleMs = force ? _PULL_FORCE_THROTTLE_MS : _PULL_THROTTLE_MS;
@@ -1565,6 +1586,22 @@ class Orchestrator {
     // Seed agent workspace using the chosen environment
     const seedResult = seedAgentWorkspace(id, env);
 
+    // For orchestrators the briefings repo is load-bearing: without the clone
+    // the BP discovery pipeline silently returns zero stubs and the user sees
+    // an orchestrator that "works" but never finds anything. Treat the clone
+    // failure as fatal (mirrors the team-setup wizard's gate), roll back the
+    // half-built Matrix user, and surface the cause to the API caller.
+    if (role === "orchestrator" && extra.briefingsPath) {
+      const cloneWarning = (seedResult.warnings || []).find(w => /^git clone /.test(w));
+      if (cloneWarning) {
+        deleteAgentFiles(id);
+        await this.deactivateMatrixUser(id).catch(() => { /* best effort */ });
+        throw new Error(
+          `Cannot create orchestrator '${id}': briefings clone failed — ${cloneWarning}`
+        );
+      }
+    }
+
     const effectivePrompt =
       systemPrompt && systemPrompt.trim()
         ? systemPrompt
@@ -1809,6 +1846,22 @@ class Orchestrator {
       pullOrchestratorWorkspace(orchestratorId, orchCfg.briefingsPath, env, { force });
     }
 
+    // Pre-flight: the rest of the chain (pull + bp-explorer) silently
+    // returns empty when the workspace clone is missing, which produces an
+    // orchestrator with zero BP-instance stubs and no surfaced error. Fail
+    // loudly here instead so the caller — create-agent, sync button, claim
+    // tick — gets a clear message naming the missing path.
+    const rel = orchCfg.briefingsPath.replace(/^\/+|\/+$/g, "");
+    const workspace = path.join(AGENTS_DIR, orchestratorId, rel);
+    if (!fs.existsSync(path.join(workspace, ".git"))) {
+      throw new Error(
+        `Briefings workspace is not a git checkout: ${workspace} ` +
+        `(briefingsPath='${orchCfg.briefingsPath}'). Likely cause: the env's ` +
+        `repository clone failed during agent seeding — check the orchestrator ` +
+        `log for 'Seed warning' entries.`
+      );
+    }
+
     const bps = await fetchBriefingPacks(orchestratorId, orchCfg.briefingsPath);
     const present = [];
     let created = 0;
@@ -1879,6 +1932,18 @@ class Orchestrator {
     // Pull main from origin (throttled). Failures are logged but never throw.
     const env = loadEnvironment(orchCfg.environmentId);
     if (env) pullOrchestratorWorkspace(orchestratorId, orchCfg.briefingsPath, env);
+
+    // Mirrors the pre-flight in syncBpStubs: without a workspace clone there
+    // is nothing for bp-explorer to scan. The 30s claim loop hits this path
+    // repeatedly, so log once and return a structured skip rather than
+    // pretending the orchestrator is healthy (zero BPs, no error).
+    const rel = orchCfg.briefingsPath.replace(/^\/+|\/+$/g, "");
+    const workspace = path.join(AGENTS_DIR, orchestratorId, rel);
+    if (!fs.existsSync(path.join(workspace, ".git"))) {
+      // `pullOrchestratorWorkspace` already logged this above (throttled).
+      // Just return the structured skip so callers can see the cause.
+      return { skipped: "workspace-not-cloned", path: workspace };
+    }
 
     const bps = await fetchBriefingPacks(orchestratorId, orchCfg.briefingsPath);
 
@@ -3413,7 +3478,13 @@ async function main() {
           res.end(JSON.stringify({ orchestratorId: orchId, stubs, total: stubs.length }));
         } catch (err) {
           console.error(`[Orchestrator] sync-bps error for ${orchId}: ${err.message}`);
-          const status = /not found/i.test(err.message) ? 404 : 500;
+          // 400 for caller-fixable misconfigurations (no briefingsPath, no
+          // workspace clone). The workspace-missing case is by far the most
+          // common diagnostic the user can act on, so it must not look like
+          // a 500 server bug.
+          let status = 500;
+          if (/not found/i.test(err.message)) status = 404;
+          else if (/not a git checkout/i.test(err.message) || /briefingsPath/i.test(err.message)) status = 400;
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));
         }
@@ -3643,7 +3714,11 @@ async function main() {
         res.end(JSON.stringify(result));
       } catch (err) {
         console.error(`[Orchestrator] Internal API create error: ${err.message}`);
-        const statusCode = /not found/i.test(err.message) ? 400 : 500;
+        // 400 for caller-fixable misconfigurations (missing env / token, clone
+        // rejected by the remote) so the UI surfaces them as a validation
+        // error rather than a generic 500 server error.
+        const isUserError = /not found/i.test(err.message) || /clone failed/i.test(err.message);
+        const statusCode = isUserError ? 400 : 500;
         res.writeHead(statusCode, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: err.message }));
       }

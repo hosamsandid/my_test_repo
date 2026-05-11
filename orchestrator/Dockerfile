@@ -1,7 +1,7 @@
 FROM node:22-slim
 
 RUN apt-get -o Acquire::Check-Valid-Until=false update && apt-get install -y --no-install-recommends \
-    git ca-certificates curl openssh-client gnupg \
+    git ca-certificates curl openssh-client gnupg jq \
   && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI (gh) — official APT repo. Authenticates via GH_TOKEN, which the

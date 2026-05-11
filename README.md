@@ -223,12 +223,17 @@ The Model Registry (`/models`) manages LLM endpoints independently of agents:
 
 ## Persistent Memory
 
-Every agent workspace contains:
+Every agent workspace contains five memory files:
 
-- `memory/context.md` — facts, decisions, important information (keyed by date)
-- `memory/log.md` — short summary of each conversation
+| File | Purpose |
+|---|---|
+| `memory/context.md` | Active session state — what's currently happening. Keep slim. |
+| `memory/log.md` | One conversation summary per entry (date + 1–2 sentences). |
+| `memory/facts.md` | Atomic, deduplicated facts. Format: `- [YYYY-MM-DD] Fact.` |
+| `memory/entities.md` | Rich knowledge about projects, systems, frameworks. |
+| `memory/users.md` | Per-user interaction profiles: language, role, preferences. |
 
-Both files are seeded from the skill-pool volume at agent creation and read by Claude at the start of every invocation. Agents update these files themselves during conversations; the Workspace Browser lets you inspect them without leaving the Admin Console.
+All five files are seeded from the skill-pool volume at agent creation and read by Claude at the start of every invocation. Agents route new information to the right file during conversations; the Workspace Browser lets you inspect them without leaving the Admin Console.
 
 ---
 

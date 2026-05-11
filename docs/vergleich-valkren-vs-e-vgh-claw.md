@@ -13,7 +13,7 @@ Beide Systeme sind **Wrapper um Claude Code**, die das rohe CLI in eine struktur
 | **Interface** | Direkt in IDE/Terminal | Matrix Chat (Element) |
 | **Agent-Modell** | "Oracle" Adversarial Review (3+ parallele Reviewer) | Multi-Agent Pool (Expert/Synthesizer/Autonomous) |
 | **Prozess-Enforcement** | 27-Step Release Gate State Machine + Hooks | ACE Plugin (BP/CRP/MRP) |
-| **Memory** | 80+ Behavior-Files, 142 Lessons Learned | Basis-Memory (context.md, log.md) |
+| **Memory** | 80+ Behavior-Files, 142 Lessons Learned | 5-file memory system (context, log, facts, entities, users) |
 | **Deployment** | Portable Kit → lokales Projekt + ~/.claude/ | Podman-Container-Stack |
 | **Domäne** | SAP BTP Enterprise Knowledge Platform | Mainframe Migration (COBOL, JCL, DB2) |
 | **LLM Backend** | Direkt (lokales Claude Code) | Azure AI Foundry |
@@ -37,7 +37,7 @@ Mocks destroyed trust in R31-R73 (14 critical divergences found).
 **How to apply:** Always real implementations. If backend missing, build backend FIRST.
 ```
 
-**Bei uns:** Wir haben das Claude Code Memory-System (MEMORY.md + Dateien), aber es wird kaum genutzt. Unsere Agents haben nur `context.md` und `log.md`. Das Valkren-System zeigt, wie mächtig ein kuratierter Memory-Korpus ist — jede Session lädt automatisch 80+ Verhaltensregeln.
+**Bei uns:** Wir haben das Claude Code Memory-System jetzt mit 5 Dateien: `context.md`, `log.md`, `facts.md`, `entities.md`, `users.md`. Jede Datei hat eine dedizierte Rolle — Fakten gehen in `facts.md`, Entitätswissen in `entities.md`, User-Profile in `users.md`. Das Valkren-System zeigt dennoch, wie mächtig ein kuratierter Memory-Korpus *mit domänenspezifischem Inhalt* ist — jede Session lädt automatisch 80+ Verhaltensregeln.
 
 **Takeaway:** Wir sollten unsere Agent-Workspaces mit domänenspezifischem Memory ausstatten — Lessons Learned aus Mainframe-Migrationen, Feedback-Patterns, Referenzen zu Systemen.
 

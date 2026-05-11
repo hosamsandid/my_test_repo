@@ -243,7 +243,7 @@ Role templates live as JSON files under `/template-workspace/agent-templates/` (
 | Role | Session | Trigger | `from` |
 |---|---|---|---|
 | `business-analyst` | persistent | — (DM only) | — |
-| `developer` | per-invocation | `issues.labeled` (`ready` gate) | any-except-self |
+| `developer` | per-invocation | `issues.labeled` (`assigned:<agentId>`) | any-except-self |
 | `code-reviewer` | per-invocation | `pull_request.opened/reopened` | any-except-self |
 | `security-reviewer` | per-invocation | `pull_request.opened/reopened` | any-except-self |
 | `test-reviewer` | per-invocation | `pull_request.opened/reopened` | any-except-self |
@@ -259,7 +259,7 @@ Each `per-invocation` role also ships a weekly self-curation cron (staggered 5mi
    - `systemPrompt` = role-specific prompt from the template (override against the team default).
    - `skillsOverride` deliberately omitted in v1 — members inherit the team-env's empty skill list. Once role-specific skill packs ship they slot in here.
    - `sessionPolicy: per-invocation` (for reactive roles).
-   - Full `triggers.json` rendered from the template (`{{repoFullName}}` substituted), with `from` filter and `repo` set to the team's repo.
+   - Full `triggers.json` rendered from the template (`{{repoFullName}}` and `{{agentId}}` substituted per-member), with `from` filter and `repo` set to the team's repo.
 4. One DM room pre-created per member (best-effort — failure here doesn't roll back the team).
 
 On any failure the wizard rolls back members (`DELETE /internal/agents/:id`), then the team agent, then the env, in reverse creation order. `mode: "extend"` keeps a pre-existing team and adds only the missing role-members; `mode: "create"` (default) returns 409 if the env or team or any member already exists.

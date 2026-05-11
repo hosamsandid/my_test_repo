@@ -9,7 +9,7 @@ depends_on:
 artifacts:
   - path: artifacts/output/issues/ready-issue.md
     direction: input
-    description: "GitHub Issue mit Ready-Label als Arbeitsauftrag"
+    description: "GitHub Issue mit assigned:<agentId>-Label als Arbeitsauftrag"
   - path: artifacts/output/pull-requests/feature-pr.md
     direction: output
     description: "Feature Branch + Pull Request mit Implementierung"
@@ -19,13 +19,11 @@ artifacts:
 
 ## Rolle
 
-**Reaktiver Implementierungs-Agent**. Pickt `ready`-gelabelte Issues auf und
-implementiert sie auf einem Feature-Branch. Öffnet PR wenn fertig.
+**Reaktiver Implementierungs-Agent**. Pickt Issues auf, die ihm per `assigned:<agentId>`-Label vom Coordinator zugeteilt wurden, und implementiert sie auf einem Feature-Branch. Öffnet PR wenn fertig.
 
 ## Auslöser
 
-`github-event: issues.labeled` — feuert wenn das `ready`-Label auf einem Issue gesetzt
-wird. `from: any-except-self` verhindert Selbst-Loops.
+`github-event: issues.labeled` — feuert wenn das `assigned:<agentId>`-Label auf einem Issue gesetzt wird (der Coordinator wählt genau einen Gewinner des Bid-Prozesses aus). `from: any-except-self` verhindert Selbst-Loops.
 
 ## Aufgabe
 
@@ -41,8 +39,10 @@ wird. `from: any-except-self` verhindert Selbst-Loops.
 {
   "sessionPolicy": "per-invocation",
   "trigger": {
+    "id": "developer-assigned",
     "type": "github-event",
     "events": ["issues.labeled"],
+    "labelFilter": "assigned:<agentId>",
     "from": "any-except-self"
   }
 }
@@ -58,6 +58,6 @@ wird. `from: any-except-self` verhindert Selbst-Loops.
 
 ## Abhängigkeiten
 
-**Upstream:** Business Analyst (`bb0000000003`) — liefert das `ready`-gelabelte Issue
+**Upstream:** Business Analyst (`bb0000000003`) → Dispatcher → Coordinator — Coordinator vergibt `assigned:<agentId>` an den Gewinner des Bids
 
 **Downstream:** Code Reviewer, Security Reviewer, Test Reviewer, Performance Reviewer (alle parallel)

@@ -1008,6 +1008,12 @@ function StepTeam({ form, setForm, templates, roleConfig, setRoleConfig, error, 
 }
 
 // ─── Step 5 — Review ─────────────────────────────────────────────────
+function repoSlug(url) {
+  if (!url) return null;
+  const m = url.match(/github\.com[/:]([^/]+\/[^/ ]+?)(?:\.git)?\s*$/);
+  return m ? m[1] : null;
+}
+
 function StepReview({ form, templates, sshKeys, githubTokens, mcpServers, mcpCredentials, error, extendMode, existingRoles }) {
   const existingSet = new Set(extendMode ? (existingRoles || []) : []);
   const sshKey = sshKeys?.find(k => k.id === form.sshKeyId);
@@ -1019,6 +1025,47 @@ function StepReview({ form, templates, sshKeys, githubTokens, mcpServers, mcpCre
   const showReadyLabel = roleConfig.some(r => READY_LABEL_ROLES.has(r.id));
   const showDispatchControls = roleConfig.some(r => DISPATCH_LABEL_ROLES.has(r.id));
   const knowledge = (form.mcpSelections || []).filter(s => s.serverId);
+
+  const hasMultiInstance = roleConfig.some(r => (r.count || 1) > 1);
+  const [coordinatorStatus, setCoordinatorStatus] = useState(null);
+  const [coordinatorError, setCoordinatorError] = useState(null);
+
+  useEffect(() => {
+    if (!hasMultiInstance || !form.githubTokenId || !form.repoUrl) return;
+    const slug = repoSlug(form.repoUrl);
+    if (!slug) return;
+    setCoordinatorStatus('checking');
+    setCoordinatorError(null);
+    fetch(`/api/repos/coordinator-workflow?repo=${encodeURIComponent(slug)}&githubTokenId=${encodeURIComponent(form.githubTokenId)}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) { setCoordinatorStatus('error'); setCoordinatorError(data.error); }
+        else setCoordinatorStatus(data.exists ? 'active' : 'needed');
+      })
+      .catch(err => { setCoordinatorStatus('error'); setCoordinatorError(String(err)); });
+  }, [hasMultiInstance, form.githubTokenId, form.repoUrl]);
+
+  function installCoordinator() {
+    const slug = repoSlug(form.repoUrl);
+    if (!slug) return;
+    setCoordinatorStatus('installing');
+    setCoordinatorError(null);
+    fetch('/api/repos/coordinator-workflow', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo: slug, githubTokenId: form.githubTokenId }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) { setCoordinatorStatus('active'); }
+        else {
+          setCoordinatorStatus('install-error');
+          setCoordinatorError(data.error || 'Installation failed');
+          if (data.manualCommand) setCoordinatorError((data.error || '') + '\n\nRun manually:\n' + data.manualCommand);
+        }
+      })
+      .catch(err => { setCoordinatorStatus('install-error'); setCoordinatorError(String(err)); });
+  }
 
   function countFor(id) { return (roleConfig.find(r => r.id === id) || {}).count || 1; }
   function agentIds(id) {
@@ -1117,6 +1164,68 @@ function StepReview({ form, templates, sshKeys, githubTokens, mcpServers, mcpCre
                 );
               })}
             </ul>
+          </div>
+        )}
+        {hasMultiInstance && (
+          <div style={{
+            padding: 'var(--eb-space-3) var(--eb-space-4)',
+            borderRadius: 'var(--eb-radius-md)',
+            border: coordinatorStatus === 'active' ? '1px solid var(--eb-status-success)' : '1px solid var(--eb-border-default)',
+            background: 'var(--eb-bg-elevated)',
+          }}>
+            {coordinatorStatus === 'checking' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+                <Loader2 size={14} style={{ animation: 'team-setup-spin 0.9s linear infinite' }} />
+                Checking coordinator workflow…
+              </div>
+            )}
+            {coordinatorStatus === 'active' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-success)' }}>
+                <CheckCircle size={14} />
+                <strong>Coordinator active</strong> — <code>.github/workflows/coordinator.yml</code> is present.
+              </div>
+            )}
+            {(coordinatorStatus === 'needed' || coordinatorStatus === 'installing' || coordinatorStatus === 'install-error') && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)' }}>
+                  <AlertCircle size={14} style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2 }} />
+                  <span>
+                    <strong>Coordinator not set up.</strong> You have multiple instances of one or more roles. The coordinator workflow manages automatic work distribution between them.
+                  </span>
+                </div>
+                {coordinatorStatus === 'install-error' && coordinatorError && (
+                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', whiteSpace: 'pre-wrap', fontFamily: 'var(--eb-font-mono)' }}>
+                    {coordinatorError}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={installCoordinator}
+                  disabled={coordinatorStatus === 'installing'}
+                  style={{
+                    alignSelf: 'flex-start',
+                    padding: 'var(--eb-space-2) var(--eb-space-3)',
+                    background: 'var(--eb-accent-primary)',
+                    color: 'var(--eb-text-inverted)',
+                    border: 'none',
+                    borderRadius: 'var(--eb-radius-md)',
+                    fontSize: 'var(--eb-text-sm)',
+                    fontFamily: 'inherit',
+                    cursor: coordinatorStatus === 'installing' ? 'not-allowed' : 'pointer',
+                    opacity: coordinatorStatus === 'installing' ? 0.5 : 1,
+                    display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+                  }}
+                >
+                  {coordinatorStatus === 'installing' && <Loader2 size={13} style={{ animation: 'team-setup-spin 0.9s linear infinite' }} />}
+                  {coordinatorStatus === 'installing' ? 'Installing…' : 'Install coordinator workflow'}
+                </button>
+              </div>
+            )}
+            {coordinatorStatus === 'error' && (
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>
+                Could not check coordinator status: {coordinatorError}
+              </div>
+            )}
           </div>
         )}
         <ErrorBox message={error} />

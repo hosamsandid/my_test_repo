@@ -2,6 +2,7 @@
 
 const express = require('express');
 const cors = require('cors');
+const rateLimit = require('express-rate-limit');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
@@ -55,6 +56,17 @@ const AGENT_ID_RE = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/;
 const SSH_KEY_ID_RE = /^[a-z0-9-]+$/;
 const GH_TOKEN_ID_RE = /^[a-z0-9-]+$/;
 const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
+
+// Rate limiter for the coordinator-workflow endpoints — uses express-rate-limit
+// rather than a hand-rolled bucket so that CodeQL's js/missing-rate-limiting
+// query recognises it (the query only flags routes without a known middleware).
+const coordinatorWorkflowLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests' },
+});
 const MCP_SERVER_ID_RE = /^[a-z0-9-]+$/;
 const MCP_CREDENTIAL_ID_RE = /^[a-z0-9-]+$/;
 
@@ -3746,6 +3758,273 @@ app.post('/api/github/probe', async (req, res) => {
     });
   } catch (err) {
     return res.json({ ok: false, error: `Network: ${err.message}` });
+  }
+});
+
+/* ─── Coordinator Workflow ──────────────────────────────────────────── */
+
+/*
+ * AC 1: Check whether .github/workflows/coordinator.yml exists in the target repo.
+ * GET /api/repos/coordinator-workflow?repo=<owner>/<name>&githubTokenId=<id>
+ * Returns { exists: true|false, sha: <sha if exists> }
+ */
+app.get('/api/repos/coordinator-workflow', coordinatorWorkflowLimiter, async (req, res) => {
+  const { repo, githubTokenId } = req.query;
+  if (typeof repo !== 'string' || !repo.includes('/')) {
+    return res.status(400).json({ error: 'repo query param required (owner/name)' });
+  }
+  if (typeof githubTokenId !== 'string' || !GH_TOKEN_ID_RE.test(githubTokenId)) {
+    return res.status(400).json({ error: 'githubTokenId query param required' });
+  }
+  if (!listGithubTokens().some(t => t.id === githubTokenId)) {
+    return res.status(400).json({ error: `GitHub token '${githubTokenId}' not found` });
+  }
+  const safeTokenId = path.basename(githubTokenId);
+  let token;
+  try {
+    token = fs.readFileSync(path.join(GH_TOKENS_DIR, safeTokenId), 'utf8').trim();
+  } catch (err) {
+    return res.status(500).json({ error: `Cannot read token: ${err.message}` });
+  }
+  const [owner, repoName] = repo.split('/');
+  const headers = {
+    'Authorization': `Bearer ${token}`,
+    'Accept': 'application/vnd.github+json',
+    'User-Agent': 'e-vgh-claw-wizard',
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
+  const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/contents/.github/workflows/coordinator.yml`;
+  try {
+    const r = await fetch(url, { headers });
+    if (r.status === 404) return res.json({ exists: false });
+    if (!r.ok) return res.status(r.status).json({ error: `GitHub API HTTP ${r.status}` });
+    const data = await r.json();
+    return res.json({ exists: true, sha: data.sha });
+  } catch (err) {
+    return res.status(500).json({ error: `Network: ${err.message}` });
+  }
+});
+
+/*
+ * AC 3 / AC 5 / AC 6: Install (or update) the coordinator workflow in the target repo.
+ * POST /api/repos/coordinator-workflow
+ * Body: { repo: "owner/name", githubTokenId: "<id>" }
+ * Commits .github/workflows/coordinator.yml via GitHub Contents API.
+ */
+app.post('/api/repos/coordinator-workflow', coordinatorWorkflowLimiter, async (req, res) => {
+  const { repo, githubTokenId } = req.body || {};
+  if (typeof repo !== 'string' || !repo.includes('/')) {
+    return res.status(400).json({ error: 'repo required (owner/name)' });
+  }
+  if (typeof githubTokenId !== 'string' || !GH_TOKEN_ID_RE.test(githubTokenId)) {
+    return res.status(400).json({ error: 'githubTokenId required' });
+  }
+  if (!listGithubTokens().some(t => t.id === githubTokenId)) {
+    return res.status(400).json({ error: `GitHub token '${githubTokenId}' not found` });
+  }
+  const safeTokenId = path.basename(githubTokenId);
+  let token;
+  try {
+    token = fs.readFileSync(path.join(GH_TOKENS_DIR, safeTokenId), 'utf8').trim();
+  } catch (err) {
+    return res.status(500).json({ error: `Cannot read token: ${err.message}` });
+  }
+  const [owner, repoName] = repo.split('/');
+  const headers = {
+    'Authorization': `Bearer ${token}`,
+    'Accept': 'application/vnd.github+json',
+    'User-Agent': 'e-vgh-claw-wizard',
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
+  const contentsUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/contents/.github/workflows/coordinator.yml`;
+
+  // AC 5: Workflow content — functionally equivalent to #147 AC 2.
+  const workflowYaml = `name: Multi-agent Coordinator
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: coordinator
+  cancel-in-progress: false
+
+permissions:
+  issues: write
+
+env:
+  ASSIGN_TIMEOUT_MINUTES: '10'
+
+jobs:
+  coordinate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assign bidders and recover timed-out assignments
+        env:
+          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+          REPO: \${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # ── Phase 1: Assign bidders ──────────────────────────────────────────
+          bid_issues=$(gh issue list \\
+            --repo "$REPO" \\
+            --state open \\
+            --json number,labels \\
+            --limit 200 \\
+            | jq -r '
+                .[]
+                | .number as $n
+                | .labels[].name
+                | select(test("^bid:"))
+                | "\\($n)"
+              ' | sort -u)
+
+          for issue_num in $bid_issues; do
+            current_labels=$(gh issue view "$issue_num" \\
+              --repo "$REPO" \\
+              --json labels \\
+              | jq -r '.labels[].name')
+
+            bid_labels=$(echo "$current_labels" | grep -E '^bid:' || true)
+            if [[ -z "$bid_labels" ]]; then
+              continue
+            fi
+
+            if echo "$current_labels" | grep -qE '^assigned:'; then
+              continue
+            fi
+
+            chosen=$(echo "$bid_labels" | shuf -n 1)
+            agent_id="\${chosen#bid:}"
+            assigned_label="assigned:\${agent_id}"
+
+            if ! gh label list \\
+                --repo "$REPO" \\
+                --json name \\
+                --limit 500 \\
+                | jq -r '.[].name' | grep -qxF "$assigned_label"; then
+              gh label create "$assigned_label" \\
+                --repo "$REPO" \\
+                --color "0075ca" \\
+                --description "Assigned to agent \${agent_id}" \\
+                2>/dev/null || true
+            fi
+
+            gh issue edit "$issue_num" \\
+              --repo "$REPO" \\
+              --add-label "$assigned_label"
+
+            while IFS= read -r bid; do
+              gh issue edit "$issue_num" \\
+                --repo "$REPO" \\
+                --remove-label "$bid" \\
+                2>/dev/null || true
+            done <<< "$bid_labels"
+
+            echo "Assigned issue #\${issue_num} to \${agent_id}"
+          done
+
+          # ── Phase 2: Timeout recovery ────────────────────────────────────────
+          cutoff_ts=$(date -d "\${ASSIGN_TIMEOUT_MINUTES} minutes ago" --iso-8601=seconds)
+
+          gh issue list \\
+            --repo "$REPO" \\
+            --state open \\
+            --json number,labels,updatedAt \\
+            --limit 200 \\
+            | jq -r --arg cutoff "$cutoff_ts" '
+                .[]
+                | select(
+                    (.labels | map(.name) | any(test("^assigned:")))
+                    and (.labels | map(.name) | any(test("^started:")) | not)
+                    and (.updatedAt <= $cutoff)
+                  )
+                | .number
+              ' \\
+            | while read -r issue_num; do
+              assigned_label=$(gh issue view "$issue_num" \\
+                --repo "$REPO" \\
+                --json labels \\
+                | jq -r '.labels[].name | select(test("^assigned:"))' \\
+                | head -1)
+
+              if [[ -z "$assigned_label" ]]; then
+                continue
+              fi
+
+              agent_id="\${assigned_label#assigned:}"
+
+              gh issue edit "$issue_num" \\
+                --repo "$REPO" \\
+                --remove-label "$assigned_label" \\
+                2>/dev/null || true
+
+              has_ready=$(gh issue view "$issue_num" \\
+                --repo "$REPO" \\
+                --json labels \\
+                | jq -r '[.labels[].name] | any(. == "ready")' )
+              if [[ "$has_ready" != "true" ]]; then
+                gh issue edit "$issue_num" \\
+                  --repo "$REPO" \\
+                  --add-label "ready"
+              fi
+
+              gh issue comment "$issue_num" \\
+                --repo "$REPO" \\
+                --body "Assignment to \${agent_id} timed out — returned to ready pool."
+
+              echo "Timeout recovery: issue #\${issue_num} (was assigned to \${agent_id})"
+            done
+`;
+
+  const contentBase64 = Buffer.from(workflowYaml).toString('base64');
+
+  // AC 6: Check for existing file sha (required for updates).
+  let existingSha;
+  try {
+    const checkResp = await fetch(contentsUrl, { headers });
+    if (checkResp.ok) {
+      const existing = await checkResp.json();
+      existingSha = existing.sha;
+    } else if (checkResp.status !== 404) {
+      return res.status(checkResp.status).json({ error: `GitHub API HTTP ${checkResp.status}` });
+    }
+  } catch (err) {
+    return res.status(500).json({ error: `Network: ${err.message}` });
+  }
+
+  const commitMessage = existingSha ? 'Update agent coordinator workflow' : 'Add agent coordinator workflow';
+  const putBody = {
+    message: commitMessage,
+    content: contentBase64,
+    ...(existingSha ? { sha: existingSha } : {}),
+  };
+
+  try {
+    const putResp = await fetch(contentsUrl, {
+      method: 'PUT',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify(putBody),
+    });
+    if (putResp.status === 403) {
+      const shaFlag = existingSha ? ` -f sha=${existingSha}` : '';
+      return res.status(403).json({
+        error: 'The GitHub PAT does not have the `workflow` scope. Add this scope in GitHub → Settings → Developer settings → Personal access tokens, then retry.',
+        manualCommand: `gh api --method PUT /repos/${repo}/contents/.github/workflows/coordinator.yml -f message="${commitMessage}" -f content="${contentBase64}"${shaFlag}`,
+      });
+    }
+    if (putResp.status === 409) {
+      return res.status(409).json({ error: 'File was updated concurrently — refresh and retry.' });
+    }
+    if (!putResp.ok) {
+      const data = await putResp.json().catch(() => ({}));
+      return res.status(putResp.status).json({ error: data.message || `GitHub API HTTP ${putResp.status}` });
+    }
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ error: `Network: ${err.message}` });
   }
 });
 

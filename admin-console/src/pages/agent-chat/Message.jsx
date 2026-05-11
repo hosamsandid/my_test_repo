@@ -284,7 +284,7 @@ function NoticeMessage({ message }) {
         {/* Plain text only — intentionally scoped to AEE trigger notices, not general Matrix m.notice rendering */}
         <span>{message.body}</span>
         <div style={{ fontSize: 'var(--eb-text-xs)', marginTop: 'var(--eb-space-0-5)', opacity: 0.7 }}>
-          {time}
+          {message.sender} · {time}
         </div>
       </div>
     </div>
@@ -292,7 +292,7 @@ function NoticeMessage({ message }) {
 }
 
 export default function Message({ message, agentUserId, thinking }) {
-  if (message.msgtype === 'm.notice') {
+  if (message.msgtype === 'm.notice' && message['io.aee.trigger']) {
     return <NoticeMessage message={message} />;
   }
   const isAgent = message.sender === agentUserId;

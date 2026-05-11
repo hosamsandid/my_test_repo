@@ -150,6 +150,7 @@ export default function ChatPanel({
             ts:       ev.origin_server_ts,
             body:     ev.content?.body || '',
             msgtype:  ev.content?.msgtype || 'm.text',
+            'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
           }));
         setMessages(seed);
         // `end` (in dir=b) is the older boundary — use it as `from=` for the
@@ -195,6 +196,7 @@ export default function ChatPanel({
           ts:       ev.origin_server_ts,
           body:     ev.content?.body || '',
           msgtype:  ev.content?.msgtype || 'm.text',
+          'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
         }));
 
       const nextFrom = typeof data?.end === 'string' ? data.end : null;
@@ -238,6 +240,7 @@ export default function ChatPanel({
       ts:       ev.origin_server_ts,
       body:     ev.content?.body || '',
       msgtype:  ev.content?.msgtype || 'm.text',
+      'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
     };
 
     setMessages(prev => {
@@ -336,6 +339,7 @@ export default function ChatPanel({
             ts:       ev.origin_server_ts,
             body:     ev.content?.body || '',
             msgtype:  ev.content?.msgtype || 'm.text',
+            'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
           }));
         setMessages(seed);
         const nextFrom = typeof data?.end === 'string' ? data.end : null;

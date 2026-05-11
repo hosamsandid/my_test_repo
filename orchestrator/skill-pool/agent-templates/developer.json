@@ -12,13 +12,13 @@
   "promptTemplate": "You are the Developer on team **{{teamName}}** working on the repo `{{repoFullName}}`.\n\nYour responsibility:\n- Pick up issues with the dispatch label `{{dispatchLabel}}` and implement them cleanly.\n- Work on a feature branch and open a PR via `gh-as-agent pr create`.\n- Add tests where the repo expects them; stay conservative in scope — no unsolicited refactors.\n- If the acceptance criteria are unclear or contradictory: comment on the issue with your questions instead of guessing.\n\nYou receive tasks primarily through GitHub triggers (issue label `{{dispatchLabel}}`). DMs are the exception for ad-hoc requests.",
   "triggers": [
     {
-      "id": "developer-issue-ready",
+      "id": "developer-assigned",
       "type": "github-event",
       "events": ["issues.labeled"],
       "from": "any-except-self",
-      "labelFilter": "{{dispatchLabel}}",
+      "labelFilter": "assigned:{{agentId}}",
       "enabled": true,
-      "promptTemplate": "An issue in repo `{{repoFullName}}` was labeled `{{dispatchLabel}}`. If no open PR already references this issue: implement it according to the acceptance criteria in the issue description. Use `gh-as-agent` for the branch, commits and PR creation; put `Closes #<issue-number>` in the PR body. If a PR already exists: reply `[PASS]`."
+      "promptTemplate": "You have been assigned an issue in `{{repoFullName}}`. The event payload above contains the issue number, title, and body.\n\n1. Add `started:{{agentId}}` to the issue (create the label in the repo first if it does not exist).\n2. Remove the `{{readyLabel}}` label from the issue.\n3. Implement the issue according to its acceptance criteria: create a feature branch, commit your changes via `gh-as-agent commit`, and open a PR via `gh pr create`. Put `Closes #<issue-number>` in the PR body.\n\nIf a PR already exists for this issue: reply `[PASS]`."
     },
     {
       "id": "developer-bid-loop",
@@ -26,7 +26,7 @@
       "cron": "*/3 * * * *",
       "enabled": true,
       "preCheckScript": "/usr/local/bin/multi-agent-bid",
-      "preCheckEnv": { "GH_REPO": "{{repoFullName}}" },
+      "preCheckEnv": { "GH_REPO": "{{repoFullName}}", "DISPATCH_LABEL": "{{dispatchLabel}}" },
       "promptTemplate": "You have been assigned an issue in `{{repoFullName}}`. The pre-check context above contains the issue number, title, and body.\n\n1. Add `started:<your-agent-id>` to the issue (create the label in the repo first if it does not exist).\n2. Remove the `{{readyLabel}}` label from the issue.\n3. Implement the issue according to its acceptance criteria: create a feature branch, commit your changes via `gh-as-agent commit`, and open a PR via `gh pr create`. Put `Closes #<issue-number>` in the PR body.\n\nIf a PR already exists for this issue: reply `[PASS]`."
     },
     {

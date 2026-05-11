@@ -2893,14 +2893,15 @@ app.post('/api/teams', async (req, res) => {
     // role-specific prompt override (so the team's generic prompt stays
     // useful as a fallback) and the role's full triggers.json.
     for (const p of toCreate) {
-      const promptText = applyTemplateVars(p.template.promptTemplate, vars);
+      const memberVars = { ...vars, agentId: p.memberId };
+      const promptText = applyTemplateVars(p.template.promptTemplate, memberVars);
       const triggersOut = (p.template.triggers || []).map(tr => {
         const out = {
           id: tr.id,
           type: tr.type,
           enabled: tr.enabled !== false,
           description: tr.description || `${p.template.displayName} — ${tr.id}`,
-          prompt: applyTemplateVars(tr.promptTemplate || '', vars),
+          prompt: applyTemplateVars(tr.promptTemplate || '', memberVars),
         };
         if (tr.type === 'github-event') {
           out.events = tr.events || [];
@@ -2910,7 +2911,7 @@ app.post('/api/teams', async (req, res) => {
           // defines one (e.g. developer.json pins it to the wizard's
           // {{readyLabel}} so the trigger fires only on that label).
           if (typeof tr.labelFilter === 'string' && tr.labelFilter.trim()) {
-            out.labelFilter = applyTemplateVars(tr.labelFilter, vars);
+            out.labelFilter = applyTemplateVars(tr.labelFilter, memberVars);
           }
         } else if (tr.type === 'cron') {
           out.cron = tr.cron;
@@ -2921,7 +2922,7 @@ app.post('/api/teams', async (req, res) => {
         }
         if (tr.preCheckEnv && typeof tr.preCheckEnv === 'object') {
           out.preCheckEnv = Object.fromEntries(
-            Object.entries(tr.preCheckEnv).map(([k, v]) => [k, applyTemplateVars(v, vars)])
+            Object.entries(tr.preCheckEnv).map(([k, v]) => [k, applyTemplateVars(v, memberVars)])
           );
         }
         return out;
@@ -3310,14 +3311,15 @@ app.post('/api/teams/stream', async (req, res) => {
     for (const p of toCreate) {
       const stepId = `member:${p.memberId}`;
       emit({ type: 'step', id: stepId, status: 'running' });
-      const promptText = applyTemplateVars(p.template.promptTemplate, vars);
+      const memberVars = { ...vars, agentId: p.memberId };
+      const promptText = applyTemplateVars(p.template.promptTemplate, memberVars);
       const triggersOut = (p.template.triggers || []).map(tr => {
         const out = {
           id: tr.id,
           type: tr.type,
           enabled: tr.enabled !== false,
           description: tr.description || `${p.template.displayName} — ${tr.id}`,
-          prompt: applyTemplateVars(tr.promptTemplate || '', vars),
+          prompt: applyTemplateVars(tr.promptTemplate || '', memberVars),
         };
         if (tr.type === 'github-event') {
           out.events = tr.events || [];
@@ -3327,7 +3329,7 @@ app.post('/api/teams/stream', async (req, res) => {
           // defines one (e.g. developer.json pins it to the wizard's
           // {{readyLabel}} so the trigger fires only on that label).
           if (typeof tr.labelFilter === 'string' && tr.labelFilter.trim()) {
-            out.labelFilter = applyTemplateVars(tr.labelFilter, vars);
+            out.labelFilter = applyTemplateVars(tr.labelFilter, memberVars);
           }
         } else if (tr.type === 'cron') {
           out.cron = tr.cron;
@@ -3338,7 +3340,7 @@ app.post('/api/teams/stream', async (req, res) => {
         }
         if (tr.preCheckEnv && typeof tr.preCheckEnv === 'object') {
           out.preCheckEnv = Object.fromEntries(
-            Object.entries(tr.preCheckEnv).map(([k, v]) => [k, applyTemplateVars(v, vars)])
+            Object.entries(tr.preCheckEnv).map(([k, v]) => [k, applyTemplateVars(v, memberVars)])
           );
         }
         return out;

@@ -17,17 +17,19 @@
 #   it to the issue. Exit 1 — bidding is pure shell, no LLM needed.
 #
 # Environment (all required):
-#   GH_REPO   — owner/repo (e.g. "acme/my-repo")
-#   AGENT_ID  — agent identifier (e.g. "aee-team-developer")
-#   GH_TOKEN  — GitHub PAT (typically already present in the container env)
+#   GH_REPO        — owner/repo (e.g. "acme/my-repo")
+#   AGENT_ID       — agent identifier (e.g. "aee-team-developer")
+#   DISPATCH_LABEL — label the Dispatcher applies to release issues (e.g. "dispatch")
+#   GH_TOKEN       — GitHub PAT (typically already present in the container env)
 
 set -euo pipefail
 
 REPO="${GH_REPO:-}"
 AID="${AGENT_ID:-}"
+DISPATCH_LABEL="${DISPATCH_LABEL:-}"
 
-if [[ -z "$REPO" || -z "$AID" ]]; then
-  echo "multi-agent-bid: GH_REPO and AGENT_ID are required" >&2
+if [[ -z "$REPO" || -z "$AID" || -z "$DISPATCH_LABEL" ]]; then
+  echo "multi-agent-bid: GH_REPO, AGENT_ID and DISPATCH_LABEL are required" >&2
   exit 2
 fi
 
@@ -53,11 +55,11 @@ if [[ "$assigned_count" -gt 0 ]]; then
   exit 0
 fi
 
-# ── Phase 2: Bid on ready issues ──────────────────────────────────────────────
+# ── Phase 2: Bid on dispatched issues ─────────────────────────────────────────
 ready_issues=$(gh issue list \
   --repo "$REPO" \
   --state open \
-  --label "ready" \
+  --label "$DISPATCH_LABEL" \
   --json number,labels \
   --limit 50 \
   2>/dev/null || echo "[]")

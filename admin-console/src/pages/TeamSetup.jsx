@@ -85,18 +85,25 @@ function ErrorBox({ message }) {
 
 const STEPS = ['Team', 'Working Environment', 'Knowledge', 'Members', 'Review'];
 
-function StepIndicator({ current }) {
+function StepIndicator({ current, onStepClick }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
       {STEPS.map((label, idx) => {
         const done = idx < current;
         const active = idx === current;
+        const clickable = !!onStepClick;
         return (
           <React.Fragment key={label}>
-            <div style={{
-              display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
-              opacity: active || done ? 1 : 0.5,
-            }}>
+            <div
+              onClick={clickable ? () => onStepClick(idx) : undefined}
+              role={clickable ? 'button' : undefined}
+              tabIndex={clickable ? 0 : undefined}
+              onKeyDown={clickable ? (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); onStepClick(idx); } } : undefined}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+                opacity: active || done ? 1 : 0.5,
+                cursor: clickable ? 'pointer' : 'default',
+              }}>
               <div style={{
                 width: 28, height: 28, borderRadius: '50%',
                 background: done
@@ -138,12 +145,12 @@ function ExtendReadOnlyBanner({ children }) {
     <div style={{
       padding: 'var(--eb-space-3) var(--eb-space-4)',
       background: 'var(--eb-bg-elevated)',
-      border: '1px solid var(--eb-border-default)',
+      border: '1px solid var(--eb-accent-primary)',
       borderRadius: 'var(--eb-radius-md)',
       display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
       fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
     }}>
-      <Lock size={14} style={{ flexShrink: 0, marginTop: 2, color: 'var(--eb-text-muted)' }} />
+      <Lock size={14} style={{ flexShrink: 0, marginTop: 2, color: 'var(--eb-accent-primary)' }} />
       <div>{children}</div>
     </div>
   );
@@ -153,7 +160,7 @@ function StepProjectReadOnly({ form }) {
   return (
     <Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-        <ExtendReadOnlyBanner>Read-only in extend mode — team identity cannot be changed.</ExtendReadOnlyBanner>
+        <ExtendReadOnlyBanner>These settings belong to the existing team and cannot be changed here.</ExtendReadOnlyBanner>
         <ReviewRow label="Team Name" value={form.teamName} />
         <ReviewRow label="Team ID" value={form.teamId} />
       </div>
@@ -167,7 +174,7 @@ function StepEnvironmentReadOnly({ form, sshKeys, githubTokens }) {
   return (
     <Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-        <ExtendReadOnlyBanner>Read-only in extend mode — working environment is shared across all team members.</ExtendReadOnlyBanner>
+        <ExtendReadOnlyBanner>These settings belong to the existing team and cannot be changed here.</ExtendReadOnlyBanner>
         <ReviewRow label="SSH Deploy Key" value={sshKey ? sshKey.name : '—'} />
         <ReviewRow label="GitHub Token" value={ghToken ? ghToken.name : '—'} />
         <ReviewRow label="Repository" value={form.repoUrl ? `${form.repoUrl} @ ${form.branch || 'main'}` : '—'} />
@@ -181,7 +188,7 @@ function StepKnowledgeReadOnly({ form, mcpServers, mcpCredentials }) {
   return (
     <Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-        <ExtendReadOnlyBanner>Read-only in extend mode — knowledge sources are shared across all team members.</ExtendReadOnlyBanner>
+        <ExtendReadOnlyBanner>These settings belong to the existing team and cannot be changed here.</ExtendReadOnlyBanner>
         <div>
           <div style={labelStyle}>Knowledge sources ({knowledge.length})</div>
           {knowledge.length === 0 ? (
@@ -1539,6 +1546,7 @@ export default function TeamSetup() {
           mcpSelections: (env?.mcpServers || []).map(s => ({ serverId: s.serverId, credentialId: s.credentialId || null })),
           roleConfig: roles.map(id => ({ id, count: 1 })),
         }));
+        setStep(3);
       } catch (err) {
         setExtendError(err.message || String(err));
       } finally {
@@ -1665,7 +1673,18 @@ export default function TeamSetup() {
           ? prev.map(s => s.id === ev.id ? { ...s, status: ev.status, error: ev.error || s.error } : s)
           : prev);
       } else if (ev.type === 'collision') {
+        // Derive existing role ids from the member-id list in the collision payload.
+        const prefix = form.teamId + '-';
+        const collisionRoles = (ev.existing?.members || []).map(m => {
+          if (typeof m !== 'string') return null;
+          if (m.startsWith(prefix)) return m.slice(prefix.length).replace(/-\d+$/, '');
+          return null;
+        }).filter(Boolean);
+        setExistingRoles(collisionRoles);
+        setExtendMode(true);
         setCollisionInfo({ existing: ev.existing, suggestion: ev.suggestion });
+        setProgressSteps(null);
+        setStep(3);
       } else if (ev.type === 'complete') {
         setResult(ev.result);
         const land = landingAgent(ev.result?.created);
@@ -1769,7 +1788,10 @@ export default function TeamSetup() {
 
       {extendError && <ErrorBox message={extendError} />}
 
-      <StepIndicator current={step} />
+      <StepIndicator
+        current={step}
+        onStepClick={extendMode ? (idx) => { if (idx <= 3) setStep(idx); } : undefined}
+      />
 
       {step === 0 && (extendMode
         ? <StepProjectReadOnly form={form} />
@@ -1832,7 +1854,7 @@ export default function TeamSetup() {
         <ProgressCard steps={progressSteps} error={progressError} />
       )}
 
-      {collisionInfo && (
+      {collisionInfo && !extendMode && (
         <Card accent="var(--eb-status-warning)">
           <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-2)' }}>
             Some resources for team <code>{form.teamId}</code> already exist.
@@ -1887,11 +1909,15 @@ export default function TeamSetup() {
             <ArrowLeft size={16} /> Back
           </button>
 
-          {!isLast && (
-            <button type="button" onClick={next} disabled={tplLoading || submitting} style={primaryButtonStyle(submitting || tplLoading)}>
-              {extendMode && step < 3 ? 'Continue' : 'Next'} <ArrowRight size={16} />
+          {!isLast && (extendMode && step < 3 ? (
+            <button type="button" onClick={() => setStep(3)} style={primaryButtonStyle(false)}>
+              Back to Roles <ArrowRight size={16} />
             </button>
-          )}
+          ) : (
+            <button type="button" onClick={next} disabled={tplLoading || submitting} style={primaryButtonStyle(submitting || tplLoading)}>
+              Next <ArrowRight size={16} />
+            </button>
+          ))}
           {isLast && (
             <button type="button" onClick={() => submit('create')} disabled={submitting} style={primaryButtonStyle(submitting)}>
               {submitting

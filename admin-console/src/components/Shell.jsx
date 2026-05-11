@@ -273,6 +273,21 @@ export default function Shell({ children }) {
             </div>
           ))}
         </nav>
+
+        {/* Copyright footer */}
+        {!collapsed && (
+          <div style={{
+            flexShrink: 0,
+            padding: 'var(--eb-space-3) var(--eb-space-4)',
+            paddingTop: 'var(--eb-space-4)',
+            fontSize: 11,
+            color: 'var(--eb-text-muted)',
+            borderTop: '1px solid var(--eb-border-default)',
+            whiteSpace: 'nowrap',
+          }}>
+            © 2026 Accenture. All rights reserved.
+          </div>
+        )}
       </aside>
 
       {/* ── Main area ────────────────────────────────────────────────── */}

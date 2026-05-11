@@ -15,8 +15,13 @@ import MessageInput from './MessageInput';
 const LEARN_PROMPT =
   'Before we end this conversation: please summarize the key insights, ' +
   'decisions and open points from our discussion so far ' +
-  'and update your memory/ files (especially memory/log.md and memory/context.md, ' +
-  'if present) accordingly. Then briefly reply with what you have remembered.';
+  'and update your memory/ files accordingly, routing each piece to the right file:\n' +
+  '- memory/context.md — current session state (keep slim)\n' +
+  '- memory/log.md — one summary entry for this conversation\n' +
+  '- memory/facts.md — atomic, deduplicated facts (one per line, with date)\n' +
+  '- memory/entities.md — rich knowledge about projects, systems, frameworks\n' +
+  '- memory/users.md — per-user interaction profiles\n' +
+  'Then briefly reply with what you have saved.';
 
 /**
  * The middle column: header + scrollable message list + input.

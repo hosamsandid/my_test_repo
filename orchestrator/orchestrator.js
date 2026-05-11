@@ -2777,6 +2777,33 @@ async function main() {
 
   // Internal API — used by admin-console to manage agents
   const internalApi = http.createServer((req, res) => {
+    // Read-only access to baked-in helper scripts referenced by agent
+    // templates' preCheckScript. The allowlist is the only way to obtain a
+    // path — no user-supplied path ever reaches the filesystem.
+    const SCRIPT_ALLOWLIST = {
+      'multi-agent-bid': '/usr/local/bin/multi-agent-bid',
+    };
+    const scriptMatch = req.method === 'GET' && req.url.match(/^\/internal\/scripts\/([^/?]+)$/);
+    if (scriptMatch) {
+      const name = scriptMatch[1];
+      const filePath = SCRIPT_ALLOWLIST[name];
+      if (!filePath) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'script not in allowlist' }));
+        return;
+      }
+      fs.readFile(filePath, 'utf8', (err, content) => {
+        if (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `read failed: ${err.code || err.message}` }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ name, path: filePath, content }));
+      });
+      return;
+    }
+
     if (req.method === 'GET' && req.url === '/internal/agents/processes') {
       const processes = [];
       for (const [id, proc] of agentProcesses) {

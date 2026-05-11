@@ -5,9 +5,17 @@ import {
   Compass, Code, Search, Shield, FlaskConical, Book, Tag, User,
   Loader2, Circle, XCircle, Lock,
   Network, ClipboardCheck, Gauge, Rocket, MessageCircle, TrendingUp,
-  Server, KeyRound,
+  Server, KeyRound, Terminal, FileCode2,
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
+import ScriptViewerPanel from '../components/ScriptViewerPanel';
+
+function scriptNameFromPath(scriptPath) {
+  if (typeof scriptPath !== 'string') return null;
+  const trimmed = scriptPath.trim();
+  if (!trimmed) return null;
+  return trimmed.split('/').filter(Boolean).pop() || null;
+}
 
 const ROLE_ICONS = {
   compass: Compass, code: Code, search: Search, shield: Shield,
@@ -681,6 +689,7 @@ function StepKnowledge({ form, setForm, mcpServers, mcpServersLoading, mcpCreden
 const SINGLE_INSTANCE_ROLES = new Set(['business-analyst']);
 
 function RoleCard({ template, selected, count, onToggle, onCountChange }) {
+  const [scriptPanelName, setScriptPanelName] = useState(null);
   const Icon = ROLE_ICONS[template.icon] || User;
   const multiAllowed = !SINGLE_INSTANCE_ROLES.has(template.id);
 
@@ -753,22 +762,108 @@ function RoleCard({ template, selected, count, onToggle, onCountChange }) {
           {template.triggerSummary && template.triggerSummary.length > 0 && (
             <div style={{
               marginTop: 'var(--eb-space-2)',
-              fontSize: 'var(--eb-text-xs)',
-              color: 'var(--eb-text-muted)',
-              display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-2)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 'var(--eb-space-2)',
             }}>
-              {template.triggerSummary.map(t => (
-                <span key={t.id} style={{
-                  padding: '1px 6px',
-                  background: 'var(--eb-bg-elevated)',
-                  borderRadius: 'var(--eb-radius-sm)',
-                  fontFamily: 'var(--eb-font-mono)',
-                }}>
-                  {t.type === 'cron' ? `cron ${t.cron}` : (t.events || []).join(', ')}
-                </span>
-              ))}
+              {template.triggerSummary.map(t => {
+                const schedule = t.type === 'cron'
+                  ? `cron ${t.cron}`
+                  : (t.events && t.events.length ? t.events.join(', ') : t.type);
+                const scriptName = scriptNameFromPath(t.preCheckScript);
+                return (
+                  <div key={t.id} style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 2,
+                    fontSize: 'var(--eb-text-xs)',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+                      <span style={{
+                        padding: '1px 6px',
+                        background: 'var(--eb-bg-elevated)',
+                        borderRadius: 'var(--eb-radius-sm)',
+                        fontFamily: 'var(--eb-font-mono)',
+                        color: 'var(--eb-text-secondary)',
+                      }}>
+                        {schedule}
+                      </span>
+                      <code style={{
+                        fontFamily: 'var(--eb-font-mono)',
+                        color: 'var(--eb-text-muted)',
+                      }}>
+                        {t.id}
+                      </code>
+                      {t.preCheckScript && (
+                        <span style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 4,
+                          padding: '1px 6px',
+                          background: 'var(--eb-bg-elevated)',
+                          border: '1px solid var(--eb-border-default)',
+                          borderRadius: 'var(--eb-radius-sm)',
+                          color: 'var(--eb-text-secondary)',
+                          fontFamily: 'var(--eb-font-mono)',
+                        }}>
+                          <Terminal size={10} />
+                          {t.preCheckScript}
+                        </span>
+                      )}
+                      {scriptName && (
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); setScriptPanelName(scriptName); }}
+                          title="View script source (read-only)"
+                          style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 4,
+                            background: 'none',
+                            border: '1px solid var(--eb-border-default)',
+                            borderRadius: 'var(--eb-radius-sm)',
+                            color: 'var(--eb-text-secondary)',
+                            cursor: 'pointer',
+                            padding: '1px 6px',
+                            fontSize: 'var(--eb-text-xs)',
+                          }}
+                        >
+                          <FileCode2 size={10} /> View
+                        </button>
+                      )}
+                    </div>
+                    {t.description && (
+                      <div style={{
+                        color: 'var(--eb-text-muted)',
+                        lineHeight: 1.4,
+                        paddingLeft: 2,
+                      }}>
+                        {t.description}
+                      </div>
+                    )}
+                    {t.preCheckEnvKeys && t.preCheckEnvKeys.length > 0 && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, paddingLeft: 2 }}>
+                        {t.preCheckEnvKeys.map(k => (
+                          <span key={k} style={{
+                            fontSize: 'var(--eb-text-xs)',
+                            fontFamily: 'var(--eb-font-mono)',
+                            padding: '0 4px',
+                            background: 'var(--eb-bg-surface)',
+                            border: '1px solid var(--eb-border-default)',
+                            borderRadius: 'var(--eb-radius-sm)',
+                            color: 'var(--eb-text-muted)',
+                          }}>
+                            {k}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
+          <ScriptViewerPanel
+            open={!!scriptPanelName}
+            onClose={() => setScriptPanelName(null)}
+            scriptName={scriptPanelName}
+          />
         </div>
       </div>
 

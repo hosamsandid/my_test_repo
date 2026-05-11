@@ -18,22 +18,42 @@
       "from": "any-except-self",
       "labelFilter": "assigned:{{agentId}}",
       "enabled": true,
-      "promptTemplate": "You have been assigned an issue in `{{repoFullName}}`. The event payload above contains the issue number, title, and body.\n\n1. Add `started:{{agentId}}` to the issue (create the label in the repo first if it does not exist).\n2. Remove the `{{readyLabel}}` label from the issue.\n3. Implement the issue according to its acceptance criteria: create a feature branch, commit your changes via `gh-as-agent commit`, and open a PR via `gh pr create`. Put `Closes #<issue-number>` in the PR body.\n\nIf a PR already exists for this issue: reply `[PASS]`."
+      "description": "Primary path. Fires immediately when the coordinator workflow applies `assigned:{{agentId}}` to an issue, and starts the implementation.",
+      "promptTemplate": "You have been assigned an issue in `{{repoFullName}}`. The event payload above contains the issue number, title, and body.\n\n1. Add `started:{{agentId}}` to the issue (create the label in the repo first if it does not exist).\n2. Remove the `{{readyLabel}}` label from the issue.\n3. Implement the issue according to its acceptance criteria: create a feature branch, commit your changes via `gh-as-agent commit`, and open a PR via `gh-as-agent pr create`. Put `Closes #<issue-number>` in the PR body.\n\nIf a PR already exists for this issue: reply `[PASS]`."
     },
     {
-      "id": "developer-bid-loop",
+      "id": "developer-bid",
       "type": "cron",
       "cron": "*/3 * * * *",
       "enabled": true,
       "preCheckScript": "/usr/local/bin/multi-agent-bid",
-      "preCheckEnv": { "GH_REPO": "{{repoFullName}}", "DISPATCH_LABEL": "{{dispatchLabel}}" },
-      "promptTemplate": "You have been assigned an issue in `{{repoFullName}}`. The pre-check context above contains the issue number, title, and body.\n\n1. Add `started:<your-agent-id>` to the issue (create the label in the repo first if it does not exist).\n2. Remove the `{{readyLabel}}` label from the issue.\n3. Implement the issue according to its acceptance criteria: create a feature branch, commit your changes via `gh-as-agent commit`, and open a PR via `gh pr create`. Put `Closes #<issue-number>` in the PR body.\n\nIf a PR already exists for this issue: reply `[PASS]`."
+      "preCheckEnv": {
+        "GH_REPO": "{{repoFullName}}",
+        "DISPATCH_LABEL": "{{dispatchLabel}}",
+        "BID_MODE": "bid"
+      },
+      "description": "Pure-shell bidding tick. Every 3 minutes, the pre-check script places `bid:{{agentId}}` on every `{{dispatchLabel}}`-labeled issue that has no bid/assignment/start yet. No LLM call — the script always exits 1.",
+      "promptTemplate": "[PASS]"
+    },
+    {
+      "id": "developer-assigned-safetynet",
+      "type": "cron",
+      "cron": "1-59/3 * * * *",
+      "enabled": true,
+      "preCheckScript": "/usr/local/bin/multi-agent-bid",
+      "preCheckEnv": {
+        "GH_REPO": "{{repoFullName}}",
+        "BID_MODE": "safetynet"
+      },
+      "description": "Safety net for missed `issues.labeled` events. Every 3 minutes (offset by 1 from developer-bid), the pre-check script checks for `assigned:{{agentId}}` and, if found, fires the implement prompt — same outcome as the event-driven `developer-assigned` trigger.",
+      "promptTemplate": "You have been assigned an issue in `{{repoFullName}}`. The pre-check context above contains the issue number, title, and body.\n\n1. Add `started:{{agentId}}` to the issue (create the label in the repo first if it does not exist).\n2. Remove the `{{readyLabel}}` label from the issue.\n3. Implement the issue according to its acceptance criteria: create a feature branch, commit your changes via `gh-as-agent commit`, and open a PR via `gh-as-agent pr create`. Put `Closes #<issue-number>` in the PR body.\n\nIf a PR already exists for this issue: reply `[PASS]`."
     },
     {
       "id": "self-curation",
       "type": "cron",
       "cron": "5 3 * * 1",
       "enabled": true,
+      "description": "Weekly memory housekeeping every Monday at 03:05.",
       "promptTemplate": "Weekly memory curation. Review `memory/log.md` and `memory/context.md` for: (1) contradictory entries → consolidate; (2) PR/issue-specific details that should be generalised or deleted; (3) duplicates → merge; (4) entries older than 90 days and never relevant since → consider deleting. If nothing to do: `[PASS]`."
     }
   ]

@@ -1,9 +1,20 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github } from 'lucide-react';
+import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Terminal, FileCode2 } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
+import ScriptViewerPanel from '../../components/ScriptViewerPanel';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import FormInput from '../../components/FormInput';
+
+// preCheckScript paths reference an installed binary inside the orchestrator
+// container (e.g. `/usr/local/bin/multi-agent-bid`). The allowlisted name is
+// the basename — `/api/scripts/:name` checks it against the server-side allowlist.
+function scriptNameFromPath(scriptPath) {
+  if (typeof scriptPath !== 'string') return null;
+  const trimmed = scriptPath.trim();
+  if (!trimmed) return null;
+  return trimmed.split('/').filter(Boolean).pop() || null;
+}
 
 const POLL_MS = 30_000;
 
@@ -323,6 +334,11 @@ function DateTimePicker({ value, onChange }) {
 /* ── Trigger row ────────────────────────────────────────────────────── */
 function TriggerRow({ trigger, agentId, onEdit, onDeleted, onToggled }) {
   const [toggling, setToggling] = useState(false);
+  const [scriptPanelName, setScriptPanelName] = useState(null);
+  const preCheckScriptName = scriptNameFromPath(trigger.preCheckScript);
+  const preCheckEnvEntries = trigger.preCheckEnv && typeof trigger.preCheckEnv === 'object'
+    ? Object.entries(trigger.preCheckEnv)
+    : [];
   let schedule;
   if (trigger.type === 'http') {
     schedule = `/hooks/${agentId}/${trigger.id}`;
@@ -401,6 +417,83 @@ function TriggerRow({ trigger, agentId, onEdit, onDeleted, onToggled }) {
         </span>
       </div>
 
+      {trigger.preCheckScript && (
+        <div style={{
+          padding: 'var(--eb-space-2)',
+          background: 'var(--eb-bg-elevated)',
+          border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-sm)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 'var(--eb-space-1)',
+          marginTop: 2,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+            <Terminal size={12} style={{ color: 'var(--eb-text-muted)', flexShrink: 0 }} />
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', flexShrink: 0 }}>
+              pre-check:
+            </span>
+            <code style={{
+              fontSize: 'var(--eb-text-xs)',
+              fontFamily: 'var(--eb-font-mono)',
+              color: 'var(--eb-text-primary)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              flex: 1,
+            }}>
+              {trigger.preCheckScript}
+            </code>
+            {preCheckScriptName && (
+              <button
+                onClick={() => setScriptPanelName(preCheckScriptName)}
+                title="View script source (read-only)"
+                style={{
+                  background: 'none',
+                  border: '1px solid var(--eb-border-default)',
+                  borderRadius: 'var(--eb-radius-sm)',
+                  color: 'var(--eb-text-secondary)',
+                  cursor: 'pointer',
+                  padding: '1px 6px',
+                  fontSize: 'var(--eb-text-xs)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  flexShrink: 0,
+                }}
+              >
+                <FileCode2 size={11} /> View
+              </button>
+            )}
+          </div>
+          {preCheckEnvEntries.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-1)' }}>
+              {preCheckEnvEntries.map(([key, value]) => (
+                <span
+                  key={key}
+                  title={`${key}=${value}`}
+                  style={{
+                    fontSize: 'var(--eb-text-xs)',
+                    fontFamily: 'var(--eb-font-mono)',
+                    padding: '1px 6px',
+                    background: 'var(--eb-bg-surface)',
+                    border: '1px solid var(--eb-border-default)',
+                    borderRadius: 'var(--eb-radius-sm)',
+                    color: 'var(--eb-text-secondary)',
+                    maxWidth: 240,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {key}={String(value)}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {trigger.prompt && (
         <div style={{
           fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.4,
@@ -411,6 +504,12 @@ function TriggerRow({ trigger, agentId, onEdit, onDeleted, onToggled }) {
           {trigger.prompt}
         </div>
       )}
+
+      <ScriptViewerPanel
+        open={!!scriptPanelName}
+        onClose={() => setScriptPanelName(null)}
+        scriptName={scriptPanelName}
+      />
     </div>
   );
 }

@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-# multi-agent-bid — Two-phase work-distribution pre-check for Developer agents.
+# multi-agent-bid — Work-distribution pre-check for Developer agents.
+#
+# The script has two independent phases that can be run separately or together,
+# selected via BID_MODE:
+#
+#   BID_MODE=both       (default) — Phase 1 then, if no assignment, Phase 2.
+#   BID_MODE=safetynet  — Phase 1 only. Used as a missed-event safety net.
+#   BID_MODE=bid        — Phase 2 only. Pure-shell bidding, never invokes LLM.
 #
 # Exit codes:
 #   0  — an issue is assigned to this agent; caller should invoke the LLM.
@@ -17,43 +24,65 @@
 #   For each: create `bid:<AGENT_ID>` in the repo (if absent) and add it to
 #   the issue. Exit 1 — bidding is pure shell, no LLM needed.
 #
-# Environment (all required):
-#   GH_REPO        — owner/repo (e.g. "acme/my-repo")
-#   AGENT_ID       — agent identifier (e.g. "aee-team-developer")
-#   DISPATCH_LABEL — label the Dispatcher applies to release issues (e.g. "dispatch")
-#   GH_TOKEN       — GitHub PAT (typically already present in the container env)
+# Environment:
+#   GH_REPO        — owner/repo (e.g. "acme/my-repo"). Always required.
+#   AGENT_ID       — agent identifier (e.g. "aee-team-developer"). Always required.
+#   DISPATCH_LABEL — label the Dispatcher applies (e.g. "dispatch"). Required for
+#                    BID_MODE=both and BID_MODE=bid. Ignored for BID_MODE=safetynet.
+#   BID_MODE       — "both" (default), "safetynet", or "bid".
+#   GH_TOKEN       — GitHub PAT (typically already present in the container env).
 
 set -euo pipefail
 
 REPO="${GH_REPO:-}"
 AID="${AGENT_ID:-}"
 DISPATCH_LABEL="${DISPATCH_LABEL:-}"
+MODE="${BID_MODE:-both}"
 
-if [[ -z "$REPO" || -z "$AID" || -z "$DISPATCH_LABEL" ]]; then
-  echo "multi-agent-bid: GH_REPO, AGENT_ID and DISPATCH_LABEL are required" >&2
+case "$MODE" in
+  both|safetynet|bid) ;;
+  *)
+    echo "multi-agent-bid: BID_MODE must be one of: both, safetynet, bid (got '$MODE')" >&2
+    exit 2
+    ;;
+esac
+
+if [[ -z "$REPO" || -z "$AID" ]]; then
+  echo "multi-agent-bid: GH_REPO and AGENT_ID are required" >&2
+  exit 2
+fi
+if [[ "$MODE" != "safetynet" && -z "$DISPATCH_LABEL" ]]; then
+  echo "multi-agent-bid: DISPATCH_LABEL is required for BID_MODE=$MODE" >&2
   exit 2
 fi
 
 # ── Phase 1: Check for assignment ────────────────────────────────────────────
-ASSIGNED_LABEL="assigned:${AID}"
+if [[ "$MODE" == "both" || "$MODE" == "safetynet" ]]; then
+  ASSIGNED_LABEL="assigned:${AID}"
 
-assigned_issues=$(gh issue list \
-  --repo "$REPO" \
-  --state open \
-  --label "$ASSIGNED_LABEL" \
-  --json number,title,body \
-  --limit 1 \
-  2>/dev/null || echo "[]")
+  assigned_issues=$(gh issue list \
+    --repo "$REPO" \
+    --state open \
+    --label "$ASSIGNED_LABEL" \
+    --json number,title,body \
+    --limit 1 \
+    2>/dev/null || echo "[]")
 
-assigned_count=$(echo "$assigned_issues" | jq 'length')
+  assigned_count=$(echo "$assigned_issues" | jq 'length')
 
-if [[ "$assigned_count" -gt 0 ]]; then
-  num=$(echo "$assigned_issues"   | jq -r '.[0].number')
-  title=$(echo "$assigned_issues" | jq -r '.[0].title')
-  body=$(echo "$assigned_issues"  | jq -r '.[0].body // ""')
-  printf 'Issue #%s is assigned to you.\nTitle: %s\n\nBody:\n%s\n' \
-    "$num" "$title" "$body"
-  exit 0
+  if [[ "$assigned_count" -gt 0 ]]; then
+    num=$(echo "$assigned_issues"   | jq -r '.[0].number')
+    title=$(echo "$assigned_issues" | jq -r '.[0].title')
+    body=$(echo "$assigned_issues"  | jq -r '.[0].body // ""')
+    printf 'Issue #%s is assigned to you.\nTitle: %s\n\nBody:\n%s\n' \
+      "$num" "$title" "$body"
+    exit 0
+  fi
+
+  # safetynet mode stops here — bidding is not its job.
+  if [[ "$MODE" == "safetynet" ]]; then
+    exit 1
+  fi
 fi
 
 # ── Phase 2: Bid on dispatched issues ─────────────────────────────────────────

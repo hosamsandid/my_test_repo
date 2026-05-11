@@ -1364,6 +1364,25 @@ app.get('/api/agents/:id/triggers', (req, res) => {
   res.json(Array.isArray(triggers) ? triggers : []);
 });
 
+// Read-only proxy to the orchestrator's allowlisted script content. Used by
+// the trigger UI to render baked-in helper scripts (e.g. multi-agent-bid)
+// inline so operators can see what the preCheckScript actually does.
+const SCRIPT_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+app.get('/api/scripts/:name', async (req, res) => {
+  const { name } = req.params;
+  if (!SCRIPT_NAME_RE.test(name)) {
+    return res.status(400).json({ error: 'invalid script name' });
+  }
+  try {
+    const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+    const upstream = await fetch(`${orchestratorUrl}/internal/scripts/${encodeURIComponent(name)}`);
+    const body = await upstream.text();
+    res.status(upstream.status).type(upstream.headers.get('content-type') || 'application/json').send(body);
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
 function notifyTriggerReload(agentId) {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/reload-triggers`, { method: 'POST' })
@@ -2535,6 +2554,11 @@ app.get('/api/agent-templates', (_req, res) => {
         type: tr.type,
         events: tr.events || null,
         cron: tr.cron || null,
+        description: tr.description || null,
+        preCheckScript: tr.preCheckScript || null,
+        preCheckEnvKeys: tr.preCheckEnv && typeof tr.preCheckEnv === 'object'
+          ? Object.keys(tr.preCheckEnv)
+          : [],
       })),
     });
   }

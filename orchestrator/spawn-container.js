@@ -111,6 +111,7 @@ function spawnContainer({ id, env }) {
       }
       containerId = r.body.Id;
       handle.pid = containerId.slice(0, 12);
+      handle.emit('spawned', handle.pid);
       streamLogs(containerId, handle.stdout, handle.stderr);
       return libpodRequest('POST', `/containers/${containerId}/start`);
     })
@@ -135,4 +136,4 @@ function spawnContainer({ id, env }) {
   return handle;
 }
 
-module.exports = { spawnContainer };
+module.exports = { spawnContainer, libpodRequest };

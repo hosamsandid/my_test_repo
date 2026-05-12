@@ -27,7 +27,7 @@ RUN git config --system user.name  "claw-agent" \
 WORKDIR /app
 COPY package.json .
 RUN npm install --omit=dev
-COPY *.js .
+COPY *.js ./
 
 # `gh-as-agent` wrapper: tags git commits and PR/review/comment bodies
 # with the per-agent identity so the GitHub poller can filter out events

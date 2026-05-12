@@ -72,7 +72,7 @@ function loadLlmBindingForEnv(env) {
 }
 
 const { execFile, execFileSync } = require("child_process");
-const { spawnContainer } = require("./spawn-container");
+const { spawnContainer, libpodRequest } = require("./spawn-container");
 const crypto = require("crypto");
 
 function randomHex(bytes) {
@@ -150,7 +150,9 @@ function startAgentProcess(config) {
   });
 
   agentProcesses.set(id, child);
-  console.log(`[Orchestrator] Started process for agent ${id} (pid ${child.pid})`);
+  child.on('spawned', (pid) => {
+    console.log(`[Orchestrator] Started container for agent ${id} (id ${pid})`);
+  });
 }
 
 function stopAgentProcess(id) {
@@ -180,7 +182,34 @@ function stopAgentSession(id, sessionId) {
   }
 }
 
+async function evictStaleAgentContainers() {
+  if (process.env.EVICT_STALE_AGENTS === '0') return;
+  const image = process.env.AGENT_IMAGE || 'ace-agent:latest';
+  try {
+    const filters = encodeURIComponent(JSON.stringify({ ancestor: [image] }));
+    const list = await libpodRequest('GET', `/containers/json?all=true&filters=${filters}`);
+    if (list.status >= 300 || !Array.isArray(list.body)) {
+      console.warn(`[Orchestrator] evict: list returned status=${list.status}`);
+      return;
+    }
+    let evicted = 0;
+    for (const c of list.body) {
+      const cid = c.Id || c.ID;
+      if (!cid) continue;
+      const del = await libpodRequest('DELETE', `/containers/${cid}?force=true&v=true`);
+      if (del.status < 300) evicted += 1;
+      else console.warn(`[Orchestrator] evict: delete ${cid.slice(0, 12)} status=${del.status}`);
+    }
+    if (evicted > 0) {
+      console.log(`[Orchestrator] evicted ${evicted} stale ${image} container(s)`);
+    }
+  } catch (err) {
+    console.warn(`[Orchestrator] evict skipped: ${err.message}`);
+  }
+}
+
 async function startAllEnabledAgents() {
+  await evictStaleAgentContainers();
   for (const id of listAgentIds()) {
     const config = loadAgentConfig(id);
     // Skip pure-config orchestrators (created via POST /internal/agents/create

@@ -822,6 +822,17 @@ class TriggerScheduler {
       console.log(`[Runner:${AGENT_ID}] Trigger ${trigger.id} still running — skipping`);
       return;
     }
+
+    // Guard: if the agent has been disabled since this trigger was scheduled,
+    // do not start a new execution. config.json is re-read here so drain-mode
+    // disables (enabled=false written without killing the process) take effect
+    // on the next tick without requiring a process restart.
+    const agentCfg = loadAgentConfig();
+    if (agentCfg?.enabled === false) {
+      console.log(`[Runner:${AGENT_ID}] Trigger ${trigger.id} skipped — agent is disabled`);
+      return;
+    }
+
     this.triggerRunning.add(trigger.id);
 
     // Optional pre-check script: runs before any LLM call.

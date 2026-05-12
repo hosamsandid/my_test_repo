@@ -283,6 +283,16 @@ class GitHubPoller {
     const plan = new Map();
     if (!fs.existsSync(AGENTS_DIR)) return plan;
     for (const agentId of fs.readdirSync(AGENTS_DIR)) {
+      // Skip disabled agents — do not enqueue events for them. The agent's
+      // process may have been stopped; enqueueing would only accumulate a
+      // backlog that fires in a burst on re-enable.
+      try {
+        const agentCfg = JSON.parse(
+          fs.readFileSync(path.join(AGENTS_DIR, agentId, 'config.json'), 'utf8'),
+        );
+        if (agentCfg?.enabled === false) continue;
+      } catch { /* no config.json = new/stub agent, allow through */ }
+
       const triggersPath = path.join(AGENTS_DIR, agentId, 'triggers.json');
       if (!fs.existsSync(triggersPath)) continue;
       let triggers;

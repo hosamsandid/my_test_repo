@@ -2237,7 +2237,10 @@ class Orchestrator {
     }
     const policy = cfg["bp-trigger-policy"] || {};
     const mode = policy.mode || "notify-on-activate";
-    const respectManualDisable = policy["respect-manual-disable"] === true;
+    // Default true: a manually-disabled agent should not be auto-respawned by
+    // BP events. Operators who want the old "always respawn" behaviour can set
+    // "respect-manual-disable": false explicitly in the agent's config.json.
+    const respectManualDisable = policy["respect-manual-disable"] !== false;
 
     if (mode === "off") {
       return { agentId: target.agentId, action: "skipped", reason: "policy-off" };
@@ -2454,15 +2457,66 @@ class Orchestrator {
     };
   }
 
-  // Disable an agent: stop its process, mark enabled=false. Keeps token and
-  // workspace intact so it can be re-enabled with a single click.
-  async disableAgent(id) {
+  // Disable an agent: mark enabled=false and (depending on mode) stop its
+  // process. Keeps token and workspace intact so it can be re-enabled.
+  //
+  // mode === undefined → if the agent is running and has active triggers or a
+  //   busy session, return a warning object instead of disabling. The caller
+  //   (admin-console UI) must re-call with an explicit mode.
+  // mode === 'drain'  → write enabled=false immediately so no new trigger
+  //   executions start, but leave the process running to let the current
+  //   invocation finish naturally.
+  // mode === 'abort'  → write enabled=false and kill the process right away.
+  async disableAgent(id, { mode } = {}) {
     const cfg = loadAgentConfig(id);
     if (!cfg) throw new Error(`Agent '${id}' not found`);
-    stopAgentProcess(id);
+
+    const isRunning = agentProcesses.has(id);
+
+    if (!mode && isRunning) {
+      // Check for active state before disabling without an explicit mode.
+      let isBusy = false;
+      try {
+        const status = JSON.parse(
+          fs.readFileSync(path.join(agentDir(id), 'status.json'), 'utf8'),
+        );
+        isBusy = status?.state === 'busy';
+      } catch { /* no status file = idle */ }
+
+      let activeTriggers = [];
+      try {
+        const triggers = JSON.parse(
+          fs.readFileSync(path.join(agentDir(id), 'triggers.json'), 'utf8'),
+        );
+        if (Array.isArray(triggers)) {
+          activeTriggers = triggers
+            .filter(t => t.enabled !== false && t.id)
+            .map(t => ({ id: t.id, type: t.type, description: t.description || null }));
+        }
+      } catch { /* no triggers file */ }
+
+      if (isBusy || activeTriggers.length > 0) {
+        return {
+          id,
+          warning: true,
+          busy: isBusy,
+          activeTriggers,
+        };
+      }
+    }
+
+    // Write enabled=false first so drain mode takes effect immediately:
+    // TriggerScheduler.execute() re-reads config.json on every trigger tick
+    // and will skip new executions as soon as this write lands.
     const updated = { ...cfg, enabled: false };
     saveAgentConfig(id, updated);
     this.agentConfigs.set(id, { config: updated });
+
+    if (mode !== 'drain') {
+      // abort mode (or no active state needing drain) — kill process now.
+      stopAgentProcess(id);
+    }
+
     return { id, enabled: false };
   }
 
@@ -2472,9 +2526,55 @@ class Orchestrator {
   // metadata needed to re-activate later.
   //
   // Destructive — caller is expected to have confirmed with the user.
-  async deactivateAgent(id) {
+  //
+  // mode === undefined → if the agent is running and has active triggers or a
+  //   busy session, return a warning object (HTTP 409) so the caller can ask
+  //   the user to choose drain or abort before proceeding.
+  // mode === 'drain' → disable triggers and set enabled=false immediately
+  //   (no new executions start), but leave the process running and defer the
+  //   workspace wipe. The agent appears as "disabled" until the operator
+  //   deactivates again once idle.
+  // mode === 'hard-stop' → stop the process right away and wipe (original
+  //   behaviour).
+  async deactivateAgent(id, { mode } = {}) {
     const cfg = loadAgentConfig(id);
     if (!cfg) throw new Error(`Agent '${id}' not found`);
+
+    const isRunning = agentProcesses.has(id);
+
+    // Pre-flight: when no mode is given and the process is running, check for
+    // active state and surface it as a warning so the UI can ask the user.
+    if (!mode && isRunning) {
+      let isBusy = false;
+      try {
+        const status = JSON.parse(
+          fs.readFileSync(path.join(agentDir(id), 'status.json'), 'utf8'),
+        );
+        isBusy = status?.state === 'busy';
+      } catch { /* no status file = idle */ }
+
+      let activeTriggers = [];
+      try {
+        const triggers = JSON.parse(
+          fs.readFileSync(path.join(agentDir(id), 'triggers.json'), 'utf8'),
+        );
+        if (Array.isArray(triggers)) {
+          activeTriggers = triggers
+            .filter(t => t.enabled !== false && t.id)
+            .map(t => ({ id: t.id, type: t.type, description: t.description || null }));
+        }
+      } catch { /* no triggers file */ }
+
+      if (isBusy || activeTriggers.length > 0) {
+        return { id, warning: true, busy: isBusy, activeTriggers };
+      }
+    }
+
+    // Drain mode: disable the agent in place (no wipe). The caller should
+    // re-invoke with hard-stop once the agent goes idle.
+    if (mode === 'drain') {
+      return this.disableAgent(id, { mode: 'drain' });
+    }
 
     stopAgentProcess(id);
 
@@ -3379,18 +3479,28 @@ async function main() {
     const disableMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/disable$/);
     if (disableMatch) {
       const id = decodeURIComponent(disableMatch[1]);
-      (async () => {
-        try {
-          const result = await orchestrator.disableAgent(id);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(result));
-        } catch (err) {
-          console.error(`[Orchestrator] disableAgent error for ${id}: ${err.message}`);
-          const status = /not found/i.test(err.message) ? 404 : 500;
-          res.writeHead(status, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
-        }
-      })();
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* ignore */ }
+        const mode = parsed.mode || undefined;
+        (async () => {
+          try {
+            const result = await orchestrator.disableAgent(id, { mode });
+            // warning=true means the agent is busy/has active triggers and the
+            // caller must choose drain or abort before we proceed.
+            const httpStatus = result.warning ? 409 : 200;
+            res.writeHead(httpStatus, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+          } catch (err) {
+            console.error(`[Orchestrator] disableAgent error for ${id}: ${err.message}`);
+            const status = /not found/i.test(err.message) ? 404 : 500;
+            res.writeHead(status, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+          }
+        })();
+      });
       return;
     }
 
@@ -3476,18 +3586,26 @@ async function main() {
     const deactivateMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/deactivate$/);
     if (deactivateMatch) {
       const id = decodeURIComponent(deactivateMatch[1]);
-      (async () => {
-        try {
-          const result = await orchestrator.deactivateAgent(id);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(result));
-        } catch (err) {
-          console.error(`[Orchestrator] deactivateAgent error for ${id}: ${err.message}`);
-          const status = /not found/i.test(err.message) ? 404 : 500;
-          res.writeHead(status, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
-        }
-      })();
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* ignore */ }
+        const mode = parsed.mode || undefined;
+        (async () => {
+          try {
+            const result = await orchestrator.deactivateAgent(id, { mode });
+            const httpStatus = result.warning ? 409 : 200;
+            res.writeHead(httpStatus, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+          } catch (err) {
+            console.error(`[Orchestrator] deactivateAgent error for ${id}: ${err.message}`);
+            const status = /not found/i.test(err.message) ? 404 : 500;
+            res.writeHead(status, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+          }
+        })();
+      });
       return;
     }
 
@@ -3807,6 +3925,17 @@ async function main() {
       res.end(JSON.stringify({ error: `Agent '${agentId}' not found` }));
       return;
     }
+
+    // Reject webhooks for disabled agents — the agent process is stopped and
+    // no new executions should start. Callers can retry after re-enabling.
+    try {
+      const agentCfg = JSON.parse(fs.readFileSync(path.join(agentDir, 'config.json'), 'utf8'));
+      if (agentCfg?.enabled === false) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `Agent '${agentId}' is disabled` }));
+        return;
+      }
+    } catch { /* no config.json → new agent, allow through */ }
 
     let triggers = [];
     try {

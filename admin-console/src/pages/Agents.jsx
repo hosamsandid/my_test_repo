@@ -1628,6 +1628,8 @@ export default function Agents() {
   const [selectedAgent, setSelectedAgent] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deactivateTarget, setDeactivateTarget] = useState(null);
+  const [deactivateWarning, setDeactivateWarning] = useState(null); // { agent, busy, activeTriggers }
+  const [disableWarning, setDisableWarning] = useState(null); // { agent, busy, activeTriggers }
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [actionError, setActionError] = useState(null);
@@ -1722,7 +1724,41 @@ export default function Agents() {
   async function handleToggleEnabled(agent) {
     markBusy(agent.id, true);
     try {
-      await apiCall('PUT', `/api/agents/${agent.id}`, { enabled: agent.enabled === false });
+      if (agent.enabled !== false) {
+        // Disabling: probe without a mode first. The orchestrator returns 409
+        // with a warning payload if the agent is running and has active
+        // triggers or a busy session — show the drain-vs-abort dialog in that case.
+        const res = await fetch(`/api/agents/${agent.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: false }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 409 && data.warning) {
+          setDisableWarning({ agent, busy: data.busy, activeTriggers: data.activeTriggers || [] });
+          return;
+        }
+        if (!res.ok) {
+          setActionError(data.error || `HTTP ${res.status}`);
+          return;
+        }
+      } else {
+        await apiCall('PUT', `/api/agents/${agent.id}`, { enabled: true });
+      }
+      refetch();
+    } catch (e) {
+      setActionError(e.message);
+    } finally {
+      markBusy(agent.id, false);
+    }
+  }
+
+  async function handleDisableConfirmed(mode) {
+    const { agent } = disableWarning;
+    setDisableWarning(null);
+    markBusy(agent.id, true);
+    try {
+      await apiCall('PUT', `/api/agents/${agent.id}`, { enabled: false, disableMode: mode });
       refetch();
     } catch (e) {
       setActionError(e.message);
@@ -1772,12 +1808,35 @@ export default function Agents() {
     if (!target) return;
     markBusy(target.id, true);
     try {
-      await apiCall('POST', `/api/agents/${target.id}/deactivate`);
+      const res = await fetch(`/api/agents/${target.id}/deactivate`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 409 && data.warning) {
+        setDeactivateWarning({ agent: target, busy: data.busy, activeTriggers: data.activeTriggers || [] });
+        return;
+      }
+      if (!res.ok) {
+        setActionError(data.error || `HTTP ${res.status}`);
+        return;
+      }
       refetch();
     } catch (e) {
       setActionError(e.message);
     } finally {
       markBusy(target.id, false);
+    }
+  }
+
+  async function handleDeactivateMode(mode) {
+    const { agent } = deactivateWarning;
+    setDeactivateWarning(null);
+    markBusy(agent.id, true);
+    try {
+      await apiCall('POST', `/api/agents/${agent.id}/deactivate`, { mode });
+      refetch();
+    } catch (e) {
+      setActionError(e.message);
+    } finally {
+      markBusy(agent.id, false);
     }
   }
 
@@ -1988,6 +2047,146 @@ export default function Agents() {
         onConfirm={handleDeactivateConfirmed}
         onCancel={() => setDeactivateTarget(null)}
       />
+
+      <DisableWarningDialog
+        open={!!disableWarning}
+        agent={disableWarning?.agent}
+        busy={disableWarning?.busy}
+        activeTriggers={disableWarning?.activeTriggers}
+        onDrain={() => handleDisableConfirmed('drain')}
+        onAbort={() => handleDisableConfirmed('abort')}
+        onCancel={() => setDisableWarning(null)}
+      />
+
+      <DeactivateWarningDialog
+        open={!!deactivateWarning}
+        agent={deactivateWarning?.agent}
+        busy={deactivateWarning?.busy}
+        activeTriggers={deactivateWarning?.activeTriggers}
+        onDrain={() => handleDeactivateMode('drain')}
+        onHardStop={() => handleDeactivateMode('hard-stop')}
+        onCancel={() => setDeactivateWarning(null)}
+      />
+    </div>
+  );
+}
+
+function DisableWarningDialog({ open, agent, busy, activeTriggers, onDrain, onAbort, onCancel }) {
+  if (!open) return null;
+  const name = agent?.displayName ?? agent?.id ?? 'this agent';
+  const triggerCount = Array.isArray(activeTriggers) ? activeTriggers.length : 0;
+
+  const parts = [];
+  if (busy) parts.push('a session is currently running');
+  if (triggerCount > 0) parts.push(`${triggerCount} active trigger${triggerCount !== 1 ? 's' : ''}`);
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Disable agent" style={{
+      position: 'fixed', inset: 0, background: 'oklch(0 0 0 / 0.5)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999,
+    }}>
+      <div style={{
+        background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-lg)', padding: 'var(--eb-space-5)', maxWidth: 480,
+        width: '90%', boxShadow: 'var(--eb-shadow-xl)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-3)' }}>
+          <span style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2, fontSize: 20 }}>⚠</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h3 style={{ margin: 0, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
+              Disable "{name}"
+            </h3>
+            <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+              {parts.length > 0
+                ? `This agent has ${parts.join(' and ')}. Choose how to proceed:`
+                : 'This agent has active state. Choose how to proceed:'}
+            </p>
+            <ul style={{ margin: 'var(--eb-space-2) 0 0', paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
+              <li><strong>Let run</strong> — disable immediately; the current execution finishes naturally. No new triggers will start.</li>
+              <li><strong>Hard stop</strong> — kill the process now. Any in-progress work is aborted.</li>
+            </ul>
+          </div>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-4)' }}>
+          <button onClick={onCancel} style={{
+            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-bg-elevated)',
+            color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit',
+          }}>Cancel</button>
+          <button onClick={onDrain} style={{
+            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)',
+            color: 'var(--eb-text-inverted)', border: 'none',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit',
+          }}>Let run</button>
+          <button onClick={onAbort} style={{
+            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-status-error)',
+            color: 'var(--eb-text-inverted)', border: 'none',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit',
+          }}>Hard stop</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeactivateWarningDialog({ open, agent, busy, activeTriggers, onDrain, onHardStop, onCancel }) {
+  if (!open) return null;
+  const name = agent?.displayName ?? agent?.id ?? 'this agent';
+  const triggerCount = Array.isArray(activeTriggers) ? activeTriggers.length : 0;
+
+  const parts = [];
+  if (busy) parts.push('a session is currently running');
+  if (triggerCount > 0) parts.push(`${triggerCount} active trigger${triggerCount !== 1 ? 's' : ''}`);
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Deactivate agent" style={{
+      position: 'fixed', inset: 0, background: 'oklch(0 0 0 / 0.5)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999,
+    }}>
+      <div style={{
+        background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-lg)', padding: 'var(--eb-space-5)', maxWidth: 500,
+        width: '90%', boxShadow: 'var(--eb-shadow-xl)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-3)' }}>
+          <span style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2, fontSize: 20 }}>⚠</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h3 style={{ margin: 0, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
+              Deactivate "{name}"
+            </h3>
+            <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+              {parts.length > 0
+                ? `This agent has ${parts.join(' and ')}. Choose how to proceed:`
+                : 'This agent has active state. Choose how to proceed:'}
+            </p>
+            <ul style={{ margin: 'var(--eb-space-2) 0 0', paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
+              <li><strong>Let run</strong> — disable triggers now so no new executions start; the current execution finishes naturally. Come back to deactivate fully once the agent is idle.</li>
+              <li><strong>Hard stop</strong> — kill the process immediately, then wipe the workspace.</li>
+            </ul>
+          </div>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-4)' }}>
+          <button onClick={onCancel} style={{
+            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-bg-elevated)',
+            color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit',
+          }}>Cancel</button>
+          <button onClick={onDrain} style={{
+            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)',
+            color: 'var(--eb-text-inverted)', border: 'none',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit',
+          }}>Let run</button>
+          <button onClick={onHardStop} style={{
+            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-status-error)',
+            color: 'var(--eb-text-inverted)', border: 'none',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit',
+          }}>Hard stop + Deactivate</button>
+        </div>
+      </div>
     </div>
   );
 }

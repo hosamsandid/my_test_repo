@@ -657,7 +657,7 @@ app.put('/api/agents/:id', async (req, res) => {
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skillsOverride, mcpServersOverride } = req.body;
+  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skillsOverride, mcpServersOverride, disableMode } = req.body;
 
   // Enable/disable goes through the orchestrator so stubs (no token yet)
   // get fully materialized — Matrix user, workspace seeding, agent-runner
@@ -667,9 +667,19 @@ app.put('/api/agents/:id', async (req, res) => {
     const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
     const action = enabled ? 'enable' : 'disable';
     try {
-      const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/${action}`, {
-        method: 'POST',
-      });
+      // When disabling, forward an explicit mode ('drain' or 'abort') if the
+      // caller supplied one. Without a mode the orchestrator may return 409
+      // with a warning payload — relay that directly to the frontend so the
+      // UI can present the drain-vs-abort choice to the user.
+      const fetchOpts = { method: 'POST' };
+      if (action === 'disable' && disableMode) {
+        fetchOpts.headers = { 'Content-Type': 'application/json' };
+        fetchOpts.body = JSON.stringify({ mode: disableMode });
+      }
+      const resp = await fetch(
+        `${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/${action}`,
+        fetchOpts,
+      );
       const data = await resp.json();
       if (!resp.ok) return res.status(resp.status).json(data);
       // Re-read the updated config — orchestrator wrote the canonical version.
@@ -739,10 +749,19 @@ app.post('/api/agents/:id/deactivate', async (req, res) => {
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
-    const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/deactivate`, {
-      method: 'POST',
-    });
+    const { mode } = req.body || {};
+    const fetchOpts = { method: 'POST' };
+    if (mode) {
+      fetchOpts.headers = { 'Content-Type': 'application/json' };
+      fetchOpts.body = JSON.stringify({ mode });
+    }
+    const resp = await fetch(
+      `${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/deactivate`,
+      fetchOpts,
+    );
     const data = await resp.json();
+    // Forward 409 warning payloads to the frontend so the UI can present the
+    // drain-vs-hard-stop choice to the user.
     if (!resp.ok) return res.status(resp.status).json(data);
     res.json(data);
   } catch (err) {

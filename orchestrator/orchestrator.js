@@ -3741,8 +3741,8 @@ async function main() {
       const id = decodeURIComponent(reloadTriggersMatch[1]);
       const proc = agentProcesses.get(id);
       if (proc) {
-        proc.send({ type: 'reload-triggers' });
-        console.log(`[Orchestrator] Sent reload-triggers to agent ${id}`);
+        proc.kill('SIGUSR2');
+        console.log(`[Orchestrator] Sent SIGUSR2 (reload-triggers) to agent ${id}`);
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));

@@ -1523,7 +1523,12 @@ async def run_dm_listener() -> None:
     blueprint_id = cfg.get("blueprintId")
     if blueprint_id:
         print(f"[Runner:{agent_id}] Blueprint instance: {blueprint_id}", file=sys.stderr)
-    run_triggers = role in ("autonomous", "orchestrator")
+    # Always start the scheduler — mirrors agent-runner.js, which constructs
+    # TriggerScheduler unconditionally and lets it no-op when triggers.json
+    # is empty. The previous gate (role in autonomous/orchestrator) was
+    # carried over from the placeholder log and predates the #122 role
+    # rename (expert → agent/team/team-member).
+    run_triggers = True
 
     # Lazy import — keeps BP-dispatch mode working even on hosts without nio.
     from nio import (  # type: ignore

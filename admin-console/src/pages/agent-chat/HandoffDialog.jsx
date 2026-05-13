@@ -1,21 +1,14 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { Loader2, Send, X, ArrowRight, RefreshCw, GitCommit, GitBranch, AlertTriangle, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Loader2, Send, X, ArrowRight, RefreshCw, GitCommit, AlertTriangle, CheckCircle2, AlertCircle, ChevronRight, ChevronLeft } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 
 /**
- * HandoffDialog — Modal for the FreeFlow hand-off action on a bp-instance.
+ * HandoffDialog — Guided wizard for the FreeFlow hand-off action on a bp-instance.
  *
- * On open, loads two things in parallel:
- *   - candidates  : suggested + sibling targets from the BP graph
- *   - git-status  : per-repo commit/push state of the source workspace
- *
- * The git-status drives a pre-flight section above the target list. If any
- * source repo is dirty or ahead of its upstream, submit is disabled until
- * the user either resolves the issue (via "Ask agent to commit/push", which
- * posts a canned prompt into the source DM and re-checks) or explicitly
- * opts into an override and provides a reason. The reason flows server-side
- * into the structured DM body each target receives, so the audit trail
- * survives in chat.
+ * Three steps:
+ *   Step 1: Check workspace (git status, human-readable)
+ *   Step 2: Select target agents
+ *   Step 3: Add a hand-off note and confirm
  *
  * On submit, POSTs to /api/agents/:id/handover with targets + note +
  * optional override. The server re-fetches git-status and refuses unless
@@ -33,6 +26,9 @@ export default function HandoffDialog({ open, agent, onClose, onSent }) {
   const [overrideOn, setOverrideOn]     = useState(false);
   const [overrideReason, setOverrideRn] = useState('');
   const [results, setResults]           = useState(null);
+  const [step, setStep]                 = useState(1); // 1 | 2 | 3
+
+  const TOTAL_STEPS = 3;
 
   const refreshGitStatus = useCallback(async () => {
     if (!agent?.id) return;
@@ -59,6 +55,7 @@ export default function HandoffDialog({ open, agent, onClose, onSent }) {
     setOverrideOn(false);
     setOverrideRn('');
     setResults(null);
+    setStep(1);
 
     Promise.all([
       apiCall('GET', `/api/agents/${agent.id}/handover/candidates`).catch((err) => ({ __error: err.message || String(err) })),
@@ -101,10 +98,10 @@ export default function HandoffDialog({ open, agent, onClose, onSent }) {
 
   const overrideRequired = !sourceReady && hasRepos;
   const overrideValid = overrideOn && overrideReason.trim().length > 0;
-  const canSubmit =
-    phase === 'ready' &&
-    selected.size > 0 &&
-    (sourceReady || overrideValid || !hasRepos);
+
+  const step1Ready = sourceReady || overrideValid || !hasRepos;
+  const step2Ready = selected.size > 0;
+  const canSubmit = phase === 'ready' && step1Ready && step2Ready;
 
   const rows = (() => {
     if (!candidates) return [];
@@ -176,17 +173,320 @@ export default function HandoffDialog({ open, agent, onClose, onSent }) {
 
   const sourceLabel = candidates?.source?.displayName || agent?.displayName || agent?.id;
 
+  const selectedRows = rows.filter((r) => selected.has(r.agentId));
+  const selectedRepos = repos.filter((r) => r.exists);
+
+  /* ─── Workspace status message (human-readable) ─────────────────────── */
+
+  function workspaceStatusMessage() {
+    if (gitStatus?.error) return null;
+    if (!hasRepos) return { tone: 'neutral', text: 'No repositories are linked to this workspace.' };
+    if (sourceReady) return { tone: 'success', text: 'Your workspace is clean and all changes have been pushed. You\'re ready to hand off.' };
+    const issues = [];
+    if (hasDirty) issues.push('unsaved changes');
+    if (hasUnpushed) issues.push('unpushed commits');
+    return {
+      tone: 'warning',
+      text: `Your workspace has ${issues.join(' and ')}. Please resolve this before handing off, or explain why you're proceeding anyway.`,
+    };
+  }
+
+  const wsMsg = workspaceStatusMessage();
+
+  /* ─── Render helpers ─────────────────────────────────────────────────── */
+
+  function renderStep1() {
+    return (
+      <div style={stepContentStyle}>
+        <p style={stepDescStyle}>
+          Before handing off, make sure your work is saved and pushed to the remote repository. This ensures the next agent can pick up exactly where you left off.
+        </p>
+
+        {phase === 'loading' && (
+          <div style={statusStyle}>
+            <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> Checking workspace…
+          </div>
+        )}
+
+        {wsMsg && (
+          <div style={workspaceStatusStyle(wsMsg.tone)}>
+            {wsMsg.tone === 'success' && <CheckCircle2 size={16} style={{ color: 'var(--eb-status-success)', flexShrink: 0 }} />}
+            {wsMsg.tone === 'warning' && <AlertTriangle size={16} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />}
+            {wsMsg.tone === 'neutral' && <AlertCircle size={16} style={{ color: 'var(--eb-text-muted)', flexShrink: 0 }} />}
+            <span>{wsMsg.text}</span>
+          </div>
+        )}
+
+        {gitStatus?.error && (
+          <div style={errorStyle}>Workspace check unavailable: {gitStatus.error}</div>
+        )}
+
+        {!gitStatus?.error && hasRepos && (
+          <div style={repoListStyle}>
+            {repos.map((r) => (
+              <RepoStatusCard key={r.name} repo={r} />
+            ))}
+          </div>
+        )}
+
+        {(hasDirty || hasUnpushed) && (
+          <div style={nudgeRowStyle}>
+            {hasDirty && (
+              <button
+                type="button"
+                onClick={() => handleNudge('commit')}
+                disabled={nudging !== null}
+                style={nudgeBtnStyle(nudging === 'commit')}
+              >
+                {nudging === 'commit'
+                  ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
+                  : <GitCommit size={12} />}
+                Ask agent to save &amp; push
+              </button>
+            )}
+            {hasUnpushed && !hasDirty && (
+              <button
+                type="button"
+                onClick={() => handleNudge('push')}
+                disabled={nudging !== null}
+                style={nudgeBtnStyle(nudging === 'push')}
+              >
+                {nudging === 'push'
+                  ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
+                  : <Send size={12} />}
+                Ask agent to push changes
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={refreshGitStatus}
+              disabled={gitRefreshing}
+              style={ghostBtnStyle(gitRefreshing)}
+            >
+              {gitRefreshing
+                ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
+                : <RefreshCw size={12} />}
+              Re-check
+            </button>
+          </div>
+        )}
+
+        {hasRepos && sourceReady && (
+          <div style={nudgeRowStyle}>
+            <button
+              type="button"
+              onClick={refreshGitStatus}
+              disabled={gitRefreshing}
+              style={ghostBtnStyle(gitRefreshing)}
+            >
+              {gitRefreshing
+                ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
+                : <RefreshCw size={12} />}
+              Re-check
+            </button>
+          </div>
+        )}
+
+        {overrideRequired && (
+          <div style={overrideBoxStyle}>
+            <label style={overrideLabelStyle}>
+              <input
+                type="checkbox"
+                checked={overrideOn}
+                onChange={(e) => setOverrideOn(e.target.checked)}
+              />
+              <span>Proceed anyway without resolving the issues above</span>
+            </label>
+            {overrideOn && (
+              <div style={{ marginTop: 8 }}>
+                <label style={labelStyle}>Why are you skipping this check?</label>
+                <textarea
+                  value={overrideReason}
+                  onChange={(e) => setOverrideRn(e.target.value)}
+                  placeholder="Explain why you're handing off with unresolved workspace issues. This will be visible to the receiving agent."
+                  rows={3}
+                  style={{ ...textareaStyle, marginTop: 4 }}
+                />
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderStep2() {
+    return (
+      <div style={stepContentStyle}>
+        <p style={stepDescStyle}>
+          Choose which agents should receive this work. Pre-selected agents are direct successors based on the project plan.
+        </p>
+
+        {rows.length === 0 && (
+          <div style={emptyStateStyle}>
+            No downstream agents found. There is nobody to hand off to.
+          </div>
+        )}
+
+        {rows.length > 0 && (
+          <div style={listStyle}>
+            {rows.map((row) => {
+              const checked = selected.has(row.agentId);
+              return (
+                <label key={row.agentId} style={rowStyle(checked)}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggle(row.agentId)}
+                    style={{ marginTop: 3 }}
+                  />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                      <span style={{ fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
+                        {row.displayName}
+                      </span>
+                      <span
+                        title={row.agentId}
+                        style={agentIdTooltipStyle}
+                      >
+                        {row.agentId}
+                      </span>
+                      {!row.materialized && <span style={badgeStyle('var(--eb-status-warning)')}>not yet active</span>}
+                      {row.suggested && row.reason === 'depends-on' && (
+                        <span style={badgeStyle('var(--eb-accent-primary)')}>next in plan</span>
+                      )}
+                      {row.suggested && row.reason === 'input-artifact' && (
+                        <span style={badgeStyle('var(--eb-accent-primary)')}>needs your output</span>
+                      )}
+                      {!row.suggested && (
+                        <span style={badgeStyle('var(--eb-text-muted)')}>sibling</span>
+                      )}
+                    </div>
+                    {row.suggested && row.reason === 'input-artifact' && Array.isArray(row.paths) && row.paths.length > 0 && (
+                      <div style={pathsStyle}>
+                        {row.paths.map((p) => <code key={p} style={pathChipStyle}>{p}</code>)}
+                      </div>
+                    )}
+                  </div>
+                </label>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderStep3() {
+    return (
+      <div style={stepContentStyle}>
+        <p style={stepDescStyle}>
+          Add a brief note for the receiving agent — what did you complete, and what should they do next?
+        </p>
+
+        {/* Summary */}
+        <div style={summaryBoxStyle}>
+          <div style={summaryTitleStyle}>Summary</div>
+          <div style={summaryLineStyle}>
+            <span style={summaryLabelStyle}>Handing off from</span>
+            <span style={summaryValueStyle}>{sourceLabel}</span>
+          </div>
+          <div style={summaryLineStyle}>
+            <span style={summaryLabelStyle}>Receiving agent{selectedRows.length !== 1 ? 's' : ''}</span>
+            <span style={summaryValueStyle}>
+              {selectedRows.length > 0
+                ? selectedRows.map((r) => r.displayName).join(', ')
+                : <em style={{ color: 'var(--eb-text-muted)' }}>none selected</em>}
+            </span>
+          </div>
+          {selectedRepos.length > 0 && (
+            <div style={summaryLineStyle}>
+              <span style={summaryLabelStyle}>Repositories</span>
+              <span style={summaryValueStyle}>{selectedRepos.map((r) => r.name).join(', ')}</span>
+            </div>
+          )}
+        </div>
+
+        <label style={{ display: 'block', marginTop: 'var(--eb-space-3)' }}>
+          <span style={labelStyle}>Hand-off note <span style={{ fontWeight: 'normal', color: 'var(--eb-text-muted)' }}>(optional)</span></span>
+          <textarea
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            disabled={phase === 'sending' || phase === 'done'}
+            placeholder="What did you finish? What should the next agent focus on?"
+            rows={5}
+            style={{ ...textareaStyle, marginTop: 4 }}
+          />
+          <span style={hintStyle}>
+            Your note — along with the repository coordinates — will be sent to each selected agent.
+          </span>
+        </label>
+      </div>
+    );
+  }
+
+  function renderDone() {
+    const successCount = (results?.results || []).filter((r) => r.ok).length;
+    const activatedNames = (results?.results || [])
+      .filter((r) => r.ok)
+      .map((r) => {
+        const match = rows.find((row) => row.agentId === r.agentId);
+        return match?.displayName || r.agentId;
+      });
+
+    return (
+      <div style={stepContentStyle}>
+        <div style={doneIconStyle}>
+          <CheckCircle2 size={40} style={{ color: 'var(--eb-status-success)' }} />
+        </div>
+        <h4 style={doneTitleStyle}>Hand-off complete</h4>
+        <p style={doneDescStyle}>
+          {successCount === 1
+            ? `${activatedNames[0]} has received the hand-off and will pick up the work.`
+            : `${activatedNames.join(', ')} have received the hand-off and will pick up the work.`}
+        </p>
+        {(results?.results || []).some((r) => !r.ok) && (
+          <div style={{ marginTop: 'var(--eb-space-3)' }}>
+            <div style={{ ...sectionTitleStyle, marginBottom: 4 }}>Issues</div>
+            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 'var(--eb-text-xs)' }}>
+              {(results.results || []).filter((r) => !r.ok).map((r) => {
+                const match = rows.find((row) => row.agentId === r.agentId);
+                return (
+                  <li key={r.agentId} style={{ color: 'var(--eb-status-error)', marginBottom: 2 }}>
+                    {match?.displayName || r.agentId}: {r.error}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const stepTitles = [
+    'Step 1: Check your workspace',
+    'Step 2: Select the receiving agent',
+    'Step 3: Add a note and confirm',
+  ];
+
+  const canGoNext = step === 1 ? step1Ready : step === 2 ? step2Ready : false;
+
   return (
     <div role="dialog" aria-modal="true" aria-label="Hand-off" style={overlayStyle}>
       <div style={dialogStyle}>
+
+        {/* Header */}
         <div style={headerStyle}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', minWidth: 0 }}>
             <ArrowRight size={18} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
             <div style={{ minWidth: 0 }}>
               <h3 style={titleStyle}>Hand-off from {sourceLabel}</h3>
-              <p style={subtitleStyle}>
-                Review the source workspace, pick downstream agents to activate, and send them a structured hand-off note.
-              </p>
+              {phase !== 'done' && (
+                <p style={subtitleStyle}>
+                  {stepTitles[step - 1]}
+                </p>
+              )}
             </div>
           </div>
           <button
@@ -200,244 +500,82 @@ export default function HandoffDialog({ open, agent, onClose, onSent }) {
           </button>
         </div>
 
+        {/* Progress indicator */}
+        {phase !== 'done' && (
+          <div style={progressBarContainerStyle}>
+            {[1, 2, 3].map((s) => (
+              <div key={s} style={progressStepStyle(s, step)} />
+            ))}
+            <span style={progressLabelStyle}>{step} / {TOTAL_STEPS}</span>
+          </div>
+        )}
+
+        {/* Body */}
         <div style={bodyStyle}>
-          {phase === 'loading' && (
+          {phase === 'loading' && step === 1 && (
             <div style={statusStyle}>
-              <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> Loading candidates and git status…
+              <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> Loading workspace status…
             </div>
           )}
           {error && phase !== 'sending' && (
             <div style={errorStyle}>{error}</div>
           )}
 
-          {phase !== 'loading' && (
-            <>
-              {/* Pre-flight: source workspace git status */}
-              <section style={sectionStyle}>
-                <div style={sectionHeadStyle}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <GitBranch size={14} />
-                    <span style={sectionTitleStyle}>Source workspace</span>
-                    {sourceReady && hasRepos && (
-                      <span style={badgeStyle('var(--eb-status-success)')}>Ready</span>
-                    )}
-                    {!sourceReady && hasRepos && (
-                      <span style={badgeStyle('var(--eb-status-warning)')}>Not ready</span>
-                    )}
-                    {!hasRepos && !gitStatus?.error && (
-                      <span style={badgeStyle('var(--eb-text-muted)')}>No repos</span>
-                    )}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={refreshGitStatus}
-                    disabled={gitRefreshing}
-                    style={ghostBtnStyle(gitRefreshing)}
-                    title="Re-check git status"
-                  >
-                    {gitRefreshing
-                      ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
-                      : <RefreshCw size={12} />}
-                    Re-check
-                  </button>
-                </div>
-
-                {gitStatus?.error && (
-                  <div style={errorStyle}>Git status unavailable: {gitStatus.error}</div>
-                )}
-
-                {!gitStatus?.error && hasRepos && (
-                  <div style={repoListStyle}>
-                    {repos.map((r) => (
-                      <RepoStatusCard key={r.name} repo={r} />
-                    ))}
-                  </div>
-                )}
-
-                {(hasDirty || hasUnpushed) && (
-                  <div style={nudgeRowStyle}>
-                    {hasDirty && (
-                      <button
-                        type="button"
-                        onClick={() => handleNudge('commit')}
-                        disabled={nudging !== null}
-                        style={nudgeBtnStyle(nudging === 'commit')}
-                      >
-                        {nudging === 'commit'
-                          ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
-                          : <GitCommit size={12} />}
-                        Ask agent to commit &amp; push
-                      </button>
-                    )}
-                    {hasUnpushed && !hasDirty && (
-                      <button
-                        type="button"
-                        onClick={() => handleNudge('push')}
-                        disabled={nudging !== null}
-                        style={nudgeBtnStyle(nudging === 'push')}
-                      >
-                        {nudging === 'push'
-                          ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
-                          : <Send size={12} />}
-                        Ask agent to push pending commits
-                      </button>
-                    )}
-                    <span style={hintStyle}>
-                      Posts a prompt into the source agent&apos;s chat so the agent does the git work itself.
-                      Re-check after the commits land.
-                    </span>
-                  </div>
-                )}
-
-                {overrideRequired && (
-                  <div style={overrideBoxStyle}>
-                    <label style={overrideLabelStyle}>
-                      <input
-                        type="checkbox"
-                        checked={overrideOn}
-                        onChange={(e) => setOverrideOn(e.target.checked)}
-                        disabled={phase === 'sending' || phase === 'done'}
-                      />
-                      <span>Hand off anyway (not recommended)</span>
-                    </label>
-                    {overrideOn && (
-                      <textarea
-                        value={overrideReason}
-                        onChange={(e) => setOverrideRn(e.target.value)}
-                        placeholder="Why are you bypassing the git checks? This is included in every target's hand-off note."
-                        rows={2}
-                        disabled={phase === 'sending' || phase === 'done'}
-                        style={{ ...textareaStyle, marginTop: 6 }}
-                      />
-                    )}
-                  </div>
-                )}
-              </section>
-
-              {/* Targets */}
-              <section style={{ ...sectionStyle, marginTop: 'var(--eb-space-3)' }}>
-                <div style={sectionHeadStyle}>
-                  <span style={sectionTitleStyle}>Targets</span>
-                  <span style={hintStyle}>
-                    {rows.length > 0
-                      ? 'Suggested = depends-on / input-artifact dependents from the BP graph.'
-                      : 'No sibling bp-instance agents — nothing to hand off to.'}
-                  </span>
-                </div>
-
-                {rows.length > 0 && (
-                  <>
-                    <div style={listStyle}>
-                      {rows.map((row) => {
-                        const checked = selected.has(row.agentId);
-                        return (
-                          <label key={row.agentId} style={rowStyle(checked)}>
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() => toggle(row.agentId)}
-                              disabled={phase === 'sending' || phase === 'done'}
-                              style={{ marginTop: 3 }}
-                            />
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                                <span style={{ fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
-                                  {row.displayName}
-                                </span>
-                                <code style={idStyle}>{row.agentId}</code>
-                                {!row.materialized && <span style={badgeStyle('var(--eb-status-warning)')}>stub</span>}
-                                {row.suggested && row.reason === 'depends-on' && (
-                                  <span style={badgeStyle('var(--eb-accent-primary)')}>depends-on</span>
-                                )}
-                                {row.suggested && row.reason === 'input-artifact' && (
-                                  <span style={badgeStyle('var(--eb-accent-primary)')}>input-artifact</span>
-                                )}
-                                {!row.suggested && (
-                                  <span style={badgeStyle('var(--eb-text-muted)')}>sibling</span>
-                                )}
-                              </div>
-                              {row.suggested && row.reason === 'input-artifact' && Array.isArray(row.paths) && row.paths.length > 0 && (
-                                <div style={pathsStyle}>
-                                  {row.paths.map((p) => <code key={p} style={pathChipStyle}>{p}</code>)}
-                                </div>
-                              )}
-                            </div>
-                          </label>
-                        );
-                      })}
-                    </div>
-
-                    <label style={{ display: 'block', marginTop: 'var(--eb-space-3)' }}>
-                      <span style={labelStyle}>Hand-off note</span>
-                      <textarea
-                        value={note}
-                        onChange={(e) => setNote(e.target.value)}
-                        disabled={phase === 'sending' || phase === 'done'}
-                        placeholder="What did you finish, what should the downstream agents do? This goes into each target's chat as part of the structured hand-off."
-                        rows={5}
-                        style={textareaStyle}
-                      />
-                      <span style={hintStyle}>
-                        The note is wrapped with the source-of-work coordinates (repo, branch, head commit) so each target can pull immediately.
-                      </span>
-                    </label>
-                  </>
-                )}
-              </section>
-
-              {results && (
-                <div style={resultsStyle}>
-                  <div style={resultsTitleStyle}>
-                    Sent to {results.sent}/{results.total} target{results.total === 1 ? '' : 's'}
-                  </div>
-                  <ul style={resultsListStyle}>
-                    {(results.results || []).map((r) => (
-                      <li key={r.agentId} style={resultItemStyle(r.ok)}>
-                        <code style={idStyle}>{r.agentId}</code>
-                        {r.ok ? ' ✓ delivered' : ` ✗ failed (${r.stage}: ${r.error})`}
-                        {r.ok && Array.isArray(r.consistencyWarnings) && r.consistencyWarnings.length > 0 && (
-                          <ul style={warningSubListStyle}>
-                            {r.consistencyWarnings.map((w, i) => (
-                              <li key={i} style={warningSubItemStyle}>{w}</li>
-                            ))}
-                          </ul>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </>
-          )}
+          {phase === 'done'
+            ? renderDone()
+            : phase !== 'loading' && (
+              <>
+                {step === 1 && renderStep1()}
+                {step === 2 && renderStep2()}
+                {step === 3 && renderStep3()}
+              </>
+            )}
         </div>
 
+        {/* Footer */}
         <div style={footerStyle}>
           <button
             type="button"
-            onClick={() => onClose?.()}
+            onClick={() => phase === 'done' ? onClose?.() : (step === 1 ? onClose?.() : setStep(step - 1))}
             disabled={phase === 'sending'}
             style={cancelBtnStyle(phase === 'sending')}
           >
-            {phase === 'done' ? 'Close' : 'Cancel'}
+            {phase === 'done' ? 'Close' : step === 1 ? 'Cancel' : (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <ChevronLeft size={14} /> Back
+              </span>
+            )}
           </button>
+
           {phase !== 'done' && (
-            <button
-              type="button"
-              onClick={handleSubmit}
-              disabled={!canSubmit}
-              style={confirmBtnStyle(!canSubmit)}
-              title={
-                !sourceReady && !overrideValid
-                  ? 'Source workspace has uncommitted or unpushed changes — resolve them or enable the override'
-                  : selected.size === 0
-                    ? 'Pick at least one target'
-                    : ''
-              }
-            >
-              {phase === 'sending'
-                ? <><Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> Sending…</>
-                : <><Send size={13} /> Hand off to {selected.size || 0}</>}
-            </button>
+            step < 3 ? (
+              <button
+                type="button"
+                onClick={() => setStep(step + 1)}
+                disabled={!canGoNext || phase === 'loading'}
+                style={confirmBtnStyle(!canGoNext || phase === 'loading')}
+                title={
+                  step === 1 && !step1Ready
+                    ? 'Resolve workspace issues or enable the override to continue'
+                    : step === 2 && !step2Ready
+                      ? 'Select at least one target agent'
+                      : ''
+                }
+              >
+                Next <ChevronRight size={14} />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleSubmit}
+                disabled={!canSubmit}
+                style={confirmBtnStyle(!canSubmit)}
+              >
+                {phase === 'sending'
+                  ? <><Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> Sending…</>
+                  : <><Send size={13} /> Hand off</>}
+              </button>
+            )
           )}
         </div>
       </div>
@@ -461,6 +599,28 @@ function RepoStatusCard({ repo }) {
     tone === 'error'   ? 'var(--eb-status-error)' :
                          'var(--eb-status-warning)';
 
+  function humanStatus() {
+    if (!repo.exists) return 'This repository has not been set up in this workspace.';
+    if (repo.error) return `Something went wrong checking this repository: ${repo.error}`;
+    if (repo.ready) return `All good — work is saved and synced on ${repo.branchActual}.`;
+    const issues = [];
+    if (!repo.clean) {
+      const { staged = 0, unstaged = 0, untracked = 0 } = repo.dirty || {};
+      const parts = [];
+      if (staged > 0) parts.push(`${staged} staged`);
+      if (unstaged > 0) parts.push(`${unstaged} changed`);
+      if (untracked > 0) parts.push(`${untracked} new`);
+      issues.push(`Unsaved changes (${parts.join(', ')})`);
+    }
+    if (repo.upstream && (repo.ahead || 0) > 0) {
+      issues.push(`${repo.ahead} commit${repo.ahead === 1 ? '' : 's'} not yet pushed`);
+    }
+    if (!repo.upstream) {
+      issues.push('Branch has never been pushed to remote');
+    }
+    return issues.join(' · ');
+  }
+
   return (
     <div style={repoCardStyle(color)}>
       <div style={repoCardHeadStyle}>
@@ -470,51 +630,18 @@ function RepoStatusCard({ repo }) {
           <code style={idStyle}>{repo.branchActual}{repo.headShort ? ` @ ${repo.headShort}` : ''}</code>
         )}
       </div>
-
-      {!repo.exists && (
-        <div style={cardLineStyle}>Not cloned in this workspace.</div>
-      )}
-      {repo.error && (
-        <div style={cardLineStyle}>git error: {repo.error}</div>
-      )}
-      {repo.exists && !repo.error && (
-        <>
-          {repo.headSubject && (
-            <div style={cardLineStyle} title={repo.headSubject}>
-              <em>{repo.headSubject}</em>
-            </div>
-          )}
-          {!repo.clean && (
-            <div style={cardLineStyle}>
-              Uncommitted: {repo.dirty.staged} staged · {repo.dirty.unstaged} unstaged · {repo.dirty.untracked} untracked
-              {repo.dirty.files?.length > 0 && (
-                <details style={{ marginTop: 4 }}>
-                  <summary style={{ cursor: 'pointer', color: 'var(--eb-text-secondary)' }}>show files</summary>
-                  <ul style={fileListStyle}>
-                    {repo.dirty.files.map((f) => (
-                      <li key={f.path} style={fileItemStyle}>
-                        <code style={fileCodeStyle}>{f.status}</code> {f.path}
-                      </li>
-                    ))}
-                  </ul>
-                </details>
-              )}
-            </div>
-          )}
-          {repo.upstream && (repo.ahead || 0) > 0 && (
-            <div style={cardLineStyle}>
-              {repo.ahead} unpushed commit{repo.ahead === 1 ? '' : 's'} (upstream: <code style={fileCodeStyle}>{repo.upstream}</code>)
-            </div>
-          )}
-          {!repo.upstream && (
-            <div style={cardLineStyle}>No upstream tracking branch — branch has never been pushed.</div>
-          )}
-          {repo.ready && (
-            <div style={{ ...cardLineStyle, color: 'var(--eb-status-success)' }}>
-              Clean, pushed, and on <code style={fileCodeStyle}>{repo.upstream}</code>.
-            </div>
-          )}
-        </>
+      <div style={cardLineStyle}>{humanStatus()}</div>
+      {!repo.clean && repo.dirty?.files?.length > 0 && (
+        <details style={{ marginTop: 4 }}>
+          <summary style={{ cursor: 'pointer', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)' }}>Show changed files</summary>
+          <ul style={fileListStyle}>
+            {repo.dirty.files.map((f) => (
+              <li key={f.path} style={fileItemStyle}>
+                <code style={fileCodeStyle}>{f.status}</code> {f.path}
+              </li>
+            ))}
+          </ul>
+        </details>
       )}
     </div>
   );
@@ -538,7 +665,7 @@ const dialogStyle = {
   border: '1px solid var(--eb-border-default)',
   borderRadius: 'var(--eb-radius-lg)',
   width: '100%',
-  maxWidth: 720,
+  maxWidth: 680,
   maxHeight: '90vh',
   display: 'flex',
   flexDirection: 'column',
@@ -583,10 +710,47 @@ const closeBtnStyle = (disabled) => ({
   flexShrink: 0,
 });
 
+const progressBarContainerStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 4,
+  padding: '8px var(--eb-space-4)',
+  borderBottom: '1px solid var(--eb-border-default)',
+  background: 'var(--eb-bg-elevated)',
+};
+
+const progressStepStyle = (s, current) => ({
+  flex: 1,
+  height: 4,
+  borderRadius: 2,
+  background: s <= current ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)',
+  transition: 'background 0.2s',
+});
+
+const progressLabelStyle = {
+  fontSize: 11,
+  color: 'var(--eb-text-muted)',
+  flexShrink: 0,
+  marginLeft: 4,
+};
+
 const bodyStyle = {
   flex: 1,
   overflowY: 'auto',
   padding: 'var(--eb-space-4)',
+};
+
+const stepContentStyle = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 'var(--eb-space-3)',
+};
+
+const stepDescStyle = {
+  margin: 0,
+  fontSize: 'var(--eb-text-sm)',
+  color: 'var(--eb-text-secondary)',
+  lineHeight: 1.6,
 };
 
 const statusStyle = {
@@ -607,25 +771,24 @@ const errorStyle = {
   marginBottom: 'var(--eb-space-3)',
 };
 
-const sectionStyle = {
+const workspaceStatusStyle = (tone) => ({
   display: 'flex',
-  flexDirection: 'column',
-  gap: 'var(--eb-space-2)',
-};
-
-const sectionHeadStyle = {
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'space-between',
-  gap: 'var(--eb-space-2)',
-  flexWrap: 'wrap',
-};
-
-const sectionTitleStyle = {
+  alignItems: 'flex-start',
+  gap: 8,
+  padding: 'var(--eb-space-3)',
+  borderRadius: 'var(--eb-radius-md)',
   fontSize: 'var(--eb-text-sm)',
-  fontWeight: 'var(--eb-font-semibold)',
   color: 'var(--eb-text-primary)',
-};
+  lineHeight: 1.5,
+  background:
+    tone === 'success' ? 'var(--eb-status-success-bg, color-mix(in srgb, var(--eb-status-success) 8%, transparent))' :
+    tone === 'warning' ? 'var(--eb-status-warning-bg, color-mix(in srgb, var(--eb-status-warning) 10%, transparent))' :
+                         'var(--eb-bg-elevated)',
+  border: `1px solid ${
+    tone === 'success' ? 'var(--eb-status-success)' :
+    tone === 'warning' ? 'var(--eb-status-warning)' :
+                         'var(--eb-border-default)'}`,
+});
 
 const repoListStyle = {
   display: 'flex',
@@ -712,8 +875,7 @@ const ghostBtnStyle = (disabled) => ({
 });
 
 const overrideBoxStyle = {
-  marginTop: 'var(--eb-space-2)',
-  padding: 'var(--eb-space-2) var(--eb-space-3)',
+  padding: 'var(--eb-space-3)',
   border: '1px dashed var(--eb-status-warning)',
   borderRadius: 'var(--eb-radius-md)',
   background: 'var(--eb-bg-elevated)',
@@ -726,6 +888,16 @@ const overrideLabelStyle = {
   fontSize: 'var(--eb-text-sm)',
   color: 'var(--eb-text-primary)',
   cursor: 'pointer',
+};
+
+const emptyStateStyle = {
+  padding: 'var(--eb-space-4)',
+  textAlign: 'center',
+  fontSize: 'var(--eb-text-sm)',
+  color: 'var(--eb-text-muted)',
+  background: 'var(--eb-bg-elevated)',
+  borderRadius: 'var(--eb-radius-md)',
+  border: '1px solid var(--eb-border-default)',
 };
 
 const listStyle = {
@@ -754,6 +926,20 @@ const idStyle = {
   borderRadius: 4,
 };
 
+const agentIdTooltipStyle = {
+  fontFamily: 'var(--eb-font-mono)',
+  fontSize: 10,
+  color: 'var(--eb-text-muted)',
+  background: 'var(--eb-bg-elevated)',
+  padding: '1px 6px',
+  borderRadius: 4,
+  cursor: 'help',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  maxWidth: 120,
+  whiteSpace: 'nowrap',
+};
+
 const badgeStyle = (color) => ({
   fontSize: 10,
   padding: '1px 6px',
@@ -779,6 +965,43 @@ const pathChipStyle = {
   padding: '1px 5px',
   borderRadius: 3,
   color: 'var(--eb-text-secondary)',
+};
+
+const summaryBoxStyle = {
+  padding: 'var(--eb-space-3)',
+  background: 'var(--eb-bg-elevated)',
+  border: '1px solid var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-md)',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+};
+
+const summaryTitleStyle = {
+  fontSize: 'var(--eb-text-xs)',
+  fontWeight: 'var(--eb-font-semibold)',
+  color: 'var(--eb-text-muted)',
+  textTransform: 'uppercase',
+  letterSpacing: 0.5,
+  marginBottom: 2,
+};
+
+const summaryLineStyle = {
+  display: 'flex',
+  gap: 8,
+  fontSize: 'var(--eb-text-sm)',
+  alignItems: 'baseline',
+};
+
+const summaryLabelStyle = {
+  color: 'var(--eb-text-muted)',
+  flexShrink: 0,
+  minWidth: 120,
+};
+
+const summaryValueStyle = {
+  color: 'var(--eb-text-primary)',
+  fontWeight: 'var(--eb-font-medium)',
 };
 
 const labelStyle = {
@@ -810,45 +1033,37 @@ const hintStyle = {
   color: 'var(--eb-text-muted)',
 };
 
-const resultsStyle = {
-  marginTop: 'var(--eb-space-3)',
-  padding: 'var(--eb-space-3)',
-  background: 'var(--eb-bg-elevated)',
-  border: '1px solid var(--eb-border-default)',
-  borderRadius: 'var(--eb-radius-md)',
-};
-
-const resultsTitleStyle = {
+const sectionTitleStyle = {
   fontSize: 'var(--eb-text-sm)',
-  fontWeight: 'var(--eb-font-medium)',
+  fontWeight: 'var(--eb-font-semibold)',
   color: 'var(--eb-text-primary)',
-  marginBottom: 6,
 };
 
-const resultsListStyle = {
+const doneIconStyle = {
+  display: 'flex',
+  justifyContent: 'center',
+  padding: 'var(--eb-space-3) 0',
+};
+
+const doneTitleStyle = {
   margin: 0,
-  paddingLeft: 18,
-  fontSize: 'var(--eb-text-xs)',
+  fontSize: 'var(--eb-text-lg, var(--eb-text-md))',
+  fontWeight: 'var(--eb-font-semibold)',
+  color: 'var(--eb-text-primary)',
+  textAlign: 'center',
 };
 
-const resultItemStyle = (ok) => ({
-  color: ok ? 'var(--eb-status-success)' : 'var(--eb-status-error)',
-  marginBottom: 2,
-});
-
-const warningSubListStyle = {
-  marginTop: 2,
-  paddingLeft: 14,
-  color: 'var(--eb-status-warning)',
-};
-
-const warningSubItemStyle = {
-  fontSize: 11,
+const doneDescStyle = {
+  margin: '8px 0 0',
+  fontSize: 'var(--eb-text-sm)',
+  color: 'var(--eb-text-secondary)',
+  textAlign: 'center',
+  lineHeight: 1.6,
 };
 
 const footerStyle = {
   display: 'flex',
-  justifyContent: 'flex-end',
+  justifyContent: 'space-between',
   gap: 'var(--eb-space-2)',
   padding: 'var(--eb-space-3) var(--eb-space-4)',
   borderTop: '1px solid var(--eb-border-default)',
@@ -864,6 +1079,9 @@ const cancelBtnStyle = (disabled) => ({
   cursor: disabled ? 'not-allowed' : 'pointer',
   opacity: disabled ? 0.6 : 1,
   fontFamily: 'inherit',
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 4,
 });
 
 const confirmBtnStyle = (disabled) => ({

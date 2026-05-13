@@ -74,6 +74,30 @@ const handoverLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Too many requests' },
 });
+
+// Global limiter applied to all /api/ routes — covers the bulk of the
+// js/missing-rate-limiting findings. Conservative limit since this is an
+// internal admin console, not a public API.
+const apiLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests' },
+});
+
+// Tighter limit for routes that spawn processes, run git clone, or write
+// large files. Applied in addition to the global apiLimiter.
+const heavyLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests' },
+});
+
+app.use('/api/', apiLimiter);
+
 const MCP_SERVER_ID_RE = /^[a-z0-9-]+$/;
 const MCP_CREDENTIAL_ID_RE = /^[a-z0-9-]+$/;
 
@@ -1221,7 +1245,7 @@ app.post('/api/agents/:teamId/members', async (req, res) => {
   }
 });
 
-app.post('/api/agents', async (req, res) => {
+app.post('/api/agents', heavyLimiter, async (req, res) => {
   const { id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt, briefingsPath } = req.body;
   if (!id || !displayName || !role || !environmentId) {
     return res.status(400).json({ error: 'id, displayName, role, environmentId required' });
@@ -2131,7 +2155,7 @@ function resolveLlmBinding(llmEndpointId, defaultModelId) {
   return { llmEndpointId: ep.id, defaultModelId: pickEndpointDefaultModel(ep) };
 }
 
-app.post('/api/environments', (req, res) => {
+app.post('/api/environments', heavyLimiter, (req, res) => {
   const { name, description, skills, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers } = req.body || {};
   const id = normalizeEnvId(req.body?.id);
   if (!id) return res.status(400).json({ error: 'id is required (a-z, 0-9, -)' });
@@ -2241,7 +2265,7 @@ app.delete('/api/environments/:id', (req, res) => {
 // Probe a repo URL (optionally with one of our SSH keys) to verify the agent
 // will actually be able to clone it. Delegates to the orchestrator since only
 // that container has git/openssh and the SSH key files mounted.
-app.post('/api/repositories/check', async (req, res) => {
+app.post('/api/repositories/check', heavyLimiter, async (req, res) => {
   const { url, sshKeyId, githubTokenId } = req.body || {};
   if (!url || typeof url !== 'string') {
     return res.status(400).json({ ok: false, error: 'url is required' });
@@ -2374,7 +2398,7 @@ function quickstartSystemPrompt(org, repo) {
 // One-shot: from a GitHub URL, ensure a Working Environment exists for the
 // repo, and return (or create) a default agent bound to it. Reuses
 // existing artefacts when possible so repeat clicks are safe.
-app.post('/api/quickstart', async (req, res) => {
+app.post('/api/quickstart', heavyLimiter, async (req, res) => {
   const { url, githubTokenId, sshKeyId } = req.body || {};
 
   let parsed;
@@ -2695,7 +2719,7 @@ function planMembers(teamId, normalizedRoles, loadTemplate) {
   return planned;
 }
 
-app.post('/api/teams', async (req, res) => {
+app.post('/api/teams', heavyLimiter, async (req, res) => {
   const body = req.body || {};
   const { teamId, teamName, repository, githubTokenId, mcpServers } = body;
   const mode = body.mode === 'extend' ? 'extend' : 'create';
@@ -3072,7 +3096,7 @@ app.post('/api/teams', async (req, res) => {
    as the materialization proceeds. The frontend uses this for the live
    progress UI in the Team-Setup wizard. */
 
-app.post('/api/teams/stream', async (req, res) => {
+app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // Plain NDJSON over chunked transfer; no SSE wrapping. The wizard reads
   // chunks via the fetch streams API and parses one JSON object per line.
   res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
@@ -3778,7 +3802,7 @@ app.delete('/api/github-tokens/:id', (req, res) => {
    field. Falls back to { ok: false, error } on parse / auth / 404 — the
    wizard surfaces that to the user. */
 
-app.post('/api/github/probe', async (req, res) => {
+app.post('/api/github/probe', heavyLimiter, async (req, res) => {
   const { url, githubTokenId } = req.body || {};
   let parsed;
   try {

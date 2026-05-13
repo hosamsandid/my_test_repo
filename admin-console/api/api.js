@@ -3307,12 +3307,15 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
         return out;
       });
 
+      const memberDisplayName = p.instanceIndex !== null
+        ? `${teamName} · ${p.template.displayName} ${p.instanceIndex}`
+        : `${teamName} · ${p.template.displayName}`;
       const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(teamAgentId)}/members`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           id: p.memberId,
-          displayName: `${teamName} · ${p.template.displayName}`,
+          displayName: memberDisplayName,
           systemPromptOverride: promptText,
           // skillsOverride deliberately omitted in v1 — members inherit the
           // team-env's empty skill list. Once we ship role-specific Skill
@@ -3725,12 +3728,15 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
         return out;
       });
 
+      const memberDisplayName = p.instanceIndex !== null
+        ? `${teamName} · ${p.template.displayName} ${p.instanceIndex}`
+        : `${teamName} · ${p.template.displayName}`;
       const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(teamAgentId)}/members`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           id: p.memberId,
-          displayName: `${teamName} · ${p.template.displayName}`,
+          displayName: memberDisplayName,
           systemPromptOverride: promptText,
           sessionPolicy: p.template.sessionPolicy === 'per-invocation' ? 'per-invocation' : undefined,
           triggers: triggersOut,

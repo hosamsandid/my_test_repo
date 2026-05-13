@@ -717,22 +717,35 @@ const SINGLE_INSTANCE_ROLES = new Set(['business-analyst']);
 
 function RoleCard({ template, selected, count, onToggle, onCountChange }) {
   const [scriptPanelName, setScriptPanelName] = useState(null);
+  const [countError, setCountError] = useState(null);
   const Icon = ROLE_ICONS[template.icon] || User;
   const multiAllowed = !SINGLE_INSTANCE_ROLES.has(template.id);
 
   function handleMinus(e) {
     e.stopPropagation();
+    setCountError(null);
     if (count > 1) onCountChange(count - 1);
     else onToggle(); // deselect when decrementing below 1
   }
   function handlePlus(e) {
     e.stopPropagation();
+    setCountError(null);
     if (count < 10) onCountChange(count + 1);
   }
   function handleCountChange(e) {
     e.stopPropagation();
-    const v = parseInt(e.target.value, 10);
-    if (!isNaN(v) && v >= 1 && v <= 10) onCountChange(v);
+    const raw = e.target.value;
+    const v = parseInt(raw, 10);
+    if (raw === '' || isNaN(v) || !Number.isInteger(v)) {
+      setCountError('Enter a whole number between 1 and 10');
+      return;
+    }
+    if (v < 1 || v > 10) {
+      setCountError('Instance count must be between 1 and 10');
+      return;
+    }
+    setCountError(null);
+    onCountChange(v);
   }
 
   return (
@@ -898,60 +911,67 @@ function RoleCard({ template, selected, count, onToggle, onCountChange }) {
         <div
           onClick={e => e.stopPropagation()}
           style={{
-            display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+            display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)',
             paddingTop: 'var(--eb-space-2)',
             borderTop: '1px solid var(--eb-border-default)',
           }}
         >
-          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginRight: 'var(--eb-space-1)' }}>
-            Instances:
-          </span>
-          <button
-            type="button"
-            onClick={handleMinus}
-            style={{
-              width: 26, height: 26, borderRadius: 'var(--eb-radius-sm)',
-              background: 'var(--eb-bg-elevated)',
-              border: '1px solid var(--eb-border-default)',
-              color: 'var(--eb-text-primary)',
-              cursor: 'pointer', fontFamily: 'inherit',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 'var(--eb-text-md)', lineHeight: 1,
-            }}
-          >−</button>
-          <input
-            type="number"
-            value={count}
-            min={1}
-            max={10}
-            onClick={e => e.stopPropagation()}
-            onChange={handleCountChange}
-            style={{
-              width: 44, textAlign: 'center',
-              padding: 'var(--eb-space-1)',
-              background: 'var(--eb-bg-elevated)',
-              border: '1px solid var(--eb-border-default)',
-              borderRadius: 'var(--eb-radius-sm)',
-              color: 'var(--eb-text-primary)',
-              fontSize: 'var(--eb-text-sm)',
-              fontFamily: 'var(--eb-font-mono)',
-            }}
-          />
-          <button
-            type="button"
-            onClick={handlePlus}
-            disabled={count >= 10}
-            style={{
-              width: 26, height: 26, borderRadius: 'var(--eb-radius-sm)',
-              background: 'var(--eb-bg-elevated)',
-              border: '1px solid var(--eb-border-default)',
-              color: count >= 10 ? 'var(--eb-text-muted)' : 'var(--eb-text-primary)',
-              cursor: count >= 10 ? 'not-allowed' : 'pointer',
-              fontFamily: 'inherit',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 'var(--eb-text-md)', lineHeight: 1,
-            }}
-          >+</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginRight: 'var(--eb-space-1)' }}>
+              Instances:
+            </span>
+            <button
+              type="button"
+              onClick={handleMinus}
+              style={{
+                width: 26, height: 26, borderRadius: 'var(--eb-radius-sm)',
+                background: 'var(--eb-bg-elevated)',
+                border: '1px solid var(--eb-border-default)',
+                color: 'var(--eb-text-primary)',
+                cursor: 'pointer', fontFamily: 'inherit',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: 'var(--eb-text-md)', lineHeight: 1,
+              }}
+            >−</button>
+            <input
+              type="number"
+              value={count}
+              min={1}
+              max={10}
+              onClick={e => e.stopPropagation()}
+              onChange={handleCountChange}
+              style={{
+                width: 44, textAlign: 'center',
+                padding: 'var(--eb-space-1)',
+                background: 'var(--eb-bg-elevated)',
+                border: `1px solid ${countError ? 'var(--eb-status-error)' : 'var(--eb-border-default)'}`,
+                borderRadius: 'var(--eb-radius-sm)',
+                color: 'var(--eb-text-primary)',
+                fontSize: 'var(--eb-text-sm)',
+                fontFamily: 'var(--eb-font-mono)',
+              }}
+            />
+            <button
+              type="button"
+              onClick={handlePlus}
+              disabled={count >= 10}
+              style={{
+                width: 26, height: 26, borderRadius: 'var(--eb-radius-sm)',
+                background: 'var(--eb-bg-elevated)',
+                border: '1px solid var(--eb-border-default)',
+                color: count >= 10 ? 'var(--eb-text-muted)' : 'var(--eb-text-primary)',
+                cursor: count >= 10 ? 'not-allowed' : 'pointer',
+                fontFamily: 'inherit',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: 'var(--eb-text-md)', lineHeight: 1,
+              }}
+            >+</button>
+          </div>
+          {countError && (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', marginLeft: 2 }}>
+              {countError}
+            </div>
+          )}
         </div>
       )}
     </div>

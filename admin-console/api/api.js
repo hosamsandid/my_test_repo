@@ -1769,6 +1769,59 @@ app.get('/api/skills/:name/content', (req, res) => {
   res.json({ content });
 });
 
+app.post('/api/skills', (req, res) => {
+  const { name, content = '' } = req.body || {};
+  if (typeof name !== 'string' || !SKILL_NAME_RE.test(name)) {
+    return res.status(400).json({ error: 'Invalid skill name' });
+  }
+  const skillDir = path.join(POOL_DIR, 'skills', name);
+  const skillPath = path.join(skillDir, 'SKILL.md');
+  if (fs.existsSync(skillPath)) {
+    return res.status(409).json({ error: `Skill '${name}' already exists` });
+  }
+  fs.mkdirSync(skillDir, { recursive: true });
+  fs.writeFileSync(skillPath, typeof content === 'string' ? content : '', 'utf8');
+  res.status(201).json({ name, source: 'pool' });
+});
+
+app.put('/api/skills/:name', (req, res) => {
+  const { name } = req.params;
+  const { source } = req.query;
+  if (!SKILL_NAME_RE.test(name)) return res.status(400).json({ error: 'Invalid skill name' });
+  if (source === 'agent') {
+    return res.status(403).json({ error: 'Agent skills are read-only from the registry. Use the propagation flow to promote a skill to the pool.' });
+  }
+  const skillPath = path.join(POOL_DIR, 'skills', name, 'SKILL.md');
+  if (!fs.existsSync(skillPath)) return res.status(404).json({ error: 'Skill not found' });
+  const { content } = req.body || {};
+  if (typeof content !== 'string') return res.status(400).json({ error: 'content must be a string' });
+  fs.writeFileSync(skillPath, content, 'utf8');
+  res.json({ name, source: 'pool' });
+});
+
+app.delete('/api/skills/:name', (req, res) => {
+  const { name } = req.params;
+  const { source } = req.query;
+  if (!SKILL_NAME_RE.test(name)) return res.status(400).json({ error: 'Invalid skill name' });
+  if (source === 'agent') {
+    return res.status(403).json({ error: 'Agent skills cannot be deleted from the registry.' });
+  }
+  const skillDir = path.join(POOL_DIR, 'skills', name);
+  const skillPath = path.join(skillDir, 'SKILL.md');
+  if (!fs.existsSync(skillPath)) return res.status(404).json({ error: 'Skill not found' });
+
+  const blocking = listEnvironmentIds()
+    .map(loadEnvironment)
+    .filter(env => env && Array.isArray(env.skills) && env.skills.includes(name))
+    .map(env => env.id);
+  if (blocking.length > 0) {
+    return res.status(409).json({ error: 'Skill is in use', environments: blocking });
+  }
+
+  fs.rmSync(skillDir, { recursive: true, force: true });
+  res.json({ deleted: name });
+});
+
 /* ─── LLM Config ─────────────────────────────────────────────────────── */
 
 app.get('/api/llm-config', (req, res) => {

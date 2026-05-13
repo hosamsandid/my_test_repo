@@ -636,7 +636,7 @@ app.get('/api/agents', (req, res) => {
 // NOTE: must be registered BEFORE `/api/agents/:id` — otherwise Express
 // would match this static path against the parameterized route (with
 // id="statuses") and return 404.
-app.get('/api/agents/statuses', async (req, res) => {
+app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
   const ids = listAgentDirs();
 
   let runningIds = new Set();
@@ -682,7 +682,7 @@ app.get('/api/agents/:id', (req, res) => {
   res.json({ id, ...cfg, triggers });
 });
 
-app.put('/api/agents/:id', async (req, res) => {
+app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
@@ -775,7 +775,7 @@ app.put('/api/agents/:id', async (req, res) => {
 
 /* ─── Reset agent to stub state ─────────────────────────────────────── */
 
-app.post('/api/agents/:id/deactivate', async (req, res) => {
+app.post('/api/agents/:id/deactivate', apiLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
@@ -934,7 +934,7 @@ function renderHandoverBody({ headerLine, repos, suggestedRow, noteText, overrid
   return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
-app.get('/api/agents/:id/handover/candidates', async (req, res) => {
+app.get('/api/agents/:id/handover/candidates', apiLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   try {
@@ -947,7 +947,7 @@ app.get('/api/agents/:id/handover/candidates', async (req, res) => {
   }
 });
 
-app.get('/api/agents/:id/handover/git-status', async (req, res) => {
+app.get('/api/agents/:id/handover/git-status', heavyLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   try {
@@ -1196,7 +1196,7 @@ app.post('/api/agents/:id/handover', handoverLimiter, async (req, res) => {
 
 /* ─── BP stub sync ──────────────────────────────────────────────────── */
 
-app.post('/api/agents/:id/sync-bps', async (req, res) => {
+app.post('/api/agents/:id/sync-bps', heavyLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
@@ -1212,7 +1212,7 @@ app.post('/api/agents/:id/sync-bps', async (req, res) => {
   }
 });
 
-app.post('/api/agents/:teamId/members', async (req, res) => {
+app.post('/api/agents/:teamId/members', heavyLimiter, async (req, res) => {
   const { teamId } = req.params;
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid agent id' });
   // Containment check: AGENT_ID_RE already excludes traversal segments,
@@ -1271,7 +1271,7 @@ app.post('/api/agents', heavyLimiter, async (req, res) => {
   }
 });
 
-app.delete('/api/agents/:id', async (req, res) => {
+app.delete('/api/agents/:id', heavyLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
@@ -1293,7 +1293,7 @@ app.delete('/api/agents/:id', async (req, res) => {
 
 /* ─── Agent Clone ───────────────────────────────────────────────────── */
 
-app.post('/api/agents/:id/clone', async (req, res) => {
+app.post('/api/agents/:id/clone', heavyLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const { newId, newDisplayName } = req.body || {};
@@ -1334,7 +1334,7 @@ app.get('/api/agents/:id/prompt', (req, res) => {
   res.json({ content });
 });
 
-app.put('/api/agents/:id/prompt', (req, res) => {
+app.put('/api/agents/:id/prompt', apiLimiter, (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
@@ -1374,7 +1374,7 @@ app.get('/api/agents/:id/model-options', (req, res) => {
   });
 });
 
-app.patch('/api/agents/:id/model', (req, res) => {
+app.patch('/api/agents/:id/model', apiLimiter, (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
@@ -1429,7 +1429,7 @@ app.get('/api/agents/:id/triggers', (req, res) => {
 // the trigger UI to render baked-in helper scripts (e.g. multi-agent-bid)
 // inline so operators can see what the preCheckScript actually does.
 const SCRIPT_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
-app.get('/api/scripts/:name', async (req, res) => {
+app.get('/api/scripts/:name', apiLimiter, async (req, res) => {
   const { name } = req.params;
   if (!SCRIPT_NAME_RE.test(name)) {
     return res.status(400).json({ error: 'invalid script name' });
@@ -1450,7 +1450,7 @@ function notifyTriggerReload(agentId) {
     .catch(() => {});
 }
 
-app.post('/api/agents/:id/triggers', (req, res) => {
+app.post('/api/agents/:id/triggers', apiLimiter, (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
@@ -1464,7 +1464,7 @@ app.post('/api/agents/:id/triggers', (req, res) => {
   res.status(201).json(newTrigger);
 });
 
-app.put('/api/agents/:id/triggers/:triggerId', (req, res) => {
+app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, (req, res) => {
   const { id, triggerId } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
@@ -1479,7 +1479,7 @@ app.put('/api/agents/:id/triggers/:triggerId', (req, res) => {
   res.json(triggers[idx]);
 });
 
-app.delete('/api/agents/:id/triggers/:triggerId', (req, res) => {
+app.delete('/api/agents/:id/triggers/:triggerId', apiLimiter, (req, res) => {
   const { id, triggerId } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
@@ -1615,7 +1615,7 @@ app.get('/api/llm-endpoints/:id', (req, res) => {
   res.json(maskLlmEndpoint(ep));
 });
 
-app.post('/api/llm-endpoints', (req, res) => {
+app.post('/api/llm-endpoints', apiLimiter, (req, res) => {
   const { name, baseUrl, authToken, models, defaultModelId } = req.body || {};
   if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
   if (!baseUrl || typeof baseUrl !== 'string') return res.status(400).json({ error: 'baseUrl is required' });
@@ -1656,7 +1656,7 @@ app.post('/api/llm-endpoints', (req, res) => {
   res.status(201).json(maskLlmEndpoint(entry));
 });
 
-app.put('/api/llm-endpoints/:id', (req, res) => {
+app.put('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
   const list = listLlmEndpoints();
   const idx = list.findIndex(e => e.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'LLM endpoint not found' });
@@ -1718,7 +1718,7 @@ app.put('/api/llm-endpoints/:id', (req, res) => {
   res.json(maskLlmEndpoint(next));
 });
 
-app.put('/api/llm-endpoints/:id/models', (req, res) => {
+app.put('/api/llm-endpoints/:id/models', apiLimiter, (req, res) => {
   const list = listLlmEndpoints();
   const idx = list.findIndex(e => e.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'LLM endpoint not found' });
@@ -1745,7 +1745,7 @@ app.put('/api/llm-endpoints/:id/models', (req, res) => {
   res.json(maskLlmEndpoint(list[idx]));
 });
 
-app.delete('/api/llm-endpoints/:id', (req, res) => {
+app.delete('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
   const list = listLlmEndpoints();
   const ep = list.find(e => e.id === req.params.id);
   if (!ep) return res.status(404).json({ error: 'LLM endpoint not found' });
@@ -1758,7 +1758,7 @@ app.delete('/api/llm-endpoints/:id', (req, res) => {
   res.status(204).end();
 });
 
-app.post('/api/llm-endpoints/:id/test', async (req, res) => {
+app.post('/api/llm-endpoints/:id/test', heavyLimiter, async (req, res) => {
   const ep = listLlmEndpoints().find(e => e.id === req.params.id);
   if (!ep) return res.status(404).json({ error: 'LLM endpoint not found' });
   const token = readLlmEndpointToken(ep.authTokenId);
@@ -1777,7 +1777,7 @@ app.post('/api/llm-endpoints/:id/test', async (req, res) => {
   });
 });
 
-app.post('/api/llm-endpoints/:id/discover-models', async (req, res) => {
+app.post('/api/llm-endpoints/:id/discover-models', heavyLimiter, async (req, res) => {
   const ep = listLlmEndpoints().find(e => e.id === req.params.id);
   if (!ep) return res.status(404).json({ error: 'LLM endpoint not found' });
   const token = readLlmEndpointToken(ep.authTokenId);
@@ -1891,7 +1891,7 @@ function buildMcpServerStanza({ existing, body }) {
   return { stanza: merged };
 }
 
-app.post('/api/mcp-servers', (req, res) => {
+app.post('/api/mcp-servers', apiLimiter, (req, res) => {
   const body = req.body || {};
   const { id, name } = body;
   if (!id || !MCP_SERVER_ID_RE.test(id)) {
@@ -1917,7 +1917,7 @@ app.post('/api/mcp-servers', (req, res) => {
   res.status(201).json(data);
 });
 
-app.put('/api/mcp-servers/:id', (req, res) => {
+app.put('/api/mcp-servers/:id', apiLimiter, (req, res) => {
   const { id } = req.params;
   if (!MCP_SERVER_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid server id' });
   const existing = loadMcpServer(id);
@@ -1931,7 +1931,7 @@ app.put('/api/mcp-servers/:id', (req, res) => {
   res.json(merged);
 });
 
-app.delete('/api/mcp-servers/:id', (req, res) => {
+app.delete('/api/mcp-servers/:id', apiLimiter, (req, res) => {
   const { id } = req.params;
   if (!MCP_SERVER_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid server id' });
   if (!loadMcpServer(id)) return res.status(404).json({ error: 'MCP server not found' });
@@ -1948,7 +1948,7 @@ app.get('/api/mcp-credentials', (req, res) => {
   res.json(listMcpCredentials());
 });
 
-app.post('/api/mcp-credentials', (req, res) => {
+app.post('/api/mcp-credentials', apiLimiter, (req, res) => {
   const { name, serverId, secret } = req.body || {};
   if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
   if (!secret || typeof secret !== 'string') return res.status(400).json({ error: 'secret (string) is required' });
@@ -1982,7 +1982,7 @@ app.post('/api/mcp-credentials', (req, res) => {
   res.status(201).json(entry);
 });
 
-app.delete('/api/mcp-credentials/:id', (req, res) => {
+app.delete('/api/mcp-credentials/:id', apiLimiter, (req, res) => {
   const { id } = req.params;
   if (!MCP_CREDENTIAL_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid credential id' });
   const creds = listMcpCredentials();
@@ -2008,7 +2008,7 @@ function serverNeedsCredential(server) {
 
 /* ─── Containers ────────────────────────────────────────────────────── */
 
-app.get('/api/containers', async (req, res) => {
+app.get('/api/containers', apiLimiter, async (req, res) => {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/agents/processes`);
@@ -2204,7 +2204,7 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   res.status(201).json(env);
 });
 
-app.put('/api/environments/:id', (req, res) => {
+app.put('/api/environments/:id', apiLimiter, (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
   const { name, description, skills, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers } = req.body || {};
@@ -2251,7 +2251,7 @@ app.put('/api/environments/:id', (req, res) => {
   res.json(env);
 });
 
-app.delete('/api/environments/:id', (req, res) => {
+app.delete('/api/environments/:id', apiLimiter, (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
   const usedBy = environmentInUse(env.id);
@@ -3523,7 +3523,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
 
 /* ─── Blueprints ────────────────────────────────────────────────────── */
 
-app.get('/api/blueprints', async (req, res) => {
+app.get('/api/blueprints', apiLimiter, async (req, res) => {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/blueprints`);
@@ -3534,7 +3534,7 @@ app.get('/api/blueprints', async (req, res) => {
   }
 });
 
-app.post('/api/blueprints', async (req, res) => {
+app.post('/api/blueprints', heavyLimiter, async (req, res) => {
   const { id, displayName, role, systemPrompt, environmentId, briefingsPath } = req.body || {};
   if (!id || !displayName || !role || !environmentId) {
     return res.status(400).json({ error: 'id, displayName, role, environmentId required' });
@@ -3556,7 +3556,7 @@ app.post('/api/blueprints', async (req, res) => {
   }
 });
 
-app.put('/api/blueprints/:id', async (req, res) => {
+app.put('/api/blueprints/:id', apiLimiter, async (req, res) => {
   const { displayName, role, systemPrompt } = req.body || {};
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
@@ -3572,7 +3572,7 @@ app.put('/api/blueprints/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/blueprints/:id', async (req, res) => {
+app.delete('/api/blueprints/:id', apiLimiter, async (req, res) => {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/blueprints/${encodeURIComponent(req.params.id)}`, {
@@ -3586,7 +3586,7 @@ app.delete('/api/blueprints/:id', async (req, res) => {
   }
 });
 
-app.post('/api/blueprints/:id/instances', async (req, res) => {
+app.post('/api/blueprints/:id/instances', heavyLimiter, async (req, res) => {
   const { instanceId, displayName } = req.body || {};
   if (!instanceId || !displayName) {
     return res.status(400).json({ error: 'instanceId and displayName required' });
@@ -3612,7 +3612,7 @@ app.post('/api/blueprints/:id/instances', async (req, res) => {
   }
 });
 
-app.get('/api/blueprints/:id/memory/:file', async (req, res) => {
+app.get('/api/blueprints/:id/memory/:file', apiLimiter, async (req, res) => {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(
@@ -3626,7 +3626,7 @@ app.get('/api/blueprints/:id/memory/:file', async (req, res) => {
   }
 });
 
-app.put('/api/blueprints/:id/memory/:file', express.text({ type: '*/*' }), async (req, res) => {
+app.put('/api/blueprints/:id/memory/:file', apiLimiter, express.text({ type: '*/*' }), async (req, res) => {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(
@@ -3651,7 +3651,7 @@ app.get('/api/ssh-keys', (req, res) => {
   res.json(listSshKeys());
 });
 
-app.post('/api/ssh-keys', (req, res) => {
+app.post('/api/ssh-keys', apiLimiter, (req, res) => {
   const { name, privateKey } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (!privateKey || typeof privateKey !== 'string') {
@@ -3690,7 +3690,7 @@ app.post('/api/ssh-keys', (req, res) => {
 
 // Server-side keypair generation. Returns the public key once so the user
 // can paste it into GitHub; the private key never leaves the workspace.
-app.post('/api/ssh-keys/generate', (req, res) => {
+app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
   const { name, comment } = req.body || {};
   if (!name || typeof name !== 'string') {
     return res.status(400).json({ error: 'name is required' });
@@ -3722,7 +3722,7 @@ app.post('/api/ssh-keys/generate', (req, res) => {
   res.status(201).json({ ...entry, publicKey: pubText });
 });
 
-app.delete('/api/ssh-keys/:id', (req, res) => {
+app.delete('/api/ssh-keys/:id', apiLimiter, (req, res) => {
   const { id } = req.params;
   if (!SSH_KEY_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid ssh key id' });
   const keys = listSshKeys();
@@ -3743,7 +3743,7 @@ app.get('/api/github-tokens', (req, res) => {
   res.json(listGithubTokens());
 });
 
-app.post('/api/github-tokens', (req, res) => {
+app.post('/api/github-tokens', apiLimiter, (req, res) => {
   const { name, token } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (!token || typeof token !== 'string') {
@@ -3779,7 +3779,7 @@ app.post('/api/github-tokens', (req, res) => {
   res.status(201).json(entry);
 });
 
-app.delete('/api/github-tokens/:id', (req, res) => {
+app.delete('/api/github-tokens/:id', apiLimiter, (req, res) => {
   const { id } = req.params;
   if (!GH_TOKEN_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid token id' });
   const tokens = listGithubTokens();
@@ -4246,7 +4246,7 @@ async function ensureAgentDmRoom(agentId) {
   return { roomId, reused: false, created: true };
 }
 
-app.post('/api/matrix/agents/:agentId/dm', async (req, res) => {
+app.post('/api/matrix/agents/:agentId/dm', heavyLimiter, async (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
 
@@ -4279,7 +4279,7 @@ app.post('/api/matrix/agents/:agentId/dm', async (req, res) => {
 });
 
 // 3. Paginated message history (proxy)
-app.get('/api/matrix/rooms/:roomId/messages', async (req, res) => {
+app.get('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
   if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
   const { roomId } = req.params;
   const dir = req.query.dir === 'f' ? 'f' : 'b';
@@ -4300,7 +4300,7 @@ app.get('/api/matrix/rooms/:roomId/messages', async (req, res) => {
 });
 
 // 4. Send a text message to a room as the admin user
-app.post('/api/matrix/rooms/:roomId/messages', async (req, res) => {
+app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
   if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
   const { roomId } = req.params;
   const { body } = req.body || {};
@@ -4331,7 +4331,7 @@ app.post('/api/matrix/rooms/:roomId/messages', async (req, res) => {
 // event_id, then issues a Matrix redaction (PUT .../redact/...) for each one.
 // The admin token is used throughout. Events the homeserver rejects (e.g.
 // already redacted) are silently skipped so the call is idempotent.
-app.delete('/api/matrix/rooms/:roomId/messages', async (req, res) => {
+app.delete('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
   if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
   const { roomId } = req.params;
 
@@ -4549,7 +4549,7 @@ app.get('/api/agents/:agentId/session/:roomId/current', (req, res) => {
 // context is discarded). Also writes a reset flag (persists across navigation)
 // and triggers a best-effort git reset of all repositories in the agent's
 // working environment back to their configured default branch.
-app.delete('/api/agents/:agentId/session/:roomId/current', async (req, res) => {
+app.delete('/api/agents/:agentId/session/:roomId/current', apiLimiter, async (req, res) => {
   const { agentId, roomId } = req.params;
   if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
     return res.status(400).json({ error: 'invalid id' });
@@ -4582,7 +4582,7 @@ app.delete('/api/agents/:agentId/session/:roomId/current', async (req, res) => {
 
 // Send a stop-session signal to the orchestrator, which forwards it via IPC
 // to the agent-runner. The runner kills any in-flight Claude invocation.
-app.post('/api/agents/:agentId/session/:roomId/stop', async (req, res) => {
+app.post('/api/agents/:agentId/session/:roomId/stop', apiLimiter, async (req, res) => {
   const { agentId, roomId } = req.params;
   if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
     return res.status(400).json({ error: 'invalid id' });
@@ -4636,7 +4636,7 @@ function safeAgentPath(agentId, relPath) {
 // Directory listing. Hidden dotfiles are returned but flagged with `hidden`
 // so the UI can collapse them by default. Symlinks are reported with their
 // link target (best-effort) so the user understands what they're looking at.
-app.get('/api/agents/:agentId/workspace/tree', (req, res) => {
+app.get('/api/agents/:agentId/workspace/tree', apiLimiter, (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const relPath = typeof req.query.path === 'string' ? req.query.path : '';
@@ -4768,7 +4768,7 @@ app.get('/api/agents/:agentId/git-info', (req, res) => {
 });
 
 // Directory-only listing — delegated to BP-Explorer for orchestrator directory picker.
-app.get('/api/agents/:agentId/workspace/dirs', async (req, res) => {
+app.get('/api/agents/:agentId/workspace/dirs', apiLimiter, async (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const relPath = typeof req.query.path === 'string' ? req.query.path : '';
@@ -4788,7 +4788,7 @@ app.get('/api/agents/:agentId/workspace/dirs', async (req, res) => {
 // File content. Caps reads at WORKSPACE_FILE_MAX_BYTES; flags binary files
 // (NUL byte detection in the prefix) so the UI can show a "binary file"
 // stub instead of garbled UTF-8.
-app.get('/api/agents/:agentId/workspace/file', (req, res) => {
+app.get('/api/agents/:agentId/workspace/file', apiLimiter, (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const relPath = typeof req.query.path === 'string' ? req.query.path : '';
@@ -5039,7 +5039,7 @@ function summarizeStatus(X, Y) {
 // GET /api/agents/:agentId/workspace/git-status
 // Lists changed files for every git repo in the agent workspace. Multi-repo
 // support comes for free via getAgentGitRepos().
-app.get('/api/agents/:agentId/workspace/git-status', (req, res) => {
+app.get('/api/agents/:agentId/workspace/git-status', heavyLimiter, (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   // safeAgentPath returns null for an invalid id or a missing agent dir, and
@@ -5129,7 +5129,7 @@ app.get('/api/agents/:agentId/workspace/git-status', (req, res) => {
 // GET /api/agents/:agentId/workspace/git-diff?repo=...&path=...&context=3
 // Returns the unified diff for a single file. Untracked files are diffed
 // against /dev/null so the UI sees a uniform `diff --git` envelope.
-app.get('/api/agents/:agentId/workspace/git-diff', (req, res) => {
+app.get('/api/agents/:agentId/workspace/git-diff', heavyLimiter, (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
 
@@ -5250,7 +5250,7 @@ const requireAgentIdParam = (req, res, next) => {
   next();
 };
 
-app.post('/api/agents/:agentId/workspace/upload', requireAgentIdParam, uploadFiles, (req, res) => {
+app.post('/api/agents/:agentId/workspace/upload', heavyLimiter, requireAgentIdParam, uploadFiles, (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const relDir = typeof req.body.path === 'string' ? req.body.path : '';

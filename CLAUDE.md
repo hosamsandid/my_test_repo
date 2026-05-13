@@ -240,7 +240,7 @@ All agent lifecycle operations (create / enable / disable / edit prompt / delete
 
 `POST /api/teams` (driven by the **Team Setup** wizard at `/team-setup`) materialises a team-shaped agent group in one atomic-with-rollback transaction. The wizard sits on top of the existing `team` / `team-member` machinery — the result is identical in shape to a manually-created team plus members. Inputs: a `teamId` slug, team name, repository (URL, branch, `sshKeyId`), `githubTokenId`, and a list of role templates.
 
-Role templates live as JSON files under `/template-workspace/agent-templates/` (seeded from `orchestrator/skill-pool/agent-templates/` via `make seed-templates`). The initial catalog ships with seven roles:
+Role templates live as JSON files under `/template-workspace/agent-templates/` (seeded from `orchestrator/skill-pool/agent-templates/` via `make seed-templates`). The catalog ships with eight roles:
 
 | Role | Session | Trigger | `from` |
 |---|---|---|---|
@@ -251,6 +251,7 @@ Role templates live as JSON files under `/template-workspace/agent-templates/` (
 | `test-reviewer` | per-invocation | `pull_request.opened/reopened` | any-except-self |
 | `documentation-sync` | per-invocation | `pull_request.closed` (merged) | any-except-self |
 | `issue-triage` | per-invocation | `issues.opened` | humans |
+| `generic` | persistent | — (DM only) | — |
 
 Each `per-invocation` role also ships a weekly self-curation cron (staggered 5min apart) that reviews and prunes the agent's `memory/`.
 

@@ -1,11 +1,11 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   Plus, Trash2, Layers, ChevronDown, ChevronRight,
   Edit, MessageCircle, RefreshCw, Power, PowerOff, FileText,
-  User, Users, Workflow, Info, GitMerge,
+  User, Users, Workflow, Info, GitMerge, Download, Upload,
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import SidePanel from '../components/SidePanel';
@@ -1169,7 +1169,7 @@ const radioLabelStyle = {
 };
 
 /* ── Agent Row ──────────────────────────────────────────────────────── */
-function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, onOpenBrief, navigate, tree, busy }) {
+function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, onOpenBrief, onExport, navigate, tree, busy }) {
   const state = agentState(agent);
   const isStub = state === 'stub';
   const t = tree || {
@@ -1255,6 +1255,9 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
           onClick={() => !isStub && navigate(`/chats/${agent.id}`)}
           disabled={isStub}
         />
+        {onExport && !isStub && (
+          <IconBtn icon={Download} label="Export" title="Export agent as ZIP" onClick={() => onExport(agent.id)} />
+        )}
         <IconBtn icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
       </div>
     </div>
@@ -1262,7 +1265,7 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
 }
 
 /* ── Orchestrator Card (with bp-instance children) ─────────────────── */
-function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDeactivate, onToggleEnabled, onEditChild, onDeleteChild, navigate, syncing, busyIds }) {
+function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDeactivate, onToggleEnabled, onEditChild, onDeleteChild, onExport, navigate, syncing, busyIds }) {
   const expandedKey = `aee_orc_expanded_${agent.id}`;
   const [expanded, setExpanded] = useState(() => {
     try { return localStorage.getItem(expandedKey) === 'true'; } catch { return false; }
@@ -1417,6 +1420,9 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
           )}
           <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
           <IconBtn icon={MessageCircle} label="Open chat" onClick={() => !isStub && navigate(`/chats/${agent.id}`)} disabled={isStub} />
+          {onExport && !isStub && (
+            <IconBtn icon={Download} label="Export" title="Export agent as ZIP" onClick={() => onExport(agent.id)} />
+          )}
           <IconBtn icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
         </div>
       </div>
@@ -1470,7 +1476,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
 }
 
 /* ── Team Card ──────────────────────────────────────────────────────── */
-function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactivate, onToggleEnabled, onEditChild, onDeleteChild, navigate, addingMember, busyIds }) {
+function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactivate, onToggleEnabled, onEditChild, onDeleteChild, onExport, navigate, addingMember, busyIds }) {
   const expandedKey = `aee_team_expanded_${agent.id}`;
   const [expanded, setExpanded] = useState(() => {
     try { return localStorage.getItem(expandedKey) !== 'false'; } catch { return true; }
@@ -1553,6 +1559,9 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
             <Plus size={13} /> {addingMember ? 'Adding…' : 'Add Member'}
           </button>
           <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
+          {onExport && (
+            <IconBtn icon={Download} label="Export" title="Export team as ZIP" onClick={() => onExport(agent.id)} />
+          )}
           <IconBtn icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
         </div>
       </div>
@@ -1576,6 +1585,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
               onToggleEnabled={onToggleEnabled}
               onEdit={onEditChild}
               onDelete={onDeleteChild}
+              onExport={onExport}
             />
           ))
         )
@@ -1585,7 +1595,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
 }
 
 /* ── Leaf Agent Card ────────────────────────────────────────────────── */
-function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate, navigate, busy }) {
+function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate, onExport, navigate, busy }) {
   const state = agentState(agent);
 
   return (
@@ -1626,6 +1636,7 @@ function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate,
           />
           <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
           <IconBtn icon={MessageCircle} label="Open chat" onClick={() => navigate(`/chats/${agent.id}`)} />
+          <IconBtn icon={Download} label="Export" title="Export agent as ZIP" onClick={() => onExport(agent.id)} />
           <IconBtn icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
         </div>
       </div>
@@ -1679,6 +1690,9 @@ export default function Agents() {
   const [syncingId, setSyncingId] = useState(null);
   const [addingMemberId, setAddingMemberId] = useState(null);
   const [busyIds, setBusyIds] = useState(new Set());
+  const [importError, setImportError] = useState(null);
+  const [importSuccess, setImportSuccess] = useState(null);
+  const importFileRef = useRef(null);
 
   const agents = rawAgents || [];
   const byName = (a, b) => (a.displayName || a.id).localeCompare(b.displayName || b.id);
@@ -1722,6 +1736,30 @@ export default function Agents() {
       if (busy) next.add(id); else next.delete(id);
       return next;
     });
+  }
+
+  function handleExport(agentId) {
+    window.open(`/api/agents/${encodeURIComponent(agentId)}/export`, '_blank');
+  }
+
+  async function handleImport(e) {
+    const file = e.target.files?.[0];
+    if (!importFileRef.current) return;
+    importFileRef.current.value = '';
+    if (!file) return;
+    setImportError(null);
+    setImportSuccess(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const resp = await fetch('/api/agents/import', { method: 'POST', body: formData });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      setImportSuccess(`Agent '${data.agentId}' imported. Activate it from the card below.`);
+      refetch();
+    } catch (e) {
+      setImportError(e.message);
+    }
   }
 
   async function handleCreateAgent(form) {
@@ -1910,10 +1948,42 @@ export default function Agents() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>Agents</h1>
-        <PrimaryBtn onClick={() => openPanel('create', null)}>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Plus size={15} /> New Agent</span>
-        </PrimaryBtn>
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+          <input
+            ref={importFileRef}
+            type="file"
+            accept=".zip"
+            style={{ display: 'none' }}
+            onChange={handleImport}
+          />
+          <button
+            onClick={() => importFileRef.current?.click()}
+            style={{
+              background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-md)', cursor: 'pointer',
+              padding: '6px 12px', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+              display: 'flex', alignItems: 'center', gap: 6, color: 'var(--eb-text-secondary)',
+            }}
+          >
+            <Upload size={14} /> Import Agent
+          </button>
+          <PrimaryBtn onClick={() => openPanel('create', null)}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Plus size={15} /> New Agent</span>
+          </PrimaryBtn>
+        </div>
       </div>
+      {importSuccess && (
+        <div role="status" style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-success-bg, #e6f9f0)', border: '1px solid var(--eb-status-success, #22c55e)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          {importSuccess}
+          <button onClick={() => setImportSuccess(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>✕</button>
+        </div>
+      )}
+      {importError && (
+        <div role="alert" style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-error-bg)', border: '1px solid var(--eb-status-error)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          {importError}
+          <button onClick={() => setImportError(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>✕</button>
+        </div>
+      )}
 
       <div style={{
         padding: 'var(--eb-space-4)',
@@ -1994,6 +2064,7 @@ export default function Agents() {
               onToggleEnabled={handleToggleEnabled}
               onEditChild={a => openPanel('edit', a)}
               onDeleteChild={a => setDeleteTarget(a)}
+              onExport={handleExport}
             />
           ))}
           {teams.map(t => (
@@ -2011,6 +2082,7 @@ export default function Agents() {
               onToggleEnabled={handleToggleEnabled}
               onEditChild={a => openPanel('edit', a)}
               onDeleteChild={a => setDeleteTarget(a)}
+              onExport={handleExport}
             />
           ))}
           {leaves.map(a => (
@@ -2023,6 +2095,7 @@ export default function Agents() {
               onDelete={ag => setDeleteTarget(ag)}
               onDeactivate={ag => setDeactivateTarget(ag)}
               onToggleEnabled={handleToggleEnabled}
+              onExport={handleExport}
             />
           ))}
           {orphans.length > 0 && (

@@ -6,7 +6,7 @@ import rehypeSanitize from 'rehype-sanitize';
 import {
   ChevronRight, ChevronDown, Folder, FolderOpen, FileText, FileCode,
   Brain, Sparkles, BookOpen, Loader2, X, RefreshCw, AlertCircle, FileWarning,
-  Maximize2, Minimize2, Code2, Eye, GitBranch, Upload, GitCompare,
+  Maximize2, Minimize2, Code2, Eye, GitBranch, Upload, GitCompare, Download,
 } from 'lucide-react';
 import DiffView from './DiffView';
 
@@ -257,6 +257,15 @@ export default function WorkspaceBrowser({ agentId, active }) {
           onMouseLeave={e => { if (!uploadOpen) e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
         >
           <Upload size={12} />
+        </button>
+        <button
+          onClick={() => window.open(`/api/agents/${encodeURIComponent(agentId)}/export`, '_blank')}
+          title="Export agent workspace as ZIP"
+          style={iconBtnStyle}
+          onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
+          onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
+        >
+          <Download size={12} />
         </button>
         <button
           onClick={refreshAll}

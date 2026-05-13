@@ -10,7 +10,7 @@ FROM node:22-slim
 # (and for the existing getAgentGitRepos dirty-status detection, which silently
 # fell back to "clean" without git on PATH).
 RUN apt-get -o Acquire::Check-Valid-Until=false update \
-  && apt-get install -y --no-install-recommends git ca-certificates \
+  && apt-get install -y --no-install-recommends git ca-certificates zip unzip \
   && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY api/package.json ./api/

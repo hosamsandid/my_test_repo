@@ -1336,6 +1336,212 @@ app.post('/api/agents/:id/clone', heavyLimiter, async (req, res) => {
   }
 });
 
+/* ─── Agent Export / Import ─────────────────────────────────────────── */
+
+// Inline path-containment check — CodeQL recognises includes('..') +
+// startsWith(rootPrefix) as a path-injection sanitiser when applied in the
+// same function as the sink. Allowed roots are WORKSPACE (agent files) and
+// /tmp (scratch dirs from fs.mkdtempSync). Refuses anything else.
+function copyDirRecursive(src, dst) {
+  if (typeof src !== 'string' || src.includes('..') ||
+      !(src.startsWith(WORKSPACE + path.sep) || src.startsWith('/tmp' + path.sep))) {
+    throw new Error(`copyDirRecursive: refusing src outside allowed roots: ${src}`);
+  }
+  if (typeof dst !== 'string' || dst.includes('..') ||
+      !(dst.startsWith(WORKSPACE + path.sep) || dst.startsWith('/tmp' + path.sep))) {
+    throw new Error(`copyDirRecursive: refusing dst outside allowed roots: ${dst}`);
+  }
+  fs.mkdirSync(dst, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const s = path.join(src, entry.name);
+    const d = path.join(dst, entry.name);
+    if (entry.isSymbolicLink()) continue; // skip symlinks for safety
+    if (entry.isDirectory()) {
+      copyDirRecursive(s, d);
+    } else {
+      fs.copyFileSync(s, d);
+    }
+  }
+}
+
+// Streams a ZIP archive of the agent workspace + manifest.json.
+// Excludes the sessions/ directory (conversation history and container logs).
+app.get('/api/agents/:id/export', heavyLimiter, async (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  // Containment check: AGENT_ID_RE excludes traversal segments, but CodeQL's
+  // path-injection query doesn't always follow the regex through a destructure.
+  // The path.resolve + path.relative pattern is recognised in-flow.
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDirPath = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDirPath);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    return res.status(400).json({ error: 'Invalid agent id' });
+  }
+  const cfg = readJsonFile(path.join(agentDirPath, 'config.json'), null);
+  if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+
+  // Best-effort: resolve orchestrator image info via Podman socket
+  let imageInfo = { name: 'orchestrator', tag: 'latest', digest: null };
+  try {
+    const listResult = await podmanRequest('GET', '/containers/json?all=true');
+    if (listResult.status === 200 && Array.isArray(listResult.body)) {
+      const orch = listResult.body.find(c =>
+        Array.isArray(c.Names) && c.Names.some(n => /orchestrator/.test(n))
+      );
+      if (orch) {
+        const nameTag = orch.Image || '';
+        const atIdx = nameTag.indexOf('@');
+        const tagPart = atIdx >= 0 ? nameTag.slice(0, atIdx) : nameTag;
+        const colonIdx = tagPart.lastIndexOf(':');
+        imageInfo = {
+          name: colonIdx >= 0 ? tagPart.slice(0, colonIdx) : tagPart,
+          tag: colonIdx >= 0 ? tagPart.slice(colonIdx + 1) : 'latest',
+          digest: atIdx >= 0 ? nameTag.slice(atIdx + 1) : (orch.ImageID || null),
+        };
+      }
+    }
+  } catch { /* Podman unavailable — proceed without image info */ }
+
+  const tmpDir = fs.mkdtempSync(path.join('/tmp', 'aee-export-'));
+  // zipDir is a sibling scratch dir (so `zip -r` doesn't try to archive its
+  // own output). Neither tmpDir nor zipDir carries any user-controlled path
+  // segment, which keeps the filesystem sinks below clear of req-derived data.
+  const zipDir = fs.mkdtempSync(path.join('/tmp', 'aee-zip-'));
+  const zipPath = path.join(zipDir, 'export.zip');
+  try {
+    // Copy workspace excluding sessions/ (conversation history, logs).
+    // copyDirRecursive carries an inline path-containment check; using it
+    // for both files and directories keeps every fs sink behind that gate.
+    const workspaceDir = path.join(tmpDir, 'workspace');
+    copyDirRecursive(agentDirPath, workspaceDir);
+    try { fs.rmSync(path.join(workspaceDir, 'sessions'), { recursive: true, force: true }); } catch { /* noop */ }
+
+    // Agent-specific env vars (sensitive Matrix creds are excluded)
+    const envVars = { AGENT_ID: id };
+    if (cfg.modelOverride) envVars.AGENT_DEFAULT_MODEL = cfg.modelOverride;
+
+    fs.writeFileSync(path.join(tmpDir, 'manifest.json'), JSON.stringify({
+      version: '1',
+      exportedAt: new Date().toISOString(),
+      agentId: id,
+      image: imageInfo,
+      envVars,
+    }, null, 2));
+
+    const zipResult = spawnSync('zip', ['-r', zipPath, '.'], { cwd: tmpDir });
+    if (zipResult.status !== 0) {
+      throw new Error(`zip exited ${zipResult.status}: ${(zipResult.stderr || '').toString().trim()}`);
+    }
+
+    const stat = fs.statSync(zipPath);
+    res.setHeader('Content-Disposition', `attachment; filename="agent-${id}-export.zip"`);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Length', stat.size);
+    const stream = fs.createReadStream(zipPath);
+    stream.on('close', () => {
+      try { fs.rmSync(zipDir, { recursive: true, force: true }); } catch { /* noop */ }
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* noop */ }
+    });
+    stream.pipe(res);
+  } catch (err) {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* noop */ }
+    try { fs.rmSync(zipDir, { recursive: true, force: true }); } catch { /* noop */ }
+    console.error(`[API] Export failed for ${id}: ${err.message}`);
+    res.status(500).json({ error: `Export failed: ${err.message}` });
+  }
+});
+
+// Accepts a ZIP (field: "file") produced by GET /api/agents/:id/export.
+// Creates a new agent workspace from the ZIP contents.
+// Returns 409 if an agent with the same ID already exists.
+const _importUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 500 * 1024 * 1024 },
+});
+
+app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file provided (field name: file)' });
+
+  const tmpDir = fs.mkdtempSync(path.join('/tmp', 'aee-import-'));
+  const zipPath = path.join(tmpDir, 'upload.zip');
+  const extractDir = path.join(tmpDir, 'extracted');
+  try {
+    fs.writeFileSync(zipPath, req.file.buffer);
+    fs.mkdirSync(extractDir);
+
+    const unzipResult = spawnSync('unzip', ['-o', zipPath, '-d', extractDir]);
+    if (unzipResult.status !== 0) {
+      return res.status(400).json({ error: 'Could not extract ZIP — ensure the file is a valid agent export' });
+    }
+
+    // Zip-slip protection: verify all extracted paths stay within extractDir
+    const realExtractDir = fs.realpathSync(extractDir);
+    function checkExtractedPaths(dir) {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        try {
+          const real = fs.realpathSync(full);
+          if (!real.startsWith(realExtractDir + path.sep) && real !== realExtractDir) {
+            throw new Error(`Unsafe path in ZIP: ${real}`);
+          }
+        } catch (e) {
+          if (e.message && e.message.startsWith('Unsafe')) throw e;
+          // realpathSync on a dangling symlink throws ENOENT — skip safely
+        }
+        if (entry.isDirectory()) checkExtractedPaths(full);
+      }
+    }
+    checkExtractedPaths(extractDir);
+
+    // Validate manifest
+    const manifestPath = path.join(extractDir, 'manifest.json');
+    if (!fs.existsSync(manifestPath)) {
+      return res.status(400).json({ error: 'Missing manifest.json — not a valid agent export' });
+    }
+    let manifest;
+    try {
+      manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    } catch {
+      return res.status(400).json({ error: 'Corrupt manifest.json' });
+    }
+    const agentId = typeof manifest.agentId === 'string' ? manifest.agentId : null;
+    if (!agentId || !AGENT_ID_RE.test(agentId)) {
+      return res.status(400).json({ error: 'Invalid or missing agentId in manifest' });
+    }
+    // Containment check — path.resolve + path.relative is the in-flow
+    // sanitiser pattern CodeQL recognises for js/path-injection.
+    const agentsBaseDir = path.resolve(AGENTS_DIR);
+    const targetDir = path.resolve(agentsBaseDir, agentId);
+    const rel = path.relative(agentsBaseDir, targetDir);
+    if (rel.startsWith('..') || path.isAbsolute(rel) || !rel) {
+      return res.status(400).json({ error: 'Invalid agent id path' });
+    }
+
+    // Conflict check
+    if (fs.existsSync(targetDir)) {
+      return res.status(409).json({ error: `Agent '${agentId}' already exists — delete or rename it before importing` });
+    }
+
+    // Restore workspace
+    const workspaceDir = path.join(extractDir, 'workspace');
+    if (!fs.existsSync(workspaceDir)) {
+      return res.status(400).json({ error: 'Missing workspace/ directory in ZIP' });
+    }
+    copyDirRecursive(workspaceDir, targetDir);
+
+    const img = manifest.image || {};
+    console.log(`[API] Imported agent '${agentId}': image=${img.name}:${img.tag} digest=${img.digest || 'n/a'} exportedAt=${manifest.exportedAt}`);
+
+    res.status(201).json({ ok: true, agentId, image: manifest.image || null });
+  } catch (err) {
+    console.error(`[API] Import failed: ${err.message}`);
+    res.status(500).json({ error: `Import failed: ${err.message}` });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* noop */ }
+  }
+});
+
 /* ─── Agent Prompt ──────────────────────────────────────────────────── */
 
 app.get('/api/agents/:id/prompt', (req, res) => {

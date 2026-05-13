@@ -69,6 +69,13 @@ You now have a live, persistent AI agent running inside your own infrastructure.
 
 ---
 
+## Architecture
+
+| Resource | Description |
+|---|---|
+| [docs/aee-workflow-diagram.html](./docs/aee-workflow-diagram.html) | Presentation-ready HTML process diagram of the full AEE agent workflow |
+| [docs/architecture-story.html](./docs/architecture-story.html) | Visual walkthrough of platform concepts |
+
 ## Technical Documentation
 
 | Topic | Document |

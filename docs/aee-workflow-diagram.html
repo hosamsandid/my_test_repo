@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AEE Agent Workflow — Accenture Agentic Studio</title>
+<style>
+  @import url('data:text/css,');
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background: #f8f9fb;
+    color: #1a1d23;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px 24px 60px;
+  }
+
+  header {
+    text-align: center;
+    margin-bottom: 40px;
+    max-width: 900px;
+  }
+
+  header .logo {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: #7c3aed;
+    margin-bottom: 10px;
+  }
+
+  header h1 {
+    font-size: 28px;
+    font-weight: 700;
+    color: #1a1d23;
+    margin-bottom: 10px;
+    line-height: 1.2;
+  }
+
+  header p {
+    font-size: 14px;
+    color: #5a6072;
+    line-height: 1.6;
+  }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 20px;
+    justify-content: center;
+    margin-bottom: 36px;
+    max-width: 900px;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    font-weight: 500;
+    color: #3d4251;
+  }
+
+  .legend-swatch {
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    flex-shrink: 0;
+  }
+
+  .legend-line {
+    width: 28px;
+    height: 3px;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+
+  .diagram-wrap {
+    background: #fff;
+    border-radius: 16px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.07), 0 1px 3px rgba(0,0,0,0.05);
+    padding: 40px 32px;
+    width: 100%;
+    max-width: 1060px;
+    overflow-x: auto;
+  }
+
+  svg {
+    display: block;
+    margin: 0 auto;
+    max-width: 100%;
+    height: auto;
+  }
+
+  /* actor colours */
+  .fill-human    { fill: #e0f2fe; }
+  .stroke-human  { stroke: #0ea5e9; }
+  .fill-ba       { fill: #ede9fe; }
+  .stroke-ba     { stroke: #7c3aed; }
+  .fill-dispatch { fill: #fef3c7; }
+  .stroke-dispatch { stroke: #d97706; }
+  .fill-dev      { fill: #dcfce7; }
+  .stroke-dev    { stroke: #16a34a; }
+  .fill-github   { fill: #f1f5f9; }
+  .stroke-github { stroke: #64748b; }
+  .fill-ci       { fill: #fce7f3; }
+  .stroke-ci     { stroke: #db2777; }
+
+  .actor-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+
+  .node-title {
+    font-size: 12px;
+    font-weight: 600;
+    fill: #1a1d23;
+  }
+
+  .node-sub {
+    font-size: 10.5px;
+    fill: #5a6072;
+  }
+
+  .label-tag {
+    font-size: 9.5px;
+    font-weight: 700;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+
+  .trigger-badge {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+  }
+
+  .arrow {
+    fill: none;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .arrow-github { stroke: #64748b; }
+  .arrow-agent  { stroke: #7c3aed; }
+  .arrow-merge  { stroke: #0ea5e9; }
+  .arrow-cron   { stroke: #d97706; stroke-dasharray: 5 3; }
+
+  .edge-label {
+    font-size: 10px;
+    fill: #5a6072;
+  }
+
+  .section-bg {
+    rx: 12;
+    ry: 12;
+    stroke-width: 1.5;
+    stroke-dasharray: 4 3;
+    fill-opacity: 0.35;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Accenture Agentic Studio</div>
+  <h1>AEE Agent Workflow</h1>
+  <p>End-to-end process diagram showing how the trigger- and label-driven agent team<br>
+     coordinates requirement capture, dispatch, implementation, review, and merge.</p>
+</header>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-swatch" style="background:#e0f2fe;border:2px solid #0ea5e9"></div>Human</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#ede9fe;border:2px solid #7c3aed"></div>Business Analyst Agent</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#fef3c7;border:2px solid #d97706"></div>Dispatcher Agent</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#dcfce7;border:2px solid #16a34a"></div>Developer Agent</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#fce7f3;border:2px solid #db2777"></div>CI / Code-Scanning</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#f1f5f9;border:2px solid #64748b"></div>GitHub Artefact</div>
+  <div class="legend-item">
+    <svg width="28" height="12"><line x1="0" y1="6" x2="28" y2="6" stroke="#64748b" stroke-width="2"/><polygon points="22,3 28,6 22,9" fill="#64748b"/></svg>
+    Event-driven
+  </div>
+  <div class="legend-item">
+    <svg width="28" height="12"><line x1="0" y1="6" x2="28" y2="6" stroke="#d97706" stroke-width="2" stroke-dasharray="5 3"/><polygon points="22,3 28,6 22,9" fill="#d97706"/></svg>
+    Recurring (cron)
+  </div>
+</div>
+
+<div class="diagram-wrap">
+<svg viewBox="0 0 960 1100" xmlns="http://www.w3.org/2000/svg" width="960" height="1100" aria-label="AEE Agent Workflow Diagram">
+  <defs>
+    <!-- Arrow markers -->
+    <marker id="arr-github" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#64748b"/>
+    </marker>
+    <marker id="arr-agent" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#7c3aed"/>
+    </marker>
+    <marker id="arr-merge" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#0ea5e9"/>
+    </marker>
+    <marker id="arr-cron" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#d97706"/>
+    </marker>
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#00000018"/>
+    </filter>
+  </defs>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       COLUMN HEADERS (swimlane labels)
+  ═══════════════════════════════════════════════════════════════ -->
+
+  <!-- Human swimlane header -->
+  <rect x="10" y="10" width="120" height="40" rx="8" class="fill-human stroke-human" stroke-width="1.5"/>
+  <text x="70" y="33" text-anchor="middle" class="actor-label" fill="#0369a1">Human</text>
+
+  <!-- BA swimlane header -->
+  <rect x="150" y="10" width="160" height="40" rx="8" class="fill-ba stroke-ba" stroke-width="1.5"/>
+  <text x="230" y="33" text-anchor="middle" class="actor-label" fill="#5b21b6">Business Analyst</text>
+
+  <!-- Dispatcher swimlane header -->
+  <rect x="330" y="10" width="160" height="40" rx="8" class="fill-dispatch stroke-dispatch" stroke-width="1.5"/>
+  <text x="410" y="33" text-anchor="middle" class="actor-label" fill="#92400e">Dispatcher</text>
+
+  <!-- Developer swimlane header -->
+  <rect x="510" y="10" width="200" height="40" rx="8" class="fill-dev stroke-dev" stroke-width="1.5"/>
+  <text x="610" y="33" text-anchor="middle" class="actor-label" fill="#15803d">Developer Agents</text>
+
+  <!-- GitHub/CI swimlane header -->
+  <rect x="730" y="10" width="220" height="40" rx="8" class="fill-github stroke-github" stroke-width="1.5"/>
+  <text x="840" y="33" text-anchor="middle" class="actor-label" fill="#475569">GitHub / CI</text>
+
+
+  <!-- ═══════════════════════════════════════════════════════════
+       PHASE 1 — REQUIREMENT CAPTURE
+  ═══════════════════════════════════════════════════════════════ -->
+
+  <!-- Section bracket -->
+  <rect x="10" y="68" width="940" height="130" rx="10" fill="#f8f0ff" stroke="#c4b5fd" stroke-width="1" stroke-dasharray="4 3" fill-opacity="0.4"/>
+  <text x="22" y="84" class="actor-label" fill="#7c3aed" font-size="10">Phase 1 — Requirement Capture</text>
+
+  <!-- Human: sends request -->
+  <rect x="20" y="95" width="100" height="54" rx="8" class="fill-human stroke-human" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="70" y="115" text-anchor="middle" class="node-title">User Request</text>
+  <text x="70" y="130" text-anchor="middle" class="node-sub">via Matrix DM</text>
+  <text x="70" y="143" text-anchor="middle" class="node-sub">to BA agent</text>
+
+  <!-- BA: receives DM, creates issue -->
+  <rect x="158" y="95" width="144" height="54" rx="8" class="fill-ba stroke-ba" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="230" y="115" text-anchor="middle" class="node-title">Receive &amp; Analyse</text>
+  <text x="230" y="130" text-anchor="middle" class="node-sub">understands requirement</text>
+  <text x="230" y="143" text-anchor="middle" class="node-sub">creates GitHub issue</text>
+
+  <!-- GitHub: issue created -->
+  <rect x="748" y="95" width="192" height="54" rx="8" class="fill-github stroke-github" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="844" y="115" text-anchor="middle" class="node-title">GitHub Issue</text>
+  <text x="844" y="130" text-anchor="middle" class="node-sub">created, no labels</text>
+  <!-- label tag -->
+  <rect x="791" y="138" width="46" height="16" rx="4" fill="#dcfce7" stroke="#16a34a" stroke-width="1"/>
+  <text x="814" y="150" text-anchor="middle" class="label-tag" fill="#15803d">ready</text>
+  <text x="845" y="150" text-anchor="start" class="node-sub"> ← applied by BA</text>
+
+  <!-- Arrow: Human → BA -->
+  <path d="M120,122 L156,122" class="arrow arrow-agent" marker-end="url(#arr-agent)"/>
+
+  <!-- Arrow: BA → GitHub (create issue + apply ready) -->
+  <path d="M302,122 Q520,100 746,122" class="arrow arrow-github" marker-end="url(#arr-github)"/>
+  <text x="524" y="110" text-anchor="middle" class="edge-label">opens issue + applies</text>
+  <rect x="555" y="112" width="36" height="14" rx="3" fill="#dcfce7" stroke="#16a34a" stroke-width="1"/>
+  <text x="573" y="123" text-anchor="middle" class="label-tag" fill="#15803d">ready</text>
+
+
+  <!-- ═══════════════════════════════════════════════════════════
+       PHASE 2 — DISPATCH
+  ═══════════════════════════════════════════════════════════════ -->
+
+  <rect x="10" y="212" width="940" height="140" rx="10" fill="#fffbeb" stroke="#fcd34d" stroke-width="1" stroke-dasharray="4 3" fill-opacity="0.5"/>
+  <text x="22" y="228" class="actor-label" fill="#d97706" font-size="10">Phase 2 — Dispatch</text>
+
+  <!-- Trigger badge: github-event issues.labeled -->
+  <rect x="338" y="238" width="144" height="20" rx="5" fill="#fef3c7" stroke="#d97706" stroke-width="1.2"/>
+  <text x="352" y="252" class="trigger-badge" fill="#92400e">⚡ github-event</text>
+  <text x="440" y="252" class="trigger-badge" fill="#d97706">issues.labeled</text>
+
+  <!-- Dispatcher node -->
+  <rect x="338" y="264" width="144" height="64" rx="8" class="fill-dispatch stroke-dispatch" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="410" y="284" text-anchor="middle" class="node-title">Dispatcher Agent</text>
+  <text x="410" y="299" text-anchor="middle" class="node-sub">detects</text>
+  <rect x="373" y="302" width="36" height="14" rx="3" fill="#dcfce7" stroke="#16a34a" stroke-width="1"/>
+  <text x="391" y="313" text-anchor="middle" class="label-tag" fill="#15803d">ready</text>
+  <text x="411" y="313" text-anchor="start" class="node-sub"> label</text>
+  <text x="410" y="326" text-anchor="middle" class="node-sub">selects developer</text>
+
+  <!-- GitHub: labels added -->
+  <rect x="748" y="238" width="192" height="90" rx="8" class="fill-github stroke-github" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="844" y="258" text-anchor="middle" class="node-title">Issue Updated</text>
+  <text x="844" y="273" text-anchor="middle" class="node-sub">Dispatcher applies:</text>
+  <rect x="760" y="278" width="72" height="14" rx="3" fill="#dbeafe" stroke="#3b82f6" stroke-width="1"/>
+  <text x="796" y="289" text-anchor="middle" class="label-tag" fill="#1d4ed8">assigned:dev-1</text>
+  <rect x="843" y="278" width="88" height="14" rx="3" fill="#fee2e2" stroke="#ef4444" stroke-width="1"/>
+  <text x="887" y="289" text-anchor="middle" class="label-tag" fill="#b91c1c">dispatch</text>
+  <line x1="760" y1="298" x2="938" y2="298" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="844" y="316" text-anchor="middle" class="node-sub">removes</text>
+  <rect x="806" y="320" width="76" height="14" rx="3" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1" stroke-dasharray="3 2"/>
+  <text x="844" y="331" text-anchor="middle" class="label-tag" fill="#64748b" text-decoration="line-through">ready</text>
+
+  <!-- Arrow: GitHub ready-label → Dispatcher trigger -->
+  <path d="M748,260 L484,256" class="arrow arrow-github" marker-end="url(#arr-github)"/>
+
+  <!-- Arrow: Dispatcher → GitHub labels -->
+  <path d="M482,296 L746,296" class="arrow arrow-agent" marker-end="url(#arr-agent)"/>
+  <text x="614" y="291" text-anchor="middle" class="edge-label">applies labels</text>
+
+
+  <!-- ═══════════════════════════════════════════════════════════
+       PHASE 3 — IMPLEMENTATION
+  ═══════════════════════════════════════════════════════════════ -->
+
+  <rect x="10" y="366" width="940" height="180" rx="10" fill="#f0fdf4" stroke="#86efac" stroke-width="1" stroke-dasharray="4 3" fill-opacity="0.5"/>
+  <text x="22" y="382" class="actor-label" fill="#16a34a" font-size="10">Phase 3 — Implementation</text>
+
+  <!-- Trigger badge: github-event issues.labeled -->
+  <rect x="518" y="388" width="184" height="20" rx="5" fill="#dcfce7" stroke="#16a34a" stroke-width="1.2"/>
+  <text x="530" y="402" class="trigger-badge" fill="#15803d">⚡ github-event</text>
+  <text x="634" y="402" class="trigger-badge" fill="#16a34a">issues.labeled</text>
+
+  <!-- Developer node -->
+  <rect x="518" y="414" width="184" height="98" rx="8" class="fill-dev stroke-dev" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="610" y="433" text-anchor="middle" class="node-title">Developer Agent</text>
+  <text x="610" y="449" text-anchor="middle" class="node-sub">detects</text>
+  <rect x="551" y="452" width="72" height="14" rx="3" fill="#dbeafe" stroke="#3b82f6" stroke-width="1"/>
+  <text x="587" y="463" text-anchor="middle" class="label-tag" fill="#1d4ed8">assigned:dev-1</text>
+  <rect x="630" y="452" width="57" height="14" rx="3" fill="#fee2e2" stroke="#ef4444" stroke-width="1"/>
+  <text x="658" y="463" text-anchor="middle" class="label-tag" fill="#b91c1c">dispatch</text>
+  <text x="610" y="480" text-anchor="middle" class="node-sub">applies</text>
+  <rect x="547" y="483" width="62" height="14" rx="3" fill="#fef9c3" stroke="#ca8a04" stroke-width="1"/>
+  <text x="578" y="494" text-anchor="middle" class="label-tag" fill="#713f12">started:dev-1</text>
+  <text x="610" y="510" text-anchor="middle" class="node-sub">creates branch, commits, opens PR</text>
+
+  <!-- GitHub: PR created -->
+  <rect x="748" y="388" width="192" height="90" rx="8" class="fill-github stroke-github" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="844" y="408" text-anchor="middle" class="node-title">Pull Request Opened</text>
+  <text x="844" y="423" text-anchor="middle" class="node-sub">feature branch → main</text>
+  <text x="844" y="438" text-anchor="middle" class="node-sub">body contains</text>
+  <text x="844" y="453" text-anchor="middle" class="node-sub" font-family="monospace">Closes #&lt;issue&gt;</text>
+  <text x="844" y="468" text-anchor="middle" class="node-sub">stamped: &lt;!-- agent: id --&gt;</text>
+
+  <!-- Arrow: assigned label → Developer trigger -->
+  <path d="M748,408 L704,406" class="arrow arrow-github" marker-end="url(#arr-github)"/>
+
+  <!-- Arrow: Developer → GitHub PR -->
+  <path d="M702,450 L746,450" class="arrow arrow-agent" marker-end="url(#arr-agent)"/>
+  <text x="724" y="444" text-anchor="middle" class="edge-label">gh-as-agent</text>
+  <text x="724" y="456" text-anchor="middle" class="edge-label">pr create</text>
+
+  <!-- Arrow: Developer applies started label back to issue -->
+  <path d="M518,470 Q400,470 400,340 Q400,296 482,296" class="arrow arrow-agent" stroke="#16a34a" marker-end="url(#arr-agent)" stroke-dasharray="none"/>
+  <text x="375" y="400" text-anchor="middle" class="edge-label" transform="rotate(-90,375,400)">started:*</text>
+
+
+  <!-- ═══════════════════════════════════════════════════════════
+       PHASE 4 — PR MONITORING (recurring)
+  ═══════════════════════════════════════════════════════════════ -->
+
+  <rect x="10" y="560" width="940" height="160" rx="10" fill="#fffbeb" stroke="#fcd34d" stroke-width="1" stroke-dasharray="4 3" fill-opacity="0.35"/>
+  <text x="22" y="576" class="actor-label" fill="#d97706" font-size="10">Phase 4 — PR Monitoring (Recurring)</text>
+
+  <!-- Trigger badge: cron -->
+  <rect x="518" y="582" width="100" height="20" rx="5" fill="#fef3c7" stroke="#d97706" stroke-width="1.2"/>
+  <text x="525" y="596" class="trigger-badge" fill="#92400e">⏰ cron trigger</text>
+
+  <!-- Developer monitoring node -->
+  <rect x="518" y="608" width="184" height="98" rx="8" class="fill-dev stroke-dev" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="610" y="627" text-anchor="middle" class="node-title">Developer Agent</text>
+  <text x="610" y="643" text-anchor="middle" class="node-sub">(periodic check)</text>
+  <text x="610" y="660" text-anchor="middle" class="node-sub">— checks merge conflicts</text>
+  <text x="610" y="675" text-anchor="middle" class="node-sub">— checks code-scan findings</text>
+  <text x="610" y="690" text-anchor="middle" class="node-sub">— pushes fixes or escalates</text>
+
+  <!-- CI node -->
+  <rect x="748" y="582" width="192" height="80" rx="8" class="fill-ci stroke-ci" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="844" y="603" text-anchor="middle" class="node-title">Code Scanning / CI</text>
+  <text x="844" y="620" text-anchor="middle" class="node-sub">runs on PR push</text>
+  <text x="844" y="637" text-anchor="middle" class="node-sub">reports findings via</text>
+  <text x="844" y="652" text-anchor="middle" class="node-sub">GitHub Events API</text>
+
+  <!-- Loop back arrow: Dev monitors own PR -->
+  <path d="M518,650 Q490,650 490,630 Q490,608 518,608" class="arrow arrow-cron" marker-end="url(#arr-cron)"/>
+
+  <!-- Arrow: Dev ↔ CI (bidirectional with push + feedback) -->
+  <path d="M702,640 L746,640" class="arrow arrow-github" marker-end="url(#arr-github)"/>
+  <path d="M746,622 L702,622" class="arrow arrow-github" marker-end="url(#arr-github)" stroke="#db2777"/>
+  <text x="724" y="616" text-anchor="middle" class="edge-label">findings</text>
+  <text x="724" y="646" text-anchor="middle" class="edge-label">pushes fixes</text>
+
+  <!-- Second dev agent (parallel) -->
+  <rect x="518" y="716" width="184" height="38" rx="8" class="fill-dev stroke-dev" stroke-width="1.5" filter="url(#shadow)" stroke-dasharray="6 3"/>
+  <text x="610" y="732" text-anchor="middle" class="node-title">Developer Agent 2</text>
+  <text x="610" y="748" text-anchor="middle" class="node-sub">(parallel, same pattern)</text>
+
+  <!-- Brace showing N agents -->
+  <path d="M504,614 Q496,614 496,660 Q496,700 504,700" fill="none" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="478" y="660" text-anchor="middle" class="node-sub" fill="#16a34a" transform="rotate(-90,478,660)">N agents</text>
+
+
+  <!-- ═══════════════════════════════════════════════════════════
+       PHASE 5 — REVIEW & MERGE
+  ═══════════════════════════════════════════════════════════════ -->
+
+  <rect x="10" y="770" width="940" height="140" rx="10" fill="#e0f2fe" stroke="#38bdf8" stroke-width="1" stroke-dasharray="4 3" fill-opacity="0.4"/>
+  <text x="22" y="786" class="actor-label" fill="#0369a1" font-size="10">Phase 5 — Review &amp; Merge</text>
+
+  <!-- Human: reviews PR -->
+  <rect x="20" y="800" width="100" height="64" rx="8" class="fill-human stroke-human" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="70" y="820" text-anchor="middle" class="node-title">Human Review</text>
+  <text x="70" y="836" text-anchor="middle" class="node-sub">reviews PR</text>
+  <text x="70" y="850" text-anchor="middle" class="node-sub">approves &amp; merges</text>
+  <text x="70" y="864" text-anchor="middle" class="node-sub">or requests changes</text>
+
+  <!-- GitHub: PR merged -->
+  <rect x="748" y="800" width="192" height="64" rx="8" class="fill-github stroke-github" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="844" y="820" text-anchor="middle" class="node-title">PR Merged</text>
+  <text x="844" y="836" text-anchor="middle" class="node-sub">issue auto-closed</text>
+  <text x="844" y="851" text-anchor="middle" class="node-sub">(Closes #&lt;n&gt; in PR body)</text>
+  <rect x="794" y="857" width="100" height="14" rx="3" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1" stroke-dasharray="3 2"/>
+  <text x="844" y="868" text-anchor="middle" class="label-tag" fill="#475569">all labels cleared</text>
+
+  <!-- Arrow: Human → GitHub merge -->
+  <path d="M120,832 Q430,810 746,832" class="arrow arrow-merge" marker-end="url(#arr-merge)"/>
+  <text x="430" y="806" text-anchor="middle" class="edge-label">merge PR</text>
+
+  <!-- Arrow: change requests back to Developer -->
+  <path d="M120,848 Q300,880 518,690" class="arrow arrow-merge" marker-end="url(#arr-merge)" stroke-dasharray="5 3"/>
+  <text x="290" y="888" text-anchor="middle" class="edge-label">review comments → Dev fixes</text>
+
+
+  <!-- ═══════════════════════════════════════════════════════════
+       PHASE 6 — BA NOTIFICATION
+  ═══════════════════════════════════════════════════════════════ -->
+
+  <rect x="10" y="924" width="940" height="100" rx="10" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="1" stroke-dasharray="4 3" fill-opacity="0.4"/>
+  <text x="22" y="940" class="actor-label" fill="#7c3aed" font-size="10">Phase 6 — Completion &amp; Notification</text>
+
+  <!-- BA notification -->
+  <rect x="158" y="952" width="144" height="54" rx="8" class="fill-ba stroke-ba" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="230" y="972" text-anchor="middle" class="node-title">BA Agent Notified</text>
+  <text x="230" y="988" text-anchor="middle" class="node-sub">github-event: issue.closed</text>
+  <text x="230" y="1003" text-anchor="middle" class="node-sub">informs human via DM</text>
+
+  <!-- Human DM receive -->
+  <rect x="20" y="952" width="100" height="54" rx="8" class="fill-human stroke-human" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="70" y="972" text-anchor="middle" class="node-title">User Informed</text>
+  <text x="70" y="988" text-anchor="middle" class="node-sub">receives completion</text>
+  <text x="70" y="1003" text-anchor="middle" class="node-sub">summary via Matrix</text>
+
+  <!-- Trigger badge: github-event issue.closed -->
+  <rect x="158" y="936" width="144" height="18" rx="5" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.2"/>
+  <text x="172" y="949" class="trigger-badge" fill="#5b21b6">⚡ github-event  issue.closed</text>
+
+  <!-- GitHub merged → BA trigger -->
+  <path d="M748,868 Q690,870 600,870 Q400,870 304,965" class="arrow arrow-github" marker-end="url(#arr-github)"/>
+
+  <!-- BA → Human DM -->
+  <path d="M156,978 L122,978" class="arrow arrow-agent" marker-end="url(#arr-agent)"/>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       LOOP PROTECTION NOTE
+  ═══════════════════════════════════════════════════════════════ -->
+
+  <rect x="10" y="1038" width="940" height="52" rx="8" fill="#fff7ed" stroke="#fdba74" stroke-width="1.2"/>
+  <text x="26" y="1057" class="actor-label" fill="#c2410c" font-size="10">Loop Protection</text>
+  <text x="26" y="1075" class="node-sub" fill="#7c2d12">All agent-originated GitHub events carry</text>
+  <text x="26" y="1075" class="node-sub" fill="#7c2d12" x="236">  &lt;!-- agent: id --&gt;  stamps (PRs/comments) or  &lt;agentId&gt;@agents.local  email (commits).</text>
+  <text x="236" y="1075" font-family="monospace" font-size="9.5" fill="#9a3412">  &lt;!-- agent: id --&gt;</text>
+  <text x="370" y="1075" class="node-sub" fill="#7c2d12">  stamps and</text>
+  <text x="430" y="1075" font-family="monospace" font-size="9.5" fill="#9a3412">  &lt;agentId&gt;@agents.local</text>
+  <text x="556" y="1075" class="node-sub" fill="#7c2d12">  email. The GitHub poller drops self-originated events (Layer 0) and applies per-trigger  from  filters (Layer 2).</text>
+
+</svg>
+</div>
+
+<footer style="margin-top:32px; font-size:12px; color:#9ca3af; text-align:center; max-width:900px;">
+  Accenture Agentic Studio · AEE Agent Workflow · Generated 2026-05-13<br>
+  Self-contained — no external dependencies required. Open offline.
+</footer>
+
+</body>
+</html>

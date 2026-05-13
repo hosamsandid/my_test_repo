@@ -42,8 +42,8 @@ function NavBadge({ count, color }) {
 const NAV = [
   { section: 'OVERVIEW', items: [
     { path: '/',             label: 'Dashboard',           Icon: LayoutDashboard },
-    { path: '/quickstart',   label: 'Quick Start',         Icon: Rocket },
-    { path: '/team-setup',   label: 'Team Setup',          Icon: Users2 },
+    { path: '/quickstart',   label: 'Single Agent',        Icon: Rocket,   subtitle: 'One agent, one repo, instant setup' },
+    { path: '/team-setup',   label: 'Team Wizard',         Icon: Users2,   subtitle: 'Full multi-role team with GitHub automation' },
     { path: '/agents',       label: 'Agents',              Icon: Layers },
     { path: '/flows',         label: 'Flows',               Icon: GitBranch },
     { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
@@ -63,8 +63,8 @@ const NAV = [
 
 const BREADCRUMBS = {
   '/':             'Dashboard',
-  '/quickstart':   'Quick Start',
-  '/team-setup':   'Team Setup',
+  '/quickstart':   'Single Agent',
+  '/team-setup':   'Team Wizard',
   '/agents':       'Agents',
   '/flows':        'Flows',
   '/chats':        'Agent Chat',
@@ -203,7 +203,7 @@ export default function Shell({ children }) {
                   {section.section}
                 </div>
               )}
-              {section.items.map(({ path, label, Icon }) => {
+              {section.items.map(({ path, label, Icon, subtitle }) => {
                 const isActive = path === '/'
                   ? location.pathname === '/'
                   : location.pathname === path || location.pathname.startsWith(path + '/');
@@ -259,7 +259,21 @@ export default function Shell({ children }) {
                         }} />
                       )}
                     </span>
-                    {!collapsed && <span>{label}</span>}
+                    {!collapsed && (
+                      <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                        <span>{label}</span>
+                        {subtitle && (
+                          <span style={{
+                            fontSize: 'var(--eb-text-xs)',
+                            color: 'var(--eb-text-muted)',
+                            fontWeight: 'normal',
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                          }}>{subtitle}</span>
+                        )}
+                      </span>
+                    )}
                     {/* Status badges in expanded mode */}
                     {isChat && !collapsed && (
                       <span style={{ display: 'flex', gap: 3, marginLeft: 'auto' }}>

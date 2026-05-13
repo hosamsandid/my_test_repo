@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -787,6 +787,49 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           <RoleCard value="orchestrator"  current={form.role} onSelect={v => update('role', v)} />
         </div>
         <RoleDetailBanner role={form.role} />
+        {(form.role === 'team' || form.role === 'team-member') && (
+          <div style={{
+            display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
+            padding: 'var(--eb-space-3)',
+            background: 'color-mix(in srgb, var(--eb-accent-primary) 8%, transparent)',
+            border: '1px solid var(--eb-accent-primary)',
+            borderRadius: 'var(--eb-radius-md)',
+            fontSize: 'var(--eb-text-xs)',
+            color: 'var(--eb-text-primary)',
+            lineHeight: 1.6,
+          }}>
+            <Info size={14} style={{ flexShrink: 0, marginTop: 2, color: 'var(--eb-accent-primary)' }} />
+            <span>
+              Consider using the{' '}
+              <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)' }}>
+                Team Wizard
+              </Link>{' '}
+              instead — it sets up the full team structure automatically.
+            </span>
+          </div>
+        )}
+        {form.role === 'orchestrator' && (
+          <div style={{
+            display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
+            padding: 'var(--eb-space-3)',
+            background: 'var(--eb-bg-elevated)',
+            border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-md)',
+            fontSize: 'var(--eb-text-xs)',
+            color: 'var(--eb-text-secondary)',
+            lineHeight: 1.6,
+          }}>
+            <Info size={14} style={{ flexShrink: 0, marginTop: 2, color: 'var(--eb-text-muted)' }} />
+            <span>
+              An Orchestrator monitors a directory of BriefingPacks (ACE task files) and manages their lifecycle.
+              Use this only if you are working with ACE LoopScripts. See{' '}
+              <Link to="/flows" style={{ color: 'var(--eb-accent-primary)' }}>
+                Flows
+              </Link>{' '}
+              (in the nav) to visualise active orchestrators.
+            </span>
+          </div>
+        )}
       </div>
 
       {form.role === 'orchestrator' && (
@@ -1879,7 +1922,7 @@ export default function Agents() {
         borderRadius: 'var(--eb-radius-md)',
         fontSize: 'var(--eb-text-sm)',
         color: 'var(--eb-text-secondary)',
-        display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+        display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)',
         lineHeight: 1.55,
       }}>
         <p style={{ margin: 0, fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
@@ -1887,13 +1930,31 @@ export default function Agents() {
         </p>
         <p style={{ margin: 0 }}>
           An <strong>Agent</strong> is a long-running Claude Code instance with its own workspace and session history.
-          Once created, you talk to it in the <strong>Agent Chat</strong>. When you create an agent you choose:
+          Once created, you talk to it in the <strong>Agent Chat</strong>. This page is for advanced and custom
+          configurations — for most use cases, the guided paths below are faster:
         </p>
-        <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
-          <li><strong>A Working Environment</strong> — supplies skills, repositories, GitHub token and the LLM endpoint.</li>
-          <li><strong>A role</strong> — Agent (one chat agent), Team (a template for many identical members), or Orchestrator (drives a folder of ACE BriefingPacks).</li>
-          <li><strong>A system prompt</strong> — the persona / instructions Claude reads at startup. Orchestrators don't need one; their behaviour is fixed.</li>
-        </ul>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--eb-text-xs)' }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid var(--eb-border-default)', color: 'var(--eb-text-primary)' }}>Role</th>
+              <th style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid var(--eb-border-default)', color: 'var(--eb-text-primary)' }}>Plain-language description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style={{ padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap' }}><strong>Agent</strong></td>
+              <td style={{ padding: '4px 8px' }}>A standalone chat assistant. Use <Link to="/quickstart" style={{ color: 'var(--eb-accent-primary)' }}>Single Agent</Link> for the fastest setup.</td>
+            </tr>
+            <tr>
+              <td style={{ padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap' }}><strong>Team / Team-member</strong></td>
+              <td style={{ padding: '4px 8px' }}>Part of a coordinated group. Use the <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)' }}>Team Wizard</Link> — don&apos;t create these manually unless you know what you&apos;re doing.</td>
+            </tr>
+            <tr>
+              <td style={{ padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap' }}><strong>Orchestrator</strong></td>
+              <td style={{ padding: '4px 8px' }}>Manages a folder of BriefingPacks (ACE workflow tasks). Only needed for ACE-based workflows.</td>
+            </tr>
+          </tbody>
+        </table>
         <p style={{ margin: 0 }}>
           After creation the agent appears below as a card. <em>Active</em> agents are running and ready to chat;
           <em> paused</em> agents keep their workspace but the process is stopped; <em>not initialised</em> stubs (e.g. orchestrator children) need

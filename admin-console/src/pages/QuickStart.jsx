@@ -105,6 +105,17 @@ export default function QuickStart() {
         }}>
           Paste a GitHub URL, hit Enter, start chatting. The Working Environment and Agent are created automatically.
         </p>
+        <p style={{
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-secondary)',
+          marginTop: 'var(--eb-space-3)',
+          marginBottom: 0,
+          lineHeight: 1.6,
+        }}>
+          Creates a single chat agent bound to your repository. The agent can answer questions, read code, and help
+          you work. It does not include automated code review, issue triage, or a development workflow — use the{' '}
+          <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)' }}>Team Wizard</Link> for that.
+        </p>
       </div>
 
       {!tokensLoading && !hasTokens && (
@@ -303,6 +314,20 @@ export default function QuickStart() {
         and no additional skills. A default agent is then created on top of it. Both can be fine-tuned later under{' '}
         <Link to="/environments" style={{ color: 'var(--eb-accent-primary)' }}>Working Environments</Link> and{' '}
         <Link to="/agents" style={{ color: 'var(--eb-accent-primary)' }}>Agents</Link>.
+      </div>
+
+      <div style={{
+        padding: 'var(--eb-space-3) var(--eb-space-4)',
+        background: 'var(--eb-bg-surface)',
+        border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-md)',
+        fontSize: 'var(--eb-text-sm)',
+        color: 'var(--eb-text-secondary)',
+      }}>
+        Need a full development team instead?{' '}
+        <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)', fontWeight: 'var(--eb-font-medium)' }}>
+          → Team Wizard
+        </Link>
       </div>
     </div>
   );

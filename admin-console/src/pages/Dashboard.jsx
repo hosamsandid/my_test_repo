@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { useApi } from '../hooks/useApi';
 import StatGrid from '../components/StatGrid';
 import SetupWizard from './SetupWizard';
-import { Settings, Bot, Clock, MessageCircle, Server, Rocket, ArrowRight } from 'lucide-react';
+import { Settings, Bot, Clock, MessageCircle, Server, Rocket, ArrowRight, Users2, Layers } from 'lucide-react';
 
 const STATUS_POLL_MS = 5000;
 
@@ -334,6 +334,8 @@ export default function Dashboard() {
     { label: 'Skills',       value: dash.skills?.total ?? 0 },
   ] : [];
 
+  const totalAgents = dash?.agents?.total ?? 0;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-6)' }}>
       <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
@@ -342,34 +344,128 @@ export default function Dashboard() {
 
       <SetupNudge />
 
-      <Link
-        to="/quickstart"
-        style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: 'var(--eb-space-4) var(--eb-space-5)',
+      {totalAgents === 0 ? (
+        <div style={{
+          padding: 'var(--eb-space-5)',
           background: 'var(--eb-bg-surface)',
           border: '1px solid var(--eb-accent-primary)',
           borderRadius: 'var(--eb-radius-md)',
-          textDecoration: 'none',
-          color: 'inherit',
-          transition: 'background var(--eb-transition-fast)',
-        }}
-        onMouseEnter={e => { e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
-        onMouseLeave={e => { e.currentTarget.style.background = 'var(--eb-bg-surface)'; }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
-          <Rocket size={20} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
-          <div>
-            <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
-              Quick Start
-            </div>
-            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginTop: 2 }}>
-              Paste a GitHub URL → Working Environment + Agent in one step
-            </div>
+          display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)',
+        }}>
+          <div style={{ fontWeight: 'var(--eb-font-semibold)', fontSize: 'var(--eb-text-md)', color: 'var(--eb-text-primary)' }}>
+            Where to start?
+          </div>
+          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+            I want to…
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+            <Link
+              to="/quickstart"
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: 'var(--eb-space-3) var(--eb-space-4)',
+                background: 'var(--eb-bg-elevated)',
+                border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-md)',
+                textDecoration: 'none', color: 'inherit',
+                transition: 'background var(--eb-transition-fast)',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'var(--eb-bg-elevated)'; }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
+                <Rocket size={18} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+                <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+                  Chat with an AI about my codebase
+                </span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)' }}>Single Agent</span>
+                <ArrowRight size={14} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+              </div>
+            </Link>
+            <Link
+              to="/team-setup"
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: 'var(--eb-space-3) var(--eb-space-4)',
+                background: 'var(--eb-bg-elevated)',
+                border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-md)',
+                textDecoration: 'none', color: 'inherit',
+                transition: 'background var(--eb-transition-fast)',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'var(--eb-bg-elevated)'; }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
+                <Users2 size={18} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+                <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+                  Set up an automated development team
+                </span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)' }}>Team Wizard</span>
+                <ArrowRight size={14} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+              </div>
+            </Link>
+            <Link
+              to="/agents"
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: 'var(--eb-space-3) var(--eb-space-4)',
+                background: 'var(--eb-bg-elevated)',
+                border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-md)',
+                textDecoration: 'none', color: 'inherit',
+                transition: 'background var(--eb-transition-fast)',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'var(--eb-bg-elevated)'; }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
+                <Layers size={18} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+                <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+                  Manage ACE BriefingPack workflows
+                </span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Agents → + New Agent (Orchestrator)</span>
+                <ArrowRight size={14} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+              </div>
+            </Link>
           </div>
         </div>
-        <ArrowRight size={16} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
-      </Link>
+      ) : (
+        <Link
+          to="/quickstart"
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: 'var(--eb-space-4) var(--eb-space-5)',
+            background: 'var(--eb-bg-surface)',
+            border: '1px solid var(--eb-accent-primary)',
+            borderRadius: 'var(--eb-radius-md)',
+            textDecoration: 'none',
+            color: 'inherit',
+            transition: 'background var(--eb-transition-fast)',
+          }}
+          onMouseEnter={e => { e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
+          onMouseLeave={e => { e.currentTarget.style.background = 'var(--eb-bg-surface)'; }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
+            <Rocket size={20} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+            <div>
+              <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
+                Single Agent
+              </div>
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginTop: 2 }}>
+                One agent, one repo, instant setup
+              </div>
+            </div>
+          </div>
+          <ArrowRight size={16} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+        </Link>
+      )}
 
       <StatGrid stats={stats} />
 

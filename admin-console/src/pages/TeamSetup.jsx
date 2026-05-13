@@ -221,6 +221,26 @@ function StepProject({ form, setForm, error }) {
   return (
     <Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <div style={{
+          padding: 'var(--eb-space-3) var(--eb-space-4)',
+          background: 'var(--eb-bg-elevated)',
+          border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-md)',
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-secondary)',
+          lineHeight: 1.6,
+          display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+        }}>
+          <p style={{ margin: 0 }}>
+            Sets up a coordinated team of agents — Business Analyst, Developer, Code Reviewer, and more — all
+            wired to your GitHub repository and ready to react to issues and pull requests automatically.
+          </p>
+          <p style={{ margin: 0, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            The wizard creates agents with the <strong style={{ color: 'var(--eb-text-secondary)' }}>team-member</strong> role.
+            The <strong style={{ color: 'var(--eb-text-secondary)' }}>Team</strong> role on the Agents page is a
+            configuration template that team-members inherit from — you don&apos;t need to create it manually.
+          </p>
+        </div>
         <div>
           <label htmlFor="ts-team-name" style={labelStyle}>Team Name</label>
           <input

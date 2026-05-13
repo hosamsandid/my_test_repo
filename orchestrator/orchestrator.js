@@ -766,18 +766,18 @@ function cloneRepository(targetDir, repository, envGithubTokenId = null, envId =
     }
   }
 
-  // For HTTPS GitHub URLs, authenticate via a one-shot http.extraheader so
-  // the token never lands in `git remote -v` (no URL rewriting), and only
-  // for this clone invocation. The presence of an SSH key in the env spec
-  // does NOT block this — SSH keys are no help for HTTPS transport.
-  let extraHeaderArg = null;
+  // For HTTPS GitHub URLs, authenticate via GIT_CONFIG_* env vars so the
+  // token never appears in process arguments (/proc/<pid>/cmdline) and never
+  // lands in `git remote -v` (no URL rewriting). Only active for this single
+  // invocation. The presence of an SSH key does NOT block this path — SSH
+  // keys are no help for HTTPS transport.
+  let authBasic = null;
   if (isHttpsGithub && envGithubTokenId) {
     const tokenPath = path.join(GH_TOKENS_DIR, envGithubTokenId);
     try {
       const ghToken = fs.readFileSync(tokenPath, "utf8").trim();
       if (ghToken) {
-        const basic = Buffer.from(`x-access-token:${ghToken}`).toString("base64");
-        extraHeaderArg = `http.https://github.com/.extraheader=Authorization: Basic ${basic}`;
+        authBasic = Buffer.from(`x-access-token:${ghToken}`).toString("base64");
       }
     } catch (err) {
       console.warn(`[Orchestrator] Cannot read GitHub token ${envGithubTokenId} for clone: ${err.message}`);
@@ -786,7 +786,7 @@ function cloneRepository(targetDir, repository, envGithubTokenId = null, envId =
   // Refuse the clone proactively when no auth can possibly work. Without
   // this, git would block on a username prompt (no TTY → fatal: could not
   // read Username) and the failure would surface as a cryptic stderr line.
-  if (isHttpsGithub && !extraHeaderArg) {
+  if (isHttpsGithub && !authBasic) {
     throw new Error(
       `HTTPS clone of ${url} needs a GitHub PAT, but the env has no usable githubTokenId ` +
       `(SSH keys do not authenticate HTTPS transports). Either add a PAT to the env or ` +
@@ -794,15 +794,18 @@ function cloneRepository(targetDir, repository, envGithubTokenId = null, envId =
     );
   }
 
-  const args = [];
-  if (extraHeaderArg) args.push("-c", extraHeaderArg);
-  args.push("clone");
+  const args = ["clone"];
   if (branch) args.push("--branch", branch);
   args.push("--", url, repoName);
 
   const env = { ...process.env };
   if (keyPath) {
     env.GIT_SSH_COMMAND = `ssh -i ${keyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes`;
+  }
+  if (authBasic) {
+    env.GIT_CONFIG_COUNT = "1";
+    env.GIT_CONFIG_KEY_0 = "http.https://github.com/.extraheader";
+    env.GIT_CONFIG_VALUE_0 = `Authorization: Basic ${authBasic}`;
   }
 
   try {
@@ -2925,14 +2928,22 @@ async function main() {
         catch { parsed = {}; }
         const url = typeof parsed.url === 'string' ? parsed.url.trim() : '';
         const sshKeyId = parsed.sshKeyId || null;
+        const githubTokenId = parsed.githubTokenId || null;
         if (!url || url.startsWith('-')) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: 'url is required' }));
           return;
         }
+        const isHttpsGithub = /^https?:\/\/(www\.)?github\.com\//i.test(url);
         const cmdEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
         if (sshKeyId) {
           const keyPath = path.join(SSH_KEYS_DIR, sshKeyId);
+          const resolvedKey = path.resolve(keyPath);
+          if (!resolvedKey.startsWith(path.resolve(SSH_KEYS_DIR) + path.sep)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'Invalid SSH key id' }));
+            return;
+          }
           if (!fs.existsSync(keyPath)) {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: false, error: `SSH key not found: ${sshKeyId}` }));
@@ -2943,9 +2954,29 @@ async function main() {
             `ssh -i ${keyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null` +
             ` -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8`;
         }
+        // For HTTPS GitHub URLs inject PAT auth via GIT_CONFIG_* env vars so
+        // the token never appears in process arguments (/proc/<pid>/cmdline).
+        if (isHttpsGithub && githubTokenId) {
+          const tokenPath = path.join(GH_TOKENS_DIR, githubTokenId);
+          const resolvedToken = path.resolve(tokenPath);
+          if (resolvedToken.startsWith(path.resolve(GH_TOKENS_DIR) + path.sep)) {
+            try {
+              const ghToken = fs.readFileSync(tokenPath, 'utf8').trim();
+              if (ghToken) {
+                const basic = Buffer.from(`x-access-token:${ghToken}`).toString('base64');
+                cmdEnv.GIT_CONFIG_COUNT = '1';
+                cmdEnv.GIT_CONFIG_KEY_0 = 'http.https://github.com/.extraheader';
+                cmdEnv.GIT_CONFIG_VALUE_0 = `Authorization: Basic ${basic}`;
+              }
+            } catch (err) {
+              console.warn(`[Orchestrator] repository-check: cannot read GitHub token ${githubTokenId}: ${err.message}`);
+            }
+          }
+        }
+        const gitArgs = ['ls-remote', '--exit-code', '--symref', '--', url, 'HEAD'];
         execFile(
           'git',
-          ['ls-remote', '--exit-code', '--symref', '--', url, 'HEAD'],
+          gitArgs,
           { env: cmdEnv, timeout: 12_000, maxBuffer: 1024 * 1024 },
           (err, stdout, stderr) => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -2960,7 +2991,11 @@ async function main() {
               return;
             }
             const detail = (stderr || err.message || '').toString().trim();
-            const firstLine = detail.split('\n').find(l => l.trim()) || 'git ls-remote failed';
+            // Strip any Authorization header line that may have leaked into the
+            // error output before returning it to the caller. Match to end-of-line
+            // so the full "Basic <base64>" value is covered, not just the first word.
+            const sanitized = detail.replace(/Authorization:[^\r\n]*/gi, 'Authorization: [redacted]');
+            const firstLine = sanitized.split('\n').find(l => l.trim()) || 'git ls-remote failed';
             res.end(JSON.stringify({ ok: false, error: firstLine.slice(0, 300) }));
           },
         );

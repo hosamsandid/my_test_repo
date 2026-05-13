@@ -86,7 +86,7 @@ function SkillPicker({ allSkills, selected, onChange }) {
   );
 }
 
-function useRepoCheck(url, sshKeyId) {
+function useRepoCheck(url, sshKeyId, githubTokenId) {
   const [state, setState] = useState({ status: 'idle', error: null });
   const reqIdRef = useRef(0);
   const trimmedUrl = url ? url.trim() : '';
@@ -103,6 +103,7 @@ function useRepoCheck(url, sshKeyId) {
         const result = await apiCall('POST', '/api/repositories/check', {
           url: trimmedUrl,
           sshKeyId: sshKeyId || null,
+          githubTokenId: githubTokenId || null,
         });
         if (reqIdRef.current !== myReqId) return; // a newer request is in flight
         if (result.ok) setState({ status: 'ok', error: null });
@@ -113,7 +114,7 @@ function useRepoCheck(url, sshKeyId) {
       }
     }, 700);
     return () => clearTimeout(handle);
-  }, [trimmedUrl, sshKeyId]);
+  }, [trimmedUrl, sshKeyId, githubTokenId]);
 
   return state;
 }
@@ -143,8 +144,8 @@ function RepoStatusIcon({ status, error }) {
   return null;
 }
 
-function RepositoryCard({ idx, repo, sshKeys, onChange, onRemove }) {
-  const check = useRepoCheck(repo.url, repo.sshKeyId);
+function RepositoryCard({ idx, repo, sshKeys, githubTokenId, onChange, onRemove }) {
+  const check = useRepoCheck(repo.url, repo.sshKeyId, githubTokenId);
 
   return (
     <div style={{
@@ -440,6 +441,7 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
             idx={idx}
             repo={repo}
             sshKeys={sshKeys}
+            githubTokenId={form.githubTokenId || null}
             onChange={(key, val) => updateRepo(idx, key, val)}
             onRemove={() => removeRepo(idx)}
           />

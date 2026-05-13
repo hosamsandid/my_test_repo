@@ -67,6 +67,13 @@ const coordinatorWorkflowLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Too many requests' },
 });
+const handoverLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests' },
+});
 const MCP_SERVER_ID_RE = /^[a-z0-9-]+$/;
 const MCP_CREDENTIAL_ID_RE = /^[a-z0-9-]+$/;
 
@@ -934,7 +941,7 @@ app.get('/api/agents/:id/handover/git-status', async (req, res) => {
 // typed message) so the agent picks it up via its normal DM heuristic and
 // the entire exchange — including the resulting commits — stays visible in
 // the chat history. Used by the pre-flight buttons.
-app.post('/api/agents/:id/handover/nudge', async (req, res) => {
+app.post('/api/agents/:id/handover/nudge', handoverLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
@@ -986,7 +993,7 @@ app.post('/api/agents/:id/handover/nudge', async (req, res) => {
   }
 });
 
-app.post('/api/agents/:id/handover', async (req, res) => {
+app.post('/api/agents/:id/handover', handoverLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
 
@@ -2235,14 +2242,26 @@ app.delete('/api/environments/:id', (req, res) => {
 // will actually be able to clone it. Delegates to the orchestrator since only
 // that container has git/openssh and the SSH key files mounted.
 app.post('/api/repositories/check', async (req, res) => {
-  const { url, sshKeyId } = req.body || {};
+  const { url, sshKeyId, githubTokenId } = req.body || {};
   if (!url || typeof url !== 'string') {
     return res.status(400).json({ ok: false, error: 'url is required' });
   }
   if (sshKeyId) {
+    if (!SSH_KEY_ID_RE.test(sshKeyId)) {
+      return res.status(400).json({ ok: false, error: 'Invalid SSH key id' });
+    }
     const keys = listSshKeys();
     if (!keys.some(k => k.id === sshKeyId)) {
       return res.status(400).json({ ok: false, error: `SSH key '${sshKeyId}' not found` });
+    }
+  }
+  if (githubTokenId) {
+    if (!GH_TOKEN_ID_RE.test(githubTokenId)) {
+      return res.status(400).json({ ok: false, error: 'Invalid GitHub token id' });
+    }
+    const tokens = listGithubTokens();
+    if (!tokens.some(t => t.id === githubTokenId)) {
+      return res.status(400).json({ ok: false, error: `GitHub token '${githubTokenId}' not found` });
     }
   }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
@@ -2250,7 +2269,7 @@ app.post('/api/repositories/check', async (req, res) => {
     const resp = await fetch(`${orchestratorUrl}/internal/repository-check`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, sshKeyId: sshKeyId || null }),
+      body: JSON.stringify({ url, sshKeyId: sshKeyId || null, githubTokenId: githubTokenId || null }),
     });
     const data = await resp.json();
     res.status(resp.status).json(data);

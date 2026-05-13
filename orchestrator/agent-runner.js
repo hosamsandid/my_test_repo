@@ -586,7 +586,12 @@ class TriggerScheduler {
   // console API instead of sending a direct Matrix DM, so that delivery
   // is deferred until the agent-runner's Matrix client is ready.
   async executeHandoverDm(entry) {
-    const roomId = entry.roomId || loadDmRoomId();
+    const rawRoomId = entry.roomId || loadDmRoomId();
+    // Validate Matrix room ID format (!<localpart>:<server>) before use in file
+    // paths (session log) and Matrix API calls.
+    const MATRIX_ROOM_ID_RE = /^![a-zA-Z0-9._~-]+:[a-zA-Z0-9._:-]+$/;
+    const roomId = typeof rawRoomId === 'string' && MATRIX_ROOM_ID_RE.test(rawRoomId)
+      ? rawRoomId : null;
     if (!roomId) {
       console.log(`[Runner:${AGENT_ID}] handover-dm: no DM room available — skipping`);
       return;

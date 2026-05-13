@@ -11,7 +11,7 @@ The Admin Console at `http://localhost:4000` (configurable via `.env`) is the ce
 | **Agents** | `/agents` | Create, edit, enable/disable, and delete agents |
 | **Working Environments** | `/environments` | Reusable workspace recipes (skills, repos, GitHub token, LLM endpoint) |
 | **SSH Keys** | `/ssh-keys` | Register SSH key pairs for private repository access |
-| **GitHub Tokens** | `/github-tokens` | Register GitHub PATs for the GitHub event poller |
+| **GitHub Tokens** | `/github-tokens` | Register GitHub PATs for the GitHub event poller and HTTPS repository access |
 | **Skills Registry** | `/skills` | Browse available skills; click to view skill content |
 | **Scheduled Jobs** | `/jobs` | Cross-agent view of all triggers; add/edit/delete cron, one-shot, webhook, and GitHub event triggers |
 | **Model Registry** | `/models` | Register and test LLM endpoints; discover available models; set per-agent model overrides |

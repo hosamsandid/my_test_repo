@@ -18,6 +18,6 @@ GitHub Personal Access Tokens (PATs) authorize the built-in GitHub poller to wat
 
 **Scope:** The token must have at minimum `repo` read access for the repositories you want to monitor. For writing commits and opening pull requests via `gh-as-agent`, it must also have `repo` write access and `workflow` access if Actions workflows are involved.
 
-**Using a token:** Assign a token to a Working Environment. All agents in that environment share the token for polling — they do not each need their own.
+**Using a token:** Assign a token to a Working Environment. All agents in that environment share the token for polling and for HTTPS GitHub repository access (cloning and the real-time repo-check probe) — they do not each need their own.
 
 **Loop protection:** The GitHub poller stamps agent-originated commits and PR bodies with agent identity markers. This prevents agents from triggering themselves in a feedback loop (see [docs/triggers.md](./triggers.md) for details).

@@ -59,7 +59,7 @@ When an agent is created via the Admin Console, the orchestrator:
 2. Copies only the skills the env lists (from `/template-workspace/skills/`)
 3. Patches absolute `/workspace/` paths in seeded memory
 4. Materializes the env's MCP server refs into the agent's own `.claude/settings.json` (substituting credentials per-agent — see *MCP Servers*)
-5. If the env has a repository, runs `git clone` with `GIT_SSH_COMMAND` pointing at the env's SSH key (`/workspace/environments/_keys/<sshKeyId>`)
+5. If the env has a repository, runs `git clone` — SSH URLs use `GIT_SSH_COMMAND` pointing at the env's SSH key; HTTPS GitHub URLs inject the GitHub token via `GIT_CONFIG_*` env vars
 6. Builds a merged CLAUDE.md: base template + env section + agent prompt
 
 SSH keys are stored at `/workspace/environments/_keys/<keyId>` (mode 0600) with metadata in `_keys/index.json`. The private key value is **never** returned by the API after creation; only its fingerprint.
@@ -70,12 +70,14 @@ The two credentials are kept deliberately separate as **defense-in-depth** — t
 
 | | SSH key | GitHub PAT |
 |---|---|---|
-| `git clone` / `fetch` at workspace seed | ✅ via `GIT_SSH_COMMAND` | — |
-| `git ls-remote` probe (env editor) | ✅ | — |
+| `git clone` / `fetch` at workspace seed (SSH URL) | ✅ via `GIT_SSH_COMMAND` | — |
+| `git clone` / `fetch` at workspace seed (HTTPS GitHub URL) | — | ✅ via `GIT_CONFIG_*` env vars |
+| `git ls-remote` probe (SSH URL, env editor) | ✅ | — |
+| `git ls-remote` probe (HTTPS GitHub URL, env editor) | — | ✅ via `-c http.extraheader` |
 | GitHub Events API polling (`github-poller.js`) | — | ✅ Bearer auth |
 | `gh pr create` / commit / review (`gh-as-agent`) | — | ✅ via `GH_TOKEN` / `GITHUB_TOKEN` |
 
-**Blast-radius separation.** The SSH key can be a per-repo, read-only deploy key — its scope is "clone this one repo". The PAT carries higher privileges (push, PR creation, API actions across everything the account can reach). Splitting them means a leaked SSH key can't merge PRs and a leaked PAT didn't already grant the initial repo clone path. Collapsing the two into a token-only flow is technically possible (HTTPS clone with `GITHUB_TOKEN` injection), but would put repo I/O and API write actions on the same credential — undesirable in this enterprise context.
+**Blast-radius separation.** The SSH key can be a per-repo, read-only deploy key — its scope is "clone this one repo". The PAT carries higher privileges (push, PR creation, API actions across everything the account can reach). Splitting them means a leaked SSH key can't merge PRs and a leaked PAT didn't already grant the initial repo clone path. For HTTPS-only repos the PAT covers both git I/O and API actions on the same credential — operators who want tighter blast-radius should prefer SSH URL repos with a deploy key.
 
 The setup wizard and the SSH-keys / GitHub-tokens admin pages explain this rationale inline so that operators understand why both are required.
 

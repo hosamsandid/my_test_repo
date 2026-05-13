@@ -8,7 +8,7 @@ A **Working Environment** is a reusable workspace recipe applied when an agent i
 |---|---|
 | **Skills** | Names of skills (from the central pool) to copy into the agent workspace at creation |
 | **Repositories** | One or more Git repos to clone, each with an optional SSH key binding |
-| **GitHub Token** | PAT used by the GitHub poller for event-driven triggers on repos in this environment |
+| **GitHub Token** | PAT used by the GitHub poller for event-driven triggers; also authenticates HTTPS GitHub repository cloning and the real-time repo-check probe |
 | **LLM Endpoint** | Optional override — the agent inherits `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` from this endpoint rather than the global default |
 | **Additional Context** | Markdown appended to the agent's `CLAUDE.md` after the environment section |
 
@@ -18,7 +18,7 @@ When a new agent is created with a Working Environment, the orchestrator:
 
 1. Seeds `.claude/` and `memory/` from the skill-pool volume
 2. Copies the selected skills into the agent workspace
-3. Clones the configured repositories using the appropriate SSH key
+3. Clones the configured repositories — SSH repos use the bound SSH key; HTTPS GitHub repos use the environment's GitHub token
 4. Assembles a merged `CLAUDE.md` from the base template, the environment section, and the agent's own prompt
 
 This means all agents in the same Working Environment share the same starting skill set and repository access — but each gets an independent workspace and memory that evolves separately from that point on.

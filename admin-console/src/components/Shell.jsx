@@ -42,8 +42,8 @@ function NavBadge({ count, color }) {
 const NAV = [
   { section: 'OVERVIEW', items: [
     { path: '/',             label: 'Dashboard',           Icon: LayoutDashboard },
-    { path: '/quickstart',   label: 'Single Agent',        Icon: Rocket,   subtitle: 'One agent, one repo, instant setup' },
-    { path: '/team-setup',   label: 'Team Wizard',         Icon: Users2,   subtitle: 'Full multi-role team with GitHub automation' },
+    { path: '/quickstart',   label: 'Single Agent',        Icon: Rocket,   subtitle: 'One agent, one repo' },
+    { path: '/team-setup',   label: 'Team Wizard',         Icon: Users2,   subtitle: 'Multi-role GitHub team' },
     { path: '/agents',       label: 'Agents',              Icon: Layers },
     { path: '/flows',         label: 'Flows',               Icon: GitBranch },
     { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
@@ -234,6 +234,7 @@ export default function Shell({ children }) {
                       fontSize: 'var(--eb-text-md)',
                       cursor: 'pointer',
                       fontFamily: 'inherit',
+                      textAlign: 'left',
                       transition: 'background var(--eb-transition-fast)',
                     }}
                     onMouseEnter={e => {

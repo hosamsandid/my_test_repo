@@ -8,6 +8,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const bpEventRouter = require("./bp-event-router");
+const { findEnclosingGitRepo } = require("./git-workspace");
 
 // ============================================================
 // Config
@@ -1059,15 +1060,21 @@ function buildGitSshCommand(env) {
 // claim tick.
 function pullOrchestratorWorkspace(orchestratorId, briefingsPath, env, { force = false } = {}) {
   const rel = (briefingsPath || "").replace(/^\/+|\/+$/g, "");
-  const workspace = path.join("/workspace/agents", orchestratorId, rel);
-  if (!fs.existsSync(path.join(workspace, ".git"))) {
+  const agentRoot = path.join(AGENTS_DIR, orchestratorId);
+  const workspace = path.join(agentRoot, rel);
+  // The briefings dir may sit at the repo root (classic case) or in a
+  // sub-directory of a cloned repo (multiple BP collections per repo). Walk
+  // upward until we find an enclosing `.git`, capped at the agent root so a
+  // bad config can never escape the agent's own workspace.
+  const repoRoot = findEnclosingGitRepo(workspace, agentRoot);
+  if (!repoRoot) {
     // Log the skip so a misconfigured briefings clone isn't invisible — but
     // throttle so the 30s claim-loop doesn't carpet the orchestrator log
     // with the same line. `force: true` (operator-triggered sync) always
     // logs so the user sees feedback from their explicit action.
     if (force || shouldWarnMissingWorkspace(orchestratorId)) {
       console.warn(
-        `[Orchestrator] Pull skipped for ${orchestratorId}: ${workspace} is not a git checkout`
+        `[Orchestrator] Pull skipped for ${orchestratorId}: no enclosing git checkout found below ${agentRoot} for briefings workspace ${workspace}`
       );
     }
     return { skipped: "not-a-git-repo", path: workspace };
@@ -1083,16 +1090,16 @@ function pullOrchestratorWorkspace(orchestratorId, briefingsPath, env, { force =
 
   try {
     execFileSync("git", ["fetch", "origin"], {
-      cwd: workspace, env: gitEnv, stdio: "pipe", timeout: 30_000,
+      cwd: repoRoot, env: gitEnv, stdio: "pipe", timeout: 30_000,
     });
     execFileSync("git", ["pull", "--ff-only"], {
-      cwd: workspace, env: gitEnv, stdio: "pipe", timeout: 30_000,
+      cwd: repoRoot, env: gitEnv, stdio: "pipe", timeout: 30_000,
     });
-    return { pulled: true };
+    return { pulled: true, repoRoot };
   } catch (err) {
     const detail = (err.stderr || err.stdout || err.message || "").toString().trim().slice(0, 200);
     console.warn(`[Orchestrator] Pull failed for ${orchestratorId}: ${detail}`);
-    return { failed: true, detail };
+    return { failed: true, detail, repoRoot };
   }
 }
 
@@ -1853,16 +1860,22 @@ class Orchestrator {
     // returns empty when the workspace clone is missing, which produces an
     // orchestrator with zero BP-instance stubs and no surfaced error. Fail
     // loudly here instead so the caller — create-agent, sync button, claim
-    // tick — gets a clear message naming the missing path.
+    // tick — gets a clear message naming the missing path. The briefings
+    // dir may be the repo root or a sub-directory of a cloned repo; we
+    // accept either as long as some ancestor (up to the agent root) is a
+    // git checkout.
     const rel = orchCfg.briefingsPath.replace(/^\/+|\/+$/g, "");
-    const workspace = path.join(AGENTS_DIR, orchestratorId, rel);
-    if (!fs.existsSync(path.join(workspace, ".git"))) {
-      throw new Error(
-        `Briefings workspace is not a git checkout: ${workspace} ` +
+    const agentRoot = path.join(AGENTS_DIR, orchestratorId);
+    const workspace = path.join(agentRoot, rel);
+    if (!fs.existsSync(workspace) || !findEnclosingGitRepo(workspace, agentRoot)) {
+      const err = new Error(
+        `No enclosing git checkout found below ${agentRoot} for briefings workspace ${workspace} ` +
         `(briefingsPath='${orchCfg.briefingsPath}'). Likely cause: the env's ` +
         `repository clone failed during agent seeding — check the orchestrator ` +
         `log for 'Seed warning' entries.`
       );
+      err.code = "WORKSPACE_NO_GIT";
+      throw err;
     }
 
     const bps = await fetchBriefingPacks(orchestratorId, orchCfg.briefingsPath);
@@ -1939,10 +1952,13 @@ class Orchestrator {
     // Mirrors the pre-flight in syncBpStubs: without a workspace clone there
     // is nothing for bp-explorer to scan. The 30s claim loop hits this path
     // repeatedly, so log once and return a structured skip rather than
-    // pretending the orchestrator is healthy (zero BPs, no error).
+    // pretending the orchestrator is healthy (zero BPs, no error). Any
+    // ancestor up to the agent root is acceptable — the briefings dir may
+    // sit beneath the repo root.
     const rel = orchCfg.briefingsPath.replace(/^\/+|\/+$/g, "");
-    const workspace = path.join(AGENTS_DIR, orchestratorId, rel);
-    if (!fs.existsSync(path.join(workspace, ".git"))) {
+    const agentRoot = path.join(AGENTS_DIR, orchestratorId);
+    const workspace = path.join(agentRoot, rel);
+    if (!fs.existsSync(workspace) || !findEnclosingGitRepo(workspace, agentRoot)) {
       // `pullOrchestratorWorkspace` already logged this above (throttled).
       // Just return the structured skip so callers can see the cause.
       return { skipped: "workspace-not-cloned", path: workspace };
@@ -3664,7 +3680,12 @@ async function main() {
           // a 500 server bug.
           let status = 500;
           if (/not found/i.test(err.message)) status = 404;
-          else if (/not a git checkout/i.test(err.message) || /briefingsPath/i.test(err.message)) status = 400;
+          else if (
+            err.code === "WORKSPACE_NO_GIT" ||
+            /no enclosing git checkout/i.test(err.message) ||
+            /not a git checkout/i.test(err.message) ||
+            /briefingsPath/i.test(err.message)
+          ) status = 400;
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));
         }

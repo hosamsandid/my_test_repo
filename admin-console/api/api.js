@@ -5109,6 +5109,35 @@ app.get('/api/agents/:agentId/workspace/file', apiLimiter, (req, res) => {
   });
 });
 
+// Raw file download — streams the full file with Content-Disposition: attachment
+// so the browser saves it with its original filename. No size cap (unlike /file).
+app.get('/api/agents/:agentId/workspace/download', apiLimiter, (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  const target = safeAgentPath(agentId, relPath);
+  if (!target) return res.status(400).json({ error: 'invalid path' });
+
+  let st;
+  try {
+    st = fs.statSync(target);
+  } catch (err) {
+    if (err.code === 'ENOENT') return res.status(404).json({ error: 'not found' });
+    return res.status(500).json({ error: err.message });
+  }
+  if (!st.isFile()) return res.status(400).json({ error: 'not a file' });
+
+  const filename = path.basename(target);
+  const encoded = encodeURIComponent(filename).replace(/'/g, '%27');
+  res.setHeader('Content-Disposition', `attachment; filename="${encoded}"; filename*=UTF-8''${encoded}`);
+  res.setHeader('Content-Length', st.size);
+  res.setHeader('Content-Type', 'application/octet-stream');
+
+  const stream = fs.createReadStream(target);
+  stream.on('error', () => res.end());
+  stream.pipe(res);
+});
+
 /* ─── Workspace git-diff (read-only) ───────────────────────────────────
  *
  * Two endpoints for the Diff tab in the Workspace browser:

@@ -406,6 +406,7 @@ export default function WorkspaceBrowser({ agentId, active }) {
             onSelectFile={(p) => setSelectedFile({ path: p })}
             selectedFilePath={selectedFile?.path || null}
             onUploadToDir={handleUploadToDir}
+            agentId={agentId}
           />
         </div>
       )}
@@ -453,7 +454,7 @@ function ModeButton({ icon, label, active, onClick }) {
 
 /* ─── Tree node ───────────────────────────────────────────────────── */
 
-function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, gitBranch, onUploadToDir }) {
+function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, gitBranch, onUploadToDir, agentId }) {
   const isRoot = relPath === '';
   const isOpen = expanded.has(relPath);
   const cache  = dirCache.get(relPath);
@@ -549,13 +550,14 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
           onSelectFile={onSelectFile}
           selectedFilePath={selectedFilePath}
           onUploadToDir={onUploadToDir}
+          agentId={agentId}
         />
       )}
     </div>
   );
 }
 
-function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, onUploadToDir }) {
+function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, onUploadToDir, agentId }) {
   if (!cache) {
     return null; // not yet fetched (open root state pre-fetch)
   }
@@ -619,6 +621,7 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
               selectedFilePath={selectedFilePath}
               gitBranch={item.gitBranch || null}
               onUploadToDir={onUploadToDir}
+              agentId={agentId}
             />
           );
         }
@@ -632,6 +635,12 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
             dim={item.hidden}
             active={selectedFilePath === childRel}
             onClick={() => onSelectFile(childRel)}
+            onDownload={agentId ? () => {
+              const a = document.createElement('a');
+              a.href = `/api/agents/${encodeURIComponent(agentId)}/workspace/download?path=${encodeURIComponent(childRel)}`;
+              a.download = item.name;
+              a.click();
+            } : null}
           />
         );
       })}
@@ -639,70 +648,96 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
   );
 }
 
-function Row({ indent, icon, label, secondary, dim, active, onClick, gitBranch }) {
+function Row({ indent, icon, label, secondary, dim, active, onClick, gitBranch, onDownload }) {
+  const [hovered, setHovered] = useState(false);
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 6,
-        width: '100%',
-        textAlign: 'left',
-        paddingLeft: 16 + (indent || 0),
-        paddingRight: 8,
-        paddingTop: 3,
-        paddingBottom: 3,
-        background: active ? 'var(--eb-accent-muted)' : 'none',
-        border: 'none',
-        cursor: 'pointer',
-        fontSize: 'var(--eb-text-xs)',
-        fontFamily: 'inherit',
-        color: active
-          ? 'var(--eb-accent-primary)'
-          : (dim ? 'var(--eb-text-muted)' : 'var(--eb-text-secondary)'),
-      }}
-      onMouseEnter={e => { if (!active) e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
-      onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'none'; }}
+    <div
+      style={{ display: 'flex', alignItems: 'center', width: '100%' }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
     >
-      <span style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0 }}>
-        {icon}
-      </span>
-      <span style={{
-        flex: 1,
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
-      }}>
-        {label}
-      </span>
-      {gitBranch && (
-        <span style={{
-          display: 'inline-flex',
+      <button
+        type="button"
+        onClick={onClick}
+        style={{
+          display: 'flex',
           alignItems: 'center',
-          gap: 3,
-          color: 'var(--eb-text-muted)',
-          fontFamily: 'var(--eb-font-mono)',
-          fontSize: '10px',
-          flexShrink: 0,
-          opacity: 0.8,
-        }}>
-          <GitBranch size={10} />
-          {gitBranch}
+          gap: 6,
+          flex: 1,
+          minWidth: 0,
+          textAlign: 'left',
+          paddingLeft: 16 + (indent || 0),
+          paddingRight: onDownload ? 2 : 8,
+          paddingTop: 3,
+          paddingBottom: 3,
+          background: active ? 'var(--eb-accent-muted)' : (hovered ? 'var(--eb-bg-hover)' : 'none'),
+          border: 'none',
+          cursor: 'pointer',
+          fontSize: 'var(--eb-text-xs)',
+          fontFamily: 'inherit',
+          color: active
+            ? 'var(--eb-accent-primary)'
+            : (dim ? 'var(--eb-text-muted)' : 'var(--eb-text-secondary)'),
+        }}
+      >
+        <span style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0 }}>
+          {icon}
         </span>
-      )}
-      {secondary && (
         <span style={{
-          color: 'var(--eb-text-muted)',
-          fontFamily: 'var(--eb-font-mono)',
-          fontSize: '10px',
-          flexShrink: 0,
+          flex: 1,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
         }}>
-          {secondary}
+          {label}
         </span>
+        {gitBranch && (
+          <span style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 3,
+            color: 'var(--eb-text-muted)',
+            fontFamily: 'var(--eb-font-mono)',
+            fontSize: '10px',
+            flexShrink: 0,
+            opacity: 0.8,
+          }}>
+            <GitBranch size={10} />
+            {gitBranch}
+          </span>
+        )}
+        {secondary && (
+          <span style={{
+            color: 'var(--eb-text-muted)',
+            fontFamily: 'var(--eb-font-mono)',
+            fontSize: '10px',
+            flexShrink: 0,
+          }}>
+            {secondary}
+          </span>
+        )}
+      </button>
+      {onDownload && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onDownload(); }}
+          title={`Download ${label}`}
+          style={{
+            ...iconBtnStyle,
+            flexShrink: 0,
+            padding: '3px 6px',
+            marginRight: 2,
+            opacity: hovered ? 1 : 0,
+            pointerEvents: hovered ? 'auto' : 'none',
+            color: 'var(--eb-text-muted)',
+            background: hovered ? 'var(--eb-bg-hover)' : 'none',
+            transition: 'opacity 0.1s',
+          }}
+        >
+          <Download size={11} />
+        </button>
       )}
-    </button>
+    </div>
   );
 }
 

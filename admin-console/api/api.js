@@ -75,28 +75,42 @@ const handoverLimiter = rateLimit({
   message: { error: 'Too many requests' },
 });
 
-// Global limiter applied to all /api/ routes — covers the bulk of the
-// js/missing-rate-limiting findings. Conservative limit since this is an
-// internal admin console, not a public API.
+// Per-route limiter explicitly attached to mutating/heavy routes so CodeQL's
+// js/missing-rate-limiting query recognises them. Generous max because this
+// is an internal single-user admin console — the UI legitimately bursts
+// dozens of requests during page navigations and polls several endpoints on
+// 5s intervals.
 const apiLimiter = rateLimit({
   windowMs: 60_000,
-  max: 100,
+  max: 2000,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests' },
 });
 
 // Tighter limit for routes that spawn processes, run git clone, or write
-// large files. Applied in addition to the global apiLimiter.
+// large files. Still generous enough not to interfere with normal UI use.
 const heavyLimiter = rateLimit({
   windowMs: 60_000,
-  max: 10,
+  max: 300,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests' },
 });
 
-app.use('/api/', apiLimiter);
+// Global limiter — a SEPARATE rateLimit instance from apiLimiter so the two
+// don't share a counter. (Using the same instance both globally and
+// per-route would double-increment every request and halve the effective
+// limit.) Catches GET routes that don't carry an explicit limiter.
+const globalApiLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 3000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests' },
+});
+
+app.use('/api/', globalApiLimiter);
 
 const MCP_SERVER_ID_RE = /^[a-z0-9-]+$/;
 const MCP_CREDENTIAL_ID_RE = /^[a-z0-9-]+$/;

@@ -41,6 +41,7 @@ export default function QuickStart() {
   const navigate = useNavigate();
   const { data: tokens, loading: tokensLoading } = useApi('/api/github-tokens');
   const { data: sshKeys, loading: sshKeysLoading } = useApi('/api/ssh-keys');
+  const { data: llmEndpoints, loading: llmEndpointsLoading } = useApi('/api/llm-endpoints');
 
   const [url, setUrl] = useState('');
   const [tokenId, setTokenId] = useState('');
@@ -54,6 +55,7 @@ export default function QuickStart() {
   const showTokenPicker = Array.isArray(tokens) && tokens.length > 1;
   const hasSshKeys = !sshKeysLoading && Array.isArray(sshKeys) && sshKeys.length > 0;
   const showSshKeyPicker = Array.isArray(sshKeys) && sshKeys.length > 1;
+  const hasLlmEndpoints = !llmEndpointsLoading && Array.isArray(llmEndpoints) && llmEndpoints.length > 0;
   const ready = hasTokens && hasSshKeys;
 
   async function onSubmit(e) {
@@ -79,8 +81,8 @@ export default function QuickStart() {
         return;
       }
       setResult(data);
-      // Tiny delay so the user sees the success card before redirect.
-      setTimeout(() => navigate(`/chats/${data.agent.id}`), 800);
+      // Delay redirect; give the user extra time to read the LLM warning if present.
+      setTimeout(() => navigate(`/chats/${data.agent.id}`), data.llmWarning ? 4000 : 800);
     } catch (err) {
       setError(err.message || String(err));
     } finally {
@@ -149,6 +151,25 @@ export default function QuickStart() {
                 Quick Start clones via SSH (<code>git@github.com:…</code>).{' '}
                 <Link to="/ssh-keys" style={{ color: 'var(--eb-accent-primary)' }}>
                   Add SSH key →
+                </Link>
+              </div>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {!llmEndpointsLoading && !hasLlmEndpoints && (
+        <Card accent="var(--eb-status-warning)">
+          <div style={{ display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'flex-start' }}>
+            <AlertCircle size={20} style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2 }} />
+            <div>
+              <div style={{ fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)', marginBottom: 'var(--eb-space-1)' }}>
+                No LLM endpoint configured
+              </div>
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+                The agent will fail on its first message without an LLM endpoint.{' '}
+                <Link to="/models" style={{ color: 'var(--eb-accent-primary)' }}>
+                  Add LLM endpoint →
                 </Link>
               </div>
             </div>
@@ -263,12 +284,14 @@ export default function QuickStart() {
               display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
               padding: 'var(--eb-space-3)',
               background: 'var(--eb-bg-elevated)',
-              border: '1px solid var(--eb-status-success)',
+              border: `1px solid ${result.llmWarning ? 'var(--eb-status-warning)' : 'var(--eb-status-success)'}`,
               borderRadius: 'var(--eb-radius-md)',
               fontSize: 'var(--eb-text-sm)',
               color: 'var(--eb-text-primary)',
             }}>
-              <CheckCircle size={16} style={{ color: 'var(--eb-status-success)', flexShrink: 0, marginTop: 2 }} />
+              {result.llmWarning
+                ? <AlertCircle size={16} style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2 }} />
+                : <CheckCircle size={16} style={{ color: 'var(--eb-status-success)', flexShrink: 0, marginTop: 2 }} />}
               <div>
                 <div style={{ fontWeight: 'var(--eb-font-medium)' }}>
                   {result.reused ? 'Agent reused' : 'Agent created'}: {result.agent.displayName}
@@ -277,6 +300,14 @@ export default function QuickStart() {
                   Working Environment: {result.environment.name}
                   {result.environment.reused ? ' (reused)' : ' (new)'} · redirecting to chat …
                 </div>
+                {result.llmWarning && (
+                  <div style={{ marginTop: 'var(--eb-space-2)', color: 'var(--eb-status-warning)' }}>
+                    ⚠ {result.llmWarning}{' '}
+                    <Link to="/models" style={{ color: 'var(--eb-accent-primary)' }}>
+                      Add LLM endpoint →
+                    </Link>
+                  </div>
+                )}
               </div>
             </div>
           )}

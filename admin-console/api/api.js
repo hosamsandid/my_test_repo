@@ -2459,6 +2459,7 @@ app.post('/api/quickstart', async (req, res) => {
     while (loadEnvironment(envId)) {
       envId = `${baseEnvId}-${suffix++}`;
     }
+    const llmBinding = pickDefaultLlmBinding();
     env = {
       id: envId,
       name: `${org}/${repo}`,
@@ -2466,8 +2467,7 @@ app.post('/api/quickstart', async (req, res) => {
       skills: [],
       repositories: [{ url: sshUrl, branch: resolvedBranch, sshKeyId: chosenSshKeyId }],
       githubTokenId: chosenTokenId,
-      llmEndpointId: null,
-      defaultModelId: null,
+      ...llmBinding,
       additionalContext: '',
       createdAt: new Date().toISOString(),
     };
@@ -2479,6 +2479,10 @@ app.post('/api/quickstart', async (req, res) => {
     saveEnvironment(env.id, env);
   }
 
+  const llmWarning = env.llmEndpointId
+    ? null
+    : 'No LLM endpoint is registered. Register one under "LLM Endpoints" and bind it to the Working Environment before chatting — otherwise the agent will fail on its first message.';
+
   // 2. Reuse an existing standalone agent on this env, else create one.
   const existingAgent = findStandaloneAgentForEnv(env.id);
   if (existingAgent) {
@@ -2486,6 +2490,7 @@ app.post('/api/quickstart', async (req, res) => {
       reused: true,
       environment: { id: env.id, name: env.name, reused: envReused },
       agent: { id: existingAgent.id, displayName: existingAgent.displayName },
+      ...(llmWarning ? { llmWarning } : {}),
     });
   }
 
@@ -2522,6 +2527,7 @@ app.post('/api/quickstart', async (req, res) => {
     environment: { id: env.id, name: env.name, reused: envReused },
     agent: { id: agentId, displayName },
     seed: agentResp,
+    ...(llmWarning ? { llmWarning } : {}),
   });
 });
 
@@ -2646,7 +2652,7 @@ const MAX_PARALLEL_MAX = 50;
 // Pick the first registered endpoint as a silent default; its operator-set
 // default model (or, as a backstop, the first entry in its catalogue) becomes
 // the env-level default. The user can change either later.
-function defaultLlmEndpointForTeam() {
+function pickDefaultLlmBinding() {
   const endpoints = listLlmEndpoints();
   if (endpoints.length === 0) return { llmEndpointId: null, defaultModelId: null };
   const ep = endpoints[0];
@@ -2655,6 +2661,9 @@ function defaultLlmEndpointForTeam() {
     defaultModelId: pickEndpointDefaultModel(ep),
   };
 }
+
+// Keep old name so existing call sites in Team-Setup still compile.
+const defaultLlmEndpointForTeam = pickDefaultLlmBinding;
 
 // Normalize the `roles` payload: accepts string[] (legacy/backward-compat)
 // or Array<{id, count}> (new multi-instance shape). Returns an array of

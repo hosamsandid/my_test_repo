@@ -211,7 +211,7 @@ function formatToolSummary(tool, input) {
   }
 }
 
-function formatTodoSummary(todos) {
+export function formatTodoSummary(todos) {
   if (!Array.isArray(todos) || todos.length === 0) return '(no todos)';
   const total = todos.length;
   const done  = todos.filter(t => t?.status === 'completed').length;
@@ -227,7 +227,7 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
-function TodoList({ todos }) {
+export function TodoList({ todos }) {
   if (!Array.isArray(todos) || todos.length === 0) {
     return (
       <div style={{ color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>

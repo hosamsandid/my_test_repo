@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { Wifi, WifiOff, Loader2, PanelRightClose } from 'lucide-react';
 import { useSSE } from '../../hooks/useSSE';
 import LogEvent from './LogEvent';
+import PinnedTodoPanel from './PinnedTodoPanel';
 
 /**
  * Right-rail panel showing the structured timeline of internal agent
@@ -183,6 +184,37 @@ export default function SessionLogPanel({
     if (onCostUpdate) onCostUpdate(costTotals.usd, costTotals.tokIn, costTotals.tokOut);
   }, [costTotals, onCostUpdate]);
 
+  /* ─── 6. Latest TodoWrite for the pinned panel ─────────────────────────
+   * Walk events tail-first to find the most recent `tool_use` whose tool
+   * is `TodoWrite`. "Latest wins" — no merging across calls. The pinned
+   * panel re-renders in place as new TodoWrites arrive.
+   */
+  const latestTodoWrite = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ev = events[i];
+      if (
+        ev?.type === 'tool_use' &&
+        ev?.tool === 'TodoWrite' &&
+        Array.isArray(ev?.input?.todos)
+      ) {
+        return ev;
+      }
+    }
+    return null;
+  }, [events]);
+
+  /* User-controlled dismissal. The panel is hidden only after the user
+   * clicks ×; it re-appears automatically when the next TodoWrite arrives
+   * (i.e. once the latest entry's toolId differs from the dismissed one).
+   * Switching agents/rooms drops the events array and resets the marker
+   * via the agent/room-change effect below. */
+  const [dismissedTodoId, setDismissedTodoId] = useState(null);
+  useEffect(() => {
+    setDismissedTodoId(null);
+  }, [agentId, roomId]);
+
+  const todoVisible = !!latestTodoWrite && latestTodoWrite.toolId !== dismissedTodoId;
+
   /* ─── Render ────────────────────────────────────────────────────────── */
   return (
     <div style={{
@@ -361,6 +393,15 @@ export default function SessionLogPanel({
           );
         })}
       </div>
+
+      {todoVisible && (
+        <PinnedTodoPanel
+          todos={latestTodoWrite.input.todos}
+          correlationId={latestTodoWrite.correlationId || null}
+          onClose={() => setDismissedTodoId(latestTodoWrite.toolId || '__dismissed__')}
+          onHoverCorrelation={onHoverCorrelation}
+        />
+      )}
 
       <style>{`
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }

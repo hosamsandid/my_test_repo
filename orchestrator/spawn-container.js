@@ -25,12 +25,17 @@ const AGENT_NETWORK = process.env.AGENT_NETWORK || `${COMPOSE_PROJECT}_default`;
 const PER_AGENT_NETWORK_ENABLED = process.env.AEE_PER_AGENT_NETWORK !== '0';
 const PER_AGENT_NETWORK_PREFIX = process.env.AEE_PER_AGENT_NETWORK_PREFIX || 'aee-agent-net-';
 // Containers connected to every per-agent network so the agent can reach them.
-// Defaults to compose service names. The orchestrator's own hostname falls
-// back to the container short ID (os.hostname()), which compose sets up
-// automatically.
+// Default to the compose-generated container names (`<project>-<service>`),
+// which is how libpod looks them up. Earlier defaults used the bare service
+// name (`conduwuit`) and the container short hostname (`os.hostname()`) —
+// both returned 404 from /networks/{name}/connect because libpod resolves
+// containers by full name or full ID, not by short hostname or service alias.
+//
+// Override with AEE_PER_AGENT_NETWORK_SERVICES (comma-separated) if your
+// compose project uses non-default container names.
 const SERVICE_CONTAINERS = (
   process.env.AEE_PER_AGENT_NETWORK_SERVICES
-  || `${process.env.ORCH_CONTAINER_NAME || os.hostname()},conduwuit`
+  || `${COMPOSE_PROJECT}-orchestrator,${COMPOSE_PROJECT}-conduwuit`
 ).split(',').map(s => s.trim()).filter(Boolean);
 
 function libpodRequest(method, urlPath, body) {
@@ -103,18 +108,30 @@ function perAgentNetworkName(agentId) {
 
 async function ensurePerAgentNetwork(agentId) {
   const name = perAgentNetworkName(agentId);
-  const r = await libpodRequest('POST', '/networks/create', { name });
+  // `dns_enabled: true` is critical — without it, containers attached to this
+  // network cannot resolve each other by name (DNS lookups silently return
+  // empty). Compose-created networks default to dns_enabled=true, but the
+  // direct libpod /networks/create call defaults to false.
+  const r = await libpodRequest('POST', '/networks/create', { name, dns_enabled: true });
   // libpod returns 201 on create, 409 when the network already exists. Both
   // are fine — we just need the network to exist.
   if (r.status >= 400 && r.status !== 409 && r.status !== 500) {
     throw new Error(`per-agent network create ${name}: status=${r.status} body=${JSON.stringify(r.body)}`);
   }
   // Connect the service containers (orchestrator + conduwuit) so the agent
-  // can resolve them by hostname inside the isolated network. Best-effort:
-  // an "already connected" 409/500 is acceptable.
+  // can resolve them by hostname inside the isolated network. We also
+  // register the compose service-name (e.g. `conduwuit`) as a DNS alias —
+  // the agent's env uses the short service name, not the full
+  // `<project>-<service>` container name, so without the alias DNS lookups
+  // would fail even with dns_enabled=true. Best-effort: an "already connected"
+  // 409/500 is acceptable.
+  const projectPrefix = `${COMPOSE_PROJECT}-`;
   for (const svc of SERVICE_CONTAINERS) {
+    const alias = svc.startsWith(projectPrefix) ? svc.slice(projectPrefix.length) : null;
+    const body = { Container: svc };
+    if (alias) body.Aliases = [alias];
     try {
-      const cr = await libpodRequest('POST', `/networks/${name}/connect`, { Container: svc });
+      const cr = await libpodRequest('POST', `/networks/${name}/connect`, body);
       if (cr.status >= 400 && cr.status !== 409 && cr.status !== 500) {
         console.warn(`[spawn-container] connect ${svc} to ${name}: status=${cr.status}`);
       }
@@ -147,6 +164,33 @@ function spawnContainer({ id, env }) {
   const envMap = {};
   for (const [k, v] of Object.entries(env)) {
     if (v !== undefined && v !== null) envMap[k] = String(v);
+  }
+
+  // Seam #2: agents run on their own per-agent podman network, where
+  // compose service-name aliases (e.g. `conduwuit`) don't always register
+  // reliably. Rewrite known service-name hostnames to their full container
+  // names — those are guaranteed to resolve on every network conduwuit is
+  // attached to. Idempotent: skip the rewrite when the hostname already
+  // points at the full container name (e.g. user-overridden via env).
+  if (PER_AGENT_NETWORK_ENABLED) {
+    const projectPrefix = `${COMPOSE_PROJECT}-`;
+    const rewriteHostname = (url, shortName) => {
+      if (!url) return url;
+      const fullName = `${projectPrefix}${shortName}`;
+      if (url.includes(`://${shortName}:`) || url.includes(`://${shortName}/`)) {
+        return url.replace(`://${shortName}`, `://${fullName}`);
+      }
+      return url;
+    };
+    if (envMap.MATRIX_HOMESERVER) {
+      envMap.MATRIX_HOMESERVER = rewriteHostname(envMap.MATRIX_HOMESERVER, 'conduwuit');
+    }
+    if (envMap.AEE_ORCHESTRATOR_URL) {
+      envMap.AEE_ORCHESTRATOR_URL = rewriteHostname(envMap.AEE_ORCHESTRATOR_URL, 'orchestrator');
+    }
+    if (envMap.ORCHESTRATOR_INTERNAL_URL) {
+      envMap.ORCHESTRATOR_INTERNAL_URL = rewriteHostname(envMap.ORCHESTRATOR_INTERNAL_URL, 'orchestrator');
+    }
   }
 
   // Seam #2: provision the per-agent network up-front (with connected

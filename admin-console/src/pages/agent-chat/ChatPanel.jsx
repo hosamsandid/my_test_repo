@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Wifi, WifiOff, Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Square, Cpu, Trash2, GitBranch, ArrowRight } from 'lucide-react';
+import { Wifi, WifiOff, Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Trash2, GitBranch, ArrowRight } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
 import ConfirmDialog from '../../components/ConfirmDialog';
@@ -72,7 +72,6 @@ export default function ChatPanel({
   const [sessionId, setSessionId]     = useState(null);
   const [sessionUpdatedAt, setSessionUpdatedAt] = useState(null);
   const [resetting, setResetting]     = useState(false);
-  const [stopping, setStopping]       = useState(false);
   const [learnPending, setLearnPending] = useState(false);
   const [clearingHistory, setClearingHistory] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
@@ -474,19 +473,6 @@ export default function ChatPanel({
     }
   }
 
-  async function handleStopSession() {
-    if (!roomId || !agent?.id || stopping) return;
-    setStopping(true);
-    setError(null);
-    try {
-      await apiCall('POST', `/api/agents/${encodeURIComponent(agent.id)}/session/${encodeURIComponent(roomId)}/stop`);
-    } catch (err) {
-      setError(`Stop failed: ${err.message}`);
-    } finally {
-      setStopping(false);
-    }
-  }
-
   async function handleFullLearn() {
     if (!sessionApiBase || learnPending) return;
     setError(null);
@@ -722,24 +708,6 @@ export default function ChatPanel({
           >
             <ArrowRight size={11} />
             Hand-off
-          </button>
-        )}
-        {showThinking && (
-          <button
-            type="button"
-            onClick={handleStopSession}
-            disabled={stopping || disabled}
-            title="Interrupt the running Claude invocation"
-            style={{
-              ...sessionBtnStyle(stopping || disabled),
-              color: stopping ? undefined : 'var(--eb-status-error)',
-              borderColor: stopping ? undefined : 'var(--eb-status-error)',
-            }}
-          >
-            {stopping
-              ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
-              : <Square size={11} />}
-            Stop
           </button>
         )}
         <ModelPicker

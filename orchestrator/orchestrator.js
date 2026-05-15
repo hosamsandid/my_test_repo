@@ -162,12 +162,12 @@ function stopAgentProcess(id) {
   console.log(`[Orchestrator] Stopped process for agent ${id}`);
 }
 
-function stopAgentSession(id) {
+function stopAgentSession(id, sessionId) {
   const proc = agentProcesses.get(id);
   if (!proc) return false;
   try {
-    proc.send({ type: 'stop-session' });
-    console.log(`[Orchestrator] Sent stop-session to agent ${id}`);
+    proc.send(sessionId ? { type: 'stop-session', sessionId } : { type: 'stop-session' });
+    console.log(`[Orchestrator] Sent stop-session to agent ${id}${sessionId ? ` (session ${sessionId})` : ''}`);
     return true;
   } catch (err) {
     console.error(`[Orchestrator] stopAgentSession ${id}: ${err.message}`);
@@ -3716,6 +3716,16 @@ async function main() {
     if (stopSessionMatch) {
       const id = decodeURIComponent(stopSessionMatch[1]);
       const ok = stopAgentSession(id);
+      res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(ok ? { ok: true } : { error: 'Agent not running' }));
+      return;
+    }
+
+    const stopOneSessionMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/sessions\/([^/]+)\/stop$/);
+    if (stopOneSessionMatch) {
+      const id = decodeURIComponent(stopOneSessionMatch[1]);
+      const sessionId = decodeURIComponent(stopOneSessionMatch[2]);
+      const ok = stopAgentSession(id, sessionId);
       res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(ok ? { ok: true } : { error: 'Agent not running' }));
       return;

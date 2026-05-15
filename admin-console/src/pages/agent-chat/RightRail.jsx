@@ -1,10 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { PanelRightClose, ScrollText, FolderTree, CalendarClock } from 'lucide-react';
+import { PanelRightClose, ScrollText, FolderTree, CalendarClock, Activity } from 'lucide-react';
 import SessionLogPanel from './SessionLogPanel';
 import WorkspaceBrowser from './WorkspaceBrowser';
 import TriggersPanel from './TriggersPanel';
+import RunningSessionsPanel from './RunningSessionsPanel';
+import { apiCall } from '../../hooks/useApi';
 
 const TAB_KEY = 'agentChat.rightRailTab';
+const SESSION_POLL_MS = 3_000;
 
 /**
  * Tabbed right rail for the agent chat page.
@@ -26,13 +29,36 @@ export default function RightRail({
   const [tab, setTab] = useState(() => {
     try {
       const v = localStorage.getItem(TAB_KEY);
-      if (v === 'workspace' || v === 'log' || v === 'triggers') return v;
+      if (v === 'workspace' || v === 'log' || v === 'triggers' || v === 'sessions') return v;
     } catch { /* ignore */ }
     return 'log';
   });
   useEffect(() => {
     try { localStorage.setItem(TAB_KEY, tab); } catch { /* ignore */ }
   }, [tab]);
+
+  // Lightweight poll of just the session COUNT — so the "Sessions" tab
+  // can show a badge regardless of which tab is currently visible. The
+  // RunningSessionsPanel itself owns the full list when it's active.
+  const [sessionCount, setSessionCount] = useState(0);
+  useEffect(() => {
+    if (!agentId) { setSessionCount(0); return undefined; }
+    let cancelled = false;
+    let timer = null;
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        const data = await apiCall('GET', `/api/agents/${encodeURIComponent(agentId)}/sessions/active`);
+        if (!cancelled) setSessionCount(Array.isArray(data?.sessions) ? data.sessions.length : 0);
+      } catch { /* keep prior count */ }
+      if (!cancelled) timer = setTimeout(tick, SESSION_POLL_MS);
+    };
+    tick();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [agentId]);
 
   return (
     <div style={{
@@ -68,6 +94,13 @@ export default function RightRail({
           label="Triggers"
           active={tab === 'triggers'}
           onClick={() => setTab('triggers')}
+        />
+        <TabButton
+          icon={<Activity size={13} />}
+          label="Sessions"
+          badge={sessionCount > 0 ? sessionCount : null}
+          active={tab === 'sessions'}
+          onClick={() => setTab('sessions')}
         />
         <div style={{ flex: 1 }} />
         <button
@@ -109,12 +142,15 @@ export default function RightRail({
         <div style={{ display: tab === 'triggers' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           <TriggersPanel agentId={agentId} active={tab === 'triggers'} />
         </div>
+        <div style={{ display: tab === 'sessions' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+          <RunningSessionsPanel agentId={agentId} active={tab === 'sessions'} />
+        </div>
       </div>
     </div>
   );
 }
 
-function TabButton({ icon, label, active, onClick }) {
+function TabButton({ icon, label, active, onClick, badge = null }) {
   return (
     <button
       type="button"
@@ -139,6 +175,24 @@ function TabButton({ icon, label, active, onClick }) {
     >
       {icon}
       {label}
+      {badge !== null && badge !== undefined && (
+        <span style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          minWidth: 16,
+          height: 16,
+          padding: '0 5px',
+          borderRadius: 'var(--eb-radius-full)',
+          background: 'var(--eb-accent-primary)',
+          color: 'var(--eb-bg-app)',
+          fontSize: 10,
+          fontWeight: 'var(--eb-font-semibold)',
+          lineHeight: 1,
+        }}>
+          {badge}
+        </span>
+      )}
     </button>
   );
 }

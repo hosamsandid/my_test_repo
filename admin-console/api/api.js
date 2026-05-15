@@ -4957,6 +4957,42 @@ app.post('/api/agents/:agentId/session/:roomId/stop', apiLimiter, async (req, re
   }
 });
 
+// List running Claude sessions for an agent. Reads the per-agent
+// running-sessions.json the runner maintains. Returns `{ sessions: [] }`
+// when no file exists (agent never started or never ran a session).
+const SESSION_ID_RE = /^[a-zA-Z0-9_-]+$/;
+app.get('/api/agents/:agentId/sessions/active', apiLimiter, (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'invalid agent id' });
+  const filePath = path.join(AGENTS_DIR, agentId, 'running-sessions.json');
+  if (!fs.existsSync(filePath)) return res.json({ sessions: [] });
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    res.json({ sessions: Array.isArray(parsed) ? parsed : [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Stop one specific running session.
+app.post('/api/agents/:agentId/sessions/:sessionId/stop', apiLimiter, async (req, res) => {
+  const { agentId, sessionId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'invalid agent id' });
+  if (!SESSION_ID_RE.test(sessionId)) return res.status(400).json({ error: 'invalid session id' });
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(
+      `${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/sessions/${encodeURIComponent(sessionId)}/stop`,
+      { method: 'POST' },
+    );
+    const data = await resp.json();
+    res.status(resp.status).json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 /* ─── Workspace browser (read-only) ────────────────────────────────── */
 
 const WORKSPACE_FILE_MAX_BYTES = 512 * 1024; // 512 KB read cap per file

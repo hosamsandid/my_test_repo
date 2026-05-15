@@ -182,9 +182,77 @@ function writeLastResponseAt() {
   } catch { /* best effort */ }
 }
 
-let activeInvocations = 0;
-let activeClaudeProc = null;
-let userStopRequested = false;
+// ============================================================
+// Running-session registry
+// ============================================================
+// Every Claude CLI invocation registers a runtime "session" here so the
+// Admin Console can list active work per agent and stop a specific run.
+// The registry is serialized to /workspace/agents/<id>/running-sessions.json
+// (proc reference omitted) and drives the agent's busy/idle status.
+//
+// Entry shape (in-memory):
+//   { id, type, triggerType?, triggerId?, label, roomId, startedAt,
+//     proc, userStopRequested }
+// Persisted shape: same fields minus `proc` / `userStopRequested`.
+const runningSessions = new Map();
+let matrixClient = null;
+
+const RUNNING_SESSIONS_FILE = path.join(AGENT_WORKDIR, 'running-sessions.json');
+
+function persistRunningSessions() {
+  try {
+    const arr = Array.from(runningSessions.values()).map((s) => ({
+      id: s.id,
+      type: s.type,
+      triggerType: s.triggerType || null,
+      triggerId: s.triggerId || null,
+      label: s.label || '',
+      roomId: s.roomId || null,
+      startedAt: s.startedAt,
+    }));
+    fs.writeFileSync(RUNNING_SESSIONS_FILE, JSON.stringify(arr));
+  } catch (err) {
+    console.error(`[Runner:${AGENT_ID}] persistRunningSessions: ${err.message}`);
+  }
+}
+
+function syncBusyStatus() {
+  writeStatus(runningSessions.size > 0 ? 'busy' : 'idle');
+}
+
+function registerSession({ id, type, triggerType, triggerId, label, roomId }) {
+  const entry = {
+    id,
+    type: type || 'unknown',
+    triggerType: triggerType || null,
+    triggerId: triggerId || null,
+    label: label || '',
+    roomId: roomId || null,
+    startedAt: new Date().toISOString(),
+    proc: null,
+    userStopRequested: false,
+  };
+  runningSessions.set(id, entry);
+  persistRunningSessions();
+  syncBusyStatus();
+  return entry;
+}
+
+function unregisterSession(id, { aborted } = {}) {
+  const entry = runningSessions.get(id);
+  if (!entry) return;
+  runningSessions.delete(id);
+  persistRunningSessions();
+  syncBusyStatus();
+  // Post a single cancellation notice for any session the user stopped,
+  // regardless of caller (DM, trigger, autonomous). Best-effort: failure
+  // to post is logged but doesn't propagate.
+  if (aborted && matrixClient && entry.roomId) {
+    sendFormatted(matrixClient, entry.roomId, '_(Session cancelled by user.)_').catch((err) => {
+      console.error(`[Runner:${AGENT_ID}] Could not post abort notice for ${id}: ${err.message}`);
+    });
+  }
+}
 
 // ============================================================
 // Claude CLI
@@ -217,7 +285,7 @@ let userStopRequested = false;
  * `result` event, or a concatenation of all `assistant_text` events as a
  * fallback). Rejects on timeout or non-zero exit.
  */
-function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT, resume = true, persistSession = true } = {}) {
+function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT, resume = true, persistSession = true, sessionMeta } = {}) {
   const memoryHint = BLUEPRINT_ID
     ? `This agent is an instance of blueprint '${BLUEPRINT_ID}'. ` +
       `Memory is SHARED across all instances of this blueprint. ` +
@@ -273,6 +341,16 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT,
 
   const resumeId = resume && roomId ? readSessionPointer(roomId) : null;
 
+  const runtimeSessionId = crypto.randomUUID();
+  const sessionEntry = registerSession({
+    id: runtimeSessionId,
+    type: sessionMeta?.type || 'unknown',
+    triggerType: sessionMeta?.triggerType,
+    triggerId: sessionMeta?.triggerId,
+    label: sessionMeta?.label || '',
+    roomId,
+  });
+
   const runOnce = (withResumeId) => new Promise((resolve, reject) => {
     const args = withResumeId ? ["--resume", withResumeId, ...baseArgs] : baseArgs;
     const proc = spawn("claude", args, {
@@ -280,7 +358,7 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT,
       env: { ...process.env, HOME: "/root" },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    activeClaudeProc = proc;
+    sessionEntry.proc = proc;
 
     let stderr = "";
     let lineBuf = "";
@@ -330,7 +408,7 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT,
     }, timeoutMs);
 
     proc.on("close", (code) => {
-      if (activeClaudeProc === proc) activeClaudeProc = null;
+      if (sessionEntry.proc === proc) sessionEntry.proc = null;
       clearTimeout(timer);
       // Flush any remaining partial line
       if (lineBuf.trim()) {
@@ -338,8 +416,7 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT,
         lineBuf = "";
       }
       if (code !== 0) {
-        const wasUserStop = userStopRequested;
-        userStopRequested = false;
+        const wasUserStop = sessionEntry.userStopRequested;
         const err = new Error(wasUserStop ? 'UserAborted' : stderr.substring(0, 300) || `Exit ${code}`);
         err.stderr = stderr;
         err.exitCode = code;
@@ -363,29 +440,33 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT,
   });
 
   return (async () => {
-    if (resumeId) {
-      try {
-        return await runOnce(resumeId);
-      } catch (err) {
-        // Stale or missing session — fall back to a fresh run. Detection is
-        // best-effort; we treat any "session"/"resume" reference in stderr
-        // as a hint to retry. The pointer is cleared so we don't loop on
-        // the same broken id.
-        if (err.userAborted) throw err;
-        const blob = String(err.stderr || err.message || "").toLowerCase();
-        const sessionRelated =
-          blob.includes("session") || blob.includes("resume") || blob.includes("not found");
-        if (sessionRelated) {
-          console.warn(
-            `[Runner:${AGENT_ID}] --resume ${resumeId} failed (${err.message?.slice(0, 120)}); retrying without resume`
-          );
-          clearSessionPointer(roomId);
-          return await runOnce(null);
+    try {
+      if (resumeId) {
+        try {
+          return await runOnce(resumeId);
+        } catch (err) {
+          // Stale or missing session — fall back to a fresh run. Detection is
+          // best-effort; we treat any "session"/"resume" reference in stderr
+          // as a hint to retry. The pointer is cleared so we don't loop on
+          // the same broken id.
+          if (err.userAborted) throw err;
+          const blob = String(err.stderr || err.message || "").toLowerCase();
+          const sessionRelated =
+            blob.includes("session") || blob.includes("resume") || blob.includes("not found");
+          if (sessionRelated) {
+            console.warn(
+              `[Runner:${AGENT_ID}] --resume ${resumeId} failed (${err.message?.slice(0, 120)}); retrying without resume`
+            );
+            clearSessionPointer(roomId);
+            return await runOnce(null);
+          }
+          throw err;
         }
-        throw err;
       }
+      return await runOnce(null);
+    } finally {
+      unregisterSession(runtimeSessionId, { aborted: sessionEntry.userStopRequested });
     }
-    return runOnce(null);
   })();
 }
 
@@ -402,6 +483,19 @@ async function sendFormatted(client, roomId, text) {
     format: "org.matrix.custom.html",
     formatted_body: marked.parse(text),
   });
+}
+
+function triggerSessionLabel(trigger, ctx) {
+  if (trigger.description) return trigger.description;
+  if (trigger.type === 'cron') return `cron \`${trigger.cron || trigger.id}\``;
+  if (trigger.type === 'once') return `once @ ${trigger.at || trigger.id}`;
+  if (trigger.type === 'http') return `webhook \`${trigger.id}\``;
+  if (trigger.type === 'github-event') {
+    const event = ctx?.github?.event || (Array.isArray(trigger.events) ? trigger.events.join(',') : '');
+    const repo = ctx?.github?.repo || trigger.repo || '';
+    return `GitHub ${event || trigger.id}${repo ? ` on ${repo}` : ''}`;
+  }
+  return `${trigger.type || 'trigger'}: ${trigger.id}`;
 }
 
 async function postTriggerNotice(client, trigger, ctx, roomId) {
@@ -614,7 +708,11 @@ class TriggerScheduler {
 
     let result;
     try {
-      result = await callClaude(prompt, { roomId, correlationId });
+      result = await callClaude(prompt, {
+        roomId,
+        correlationId,
+        sessionMeta: { type: 'autonomous', label: 'Hand-off DM' },
+      });
     } catch (err) {
       console.error(`[Runner:${AGENT_ID}] handover-dm Claude call failed: ${err.message}`);
       return;
@@ -749,7 +847,11 @@ class TriggerScheduler {
 
     let result;
     try {
-      result = await callClaude(prompt, { roomId: dmRoom, correlationId });
+      result = await callClaude(prompt, {
+        roomId: dmRoom,
+        correlationId,
+        sessionMeta: { type: 'autonomous', label: 'BP event' },
+      });
     } catch (err) {
       console.error(`[Runner:${AGENT_ID}] bp-event Claude call failed: ${err.message}`);
       return;
@@ -948,7 +1050,6 @@ class TriggerScheduler {
         console.error(`[Runner:${AGENT_ID}] session-log warning: ${err.message}`);
       }
 
-      if (++activeInvocations === 1) writeStatus('busy');
       try {
         await postTriggerNotice(this.agentClient, trigger, ctx, roomId);
       } catch (err) {
@@ -964,6 +1065,12 @@ class TriggerScheduler {
           // run's session id — the DM pointer (if any) stays untouched.
           resume: !isPerInvocation,
           persistSession: !isPerInvocation,
+          sessionMeta: {
+            type: 'trigger',
+            triggerType: trigger.type,
+            triggerId: trigger.id,
+            label: triggerSessionLabel(trigger, ctx),
+          },
         });
       } catch (err) {
         try {
@@ -975,8 +1082,6 @@ class TriggerScheduler {
           });
         } catch {}
         throw err;
-      } finally {
-        if (--activeInvocations === 0) writeStatus('idle');
       }
 
       if (result.trim().startsWith("[PASS]")) {
@@ -1104,7 +1209,11 @@ class ClaimLoopScheduler {
 
     let result;
     try {
-      result = await callClaude(prompt, { roomId: dmRoom, correlationId });
+      result = await callClaude(prompt, {
+        roomId: dmRoom,
+        correlationId,
+        sessionMeta: { type: 'autonomous', label: 'Claim-loop suggestion' },
+      });
     } catch (err) {
       console.error(`[Runner:${AGENT_ID}] Claim suggestion Claude call failed: ${err.message}`);
       return;
@@ -1153,12 +1262,17 @@ async function main() {
   fs.mkdirSync(AGENT_WORKDIR, { recursive: true });
   writeStatus('idle');
 
+  // Reset the running-sessions file at startup — any prior run's sessions
+  // are gone with the previous process.
+  try { fs.writeFileSync(RUNNING_SESSIONS_FILE, '[]'); } catch { /* best effort */ }
+
   const stateFile = path.join(AGENT_WORKDIR, ".agent-state.json");
   const client = new MatrixClient(
     HOMESERVER,
     AGENT_TOKEN,
     new SimpleFsStorageProvider(stateFile)
   );
+  matrixClient = client;
   AutojoinRoomsMixin.setupOnClient(client);
 
   const startTime = Date.now();
@@ -1233,13 +1347,11 @@ async function main() {
     }
 
     try {
-      if (++activeInvocations === 1) writeStatus('busy');
-      let result;
-      try {
-        result = await callClaude(body, { roomId, correlationId });
-      } finally {
-        if (--activeInvocations === 0) writeStatus('idle');
-      }
+      const result = await callClaude(body, {
+        roomId,
+        correlationId,
+        sessionMeta: { type: 'dm', label: 'Direct message' },
+      });
       let eventId;
       try {
         eventId = await sendFormatted(client, roomId, result);
@@ -1265,12 +1377,8 @@ async function main() {
       console.log(`[Runner:${AGENT_ID}] Posted direct response (${result.length} chars)`);
     } catch (err) {
       if (err.userAborted) {
+        // Cancellation notice is posted centrally by unregisterSession().
         console.log(`[Runner:${AGENT_ID}] Session stopped by user`);
-        try {
-          await sendFormatted(client, roomId, '_(Execution aborted.)_');
-        } catch (postErr) {
-          console.error(`[Runner:${AGENT_ID}] Could not post abort notice: ${postErr.message}`);
-        }
       } else {
         try {
           appendEvent(AGENT_ID, roomId, {
@@ -1302,12 +1410,25 @@ async function main() {
   // IPC: accept signals from orchestrator.
   process.on('message', (msg) => {
     if (msg?.type === 'stop-session') {
-      if (activeClaudeProc) {
-        console.log(`[Runner:${AGENT_ID}] Stop-session signal received — terminating Claude process`);
-        userStopRequested = true;
-        activeClaudeProc.kill('SIGTERM');
+      if (msg.sessionId) {
+        const entry = runningSessions.get(msg.sessionId);
+        if (entry && entry.proc) {
+          console.log(`[Runner:${AGENT_ID}] Stop-session ${msg.sessionId} — terminating Claude process`);
+          entry.userStopRequested = true;
+          entry.proc.kill('SIGTERM');
+        } else {
+          console.log(`[Runner:${AGENT_ID}] Stop-session ${msg.sessionId} — no matching active session`);
+        }
+      } else if (runningSessions.size === 0) {
+        console.log(`[Runner:${AGENT_ID}] Stop-session signal received — no active sessions`);
       } else {
-        console.log(`[Runner:${AGENT_ID}] Stop-session signal received — no active invocation`);
+        console.log(`[Runner:${AGENT_ID}] Stop-session signal received — terminating all ${runningSessions.size} session(s)`);
+        for (const entry of runningSessions.values()) {
+          if (entry.proc) {
+            entry.userStopRequested = true;
+            entry.proc.kill('SIGTERM');
+          }
+        }
       }
     } else if (msg?.type === 'reload-triggers') {
       console.log(`[Runner:${AGENT_ID}] Reload-triggers signal received — syncing scheduler`);

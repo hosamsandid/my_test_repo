@@ -393,30 +393,39 @@ function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = '
       <Icon size={18} style={{ flexShrink: 0, color: selected ? 'var(--eb-accent-primary)' : 'var(--eb-text-muted)' }} />
 
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{
-          fontSize: 'var(--eb-text-md)',
-          fontWeight: 'var(--eb-font-medium)',
-          color: 'var(--eb-text-primary)',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}>
-          {agent.displayName || agent.id}
-        </div>
-        {agent.environmentName && (
-          <div style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 3,
-            marginTop: 2,
-            fontSize: 'var(--eb-text-xs)',
-            color: 'var(--eb-text-muted)',
+        <div
+          title={agent.displayName || agent.id}
+          style={{
+            fontSize: 'var(--eb-text-md)',
+            fontWeight: 'var(--eb-font-medium)',
+            color: 'var(--eb-text-primary)',
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
-          }}>
+          }}
+        >
+          {agent.displayName || agent.id}
+        </div>
+        {agent.environmentName && (
+          <div
+            title={agent.environmentName}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 3,
+              marginTop: 2,
+              maxWidth: '100%',
+              fontSize: 'var(--eb-text-xs)',
+              color: 'var(--eb-text-muted)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
             <Server size={10} style={{ flexShrink: 0 }} />
-            {agent.environmentName}
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {agent.environmentName}
+            </span>
           </div>
         )}
       </div>

@@ -579,26 +579,34 @@ export default function ChatPanel({
         flexShrink: 0,
       }}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden' }}>
-            <div style={{
-              fontSize: 'var(--eb-text-md)',
-              fontWeight: 'var(--eb-font-semibold)',
-              color: 'var(--eb-text-primary)',
-              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-              minWidth: 0,
-            }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden', minWidth: 0 }}>
+            <div
+              title={agent.displayName || agent.id}
+              style={{
+                flex: '1 1 auto',
+                minWidth: 0,
+                fontSize: 'var(--eb-text-md)',
+                fontWeight: 'var(--eb-font-semibold)',
+                color: 'var(--eb-text-primary)',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}
+            >
               {agent.displayName || agent.id}
             </div>
             {agent.environmentName && (
-              <div style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 4,
-                fontSize: 'var(--eb-text-xs)',
-                color: 'var(--eb-text-muted)',
-                minWidth: 0,
-                overflow: 'hidden',
-              }}>
+              <div
+                title={agent.environmentName}
+                style={{
+                  flex: '0 1 auto',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  fontSize: 'var(--eb-text-xs)',
+                  color: 'var(--eb-text-muted)',
+                  minWidth: 0,
+                  overflow: 'hidden',
+                }}
+              >
                 <Server size={11} style={{ flexShrink: 0 }} />
                 <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {agent.environmentName}

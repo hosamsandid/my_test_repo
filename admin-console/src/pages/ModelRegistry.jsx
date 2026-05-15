@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Trash2, Plus, Pencil, Check, X, RefreshCw, PlugZap, Star } from 'lucide-react';
+import { Trash2, Plus, Pencil, Check, X, RefreshCw, PlugZap, Star, Lock } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
@@ -543,10 +543,118 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
   );
 }
 
+/* ─────────────── Sub: read-only view for the .env fallback ─────────────── */
+
+function EnvProviderPanel({ provider, onClose }) {
+  const readOnlyField = {
+    padding: 'var(--eb-space-2) var(--eb-space-3)',
+    background: 'var(--eb-bg-elevated)',
+    border: '1px solid var(--eb-border-default)',
+    borderRadius: 'var(--eb-radius-md)',
+    color: 'var(--eb-text-primary)',
+    fontSize: 'var(--eb-text-sm)',
+    minHeight: 'calc(var(--eb-text-sm) * 1.5)',
+  };
+  const labelStyle = {
+    fontSize: 'var(--eb-text-sm)',
+    fontWeight: 'var(--eb-font-medium)',
+    color: 'var(--eb-text-secondary)',
+    marginBottom: 'var(--eb-space-1)',
+  };
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      <div style={{
+        padding: 'var(--eb-space-3)',
+        background: 'var(--eb-bg-elevated)',
+        border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-md)',
+        fontSize: 'var(--eb-text-sm)',
+        color: 'var(--eb-text-secondary)',
+        display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
+      }}>
+        <Lock size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+        <span>
+          Read-only mirror of the <code style={{ fontFamily: 'var(--eb-font-mono)' }}>ANTHROPIC_*</code> variables in <code style={{ fontFamily: 'var(--eb-font-mono)' }}>.env</code>. Working Environments that pick <em>“inherit from .env”</em> resolve to these values. To change them, edit <code style={{ fontFamily: 'var(--eb-font-mono)' }}>.env</code> and restart the stack (<code style={{ fontFamily: 'var(--eb-font-mono)' }}>make restart</code>).
+        </span>
+      </div>
+
+      <div>
+        <div style={labelStyle}>Name</div>
+        <div style={readOnlyField}>{provider.name}</div>
+      </div>
+
+      <div>
+        <div style={labelStyle}>Base URL</div>
+        <div style={{ ...readOnlyField, fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
+          {provider.baseUrl || <span style={{ color: 'var(--eb-text-muted)' }}>(not set)</span>}
+        </div>
+      </div>
+
+      <div>
+        <div style={labelStyle}>Auth token</div>
+        {provider.hasToken ? (
+          <div style={{ ...readOnlyField, fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
+            {provider.tokenPreview} · {provider.tokenFingerprint}
+          </div>
+        ) : (
+          <div style={{ ...readOnlyField, color: 'var(--eb-text-muted)' }}>
+            (none — <code style={{ fontFamily: 'var(--eb-font-mono)' }}>ANTHROPIC_AUTH_TOKEN</code> not set)
+          </div>
+        )}
+      </div>
+
+      <div>
+        <div style={labelStyle}>Models</div>
+        {provider.models?.length ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+            {provider.models.map(m => {
+              const isDefault = m.id === provider.defaultModelId;
+              return (
+                <div key={m.id} style={{
+                  ...readOnlyField,
+                  display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+                }}>
+                  <Star
+                    size={13}
+                    fill={isDefault ? 'currentColor' : 'none'}
+                    style={{ color: isDefault ? 'var(--eb-accent-primary)' : 'var(--eb-text-muted)' }}
+                  />
+                  <code style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{m.id}</code>
+                  {m.kind && (
+                    <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>· {m.kind}</span>
+                  )}
+                  {isDefault && (
+                    <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginLeft: 'auto' }}>
+                      default
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div style={{ ...readOnlyField, color: 'var(--eb-text-muted)' }}>(no model defaults configured)</div>
+        )}
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-2)' }}>
+          Derived from <code style={{ fontFamily: 'var(--eb-font-mono)' }}>ANTHROPIC_DEFAULT_SONNET_MODEL</code> and <code style={{ fontFamily: 'var(--eb-font-mono)' }}>ANTHROPIC_DEFAULT_HAIKU_MODEL</code>.
+        </div>
+      </div>
+
+      <div style={{
+        display: 'flex', gap: 'var(--eb-space-2)',
+        paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)',
+      }}>
+        <button onClick={onClose} style={buttonSecondary}>Close</button>
+      </div>
+    </div>
+  );
+}
+
 /* ───────────────────────────── Page ───────────────────────────── */
 
 export default function ModelRegistry() {
   const { data: endpoints, loading, error, refetch } = useApi('/api/llm-endpoints');
+  const { data: envFallback } = useApi('/api/llm-env-fallback');
   const [creating, setCreating] = useState(false);
   const [editing, setEditing]   = useState(null);    // endpoint object
   const [deleteTarget, setDeleteTarget] = useState(null);
@@ -557,14 +665,39 @@ export default function ModelRegistry() {
   // When the endpoint list refetches after a successful edit, sync the open
   // panel with the fresh masked record (token preview/fingerprint, etc.).
   useEffect(() => {
-    if (!editing || !endpoints) return;
+    if (!editing || editing.readOnly || !endpoints) return;
     const fresh = endpoints.find(e => e.id === editing.id);
     if (fresh && fresh !== editing) setEditing(fresh);
   }, [endpoints]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const COLUMNS = [
-    { key: 'id', label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
-    { key: 'name', label: 'Name' },
+    {
+      key: 'id',
+      label: 'ID',
+      render: (v, row) => row.readOnly
+        ? <span style={{
+            display: 'inline-flex', alignItems: 'center', gap: 4,
+            padding: '0 var(--eb-space-2)', borderRadius: 'var(--eb-radius-sm)',
+            background: 'var(--eb-bg-elevated)',
+            color: 'var(--eb-text-muted)',
+            fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)',
+          }} title="Synthetic record reflecting .env"><Lock size={11} />.env</span>
+        : <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span>,
+    },
+    {
+      key: 'name',
+      label: 'Name',
+      render: (v, row) => row.readOnly
+        ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+            <span>{v}</span>
+            <span style={{
+              fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
+              padding: '0 var(--eb-space-2)', borderRadius: 'var(--eb-radius-sm)',
+              border: '1px solid var(--eb-border-default)',
+            }}>read-only</span>
+          </span>
+        : v,
+    },
     { key: 'baseUrl', label: 'Base URL', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{v}</span> },
     {
       key: 'tokenPreview',
@@ -597,12 +730,16 @@ export default function ModelRegistry() {
         );
       },
     },
-    { key: 'createdAt', label: 'Added', render: v => v ? new Date(v).toLocaleString() : '—' },
+    { key: 'createdAt', label: 'Added', render: (v, row) => row.readOnly ? '—' : (v ? new Date(v).toLocaleString() : '—') },
     {
       key: '_actions',
       label: '',
       sortable: false,
-      render: (_, row) => (
+      render: (_, row) => row.readOnly ? (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', color: 'var(--eb-text-muted)' }} title="Edit .env and restart to change">
+          <Lock size={13} />
+        </div>
+      ) : (
         <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
           <button
             aria-label="Edit"
@@ -726,7 +863,7 @@ export default function ModelRegistry() {
 
       <DataTable
         columns={COLUMNS}
-        data={endpoints ?? []}
+        data={envFallback ? [envFallback, ...(endpoints ?? [])] : (endpoints ?? [])}
         emptyText="No model providers registered yet."
         onRowClick={row => { setEditing(row); setFormError(null); }}
       />
@@ -751,10 +888,13 @@ export default function ModelRegistry() {
       <SidePanel
         open={!!editing}
         onClose={() => setEditing(null)}
-        title={editing ? `Edit "${editing.name}"` : ''}
+        title={editing ? (editing.readOnly ? editing.name : `Edit "${editing.name}"`) : ''}
         width="640px"
       >
-        {editing && (
+        {editing && editing.readOnly && (
+          <EnvProviderPanel provider={editing} onClose={() => setEditing(null)} />
+        )}
+        {editing && !editing.readOnly && (
           <EndpointForm
             endpoint={editing}
             onSave={handleUpdate}

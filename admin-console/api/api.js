@@ -491,6 +491,33 @@ function maskLlmEndpoint(ep) {
   };
 }
 
+// Synthetic read-only provider record that mirrors the ANTHROPIC_* variables
+// from `.env`. Surfaced through GET /api/llm-env-fallback so the Model
+// Providers page can show the operator what the "inherit from .env" choice
+// would actually resolve to. Returns null when ANTHROPIC_BASE_URL isn't set.
+function buildEnvFallbackProvider() {
+  const baseUrl = (process.env.ANTHROPIC_BASE_URL || '').trim();
+  if (!baseUrl) return null;
+  const token  = (process.env.ANTHROPIC_AUTH_TOKEN || '').trim();
+  const sonnet = (process.env.ANTHROPIC_DEFAULT_SONNET_MODEL || 'claude-sonnet-4-6').trim();
+  const haiku  = (process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL  || 'claude-haiku-4-5').trim();
+  const models = [];
+  if (sonnet) models.push({ id: sonnet, displayName: sonnet, kind: 'sonnet' });
+  if (haiku && haiku !== sonnet) models.push({ id: haiku, displayName: haiku, kind: 'haiku' });
+  return {
+    id: '__env__',
+    name: 'Inherited from .env',
+    baseUrl,
+    hasToken: Boolean(token),
+    tokenPreview: token ? llmTokenPreview(token) : '',
+    tokenFingerprint: token ? llmTokenFingerprint(token) : '',
+    models,
+    defaultModelId: sonnet || (models[0]?.id ?? null),
+    readOnly: true,
+    source: '.env',
+  };
+}
+
 // One-time auto-migration: if no endpoint is registered yet but the legacy
 // `.env` configures a base URL, seed a "Default (from .env)" endpoint so
 // existing setups keep working without manual UI steps.
@@ -1880,6 +1907,13 @@ function pickEndpointDefaultModel(ep) {
 
 app.get('/api/llm-endpoints', (req, res) => {
   res.json(listLlmEndpoints().map(maskLlmEndpoint));
+});
+
+// Read-only view of the ANTHROPIC_* variables from `.env`, surfaced as a
+// provider-shaped record so the Model Providers page can show the operator
+// what "inherit from .env" resolves to. Never selectable as an llmEndpointId.
+app.get('/api/llm-env-fallback', (req, res) => {
+  res.json(buildEnvFallbackProvider());
 });
 
 app.get('/api/llm-endpoints/:id', (req, res) => {

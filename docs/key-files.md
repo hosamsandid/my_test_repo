@@ -43,4 +43,4 @@
 
 **Add a webhook trigger:** Add an `http` trigger in the console; it generates a secret automatically. POST to the webhook endpoint with the `X-Hook-Secret` header.
 
-**Add or switch an LLM endpoint:** Model Registry → New Endpoint → Test Connection → Discover Models. See [docs/model-registry.md](./model-registry.md).
+**Add or switch a model provider:** Model Providers → New provider → Test Connection → Discover Models. See [docs/model-providers.md](./model-providers.md).

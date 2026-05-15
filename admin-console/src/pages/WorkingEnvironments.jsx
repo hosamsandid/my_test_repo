@@ -508,12 +508,12 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
           <Cpu size={14} />
           <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
-            LLM endpoint
+            Model provider
           </span>
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
-          <div style={labelStyle}>Endpoint</div>
+          <div style={labelStyle}>Provider</div>
           <select
             value={form.llmEndpointId}
             onChange={e => updateEndpoint(e.target.value)}
@@ -539,7 +539,7 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
             <option value="">
               {form.llmEndpointId
                 ? endpointModels.length ? '— pick a model —' : '— no models in catalog —'
-                : '— select an endpoint first —'}
+                : '— select a provider first —'}
             </option>
             {endpointModels.map(m => (
               <option key={m.id} value={m.id}>
@@ -550,7 +550,7 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
         </div>
 
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-          Agents in this environment use this endpoint and start on the chosen default model. Leave the model blank to inherit the endpoint's registry-level default; without an endpoint they fall back to <code>ANTHROPIC_BASE_URL</code> from <code>.env</code>. Manage endpoints and their default model on the Model Registry page.
+          Agents in this environment use this provider and start on the chosen default model. Leave the model blank to inherit the provider's default; without a provider they fall back to <code>ANTHROPIC_BASE_URL</code> from <code>.env</code>. Manage providers and their default model on the Model Providers page.
         </div>
       </div>
 

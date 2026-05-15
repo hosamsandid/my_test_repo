@@ -1071,12 +1071,12 @@ function ModelPicker({ options, switching, disabled, onChange }) {
   // dropdown shows "(no endpoint)" or "(no models)" so the user knows where
   // to fix it.
   const tooltip = !hasEndpoint
-    ? 'No LLM endpoint bound to this environment — set one in Working Environments.'
+    ? 'No model provider bound to this environment — set one in Working Environments.'
     : !hasModels
-      ? `Endpoint "${options.endpointName}" has no models in its catalog.`
+      ? `Provider "${options.endpointName}" has no models in its catalog.`
       : overridden
         ? `Override active. Environment default: ${options.defaultModelId || '(none)'}.`
-        : `Environment default. Endpoint: ${options.endpointName}.`;
+        : `Environment default. Provider: ${options.endpointName}.`;
 
   return (
     <div

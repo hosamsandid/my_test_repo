@@ -127,7 +127,7 @@ function CreateForm({ onSave, onCancel, saving, error }) {
           </div>
         </Step>
         <Step n={4}>
-          Click <strong>Generate new token</strong>. Enter a descriptive note (e.g. <em>AEE Agent Token</em>) and set an expiry date.
+          Click <strong>Generate new token</strong>. Enter a descriptive note (e.g. <em>Agentic Studio Agent Token</em>) and set an expiry date.
           For fine-grained tokens, also select the repositories the agents should have access to.
         </Step>
         <Step n={5}>

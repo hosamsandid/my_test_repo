@@ -760,7 +760,7 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           ))}
         </select>
         <div style={helpTextStyle}>
-          Defines the skills, repositories, GitHub token and LLM endpoint the agent receives at creation time.
+          Defines the skills, repositories, GitHub token and model provider the agent receives at creation time.
           Manage these on the <em>Working Environments</em> page. Each agent gets its own isolated workspace,
           but the recipe is shared.
         </div>

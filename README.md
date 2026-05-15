@@ -10,7 +10,7 @@ For a visual walkthrough of all concepts, open **[`docs/architecture-story.html`
 
 Every enterprise AI pilot eventually hits the same wall: the assistant works in isolation. It forgets yesterday's conversation, doesn't know your codebase, can't act while you sleep, and lives on someone else's servers.
 
-Accenture Agentic Studio removes that wall. It is a platform for running AI agents that **persist across sessions**, **operate autonomously on schedules and events**, and **collaborate as a team** — all within your own infrastructure, connected to whichever LLM endpoint your organization controls.
+Accenture Agentic Studio removes that wall. It is a platform for running AI agents that **persist across sessions**, **operate autonomously on schedules and events**, and **collaborate as a team** — all within your own infrastructure, connected to whichever model provider your organization controls.
 
 ---
 
@@ -26,7 +26,7 @@ Agents don't wait to be summoned. A built-in scheduling system lets an agent sen
 
 ### Teams of specialists running in parallel, on your servers
 
-Complex enterprise problems rarely have a single expert. Agentic Studio lets you spawn a coordinated team — a code analyst, a documentation writer, a quality gate, a business analyst — that work in parallel in isolated workspaces, coordinate through shared triggers, and report to a central dashboard. The entire stack runs on Podman inside your network. The LLM endpoint is fully configurable: point it at an enterprise gateway, LiteLLM, Azure AI Foundry, or the public Anthropic API.
+Complex enterprise problems rarely have a single expert. Agentic Studio lets you spawn a coordinated team — a code analyst, a documentation writer, a quality gate, a business analyst — that work in parallel in isolated workspaces, coordinate through shared triggers, and report to a central dashboard. The entire stack runs on Podman inside your network. The model provider is fully configurable: point it at an enterprise gateway, LiteLLM, Azure AI Foundry, or the public Anthropic API.
 
 ---
 
@@ -46,10 +46,10 @@ Agentic Studio has four moving parts:
 
 ## Quick Start
 
-**Prerequisites:** Podman with `podman compose`, an Anthropic-compatible LLM endpoint.
+**Prerequisites:** Podman with `podman compose`, plus an LLM endpoint that speaks the Anthropic Messages API (the Anthropic API directly, a LiteLLM proxy, Azure AI Foundry, or any internal gateway).
 
 ```bash
-# 1. Copy the environment config and fill in your LLM endpoint + auth token
+# 1. Copy the environment config and fill in your provider URL + auth token
 cp .env.example .env
 
 # 2. Boot the Matrix homeserver and register the admin account
@@ -62,7 +62,7 @@ make up
 ```
 
 4. Open **http://localhost:4000** in your browser.
-5. The Setup Wizard walks you through five steps: LLM endpoint → SSH key → GitHub token → Working Environment → first agent.
+5. The Setup Wizard walks you through five steps: Model Provider → SSH key → GitHub token → Working Environment → first agent.
 6. Once created, the agent appears in Agent Chat. Send it a message and watch the session log on the right.
 
 You now have a live, persistent AI agent running inside your own infrastructure.
@@ -85,7 +85,7 @@ You now have a live, persistent AI agent running inside your own infrastructure.
 | Working Environments | [docs/working-environments.md](./docs/working-environments.md) |
 | Admin Console reference | [docs/admin-console.md](./docs/admin-console.md) |
 | SSH keys and GitHub tokens | [docs/credentials.md](./docs/credentials.md) |
-| Model Registry | [docs/model-registry.md](./docs/model-registry.md) |
+| Model Providers | [docs/model-providers.md](./docs/model-providers.md) |
 | Skills system | [docs/skills-system.md](./docs/skills-system.md) |
 | Persistent memory | [docs/persistent-memory.md](./docs/persistent-memory.md) |
 | Key files and project layout | [docs/key-files.md](./docs/key-files.md) |

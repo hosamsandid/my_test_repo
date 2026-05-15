@@ -342,14 +342,19 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
         placeholder="e.g. LiteLLM Prod"
       />
 
-      <FormInput
-        label="Base URL"
-        required
-        type="url"
-        value={baseUrl}
-        onChange={setBaseUrl}
-        placeholder="https://litellm.example/v1"
-      />
+      <div>
+        <FormInput
+          label="Base URL"
+          required
+          type="url"
+          value={baseUrl}
+          onChange={setBaseUrl}
+          placeholder="https://litellm.example/v1"
+        />
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+          Must speak the Anthropic Messages API — e.g. the Anthropic API directly, a LiteLLM proxy, or an internal gateway that exposes it.
+        </div>
+      </div>
 
       {/* Token field — different copy for create vs edit */}
       <div>
@@ -515,7 +520,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
           color: 'var(--eb-text-muted)',
           marginTop: 'var(--eb-space-2)',
         }}>
-          Click the star to mark one model as the registry-level default. New environments and agents bound to this endpoint start on that model unless they override it explicitly.
+          Click the star to mark one model as the provider's default. New environments and agents bound to this provider start on that model unless they override it explicitly.
         </div>
       </div>
 
@@ -530,7 +535,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
           disabled={saving || !canSubmit}
           style={{ ...buttonPrimary, cursor: saving ? 'wait' : 'pointer', opacity: (saving || !canSubmit) ? 0.6 : 1 }}
         >
-          {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Create endpoint'}
+          {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Create provider'}
         </button>
         <button onClick={onCancel} style={buttonSecondary}>Cancel</button>
       </div>
@@ -685,13 +690,13 @@ export default function ModelRegistry() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
-          Model Registry
+          Model Providers
         </h1>
         <button
           onClick={() => { setCreating(true); setFormError(null); }}
           style={{ ...buttonPrimary, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}
         >
-          <Plus size={15} /> New Endpoint
+          <Plus size={15} /> New provider
         </button>
       </div>
 
@@ -703,7 +708,7 @@ export default function ModelRegistry() {
         fontSize: 'var(--eb-text-sm)',
         color: 'var(--eb-text-secondary)',
       }}>
-        Anthropic-compatible LLM endpoints (typically a LiteLLM proxy). Each endpoint can mark one model as its registry-level default — Working Environments and new agents inherit that model unless they pin their own.
+        Model providers are where Agentic Studio routes model traffic. Each provider has a URL, an auth token and a catalog of available models. Working Environments and individual agents bind to one provider and pick a default model from its catalog.
       </div>
 
       {actionError && (
@@ -722,14 +727,14 @@ export default function ModelRegistry() {
       <DataTable
         columns={COLUMNS}
         data={endpoints ?? []}
-        emptyText="No LLM endpoints registered yet."
+        emptyText="No model providers registered yet."
         onRowClick={row => { setEditing(row); setFormError(null); }}
       />
 
       <SidePanel
         open={creating}
         onClose={() => setCreating(false)}
-        title="New LLM endpoint"
+        title="New model provider"
         width="640px"
       >
         {creating && (
@@ -762,8 +767,8 @@ export default function ModelRegistry() {
 
       <ConfirmDialog
         open={!!deleteTarget}
-        title="Delete LLM endpoint"
-        message={`Really delete "${deleteTarget?.name || deleteTarget?.id}"? Working Environments using this endpoint must detach it first.`}
+        title="Delete model provider"
+        message={`Really delete "${deleteTarget?.name || deleteTarget?.id}"? Working Environments using this provider must detach it first.`}
         variant="danger"
         confirmLabel="Delete"
         onConfirm={handleDelete}

@@ -9,12 +9,12 @@ The Admin Console at `http://localhost:4000` (configurable via `.env`) is the ce
 | **Dashboard** | `/` | Live agent status (Unread / Busy / Idle / Offline), aggregate stats, setup progress nudge |
 | **Agent Chat** | `/chats` | 1:1 chat with any agent; session log; workspace browser; trigger editor |
 | **Agents** | `/agents` | Create, edit, enable/disable, delete, export, and import agents |
-| **Working Environments** | `/environments` | Reusable workspace recipes (skills, repos, GitHub token, LLM endpoint) |
+| **Working Environments** | `/environments` | Reusable workspace recipes (skills, repos, GitHub token, model provider) |
 | **SSH Keys** | `/ssh-keys` | Register SSH key pairs for private repository access |
 | **GitHub Tokens** | `/github-tokens` | Register GitHub PATs for the GitHub event poller and HTTPS repository access |
 | **Skills Registry** | `/skills` | Browse available skills; click to view skill content |
 | **Scheduled Jobs** | `/jobs` | Cross-agent view of all triggers; add/edit/delete cron, one-shot, webhook, and GitHub event triggers |
-| **Model Registry** | `/models` | Register and test LLM endpoints; discover available models; set per-agent model overrides |
+| **Model Providers** | `/models` | Register and test model providers; discover available models; set per-agent model overrides |
 | **MCP Servers** | `/mcp` | View Model Context Protocol servers configured in the Claude settings file |
 | **Flows** | `/flows` | BriefingPack graph: visualize BP dependencies, claim/activate/deactivate orchestrator-managed BPs |
 

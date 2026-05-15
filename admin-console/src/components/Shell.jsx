@@ -56,7 +56,7 @@ const NAV = [
   { section: 'CONFIGURATION', items: [
     { path: '/skills',       label: 'Skills Registry',     Icon: Zap },
     { path: '/jobs',         label: 'Triggers',            Icon: Clock },
-    { path: '/models',       label: 'Model Registry',      Icon: Sparkles },
+    { path: '/models',       label: 'Model Providers',     Icon: Sparkles },
     { path: '/mcp',          label: 'MCP Servers',         Icon: Server },
   ]},
 ];
@@ -73,7 +73,7 @@ const BREADCRUMBS = {
   '/github-tokens': 'GitHub Tokens',
   '/skills':       'Skills Registry',
   '/jobs':         'Triggers',
-  '/models':       'Model Registry',
+  '/models':       'Model Providers',
   '/mcp':          'MCP Servers',
 };
 

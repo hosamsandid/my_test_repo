@@ -1,6 +1,6 @@
 # Working Environments
 
-A **Working Environment** is a reusable workspace recipe applied when an agent is created. It bundles everything the agent needs to operate: credentials, repositories, skills, and an LLM endpoint.
+A **Working Environment** is a reusable workspace recipe applied when an agent is created. It bundles everything the agent needs to operate: credentials, repositories, skills, and a model provider.
 
 ## Fields
 
@@ -9,7 +9,7 @@ A **Working Environment** is a reusable workspace recipe applied when an agent i
 | **Skills** | Names of skills (from the central pool) to copy into the agent workspace at creation |
 | **Repositories** | One or more Git repos to clone, each with an optional SSH key binding |
 | **GitHub Token** | PAT used by the GitHub poller for event-driven triggers; also authenticates HTTPS GitHub repository cloning and the real-time repo-check probe |
-| **LLM Endpoint** | Optional override — the agent inherits `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` from this endpoint rather than the global default |
+| **Model Provider** | Optional override — the agent inherits `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` from this provider rather than the global default |
 | **Additional Context** | Markdown appended to the agent's `CLAUDE.md` after the environment section |
 
 ## What happens at agent creation

@@ -164,12 +164,12 @@ export default function QuickStart() {
             <AlertCircle size={20} style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2 }} />
             <div>
               <div style={{ fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)', marginBottom: 'var(--eb-space-1)' }}>
-                No LLM endpoint configured
+                No model provider configured
               </div>
               <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-                The agent will fail on its first message without an LLM endpoint.{' '}
+                The agent will fail on its first message without a model provider.{' '}
                 <Link to="/models" style={{ color: 'var(--eb-accent-primary)' }}>
-                  Add LLM endpoint →
+                  Add provider →
                 </Link>
               </div>
             </div>
@@ -304,7 +304,7 @@ export default function QuickStart() {
                   <div style={{ marginTop: 'var(--eb-space-2)', color: 'var(--eb-status-warning)' }}>
                     ⚠ {result.llmWarning}{' '}
                     <Link to="/models" style={{ color: 'var(--eb-accent-primary)' }}>
-                      Add LLM endpoint →
+                      Add provider →
                     </Link>
                   </div>
                 )}

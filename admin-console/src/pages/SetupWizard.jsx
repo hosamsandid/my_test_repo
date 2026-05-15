@@ -44,7 +44,7 @@ const inputStyle = {
 /* ─── Progress Stepper ─────────────────────────────────────────── */
 
 const STEPS = [
-  { id: 'llm',         label: 'LLM Endpoint',       required: true },
+  { id: 'llm',         label: 'Model Provider',      required: true },
   { id: 'ssh-key',     label: 'SSH Key',             required: false },
   { id: 'gh-token',    label: 'GitHub Token',        required: false },
   { id: 'environment', label: 'Working Environment', required: false },
@@ -118,7 +118,7 @@ function ErrorBanner({ msg }) {
   );
 }
 
-/* ─── Step 1: LLM Endpoint ─────────────────────────────────────── */
+/* ─── Step 1: Model Provider ────────────────────────────────────── */
 
 function ModelEditor({ models, onChange }) {
   const update = (i, patch) => onChange(models.map((m, idx) => idx === i ? { ...m, ...patch } : m));
@@ -229,10 +229,10 @@ function StepLlm({ onNext, onSkip }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
       <div>
         <h2 style={{ margin: '0 0 var(--eb-space-1)', fontSize: 'var(--eb-text-lg)', fontWeight: 'var(--eb-font-semibold)' }}>
-          LLM Endpoint
+          Model Provider
         </h2>
         <p style={{ margin: 0, color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
-          Connect the system to an Anthropic-compatible API — the Anthropic API directly or a LiteLLM proxy.
+          Tell Agentic Studio where to send model traffic — the Anthropic API directly, a LiteLLM proxy, or any internal gateway that speaks the Anthropic Messages API.
           This is the only required step; everything else can be configured later.
         </p>
       </div>
@@ -240,7 +240,12 @@ function StepLlm({ onNext, onSkip }) {
       <ErrorBanner msg={error} />
 
       <FormInput label="Name" required value={name} onChange={setName} placeholder="e.g. LiteLLM Prod" />
-      <FormInput label="Base URL" required type="url" value={baseUrl} onChange={setBaseUrl} placeholder="https://api.anthropic.com" />
+      <div>
+        <FormInput label="Base URL" required type="url" value={baseUrl} onChange={setBaseUrl} placeholder="https://api.anthropic.com" />
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+          Must speak the Anthropic Messages API — e.g. the Anthropic API, a LiteLLM proxy, or an internal gateway that exposes it.
+        </div>
+      </div>
 
       <div>
         <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-1)' }}>
@@ -259,7 +264,7 @@ function StepLlm({ onNext, onSkip }) {
       {!savedId ? (
         <button onClick={handleSave} disabled={saving || !canSave}
           style={{ ...btnPrimary, cursor: saving ? 'wait' : 'pointer', opacity: (saving || !canSave) ? 0.6 : 1, alignSelf: 'flex-start' }}>
-          {saving ? 'Saving…' : 'Save endpoint'}
+          {saving ? 'Saving…' : 'Save provider'}
         </button>
       ) : (
         <div style={{
@@ -268,7 +273,7 @@ function StepLlm({ onNext, onSkip }) {
           border: '1px solid var(--eb-status-success)', borderRadius: 'var(--eb-radius-md)',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', color: 'var(--eb-status-success)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
-            <Check size={15} /> Endpoint saved
+            <Check size={15} /> Provider saved
           </div>
 
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)', flexWrap: 'wrap', alignItems: 'center' }}>
@@ -476,7 +481,7 @@ function StepSshKey({ onNext, onSkip }) {
       {!saved && mode === 'paste' && (
         <>
           <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
-            Generate a key pair with <code style={{ fontFamily: 'var(--eb-font-mono)' }}>ssh-keygen -t ed25519 -C "aee-deploy-key"</code> (no passphrase),
+            Generate a key pair with <code style={{ fontFamily: 'var(--eb-font-mono)' }}>ssh-keygen -t ed25519 -C "agentic-studio-deploy-key"</code> (no passphrase),
             add the <strong>.pub</strong> file to your GitHub instance, then paste the private key below.
             <div style={{ marginTop: 4 }}>
               <strong>SAML SSO orgs:</strong> after uploading the public key, click <strong>Configure SSO</strong> next to it in
@@ -657,7 +662,7 @@ function StepEnvironment({ onNext, onSkip, onCreated }) {
           Working Environment
         </h2>
         <p style={{ margin: 0, color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
-          A Working Environment is a workspace recipe that agents are assigned to — it defines which skills, repositories, and LLM endpoint they use.
+          A Working Environment is a workspace recipe that agents are assigned to — it defines which skills, repositories, and model provider they use.
           You can fully configure it later in <strong>Workspaces → Working Environments</strong>.
         </p>
       </div>

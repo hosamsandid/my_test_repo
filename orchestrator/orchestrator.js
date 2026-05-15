@@ -93,6 +93,8 @@ function startAgentProcess(config) {
     MATRIX_ACCESS_TOKEN: token,
     MATRIX_BOT_USER_ID: userId,
     MATRIX_HOMESERVER: process.env.MATRIX_HOMESERVER,
+    ORCHESTRATOR_INTERNAL_URL: process.env.ORCHESTRATOR_INTERNAL_URL || 'http://orchestrator:4002',
+    AEE_ORCHESTRATOR_URL: process.env.AEE_ORCHESTRATOR_URL || 'http://orchestrator:4002',
   };
 
   // Bind the agent's process to the LLM endpoint configured on its working

@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { PanelRightOpen, MessageCircle, Loader2 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
-import AgentList from './agent-chat/AgentList';
+import AgentList, { buildGroups } from './agent-chat/AgentList';
 import ChatPanel from './agent-chat/ChatPanel';
 import RightRail from './agent-chat/RightRail';
 
@@ -55,7 +55,23 @@ function ResizeDivider({ onMouseDown }) {
 
 const LAST_AGENT_KEY = 'agentChat.lastAgentId';
 const LAST_VIEWED_KEY = 'agentChat.lastViewed';
+const FILTER_KEY = 'agentChat.listFilter';
 const STATUS_POLL_MS = 5000;
+
+function loadFilter() {
+  try {
+    const raw = localStorage.getItem(FILTER_KEY);
+    if (!raw) return { kind: 'all' };
+    const parsed = JSON.parse(raw);
+    if (parsed && ['all', 'team', 'orchestrator', 'agent'].includes(parsed.kind)) {
+      return parsed;
+    }
+  } catch { /* ignore */ }
+  return { kind: 'all' };
+}
+function saveFilter(filter) {
+  try { localStorage.setItem(FILTER_KEY, JSON.stringify(filter)); } catch { /* ignore */ }
+}
 
 function loadLastViewed() {
   try { return JSON.parse(localStorage.getItem(LAST_VIEWED_KEY) || '{}'); }
@@ -140,6 +156,26 @@ export default function AgentChat() {
     statusTimerRef.current = setInterval(poll, STATUS_POLL_MS);
     return () => clearInterval(statusTimerRef.current);
   }, []);
+
+  // Sidebar filter: All | a specific team | a specific agent. Persisted in
+  // localStorage so the user's narrowed view survives reloads.
+  const [listFilter, setListFilter] = useState(loadFilter);
+  useEffect(() => { saveFilter(listFilter); }, [listFilter]);
+
+  // Drop the filter if its target disappeared (group deleted, agent removed).
+  useEffect(() => {
+    if (!agents) return;
+    if (listFilter.kind === 'agent' && !agents.find(a => a.id === listFilter.id)) {
+      setListFilter({ kind: 'all' });
+    }
+    if (listFilter.kind === 'team' || listFilter.kind === 'orchestrator') {
+      const { groups } = buildGroups(agents);
+      const stillThere = groups.some(
+        g => g.kind === listFilter.kind && g.id === listFilter.id,
+      );
+      if (!stillThere) setListFilter({ kind: 'all' });
+    }
+  }, [agents, listFilter]);
 
   // Right-rail (session log panel) toggle, persisted in localStorage so the
   // user's preference survives reload. Declared early so the drag handler
@@ -342,6 +378,13 @@ export default function AgentChat() {
                 ? `${agents.length} agent${agents.length === 1 ? '' : 's'}`
                 : ''}
           </div>
+          {agents && agents.length > 0 && (
+            <FilterSelect
+              agents={agents}
+              filter={listFilter}
+              onChange={setListFilter}
+            />
+          )}
         </div>
 
         <div style={{ flex: 1, overflowY: 'auto' }}>
@@ -404,6 +447,7 @@ export default function AgentChat() {
               onSelect={handleSelect}
               onMarkAsUnread={handleMarkAsUnread}
               statuses={agentStatuses}
+              filter={listFilter}
             />
           )}
         </div>
@@ -490,6 +534,92 @@ export default function AgentChat() {
         </button>
       )}
     </div>
+  );
+}
+
+/**
+ * Native <select> bound to the agent-list filter spec. Lists every visible
+ * team (with member count) followed by every individual agent, so the user
+ * can narrow down to either a whole team or a single chat.
+ */
+function FilterSelect({ agents, filter, onChange }) {
+  const { groups, singles } = buildGroups(agents);
+  const teams         = groups.filter(g => g.kind === 'team');
+  const orchestrators = groups.filter(g => g.kind === 'orchestrator');
+
+  const byName = (a, b) =>
+    (a.displayName || a.id).localeCompare(b.displayName || b.id);
+  const everyAgent = [
+    ...groups.flatMap(g => [g.header, ...g.children].filter(Boolean)),
+    ...singles,
+  ].sort(byName);
+
+  const value =
+    filter.kind === 'team'         ? `team:${filter.id}`         :
+    filter.kind === 'orchestrator' ? `orchestrator:${filter.id}` :
+    filter.kind === 'agent'        ? `agent:${filter.id}`        :
+    'all';
+
+  function handleChange(e) {
+    const v = e.target.value;
+    if (v === 'all') return onChange({ kind: 'all' });
+    const [kind, ...rest] = v.split(':');
+    const id = rest.join(':');
+    if (kind === 'team' || kind === 'orchestrator' || kind === 'agent') {
+      return onChange({ kind, id });
+    }
+  }
+
+  return (
+    <select
+      value={value}
+      onChange={handleChange}
+      title="Filter agent list"
+      style={{
+        marginTop: 'var(--eb-space-2)',
+        width: '100%',
+        padding: '4px 6px',
+        fontSize: 'var(--eb-text-xs)',
+        background: 'var(--eb-bg-app)',
+        color: 'var(--eb-text-primary)',
+        border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-sm)',
+        fontFamily: 'inherit',
+        cursor: 'pointer',
+      }}
+    >
+      <option value="all">All agents</option>
+
+      {teams.length > 0 && (
+        <optgroup label="Teams">
+          {teams.map(t => (
+            <option key={t.id} value={`team:${t.id}`}>
+              {t.displayName} ({t.children.length + (t.header ? 1 : 0)})
+            </option>
+          ))}
+        </optgroup>
+      )}
+
+      {orchestrators.length > 0 && (
+        <optgroup label="Orchestrators">
+          {orchestrators.map(o => (
+            <option key={o.id} value={`orchestrator:${o.id}`}>
+              {o.displayName} ({o.children.length + (o.header ? 1 : 0)})
+            </option>
+          ))}
+        </optgroup>
+      )}
+
+      {everyAgent.length > 0 && (
+        <optgroup label="Individual agents">
+          {everyAgent.map(a => (
+            <option key={a.id} value={`agent:${a.id}`}>
+              {a.displayName || a.id}
+            </option>
+          ))}
+        </optgroup>
+      )}
+    </select>
   );
 }
 

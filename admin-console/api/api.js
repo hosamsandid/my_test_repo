@@ -4494,6 +4494,8 @@ app.get('/api/matrix/agents', (req, res) => {
       dmRoomId: dm?.roomId || null,
       environmentId: cfg.environmentId || null,
       environmentName: env?.name || cfg.environmentId || null,
+      parentTeamId: cfg.parentTeamId || null,
+      parentOrchestratorId: cfg.parentOrchestratorId || null,
     });
   }
   res.json(out);

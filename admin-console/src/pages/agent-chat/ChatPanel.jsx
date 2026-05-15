@@ -34,8 +34,12 @@ const LEARN_PROMPT =
  *   3. Subscribe to `/api/matrix/rooms/:roomId/stream` (SSE) and append new
  *      events, deduplicating by `event_id` (backfill + first sync overlap).
  *   4. Optimistic insert: a synthetic `pending-<uuid>` message goes in on
- *      send. When SSE delivers a real event with the same body+sender within
- *      30 s we replace the optimistic stub.
+ *      send. When `POST /messages` returns the assigned Matrix `event_id`,
+ *      we stamp it onto the stub as `pendingEventId`; the SSE handler then
+ *      reconciles by exact event_id. A body-only fallback covers the race
+ *      where SSE delivers the canonical event before the POST response.
+ *      Timestamps are intentionally not compared — browser clock and server
+ *      clock can drift arbitrarily (see issue #252).
  *
  * @param {object} agent              From /api/matrix/agents
  * @param {string|null} roomId        DM room id (or null until created)
@@ -251,16 +255,20 @@ export default function ChatPanel({
       // Already have the canonical event — skip.
       if (prev.some(m => m.event_id === incoming.event_id)) return prev;
 
-      // Try to reconcile with an optimistic stub: same body within a 30 s
-      // window. Sender intentionally not compared — the optimistic stub uses
-      // a sentinel sender id, while the canonical event carries the real
-      // admin user id. The isOptimistic flag already restricts the match
-      // set to messages we sent ourselves.
-      const idx = prev.findIndex(m =>
-        m.isOptimistic
-        && m.body === incoming.body
-        && Math.abs((incoming.ts || 0) - (m.ts || 0)) < 30_000
-      );
+      // Reconcile with an optimistic stub. Primary key: `pendingEventId`,
+      // stamped onto the stub by handleSend once `POST /messages` returns
+      // the assigned Matrix event_id. Fallback: body-only match against a
+      // stub that hasn't received its event_id yet — covers the race where
+      // SSE delivers the canonical event before the POST response. We do
+      // NOT compare timestamps: the optimistic ts is browser `Date.now()`,
+      // the canonical ts is `origin_server_ts`, and the two clocks can drift
+      // arbitrarily (issue #252).
+      let idx = prev.findIndex(m => m.isOptimistic && m.pendingEventId === incoming.event_id);
+      if (idx < 0) {
+        idx = prev.findIndex(m =>
+          m.isOptimistic && !m.pendingEventId && m.body === incoming.body
+        );
+      }
       if (idx >= 0) {
         const next = prev.slice();
         next[idx] = incoming;
@@ -517,8 +525,20 @@ export default function ChatPanel({
     setSending(true);
     setError(null);
     try {
-      await apiCall('POST', `/api/matrix/rooms/${encodeURIComponent(roomId)}/messages`, { body });
-      // Real event arrives via SSE; the onEvent handler reconciles it.
+      const resp = await apiCall('POST', `/api/matrix/rooms/${encodeURIComponent(roomId)}/messages`, { body });
+      // Stamp the assigned Matrix event_id onto the optimistic stub so the
+      // SSE handler can reconcile by exact id rather than a fuzzy body
+      // match. If SSE already delivered the canonical event (stream faster
+      // than the HTTP response), the stub is already gone — nothing to do.
+      const eventId = resp?.event_id;
+      if (eventId) {
+        setMessages(prev => {
+          if (prev.some(m => m.event_id === eventId)) return prev;
+          return prev.map(m =>
+            m.event_id === optimisticId ? { ...m, pendingEventId: eventId } : m
+          );
+        });
+      }
     } catch (err) {
       setError(`Send failed: ${err.message}`);
       // Roll back the optimistic message so the user can retry.

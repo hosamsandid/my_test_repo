@@ -220,21 +220,41 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
     }
   }, [models, defaultModelId]);
 
-  // test / discover state — only meaningful for an existing (saved) endpoint
+  // test / discover state
   const [probing, setProbing] = useState(null);            // 'test' | 'discover' | null
   const [probeMsg, setProbeMsg] = useState(null);          // { ok, text }
   const [discovered, setDiscovered] = useState(null);      // suggestion list pending merge
 
   const canSubmit = name.trim() && baseUrl.trim();
+  const canProbe = !!baseUrl.trim();
+
+  // Pick the probe target: when the user is editing an existing endpoint and
+  // hasn't typed a new token, hit the stored-id route so the server's persisted
+  // token is used (we never round-trip the raw token through the UI). In every
+  // other case — create mode, or edit with an unsaved token change — call the
+  // stateless probe route with the form's baseUrl + typed token.
+  function probeRequest(kind) {
+    const useStored = isEdit && !authToken.trim() && !clearToken;
+    if (useStored) {
+      const suffix = kind === 'test' ? 'test' : 'discover-models';
+      return { path: `/api/llm-endpoints/${endpoint.id}/${suffix}`, body: undefined };
+    }
+    const suffix = kind === 'test' ? 'probe-test' : 'probe-discover-models';
+    return {
+      path: `/api/llm-endpoints/${suffix}`,
+      body: { baseUrl: baseUrl.trim(), authToken: clearToken ? '' : authToken.trim() },
+    };
+  }
 
   async function runTest() {
-    if (!isEdit) {
-      setProbeMsg({ ok: false, text: 'Save the endpoint first, then run a test.' });
+    if (!canProbe) {
+      setProbeMsg({ ok: false, text: 'Enter a Base URL first.' });
       return;
     }
     setProbing('test'); setProbeMsg(null);
     try {
-      const r = await apiCall('POST', `/api/llm-endpoints/${endpoint.id}/test`);
+      const { path, body } = probeRequest('test');
+      const r = await apiCall('POST', path, body);
       setProbeMsg({
         ok: r.ok,
         text: r.ok
@@ -249,13 +269,14 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
   }
 
   async function runDiscover() {
-    if (!isEdit) {
-      setProbeMsg({ ok: false, text: 'Save the endpoint first, then discover models.' });
+    if (!canProbe) {
+      setProbeMsg({ ok: false, text: 'Enter a Base URL first.' });
       return;
     }
     setProbing('discover'); setProbeMsg(null);
     try {
-      const r = await apiCall('POST', `/api/llm-endpoints/${endpoint.id}/discover-models`);
+      const { path, body } = probeRequest('discover');
+      const r = await apiCall('POST', path, body);
       setDiscovered(r.models || []);
       setProbeMsg({ ok: true, text: `Found ${r.count ?? r.models?.length ?? 0} model(s) at ${r.url}` });
     } catch (e) {
@@ -417,26 +438,21 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
         <button
           type="button"
           onClick={runTest}
-          disabled={!isEdit || probing === 'test'}
-          style={{ ...buttonGhost, opacity: !isEdit || probing === 'test' ? 0.6 : 1 }}
-          title={isEdit ? 'Send GET /v1/models to verify connectivity' : 'Save first, then test'}
+          disabled={!canProbe || probing === 'test'}
+          style={{ ...buttonGhost, opacity: !canProbe || probing === 'test' ? 0.6 : 1 }}
+          title={canProbe ? 'Send GET /v1/models to verify connectivity' : 'Enter a Base URL first'}
         >
           <PlugZap size={13} /> {probing === 'test' ? 'Testing…' : 'Test connection'}
         </button>
         <button
           type="button"
           onClick={runDiscover}
-          disabled={!isEdit || probing === 'discover'}
-          style={{ ...buttonGhost, opacity: !isEdit || probing === 'discover' ? 0.6 : 1 }}
-          title={isEdit ? 'Fetch /v1/models from the proxy' : 'Save first, then discover'}
+          disabled={!canProbe || probing === 'discover'}
+          style={{ ...buttonGhost, opacity: !canProbe || probing === 'discover' ? 0.6 : 1 }}
+          title={canProbe ? 'Fetch /v1/models from the proxy' : 'Enter a Base URL first'}
         >
           <RefreshCw size={13} /> {probing === 'discover' ? 'Loading…' : 'Discover models'}
         </button>
-        {(authToken.trim() || clearToken) && (
-          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)' }}>
-            Unsaved token change — click "Save changes" first; Test/Discover use the persisted value.
-          </span>
-        )}
         {probeMsg && (
           <span style={{
             fontSize: 'var(--eb-text-xs)',

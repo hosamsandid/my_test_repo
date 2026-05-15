@@ -2031,15 +2031,15 @@ app.delete('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
   res.status(204).end();
 });
 
-app.post('/api/llm-endpoints/:id/test', heavyLimiter, async (req, res) => {
-  const ep = listLlmEndpoints().find(e => e.id === req.params.id);
-  if (!ep) return res.status(404).json({ error: 'LLM endpoint not found' });
-  const token = readLlmEndpointToken(ep.authTokenId);
-  const url = buildModelsUrl(ep.baseUrl);
+// Shared between the stored-endpoint routes (use the persisted token) and the
+// stateless probe routes (use the token from the request body, so the form can
+// test a draft endpoint before saving).
+async function probeLlmEndpointTest(baseUrl, token) {
+  const url = buildModelsUrl(baseUrl);
   const headers = token ? { Authorization: `Bearer ${token}`, 'x-api-key': token } : {};
   const result = await httpGetJson(url, headers);
   const ok = result.status >= 200 && result.status < 300;
-  res.json({
+  return {
     ok,
     url,
     status: result.status,
@@ -2047,25 +2047,22 @@ app.post('/api/llm-endpoints/:id/test', heavyLimiter, async (req, res) => {
     sample: ok && result.body && typeof result.body === 'object'
       ? Array.isArray(result.body?.data) ? result.body.data.slice(0, 3) : result.body
       : null,
-  });
-});
+  };
+}
 
-app.post('/api/llm-endpoints/:id/discover-models', heavyLimiter, async (req, res) => {
-  const ep = listLlmEndpoints().find(e => e.id === req.params.id);
-  if (!ep) return res.status(404).json({ error: 'LLM endpoint not found' });
-  const token = readLlmEndpointToken(ep.authTokenId);
-  const url = buildModelsUrl(ep.baseUrl);
+async function probeLlmEndpointDiscover(baseUrl, token) {
+  const url = buildModelsUrl(baseUrl);
   const headers = token ? { Authorization: `Bearer ${token}`, 'x-api-key': token } : {};
   const result = await httpGetJson(url, headers);
   if (result.error || result.status < 200 || result.status >= 300) {
-    return res.status(502).json({ error: result.error || `HTTP ${result.status}`, url, status: result.status });
+    return { error: result.error || `HTTP ${result.status}`, url, status: result.status };
   }
   // OpenAI-compatible shape: { data: [{ id, ... }] }; LiteLLM also exposes
   // model_info on each entry. Normalize to our { id, displayName, kind?, … }.
   const raw = Array.isArray(result.body?.data) ? result.body.data
             : Array.isArray(result.body)       ? result.body
             : [];
-  const suggested = raw
+  const models = raw
     .map(m => {
       const id = typeof m === 'string' ? m : m?.id;
       if (!id) return null;
@@ -2077,7 +2074,52 @@ app.post('/api/llm-endpoints/:id/discover-models', heavyLimiter, async (req, res
       return { id, displayName: id, ...(kind ? { kind } : {}) };
     })
     .filter(Boolean);
-  res.json({ url, count: suggested.length, models: suggested });
+  return { url, count: models.length, models };
+}
+
+function validateProbeBody(body) {
+  const baseUrl = body?.baseUrl;
+  if (!baseUrl || typeof baseUrl !== 'string') return { error: 'baseUrl is required' };
+  try { new URL(baseUrl); } catch { return { error: 'baseUrl must be a valid URL' }; }
+  const authToken = body?.authToken;
+  if (authToken !== undefined && authToken !== null && typeof authToken !== 'string') {
+    return { error: 'authToken must be a string' };
+  }
+  return { baseUrl, token: (typeof authToken === 'string' && authToken.trim()) ? authToken.trim() : '' };
+}
+
+app.post('/api/llm-endpoints/:id/test', heavyLimiter, async (req, res) => {
+  const ep = listLlmEndpoints().find(e => e.id === req.params.id);
+  if (!ep) return res.status(404).json({ error: 'LLM endpoint not found' });
+  const token = readLlmEndpointToken(ep.authTokenId);
+  res.json(await probeLlmEndpointTest(ep.baseUrl, token));
+});
+
+app.post('/api/llm-endpoints/:id/discover-models', heavyLimiter, async (req, res) => {
+  const ep = listLlmEndpoints().find(e => e.id === req.params.id);
+  if (!ep) return res.status(404).json({ error: 'LLM endpoint not found' });
+  const token = readLlmEndpointToken(ep.authTokenId);
+  const result = await probeLlmEndpointDiscover(ep.baseUrl, token);
+  if (result.error) return res.status(502).json(result);
+  res.json(result);
+});
+
+// Stateless probe routes — accept baseUrl + authToken directly so the create
+// form (and edit-with-unsaved-token) can verify before persisting. The single
+// path segment after /api/llm-endpoints/ keeps these from colliding with the
+// /:id/{test,discover-models} routes above.
+app.post('/api/llm-endpoints/probe-test', heavyLimiter, async (req, res) => {
+  const parsed = validateProbeBody(req.body);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+  res.json(await probeLlmEndpointTest(parsed.baseUrl, parsed.token));
+});
+
+app.post('/api/llm-endpoints/probe-discover-models', heavyLimiter, async (req, res) => {
+  const parsed = validateProbeBody(req.body);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+  const result = await probeLlmEndpointDiscover(parsed.baseUrl, parsed.token);
+  if (result.error) return res.status(502).json(result);
+  res.json(result);
 });
 
 /* ─── MCP server registry ───────────────────────────────────────────── */

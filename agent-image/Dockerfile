@@ -5,10 +5,29 @@ FROM python:3.12-slim AS aee-base
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       git curl ca-certificates \
+       git curl ca-certificates openssh-client \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
+
+# Route github.com SSH via ssh.github.com:443 — same fix as the orchestrator
+# image so agents that clone or push via SSH work on corporate networks that
+# block outbound TCP 22.
+RUN mkdir -p /root/.ssh \
+  && { \
+       echo 'Host github.com'; \
+       echo '  HostName ssh.github.com'; \
+       echo '  Port 443'; \
+       echo '  User git'; \
+       echo '  StrictHostKeyChecking accept-new'; \
+       echo ''; \
+       echo 'Host *.github.com'; \
+       echo '  HostName ssh.github.com'; \
+       echo '  Port 443'; \
+       echo '  User git'; \
+       echo '  StrictHostKeyChecking accept-new'; \
+     } > /root/.ssh/config \
+  && chmod 600 /root/.ssh/config
 
 # Pin Claude Code CLI version for reproducible builds.
 ARG CLAUDE_CODE_VERSION=2.1.121

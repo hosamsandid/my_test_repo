@@ -5,6 +5,8 @@ import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
+import IdField from '../components/IdField';
+import useAutoDerivedId from '../hooks/useAutoDerivedId';
 
 /* ── Type badge ─────────────────────────────────────────────────────── */
 function TypeBadge({ type }) {
@@ -139,6 +141,12 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
   });
   const update = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const isEdit = !!initial;
+  const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
+    setName: v => update('description', v),
+    setId:   v => update('id', v),
+    getName: () => form.description,
+    initiallyAuto: !isEdit,
+  });
 
   function changeType(next) {
     setForm(f => ({
@@ -202,7 +210,24 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
         </div>
       )}
 
-      <FormInput label="ID" value={form.id} onChange={v => update('id', v)} placeholder="e.g. daily-report" disabled={isEdit} />
+      <FormInput
+        label="Description"
+        value={form.description}
+        onChange={isEdit ? v => update('description', v) : handleNameChange}
+        placeholder="e.g. Daily morning report"
+      />
+
+      <IdField
+        value={form.id}
+        onChange={handleIdChange}
+        isAutoDerived={isAutoDerived()}
+        onResetAuto={resetAutoDerive}
+        disabled={isEdit}
+        placeholder="e.g. daily-report"
+        helpText={isEdit
+          ? <>Cannot be changed after creation.</>
+          : <>Auto-derived from Description; edit to override. Lowercase letters, digits and hyphens only.</>}
+      />
 
       <div>
         <div style={fieldLabelStyle}>Type</div>
@@ -325,7 +350,6 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
         </>
       )}
 
-      <FormInput label="Description" value={form.description} onChange={v => update('description', v)} />
       <FormInput label="Prompt" value={form.prompt} onChange={v => update('prompt', v)} multiline rows={6} />
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>

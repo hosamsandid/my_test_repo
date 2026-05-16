@@ -5,6 +5,8 @@ import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
+import IdField from '../components/IdField';
+import useAutoDerivedId from '../hooks/useAutoDerivedId';
 
 const labelStyle = {
   fontSize: 'var(--eb-text-xs)',
@@ -294,6 +296,13 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
 
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
 
+  const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
+    setName: v => update('name', v),
+    setId:   v => update('id', v),
+    getName: () => form.name,
+    initiallyAuto: !isEdit,
+  });
+
   // When the endpoint changes, prefer the endpoint's registry-level default —
   // the user opted into "use whatever is chosen for this proxy". If they had
   // already pinned a different model that's still in the new catalogue, keep
@@ -362,25 +371,28 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
       )}
 
       <div>
-        <div style={labelStyle}>ID <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
-        <input
-          style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)', opacity: isEdit ? 0.6 : 1 }}
-          value={form.id}
-          disabled={isEdit}
-          onChange={e => update('id', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
-          placeholder="e.g. cobol-migration"
+        <FormInput
+          label="Name *"
+          value={form.name}
+          onChange={isEdit ? v => update('name', v) : handleNameChange}
+          placeholder="COBOL Migration"
         />
-        <div style={helpTextStyle}>
-          A unique identifier for this environment. Use lowercase letters, numbers, and hyphens only (e.g. <code>cobol-migration</code>). <strong>Cannot be changed after creation.</strong>
-        </div>
-      </div>
-
-      <div>
-        <FormInput label="Name *" value={form.name} onChange={v => update('name', v)} placeholder="COBOL Migration" />
         <div style={helpTextStyle}>
           A short, human-readable label shown in the agent list and this overview (e.g. <em>COBOL Migration Project</em>).
         </div>
       </div>
+
+      <IdField
+        value={form.id}
+        onChange={handleIdChange}
+        isAutoDerived={isAutoDerived()}
+        onResetAuto={resetAutoDerive}
+        disabled={isEdit}
+        placeholder="e.g. cobol-migration"
+        helpText={isEdit
+          ? <>A unique identifier for this environment. <strong>Cannot be changed after creation.</strong></>
+          : <>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only (e.g. <code>cobol-migration</code>). <strong>Cannot be changed after creation.</strong></>}
+      />
 
       <div>
         <div style={labelStyle}>Description</div>

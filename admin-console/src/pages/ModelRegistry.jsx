@@ -5,6 +5,8 @@ import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
+import IdField from '../components/IdField';
+import useAutoDerivedId from '../hooks/useAutoDerivedId';
 
 /* ───────────────────────── shared styles ───────────────────────── */
 
@@ -205,7 +207,14 @@ function ModelEditor({ models, defaultModelId, onChange, onDefaultChange }) {
 function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
   const isEdit = Boolean(endpoint?.id);
   const [name, setName] = useState(endpoint?.name ?? '');
+  const [id, setId] = useState(endpoint?.id ?? '');
   const [baseUrl, setBaseUrl] = useState(endpoint?.baseUrl ?? '');
+  const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
+    setName,
+    setId,
+    getName: () => name,
+    initiallyAuto: !isEdit,
+  });
   const [authToken, setAuthToken] = useState('');         // empty = leave as-is on edit
   const [clearToken, setClearToken] = useState(false);
   const [models, setModels] = useState(endpoint?.models ?? []);
@@ -318,6 +327,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
         ? defaultModelId
         : '',
     };
+    if (!isEdit && id.trim()) payload.id = id.trim();
     if (clearToken)        payload.authToken = '';
     else if (authToken.trim()) payload.authToken = authToken.trim();
     // else: undefined → server keeps existing token (only relevant on edit)
@@ -338,8 +348,20 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
         label="Name"
         required
         value={name}
-        onChange={setName}
+        onChange={isEdit ? setName : handleNameChange}
         placeholder="e.g. LiteLLM Prod"
+      />
+
+      <IdField
+        value={id}
+        onChange={handleIdChange}
+        isAutoDerived={isAutoDerived()}
+        onResetAuto={resetAutoDerive}
+        disabled={isEdit}
+        placeholder="e.g. litellm-prod"
+        helpText={isEdit
+          ? <>Cannot be changed after creation.</>
+          : <>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only. <strong>Cannot be changed after creation.</strong></>}
       />
 
       <div>

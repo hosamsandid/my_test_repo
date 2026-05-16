@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { PanelRightClose, ScrollText, FolderTree, CalendarClock, Activity } from 'lucide-react';
 import SessionLogPanel from './SessionLogPanel';
 import WorkspaceBrowser from './WorkspaceBrowser';
@@ -8,6 +8,10 @@ import { apiCall } from '../../hooks/useApi';
 
 const TAB_KEY = 'agentChat.rightRailTab';
 const SESSION_POLL_MS = 3_000;
+// Below this rail width, tab labels collapse and only icons remain — the
+// close button always stays visible. Tuned so the four current tabs plus
+// the close button still fit comfortably above the threshold.
+const COMPACT_WIDTH_PX = 360;
 
 /**
  * Tabbed right rail for the agent chat page.
@@ -37,6 +41,23 @@ export default function RightRail({
     try { localStorage.setItem(TAB_KEY, tab); } catch { /* ignore */ }
   }, [tab]);
 
+  // Container-width awareness so tab labels collapse to icons-only when the
+  // rail is dragged narrow. Viewport media queries don't help here — the
+  // rail is independently resizable from AgentChat.
+  const containerRef = useRef(null);
+  const [compact, setCompact] = useState(false);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setCompact(entry.contentRect.width < COMPACT_WIDTH_PX);
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   // Lightweight poll of just the session COUNT — so the "Sessions" tab
   // can show a badge regardless of which tab is currently visible. The
   // RunningSessionsPanel itself owns the full list when it's active.
@@ -61,7 +82,7 @@ export default function RightRail({
   }, [agentId]);
 
   return (
-    <div style={{
+    <div ref={containerRef} style={{
       display: 'flex',
       flexDirection: 'column',
       height: '100%',
@@ -80,24 +101,28 @@ export default function RightRail({
         <TabButton
           icon={<ScrollText size={13} />}
           label="Log"
+          compact={compact}
           active={tab === 'log'}
           onClick={() => setTab('log')}
         />
         <TabButton
           icon={<FolderTree size={13} />}
           label="Workspace"
+          compact={compact}
           active={tab === 'workspace'}
           onClick={() => setTab('workspace')}
         />
         <TabButton
           icon={<CalendarClock size={13} />}
           label="Triggers"
+          compact={compact}
           active={tab === 'triggers'}
           onClick={() => setTab('triggers')}
         />
         <TabButton
           icon={<Activity size={13} />}
           label="Sessions"
+          compact={compact}
           badge={sessionCount > 0 ? sessionCount : null}
           active={tab === 'sessions'}
           onClick={() => setTab('sessions')}
@@ -150,16 +175,18 @@ export default function RightRail({
   );
 }
 
-function TabButton({ icon, label, active, onClick, badge = null }) {
+function TabButton({ icon, label, active, onClick, badge = null, compact = false }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      title={compact ? label : undefined}
+      aria-label={compact ? label : undefined}
       style={{
         display: 'inline-flex',
         alignItems: 'center',
-        gap: 6,
-        padding: '0 var(--eb-space-3)',
+        gap: compact ? 4 : 6,
+        padding: compact ? '0 var(--eb-space-2)' : '0 var(--eb-space-3)',
         background: 'none',
         border: 'none',
         borderBottom: `2px solid ${active ? 'var(--eb-accent-primary)' : 'transparent'}`,
@@ -174,7 +201,7 @@ function TabButton({ icon, label, active, onClick, badge = null }) {
       onMouseLeave={e => { if (!active) e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
     >
       {icon}
-      {label}
+      {!compact && label}
       {badge !== null && badge !== undefined && (
         <span style={{
           display: 'inline-flex',

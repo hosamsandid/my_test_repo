@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -72,8 +73,11 @@ def _check_env_file() -> bool:
     if not ENV_FILE.exists():
         return False
     text = ENV_FILE.read_text(encoding="utf-8")
-    # Need at least one API key variant
-    has_key = ("ANTHROPIC_API_KEY=" in text or "ANTHROPIC_FOUNDRY_API_KEY=" in text)
+    # Require a non-empty value, not just the key name
+    has_key = bool(
+        re.search(r"^ANTHROPIC_API_KEY=\S", text, re.MULTILINE)
+        or re.search(r"^ANTHROPIC_FOUNDRY_API_KEY=\S", text, re.MULTILINE)
+    )
     return has_key
 
 

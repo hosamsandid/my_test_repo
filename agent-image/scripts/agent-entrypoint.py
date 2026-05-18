@@ -2066,6 +2066,7 @@ def _run_bp_dispatch(args) -> None:
 
     _shutdown.set()
 
+    push_failed = False
     with _git_lock:
         _git_run(["add", "-A"], check=False)
         _git_run(
@@ -2076,6 +2077,7 @@ def _run_bp_dispatch(args) -> None:
         )
         push_result = _git_run(["push", "origin", "HEAD"], check=False)
         if push_result.returncode != 0:
+            push_failed = True
             print(
                 f"[agent] WARN: git push failed (rc={push_result.returncode}): "
                 f"{push_result.stderr.strip()} "
@@ -2083,7 +2085,9 @@ def _run_bp_dispatch(args) -> None:
                 file=sys.stderr,
             )
 
-    print(f"[agent] Done: exit_code={exit_code}", file=sys.stderr)
+    if push_failed and exit_code == 0:
+        exit_code = 1
+    print(f"[agent] Done: exit_code={exit_code} push_failed={push_failed}", file=sys.stderr)
     sys.exit(exit_code)
 
 

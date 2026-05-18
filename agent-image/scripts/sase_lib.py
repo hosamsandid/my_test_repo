@@ -127,7 +127,7 @@ def parse_frontmatter(text: str) -> dict:
             continue
 
         # Structured list field continuation: "    key: value"
-        if in_structured_list and current_obj is not None and re.match(r"^    \w+:", line):
+        if in_structured_list and current_obj is not None and re.match(r"^    [\w-]+:", line):
             item_stripped = line.strip()
             if ":" in item_stripped:
                 k = item_stripped[:item_stripped.index(":")].strip()

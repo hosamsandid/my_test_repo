@@ -1,4 +1,4 @@
-# Accenture Agentic Studio
+# Accenture Agent Studio
 
 > An enterprise AI agent platform — persistent, autonomous, team-capable — running entirely within your own infrastructure.
 
@@ -10,7 +10,7 @@ For a visual walkthrough of all concepts, open **[`docs/architecture-story.html`
 
 Every enterprise AI pilot eventually hits the same wall: the assistant works in isolation. It forgets yesterday's conversation, doesn't know your codebase, can't act while you sleep, and lives on someone else's servers.
 
-Accenture Agentic Studio removes that wall. It is a platform for running AI agents that **persist across sessions**, **operate autonomously on schedules and events**, and **collaborate as a team** — all within your own infrastructure, connected to whichever model provider your organization controls.
+Accenture Agent Studio removes that wall. It is a platform for running AI agents that **persist across sessions**, **operate autonomously on schedules and events**, and **collaborate as a team** — all within your own infrastructure, connected to whichever model provider your organization controls.
 
 ---
 
@@ -26,13 +26,13 @@ Agents don't wait to be summoned. A built-in scheduling system lets an agent sen
 
 ### Teams of specialists running in parallel, on your servers
 
-Complex enterprise problems rarely have a single expert. Agentic Studio lets you spawn a coordinated team — a code analyst, a documentation writer, a quality gate, a business analyst — that work in parallel in isolated workspaces, coordinate through shared triggers, and report to a central dashboard. The entire stack runs on Podman inside your network. The model provider is fully configurable: point it at an enterprise gateway, LiteLLM, Azure AI Foundry, or the public Anthropic API.
+Complex enterprise problems rarely have a single expert. Agent Studio lets you spawn a coordinated team — a code analyst, a documentation writer, a quality gate, a business analyst — that work in parallel in isolated workspaces, coordinate through shared triggers, and report to a central dashboard. The entire stack runs on Podman inside your network. The model provider is fully configurable: point it at an enterprise gateway, LiteLLM, Azure AI Foundry, or the public Anthropic API.
 
 ---
 
 ## How it works
 
-Agentic Studio has four moving parts:
+Agent Studio has four moving parts:
 
 **The Matrix homeserver** is the communication backbone. Agents and humans meet in private 1:1 chat rooms hosted entirely on your network — no external messaging service required.
 

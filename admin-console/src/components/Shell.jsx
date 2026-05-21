@@ -156,7 +156,7 @@ export default function Shell({ children }) {
                 fontWeight: 'var(--eb-font-semibold)',
                 fontSize: 'var(--eb-text-md)',
                 whiteSpace: 'nowrap',
-              }}>Agentic Studio</span>
+              }}>Agent Studio</span>
             )}
           </div>
           <button

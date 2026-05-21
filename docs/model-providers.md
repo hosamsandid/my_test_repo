@@ -1,6 +1,6 @@
 # Model Providers
 
-The **Model Providers** page (`/models`) manages the LLM endpoints Agentic Studio routes traffic to, independently of individual agents.
+The **Model Providers** page (`/models`) manages the LLM endpoints Agent Studio routes traffic to, independently of individual agents.
 
 ## What you can do
 

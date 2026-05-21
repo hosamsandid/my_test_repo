@@ -867,7 +867,7 @@ export default function ModelRegistry() {
         fontSize: 'var(--eb-text-sm)',
         color: 'var(--eb-text-secondary)',
       }}>
-        Model providers are where Agentic Studio routes model traffic. Each provider has a URL, an auth token and a catalog of available models. Working Environments and individual agents bind to one provider and pick a default model from its catalog.
+        Model providers are where Agent Studio routes model traffic. Each provider has a URL, an auth token and a catalog of available models. Working Environments and individual agents bind to one provider and pick a default model from its catalog.
       </div>
 
       {actionError && (

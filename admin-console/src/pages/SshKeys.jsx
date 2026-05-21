@@ -284,7 +284,7 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
           <StepGuide title="How to create an SSH key pair manually" defaultOpen={true}>
             <Step n={1}>
               Open a terminal on your local machine and generate a new key pair:
-              <CodeLine>ssh-keygen -t ed25519 -C "agentic-studio-deploy-key"</CodeLine>
+              <CodeLine>ssh-keygen -t ed25519 -C "agent-studio-deploy-key"</CodeLine>
               Accept the default file path (<code style={{ fontFamily: 'var(--eb-font-mono)' }}>~/.ssh/id_ed25519</code>).
               Leave the passphrase <strong>empty</strong> — agents cannot enter passphrases interactively.
             </Step>

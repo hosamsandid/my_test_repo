@@ -67,6 +67,33 @@ make up
 
 You now have a live, persistent AI agent running inside your own infrastructure.
 
+### Windows setup notes
+
+The steps above work on Windows with the following additions:
+
+**1. Install `jq`** — required by `setup.sh`, not present by default:
+```powershell
+winget install --id jqlang.jq --accept-source-agreements --accept-package-agreements
+```
+Restart your shell (or open a new Git Bash window) so `jq` is on your PATH before running `setup.sh`.
+
+**2. Pre-set credentials in `.env`** — `setup.sh` uses an interactive password prompt (`read -rs`) that doesn't work reliably in Git Bash. Add these lines to `.env` before running the script:
+```
+ADMIN_USER=admin
+ADMIN_PASS=yourpassword
+```
+
+**3. Run `setup.sh` via bash explicitly:**
+```bash
+bash orchestrator/setup.sh
+```
+
+**4. Create `~/.gitconfig` before `make up`** — the `bp-explorer` container bind-mounts `~/.gitconfig`. If the file doesn't exist (common on a fresh Windows machine), the container fails to start with a `statfs: no such file or directory` error. Create it first:
+```bash
+git config --global user.name "Your Name"
+git config --global user.email "you@example.com"
+```
+
 ---
 
 ## Architecture

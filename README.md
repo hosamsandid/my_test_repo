@@ -51,6 +51,9 @@ Agentic Studio has four moving parts:
 ```bash
 # 1. Copy the environment config and fill in your provider URL + auth token
 cp .env.example .env
+#    On Windows or Linux, also set PODMAN_HOST_SOCKET in .env — the default
+#    in docker-compose.yml is the macOS path. Discover yours with:
+#      podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}'
 
 # 2. Boot the Matrix homeserver and register the admin account
 #    The script prints an access token — paste it into .env

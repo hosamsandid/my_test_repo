@@ -43,9 +43,13 @@ services:
       - claude-home:/root/.claude
       - ~/.ssh/id_accenturecodefoundry:/root/.ssh/id_accenturecodefoundry:ro
       - ~/.ssh/id_accenturecodefoundry.pub:/root/.ssh/id_accenturecodefoundry.pub:ro
-      # Rootless Podman socket (core uid=501 inside VM — matches container's mapped uid).
+      # Rootless Podman socket. The default path is the macOS Podman-Desktop
+      # value (core user UID 501 inside the podman-machine VM). On Windows
+      # Podman Desktop the user is typically UID 1000; on Linux rootless it's
+      # `id -u`. Override via PODMAN_HOST_SOCKET in .env. Discover yours with:
+      #   podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}'
       # NOT :ro — orchestrator P3 spawn-container.js needs create/start/kill/wait.
-      - /run/user/501/podman/podman.sock:/var/run/podman.sock
+      - ${PODMAN_HOST_SOCKET:-/run/user/501/podman/podman.sock}:/var/run/podman.sock
     environment:
       TZ: Europe/Berlin
       PODMAN_SOCK_PATH: /var/run/podman.sock
@@ -114,8 +118,9 @@ services:
       - skills-pool:/pool
       # ACE / BriefingPack integration: uncomment when ACE_REPO_PATH is set in .env
       # - ${ACE_REPO_PATH}:/ace:rw
-      # Rootless Podman socket (core uid=501 inside VM — matches container's mapped uid)
-      - /run/user/501/podman/podman.sock:/var/run/podman.sock:ro
+      # Rootless Podman socket — same default + override mechanism as the
+      # orchestrator service above (see PODMAN_HOST_SOCKET in .env).
+      - ${PODMAN_HOST_SOCKET:-/run/user/501/podman/podman.sock}:/var/run/podman.sock:ro
     environment:
       TZ: Europe/Berlin
       NODE_ENV: production

@@ -1,6 +1,6 @@
 # MCP Server Configuration
 
-Agentic Studio supports **Model Context Protocol (MCP)** servers, which extend Claude's capabilities with additional tools — for example, database access, internal APIs, or custom integrations.
+Agent Studio supports **Model Context Protocol (MCP)** servers, which extend Claude's capabilities with additional tools — for example, database access, internal APIs, or custom integrations.
 
 ## How it works
 

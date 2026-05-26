@@ -5,6 +5,8 @@ import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
+import useAutoDerivedId from '../hooks/useAutoDerivedId';
+import IdField from '../components/IdField';
 
 const inputStyle = {
   width: '100%',
@@ -25,6 +27,11 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
   const [id, setId] = useState('');
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
+    setName,
+    setId,
+    getName: () => name,
+  });
   const [transport, setTransport] = useState('stdio');
   const [command, setCommand] = useState('node');
   const [argsText, setArgsText] = useState('/template-workspace/mcp-servers/wiki/server.js');
@@ -62,8 +69,17 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
         }}>{error}</div>
       )}
 
-      <FormInput label="ID *" value={id} onChange={setId} placeholder="wiki" hint="Lowercase letters, digits, dashes. Used as the key in .claude/settings.json mcpServers." />
-      <FormInput label="Name *" value={name} onChange={setName} placeholder="Wiki search" />
+      <FormInput label="Name *" value={name} onChange={handleNameChange} placeholder="Wiki search" />
+
+      <IdField
+        value={id}
+        onChange={handleIdChange}
+        isAutoDerived={isAutoDerived()}
+        onResetAuto={resetAutoDerive}
+        placeholder="wiki"
+        helpText={<>Auto-derived from Name; edit to override. Lowercase letters, digits, dashes. Used as the key in <code>.claude/settings.json</code> <code>mcpServers</code>.</>}
+      />
+
       <FormInput label="Description" value={description} onChange={setDescription} placeholder="What agents use this server for" />
 
       <div>
@@ -155,8 +171,14 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
 
 function CreateCredentialForm({ servers, onSave, onCancel, saving, error }) {
   const [name, setName] = useState('');
+  const [id, setId] = useState('');
   const [serverId, setServerId] = useState('');
   const [secret, setSecret] = useState('');
+  const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
+    setName,
+    setId,
+    getName: () => name,
+  });
 
   const canSave = name.trim() && secret.trim();
 
@@ -170,7 +192,16 @@ function CreateCredentialForm({ servers, onSave, onCancel, saving, error }) {
         }}>{error}</div>
       )}
 
-      <FormInput label="Name *" value={name} onChange={setName} placeholder="Confluence team-A bot token" hint="A descriptive label so operators can identify which credential is bound where." />
+      <FormInput label="Name *" value={name} onChange={handleNameChange} placeholder="Confluence team-A bot token" hint="A descriptive label so operators can identify which credential is bound where." />
+
+      <IdField
+        value={id}
+        onChange={handleIdChange}
+        isAutoDerived={isAutoDerived()}
+        onResetAuto={resetAutoDerive}
+        placeholder="confluence-team-a"
+        helpText={<>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only. Used as the filename of the stored secret.</>}
+      />
 
       <div>
         <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-1)' }}>
@@ -204,7 +235,7 @@ function CreateCredentialForm({ servers, onSave, onCancel, saving, error }) {
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         <button
-          onClick={() => onSave({ name: name.trim(), serverId: serverId || null, secret: secret.trim() })}
+          onClick={() => onSave({ name: name.trim(), id: id.trim() || undefined, serverId: serverId || null, secret: secret.trim() })}
           disabled={saving || !canSave}
           style={{
             padding: 'var(--eb-space-2) var(--eb-space-4)',

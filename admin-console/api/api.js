@@ -1923,7 +1923,7 @@ app.get('/api/llm-endpoints/:id', (req, res) => {
 });
 
 app.post('/api/llm-endpoints', apiLimiter, (req, res) => {
-  const { name, baseUrl, authToken, models, defaultModelId } = req.body || {};
+  const { name, baseUrl, authToken, models, defaultModelId, id: rawId } = req.body || {};
   if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
   if (!baseUrl || typeof baseUrl !== 'string') return res.status(400).json({ error: 'baseUrl is required' });
   try { new URL(baseUrl); } catch { return res.status(400).json({ error: 'baseUrl must be a valid URL' }); }
@@ -1941,8 +1941,15 @@ app.post('/api/llm-endpoints', apiLimiter, (req, res) => {
   if (def.error) return res.status(400).json({ error: def.error });
 
   const existing = listLlmEndpoints();
-  let id = slugifyId(name) || `ep-${Date.now()}`;
-  if (existing.some(e => e.id === id)) id = `${id}-${Date.now().toString(36)}`;
+  let id;
+  if (rawId !== undefined && rawId !== null && String(rawId).trim() !== '') {
+    id = String(rawId).trim();
+    if (!/^[a-z0-9-]+$/.test(id)) return res.status(400).json({ error: 'id must contain lowercase letters, digits and hyphens only' });
+    if (existing.some(e => e.id === id)) return res.status(409).json({ error: `LLM endpoint id '${id}' already exists` });
+  } else {
+    id = slugifyId(name) || `ep-${Date.now()}`;
+    if (existing.some(e => e.id === id)) id = `${id}-${Date.now().toString(36)}`;
+  }
 
   let authTokenId = '';
   if (authToken && typeof authToken === 'string' && authToken.trim()) {
@@ -2298,7 +2305,7 @@ app.get('/api/mcp-credentials', (req, res) => {
 });
 
 app.post('/api/mcp-credentials', apiLimiter, (req, res) => {
-  const { name, serverId, secret } = req.body || {};
+  const { name, serverId, secret, id: rawId } = req.body || {};
   if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
   if (!secret || typeof secret !== 'string') return res.status(400).json({ error: 'secret (string) is required' });
   if (serverId !== undefined && serverId !== null && !MCP_SERVER_ID_RE.test(serverId)) {
@@ -2308,15 +2315,26 @@ app.post('/api/mcp-credentials', apiLimiter, (req, res) => {
     return res.status(400).json({ error: `MCP server '${serverId}' does not exist` });
   }
 
-  const baseId = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-  let id = baseId || `cred-${Date.now()}`;
   const existing = listMcpCredentials();
-  if (existing.some(c => c.id === id)) {
-    id = `${id}-${Date.now().toString(36)}`;
+  let id;
+  if (rawId !== undefined && rawId !== null && String(rawId).trim() !== '') {
+    id = String(rawId).trim();
+    if (!MCP_CREDENTIAL_ID_RE.test(id)) return res.status(400).json({ error: 'id must contain lowercase letters, digits and hyphens only' });
+    if (existing.some(c => c.id === id)) return res.status(409).json({ error: `MCP credential id '${id}' already exists` });
+  } else {
+    const baseId = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    id = baseId || `cred-${Date.now()}`;
+    if (existing.some(c => c.id === id)) {
+      id = `${id}-${Date.now().toString(36)}`;
+    }
   }
   if (!MCP_CREDENTIAL_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid credential id' });
 
-  const credPath = path.join(MCP_CREDENTIALS_KEYS_DIR, id);
+  const mcpCredsRoot = path.resolve(MCP_CREDENTIALS_KEYS_DIR);
+  const credPath = path.resolve(mcpCredsRoot, id);
+  if (credPath !== mcpCredsRoot && !credPath.startsWith(mcpCredsRoot + path.sep)) {
+    return res.status(400).json({ error: 'Invalid credential id' });
+  }
   fs.writeFileSync(credPath, secret, { mode: 0o600 });
   try { fs.chmodSync(credPath, 0o600); } catch { /* best effort */ }
 
@@ -4007,7 +4025,7 @@ app.get('/api/ssh-keys', (req, res) => {
 });
 
 app.post('/api/ssh-keys', apiLimiter, (req, res) => {
-  const { name, privateKey } = req.body || {};
+  const { name, privateKey, id: rawId } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (!privateKey || typeof privateKey !== 'string') {
     return res.status(400).json({ error: 'privateKey (string) is required' });
@@ -4017,12 +4035,19 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
     return res.status(400).json({ error: 'privateKey does not look like an SSH private key' });
   }
 
-  // Generate a stable, filesystem-safe id from the name
-  const baseId = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-  let id = baseId || `key-${Date.now()}`;
   const existing = listSshKeys();
-  if (existing.some(k => k.id === id)) {
-    id = `${id}-${Date.now().toString(36)}`;
+  let id;
+  if (rawId !== undefined && rawId !== null && String(rawId).trim() !== '') {
+    id = String(rawId).trim();
+    if (!SSH_KEY_ID_RE.test(id)) return res.status(400).json({ error: 'id must contain lowercase letters, digits and hyphens only' });
+    if (existing.some(k => k.id === id)) return res.status(409).json({ error: `SSH key id '${id}' already exists` });
+  } else {
+    // Generate a stable, filesystem-safe id from the name
+    const baseId = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    id = baseId || `key-${Date.now()}`;
+    if (existing.some(k => k.id === id)) {
+      id = `${id}-${Date.now().toString(36)}`;
+    }
   }
   // Re-check the derived id against the strict allowlist — the .replace
   // chain above is correct, but the explicit regex test is what CodeQL
@@ -4046,15 +4071,22 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
 // Server-side keypair generation. Returns the public key once so the user
 // can paste it into GitHub; the private key never leaves the workspace.
 app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
-  const { name, comment } = req.body || {};
+  const { name, comment, id: rawId } = req.body || {};
   if (!name || typeof name !== 'string') {
     return res.status(400).json({ error: 'name is required' });
   }
-  const baseId = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-  let id = baseId || `key-${Date.now()}`;
   const existing = listSshKeys();
-  if (existing.some(k => k.id === id)) {
-    id = `${id}-${Date.now().toString(36)}`;
+  let id;
+  if (rawId !== undefined && rawId !== null && String(rawId).trim() !== '') {
+    id = String(rawId).trim();
+    if (!SSH_KEY_ID_RE.test(id)) return res.status(400).json({ error: 'id must contain lowercase letters, digits and hyphens only' });
+    if (existing.some(k => k.id === id)) return res.status(409).json({ error: `SSH key id '${id}' already exists` });
+  } else {
+    const baseId = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    id = baseId || `key-${Date.now()}`;
+    if (existing.some(k => k.id === id)) {
+      id = `${id}-${Date.now().toString(36)}`;
+    }
   }
 
   const safeComment = (typeof comment === 'string' && comment.trim()) || `aee-${id}`;
@@ -4099,7 +4131,7 @@ app.get('/api/github-tokens', (req, res) => {
 });
 
 app.post('/api/github-tokens', apiLimiter, (req, res) => {
-  const { name, token } = req.body || {};
+  const { name, token, id: rawId } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (!token || typeof token !== 'string') {
     return res.status(400).json({ error: 'token (string) is required' });
@@ -4111,11 +4143,18 @@ app.post('/api/github-tokens', apiLimiter, (req, res) => {
     });
   }
 
-  const baseId = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-  let id = baseId || `token-${Date.now()}`;
   const existing = listGithubTokens();
-  if (existing.some(t => t.id === id)) {
-    id = `${id}-${Date.now().toString(36)}`;
+  let id;
+  if (rawId !== undefined && rawId !== null && String(rawId).trim() !== '') {
+    id = String(rawId).trim();
+    if (!GH_TOKEN_ID_RE.test(id)) return res.status(400).json({ error: 'id must contain lowercase letters, digits and hyphens only' });
+    if (existing.some(t => t.id === id)) return res.status(409).json({ error: `GitHub token id '${id}' already exists` });
+  } else {
+    const baseId = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    id = baseId || `token-${Date.now()}`;
+    if (existing.some(t => t.id === id)) {
+      id = `${id}-${Date.now().toString(36)}`;
+    }
   }
   if (!GH_TOKEN_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid token id' });
 

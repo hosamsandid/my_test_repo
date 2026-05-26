@@ -11,6 +11,8 @@ import { useApi, apiCall } from '../hooks/useApi';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
+import IdField from '../components/IdField';
+import useAutoDerivedId from '../hooks/useAutoDerivedId';
 
 const hasRepos = (env) =>
   (Array.isArray(env?.repositories) && env.repositories.length > 0) ||
@@ -695,6 +697,11 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
     briefingsPath: '',
   });
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
+  const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
+    setName: v => update('displayName', v),
+    setId:   v => update('id', v),
+    getName: () => form.displayName,
+  });
   const { data: environments } = useApi('/api/environments');
   const envs = environments || [];
 
@@ -726,26 +733,27 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
       )}
 
       <div>
-        <div style={labelStyle}>ID <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
-        <input
-          style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }}
-          value={form.id}
-          onChange={e => update('id', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
-          placeholder="e.g. cobol-agent"
-        />
-        <div style={helpTextStyle}>
-          Lowercase letters, digits and hyphens only. Used as the agent's URL
-          (<code>/chats/{form.id || 'id'}</code>) and the workspace folder name.
-          <strong> Cannot be changed after creation.</strong>
-        </div>
-      </div>
-
-      <div>
-        <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} placeholder="COBOL Agent" />
+        <FormInput label="Display Name *" value={form.displayName} onChange={handleNameChange} placeholder="COBOL Agent" />
         <div style={helpTextStyle}>
           A short, human-readable label shown in the agents list and chat header — e.g. <em>COBOL Agent</em>.
         </div>
       </div>
+
+      <IdField
+        value={form.id}
+        onChange={handleIdChange}
+        isAutoDerived={isAutoDerived()}
+        onResetAuto={resetAutoDerive}
+        placeholder="e.g. cobol-agent"
+        helpText={
+          <>
+            Auto-derived from Display Name; edit to override.
+            Lowercase letters, digits and hyphens only. Used as the agent's URL
+            (<code>/chats/{form.id || 'id'}</code>) and the workspace folder name.
+            <strong> Cannot be changed after creation.</strong>
+          </>
+        }
+      />
 
       <div>
         <div style={labelStyle}>Working Environment <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>

@@ -232,7 +232,7 @@ function StepLlm({ onNext, onSkip }) {
           Model Provider
         </h2>
         <p style={{ margin: 0, color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
-          Tell Agentic Studio where to send model traffic — the Anthropic API directly, a LiteLLM proxy, or any internal gateway that speaks the Anthropic Messages API.
+          Tell Agent Studio where to send model traffic — the Anthropic API directly, a LiteLLM proxy, or any internal gateway that speaks the Anthropic Messages API.
           This is the only required step; everything else can be configured later.
         </p>
       </div>
@@ -481,7 +481,7 @@ function StepSshKey({ onNext, onSkip }) {
       {!saved && mode === 'paste' && (
         <>
           <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
-            Generate a key pair with <code style={{ fontFamily: 'var(--eb-font-mono)' }}>ssh-keygen -t ed25519 -C "agentic-studio-deploy-key"</code> (no passphrase),
+            Generate a key pair with <code style={{ fontFamily: 'var(--eb-font-mono)' }}>ssh-keygen -t ed25519 -C "agent-studio-deploy-key"</code> (no passphrase),
             add the <strong>.pub</strong> file to your GitHub instance, then paste the private key below.
             <div style={{ marginTop: 4 }}>
               <strong>SAML SSO orgs:</strong> after uploading the public key, click <strong>Configure SSO</strong> next to it in
@@ -871,7 +871,7 @@ export default function SetupWizard({ onComplete }) {
         flexShrink: 0,
       }}>
         <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
-          Agentic Studio Setup
+          Agent Studio Setup
         </div>
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
           Step {current + 1} of {STEPS.length}

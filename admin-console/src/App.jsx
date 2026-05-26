@@ -53,6 +53,7 @@ export default function App() {
           <Route path="/chats/:agentId"  element={<AgentChat />} />
           <Route path="/quickstart"   element={<QuickStart />} />
           <Route path="/team-setup"   element={<TeamSetup />} />
+          <Route path="/wizard/team"  element={<TeamSetup />} />
           <Route path="/environments" element={<WorkingEnvironments />} />
           <Route path="/ssh-keys"     element={<SshKeys />} />
           <Route path="/github-tokens" element={<GithubTokens />} />

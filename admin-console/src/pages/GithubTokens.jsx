@@ -5,6 +5,8 @@ import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
+import IdField from '../components/IdField';
+import useAutoDerivedId from '../hooks/useAutoDerivedId';
 
 const inputStyle = {
   width: '100%',
@@ -89,7 +91,13 @@ function PermissionRow({ scope, access, note }) {
 
 function CreateForm({ onSave, onCancel, saving, error }) {
   const [name, setName] = useState('');
+  const [id, setId] = useState('');
   const [token, setToken] = useState('');
+  const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
+    setName,
+    setId,
+    getName: () => name,
+  });
 
   const canSubmit = name.trim() && token.trim();
 
@@ -127,7 +135,7 @@ function CreateForm({ onSave, onCancel, saving, error }) {
           </div>
         </Step>
         <Step n={4}>
-          Click <strong>Generate new token</strong>. Enter a descriptive note (e.g. <em>Agentic Studio Agent Token</em>) and set an expiry date.
+          Click <strong>Generate new token</strong>. Enter a descriptive note (e.g. <em>Agent Studio Agent Token</em>) and set an expiry date.
           For fine-grained tokens, also select the repositories the agents should have access to.
         </Step>
         <Step n={5}>
@@ -178,9 +186,18 @@ function CreateForm({ onSave, onCancel, saving, error }) {
       <FormInput
         label="Name *"
         value={name}
-        onChange={setName}
+        onChange={handleNameChange}
         placeholder="e.g. AccentureCodeFoundry PAT"
         hint="A label to identify this token — for example the GitHub account or organisation it belongs to."
+      />
+
+      <IdField
+        value={id}
+        onChange={handleIdChange}
+        isAutoDerived={isAutoDerived()}
+        onResetAuto={resetAutoDerive}
+        placeholder="e.g. accenture-pat"
+        helpText={<>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only. Used as the filename of the stored token.</>}
       />
 
       <div>
@@ -213,7 +230,7 @@ function CreateForm({ onSave, onCancel, saving, error }) {
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         <button
-          onClick={() => onSave({ name: name.trim(), token: token.trim() })}
+          onClick={() => onSave({ name: name.trim(), id: id.trim() || undefined, token: token.trim() })}
           disabled={saving || !canSubmit}
           style={{
             padding: 'var(--eb-space-2) var(--eb-space-4)',
@@ -283,10 +300,10 @@ export default function GithubTokens() {
     },
   ];
 
-  async function handleSave({ name, token }) {
+  async function handleSave({ name, id, token }) {
     setSaving(true); setFormError(null);
     try {
-      await apiCall('POST', '/api/github-tokens', { name, token });
+      await apiCall('POST', '/api/github-tokens', { name, id, token });
       setCreating(false);
       refetch();
     } catch (e) {

@@ -4,6 +4,8 @@ import { useApi, apiCall } from '../hooks/useApi';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
+import IdField from '../components/IdField';
+import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import StatusBadge from '../components/StatusBadge';
 
 const hasRepos = (env) =>
@@ -59,6 +61,11 @@ function BlueprintCreateForm({ onSave, onCancel, saving, error }) {
     id: '', displayName: '', role: 'agent', environmentId: '', systemPrompt: '',
   });
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
+  const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
+    setName: v => update('displayName', v),
+    setId:   v => update('id', v),
+    getName: () => form.displayName,
+  });
   const { data: environments } = useApi('/api/environments');
   const envs = environments || [];
   const canSubmit = form.id && form.displayName && form.systemPrompt && form.environmentId;
@@ -71,20 +78,16 @@ function BlueprintCreateForm({ onSave, onCancel, saving, error }) {
         </div>
       )}
 
-      <div>
-        <div style={labelStyle}>ID <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
-        <input
-          style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }}
-          value={form.id}
-          onChange={e => update('id', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
-          placeholder="e.g. cobol-agent"
-        />
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-          Lowercase letters, digits, hyphens. Becomes the agent identifier.
-        </div>
-      </div>
+      <FormInput label="Display Name *" value={form.displayName} onChange={handleNameChange} placeholder="COBOL Agent" />
 
-      <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} placeholder="COBOL Agent" />
+      <IdField
+        value={form.id}
+        onChange={handleIdChange}
+        isAutoDerived={isAutoDerived()}
+        onResetAuto={resetAutoDerive}
+        placeholder="e.g. cobol-agent"
+        helpText={<>Auto-derived from Display Name; edit to override. Lowercase letters, digits, hyphens. Becomes the agent identifier.</>}
+      />
 
       <div>
         <div style={labelStyle}>Working Environment <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>

@@ -385,7 +385,7 @@ export default function Dashboard() {
               </div>
             </Link>
             <Link
-              to="/team-setup"
+              to="/wizard/team"
               style={{
                 display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                 padding: 'var(--eb-space-3) var(--eb-space-4)',
@@ -405,7 +405,7 @@ export default function Dashboard() {
                 </span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)' }}>Team Wizard</span>
+                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)' }}>Create Team Agent</span>
                 <ArrowRight size={14} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
               </div>
             </Link>
@@ -437,34 +437,64 @@ export default function Dashboard() {
           </div>
         </div>
       ) : (
-        <Link
-          to="/quickstart"
-          style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            padding: 'var(--eb-space-4) var(--eb-space-5)',
-            background: 'var(--eb-bg-surface)',
-            border: '1px solid var(--eb-accent-primary)',
-            borderRadius: 'var(--eb-radius-md)',
-            textDecoration: 'none',
-            color: 'inherit',
-            transition: 'background var(--eb-transition-fast)',
-          }}
-          onMouseEnter={e => { e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
-          onMouseLeave={e => { e.currentTarget.style.background = 'var(--eb-bg-surface)'; }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
-            <Rocket size={20} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
-            <div>
-              <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
-                Single Agent
-              </div>
-              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginTop: 2 }}>
-                One agent, one repo, instant setup
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+          <Link
+            to="/quickstart"
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: 'var(--eb-space-4) var(--eb-space-5)',
+              background: 'var(--eb-bg-surface)',
+              border: '1px solid var(--eb-accent-primary)',
+              borderRadius: 'var(--eb-radius-md)',
+              textDecoration: 'none',
+              color: 'inherit',
+              transition: 'background var(--eb-transition-fast)',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'var(--eb-bg-surface)'; }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
+              <Rocket size={20} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+              <div>
+                <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
+                  Single Agent
+                </div>
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginTop: 2 }}>
+                  One agent, one repo, instant setup
+                </div>
               </div>
             </div>
-          </div>
-          <ArrowRight size={16} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
-        </Link>
+            <ArrowRight size={16} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+          </Link>
+          <Link
+            to="/wizard/team"
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: 'var(--eb-space-4) var(--eb-space-5)',
+              background: 'var(--eb-bg-surface)',
+              border: '1px solid var(--eb-accent-primary)',
+              borderRadius: 'var(--eb-radius-md)',
+              textDecoration: 'none',
+              color: 'inherit',
+              transition: 'background var(--eb-transition-fast)',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'var(--eb-bg-surface)'; }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
+              <Users2 size={20} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+              <div>
+                <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
+                  Create Team Agent
+                </div>
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginTop: 2 }}>
+                  Multi-agent team, one repo, automated roles
+                </div>
+              </div>
+            </div>
+            <ArrowRight size={16} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+          </Link>
+        </div>
       )}
 
       <StatGrid stats={stats} />

@@ -5,6 +5,8 @@ import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
+import IdField from '../components/IdField';
+import useAutoDerivedId from '../hooks/useAutoDerivedId';
 
 const inputStyle = {
   width: '100%',
@@ -186,7 +188,15 @@ function PublicKeyReveal({ publicKey, onDone }) {
 function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, generated, onDoneGenerated }) {
   const [mode, setMode] = useState('generate');
   const [name, setName] = useState('');
+  const [id, setId] = useState('');
   const [privateKey, setPrivateKey] = useState('');
+  const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
+    setName,
+    setId,
+    getName: () => name,
+  });
+
+  const idHelp = <>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only. Used as the filename of the stored key.</>;
 
   if (generated) {
     return <PublicKeyReveal publicKey={generated} onDone={onDoneGenerated} />;
@@ -231,14 +241,23 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
           </div>
 
           <FormInput
-            label="Name *" value={name} onChange={setName}
+            label="Name *" value={name} onChange={handleNameChange}
             placeholder="e.g. GitHub Deploy Key"
             hint="A descriptive label so you can identify this key later (e.g. which GitHub account or project it belongs to)."
           />
 
+          <IdField
+            value={id}
+            onChange={handleIdChange}
+            isAutoDerived={isAutoDerived()}
+            onResetAuto={resetAutoDerive}
+            placeholder="e.g. github-deploy-key"
+            helpText={idHelp}
+          />
+
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
             <button
-              onClick={() => onSaveGenerate({ name: name.trim() })}
+              onClick={() => onSaveGenerate({ name: name.trim(), id: id.trim() || undefined })}
               disabled={saving || !canGenerate}
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
@@ -265,7 +284,7 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
           <StepGuide title="How to create an SSH key pair manually" defaultOpen={true}>
             <Step n={1}>
               Open a terminal on your local machine and generate a new key pair:
-              <CodeLine>ssh-keygen -t ed25519 -C "agentic-studio-deploy-key"</CodeLine>
+              <CodeLine>ssh-keygen -t ed25519 -C "agent-studio-deploy-key"</CodeLine>
               Accept the default file path (<code style={{ fontFamily: 'var(--eb-font-mono)' }}>~/.ssh/id_ed25519</code>).
               Leave the passphrase <strong>empty</strong> — agents cannot enter passphrases interactively.
             </Step>
@@ -295,9 +314,18 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
           </StepGuide>
 
           <FormInput
-            label="Name *" value={name} onChange={setName}
+            label="Name *" value={name} onChange={handleNameChange}
             placeholder="e.g. GitHub Deploy Key"
             hint="A descriptive label so you can identify this key later (e.g. which GitHub account or project it belongs to)."
+          />
+
+          <IdField
+            value={id}
+            onChange={handleIdChange}
+            isAutoDerived={isAutoDerived()}
+            onResetAuto={resetAutoDerive}
+            placeholder="e.g. github-deploy-key"
+            helpText={idHelp}
           />
 
           <div>
@@ -329,7 +357,7 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
 
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
             <button
-              onClick={() => onSavePaste({ name: name.trim(), privateKey: privateKey.trim() })}
+              onClick={() => onSavePaste({ name: name.trim(), id: id.trim() || undefined, privateKey: privateKey.trim() })}
               disabled={saving || !canPaste}
               style={{
                 padding: 'var(--eb-space-2) var(--eb-space-4)',
@@ -401,10 +429,10 @@ export default function SshKeys() {
     },
   ];
 
-  async function handleSavePaste({ name, privateKey }) {
+  async function handleSavePaste({ name, id, privateKey }) {
     setSaving(true); setFormError(null);
     try {
-      await apiCall('POST', '/api/ssh-keys', { name, privateKey });
+      await apiCall('POST', '/api/ssh-keys', { name, id, privateKey });
       setCreating(false);
       refetch();
     } catch (e) {
@@ -414,10 +442,10 @@ export default function SshKeys() {
     }
   }
 
-  async function handleSaveGenerate({ name }) {
+  async function handleSaveGenerate({ name, id }) {
     setSaving(true); setFormError(null);
     try {
-      const r = await apiCall('POST', '/api/ssh-keys/generate', { name });
+      const r = await apiCall('POST', '/api/ssh-keys/generate', { name, id });
       setGeneratedPublicKey(r.publicKey);
       refetch();
     } catch (e) {

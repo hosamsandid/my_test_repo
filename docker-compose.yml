@@ -94,8 +94,8 @@ services:
       - skills-pool:/pool
       # ACE / BriefingPack integration: uncomment when ACE_REPO_PATH is set in .env
       # - ${ACE_REPO_PATH}:/ace:rw
-      # Rootless Podman socket (core uid=501 inside VM — matches container's mapped uid)
-      - /run/user/501/podman/podman.sock:/var/run/podman.sock:ro
+      # Rootless Podman socket — UID depends on the host: 501 on macOS, 1000 on Linux/WSL
+      - /run/user/1000/podman/podman.sock:/var/run/podman.sock:ro
     environment:
       TZ: Europe/Berlin
       NODE_ENV: production

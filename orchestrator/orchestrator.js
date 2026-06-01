@@ -9,6 +9,7 @@ const fs = require("fs");
 const path = require("path");
 const bpEventRouter = require("./bp-event-router");
 const { findEnclosingGitRepo } = require("./git-workspace");
+const { bpsToBriefingsMap } = require("./briefings-graph");
 
 // ============================================================
 // Config
@@ -1348,6 +1349,19 @@ async function fetchBriefingPacks(orchestratorId, briefingsPath) {
   return Array.isArray(data) ? data : [];
 }
 
+// Build the briefings dependency graph from bp-explorer's parsed frontmatter,
+// returning the same map shape `bpEventRouter.findAffectedBps()` expects.
+// This replaces the previous `.index.json` file read — bp-explorer already
+// parses every brief.md and exposes the data via /api/briefings, so the
+// orchestrator can derive the graph at request time without depending on an
+// ACE-plugin script (scripts/build-index.py) being present in the repo.
+//
+// Transformation is in ./briefings-graph (pure, unit-tested separately).
+async function loadBriefingsGraphFromExplorer(orchestratorId, briefingsPath) {
+  const bps = await fetchBriefingPacks(orchestratorId, briefingsPath);
+  return bpsToBriefingsMap(bps);
+}
+
 // Build the agent id for a BP-instance stub. Schema: `<slug>-<8-hex>` if a
 // slug is available, else `bp-<8-hex>`. The hash prefix disambiguates BPs
 // that share a slug.
@@ -2140,27 +2154,24 @@ class Orchestrator {
         continue;
       }
 
-      // .index.json lives inside the orchestrator's clone of the briefings repo.
-      // Force-pull first so a signal from a just-pushed agent isn't misrouted
-      // against a stale local index. Pull failures are non-fatal — we fall
-      // back to whatever .index.json is currently on disk. Forced pulls still
-      // coalesce within _PULL_FORCE_THROTTLE_MS so a burst of bp-events from
-      // several agents in quick succession doesn't multiply git operations.
+      // Force-pull the orchestrator's briefings clone first so a signal from
+      // a just-pushed agent isn't routed against a stale local copy. Pull
+      // failures are non-fatal — we fall back to whatever is currently on
+      // disk. Forced pulls still coalesce within _PULL_FORCE_THROTTLE_MS so a
+      // burst of bp-events from several agents in quick succession doesn't
+      // multiply git operations. bp-explorer reads from the same clone, so
+      // the freshly-pulled brief.md files are what feed the graph below.
       const briefingsPath = (orchCfg.briefingsPath || "").replace(/^\/+|\/+$/g, "");
       const env = loadEnvironment(orchCfg.environmentId);
       if (env) {
         pullOrchestratorWorkspace(orchId, briefingsPath, env, { force: true });
       }
 
-      const indexPath = path.join(
-        AGENTS_DIR, orchId, briefingsPath, "artifacts/briefings/.index.json"
-      );
-
       let briefings;
       try {
-        briefings = bpEventRouter.loadIndex(indexPath);
+        briefings = await loadBriefingsGraphFromExplorer(orchId, briefingsPath);
       } catch (err) {
-        console.warn(`[Orchestrator] BP-events: cannot load index for ${orchId}: ${err.message}`);
+        console.warn(`[Orchestrator] BP-events: cannot load briefings graph for ${orchId}: ${err.message}`);
         for (const ev of orchEvents) {
           skipped.push({ event: ev, reason: "index-unavailable", detail: err.message });
         }
@@ -2311,11 +2322,12 @@ class Orchestrator {
   //     suggested: [{ agentId, displayName, role, materialized, reason, paths? }, ...],
   //     siblings:  [{ agentId, displayName, role, materialized }, ...]   // all bp-instance siblings under the same parent orchestrator (excluding source)
   //   }
-  // `suggested` derives from the orchestrator's .index.json — same graph the
+  // `suggested` derives from the briefings graph that bp-explorer parses out
+  // of each brief.md frontmatter — same depends-on / input-artifact edges the
   // legacy bp-event router used. `siblings` lets the user pick targets the
   // graph doesn't know about. The two lists may overlap (every suggested
   // entry also appears in siblings).
-  handoverCandidates(id) {
+  async handoverCandidates(id) {
     const cfg = loadAgentConfig(id);
     if (!cfg) throw new Error(`Agent '${id}' not found`);
     if (cfg.role !== "bp-instance") {
@@ -2355,12 +2367,8 @@ class Orchestrator {
 
     let suggested = [];
     if (cfg.bpId) {
-      const briefingsRel = (orchCfg.briefingsPath || "").replace(/^\/+|\/+$/g, "");
-      const indexPath = path.join(
-        AGENTS_DIR, parentId, briefingsRel, "artifacts/briefings/.index.json"
-      );
       try {
-        const briefings = bpEventRouter.loadIndex(indexPath);
+        const briefings = await loadBriefingsGraphFromExplorer(parentId, orchCfg.briefingsPath);
         const affected = bpEventRouter.findAffectedBps(briefings, cfg.bpId);
         for (const depBp of affected.dependsOn) {
           const targetId = bpHashToStub.get(depBp);
@@ -2390,9 +2398,9 @@ class Orchestrator {
           });
         }
       } catch (err) {
-        // Missing or malformed .index.json is fine — we just return an empty
-        // suggested list and let the user pick from siblings manually.
-        console.warn(`[Orchestrator] handoverCandidates: cannot load index for ${parentId}: ${err.message}`);
+        // bp-explorer unavailable or briefings unreadable — degrade to
+        // "siblings only" so the user can still pick a target manually.
+        console.warn(`[Orchestrator] handoverCandidates: cannot load briefings graph for ${parentId}: ${err.message}`);
       }
     }
 
@@ -3558,25 +3566,28 @@ async function main() {
     // ── Hand-off candidates for a bp-instance ────────────────────────────
     // Returns the bp-instance stubs that should be considered as hand-off
     // targets when the named source agent finishes its work. Suggested via
-    // .index.json (depends-on + input-artifact graph); unknown source or
-    // missing index yield empty `suggested`. The full list of sibling
-    // bp-instance agents under the same parent orchestrator is also
-    // returned so the user can hand off to siblings the graph doesn't know
-    // about (e.g. ad-hoc dynamic-mode coordination).
+    // the briefings graph (depends-on + input-artifact, sourced from
+    // bp-explorer); unknown source or unreachable graph yield empty
+    // `suggested`. The full list of sibling bp-instance agents under the
+    // same parent orchestrator is also returned so the user can hand off to
+    // siblings the graph doesn't know about (e.g. ad-hoc dynamic-mode
+    // coordination).
     const handoverCandMatch = req.method === 'GET' && req.url.match(/^\/internal\/agents\/([^/?]+)\/handover-candidates(?:\?.*)?$/);
     if (handoverCandMatch) {
       const id = decodeURIComponent(handoverCandMatch[1]);
-      try {
-        const result = orchestrator.handoverCandidates(id);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(result));
-      } catch (err) {
-        console.error(`[Orchestrator] handoverCandidates error for ${id}: ${err.message}`);
-        const status = /not found/i.test(err.message) ? 404 :
-                       /not a bp-instance/i.test(err.message) ? 409 : 500;
-        res.writeHead(status, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: err.message }));
-      }
+      (async () => {
+        try {
+          const result = await orchestrator.handoverCandidates(id);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] handoverCandidates error for ${id}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404 :
+                         /not a bp-instance/i.test(err.message) ? 409 : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      })();
       return;
     }
 

@@ -139,6 +139,7 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
     dragStart:          { x: 0, y: 0 },
     panStart:           { x: 0, y: 0 },
     showArchived:       localStorage.getItem('ace-graph-show-archived') === 'true',
+    orientation:        localStorage.getItem('ace-graph-orientation') === 'vertical' ? 'vertical' : 'horizontal',
   };
 
   // ─── Data Loading ────────────────────────────────────────────────────
@@ -344,7 +345,14 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
   function layout() {
     const visible = getVisibleNodes();
     if (visible.length === 0) return;
+    if (state.orientation === 'vertical') {
+      layoutVertical(visible);
+    } else {
+      layoutHorizontal(visible);
+    }
+  }
 
+  function layoutHorizontal(visible) {
     const visibleIds = new Set(visible.map(n => n.id));
     const childrenOf = {};
     visible.forEach(n => {
@@ -415,7 +423,89 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
     layoutArtifacts(visible);
   }
 
+  function layoutVertical(visible) {
+    const visibleIds = new Set(visible.map(n => n.id));
+    const childrenOf = {};
+    visible.forEach(n => {
+      const bp  = state.byId[n.id];
+      const kids = (bp.children || []).filter(cid => visibleIds.has(cid));
+      childrenOf[n.id] = topoSort(kids);
+    });
+
+    // Sibling gap (vertical) — give a bit of breathing room between stacked nodes
+    const SIBLING_V_GAP = 30;
+
+    const subtreeH = {};
+    const maxDepth = Math.max(...visible.map(n => n.depth));
+
+    for (let d = maxDepth; d >= 0; d--) {
+      visible.filter(n => n.depth === d).forEach(n => {
+        const kids = childrenOf[n.id] || [];
+        const selfH = getNodeHeight(n.id);
+        if (kids.length === 0) {
+          subtreeH[n.id] = selfH;
+        } else {
+          const childrenH = kids.reduce((sum, cid) => sum + subtreeH[cid], 0)
+            + SIBLING_V_GAP * (kids.length - 1);
+          subtreeH[n.id] = Math.max(selfH, childrenH);
+        }
+      });
+    }
+
+    const pos = {};
+
+    function assignY(id, yStart) {
+      const kids = childrenOf[id] || [];
+      const selfH = getNodeHeight(id);
+      if (kids.length === 0) {
+        pos[id] = { x: 0, y: yStart };
+      } else {
+        let cy = yStart;
+        kids.forEach(cid => {
+          assignY(cid, cy);
+          cy += subtreeH[cid] + SIBLING_V_GAP;
+        });
+        const firstId = kids[0];
+        const lastId  = kids[kids.length - 1];
+        const firstH  = getNodeHeight(firstId);
+        const lastH   = getNodeHeight(lastId);
+        // Center parent's vertical midpoint between first child's and last child's midpoints
+        const centerY = ((pos[firstId].y + firstH / 2) + (pos[lastId].y + lastH / 2)) / 2;
+        pos[id] = {
+          x: 0,
+          y: centerY - selfH / 2,
+        };
+      }
+    }
+
+    let yCursor = 0;
+    const sortedRoots = topoSortRoots(state.roots).filter(id => visibleIds.has(id));
+    sortedRoots.forEach(id => {
+      assignY(id, yCursor);
+      yCursor += subtreeH[id] + V_GAP;
+    });
+
+    // Assign X per depth column — all nodes have the same width
+    let xOffset = 0;
+    for (let d = 0; d <= maxDepth; d++) {
+      const ids = (visible.filter(n => n.depth === d) || []).map(n => n.id);
+      ids.forEach(id => { pos[id].x = xOffset; });
+      xOffset += NODE_W + H_GAP * 2;
+    }
+
+    state.positions = pos;
+    layoutArtifacts(visible);
+  }
+
   function layoutArtifacts(visibleBpNodes) {
+    if (state.orientation === 'vertical') {
+      layoutArtifactsVertical(visibleBpNodes);
+    } else {
+      layoutArtifactsHorizontal(visibleBpNodes);
+    }
+  }
+
+  function layoutArtifactsHorizontal(visibleBpNodes) {
     const visiblePaths = getVisibleArtifactPaths();
     if (visiblePaths.size === 0) { state.artifactPositions = {}; return; }
 
@@ -535,6 +625,130 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
 
     const artPos = {};
     items.forEach(it => { artPos[it.path] = { x: it.x, y: artifactRowY }; });
+    state.artifactPositions = artPos;
+  }
+
+  function layoutArtifactsVertical(visibleBpNodes) {
+    const visiblePaths = getVisibleArtifactPaths();
+    if (visiblePaths.size === 0) { state.artifactPositions = {}; return; }
+
+    // Artifact column lives to the right of all BP columns
+    let maxX = 0;
+    visibleBpNodes.forEach(n => {
+      const pos = state.positions[n.id];
+      if (!pos) return;
+      maxX = Math.max(maxX, pos.x + NODE_W);
+    });
+    const artifactColX = maxX + H_GAP * 2;
+
+    const visibleBpIds = new Set(visibleBpNodes.map(n => n.id));
+
+    const items = [];
+    visiblePaths.forEach(path => {
+      const reg = state.artifactRegistry[path];
+      if (!reg) return;
+
+      let sum  = 0;
+      let count = 0;
+      let bpMin = Infinity;
+      let bpMax = -Infinity;
+      const consider = (id, toggleSet) => {
+        if (!visibleBpIds.has(id) || !toggleSet.has(id)) return;
+        const pos = state.positions[id];
+        if (!pos) return;
+        const h = getNodeHeight(id);
+        const center = pos.y + h / 2;
+        sum += center;
+        count++;
+        if (center < bpMin) bpMin = center;
+        if (center > bpMax) bpMax = center;
+      };
+      reg.producers.forEach(id => consider(id, state.outputsVisible));
+      reg.consumers.forEach(id => consider(id, state.inputsVisible));
+      if (count === 0) return;
+
+      items.push({
+        path,
+        idealY: sum / count - ARTIFACT_H / 2,
+        bpMin:  bpMin - ARTIFACT_H / 2,
+        bpMax:  bpMax - ARTIFACT_H / 2,
+      });
+    });
+
+    items.sort((a, b) => a.idealY - b.idealY);
+    const SPACING = ARTIFACT_H + 16;
+    const blocks  = [];
+    for (let i = 0; i < items.length; i++) {
+      let start = i;
+      let count = 1;
+      let sum   = items[i].idealY - i * SPACING;
+      let value = sum;
+      while (blocks.length > 0 && blocks[blocks.length - 1].value > value) {
+        const prev = blocks.pop();
+        start  = prev.start;
+        count += prev.count;
+        sum   += prev.sum;
+        value  = sum / count;
+      }
+      blocks.push({ start, end: i, count, sum, value });
+    }
+
+    blocks.forEach(b => {
+      for (let i = b.start; i <= b.end; i++) {
+        items[i].y = b.value + i * SPACING;
+      }
+    });
+
+    let prevBottom = -Infinity;
+    blocks.forEach((b, bIdx) => {
+      const minSpan = (b.count - 1) * SPACING;
+
+      if (b.count < 2) {
+        prevBottom = items[b.start].y;
+        return;
+      }
+
+      let unionMin = Infinity;
+      let unionMax = -Infinity;
+      for (let i = b.start; i <= b.end; i++) {
+        if (items[i].bpMin < unionMin) unionMin = items[i].bpMin;
+        if (items[i].bpMax > unionMax) unionMax = items[i].bpMax;
+      }
+      const desiredSpan = unionMax - unionMin;
+      if (desiredSpan <= minSpan) {
+        prevBottom = items[b.end].y;
+        return;
+      }
+
+      const topLimit    = bIdx > 0 ? prevBottom + SPACING : -Infinity;
+      const bottomLimit = bIdx < blocks.length - 1
+        ? blocks[bIdx + 1].value + blocks[bIdx + 1].start * SPACING - SPACING
+        : Infinity;
+
+      const centroid = b.value + ((b.start + b.end) / 2) * SPACING;
+      let blockStart = centroid - desiredSpan / 2;
+      let blockEnd   = centroid + desiredSpan / 2;
+      if (blockStart < topLimit) {
+        blockEnd  += topLimit - blockStart;
+        blockStart = topLimit;
+      }
+      if (blockEnd > bottomLimit) {
+        blockStart -= blockEnd - bottomLimit;
+        blockEnd    = bottomLimit;
+        if (blockStart < topLimit) blockStart = topLimit;
+      }
+      let span = blockEnd - blockStart;
+      if (span < minSpan) span = minSpan;
+
+      const step = span / (b.count - 1);
+      for (let i = b.start; i <= b.end; i++) {
+        items[i].y = blockStart + step * (i - b.start);
+      }
+      prevBottom = items[b.end].y;
+    });
+
+    const artPos = {};
+    items.forEach(it => { artPos[it.path] = { x: artifactColX, y: it.y }; });
     state.artifactPositions = artPos;
   }
 
@@ -850,6 +1064,7 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
 
     const visible    = getVisibleNodes();
     const visibleIds = new Set(visible.map(n => n.id));
+    const vertical   = state.orientation === 'vertical';
 
     // 1. Hierarchy edges (gray solid)
     visible.forEach(n => {
@@ -865,14 +1080,26 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
       (bp.children || []).forEach(childId => {
         if (!visibleIds.has(childId)) return;
         const childPos = state.positions[childId];
+        const childEl  = canvas.querySelector(`.bp-node[data-id="${childId}"]`);
         if (!childPos) return;
+        const childH = childEl ? childEl.offsetHeight : getNodeHeight(childId);
 
-        const x1 = parentPos.x + NODE_W / 2;
-        const y1 = parentPos.y + parentH;
-        const x2 = childPos.x + NODE_W / 2;
-        const y2 = childPos.y;
+        let x1, y1, x2, y2, flow;
+        if (vertical) {
+          x1 = parentPos.x + NODE_W;
+          y1 = parentPos.y + parentH / 2;
+          x2 = childPos.x;
+          y2 = childPos.y + childH / 2;
+          flow = 'horizontal';
+        } else {
+          x1 = parentPos.x + NODE_W / 2;
+          y1 = parentPos.y + parentH;
+          x2 = childPos.x + NODE_W / 2;
+          y2 = childPos.y;
+          flow = 'vertical';
+        }
 
-        drawBezierEdge(x1, y1, x2, y2, 'var(--eb-border-hover)', 2, '', false);
+        drawBezierEdge(x1, y1, x2, y2, 'var(--eb-border-hover)', 2, '', false, flow);
       });
     });
 
@@ -889,13 +1116,30 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
         if (!fromPos || !toPos || !fromEl) return;
 
         const fromH = fromEl.offsetHeight;
-        const x1 = fromPos.x + NODE_W;
-        const y1 = fromPos.y + fromH / 2;
-        const x2 = toPos.x;
-        const y2 = toPos.y + 45;
-        const mx = (x1 + x2) / 2;
 
-        const path = makeSvgPath(`M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`);
+        let x1, y1, x2, y2, pathD, arrowPoints;
+        if (vertical) {
+          // Deps flow top → bottom (dependent BP sits below the producer in the column)
+          x1 = fromPos.x + NODE_W / 2;
+          y1 = fromPos.y + fromH;
+          x2 = toPos.x + 45;
+          y2 = toPos.y;
+          const my = (y1 + y2) / 2;
+          pathD = `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`;
+          // arrowhead points down (toward target's top)
+          arrowPoints = `${x2},${y2} ${x2-4},${y2-8} ${x2+4},${y2-8}`;
+        } else {
+          x1 = fromPos.x + NODE_W;
+          y1 = fromPos.y + fromH / 2;
+          x2 = toPos.x;
+          y2 = toPos.y + 45;
+          const mx = (x1 + x2) / 2;
+          pathD = `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`;
+          // arrowhead points right (toward target's left)
+          arrowPoints = `${x2},${y2} ${x2-8},${y2-4} ${x2-8},${y2+4}`;
+        }
+
+        const path = makeSvgPath(pathD);
         path.setAttribute('stroke', '#ef4444');
         path.setAttribute('stroke-width', '1.5');
         path.setAttribute('stroke-dasharray', '6 4');
@@ -903,7 +1147,7 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
         path.setAttribute('opacity', '0.5');
 
         const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-        arrow.setAttribute('points', `${x2},${y2} ${x2-8},${y2-4} ${x2-8},${y2+4}`);
+        arrow.setAttribute('points', arrowPoints);
         arrow.setAttribute('fill', '#ef4444');
         arrow.setAttribute('opacity', '0.5');
         svgEdges.appendChild(arrow);
@@ -916,6 +1160,7 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
 
   function drawArtifactEdges(visibleBpIds) {
     const visiblePaths = getVisibleArtifactPaths();
+    const vertical     = state.orientation === 'vertical';
 
     visiblePaths.forEach(path => {
       const reg    = state.artifactRegistry[path];
@@ -925,7 +1170,7 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
       const artEl = canvas.querySelector(`.artifact-node[data-path="${CSS.escape(path)}"]`);
       const artH  = artEl ? artEl.offsetHeight : ARTIFACT_H;
 
-      // Output edges: BP bottom → artifact top (green)
+      // Output edges: BP → artifact (green)
       reg.producers.forEach(bpId => {
         if (!visibleBpIds.has(bpId)) return;
         const bpPos = state.positions[bpId];
@@ -933,11 +1178,20 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
         if (!bpPos || !bpEl) return;
 
         const bpH = bpEl.offsetHeight;
-        drawBezierEdge(
-          bpPos.x + NODE_W / 2, bpPos.y + bpH,
-          artPos.x + ARTIFACT_W / 2, artPos.y,
-          '#34d399', 1.5, '', true
-        );
+        if (vertical) {
+          // BP right → artifact left
+          drawBezierEdge(
+            bpPos.x + NODE_W, bpPos.y + bpH / 2,
+            artPos.x,         artPos.y + artH / 2,
+            '#34d399', 1.5, '', true, 'horizontal'
+          );
+        } else {
+          drawBezierEdge(
+            bpPos.x + NODE_W / 2, bpPos.y + bpH,
+            artPos.x + ARTIFACT_W / 2, artPos.y,
+            '#34d399', 1.5, '', true, 'vertical'
+          );
+        }
       });
 
       // Input edges: artifact → BP (blue dashed)
@@ -948,27 +1202,48 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
         if (!bpPos || !bpEl) return;
 
         const bpH = bpEl.offsetHeight;
-        drawBezierEdge(
-          artPos.x + ARTIFACT_W / 2, artPos.y,
-          bpPos.x + NODE_W / 2, bpPos.y + bpH,
-          '#60a5fa', 1.5, '4 3', true
-        );
+        if (vertical) {
+          // artifact left → BP right? No — input means artifact feeds INTO bp
+          // In horizontal mode it goes artifact-top → bp-bottom (i.e. the arrow points down to BP)
+          // The artifact column sits to the right of BPs, so we route from artifact's LEFT into BP's RIGHT
+          drawBezierEdge(
+            artPos.x,         artPos.y + artH / 2,
+            bpPos.x + NODE_W, bpPos.y + bpH / 2,
+            '#60a5fa', 1.5, '4 3', true, 'horizontal'
+          );
+        } else {
+          drawBezierEdge(
+            artPos.x + ARTIFACT_W / 2, artPos.y,
+            bpPos.x + NODE_W / 2, bpPos.y + bpH,
+            '#60a5fa', 1.5, '4 3', true, 'vertical'
+          );
+        }
       });
     });
   }
 
-  function drawBezierEdge(x1, y1, x2, y2, stroke, width, dash, arrow) {
-    const cy1 = y1 + (y2 - y1) * 0.4;
-    const cy2 = y2 - (y2 - y1) * 0.4;
-    const p   = makeSvgPath(`M ${x1} ${y1} C ${x1} ${cy1}, ${x2} ${cy2}, ${x2} ${y2}`);
+  function drawBezierEdge(x1, y1, x2, y2, stroke, width, dash, arrow, flow = 'vertical') {
+    let d, dx, dy;
+    if (flow === 'horizontal') {
+      const cx1 = x1 + (x2 - x1) * 0.4;
+      const cx2 = x2 - (x2 - x1) * 0.4;
+      d  = `M ${x1} ${y1} C ${cx1} ${y1}, ${cx2} ${y2}, ${x2} ${y2}`;
+      dx = x2 - cx2;
+      dy = 0;
+    } else {
+      const cy1 = y1 + (y2 - y1) * 0.4;
+      const cy2 = y2 - (y2 - y1) * 0.4;
+      d  = `M ${x1} ${y1} C ${x1} ${cy1}, ${x2} ${cy2}, ${x2} ${y2}`;
+      dx = 0;
+      dy = y2 - cy2;
+    }
+    const p = makeSvgPath(d);
     p.setAttribute('stroke', stroke);
     p.setAttribute('stroke-width', String(width));
     if (dash) p.setAttribute('stroke-dasharray', dash);
     p.setAttribute('fill', 'none');
 
     if (arrow) {
-      const dx    = 0;          // last control → end: dx = x2 - x2 = 0
-      const dy    = y2 - cy2;
       const angle = Math.atan2(dy, dx);
       const size  = 7;
       const ax1   = x2 - size * Math.cos(angle - 0.4);
@@ -1302,6 +1577,28 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
   toolbarEl.appendChild(makeToolBtn('Fit',          () => { state.userTransform = false; fitToView(); }));
   toolbarEl.appendChild(makeToolBtn('Expand All',   () => expandAll()));
   toolbarEl.appendChild(makeToolBtn('Collapse All', () => collapseAll()));
+
+  function updateOrientationBtn(btn) {
+    const active = state.orientation === 'vertical';
+    btn._active            = active;
+    btn.textContent        = active ? 'Vertical' : 'Horizontal';
+    btn.title              = 'Toggle layout orientation (roots flow ' +
+      (active ? 'top to bottom; children flow left to right' : 'left to right; children flow top to bottom') + ')';
+    btn.style.borderColor  = active ? '#3b82f6' : 'var(--eb-border-default)';
+    btn.style.color        = active ? '#3b82f6' : 'var(--eb-text-secondary)';
+    btn.style.background   = active ? 'rgba(59,130,246,0.15)' : 'var(--eb-bg-elevated)';
+  }
+
+  const orientationBtn = makeToolBtn('Horizontal', () => {
+    state.orientation = state.orientation === 'vertical' ? 'horizontal' : 'vertical';
+    localStorage.setItem('ace-graph-orientation', state.orientation);
+    updateOrientationBtn(orientationBtn);
+    state.userTransform = false;
+    render();
+    requestAnimationFrame(() => fitToView());
+  });
+  updateOrientationBtn(orientationBtn);
+  toolbarEl.appendChild(orientationBtn);
 
   const archivedBtn = makeToolBtn('Archived', () => {
     state.showArchived = !state.showArchived;

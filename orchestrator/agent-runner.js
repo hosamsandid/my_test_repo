@@ -681,9 +681,11 @@ class TriggerScheduler {
   // is deferred until the agent-runner's Matrix client is ready.
   async executeHandoverDm(entry) {
     const rawRoomId = entry.roomId || loadDmRoomId();
-    // Validate Matrix room ID format (!<localpart>:<server>) before use in file
-    // paths (session log) and Matrix API calls.
-    const MATRIX_ROOM_ID_RE = /^![a-zA-Z0-9._~-]+:[a-zA-Z0-9._:-]+$/;
+    // Validate Matrix room ID format before use in file paths (session log)
+    // and Matrix API calls. Accepts both the legacy `!<localpart>:<server>`
+    // form (room versions ≤ 11) and the hash-based `!<opaque>` form from
+    // room version 12 (MSC4291); the server suffix is optional.
+    const MATRIX_ROOM_ID_RE = /^![a-zA-Z0-9._~-]+(:[a-zA-Z0-9._:-]+)?$/;
     const roomId = typeof rawRoomId === 'string' && MATRIX_ROOM_ID_RE.test(rawRoomId)
       ? rawRoomId : null;
     if (!roomId) {

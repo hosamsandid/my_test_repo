@@ -72,7 +72,8 @@ function loadLlmBindingForEnv(env) {
   };
 }
 
-const { spawn, execFile, execFileSync } = require("child_process");
+const { execFile, execFileSync } = require("child_process");
+const { spawnContainer, libpodRequest } = require("./spawn-container");
 const crypto = require("crypto");
 
 function randomHex(bytes) {
@@ -92,6 +93,9 @@ function startAgentProcess(config) {
     AGENT_ID: id,
     MATRIX_ACCESS_TOKEN: token,
     MATRIX_BOT_USER_ID: userId,
+    MATRIX_HOMESERVER: process.env.MATRIX_HOMESERVER,
+    ORCHESTRATOR_INTERNAL_URL: process.env.ORCHESTRATOR_INTERNAL_URL || 'http://orchestrator:4002',
+    AEE_ORCHESTRATOR_URL: process.env.AEE_ORCHESTRATOR_URL || 'http://orchestrator:4002',
   };
 
   // Bind the agent's process to the LLM endpoint configured on its working
@@ -131,10 +135,30 @@ function startAgentProcess(config) {
     }
   }
 
-  const child = spawn('node', ['/app/agent-runner.js'], {
-    env: childEnv,
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-  });
+  // Seam #3 fail-closed guard. With per-agent filesystem isolation the
+  // container mounts only `agents/<id>` (SubPath) of the pool volume. If the
+  // workspace wasn't seeded the SubPath target is missing — refuse to spawn
+  // rather than let anything fall back to mounting the whole pool, which would
+  // re-expose every agent + the secret stores. Also pre-create the persistent
+  // per-agent Claude home SubPath target (`/root/.claude/homes/<id>`), which
+  // the orchestrator can write because it mounts claude-home at /root/.claude.
+  if (process.env.AEE_WORKSPACE_ISOLATION !== '0') {
+    const workdir = path.join('/workspace/agents', id);
+    if (!fs.existsSync(workdir)) {
+      console.error(
+        `[Orchestrator] Refusing to start agent ${id}: workspace ${workdir} ` +
+        `not seeded (AEE_WORKSPACE_ISOLATION on)`,
+      );
+      return;
+    }
+    try {
+      fs.mkdirSync(path.join('/root/.claude/homes', id), { recursive: true });
+    } catch (err) {
+      console.warn(`[Orchestrator] could not pre-create Claude home for ${id}: ${err.message}`);
+    }
+  }
+
+  const child = spawnContainer({ id, env: childEnv });
 
   child.stdout.on('data', (d) =>
     d.toString().split('\n').filter(Boolean).forEach(line =>
@@ -152,7 +176,9 @@ function startAgentProcess(config) {
   });
 
   agentProcesses.set(id, child);
-  console.log(`[Orchestrator] Started process for agent ${id} (pid ${child.pid})`);
+  child.on('spawned', (pid) => {
+    console.log(`[Orchestrator] Started container for agent ${id} (id ${pid})`);
+  });
 }
 
 function stopAgentProcess(id) {
@@ -166,9 +192,15 @@ function stopAgentProcess(id) {
 function stopAgentSession(id, sessionId) {
   const proc = agentProcesses.get(id);
   if (!proc) return false;
+  // Stop-session is delivered via SIGUSR1; the container's Python listener
+  // catches it and terminates the active claude subprocess (the container
+  // itself keeps running and stays available for further DMs).
   try {
-    proc.send(sessionId ? { type: 'stop-session', sessionId } : { type: 'stop-session' });
-    console.log(`[Orchestrator] Sent stop-session to agent ${id}${sessionId ? ` (session ${sessionId})` : ''}`);
+    proc.kill('SIGUSR1');
+    console.log(
+      `[Orchestrator] Sent SIGUSR1 stop-session to agent ${id}` +
+      (sessionId ? ` (session ${sessionId})` : '')
+    );
     return true;
   } catch (err) {
     console.error(`[Orchestrator] stopAgentSession ${id}: ${err.message}`);
@@ -176,7 +208,34 @@ function stopAgentSession(id, sessionId) {
   }
 }
 
+async function evictStaleAgentContainers() {
+  if (process.env.EVICT_STALE_AGENTS === '0') return;
+  const image = process.env.AGENT_IMAGE || 'ace-agent:latest';
+  try {
+    const filters = encodeURIComponent(JSON.stringify({ ancestor: [image] }));
+    const list = await libpodRequest('GET', `/containers/json?all=true&filters=${filters}`);
+    if (list.status >= 300 || !Array.isArray(list.body)) {
+      console.warn(`[Orchestrator] evict: list returned status=${list.status}`);
+      return;
+    }
+    let evicted = 0;
+    for (const c of list.body) {
+      const cid = c.Id || c.ID;
+      if (!cid) continue;
+      const del = await libpodRequest('DELETE', `/containers/${cid}?force=true&v=true`);
+      if (del.status < 300) evicted += 1;
+      else console.warn(`[Orchestrator] evict: delete ${cid.slice(0, 12)} status=${del.status}`);
+    }
+    if (evicted > 0) {
+      console.log(`[Orchestrator] evicted ${evicted} stale ${image} container(s)`);
+    }
+  } catch (err) {
+    console.warn(`[Orchestrator] evict skipped: ${err.message}`);
+  }
+}
+
 async function startAllEnabledAgents() {
+  await evictStaleAgentContainers();
   for (const id of listAgentIds()) {
     const config = loadAgentConfig(id);
     // Skip pure-config orchestrators (created via POST /internal/agents/create
@@ -2932,12 +2991,41 @@ async function main() {
     }
 
     if (req.method === 'GET' && req.url === '/internal/agents/processes') {
-      const processes = [];
-      for (const [id, proc] of agentProcesses) {
-        processes.push({ id, pid: proc.pid, running: !proc.exitCode && !proc.killed });
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(processes));
+      // Source of truth = Podman. The in-memory map is the fast path and the
+      // authority for pid + this-process ownership, but it drifts (e.g. an
+      // orchestrator restart race, or a container that died without the exit
+      // handler firing). Merge the labelled live containers so the UI reflects
+      // real container state instead of a stale map.
+      (async () => {
+        const byId = new Map();
+        for (const [id, proc] of agentProcesses) {
+          byId.set(id, { id, pid: proc.pid, running: !proc.exitCode && !proc.killed });
+        }
+        try {
+          const filters = encodeURIComponent(JSON.stringify({ label: ['aee.agent.id'] }));
+          const list = await libpodRequest('GET', `/containers/json?filters=${filters}`);
+          if (list.status < 300 && Array.isArray(list.body)) {
+            for (const c of list.body) {
+              const labels = c.Labels || c.labels || {};
+              const aid = labels['aee.agent.id'];
+              if (!aid) continue;
+              const running = String(c.State || c.state || '').toLowerCase() === 'running';
+              const cid = String(c.Id || c.ID || '').slice(0, 12) || null;
+              const existing = byId.get(aid);
+              if (existing) {
+                existing.running = existing.running || running;
+                if (!existing.pid && cid) existing.pid = cid;
+              } else {
+                byId.set(aid, { id: aid, pid: cid, running });
+              }
+            }
+          }
+        } catch (err) {
+          console.warn(`[Orchestrator] /processes podman reconcile skipped: ${err.message}`);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify([...byId.values()]));
+      })();
       return;
     }
 
@@ -3747,8 +3835,8 @@ async function main() {
       const id = decodeURIComponent(reloadTriggersMatch[1]);
       const proc = agentProcesses.get(id);
       if (proc) {
-        proc.send({ type: 'reload-triggers' });
-        console.log(`[Orchestrator] Sent reload-triggers to agent ${id}`);
+        proc.kill('SIGUSR2');
+        console.log(`[Orchestrator] Sent SIGUSR2 (reload-triggers) to agent ${id}`);
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));

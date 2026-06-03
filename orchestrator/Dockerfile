@@ -4,6 +4,25 @@ RUN apt-get -o Acquire::Check-Valid-Until=false update && apt-get install -y --n
     git ca-certificates curl openssh-client gnupg jq \
   && rm -rf /var/lib/apt/lists/*
 
+# Route github.com SSH via ssh.github.com:443 — works on corporate networks
+# that block outbound TCP 22 and is a no-op on permissive networks (GitHub
+# exposes the same SSH service on port 443 via ssh.github.com).
+RUN mkdir -p /root/.ssh \
+  && { \
+       echo 'Host github.com'; \
+       echo '  HostName ssh.github.com'; \
+       echo '  Port 443'; \
+       echo '  User git'; \
+       echo '  StrictHostKeyChecking accept-new'; \
+       echo ''; \
+       echo 'Host *.github.com'; \
+       echo '  HostName ssh.github.com'; \
+       echo '  Port 443'; \
+       echo '  User git'; \
+       echo '  StrictHostKeyChecking accept-new'; \
+     } > /root/.ssh/config \
+  && chmod 600 /root/.ssh/config
+
 # GitHub CLI (gh) — official APT repo. Authenticates via GH_TOKEN, which the
 # orchestrator injects per-agent from the GitHub-token store managed in the
 # Admin Console.
@@ -27,7 +46,7 @@ RUN git config --system user.name  "claw-agent" \
 WORKDIR /app
 COPY package.json .
 RUN npm install --omit=dev
-COPY *.js .
+COPY *.js ./
 
 # `gh-as-agent` wrapper: tags git commits and PR/review/comment bodies
 # with the per-agent identity so the GitHub poller can filter out events

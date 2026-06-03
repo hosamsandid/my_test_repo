@@ -51,14 +51,24 @@ Agent Studio has four moving parts:
 ```bash
 # 1. Copy the environment config and fill in your provider URL + auth token
 cp .env.example .env
+#    On Windows or Linux, also set PODMAN_HOST_SOCKET in .env — the default
+#    in docker-compose.yml is the macOS path. Discover yours with:
+#      podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}'
 
 # 2. Boot the Matrix homeserver and register the admin account
 #    The script prints an access token — paste it into .env
 podman compose up -d conduwuit
 ./orchestrator/setup.sh
 
-# 3. Start the full stack
+# 3. Build the per-agent container image. Required before any agent can spawn —
+#    `make up` does NOT build this image automatically.
+make agent-image
+
+# 4. Start the full stack
 make up
+
+# 5. Tail logs
+make logs
 ```
 
 4. Open **http://localhost:4000** in your browser.

@@ -26,6 +26,11 @@ services:
     restart: unless-stopped
     ports:
       - "${HOOK_PORT:-4003}:${HOOK_PORT:-4003}"
+    # Required for podman socket access on SELinux-enforcing hosts (Fedora CoreOS).
+    # Without this, container_t cannot connect to the user_tmp_t-labeled socket
+    # and the connection silently fails with EACCES (no audit log entry).
+    security_opt:
+      - label=disable
     volumes:
       - agent-pool-workspace:/workspace
       - skills-pool:/template-workspace:ro
@@ -38,11 +43,25 @@ services:
       - claude-home:/root/.claude
       - ~/.ssh/id_accenturecodefoundry:/root/.ssh/id_accenturecodefoundry:ro
       - ~/.ssh/id_accenturecodefoundry.pub:/root/.ssh/id_accenturecodefoundry.pub:ro
+      # Rootless Podman socket. The default path is the macOS Podman-Desktop
+      # value (core user UID 501 inside the podman-machine VM). On Windows
+      # Podman Desktop the user is typically UID 1000; on Linux rootless it's
+      # `id -u`. Override via PODMAN_HOST_SOCKET in .env. Discover yours with:
+      #   podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}'
+      # NOT :ro — orchestrator P3 spawn-container.js needs create/start/kill/wait.
+      - ${PODMAN_HOST_SOCKET:-/run/user/501/podman/podman.sock}:/var/run/podman.sock
     environment:
       TZ: Europe/Berlin
+      PODMAN_SOCK_PATH: /var/run/podman.sock
       MATRIX_HOMESERVER: http://conduwuit:6167
       ADMIN_USER_ID: "@${ADMIN_USER:-admin}:local"
-      # Conduwuit admin (for auto-creating Matrix users)
+      # Conduwuit admin (for auto-creating Matrix users).
+      # CONDUWUIT_ADMIN_ROOM defaults to the historic value but is now
+      # overridable via .env — Continuwuity generates a fresh deterministic
+      # admin room ID per database (e.g. after a volume reset), so the old
+      # hard-coded value is wrong on freshly-bootstrapped stacks. Look up
+      # the actual ID with: curl -H "Authorization: Bearer $MATRIX_ACCESS_TOKEN" \
+      # http://localhost:${CONDUWUIT_PORT}/_matrix/client/v3/directory/room/%23admins%3Alocal
       CONDUWUIT_ADMIN_TOKEN: "${MATRIX_ACCESS_TOKEN}"
       CONDUWUIT_ADMIN_ROOM: "${CONDUWUIT_ADMIN_ROOM:-!cUxr0SyfINf9yEvBOD:local}"
       # Git identity for agents that use git (push/PR)
@@ -57,6 +76,7 @@ services:
       ACE_WATCH_INTERVAL_SECONDS: "${ACE_WATCH_INTERVAL_SECONDS:-30}"
       ACE_BRIEFING_ENV_ID: "${ACE_BRIEFING_ENV_ID:-briefing-pack}"
       HOOK_PORT: "${HOOK_PORT:-4003}"
+      COMPOSE_PROJECT_NAME: "${COMPOSE_PROJECT_NAME:-vgh-claw}"
     depends_on:
       conduwuit:
         condition: service_started
@@ -87,6 +107,11 @@ services:
       context: ./admin-console
     container_name: ${COMPOSE_PROJECT_NAME}-admin-console
     restart: unless-stopped
+    # Required for podman socket access on SELinux-enforcing hosts (Fedora CoreOS).
+    # Without this, the /api/logs/stream SSE endpoint silently returns
+    # "[log error: connect EACCES /var/run/podman.sock]".
+    security_opt:
+      - label=disable
     ports:
       - "${ADMIN_PORT:-4000}:4000"
     volumes:
@@ -94,8 +119,9 @@ services:
       - skills-pool:/pool
       # ACE / BriefingPack integration: uncomment when ACE_REPO_PATH is set in .env
       # - ${ACE_REPO_PATH}:/ace:rw
-      # Rootless Podman socket — UID depends on the host: 501 on macOS, 1000 on Linux/WSL
-      - /run/user/1000/podman/podman.sock:/var/run/podman.sock:ro
+      # Rootless Podman socket — same default + override mechanism as the
+      # orchestrator service above (see PODMAN_HOST_SOCKET in .env).
+      - ${PODMAN_HOST_SOCKET:-/run/user/501/podman/podman.sock}:/var/run/podman.sock:ro
     environment:
       TZ: Europe/Berlin
       NODE_ENV: production

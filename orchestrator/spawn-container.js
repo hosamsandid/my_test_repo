@@ -106,6 +106,41 @@ function perAgentNetworkName(agentId) {
   return `${PER_AGENT_NETWORK_PREFIX}${safe}`;
 }
 
+// Connecting a service container into a per-agent network races the service's
+// own boot at stack startup: until conduwuit is running, the libpod connect
+// call returns 500 ("no container with that name / not running"). Earlier code
+// swallowed that 500 and carried on, leaving every agent stranded on a network
+// with no route to the homeserver. We now retry until the connect succeeds.
+const NETWORK_CONNECT_RETRIES = Number(process.env.AEE_NETWORK_CONNECT_RETRIES || 10);
+const NETWORK_CONNECT_DELAY_MS = Number(process.env.AEE_NETWORK_CONNECT_DELAY_MS || 1500);
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+async function connectServiceWithRetry(networkName, svc, body) {
+  let last = 'no attempt';
+  for (let attempt = 1; attempt <= NETWORK_CONNECT_RETRIES; attempt++) {
+    let cr;
+    try {
+      cr = await libpodRequest('POST', `/networks/${networkName}/connect`, body);
+    } catch (err) {
+      last = `request error: ${err.message}`;
+      await sleep(NETWORK_CONNECT_DELAY_MS);
+      continue;
+    }
+    // 2xx = connected, 409 = already connected. Both are success.
+    if (cr.status < 300 || cr.status === 409) return;
+    last = `status=${cr.status} body=${JSON.stringify(cr.body)}`;
+    // A 500 here is typically "service not ready yet" during startup — retry.
+    console.warn(
+      `[spawn-container] connect ${svc} -> ${networkName} ` +
+      `attempt ${attempt}/${NETWORK_CONNECT_RETRIES}: ${last}`,
+    );
+    await sleep(NETWORK_CONNECT_DELAY_MS);
+  }
+  throw new Error(
+    `connect ${svc} -> ${networkName} failed after ${NETWORK_CONNECT_RETRIES} attempts: ${last}`,
+  );
+}
+
 async function ensurePerAgentNetwork(agentId) {
   const name = perAgentNetworkName(agentId);
   // `dns_enabled: true` is critical — without it, containers attached to this
@@ -114,30 +149,46 @@ async function ensurePerAgentNetwork(agentId) {
   // direct libpod /networks/create call defaults to false.
   const r = await libpodRequest('POST', '/networks/create', { name, dns_enabled: true });
   // libpod returns 201 on create, 409 when the network already exists. Both
-  // are fine — we just need the network to exist.
-  if (r.status >= 400 && r.status !== 409 && r.status !== 500) {
+  // are fine — we just need the network to exist. Anything else is a real
+  // failure (do not swallow it).
+  if (r.status >= 400 && r.status !== 409) {
     throw new Error(`per-agent network create ${name}: status=${r.status} body=${JSON.stringify(r.body)}`);
   }
-  // Connect the service containers (orchestrator + conduwuit) so the agent
-  // can resolve them by hostname inside the isolated network. We also
-  // register the compose service-name (e.g. `conduwuit`) as a DNS alias —
-  // the agent's env uses the short service name, not the full
-  // `<project>-<service>` container name, so without the alias DNS lookups
-  // would fail even with dns_enabled=true. Best-effort: an "already connected"
-  // 409/500 is acceptable.
+  // Connect the service containers (orchestrator + conduwuit) so the agent can
+  // resolve them inside the isolated network. This is load-bearing: if conduwuit
+  // isn't reachable here, the agent can never sync Matrix. We register the short
+  // compose service-name (e.g. `conduwuit`) as a DNS alias as well — once
+  // connected, the full container name resolves via aardvark-dns, but the alias
+  // keeps the short name working too. Failure throws so the caller can fall back
+  // to the shared network instead of stranding the agent.
   const projectPrefix = `${COMPOSE_PROJECT}-`;
   for (const svc of SERVICE_CONTAINERS) {
     const alias = svc.startsWith(projectPrefix) ? svc.slice(projectPrefix.length) : null;
     const body = { Container: svc };
     if (alias) body.Aliases = [alias];
-    try {
-      const cr = await libpodRequest('POST', `/networks/${name}/connect`, body);
-      if (cr.status >= 400 && cr.status !== 409 && cr.status !== 500) {
-        console.warn(`[spawn-container] connect ${svc} to ${name}: status=${cr.status}`);
+    await connectServiceWithRetry(name, svc, body);
+  }
+  // Best-effort verification: only fail if the inspect clearly shows a service
+  // missing (catches the original "connect reported OK but didn't attach" bug).
+  // If the inspect call itself errors or returns an unexpected shape, trust the
+  // connect result above rather than forcing an unnecessary fallback.
+  try {
+    const insp = await libpodRequest('GET', `/networks/${name}`);
+    if (insp.status < 300 && insp.body && insp.body.containers) {
+      const members = Object.values(insp.body.containers)
+        .map((c) => c && c.name)
+        .filter(Boolean);
+      for (const svc of SERVICE_CONTAINERS) {
+        if (!members.includes(svc)) {
+          throw new Error(
+            `per-agent network ${name}: ${svc} missing after connect (members=${JSON.stringify(members)})`,
+          );
+        }
       }
-    } catch (err) {
-      console.warn(`[spawn-container] connect ${svc} to ${name} failed: ${err.message}`);
     }
+  } catch (err) {
+    if (/missing after connect/.test(err.message)) throw err;
+    console.warn(`[spawn-container] verify ${name} membership skipped: ${err.message}`);
   }
   return name;
 }
@@ -209,6 +260,11 @@ function spawnContainer({ id, env }) {
 
   networkPromise
     .then((networkName) => {
+      const isolated = PER_AGENT_NETWORK_ENABLED && networkName !== AGENT_NETWORK;
+      console.log(
+        `[spawn-container] ${id} -> network ${networkName} ` +
+        `(${isolated ? 'isolated' : PER_AGENT_NETWORK_ENABLED ? 'shared-fallback' : 'shared'})`,
+      );
       const createBody = {
         image: AGENT_IMAGE,
         env: envMap,

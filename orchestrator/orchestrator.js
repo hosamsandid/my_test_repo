@@ -134,6 +134,29 @@ function startAgentProcess(config) {
     }
   }
 
+  // Seam #3 fail-closed guard. With per-agent filesystem isolation the
+  // container mounts only `agents/<id>` (SubPath) of the pool volume. If the
+  // workspace wasn't seeded the SubPath target is missing — refuse to spawn
+  // rather than let anything fall back to mounting the whole pool, which would
+  // re-expose every agent + the secret stores. Also pre-create the persistent
+  // per-agent Claude home SubPath target (`/root/.claude/homes/<id>`), which
+  // the orchestrator can write because it mounts claude-home at /root/.claude.
+  if (process.env.AEE_WORKSPACE_ISOLATION !== '0') {
+    const workdir = path.join('/workspace/agents', id);
+    if (!fs.existsSync(workdir)) {
+      console.error(
+        `[Orchestrator] Refusing to start agent ${id}: workspace ${workdir} ` +
+        `not seeded (AEE_WORKSPACE_ISOLATION on)`,
+      );
+      return;
+    }
+    try {
+      fs.mkdirSync(path.join('/root/.claude/homes', id), { recursive: true });
+    } catch (err) {
+      console.warn(`[Orchestrator] could not pre-create Claude home for ${id}: ${err.message}`);
+    }
+  }
+
   const child = spawnContainer({ id, env: childEnv });
 
   child.stdout.on('data', (d) =>
@@ -2960,12 +2983,41 @@ async function main() {
     }
 
     if (req.method === 'GET' && req.url === '/internal/agents/processes') {
-      const processes = [];
-      for (const [id, proc] of agentProcesses) {
-        processes.push({ id, pid: proc.pid, running: !proc.exitCode && !proc.killed });
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(processes));
+      // Source of truth = Podman. The in-memory map is the fast path and the
+      // authority for pid + this-process ownership, but it drifts (e.g. an
+      // orchestrator restart race, or a container that died without the exit
+      // handler firing). Merge the labelled live containers so the UI reflects
+      // real container state instead of a stale map.
+      (async () => {
+        const byId = new Map();
+        for (const [id, proc] of agentProcesses) {
+          byId.set(id, { id, pid: proc.pid, running: !proc.exitCode && !proc.killed });
+        }
+        try {
+          const filters = encodeURIComponent(JSON.stringify({ label: ['aee.agent.id'] }));
+          const list = await libpodRequest('GET', `/containers/json?filters=${filters}`);
+          if (list.status < 300 && Array.isArray(list.body)) {
+            for (const c of list.body) {
+              const labels = c.Labels || c.labels || {};
+              const aid = labels['aee.agent.id'];
+              if (!aid) continue;
+              const running = String(c.State || c.state || '').toLowerCase() === 'running';
+              const cid = String(c.Id || c.ID || '').slice(0, 12) || null;
+              const existing = byId.get(aid);
+              if (existing) {
+                existing.running = existing.running || running;
+                if (!existing.pid && cid) existing.pid = cid;
+              } else {
+                byId.set(aid, { id: aid, pid: cid, running });
+              }
+            }
+          }
+        } catch (err) {
+          console.warn(`[Orchestrator] /processes podman reconcile skipped: ${err.message}`);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify([...byId.values()]));
+      })();
       return;
     }
 

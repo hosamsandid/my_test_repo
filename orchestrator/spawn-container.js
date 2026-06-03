@@ -9,6 +9,37 @@ const AGENT_IMAGE = process.env.AGENT_IMAGE || 'ace-agent:latest';
 const COMPOSE_PROJECT = process.env.COMPOSE_PROJECT_NAME || 'vgh-claw-314092';
 const WORKSPACE_VOLUME = process.env.AGENT_WORKSPACE_VOLUME ||
   `${COMPOSE_PROJECT}_agent-pool-workspace`;
+
+// Seam #3 — per-agent filesystem isolation. By default each agent container
+// mounts ONLY its own subdirectory of the shared pool volume
+// (SubPath `agents/<id>` -> `/workspace/agents/<id>`), so it can no longer read
+// sibling agents' workspaces or the secret stores that also live on the pool
+// volume (`environments/_keys`, `mcp-credentials/_keys`, github tokens).
+// Set AEE_WORKSPACE_ISOLATION=0 to restore the legacy whole-volume mount for
+// debugging — DANGER: that re-exposes every agent + all secrets to each agent.
+//
+// Deferred hardening (not yet implemented): move the secret stores onto a
+// control-plane-only volume mounted just by orchestrator + admin-console, and
+// give each agent a dedicated data volume instead of a shared-volume subpath.
+const WORKSPACE_ISOLATION = process.env.AEE_WORKSPACE_ISOLATION !== '0';
+// Persistent per-agent Claude home (SubPath `homes/<id>` of the claude-home
+// volume the orchestrator already declares). Without this, `--resume` session
+// snapshots under /root/.claude/projects are lost on every container restart.
+const CLAUDE_HOME_VOLUME = process.env.AGENT_CLAUDE_HOME_VOLUME ||
+  `${COMPOSE_PROJECT}_claude-home`;
+// Container hardening (conservative slice). Memory accepts a human suffix
+// (e.g. "2g", "512m"); 0/empty disables that limit.
+function parseBytes(s) {
+  const m = String(s || '').trim().match(/^(\d+)\s*([kKmMgG]?)[bB]?$/);
+  if (!m) return 0;
+  const mult = { '': 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3 }[m[2].toLowerCase()];
+  return Number(m[1]) * mult;
+}
+const AGENT_MEM_LIMIT_BYTES = parseBytes(process.env.AEE_AGENT_MEM_LIMIT || '2g');
+const AGENT_PIDS_LIMIT = Number(process.env.AEE_AGENT_PIDS_LIMIT || 512);
+// Label stamped on every agent container so the orchestrator can reconcile
+// live container state against its in-memory process map (source of truth).
+const AGENT_LABEL_KEY = 'aee.agent.id';
 // Legacy: the compose stack creates the bridge network as ${project}_default.
 // Used as a fallback when per-agent network isolation is disabled. Override
 // with AGENT_NETWORK if the compose project renames the network.
@@ -265,13 +296,31 @@ function spawnContainer({ id, env }) {
         `[spawn-container] ${id} -> network ${networkName} ` +
         `(${isolated ? 'isolated' : PER_AGENT_NETWORK_ENABLED ? 'shared-fallback' : 'shared'})`,
       );
+      // Seam #3: isolate the agent to its own workspace subdir + give it a
+      // persistent Claude home. The SubPath targets (`agents/<id>`,
+      // `homes/<id>`) are pre-created by the orchestrator before spawn, so the
+      // mount never has to create them. The destination path for the workspace
+      // is kept identical to the legacy layout (`/workspace/agents/<id>`) so
+      // cwd and absolute paths in seeded memory are unaffected.
+      const volumes = WORKSPACE_ISOLATION
+        ? [
+            { Name: WORKSPACE_VOLUME, Dest: `/workspace/agents/${id}`, SubPath: `agents/${id}` },
+            { Name: CLAUDE_HOME_VOLUME, Dest: '/root/.claude', SubPath: `homes/${id}` },
+          ]
+        : [{ Name: WORKSPACE_VOLUME, Dest: '/workspace' }];
+      const resourceLimits = {};
+      if (AGENT_MEM_LIMIT_BYTES) resourceLimits.memory = { limit: AGENT_MEM_LIMIT_BYTES };
+      if (AGENT_PIDS_LIMIT) resourceLimits.pids = { limit: AGENT_PIDS_LIMIT };
       const createBody = {
         image: AGENT_IMAGE,
         env: envMap,
-        volumes: [{ Name: WORKSPACE_VOLUME, Dest: '/workspace' }],
+        volumes,
         Networks: { [networkName]: {} },
+        labels: { [AGENT_LABEL_KEY]: String(id) },
+        no_new_privileges: true,
         remove: true,
       };
+      if (Object.keys(resourceLimits).length) createBody.resource_limits = resourceLimits;
       return libpodRequest('POST', '/containers/create', createBody);
     })
     .then((r) => {

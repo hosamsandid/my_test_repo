@@ -76,6 +76,7 @@ services:
       ACE_WATCH_INTERVAL_SECONDS: "${ACE_WATCH_INTERVAL_SECONDS:-30}"
       ACE_BRIEFING_ENV_ID: "${ACE_BRIEFING_ENV_ID:-briefing-pack}"
       HOOK_PORT: "${HOOK_PORT:-4003}"
+      COMPOSE_PROJECT_NAME: "${COMPOSE_PROJECT_NAME:-vgh-claw}"
     depends_on:
       conduwuit:
         condition: service_started

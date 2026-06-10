@@ -1930,6 +1930,128 @@ app.put('/api/skills/:name/file', (req, res) => {
   res.json({ path: String(file), source: 'pool' });
 });
 
+// Stream a ZIP archive of an entire skill directory (pool or agent source).
+// The archive contains a single top-level folder named after the skill, so it
+// round-trips cleanly through POST /api/skills/import.
+app.get('/api/skills/:name/export', heavyLimiter, (req, res) => {
+  const { name } = req.params;
+  const { source, agentId } = req.query;
+  const root = skillRootDir(source, name, agentId);
+  if (!root) return res.status(400).json({ error: 'Invalid skill name or agent id' });
+  if (!fs.existsSync(path.join(root, 'SKILL.md'))) return res.status(404).json({ error: 'Skill not found' });
+
+  const parentDir = path.dirname(root);
+  const dirName = path.basename(root);
+  // Scratch zip lives in /tmp so `zip -r` doesn't try to archive its own output.
+  const zipDir = fs.mkdtempSync(path.join('/tmp', 'skill-zip-'));
+  const zipPath = path.join(zipDir, 'skill.zip');
+  try {
+    const zipResult = spawnSync('zip', ['-r', zipPath, dirName], { cwd: parentDir });
+    if (zipResult.status !== 0) {
+      throw new Error(`zip exited ${zipResult.status}: ${(zipResult.stderr || '').toString().trim()}`);
+    }
+    const stat = fs.statSync(zipPath);
+    res.setHeader('Content-Disposition', `attachment; filename="skill-${name}.zip"`);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Length', stat.size);
+    const stream = fs.createReadStream(zipPath);
+    stream.on('close', () => { try { fs.rmSync(zipDir, { recursive: true, force: true }); } catch { /* noop */ } });
+    stream.pipe(res);
+  } catch (err) {
+    try { fs.rmSync(zipDir, { recursive: true, force: true }); } catch { /* noop */ }
+    console.error(`[API] Skill export failed for ${name}: ${err.message}`);
+    res.status(500).json({ error: `Export failed: ${err.message}` });
+  }
+});
+
+// Accepts a ZIP (field: "file") of a skill directory and creates a new pool
+// skill from it. The ZIP may carry the files at its root or nested under a
+// single top-level folder (as produced by /export). An optional `name` form
+// field overrides the skill name; otherwise the top-level folder name is used.
+const _skillImportUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 },
+});
+
+app.post('/api/skills/import', heavyLimiter, _skillImportUpload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file provided (field name: file)' });
+
+  const tmpDir = fs.mkdtempSync(path.join('/tmp', 'skill-import-'));
+  const zipPath = path.join(tmpDir, 'upload.zip');
+  const extractDir = path.join(tmpDir, 'extracted');
+  try {
+    fs.writeFileSync(zipPath, req.file.buffer);
+    fs.mkdirSync(extractDir);
+
+    const unzipResult = spawnSync('unzip', ['-o', zipPath, '-d', extractDir]);
+    if (unzipResult.status !== 0) {
+      return res.status(400).json({ error: 'Could not extract ZIP — ensure the file is a valid skill archive' });
+    }
+
+    // Zip-slip protection: verify every extracted path stays within extractDir.
+    const realExtractDir = fs.realpathSync(extractDir);
+    function checkExtractedPaths(dir) {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        try {
+          const real = fs.realpathSync(full);
+          if (!real.startsWith(realExtractDir + path.sep) && real !== realExtractDir) {
+            throw new Error(`Unsafe path in ZIP: ${real}`);
+          }
+        } catch (e) {
+          if (e.message && e.message.startsWith('Unsafe')) throw e;
+          // realpathSync on a dangling symlink throws ENOENT — skip safely
+        }
+        if (entry.isDirectory()) checkExtractedPaths(full);
+      }
+    }
+    checkExtractedPaths(extractDir);
+
+    // Locate the skill root inside the archive: either SKILL.md at the top, or
+    // a single top-level directory that contains SKILL.md.
+    const topEntries = fs.readdirSync(extractDir, { withFileTypes: true })
+      .filter(e => e.name !== '__MACOSX');
+    let skillRoot = null;
+    let inferredName = null;
+    if (fs.existsSync(path.join(extractDir, 'SKILL.md'))) {
+      skillRoot = extractDir;
+    } else {
+      const dirs = topEntries.filter(e => e.isDirectory());
+      if (dirs.length === 1 && fs.existsSync(path.join(extractDir, dirs[0].name, 'SKILL.md'))) {
+        skillRoot = path.join(extractDir, dirs[0].name);
+        inferredName = dirs[0].name;
+      }
+    }
+    if (!skillRoot) {
+      return res.status(400).json({ error: 'Archive does not contain a SKILL.md (at the root or in a single top-level folder)' });
+    }
+
+    const rawName = (typeof req.body?.name === 'string' && req.body.name.trim()) || inferredName;
+    if (!rawName || !SKILL_NAME_RE.test(rawName)) {
+      return res.status(400).json({ error: 'Could not determine a valid skill name — provide a "name" field' });
+    }
+
+    // Containment check for the pool target.
+    const poolSkillsBaseDir = path.resolve(POOL_DIR, 'skills');
+    const targetDir = path.resolve(poolSkillsBaseDir, rawName);
+    const rel = path.relative(poolSkillsBaseDir, targetDir);
+    if (rel.startsWith('..') || path.isAbsolute(rel) || !rel) {
+      return res.status(400).json({ error: 'Invalid skill name' });
+    }
+    if (fs.existsSync(targetDir)) {
+      return res.status(409).json({ error: `Skill '${rawName}' already exists in the pool`, exists: true });
+    }
+
+    fs.cpSync(skillRoot, targetDir, { recursive: true });
+    res.status(201).json({ name: rawName, source: 'pool' });
+  } catch (err) {
+    console.error(`[API] Skill import failed: ${err.message}`);
+    res.status(500).json({ error: `Import failed: ${err.message}` });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* noop */ }
+  }
+});
+
 app.post('/api/skills', (req, res) => {
   const { name, content = '' } = req.body || {};
   if (typeof name !== 'string' || !SKILL_NAME_RE.test(name)) {

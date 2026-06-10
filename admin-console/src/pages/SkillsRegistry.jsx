@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypePrettyCode from 'rehype-pretty-code';
@@ -339,6 +339,12 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
 
   const fileEditable = isPool && fileData && !fileData.binary && !fileData.truncated;
 
+  function exportSkill() {
+    const params = new URLSearchParams({ source: skill.source });
+    if (skill.agentId) params.set('agentId', skill.agentId);
+    window.open(`/api/skills/${encodeURIComponent(skill.name)}/export?${params}`, '_blank');
+  }
+
   async function install(overwrite) {
     if (!installTarget) return;
     setInstalling(true);
@@ -451,6 +457,11 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', height: '100%' }}>
       {/* toolbar */}
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
+        {!editing && (
+          <button onClick={exportSkill} style={secondaryBtnStyle} title="Download the whole skill directory as a ZIP">
+            Export ZIP
+          </button>
+        )}
         {isPool && !editing && (
           <>
             <button
@@ -725,6 +736,11 @@ export default function SkillsRegistry() {
   const [rowDeleteTarget, setRowDeleteTarget] = useState(null);
   const [rowDeleteError, setRowDeleteError] = useState(null);
   const [rowDeleting, setRowDeleting] = useState(false);
+  // import (ZIP upload → pool skill)
+  const importFileRef = useRef(null);
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState(null);
+  const [importSuccess, setImportSuccess] = useState(null);
 
   const filteredSkills = (allSkills ?? []).filter(s => {
     if (filter === 'Pool') return s.source === 'pool';
@@ -751,6 +767,29 @@ export default function SkillsRegistry() {
   function handlePromoted(skill) {
     refetch?.();
     openSkill({ name: skill.name, source: 'pool' });
+  }
+
+  async function handleImport(e) {
+    const file = e.target.files?.[0];
+    if (importFileRef.current) importFileRef.current.value = '';
+    if (!file) return;
+    setImporting(true);
+    setImportError(null);
+    setImportSuccess(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const resp = await fetch('/api/skills/import', { method: 'POST', body: formData });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      setImportSuccess(`Skill '${data.name}' imported into the pool.`);
+      refetch?.();
+      openSkill({ name: data.name, source: 'pool' });
+    } catch (e) {
+      setImportError(e.message);
+    } finally {
+      setImporting(false);
+    }
   }
 
   const poolNames = new Set((allSkills ?? []).filter(s => s.source === 'pool').map(s => s.name));
@@ -805,10 +844,62 @@ export default function SkillsRegistry() {
         <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
           Skills Registry
         </h1>
-        <button onClick={() => setShowNewForm(f => !f)} style={primaryBtnStyle(false)}>
-          {showNewForm ? 'Cancel' : '+ New Skill'}
-        </button>
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+          <input
+            ref={importFileRef}
+            type="file"
+            accept=".zip,application/zip"
+            onChange={handleImport}
+            style={{ display: 'none' }}
+          />
+          <button
+            onClick={() => importFileRef.current?.click()}
+            disabled={importing}
+            style={secondaryBtnStyle}
+            title="Upload a skill directory packaged as a ZIP and add it to the pool"
+          >
+            {importing ? 'Importing…' : 'Import ZIP'}
+          </button>
+          <button onClick={() => setShowNewForm(f => !f)} style={primaryBtnStyle(false)}>
+            {showNewForm ? 'Cancel' : '+ New Skill'}
+          </button>
+        </div>
       </div>
+
+      {/* Intro / explanation */}
+      <div style={{
+        padding: 'var(--eb-space-4)',
+        background: 'var(--eb-bg-elevated)',
+        border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-md)',
+        fontSize: 'var(--eb-text-sm)',
+        color: 'var(--eb-text-secondary)',
+        lineHeight: 1.5,
+      }}>
+        <p style={{ margin: '0 0 var(--eb-space-2)' }}>
+          Skills are reusable instruction packages (a <code style={{ fontFamily: 'var(--eb-font-mono)' }}>SKILL.md</code> plus
+          any helper scripts or assets) that agents load to perform domain-specific tasks. This page shows every skill in
+          the shared <strong>pool</strong> as well as the copies living inside individual <strong>agents</strong>.
+        </p>
+        <p style={{ margin: 0 }}>
+          <strong>Pool</strong> skills can be edited here and attached to Working Environments so new agents receive them.
+          <strong> Agent</strong> skills are read-only — use <em>Promote to pool</em> to lift one back into the pool, or{' '}
+          <em>Install into agent</em> to push a pool skill into a running agent. Click a skill to browse its files;
+          use <em>Export ZIP</em> to download a skill directory, or <em>Import ZIP</em> to add one to the pool.
+        </p>
+      </div>
+
+      {/* Import feedback */}
+      {importError && (
+        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>
+          Import failed: {importError}
+        </div>
+      )}
+      {importSuccess && (
+        <div role="status" style={{ color: 'var(--eb-status-success)', fontSize: 'var(--eb-text-sm)' }}>
+          {importSuccess}
+        </div>
+      )}
 
       {/* New skill inline form */}
       {showNewForm && (

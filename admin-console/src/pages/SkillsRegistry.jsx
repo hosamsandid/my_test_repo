@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypePrettyCode from 'rehype-pretty-code';
@@ -241,16 +241,58 @@ function NewSkillForm({ onCreated, onCancel }) {
   );
 }
 
+/* ─── File helpers ─────────────────────────────────────────────────────── */
+function isMarkdownPath(p) { return /\.md$/i.test(p || ''); }
+
+function formatBytes(n) {
+  if (!Number.isFinite(n)) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// Plain monospace renderer for non-markdown text files.
+function CodeBlock({ content }) {
+  return (
+    <pre style={{
+      margin: 0, padding: 'var(--eb-space-3)',
+      border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+      background: 'var(--eb-bg-elevated)', overflowX: 'auto',
+      fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-sm)',
+      whiteSpace: 'pre', color: 'var(--eb-text-primary)',
+    }}>
+      <code>{content || ''}</code>
+    </pre>
+  );
+}
+
 /* ─── Skill viewer / inline editor ────────────────────────────────────── */
-function SkillViewer({ skill, content, onSaved, onDeleted, onPromoted, poolNames, installableAgents, agentSkills }) {
+function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgents, agentSkills }) {
+  const isPool = skill.source === 'pool';
+  const inPool = poolNames?.has(skill.name);
+  const skillKey = `${skill.source}:${skill.agentId ?? ''}:${skill.name}`;
+
+  // File listing for the skill directory.
+  const [files, setFiles] = useState([]);
+  const [filesLoading, setFilesLoading] = useState(true);
+  const [filesError, setFilesError] = useState(null);
+  const [selectedFile, setSelectedFile] = useState('SKILL.md');
+
+  // Content of the currently selected file.
+  const [fileData, setFileData] = useState(null); // { content, binary, truncated, size }
+  const [fileLoading, setFileLoading] = useState(false);
+  const [fileError, setFileError] = useState(null);
+
+  // Per-file editing (pool skills only).
   const [editing, setEditing] = useState(false);
-  const [editContent, setEditContent] = useState(content);
+  const [editContent, setEditContent] = useState('');
   const [preview, setPreview] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
-  const [error, setError] = useState(null);
   const [promoting, setPromoting] = useState(false);
   const [promoteError, setPromoteError] = useState(null);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
@@ -260,8 +302,42 @@ function SkillViewer({ skill, content, onSaved, onDeleted, onPromoted, poolNames
   const [installMsg, setInstallMsg] = useState(null);
   const [confirmInstallOverwrite, setConfirmInstallOverwrite] = useState(false);
 
-  const isPool = skill.source === 'pool';
-  const inPool = poolNames?.has(skill.name);
+  // Load the file list whenever the selected skill changes.
+  useEffect(() => {
+    let cancelled = false;
+    setFilesLoading(true); setFilesError(null); setFiles([]); setEditing(false);
+    const params = new URLSearchParams({ source: skill.source });
+    if (skill.agentId) params.set('agentId', skill.agentId);
+    fetch(`/api/skills/${encodeURIComponent(skill.name)}/files?${params}`)
+      .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`); return d; })
+      .then(d => {
+        if (cancelled) return;
+        const list = Array.isArray(d.files) ? d.files : [];
+        setFiles(list);
+        const hasSkillMd = list.some(f => f.path === 'SKILL.md');
+        setSelectedFile(hasSkillMd ? 'SKILL.md' : (list[0]?.path || ''));
+      })
+      .catch(e => { if (!cancelled) setFilesError(e.message); })
+      .finally(() => { if (!cancelled) setFilesLoading(false); });
+    return () => { cancelled = true; };
+  }, [skillKey]);
+
+  // Load the selected file's content.
+  useEffect(() => {
+    if (!selectedFile) { setFileData(null); return; }
+    let cancelled = false;
+    setFileLoading(true); setFileError(null); setFileData(null); setEditing(false);
+    const params = new URLSearchParams({ source: skill.source, file: selectedFile });
+    if (skill.agentId) params.set('agentId', skill.agentId);
+    fetch(`/api/skills/${encodeURIComponent(skill.name)}/file?${params}`)
+      .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`); return d; })
+      .then(d => { if (!cancelled) setFileData(d); })
+      .catch(e => { if (!cancelled) setFileError(e.message); })
+      .finally(() => { if (!cancelled) setFileLoading(false); });
+    return () => { cancelled = true; };
+  }, [skillKey, selectedFile]);
+
+  const fileEditable = isPool && fileData && !fileData.binary && !fileData.truncated;
 
   async function install(overwrite) {
     if (!installTarget) return;
@@ -326,20 +402,20 @@ function SkillViewer({ skill, content, onSaved, onDeleted, onPromoted, poolNames
     }
   }
 
-  async function handleSave() {
+  async function handleSaveFile() {
     setSaving(true);
     setError(null);
     try {
-      const params = new URLSearchParams({ source: skill.source });
-      const res = await fetch(`/api/skills/${encodeURIComponent(skill.name)}?${params}`, {
+      const params = new URLSearchParams({ source: skill.source, file: selectedFile });
+      const res = await fetch(`/api/skills/${encodeURIComponent(skill.name)}/file?${params}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: editContent }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      setFileData(fd => ({ ...(fd || {}), content: editContent }));
       setEditing(false);
-      onSaved(editContent);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -377,24 +453,31 @@ function SkillViewer({ skill, content, onSaved, onDeleted, onPromoted, poolNames
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
         {isPool && !editing && (
           <>
-            <button onClick={() => { setEditing(true); setEditContent(content); setPreview(false); setError(null); }} style={secondaryBtnStyle}>
-              Edit
+            <button
+              onClick={() => { setEditing(true); setEditContent(fileData?.content ?? ''); setPreview(false); setError(null); }}
+              disabled={!fileEditable}
+              title={fileEditable ? undefined : 'This file cannot be edited here (binary or too large)'}
+              style={fileEditable ? secondaryBtnStyle : { ...secondaryBtnStyle, cursor: 'not-allowed', opacity: 0.5 }}
+            >
+              Edit {files.length > 1 ? 'file' : ''}
             </button>
             <button onClick={() => { setDeleteError(null); setConfirmDelete(true); }} style={dangerBtnStyle}>
-              Delete
+              Delete skill
             </button>
           </>
         )}
         {isPool && editing && (
           <>
-            <button
-              type="button"
-              onClick={() => setPreview(p => !p)}
-              style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
-            >
-              {preview ? 'Edit' : 'Preview'}
-            </button>
-            <button onClick={handleSave} disabled={saving} style={primaryBtnStyle(saving)}>
+            {isMarkdownPath(selectedFile) && (
+              <button
+                type="button"
+                onClick={() => setPreview(p => !p)}
+                style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+              >
+                {preview ? 'Edit' : 'Preview'}
+              </button>
+            )}
+            <button onClick={handleSaveFile} disabled={saving} style={primaryBtnStyle(saving)}>
               {saving ? 'Saving…' : 'Save'}
             </button>
             <button onClick={() => { setEditing(false); setError(null); }} disabled={saving} style={secondaryBtnStyle}>
@@ -470,8 +553,47 @@ function SkillViewer({ skill, content, onSaved, onDeleted, onPromoted, poolNames
         </div>
       )}
 
+      {/* File list — only shown when the skill bundles more than SKILL.md */}
+      {files.length > 1 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+          <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)' }}>
+            Files ({files.length})
+          </span>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-1)' }}>
+            {files.map(f => {
+              const active = f.path === selectedFile;
+              return (
+                <button
+                  key={f.path}
+                  onClick={() => setSelectedFile(f.path)}
+                  title={`${f.path} · ${formatBytes(f.size)}`}
+                  style={{
+                    padding: '3px 10px', borderRadius: 'var(--eb-radius-sm)',
+                    fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)',
+                    border: `1px solid ${active ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+                    background: active ? 'var(--eb-accent-muted)' : 'var(--eb-bg-surface)',
+                    color: active ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)',
+                    cursor: 'pointer', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}
+                >
+                  {f.path}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* content area */}
-      {editing && !preview ? (
+      {filesLoading ? (
+        <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading files…</div>
+      ) : filesError ? (
+        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load files: {filesError}</div>
+      ) : fileLoading ? (
+        <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading {selectedFile}…</div>
+      ) : fileError ? (
+        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load file: {fileError}</div>
+      ) : editing && !(preview && isMarkdownPath(selectedFile)) ? (
         <textarea
           value={editContent}
           onChange={e => setEditContent(e.target.value)}
@@ -488,8 +610,20 @@ function SkillViewer({ skill, content, onSaved, onDeleted, onPromoted, poolNames
             width: '100%',
           }}
         />
+      ) : fileData?.binary ? (
+        <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)', fontStyle: 'italic' }}>
+          Binary file ({formatBytes(fileData.size)}) — not shown.
+        </div>
+      ) : isMarkdownPath(selectedFile) ? (
+        <SkillMarkdown content={editing ? editContent : (fileData?.content ?? '')} />
       ) : (
-        <SkillMarkdown content={editing ? editContent : content} />
+        <CodeBlock content={fileData?.content ?? ''} />
+      )}
+
+      {!filesLoading && !fileLoading && fileData?.truncated && (
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
+          File truncated at 512 KB — shown content is partial and read-only.
+        </div>
       )}
 
       {/* Delete confirmation dialog */}
@@ -501,7 +635,7 @@ function SkillViewer({ skill, content, onSaved, onDeleted, onPromoted, poolNames
           deleteError ? (
             <span><strong>Cannot delete:</strong> {deleteError}</span>
           ) : (
-            `Delete "${skill.name}"? This removes the SKILL.md file permanently.`
+            `Delete "${skill.name}"? This removes the entire skill directory permanently.`
           )
         }
         confirmLabel={deleteError ? undefined : (deleting ? 'Deleting…' : 'Delete')}
@@ -587,9 +721,6 @@ export default function SkillsRegistry() {
   const [filter, setFilter] = useState('All');
   const [showNewForm, setShowNewForm] = useState(false);
   const [selectedSkill, setSelectedSkill] = useState(null);
-  const [skillContent, setSkillContent] = useState(null);
-  const [contentLoading, setContentLoading] = useState(false);
-  const [contentError, setContentError] = useState(null);
   // row-level delete state (separate from the side-panel delete flow)
   const [rowDeleteTarget, setRowDeleteTarget] = useState(null);
   const [rowDeleteError, setRowDeleteError] = useState(null);
@@ -601,23 +732,9 @@ export default function SkillsRegistry() {
     return true;
   });
 
-  const openSkill = useCallback(async (row) => {
+  // The SkillViewer fetches its own file list + content; opening just selects.
+  const openSkill = useCallback((row) => {
     setSelectedSkill(row);
-    setSkillContent(null);
-    setContentError(null);
-    setContentLoading(true);
-    try {
-      const params = new URLSearchParams({ source: row.source });
-      if (row.agentId) params.set('agentId', row.agentId);
-      const res = await fetch(`/api/skills/${encodeURIComponent(row.name)}/content?${params}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setSkillContent(data.content);
-    } catch (e) {
-      setContentError(e.message);
-    } finally {
-      setContentLoading(false);
-    }
   }, []);
 
   function handleCreated(skill) {
@@ -626,13 +743,8 @@ export default function SkillsRegistry() {
     openSkill({ ...skill });
   }
 
-  function handleSaved(newContent) {
-    setSkillContent(newContent);
-  }
-
   function handleDeleted() {
     setSelectedSkill(null);
-    setSkillContent(null);
     refetch?.();
   }
 
@@ -666,7 +778,6 @@ export default function SkillsRegistry() {
       }
       if (selectedSkill?.name === rowDeleteTarget.name && selectedSkill?.source === 'pool') {
         setSelectedSkill(null);
-        setSkillContent(null);
       }
       setRowDeleteTarget(null);
       refetch?.();
@@ -751,19 +862,10 @@ export default function SkillsRegistry() {
         title={selectedSkill ? `${selectedSkill.name} (${selectedSkill.source})` : ''}
         width="560px"
       >
-        {contentLoading && (
-          <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading…</div>
-        )}
-        {contentError && (
-          <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>
-            Failed to load skill content: {contentError}
-          </div>
-        )}
-        {skillContent != null && !contentLoading && selectedSkill && (
+        {selectedSkill && (
           <SkillViewer
+            key={`${selectedSkill.source}:${selectedSkill.agentId ?? ''}:${selectedSkill.name}`}
             skill={selectedSkill}
-            content={skillContent}
-            onSaved={handleSaved}
             onDeleted={handleDeleted}
             onPromoted={handlePromoted}
             poolNames={poolNames}

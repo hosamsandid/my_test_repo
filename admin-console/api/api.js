@@ -1796,6 +1796,140 @@ app.get('/api/skills/:name/content', (req, res) => {
   res.json({ content });
 });
 
+/* ─── Skill directory contents (multi-file browser/editor) ───────────── */
+
+const SKILL_FILE_MAX_BYTES = 512 * 1024; // 512 KB read cap per file
+
+// Resolve a skill's root directory for the given source. Returns the absolute
+// path or null when the source/name/agentId are invalid. Does not check that
+// the directory exists.
+function skillRootDir(source, name, agentId) {
+  if (typeof name !== 'string' || !SKILL_NAME_RE.test(name)) return null;
+  if (source === 'agent') {
+    if (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId)) return null;
+    return path.join(AGENTS_DIR, agentId, 'skills', name);
+  }
+  return path.join(POOL_DIR, 'skills', name);
+}
+
+// Resolve a relative file path inside a skill directory, refusing anything
+// that escapes the root (traversal, absolute paths, outward symlinks). Mirrors
+// safeAgentPath. Returns the absolute path on success, null otherwise. The
+// target file must already exist (realpath fails on ENOENT).
+function safeSkillFilePath(rootDir, relFile) {
+  let realRoot;
+  try { realRoot = fs.realpathSync(rootDir); } catch { return null; }
+  const normalized = path.normalize(String(relFile || '').replace(/^\/+/, ''));
+  if (!normalized || normalized === '.') return null;
+  if (normalized.split(path.sep).some(seg => seg === '..')) return null;
+  const target = path.resolve(realRoot, normalized);
+  let realTarget;
+  try { realTarget = fs.realpathSync(target); } catch { return null; }
+  if (realTarget !== realRoot && !realTarget.startsWith(realRoot + path.sep)) return null;
+  return realTarget;
+}
+
+// Recursively list regular files in a skill directory (relative POSIX paths).
+// Symlinked directories are not descended (withFileTypes reports them as
+// non-directories), which also prevents symlink loops.
+function listSkillFiles(rootDir) {
+  const out = [];
+  const walk = (dir, rel) => {
+    if (out.length > 2000) return; // defensive cap
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const d of entries) {
+      const relPath = rel ? `${rel}/${d.name}` : d.name;
+      const full = path.join(dir, d.name);
+      if (d.isDirectory()) {
+        walk(full, relPath);
+      } else if (d.isFile()) {
+        let size = 0;
+        try { size = fs.statSync(full).size; } catch { /* transient */ }
+        out.push({ path: relPath, size });
+      }
+    }
+  };
+  walk(rootDir, '');
+  out.sort((a, b) => a.path.localeCompare(b.path, undefined, { sensitivity: 'base' }));
+  return out;
+}
+
+// List every file in a skill directory (not just SKILL.md) so the registry can
+// show what a skill actually contains (scripts, data, sub-skills, …).
+app.get('/api/skills/:name/files', (req, res) => {
+  const { name } = req.params;
+  const { source, agentId } = req.query;
+  const root = skillRootDir(source, name, agentId);
+  if (!root) return res.status(400).json({ error: 'Invalid skill name or agent id' });
+  if (!fs.existsSync(path.join(root, 'SKILL.md'))) return res.status(404).json({ error: 'Skill not found' });
+  res.json({ files: listSkillFiles(root) });
+});
+
+// Read a single file from a skill directory. Caps reads and flags binary files
+// (NUL byte in the prefix) so the UI can show a placeholder instead of garbage.
+app.get('/api/skills/:name/file', (req, res) => {
+  const { name } = req.params;
+  const { source, agentId, file } = req.query;
+  const root = skillRootDir(source, name, agentId);
+  if (!root) return res.status(400).json({ error: 'Invalid skill name or agent id' });
+  const target = safeSkillFilePath(root, file);
+  if (!target) return res.status(400).json({ error: 'invalid path' });
+
+  let st;
+  try { st = fs.statSync(target); } catch { return res.status(404).json({ error: 'not found' }); }
+  if (!st.isFile()) return res.status(400).json({ error: 'not a file' });
+
+  const truncated = st.size > SKILL_FILE_MAX_BYTES;
+  const readSize = Math.min(st.size, SKILL_FILE_MAX_BYTES);
+  let buf;
+  try {
+    const fd = fs.openSync(target, 'r');
+    try {
+      buf = Buffer.alloc(readSize);
+      if (readSize > 0) fs.readSync(fd, buf, 0, readSize, 0);
+    } finally { fs.closeSync(fd); }
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+
+  const probe = buf.slice(0, Math.min(buf.length, 8192));
+  const isBinary = probe.includes(0);
+  res.json({
+    path: String(file),
+    size: st.size,
+    truncated,
+    binary: isBinary,
+    content: isBinary ? null : buf.toString('utf8'),
+  });
+});
+
+// Overwrite a single file inside a POOL skill directory. Agent skills stay
+// read-only (mirrors PUT /api/skills/:name). Only existing files are editable
+// — safeSkillFilePath rejects paths that don't resolve to an existing file,
+// so this cannot create new files or escape the skill directory.
+app.put('/api/skills/:name/file', (req, res) => {
+  const { name } = req.params;
+  const { source, file } = req.query;
+  if (source === 'agent') {
+    return res.status(403).json({ error: 'Agent skills are read-only from the registry. Promote the skill to the pool to edit it.' });
+  }
+  const root = skillRootDir(source, name);
+  if (!root) return res.status(400).json({ error: 'Invalid skill name' });
+  const target = safeSkillFilePath(root, file);
+  if (!target) return res.status(400).json({ error: 'invalid path' });
+  if (!fs.statSync(target).isFile()) return res.status(400).json({ error: 'not a file' });
+
+  const { content } = req.body || {};
+  if (typeof content !== 'string') return res.status(400).json({ error: 'content must be a string' });
+  try {
+    fs.writeFileSync(target, content, 'utf8');
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  res.json({ path: String(file), source: 'pool' });
+});
+
 app.post('/api/skills', (req, res) => {
   const { name, content = '' } = req.body || {};
   if (typeof name !== 'string' || !SKILL_NAME_RE.test(name)) {

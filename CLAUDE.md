@@ -191,7 +191,7 @@ The orchestrator hosts a central ingestion endpoint that any signaling source (t
 
 1. Build a one-shot reverse index `bpId → { stubId, parentOrchestratorId }` from the bp-instance configs.
 2. Group events by hosting orchestrator. Events whose BP is unknown to any stub are skipped with `unknown-bp`.
-3. For each orchestrator: force-pull its briefings clone (so stale local index doesn't cost the routing decision), load `<briefingsPath>/artifacts/briefings/.index.json`.
+3. For each orchestrator: force-pull its briefings clone (so bp-explorer reads up-to-date `brief.md` files), then build the dependency graph via `loadBriefingsGraphFromExplorer()` — this calls bp-explorer's `GET /api/briefings` and translates the response with `bpsToBriefingsMap` (`orchestrator/briefings-graph.js`). The `artifacts/briefings/.index.json` file is no longer used.
 4. For each event, compute affected BPs:
    - **`depends-on` dependents** — any leaf BP whose `depends-on` array contains the event's BP hash.
    - **input-artifact dependents** — any leaf BP with an `artifacts[]` entry where `direction: input` and `path` matches a `direction: output` path of the event's BP.
@@ -200,7 +200,7 @@ The orchestrator hosts a central ingestion endpoint that any signaling source (t
 
 **`bp-event-batch` is not a triggers.json type.** It's a `kind`-tagged entry that the agent-runner's drain loop handles inline (`executeBpEvent`) — no triggers.json registration required.
 
-**Situation classification.** Before enqueuing, the orchestrator inspects the affected BP's current status in the loaded `.index.json` and tags each `bp-event-batch` entry with one of:
+**Situation classification.** Before enqueuing, the orchestrator inspects the affected BP's current status in the briefings graph (loaded from bp-explorer) and tags each `bp-event-batch` entry with one of:
 
 - `kickoff` — affected BP is `ready` and all its `depends-on` are now `completed`/`reviewed`. The receiving agent reads its brief, posts a 2–3-sentence mission summary plus its planned approach, and asks the user to greenlight starting. No claim, no LoopScript run, no commits before user OK.
 - `cascade-stale` — affected BP was already `completed`/`reviewed`/`stale` and may now be invalidated. The receiving agent posts a lay-of-the-land summary and asks whether to run `/confirm-valid` or `/revise`.
@@ -225,11 +225,11 @@ Every bp-instance chat in the Admin Console has a hand-off action that lets the 
 
 **Flow:**
 
-1. Opening the dialog calls two endpoints in parallel: `GET /api/agents/:id/handover/candidates` (proxy to the orchestrator's `.index.json` graph) and `GET /api/agents/:id/handover/git-status` (per-repo `branch`, `head`, `headSubject`, `upstream`, `ahead`/`behind`, `dirty`, `pushed`, `ready`).
+1. Opening the dialog calls two endpoints in parallel: `GET /api/agents/:id/handover/candidates` (proxy to the orchestrator's briefings graph, sourced from bp-explorer's `/api/briefings`) and `GET /api/agents/:id/handover/git-status` (per-repo `branch`, `head`, `headSubject`, `upstream`, `ahead`/`behind`, `dirty`, `pushed`, `ready`).
 2. The dialog renders a per-repo pre-flight card. The submit button is disabled while any repo is dirty or has unpushed commits, unless the user opts into an explicit override (checkbox + free-text reason that gets quoted into every target's hand-off note).
 3. Two pre-flight buttons — **Ask agent to commit & push** and **Ask agent to push pending commits** — POST `/api/agents/:id/handover/nudge` which posts a canned prompt into the source agent's own DM. The agent does the git work itself, the chat history captures the audit trail, and a **Re-check** button refreshes the git status without closing the dialog.
 4. On submit, `POST /api/agents/:id/handover` re-fetches git-status server-side and returns `409 git-not-ready` unless the workspace is ready or the override carries a reason — a stale browser snapshot cannot bypass the gate.
-5. For each target, the server materializes/enables the stub, ensures a DM room, and posts a structured Markdown body containing: the source-of-work block (per repo: name, branch, `headShort`, last-commit subject, remote URL, upstream, dirty markers), input-artifact paths from `.index.json` when present, the user's free-text note, the override reason (if any), per-target consistency warnings, and an explicit "Before you start" checklist (`cd <repo> && git fetch && git checkout <branch> && git pull --ff-only`, `git log --oneline -5`, confirm with user). The receiving agent picks the message up via the standard DM heuristic.
+5. For each target, the server materializes/enables the stub, ensures a DM room, and posts a structured Markdown body containing: the source-of-work block (per repo: name, branch, `headShort`, last-commit subject, remote URL, upstream, dirty markers), input-artifact paths from the briefings graph when present, the user's free-text note, the override reason (if any), per-target consistency warnings, and an explicit "Before you start" checklist (`cd <repo> && git fetch && git checkout <branch> && git pull --ff-only`, `git log --oneline -5`, confirm with user). The receiving agent picks the message up via the standard DM heuristic.
 6. **Repo consistency check.** Each target's environment is compared against the source repos: missing repo URLs and branch mismatches surface as warnings both inline in the DM body (so the receiving agent reads them) and in the dialog's per-target results list (so the user sees them).
 
 ### Agent Management

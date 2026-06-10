@@ -92,19 +92,20 @@ seed-memory:
 	@echo "Done. Pool memory contents:"
 	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/memory/
 
+# Skip (don't fail) when the host-side i-sase engineering skill is absent, so
+# `make seed-pool` still completes the repo-side seeds. Only ACE/BP agents need it.
 seed-skills:
 	@if [ ! -d "$(ACE_PLUGIN_SKILLS_DIR)/engineering" ]; then \
-	  echo "ERROR: $(ACE_PLUGIN_SKILLS_DIR)/engineering not found" >&2; \
-	  echo "Install the i-sase plugin via the Claude Code marketplace first." >&2; \
-	  exit 1; \
+	  echo "WARNING: i-sase engineering skill not found - skipping (only ACE/BriefingPack agents need it)." >&2; \
+	else \
+	  echo "Seeding engineering skill into volume $(SKILL_POOL_VOLUME)..."; \
+	  podman run --rm \
+	    -v $(SKILL_POOL_VOLUME):/pool \
+	    -v $(ACE_PLUGIN_SKILLS_DIR):/src:ro \
+	    alpine sh -c 'mkdir -p /pool/skills && rm -rf /pool/skills/engineering && cp -r /src/engineering /pool/skills/engineering'; \
+	  echo "Done. Pool skills:"; \
+	  podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/skills/; \
 	fi
-	@echo "Seeding engineering skill into volume $(SKILL_POOL_VOLUME)..."
-	podman run --rm \
-	  -v $(SKILL_POOL_VOLUME):/pool \
-	  -v $(ACE_PLUGIN_SKILLS_DIR):/src:ro \
-	  alpine sh -c 'mkdir -p /pool/skills && rm -rf /pool/skills/engineering && cp -r /src/engineering /pool/skills/engineering'
-	@echo "Done. Pool contents:"
-	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/skills/
 
 seed-templates:
 	@if [ ! -d "$(SKILL_POOL_DEFAULTS)/agent-templates" ]; then \

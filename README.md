@@ -64,16 +64,20 @@ podman compose up -d conduwuit
 #    `make up` does NOT build this image automatically.
 make agent-image
 
-# 4. Start the full stack
+# 4. Seed the shared skill pool (one-time): role templates, baseline memory, MCP
+#    reference servers, pool CLAUDE.md. `make up` does NOT seed automatically.
+make seed-pool
+
+# 5. Start the full stack
 make up
 
-# 5. Tail logs
+# 6. Tail logs
 make logs
 ```
 
-4. Open **http://localhost:4000** in your browser.
-5. The Setup Wizard walks you through five steps: Model Provider → SSH key → GitHub token → Working Environment → first agent.
-6. Once created, the agent appears in Agent Chat. Send it a message and watch the session log on the right.
+7. Open **http://localhost:4000** in your browser.
+8. The Setup Wizard walks you through five steps: Model Provider → SSH key → GitHub token → Working Environment → first agent.
+9. Once created, the agent appears in Agent Chat. Send it a message and watch the session log on the right.
 
 You now have a live, persistent AI agent running inside your own infrastructure.
 

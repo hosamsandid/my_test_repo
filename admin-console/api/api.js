@@ -1811,6 +1811,51 @@ app.post('/api/skills', (req, res) => {
   res.status(201).json({ name, source: 'pool' });
 });
 
+// Promote a skill from an agent workspace into the shared pool, copying the
+// ENTIRE skill directory (SKILL.md plus any scripts/assets) recursively so it
+// can be reused by other agents. Refuses to clobber an existing pool skill
+// unless `overwrite: true` is passed.
+app.post('/api/skills/promote', (req, res) => {
+  const { agentId, name, overwrite = false } = req.body || {};
+  if (typeof name !== 'string' || !SKILL_NAME_RE.test(name)) {
+    return res.status(400).json({ error: 'Invalid skill name' });
+  }
+  if (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId)) {
+    return res.status(400).json({ error: 'Invalid agent id' });
+  }
+
+  // Containment check: AGENT_ID_RE / SKILL_NAME_RE already exclude traversal
+  // segments, but the path.resolve + path.relative pattern is what CodeQL's
+  // path-injection query recognises in-flow.
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const srcDir = path.resolve(agentsBaseDir, agentId, 'skills', name);
+  const srcRel = path.relative(agentsBaseDir, srcDir);
+  if (srcRel.startsWith('..') || path.isAbsolute(srcRel)) {
+    return res.status(400).json({ error: 'Invalid agent id or skill name' });
+  }
+  const poolSkillsBaseDir = path.resolve(POOL_DIR, 'skills');
+  const dstDir = path.resolve(poolSkillsBaseDir, name);
+  const dstRel = path.relative(poolSkillsBaseDir, dstDir);
+  if (dstRel.startsWith('..') || path.isAbsolute(dstRel)) {
+    return res.status(400).json({ error: 'Invalid skill name' });
+  }
+
+  if (!fs.existsSync(path.join(srcDir, 'SKILL.md'))) {
+    return res.status(404).json({ error: `Skill '${name}' not found for agent '${agentId}'` });
+  }
+  if (fs.existsSync(dstDir) && !overwrite) {
+    return res.status(409).json({ error: `Skill '${name}' already exists in the pool`, exists: true });
+  }
+
+  try {
+    if (overwrite) fs.rmSync(dstDir, { recursive: true, force: true });
+    fs.cpSync(srcDir, dstDir, { recursive: true });
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to promote skill: ${err.message}` });
+  }
+  res.status(201).json({ name, source: 'pool', overwritten: !!overwrite });
+});
+
 app.put('/api/skills/:name', (req, res) => {
   const { name } = req.params;
   const { source } = req.query;

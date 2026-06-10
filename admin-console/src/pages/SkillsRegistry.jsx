@@ -242,7 +242,7 @@ function NewSkillForm({ onCreated, onCancel }) {
 }
 
 /* ─── Skill viewer / inline editor ────────────────────────────────────── */
-function SkillViewer({ skill, content, onSaved, onDeleted }) {
+function SkillViewer({ skill, content, onSaved, onDeleted, onPromoted, poolNames }) {
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState(content);
   const [preview, setPreview] = useState(false);
@@ -251,8 +251,39 @@ function SkillViewer({ skill, content, onSaved, onDeleted }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
   const [error, setError] = useState(null);
+  const [promoting, setPromoting] = useState(false);
+  const [promoteError, setPromoteError] = useState(null);
+  const [confirmOverwrite, setConfirmOverwrite] = useState(false);
 
   const isPool = skill.source === 'pool';
+  const inPool = poolNames?.has(skill.name);
+
+  async function promote(overwrite) {
+    setPromoting(true);
+    setPromoteError(null);
+    try {
+      const res = await fetch('/api/skills/promote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentId: skill.agentId, name: skill.name, overwrite }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (res.status === 409 && data.exists) {
+          setConfirmOverwrite(true);
+          setPromoting(false);
+          return;
+        }
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      setConfirmOverwrite(false);
+      onPromoted?.(data);
+    } catch (e) {
+      setPromoteError(e.message);
+    } finally {
+      setPromoting(false);
+    }
+  }
 
   async function handleSave() {
     setSaving(true);
@@ -331,14 +362,22 @@ function SkillViewer({ skill, content, onSaved, onDeleted }) {
           </>
         )}
         {!isPool && (
-          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
-            Agent skills are read-only here. Promote via the skill propagation flow to edit.
-          </span>
+          <>
+            <button onClick={() => promote(false)} disabled={promoting} style={primaryBtnStyle(promoting)}>
+              {promoting ? 'Promoting…' : (inPool ? 'Update pool copy' : 'Promote to pool')}
+            </button>
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
+              Agent skills are read-only here. Promoting copies the whole skill directory (scripts included) into the shared pool.
+            </span>
+          </>
         )}
       </div>
 
       {error && (
         <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{error}</div>
+      )}
+      {promoteError && (
+        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{promoteError}</div>
       )}
 
       {/* content area */}
@@ -382,6 +421,17 @@ function SkillViewer({ skill, content, onSaved, onDeleted }) {
           : handleDelete
         }
         onCancel={() => { setConfirmDelete(false); setDeleteError(null); }}
+      />
+
+      {/* Overwrite confirmation (pool already has a skill with this name) */}
+      <ConfirmDialog
+        open={confirmOverwrite}
+        title="Skill already in pool"
+        variant="danger"
+        message={`A pool skill named "${skill.name}" already exists. Overwrite it with the version from agent "${skill.agentId}"? This replaces the entire pool skill directory.`}
+        confirmLabel={promoting ? 'Overwriting…' : 'Overwrite'}
+        onConfirm={() => promote(true)}
+        onCancel={() => setConfirmOverwrite(false)}
       />
     </div>
   );
@@ -483,6 +533,13 @@ export default function SkillsRegistry() {
     setSkillContent(null);
     refetch?.();
   }
+
+  function handlePromoted(skill) {
+    refetch?.();
+    openSkill({ name: skill.name, source: 'pool' });
+  }
+
+  const poolNames = new Set((allSkills ?? []).filter(s => s.source === 'pool').map(s => s.name));
 
   async function confirmRowDelete() {
     if (!rowDeleteTarget) return;
@@ -601,6 +658,8 @@ export default function SkillsRegistry() {
             content={skillContent}
             onSaved={handleSaved}
             onDeleted={handleDeleted}
+            onPromoted={handlePromoted}
+            poolNames={poolNames}
           />
         )}
       </SidePanel>

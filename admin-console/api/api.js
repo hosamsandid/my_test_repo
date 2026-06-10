@@ -1856,6 +1856,62 @@ app.post('/api/skills/promote', (req, res) => {
   res.status(201).json({ name, source: 'pool', overwritten: !!overwrite });
 });
 
+// Install a pool skill into an EXISTING agent's workspace, copying the whole
+// skill directory (SKILL.md plus any scripts/assets) recursively. This is the
+// inverse of /promote and avoids a full deactivate+enable workspace reset:
+// the running agent picks the skill up on its next invocation. Refuses to
+// clobber an existing agent skill unless `overwrite: true` is passed.
+app.post('/api/skills/install', (req, res) => {
+  const { agentId, name, overwrite = false } = req.body || {};
+  if (typeof name !== 'string' || !SKILL_NAME_RE.test(name)) {
+    return res.status(400).json({ error: 'Invalid skill name' });
+  }
+  if (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId)) {
+    return res.status(400).json({ error: 'Invalid agent id' });
+  }
+
+  // Containment check: AGENT_ID_RE / SKILL_NAME_RE already exclude traversal
+  // segments, but the path.resolve + path.relative pattern is what CodeQL's
+  // path-injection query recognises in-flow.
+  const poolSkillsBaseDir = path.resolve(POOL_DIR, 'skills');
+  const srcDir = path.resolve(poolSkillsBaseDir, name);
+  const srcRel = path.relative(poolSkillsBaseDir, srcDir);
+  if (srcRel.startsWith('..') || path.isAbsolute(srcRel)) {
+    return res.status(400).json({ error: 'Invalid skill name' });
+  }
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDirPath = path.resolve(agentsBaseDir, agentId);
+  const dstDir = path.resolve(agentDirPath, 'skills', name);
+  const dstRel = path.relative(agentsBaseDir, dstDir);
+  if (dstRel.startsWith('..') || path.isAbsolute(dstRel)) {
+    return res.status(400).json({ error: 'Invalid agent id or skill name' });
+  }
+
+  const cfg = readJsonFile(path.join(agentDirPath, 'config.json'), null);
+  if (!cfg) return res.status(404).json({ error: `Agent '${agentId}' not found` });
+  // A stub (not yet materialized) has no workspace to install into; enabling it
+  // would re-seed from the environment anyway. Require a materialized agent.
+  if (cfg.enabled === false || !cfg.token) {
+    return res.status(409).json({ error: `Agent '${agentId}' is not active — enable it before installing skills` });
+  }
+
+  if (!fs.existsSync(path.join(srcDir, 'SKILL.md'))) {
+    return res.status(404).json({ error: `Skill '${name}' not found in the pool` });
+  }
+  if (fs.existsSync(dstDir) && !overwrite) {
+    return res.status(409).json({ error: `Agent '${agentId}' already has a skill named '${name}'`, exists: true });
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(dstDir), { recursive: true });
+    if (overwrite) fs.rmSync(dstDir, { recursive: true, force: true });
+    fs.cpSync(srcDir, dstDir, { recursive: true });
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to install skill: ${err.message}` });
+  }
+  res.status(201).json({ name, agentId, installed: true, overwritten: !!overwrite });
+});
+
 app.put('/api/skills/:name', (req, res) => {
   const { name } = req.params;
   const { source } = req.query;

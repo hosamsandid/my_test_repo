@@ -242,7 +242,7 @@ function NewSkillForm({ onCreated, onCancel }) {
 }
 
 /* ─── Skill viewer / inline editor ────────────────────────────────────── */
-function SkillViewer({ skill, content, onSaved, onDeleted, onPromoted, poolNames }) {
+function SkillViewer({ skill, content, onSaved, onDeleted, onPromoted, poolNames, installableAgents, agentSkills }) {
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState(content);
   const [preview, setPreview] = useState(false);
@@ -254,9 +254,50 @@ function SkillViewer({ skill, content, onSaved, onDeleted, onPromoted, poolNames
   const [promoting, setPromoting] = useState(false);
   const [promoteError, setPromoteError] = useState(null);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
+  const [installTarget, setInstallTarget] = useState('');
+  const [installing, setInstalling] = useState(false);
+  const [installError, setInstallError] = useState(null);
+  const [installMsg, setInstallMsg] = useState(null);
+  const [confirmInstallOverwrite, setConfirmInstallOverwrite] = useState(false);
 
   const isPool = skill.source === 'pool';
   const inPool = poolNames?.has(skill.name);
+
+  async function install(overwrite) {
+    if (!installTarget) return;
+    setInstalling(true);
+    setInstallError(null);
+    setInstallMsg(null);
+    try {
+      const res = await fetch('/api/skills/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentId: installTarget, name: skill.name, overwrite }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (res.status === 409 && data.exists) {
+          setConfirmInstallOverwrite(true);
+          setInstalling(false);
+          return;
+        }
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      setConfirmInstallOverwrite(false);
+      setInstallMsg(`Installed into "${installTarget}".`);
+    } catch (e) {
+      setInstallError(e.message);
+    } finally {
+      setInstalling(false);
+    }
+  }
+
+  // Agents that already carry this skill in their workspace, for an inline hint.
+  const agentsWithSkill = new Set(
+    (agentSkills ?? [])
+      .filter(s => s.source === 'agent' && s.name === skill.name && s.agentId)
+      .map(s => s.agentId),
+  );
 
   async function promote(overwrite) {
     setPromoting(true);
@@ -380,6 +421,55 @@ function SkillViewer({ skill, content, onSaved, onDeleted, onPromoted, poolNames
         <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{promoteError}</div>
       )}
 
+      {/* Install pool skill into an existing agent (no full workspace reset) */}
+      {isPool && !editing && (
+        <div style={{
+          display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)',
+          padding: 'var(--eb-space-3)', background: 'var(--eb-bg-elevated)',
+          border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
+        }}>
+          <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)' }}>
+            Install into agent
+          </span>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
+            <select
+              value={installTarget}
+              onChange={e => { setInstallTarget(e.target.value); setInstallMsg(null); setInstallError(null); }}
+              style={{
+                padding: '5px 10px', borderRadius: 'var(--eb-radius-sm)',
+                border: '1px solid var(--eb-border-default)', background: 'var(--eb-bg-surface)',
+                color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+                minWidth: 180,
+              }}
+            >
+              <option value="">Select an agent…</option>
+              {(installableAgents ?? []).map(a => (
+                <option key={a.id} value={a.id}>
+                  {a.displayName}{agentsWithSkill.has(a.id) ? ' (already installed)' : ''}
+                </option>
+              ))}
+            </select>
+            <button onClick={() => install(false)} disabled={!installTarget || installing} style={primaryBtnStyle(!installTarget || installing)}>
+              {installing ? 'Installing…' : (installTarget && agentsWithSkill.has(installTarget) ? 'Reinstall' : 'Install')}
+            </button>
+            {installMsg && (
+              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-success)' }}>{installMsg}</span>
+            )}
+          </div>
+          {(installableAgents ?? []).length === 0 && (
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
+              No active agents available. Enable an agent first.
+            </span>
+          )}
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
+            Copies the whole skill directory (scripts included) into the agent. It picks the skill up on its next message. Note: a later workspace reset re-seeds only the skills listed in the agent's environment.
+          </span>
+          {installError && (
+            <span role="alert" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>{installError}</span>
+          )}
+        </div>
+      )}
+
       {/* content area */}
       {editing && !preview ? (
         <textarea
@@ -433,6 +523,17 @@ function SkillViewer({ skill, content, onSaved, onDeleted, onPromoted, poolNames
         onConfirm={() => promote(true)}
         onCancel={() => setConfirmOverwrite(false)}
       />
+
+      {/* Reinstall confirmation (agent already has a skill with this name) */}
+      <ConfirmDialog
+        open={confirmInstallOverwrite}
+        title="Skill already installed"
+        variant="danger"
+        message={`Agent "${installTarget}" already has a skill named "${skill.name}". Overwrite it with the pool version? This replaces the entire skill directory in that agent.`}
+        confirmLabel={installing ? 'Overwriting…' : 'Overwrite'}
+        onConfirm={() => install(true)}
+        onCancel={() => setConfirmInstallOverwrite(false)}
+      />
     </div>
   );
 }
@@ -482,6 +583,7 @@ function makeColumns(onDeleteRow) {
 /* ─── Main page ────────────────────────────────────────────────────────── */
 export default function SkillsRegistry() {
   const { data: allSkills, loading, error, refetch } = useApi('/api/skills');
+  const { data: allAgents } = useApi('/api/agents');
   const [filter, setFilter] = useState('All');
   const [showNewForm, setShowNewForm] = useState(false);
   const [selectedSkill, setSelectedSkill] = useState(null);
@@ -540,6 +642,11 @@ export default function SkillsRegistry() {
   }
 
   const poolNames = new Set((allSkills ?? []).filter(s => s.source === 'pool').map(s => s.name));
+  // Only materialized, enabled agents can receive a skill in-place (a stub has
+  // no workspace yet and would be re-seeded from its environment on enable).
+  const installableAgents = (allAgents ?? [])
+    .filter(a => a.enabled !== false && a.token && a.role !== 'team' && a.role !== 'orchestrator')
+    .map(a => ({ id: a.id, displayName: a.displayName || a.id }));
 
   async function confirmRowDelete() {
     if (!rowDeleteTarget) return;
@@ -660,6 +767,8 @@ export default function SkillsRegistry() {
             onDeleted={handleDeleted}
             onPromoted={handlePromoted}
             poolNames={poolNames}
+            installableAgents={installableAgents}
+            agentSkills={allSkills ?? []}
           />
         )}
       </SidePanel>

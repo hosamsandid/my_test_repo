@@ -877,9 +877,15 @@ _TRIGGERS_FILENAME = "triggers.json"
 _PENDING_FILENAME = "pending-triggers.json"
 _TRIGGER_TZ = ZoneInfo("Europe/Berlin")
 # Skip queue entries with these `kind` discriminators — they're written by the
-# orchestrator-side `processPending` siblings (handover-dm, bp-event-batch,
-# throttle-warning) and are out of scope for the cron/once/http port.
-_PENDING_OUT_OF_SCOPE_KINDS = {"handover-dm", "bp-event-batch", "throttle-warning"}
+# orchestrator-side `processPending` siblings (bp-event-batch, throttle-warning)
+# and are out of scope for the cron/once/http port. `handover-dm` IS handled
+# (see TriggerScheduler._execute_handover_dm).
+_PENDING_OUT_OF_SCOPE_KINDS = {"bp-event-batch", "throttle-warning"}
+
+# Accepts the legacy `!<localpart>:<server>` room id form and the hash-based
+# `!<opaque>` form from room version 12 (MSC4291); the server suffix is
+# optional. Mirrors agent-runner.js executeHandoverDm.
+_MATRIX_ROOM_ID_RE = re.compile(r"^![a-zA-Z0-9._~-]+(:[a-zA-Z0-9._:-]+)?$")
 
 # Matches agent-runner.js MAX_EVENT_FIELD_CHARS (line 58). Keep in sync if the
 # Node value ever changes.
@@ -1221,6 +1227,15 @@ class TriggerScheduler:
             if not isinstance(entry, dict):
                 continue
             kind = entry.get("kind")
+            if kind == "handover-dm":
+                print(f"[Runner:{self._agent_id}] handover-dm from queue",
+                      file=sys.stderr)
+                try:
+                    await self._execute_handover_dm(entry)
+                except Exception as exc:
+                    print(f"[Runner:{self._agent_id}] handover-dm error: {exc}",
+                          file=sys.stderr)
+                continue
             if kind in _PENDING_OUT_OF_SCOPE_KINDS:
                 print(
                     f"[Runner:{self._agent_id}] pending kind={kind} not yet ported "
@@ -1261,6 +1276,100 @@ class TriggerScheduler:
             except Exception as exc:
                 print(f"[Runner:{self._agent_id}] pending _execute({entry_tid}) error: {exc}",
                       file=sys.stderr)
+
+    # -- handover DM ---------------------------------------------------------
+
+    async def _execute_handover_dm(self, entry: dict) -> None:
+        """Process a `handover-dm` queue entry written by the admin-console
+        handover endpoint.
+
+        Delivery is deferred via the queue (rather than a direct Matrix DM) so
+        it can't race the agent's first sync after being enabled. We feed the
+        structured hand-off body to Claude as a persistent-session prompt and
+        post its reply to the DM room — mirroring agent-runner.js
+        executeHandoverDm.
+        """
+        raw_room_id = entry.get("roomId") or _load_dm_room_id()
+        room_id = (
+            raw_room_id
+            if isinstance(raw_room_id, str) and _MATRIX_ROOM_ID_RE.match(raw_room_id)
+            else None
+        )
+        if not room_id:
+            print(f"[Runner:{self._agent_id}] handover-dm: no DM room available — skipping",
+                  file=sys.stderr)
+            return
+
+        prompt = entry.get("body")
+        if not isinstance(prompt, str) or not prompt.strip():
+            print(f"[Runner:{self._agent_id}] handover-dm: empty body — skipping",
+                  file=sys.stderr)
+            return
+
+        correlation_id = f"handover-dm:{int(time.time() * 1000)}"
+        try:
+            _append_event(room_id, {
+                "type": "claude.invoke",
+                "correlationId": correlation_id,
+                "promptChars": len(prompt),
+            })
+        except Exception as exc:
+            print(f"[Runner:{self._agent_id}] session-log warning: {exc}",
+                  file=sys.stderr)
+
+        _bump_active(+1)
+        try:
+            result = await asyncio.to_thread(
+                _call_claude,
+                prompt, room_id, correlation_id, self._blueprint_id,
+                CLAUDE_TIMEOUT_SEC,
+            )
+        except subprocess.CalledProcessError as err:
+            try:
+                _append_event(room_id, {
+                    "type": "error",
+                    "correlationId": correlation_id,
+                    "stage": "claude",
+                    "message": str(err),
+                })
+            except Exception:
+                pass
+            print(f"[Runner:{self._agent_id}] handover-dm Claude call failed: {err}",
+                  file=sys.stderr)
+            return
+        finally:
+            _bump_active(-1)
+
+        if not result or not result.strip():
+            return
+
+        try:
+            event_id = await self._send_formatted(room_id, result)
+        except Exception as exc:
+            try:
+                _append_event(room_id, {
+                    "type": "error",
+                    "correlationId": correlation_id,
+                    "stage": "matrix",
+                    "message": str(exc),
+                })
+            except Exception:
+                pass
+            print(f"[Runner:{self._agent_id}] Could not post handover-dm response: {exc}",
+                  file=sys.stderr)
+            return
+
+        try:
+            _write_last_response_at()
+            _append_event(room_id, {
+                "type": "message.posted",
+                "correlationId": correlation_id,
+                "eventId": event_id,
+            })
+        except Exception:
+            pass
+        print(f"[Runner:{self._agent_id}] handover-dm: {len(result)} chars",
+              file=sys.stderr)
 
     # -- execute -------------------------------------------------------------
 

@@ -146,6 +146,19 @@ const NETWORK_CONNECT_RETRIES = Number(process.env.AEE_NETWORK_CONNECT_RETRIES |
 const NETWORK_CONNECT_DELAY_MS = Number(process.env.AEE_NETWORK_CONNECT_DELAY_MS || 1500);
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
+// libpod reports "service already on this network" inconsistently: a clean
+// 409, or — as observed on agent respawn, when the orchestrator is still
+// attached to the persistent per-agent network from the previous spawn — a
+// 500 whose body carries `cause: "network is already connected"`. Either way
+// the service IS connected, which is exactly the desired end state, so both
+// must be treated as success. Without this, respawns burned all retries and
+// fell back to the shared network, breaking per-agent isolation.
+function isAlreadyConnected(cr) {
+  if (cr.status === 409) return true;
+  const blob = typeof cr.body === 'string' ? cr.body : JSON.stringify(cr.body || '');
+  return /already connected/i.test(blob);
+}
+
 async function connectServiceWithRetry(networkName, svc, body) {
   let last = 'no attempt';
   for (let attempt = 1; attempt <= NETWORK_CONNECT_RETRIES; attempt++) {
@@ -157,8 +170,9 @@ async function connectServiceWithRetry(networkName, svc, body) {
       await sleep(NETWORK_CONNECT_DELAY_MS);
       continue;
     }
-    // 2xx = connected, 409 = already connected. Both are success.
-    if (cr.status < 300 || cr.status === 409) return;
+    // 2xx = freshly connected; "already connected" (409 or a 500 with that
+    // cause) means the service is on the network already. Both are success.
+    if (cr.status < 300 || isAlreadyConnected(cr)) return;
     last = `status=${cr.status} body=${JSON.stringify(cr.body)}`;
     // A 500 here is typically "service not ready yet" during startup — retry.
     console.warn(

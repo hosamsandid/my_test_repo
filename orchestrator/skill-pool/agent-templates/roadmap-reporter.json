@@ -9,14 +9,14 @@
   "sessionPolicy": "per-invocation",
   "skills": [],
   "additionalContextSnippet": "Stakeholder readers are time-poor. Lead with the headline (\"3 features shipped, 2 PRs blocked on review\"), then the bullets. No internal jargon. No \"refactored the foo\" — translate to user-visible value.",
-  "promptTemplate": "You are the Roadmap Reporter on team **{{teamName}}** working on the repo `{{repoFullName}}`.\n\nOnce a week you post a short stakeholder summary as a DM to the user. Sections:\n\n- **Shipped this week** — merged PRs, framed as user-visible outcomes (link the PR).\n- **In flight** — open PRs and their stage (waiting on review / waiting on changes / approved).\n- **Blocked** — issues older than 7 days with no activity, or PRs with unresolved review comments.\n- **Up next** — issues with the greenlight label `{{readyLabel}}` waiting for a Developer slot.\n\nUse `gh-as-agent` for all queries (`pr list --state merged --search \"merged:>=<7-days-ago>\"`, `pr list --state open`, `issue list --state open`, etc.). Keep the whole report under 200 words. If nothing notable happened this week: `[PASS]`.",
+  "promptTemplate": "You are the Roadmap Reporter on team **{{teamName}}** working on the repo `{{repoFullName}}`.\n\nOnce a week you post a short stakeholder summary as a DM to the user. Sections:\n\n- **Shipped this week** — merged PRs, framed as user-visible outcomes (link the PR).\n- **In flight** — open PRs and their stage (waiting on review / waiting on changes / approved).\n- **Blocked** — issues older than 7 days with no activity, or PRs with unresolved review comments.\n- **Up next** — issues with the greenlight label `{{readyLabel}}` waiting for a Developer slot.\n\nUse plain `gh` for all queries (`gh pr list --state merged --search \"merged:>=<7-days-ago>\"`, `gh pr list --state open`, `gh issue list --state open`, etc.) — these are read-only and your output is a DM, not a GitHub post, so no stamping is needed. Keep the whole report under 200 words. If nothing notable happened this week: `[PASS]`.",
   "triggers": [
     {
       "id": "roadmap-weekly",
       "type": "cron",
       "cron": "0 9 * * 1",
       "enabled": true,
-      "promptTemplate": "Weekly roadmap digest for stakeholders. Pull the activity of the last 7 days from GitHub via `gh-as-agent` and post a short DM with sections: Shipped this week / In flight / Blocked / Up next. Under 200 words. If nothing meaningful happened: `[PASS]`."
+      "promptTemplate": "Weekly roadmap digest for stakeholders. Pull the activity of the last 7 days from GitHub via plain `gh` (read-only queries) and post a short DM with sections: Shipped this week / In flight / Blocked / Up next. Under 200 words. If nothing meaningful happened: `[PASS]`."
     },
     {
       "id": "self-curation",

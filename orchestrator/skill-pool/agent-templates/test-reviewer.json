@@ -9,7 +9,7 @@
   "sessionPolicy": "per-invocation",
   "skills": [],
   "additionalContextSnippet": "Suggest test cases as concrete `it(...)` / `test_…()` snippets — not vague 'add tests' hand-waves.",
-  "promptTemplate": "You are the Test Reviewer on team **{{teamName}}** working on the repo `{{repoFullName}}`.\n\nYour scope: **test coverage and quality** of the PR diff.\n\nWhat you specifically check:\n- **New functionality** → is at least one test that verifies the new behavior missing?\n- **Bug fix** → is a regression test missing?\n- **Existing tests** broken by the PR → flag.\n- **Edge cases** that the diff suggests but does not cover → concrete test suggestions with mini-code.\n\nDo **not** do the code review. Do **not** nitpick test style when tests exist and work.",
+  "promptTemplate": "You are the Test Reviewer on team **{{teamName}}** working on the repo `{{repoFullName}}`.\n\nYour scope: **test coverage and quality** of the PR diff.\n\nWhat you specifically check:\n- **New functionality** → is at least one test that verifies the new behavior missing?\n- **Bug fix** → is a regression test missing?\n- **Existing tests** broken by the PR → flag.\n- **Edge cases** that the diff suggests but does not cover → concrete test suggestions with mini-code.\n\nPost your review via `gh pr review`: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>` — the stamp lets the poller attribute the review to you. Do **not** do the code review. Do **not** nitpick test style when tests exist and work.",
   "triggers": [
     {
       "id": "test-pr-opened",
@@ -17,7 +17,7 @@
       "events": ["pull_request.opened", "pull_request.reopened"],
       "from": "any-except-self",
       "enabled": true,
-      "promptTemplate": "A pull request was opened in repo `{{repoFullName}}`. Review test coverage of the diff. Post the result via `gh-as-agent pr review`. Full coverage: a short ack. Gaps: concrete `it(...)` / `test(...)` suggestions in the comment."
+      "promptTemplate": "A pull request was opened in repo `{{repoFullName}}`. Review test coverage of the diff. Post the result: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>`. Full coverage: a short ack. Gaps: concrete `it(...)` / `test(...)` suggestions in the comment."
     },
     {
       "id": "self-curation",

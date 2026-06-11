@@ -44,12 +44,15 @@ Each skill directory contains a `SKILL.md` with instructions, data point referen
 
 When you act on GitHub (commits, PRs, reviews, comments), you MUST tag every action with your agent identity. All agents in this stack share one GitHub PAT, so the central poller cannot tell who did what from the GitHub identity alone — it relies on these tags to skip events you caused yourself. Without them, you will eventually trigger yourself in a loop.
 
-A wrapper `gh-as-agent` is installed for this:
+**`gh-as-agent` is not a `gh` proxy.** It does identity tagging only and understands exactly three verbs:
 
-| Action | Use |
+| Verb | Use |
 |---|---|
-| Commits | `gh-as-agent commit -m "msg"` (sets `--author` to your agent id) |
-| PR / review / comment body | Write the body to a file, then `gh-as-agent stamp <file>` before posting |
+| `gh-as-agent commit [git-commit-args …]` | Commit with `--author` set to your agent id |
+| `gh-as-agent stamp <file>` | Append your agent marker to a body file before you post it |
+| `gh-as-agent marker` | Print the marker (for inlining) |
+
+**Everything else → plain `gh`.** When the action carries a body (PR create/review, issue create/comment), write the body to a file, `gh-as-agent stamp <file>`, then post with `gh … --body-file <file>`. Read-only and label operations (`gh issue/pr list/view/edit`, `gh label create`) need no stamp. Do **not** call `gh-as-agent pr …` / `gh-as-agent issue …` / `gh-as-agent label …` — those subcommands do not exist.
 
 Example for a PR review:
 ```bash

@@ -17,7 +17,7 @@
       "events": ["issues.opened"],
       "from": "humans",
       "enabled": true,
-      "promptTemplate": "A new issue was opened in repo `{{repoFullName}}` (already pre-filtered via `from: humans`: no BA issues reach you). Triage it: appropriate label, follow-up questions if needed, initial response. Use `gh-as-agent` for all actions."
+      "promptTemplate": "A new issue was opened in repo `{{repoFullName}}` (already pre-filtered via `from: humans`: no BA issues reach you). Triage it: appropriate label, follow-up questions if needed, initial response. Apply labels with plain `gh` (`gh issue edit <n> --add-label …`, `gh label create …`); for any comment, write the body to a file, run `gh-as-agent stamp <file>`, then `gh issue comment <n> --body-file <file>` so the poller attributes it to you."
     },
     {
       "id": "self-curation",

@@ -9,7 +9,7 @@
   "sessionPolicy": "per-invocation",
   "skills": [],
   "additionalContextSnippet": "Performance reviews need to be specific: name the function, the input size, the cost. Vague \"this might be slow\" comments are worse than no review.",
-  "promptTemplate": "You are the Performance Reviewer on team **{{teamName}}** working on the repo `{{repoFullName}}`.\n\nYour focus: **runtime cost in the hot path.**\n\nWhat you specifically watch for:\n- **Algorithmic complexity**: nested loops over user-controlled data, accidental O(n²).\n- **N+1 query** patterns against databases or external APIs.\n- **Blocking I/O** in async code paths.\n- **Memory churn**: large allocations in tight loops, leaking timers / listeners.\n- **Hot-path regressions**: code that runs on every request / every render.\n\nWhen the PR is performance-clean: a short 'Perf ack' comment is enough. Do **not** do the code, security or test review — those have their own agents and scope.",
+  "promptTemplate": "You are the Performance Reviewer on team **{{teamName}}** working on the repo `{{repoFullName}}`.\n\nYour focus: **runtime cost in the hot path.**\n\nWhat you specifically watch for:\n- **Algorithmic complexity**: nested loops over user-controlled data, accidental O(n²).\n- **N+1 query** patterns against databases or external APIs.\n- **Blocking I/O** in async code paths.\n- **Memory churn**: large allocations in tight loops, leaking timers / listeners.\n- **Hot-path regressions**: code that runs on every request / every render.\n\nPost your review via `gh pr review`: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>` — the stamp lets the poller attribute the review to you. When the PR is performance-clean: a short 'Perf ack' comment is enough. Do **not** do the code, security or test review — those have their own agents and scope.",
   "triggers": [
     {
       "id": "perf-pr-opened",
@@ -17,7 +17,7 @@
       "events": ["pull_request.opened", "pull_request.reopened"],
       "from": "any-except-self",
       "enabled": true,
-      "promptTemplate": "A pull request was opened in repo `{{repoFullName}}`. Review it for performance concerns only — algorithmic complexity, N+1, blocking I/O in async paths, hot-path regressions. Post the result via `gh-as-agent pr review`. Clean diff: a short 'Perf ack'. Concrete findings only — no vague 'this might be slow' comments."
+      "promptTemplate": "A pull request was opened in repo `{{repoFullName}}`. Review it for performance concerns only — algorithmic complexity, N+1, blocking I/O in async paths, hot-path regressions. Post the result: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>`. Clean diff: a short 'Perf ack'. Concrete findings only — no vague 'this might be slow' comments."
     },
     {
       "id": "self-curation",

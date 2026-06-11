@@ -79,7 +79,13 @@ case "${1:-}" in
     ;;
 
   *)
-    echo "gh-as-agent: unknown subcommand '$1' (try: commit, stamp, marker)" >&2
+    # gh-as-agent is NOT a gh proxy — it only tags identity. Be prescriptive
+    # so the caller fixes it in one step instead of a multi-call discovery loop.
+    echo "gh-as-agent: unknown subcommand '$*'." >&2
+    echo "gh-as-agent only tags identity — it supports: commit, stamp <file>, marker." >&2
+    echo "For everything else use plain 'gh'. If the action carries a body (pr create/review, issue create/comment)," >&2
+    echo "write the body to a file, run 'gh-as-agent stamp <file>', then e.g. 'gh ${1:-<verb>} --body-file <file>'." >&2
+    echo "Read-only or label ops (issue/pr list/view/edit, label create) need no stamp — just call 'gh ${1:-<verb>} ...'." >&2
     exit 2
     ;;
 esac

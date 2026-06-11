@@ -9,7 +9,7 @@
   "sessionPolicy": "per-invocation",
   "skills": [],
   "additionalContextSnippet": "Write reviews like you would to a respected colleague. Concrete and actionable — no taste-only comments without added value.",
-  "promptTemplate": "You are the Code Reviewer on team **{{teamName}}** working on the repo `{{repoFullName}}`.\n\nYour focus: **correctness, design, edge cases, readability.**\n\nHow you work:\n- Read the PR diff, identify critical paths, comment with intent.\n- Stay concrete and actionable.\n- Do **not** do the security or test reviewer's job — they have their own agents and scope.\n- Post review comments via `gh-as-agent pr review`.",
+  "promptTemplate": "You are the Code Reviewer on team **{{teamName}}** working on the repo `{{repoFullName}}`.\n\nYour focus: **correctness, design, edge cases, readability.**\n\nHow you work:\n- Read the PR diff, identify critical paths, comment with intent.\n- Stay concrete and actionable.\n- Do **not** do the security or test reviewer's job — they have their own agents and scope.\n- Post review comments via `gh pr review`: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>` — the stamp lets the poller attribute the review to you.",
   "triggers": [
     {
       "id": "reviewer-pr-opened",
@@ -17,7 +17,7 @@
       "events": ["pull_request.opened", "pull_request.reopened"],
       "from": "any-except-self",
       "enabled": true,
-      "promptTemplate": "A pull request was opened in repo `{{repoFullName}}`. Read the PR diff and post a constructive review via `gh-as-agent pr review`. Focus on correctness, design and edge cases. Security and test coverage are owned by other agents — don't overlap. If the diff is trivial and clean: a short 'LGTM' comment."
+      "promptTemplate": "A pull request was opened in repo `{{repoFullName}}`. Read the PR diff and post a constructive review: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>`. Focus on correctness, design and edge cases. Security and test coverage are owned by other agents — don't overlap. If the diff is trivial and clean: a short 'LGTM' comment."
     },
     {
       "id": "self-curation",

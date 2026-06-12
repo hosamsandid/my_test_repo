@@ -728,9 +728,17 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     """
     global _active_claude_proc, _user_stop_requested
 
-    args = _base_claude_args(prompt, _build_memory_hint(blueprint_id), _resolve_model_arg())
+    model_arg = _resolve_model_arg()
+    args = _base_claude_args(prompt, _build_memory_hint(blueprint_id), model_arg)
     if resume_id:
         args = ["--resume", resume_id, *args]
+    # Surface the resolved model so a missing/blank AGENT_DEFAULT_MODEL (a prime
+    # suspect for silent failures) is visible in the container logs (#186).
+    print(
+        f"[Runner] claude invoke: model={model_arg or '(CLI default — AGENT_DEFAULT_MODEL unset)'}, "
+        f"resume={'yes' if resume_id else 'no'}",
+        file=sys.stderr,
+    )
 
     # HOME is the persistent agent workdir so claude's session files (under
     # $HOME/.claude/projects/...) survive container restarts. The default
@@ -1994,8 +2002,23 @@ async def run_dm_listener() -> None:
             finally:
                 _bump_active(-1)
 
+            # Guard empty/whitespace output: posting a blank message looks like
+            # "no reply" to the user. Substitute a visible notice and log it so
+            # a misconfigured model id / interrupted run is diagnosable (#186).
+            reply = result if (result and result.strip()) else None
+            if reply is None:
+                print(
+                    f"[Runner:{agent_id}] Claude returned no text — posting fallback "
+                    f"notice (check model id / container logs)",
+                    file=sys.stderr,
+                )
+                reply = (
+                    "_(The agent produced no output. This usually means the model id is "
+                    "misconfigured or the run was interrupted — check the agent container logs.)_"
+                )
+
             try:
-                event_id = await send_formatted(room_id, result)
+                event_id = await send_formatted(room_id, reply)
             except Exception as exc:
                 _append_event(room_id, {
                     "type": "error", "correlationId": correlation_id,
@@ -2009,7 +2032,7 @@ async def run_dm_listener() -> None:
                 "correlationId": correlation_id,
                 "eventId": event_id,
             })
-            print(f"[Runner:{agent_id}] Posted direct response ({len(result)} chars)",
+            print(f"[Runner:{agent_id}] Posted direct response ({len(reply)} chars)",
                   file=sys.stderr)
 
         except subprocess.CalledProcessError as err:
@@ -2106,15 +2129,30 @@ async def run_dm_listener() -> None:
             claim_loop = None
 
     _DM_LOOP_RUNNING = True
+    sync_fail_streak = 0
     try:
         while not _shutdown.is_set():
             try:
                 await client.sync(timeout=30000, full_state=False,
                                   since=client.next_batch)
+                sync_fail_streak = 0
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                print(f"[Runner:{agent_id}] sync error: {exc}", file=sys.stderr)
+                sync_fail_streak += 1
+                # Name the homeserver on the first failure and periodically
+                # after. A persistent sync error here almost always means the
+                # agent cannot reach Conduwuit (DNS/network) — e.g. the Seam #2
+                # per-agent-network hostname rewrite is wrong (#186).
+                if sync_fail_streak == 1 or sync_fail_streak % 15 == 0:
+                    print(
+                        f"[Runner:{agent_id}] sync error (x{sync_fail_streak}) against "
+                        f"{homeserver}: {exc} — check Conduwuit reachability/DNS "
+                        f"from this container",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(f"[Runner:{agent_id}] sync error: {exc}", file=sys.stderr)
                 await asyncio.sleep(2)
     finally:
         _DM_LOOP_RUNNING = False

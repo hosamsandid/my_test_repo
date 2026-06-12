@@ -210,7 +210,7 @@ function stopAgentSession(id, sessionId) {
 
 async function evictStaleAgentContainers() {
   if (process.env.EVICT_STALE_AGENTS === '0') return;
-  const image = process.env.AGENT_IMAGE || 'ace-agent:latest';
+  const image = process.env.AGENT_IMAGE || 'as-agent:latest';
   try {
     const filters = encodeURIComponent(JSON.stringify({ ancestor: [image] }));
     const list = await libpodRequest('GET', `/containers/json?all=true&filters=${filters}`);

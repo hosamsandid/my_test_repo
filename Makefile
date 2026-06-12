@@ -6,7 +6,7 @@
 #   make down      # stop the stack
 #   make restart   # down + up
 #   make build     # rebuild orchestrator image
-#   make agent-image # build the per-agent container image (ace-agent:latest)
+#   make agent-image # build the per-agent container image (as-agent:latest)
 #   make update    # git pull + down + up (pulls latest, restarts with rebuild)
 #   make ps        # show container status
 #   make logs      # follow logs of all stack containers
@@ -48,7 +48,7 @@ build:
 	$(COMPOSE) -f $(COMPOSE_FILE) build orchestrator
 
 agent-image:
-	podman build -t ace-agent:latest -f agent-image/Dockerfile agent-image/
+	podman build -t as-agent:latest -f agent-image/Dockerfile agent-image/
 
 update:
 	@echo "Pulling latest changes from git..."

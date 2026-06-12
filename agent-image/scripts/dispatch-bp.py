@@ -52,7 +52,7 @@ class DispatchConfig:
     bp_prefix: str
     execution_mode: str = "worktree"
     push: bool = False
-    image: str = "localhost/ace-agent:latest"
+    image: str = "localhost/as-agent:latest"
     cpus: int | None = None
     memory: str | None = None
     timeout: int = 3600
@@ -628,7 +628,7 @@ def main():
     )
     parser.add_argument(
         "--image",
-        default="localhost/ace-agent:latest",
+        default="localhost/as-agent:latest",
         help="Podman image for container modes",
     )
     parser.add_argument(

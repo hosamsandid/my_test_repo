@@ -437,18 +437,20 @@ def _write_session_pointer(room_id: str, session_id: str) -> None:
     if not session_id:
         return
     p = _session_pointer_file(room_id)
+    updated_at = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(
-            json.dumps(
-                {"sessionId": session_id,
-                 "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())},
-                indent=2,
-            ),
+            json.dumps({"sessionId": session_id, "updatedAt": updated_at}, indent=2),
             encoding="utf-8",
         )
     except Exception as exc:
         print(f"[Runner] writeSessionPointer: {exc}", file=sys.stderr)
+    # Mirror to the control plane (#185) so the admin reads it under per-agent
+    # volume isolation. Best-effort, off the hot path.
+    pc = _get_push_client()
+    if pc:
+        pc.push_pointer(room_id, session_id, updated_at)
 
 
 def _clear_session_pointer(room_id: str) -> None:
@@ -456,6 +458,9 @@ def _clear_session_pointer(room_id: str) -> None:
         _session_pointer_file(room_id).unlink(missing_ok=True)
     except Exception:
         pass
+    pc = _get_push_client()
+    if pc:
+        pc.push_pointer(room_id, "", "")  # clears the mirrored copy too
 
 
 # ---- JSONL session log (schema must match orchestrator/session-log.js) ----
@@ -474,6 +479,11 @@ def _session_log_file(room_id: str) -> Path:
 # source of truth we re-read from — so the session-log push is byte-exact and
 # the admin viewer's byte-cursor (?since=<byte>) contract stays valid.
 _PUSH_ENABLED = os.environ.get("AEE_PUSH_STATE", "1") != "0"
+# Phase 2 (#185): with per-agent volume isolation the orchestrator/admin can no
+# longer write control→agent state (triggers, pending-triggers, session reset)
+# into this agent's volume, so we PULL it over HTTP instead of reading the local
+# file. Off (the default) keeps the local-file path, byte-identical to today.
+_PER_AGENT_VOLUME = os.environ.get("AEE_PER_AGENT_VOLUME") == "1"
 
 
 class _StatePushClient:
@@ -496,6 +506,12 @@ class _StatePushClient:
     def mark_session_dirty(self, room_id: str) -> None:
         self._q.put(("session", room_id))
 
+    def push_pointer(self, room_id: str, session_id: str | None,
+                     updated_at: str | None) -> None:
+        # session_id="" / None means "clear" (drops the admin's Session-aktiv
+        # badge after a reset). Last write per room wins within a debounce tick.
+        self._q.put(("pointer", (room_id, session_id or "", updated_at or "")))
+
     def _run(self) -> None:
         while True:
             try:
@@ -513,22 +529,36 @@ class _StatePushClient:
                     break
             status_data = None
             dirty: list[str] = []
+            pointers: dict[str, tuple[str, str]] = {}
             for kind, payload in items:
                 if kind == "status":
                     status_data = payload
                 elif kind == "session" and payload not in dirty:
                     dirty.append(payload)  # type: ignore[arg-type]
+                elif kind == "pointer":
+                    room_id, sid, upd = payload  # type: ignore[misc]
+                    pointers[room_id] = (sid, upd)
             try:
                 if status_data is not None:
                     self._post_status(status_data)
                 for room_id in dirty:
                     self._flush_session(room_id)
+                for room_id, (sid, upd) in pointers.items():
+                    self._post_pointer(room_id, sid, upd)
             except Exception as exc:  # never let the push thread die
                 print(f"[Runner] state-push tick failed: {exc}", file=sys.stderr)
 
     def _post_status(self, data: dict) -> None:
         body = json.dumps(data).encode("utf-8")
         self._post(f"/internal/agents/{self._agent_id}/status", body)
+
+    def _post_pointer(self, room_id: str, session_id: str, updated_at: str) -> None:
+        body = json.dumps({
+            "roomId": room_id,
+            "sessionId": session_id,
+            "updatedAt": updated_at,
+        }).encode("utf-8")
+        self._post(f"/internal/agents/{self._agent_id}/session-pointer", body)
 
     def _flush_session(self, room_id: str) -> None:
         p = _session_log_file(room_id)
@@ -1172,6 +1202,7 @@ class TriggerScheduler:
 
         self._cron_tasks: dict[str, dict] = {}  # triggerId -> {"task": Task, "expr": str}
         self._running: set[str] = set()
+        self._fired_once: set[str] = set()  # once-triggers already fired this lifetime (#185)
         self._reload_event = asyncio.Event()
         self._shutdown_event = asyncio.Event()
         self._sync_task: asyncio.Task | None = None
@@ -1244,7 +1275,59 @@ class TriggerScheduler:
                 print(f"[Runner:{self._agent_id}] sync error: {exc}",
                       file=sys.stderr)
 
+    async def _pull_triggers(self) -> None:
+        """When isolated, refresh the local triggers.json cache from the
+        orchestrator's canonical copy. No-op on the shared volume, where the
+        admin/orchestrator already write the agent's own file. On a transient
+        failure we keep the last-synced cache rather than dropping schedules."""
+        if not _PER_AGENT_VOLUME:
+            return
+        status, body = await asyncio.to_thread(
+            self._orch_get,
+            f"/internal/agents/{urllib.parse.quote(self._agent_id, safe='')}/triggers",
+        )
+        if status != 200:
+            return
+        try:
+            data = json.loads(body)
+        except Exception:
+            return
+        triggers = data.get("triggers") if isinstance(data, dict) else data
+        if isinstance(triggers, list):
+            _save_triggers(triggers)
+
+    async def _pull_config_dm(self) -> None:
+        """When isolated, refresh the local config.json + dm-room.json caches
+        from the orchestrator. Both are control-plane authored and canonical on
+        the pool subpath, which an isolated agent can't read — so we pull them
+        and the existing local readers (_load_dm_agent_config / _load_dm_room_id)
+        keep working unchanged. No-op on the shared volume; a failed fetch keeps
+        the last-synced cache."""
+        if not _PER_AGENT_VOLUME:
+            return
+        aid = urllib.parse.quote(self._agent_id, safe='')
+        status, body = await asyncio.to_thread(self._orch_get, f"/internal/agents/{aid}/config")
+        if status == 200:
+            try:
+                data = json.loads(body)
+                cfg = data.get("config") if isinstance(data, dict) else None
+                if isinstance(cfg, dict):
+                    _atomic_write_json(_agent_workdir() / "config.json", cfg)
+            except Exception:
+                pass
+        status, body = await asyncio.to_thread(self._orch_get, f"/internal/agents/{aid}/dm-room")
+        if status == 200:
+            try:
+                data = json.loads(body)
+                dm = data.get("dmRoom") if isinstance(data, dict) else None
+                if isinstance(dm, dict) and dm.get("roomId"):
+                    _atomic_write_json(_agent_workdir() / "dm-room.json", dm)
+            except Exception:
+                pass
+
     async def _sync(self) -> None:
+        await self._pull_triggers()
+        await self._pull_config_dm()
         triggers = _load_triggers()
         active_ids: set[str] = set()
 
@@ -1298,11 +1381,25 @@ class TriggerScheduler:
                     continue
                 now = datetime.now(tz=_TRIGGER_TZ)
                 if now >= fire_at:
+                    # Guard against a re-fire if a pull re-introduces this once
+                    # (e.g. the consumed-report below lagged or failed). #185
+                    if tid in self._fired_once:
+                        continue
+                    self._fired_once.add(tid)
                     # Fire and remove. Spawn as task so a slow Claude run
                     # doesn't block the sync loop.
                     asyncio.create_task(self._execute(dict(trigger)))
                     remaining = [t for t in _load_triggers() if t.get("id") != tid]
                     _save_triggers(remaining)
+                    if _PER_AGENT_VOLUME:
+                        # Tell the orchestrator to drop it from the canonical copy
+                        # so the next pull doesn't bring it back.
+                        asyncio.create_task(asyncio.to_thread(
+                            self._orch_post_json,
+                            f"/internal/agents/{urllib.parse.quote(self._agent_id, safe='')}"
+                            f"/triggers/{urllib.parse.quote(tid, safe='')}/consumed",
+                            {},
+                        ))
                     print(f"[Runner:{self._agent_id}] One-shot fired and removed: {tid}",
                           file=sys.stderr)
                 # Future-dated once-triggers fall through to the next 60 s
@@ -1346,6 +1443,44 @@ class TriggerScheduler:
         except asyncio.CancelledError:
             return
 
+    # -- orchestrator HTTP (control→agent pull channel, #185) ----------------
+
+    @staticmethod
+    def _orch_get(route: str) -> tuple[int, str]:
+        """Blocking GET against the orchestrator; run via asyncio.to_thread."""
+        url = f"{ORCHESTRATOR_INTERNAL_URL.rstrip('/')}{route}"
+        req = urllib.request.Request(url, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            try:
+                return exc.code, exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                return exc.code, str(exc)
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            return 0, str(exc)
+
+    @staticmethod
+    def _orch_post_json(route: str, payload: dict) -> tuple[int, str]:
+        """Blocking JSON POST against the orchestrator; run via asyncio.to_thread."""
+        url = f"{ORCHESTRATOR_INTERNAL_URL.rstrip('/')}{route}"
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            try:
+                return exc.code, exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                return exc.code, str(exc)
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            return 0, str(exc)
+
     # -- pending queue (http / github-event) ---------------------------------
 
     async def _pending_loop(self) -> None:
@@ -1360,18 +1495,36 @@ class TriggerScheduler:
             except asyncio.TimeoutError:
                 pass
 
-    async def _process_pending(self) -> None:
+    async def _drain_pending(self) -> list:
+        """Read-and-clear the pending queue. With per-agent volume isolation the
+        orchestrator owns the queue and we pull it over HTTP (it clears on read);
+        otherwise we read+clear our own local file, byte-identical to before."""
+        if _PER_AGENT_VOLUME:
+            status, body = await asyncio.to_thread(
+                self._orch_get,
+                f"/internal/agents/{urllib.parse.quote(self._agent_id, safe='')}/pending-drain",
+            )
+            if status != 200:
+                if status != 0:  # 0 == orchestrator unreachable; stay quiet, retry next tick
+                    print(f"[Runner:{self._agent_id}] pending-drain HTTP {status}",
+                          file=sys.stderr)
+                return []
+            try:
+                data = json.loads(body)
+            except Exception:
+                return []
+            entries = data.get("entries") if isinstance(data, dict) else data
+            return entries if isinstance(entries, list) else []
+
         pending_path = _agent_workdir() / _PENDING_FILENAME
         if not pending_path.exists():
-            return
+            return []
         try:
-            raw = pending_path.read_text(encoding="utf-8")
-            entries = json.loads(raw)
+            entries = json.loads(pending_path.read_text(encoding="utf-8"))
         except Exception:
-            return
+            return []
         if not isinstance(entries, list) or not entries:
-            return
-
+            return []
         # Clear before firing so a slow run can't double-process the queue
         # (matches agent-runner.js:501).
         try:
@@ -1379,6 +1532,12 @@ class TriggerScheduler:
         except Exception as exc:
             print(f"[Runner:{self._agent_id}] pending clear failed: {exc}",
                   file=sys.stderr)
+        return entries
+
+    async def _process_pending(self) -> None:
+        entries = await self._drain_pending()
+        if not entries:
+            return
 
         triggers = _load_triggers()
 
@@ -1386,6 +1545,15 @@ class TriggerScheduler:
             if not isinstance(entry, dict):
                 continue
             kind = entry.get("kind")
+            if kind == "session-reset":
+                # Control→agent reset command (#185): the admin can't delete our
+                # pointer on an isolated volume, so it asks us to drop it.
+                rid = entry.get("roomId")
+                if rid:
+                    _clear_session_pointer(rid)
+                    print(f"[Runner:{self._agent_id}] session-reset for {rid}",
+                          file=sys.stderr)
+                continue
             if kind == "handover-dm":
                 print(f"[Runner:{self._agent_id}] handover-dm from queue",
                       file=sys.stderr)

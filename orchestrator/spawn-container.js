@@ -277,10 +277,16 @@ async function ensurePerAgentVolume(id) {
 // SELinux host doesn't deny the bind (no-op on macOS).
 async function seedPerAgentVolume(id) {
   const volName = perAgentVolumeName(id);
+  // Fail-closed sentinel (#185 item 7): after seeding, the dedicated volume MUST
+  // carry config.json (written to the pool subpath by saveAgentConfig before
+  // every spawn). If it's missing the copy produced an empty/corrupt volume —
+  // exit nonzero so seedPerAgentVolume throws and aborts the spawn before the
+  // agent container ever starts (never boot against an un-seeded volume).
   const seedScript =
     'if [ -z "$(ls -A /dst 2>/dev/null)" ]; then ' +
     'cp -a /src/. /dst/ && echo "[seed] populated /dst from pool subpath agents/' + id + '"; ' +
-    'else echo "[seed] /dst already populated — skipping"; fi';
+    'else echo "[seed] /dst already populated — skipping"; fi; ' +
+    'if [ ! -f /dst/config.json ]; then echo "[seed] FATAL: /dst missing config.json after seed" >&2; exit 3; fi';
   const createBody = {
     image: AGENT_IMAGE,
     entrypoint: ['/bin/sh', '-c'],
@@ -308,6 +314,101 @@ async function seedPerAgentVolume(id) {
     throw new Error(`seed helper for ${id} exited ${code}`);
   }
   console.log(`[spawn-container] seeded dedicated volume ${volName}`);
+}
+
+// Idempotent teardown (#185 item 6): remove the agent's dedicated volume on
+// delete / deactivate. 404 / "no such volume" is success (already gone). Without
+// this the dedicated volume leaks, and — because seedPerAgentVolume only copies
+// into an EMPTY /dst — a deactivated agent that keeps its volume would silently
+// reactivate against stale state instead of re-seeding.
+async function removePerAgentVolume(id) {
+  const name = perAgentVolumeName(id);
+  const r = await libpodRequest('DELETE', `/volumes/${name}?force=true`);
+  if (r.status >= 300 && r.status !== 404) {
+    const blob = typeof r.body === 'string' ? r.body : JSON.stringify(r.body || '');
+    if (!/no such volume|no volume with/i.test(blob)) {
+      throw new Error(`per-agent volume remove ${name}: status=${r.status} body=${blob}`);
+    }
+  }
+  return name;
+}
+
+// Targeted re-seed (#185 item 5): copy NAMED control-plane files from the pool
+// subpath (/src) into the agent's ALREADY-POPULATED dedicated volume (/dst),
+// without clobbering agent-written state (memory/, the git tree, sessions/).
+// Used when a prompt/skill edit rewrites the pool subpath after the one-time
+// seedPerAgentVolume has already run. `paths` are workspace-relative
+// (e.g. 'CLAUDE.md', 'AGENT-PROMPT.md', 'skills/foo'). No-op (skipped) when the
+// dedicated volume doesn't exist yet — never resurrect a torn-down volume.
+async function reseedPerAgentVolume(id, paths) {
+  // Path safety is load-bearing — these become filesystem paths inside the
+  // helper. Allowlist only; reject traversal and absolute paths. (Even so we
+  // pass them as positional args below, not interpolated into the script.) The
+  // ':' is allowed because namespaced skill names (e.g. skills/ace:brief — see
+  // SKILL_NAME_RE) use it; it carries no shell-metachar risk since every $p is
+  // quoted and rooted under /src or /dst.
+  const SAFE = /^[A-Za-z0-9._:/-]+$/;
+  const all = Array.isArray(paths) ? paths : [];
+  const valid = all.filter(
+    (p) => typeof p === 'string' && p.length > 0 && p.length <= 256 &&
+      SAFE.test(p) && !p.includes('..') && !p.startsWith('/'),
+  );
+  // Surface anything we dropped so a silently-unmirrored file (e.g. a skill name
+  // the allowlist doesn't cover) is observable rather than a success no-op.
+  if (valid.length !== all.length) {
+    const rejected = all.filter((p) => !valid.includes(p));
+    console.warn(`[spawn-container] reseed ${id}: dropped unsafe path(s): ${JSON.stringify(rejected)}`);
+  }
+  if (valid.length === 0) return { skipped: 'no-paths' };
+
+  const volName = perAgentVolumeName(id);
+  // Inspect rather than create: a missing volume means the agent isn't
+  // provisioned, so reseeding is a no-op (creating it here would resurrect a
+  // volume that delete/deactivate just tore down).
+  const insp = await libpodRequest('GET', `/volumes/${volName}/json`);
+  if (insp.status === 404) return { skipped: 'no-volume' };
+  if (insp.status >= 300) {
+    throw new Error(`reseed inspect ${volName}: status=${insp.status} body=${JSON.stringify(insp.body)}`);
+  }
+
+  // Per path: skip if absent in /src; replace dirs wholesale (rm -rf + cp, a
+  // sub-second non-atomic window matching the existing seed's risk); files via
+  // cp-to-temp + intra-/dst rename (atomic). Paths arrive as "$@" positionals.
+  const reseedScript =
+    'set -e; for p in "$@"; do ' +
+    'if [ ! -e "/src/$p" ]; then echo "[reseed] skip (absent in /src): $p"; continue; fi; ' +
+    'mkdir -p "/dst/$(dirname "$p")"; ' +
+    'if [ -d "/src/$p" ]; then rm -rf "/dst/$p" && cp -a "/src/$p" "/dst/$p" && echo "[reseed] dir $p"; ' +
+    'else cp -a "/src/$p" "/dst/$p.tmp.$$" && mv -f "/dst/$p.tmp.$$" "/dst/$p" && echo "[reseed] file $p"; fi; ' +
+    'done';
+  const createBody = {
+    image: AGENT_IMAGE,
+    entrypoint: ['/bin/sh', '-c'],
+    command: [reseedScript, 'reseed', ...valid],
+    volumes: [
+      { Name: WORKSPACE_VOLUME, Dest: '/src', SubPath: `agents/${id}` },
+      { Name: volName, Dest: '/dst' },
+    ],
+    labels: { [AGENT_LABEL_KEY]: `reseed-${id}` },
+    security_opt: ['label=disable'],
+    no_new_privileges: true,
+    remove: true,
+  };
+  const cr = await libpodRequest('POST', '/containers/create', createBody);
+  if (cr.status >= 300 || !cr.body || !cr.body.Id) {
+    throw new Error(`reseed helper create for ${id}: status=${cr.status} body=${JSON.stringify(cr.body)}`);
+  }
+  const cid = cr.body.Id;
+  const sr = await libpodRequest('POST', `/containers/${cid}/start`);
+  if (sr.status >= 300) {
+    throw new Error(`reseed helper start for ${id}: status=${sr.status} body=${JSON.stringify(sr.body)}`);
+  }
+  const code = await waitForExit(cid);
+  if (typeof code === 'number' && code !== 0) {
+    throw new Error(`reseed helper for ${id} exited ${code}`);
+  }
+  console.log(`[spawn-container] reseeded ${valid.length} path(s) into ${volName}: ${valid.join(', ')}`);
+  return { reseeded: valid };
 }
 
 function spawnContainer({ id, env }) {
@@ -453,4 +554,4 @@ function spawnContainer({ id, env }) {
   return handle;
 }
 
-module.exports = { spawnContainer, libpodRequest };
+module.exports = { spawnContainer, libpodRequest, removePerAgentVolume, reseedPerAgentVolume };

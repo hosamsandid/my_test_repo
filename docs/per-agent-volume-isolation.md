@@ -103,42 +103,75 @@ needed** in Phase 1.
 | `AEE_PUSH_STATE` | on (`!= "0"`) | agent pushes status + session-log to the orchestrator |
 | `AEE_PER_AGENT_VOLUME` | off (`== "1"` to enable) | dedicated volume per agent instead of a pool subpath |
 
-Keep `AEE_PER_AGENT_VOLUME` **off** until Phase 2 lands — separating the volume
-while the control→agent surfaces still read the shared filesystem would break
-trigger CRUD, pending-triggers delivery, and config propagation.
+Keep `AEE_PER_AGENT_VOLUME` **off** until Phase 2 fully lands. Triggers,
+pending-triggers, the session pointer/reset, and config/dm-room propagation
+already work behind the flag (see *Phase 2 — implemented behind the flag*), but
+re-seed on config change and volume teardown do not yet — turning the flag on now
+would leave those surfaces broken for an isolated agent.
 
-## Phase 2 backlog (deferred)
+## Phase 2 — implemented behind the flag
 
-Each still reads/writes the agent volume directly; isolating the volume requires
-a control→agent channel first.
+The control→agent channel is **agent-pull**: the orchestrator owns the canonical
+copy (on `/control` when `AEE_PER_AGENT_VOLUME` is on, on the pool subpath
+otherwise) and the agent dials out for it — same topology as the Phase-1 push.
+With the flag **off** every path resolves to the pool subpath, byte-identical to
+before. Resolvers: `controlOrPoolPath()` (orchestrator, flag-gated read+write) and
+`controlOrAgentPath()` (admin, existence-based, prefers `/control`).
 
-- **`triggers.json`** — admin CRUD (`api.js`: `POST/PUT/DELETE
-  /api/agents/:id/triggers...`), admin read (`GET /api/agents/:id`), orchestrator
-  disable/deactivate preflight reads, agent reads (`agent-entrypoint.py`
-  `_load_triggers`). Needs a control→agent push/command + the orchestrator owning
-  the canonical copy.
-- **`pending-triggers.json`** — the multi-writer queue: github-poller
-  (`github-poller.js` enqueue + throttle), admin handover
-  (`api.js POST /api/teams/:teamId/handover`), hook server
-  (`orchestrator.js POST /hooks/:agentId/:hookId`); drained by the agent. The
-  hardest item — make the orchestrator own the queue and deliver to the agent.
-- **`config.json` / `dm-room.json`** — control-plane authored, agent-read: needs
-  a seed/command channel to the isolated agent.
-- **session pointer `<roomId>.current.json`** — agent-authored, admin-read: fold
-  into the session push channel.
+- **session pointer `<roomId>.current.json`** — agent mirrors it to `/control`
+  via `POST /internal/agents/:id/session-pointer` (reuses `_StatePushClient`,
+  gated by `AEE_PUSH_STATE`). Admin reads (`hasSession`, `GET …/session/:roomId/
+  current`) repointed to `controlOrAgentPath`. Reset (`DELETE …/current`) calls
+  `POST /internal/agents/:id/session-reset`, which drops the mirror and — when
+  isolated — enqueues a `session-reset` command so the agent clears its own
+  `--resume` pointer.
+- **`pending-triggers.json`** — the orchestrator now owns the queue. All writers
+  funnel through `enqueuePending()`: hook server, bp-event router, github-poller
+  (injected callback), and admin handover (routed through
+  `POST /internal/agents/:id/enqueue-pending` so the queue stays single-writer).
+  The agent drains via `GET /internal/agents/:id/pending-drain` (atomic
+  read-and-clear) when isolated, local read+clear otherwise.
+- **`triggers.json`** — canonical copy via `controlOrPoolPath`
+  (`loadTriggers`/`saveTriggers`, both disable/deactivate preflights, hook-server
+  read, github-poller subscriber scan all repointed). Agent pulls via
+  `GET /internal/agents/:id/triggers` into a local cache each sync tick / on
+  `SIGUSR2`; admin CRUD routes writes through `PUT /internal/agents/:id/triggers`
+  (persist + `SIGUSR2`); one-shot `once` removal reports back via
+  `POST …/triggers/:tid/consumed`, with an in-memory `_fired_once` guard against
+  double-fire on a lagging report.
+- **`config.json` / `dm-room.json`** — control-plane authored, agent-read, and
+  **canonical on the pool subpath** (admin/orchestrator own them there; they're
+  not moved to `/control`). The orchestrator serves its pool copies via
+  `GET /internal/agents/:id/config` and `…/dm-room`; the agent refreshes its
+  local cache in the same `_sync` loop (`_pull_config_dm`, every 60s / on
+  `SIGUSR2`) so the existing readers (`_load_dm_agent_config`,
+  `_load_dm_room_id`) work unchanged. Admin config edits and DM-room creation
+  fire `notifyAgentReload` (→ `SIGUSR2`) for prompt refresh. At first
+  provisioning the seed-helper's `cp -a` already copies the current
+  `config.json`/`dm-room.json` into the dedicated volume, so startup reads are
+  correct; the pull only covers later edits.
+
+## Phase 2 backlog (still deferred)
+
 - **CLAUDE.md / AGENT-PROMPT.md / `.claude/settings.json` / memory / skills / git
   clones** — with the volume flag on these are handled by the seed helper at
   provisioning time; the only Phase-2 work is **re-seed on config change**.
 - **Volume teardown** — delete/deactivate currently wipes the pool subpath; with
   per-agent volumes the dedicated volume must also be removed.
+- **Fail-closed guard** — `startAgentProcess` refuses to spawn unless the pool
+  subpath exists; with full isolation + no pool seeding this must instead confirm
+  the dedicated volume is provisioned + seeded.
 
-When all of the above land, flip `AEE_PER_AGENT_VOLUME` on by default and drop
-the agent-dir read fallbacks.
+When these land, flip `AEE_PER_AGENT_VOLUME` on by default and drop the agent-dir
+read fallbacks.
 
-## Known Phase-1 limitations (flag ON)
+## Known limitations (flag ON)
 
-- Admin-side trigger/config edits do not reach an isolated agent (Phase 2).
-- The dedicated volume is not torn down on delete/deactivate yet (Phase 2).
+- Trigger edits, pending-triggers delivery, session reset, and config/dm-room
+  edits now reach an isolated agent (Phase 2, above).
+- The dedicated volume is not torn down on delete/deactivate yet (deferred).
+- Re-seed on config change (CLAUDE.md / skills / MCP) does not yet reach an
+  isolated agent — only the first provisioning seed does (deferred).
 - The SSE stream resolves its file path once at connect; with the flag on, a
   brand-new room connected to before the agent's first push has no readable
   source until the first event arrives.

@@ -27,6 +27,19 @@ const WORKSPACE_ISOLATION = process.env.AEE_WORKSPACE_ISOLATION !== '0';
 // snapshots under /root/.claude/projects are lost on every container restart.
 const CLAUDE_HOME_VOLUME = process.env.AGENT_CLAUDE_HOME_VOLUME ||
   `${COMPOSE_PROJECT}_claude-home`;
+// Seam #3+ (#185): TRUE per-agent volume isolation. When AEE_PER_AGENT_VOLUME=1
+// each agent gets a DEDICATED podman volume (`<project>_agent-<id>`) mounted at
+// /workspace/agents/<id> with NO SubPath, instead of a subpath of the shared
+// pool volume. Default OFF (explicit opt-in, opposite polarity to
+// AEE_WORKSPACE_ISOLATION) — the remaining control-plane readers (triggers,
+// pending-triggers, config) must move to push first (Phase 2). The orchestrator
+// still seeds the pool subpath `agents/<id>` as today; on first spawn we copy
+// that into the fresh dedicated volume (the seed helper below).
+const PER_AGENT_VOLUME = process.env.AEE_PER_AGENT_VOLUME === '1';
+function perAgentVolumeName(id) {
+  const safe = String(id).replace(/[^a-zA-Z0-9_.-]/g, '_');
+  return `${COMPOSE_PROJECT}_agent-${safe}`;
+}
 // Container hardening (conservative slice). Memory accepts a human suffix
 // (e.g. "2g", "512m"); 0/empty disables that limit.
 function parseBytes(s) {
@@ -238,6 +251,65 @@ async function ensurePerAgentNetwork(agentId) {
   return name;
 }
 
+// ── Seam #3+ helpers — per-agent volume (#185) ──────────────────────────────
+
+// Idempotent: create the dedicated volume; "already exists" is success.
+async function ensurePerAgentVolume(id) {
+  const name = perAgentVolumeName(id);
+  const r = await libpodRequest('POST', '/volumes/create', { name });
+  if (r.status >= 300 && r.status !== 409) {
+    const blob = typeof r.body === 'string' ? r.body : JSON.stringify(r.body || '');
+    if (!/exists/i.test(blob)) {
+      throw new Error(`per-agent volume create ${name}: status=${r.status} body=${blob}`);
+    }
+  }
+  return name;
+}
+
+// Seed a fresh per-agent volume from the orchestrator-seeded pool subpath. The
+// orchestrator cannot add a mount to its own running container, so we run a
+// short-lived helper (the agent image is already present — no extra pull) that
+// mounts BOTH the pool subpath (/src) and the dedicated volume (/dst) and
+// copies once. Idempotent: only copies when /dst is empty, so a respawn never
+// clobbers agent-written state. This is the libpod analogue of a K8s init
+// container. Fatal on failure — we must not spawn an agent against an empty
+// volume. `security_opt: label=disable` matches the compose services so an
+// SELinux host doesn't deny the bind (no-op on macOS).
+async function seedPerAgentVolume(id) {
+  const volName = perAgentVolumeName(id);
+  const seedScript =
+    'if [ -z "$(ls -A /dst 2>/dev/null)" ]; then ' +
+    'cp -a /src/. /dst/ && echo "[seed] populated /dst from pool subpath agents/' + id + '"; ' +
+    'else echo "[seed] /dst already populated — skipping"; fi';
+  const createBody = {
+    image: AGENT_IMAGE,
+    entrypoint: ['/bin/sh', '-c'],
+    command: [seedScript],
+    volumes: [
+      { Name: WORKSPACE_VOLUME, Dest: '/src', SubPath: `agents/${id}` },
+      { Name: volName, Dest: '/dst' },
+    ],
+    labels: { [AGENT_LABEL_KEY]: `seed-${id}` },
+    security_opt: ['label=disable'],
+    no_new_privileges: true,
+    remove: true,
+  };
+  const cr = await libpodRequest('POST', '/containers/create', createBody);
+  if (cr.status >= 300 || !cr.body || !cr.body.Id) {
+    throw new Error(`seed helper create for ${id}: status=${cr.status} body=${JSON.stringify(cr.body)}`);
+  }
+  const cid = cr.body.Id;
+  const sr = await libpodRequest('POST', `/containers/${cid}/start`);
+  if (sr.status >= 300) {
+    throw new Error(`seed helper start for ${id}: status=${sr.status} body=${JSON.stringify(sr.body)}`);
+  }
+  const code = await waitForExit(cid);
+  if (typeof code === 'number' && code !== 0) {
+    throw new Error(`seed helper for ${id} exited ${code}`);
+  }
+  console.log(`[spawn-container] seeded dedicated volume ${volName}`);
+}
+
 function spawnContainer({ id, env }) {
   const handle = new EventEmitter();
   handle.stdout = new PassThrough();
@@ -304,21 +376,34 @@ function spawnContainer({ id, env }) {
     : Promise.resolve(AGENT_NETWORK);
 
   networkPromise
-    .then((networkName) => {
+    .then(async (networkName) => {
       const isolated = PER_AGENT_NETWORK_ENABLED && networkName !== AGENT_NETWORK;
       console.log(
         `[spawn-container] ${id} -> network ${networkName} ` +
         `(${isolated ? 'isolated' : PER_AGENT_NETWORK_ENABLED ? 'shared-fallback' : 'shared'})`,
       );
-      // Seam #3: isolate the agent to its own workspace subdir + give it a
-      // persistent Claude home. The SubPath targets (`agents/<id>`,
-      // `homes/<id>`) are pre-created by the orchestrator before spawn, so the
-      // mount never has to create them. The destination path for the workspace
-      // is kept identical to the legacy layout (`/workspace/agents/<id>`) so
-      // cwd and absolute paths in seeded memory are unaffected.
-      const volumes = WORKSPACE_ISOLATION
+      // Seam #3: isolate the agent to its own workspace + give it a persistent
+      // Claude home. The destination path (`/workspace/agents/<id>`) is kept
+      // identical across all modes so cwd and absolute paths in seeded memory
+      // are unaffected.
+      //   - PER_AGENT_VOLUME (#185): a DEDICATED volume, no SubPath. Provision +
+      //     one-time seed from the pool subpath first (fatal on failure — never
+      //     spawn against an empty volume).
+      //   - WORKSPACE_ISOLATION (default): a SubPath of the shared pool volume,
+      //     pre-created by the orchestrator before spawn.
+      //   - neither: legacy whole-pool mount (debug only — re-exposes secrets).
+      let workspaceMount;
+      if (PER_AGENT_VOLUME) {
+        const volName = await ensurePerAgentVolume(id);
+        await seedPerAgentVolume(id);
+        workspaceMount = { Name: volName, Dest: `/workspace/agents/${id}` };
+        console.log(`[spawn-container] ${id} -> dedicated volume ${volName}`);
+      } else if (WORKSPACE_ISOLATION) {
+        workspaceMount = { Name: WORKSPACE_VOLUME, Dest: `/workspace/agents/${id}`, SubPath: `agents/${id}` };
+      }
+      const volumes = (WORKSPACE_ISOLATION || PER_AGENT_VOLUME)
         ? [
-            { Name: WORKSPACE_VOLUME, Dest: `/workspace/agents/${id}`, SubPath: `agents/${id}` },
+            workspaceMount,
             { Name: CLAUDE_HOME_VOLUME, Dest: '/root/.claude', SubPath: `homes/${id}` },
           ]
         : [{ Name: WORKSPACE_VOLUME, Dest: '/workspace' }];

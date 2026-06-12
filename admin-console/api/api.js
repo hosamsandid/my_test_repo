@@ -15,6 +15,18 @@ const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
 const AGENT_TEMPLATES_DIR = path.join(POOL_DIR, 'agent-templates');
 const AGENTS_DIR = path.join(WORKSPACE, 'agents');
+// Control-plane volume (#185): agents push status + session-log to the
+// orchestrator, which persists them here. Mounted read-write by both services.
+const CONTROL_DIR = '/control/agents';
+// Resolve a per-agent state file, preferring the pushed control-plane copy and
+// falling back to the agent's own workspace when it hasn't pushed yet (or push
+// is off). Keeps the read-repoint non-breaking on the shared volume and lets it
+// transparently survive per-agent volume isolation.
+function controlOrAgentPath(...segs) {
+  const ctrl = path.join(CONTROL_DIR, ...segs);
+  if (fs.existsSync(ctrl)) return ctrl;
+  return path.join(AGENTS_DIR, ...segs);
+}
 const ENVIRONMENTS_DIR = path.join(WORKSPACE, 'environments');
 const SSH_KEYS_DIR = path.join(ENVIRONMENTS_DIR, '_keys');
 const SSH_KEYS_INDEX = path.join(SSH_KEYS_DIR, 'index.json');
@@ -697,7 +709,7 @@ app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
     const displayName = cfg.displayName ?? id;
     if (cfg.enabled === false) return { id, displayName, activityState: 'disabled', hasSession: false };
     if (!runningIds.has(id)) return { id, displayName, activityState: 'offline', hasSession: false };
-    const status = readJsonFile(path.join(AGENTS_DIR, id, 'status.json'), null);
+    const status = readJsonFile(controlOrAgentPath(id, 'status.json'), null); // pushed copy preferred (#185)
     const dmRoom = readJsonFile(path.join(AGENTS_DIR, id, 'dm-room.json'), null);
     const hasSession = !!(dmRoom?.roomId &&
       fs.existsSync(path.join(AGENTS_DIR, id, 'sessions', dmRoom.roomId + '.current.json')));
@@ -6223,7 +6235,7 @@ app.get('/api/agents/:agentId/session/:roomId', (req, res) => {
   if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
     return res.status(400).json({ error: 'invalid id' });
   }
-  const filepath = path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.jsonl');
+  const filepath = controlOrAgentPath(agentId, 'sessions', roomId + '.jsonl'); // pushed copy preferred (#185)
 
   if (!fs.existsSync(filepath)) {
     return res.json({ events: [], cursor: 0 });
@@ -6282,7 +6294,7 @@ app.get('/api/agents/:agentId/session/:roomId/stream', (req, res) => {
   if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
     return res.status(400).json({ error: 'invalid id' });
   }
-  const filepath = path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.jsonl');
+  const filepath = controlOrAgentPath(agentId, 'sessions', roomId + '.jsonl'); // pushed copy preferred (#185)
   const dirpath = path.dirname(filepath);
 
   res.setHeader('Content-Type', 'text/event-stream');

@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import os
+import queue
 import re
 import signal
 import subprocess
@@ -462,6 +464,144 @@ def _session_log_file(room_id: str) -> Path:
     return _agent_workdir() / "sessions" / f"{room_id}.jsonl"
 
 
+# ---- Control-plane state push (#185) ----
+#
+# With per-agent volume isolation the orchestrator/admin-console can no longer
+# read this agent's status.json / session-log off a shared filesystem, so we
+# PUSH them to the orchestrator's internal API. Best-effort and off the hot
+# path: a background daemon thread debounces and POSTs; failures never touch the
+# runner. The agent still writes its local files, and those local files are the
+# source of truth we re-read from — so the session-log push is byte-exact and
+# the admin viewer's byte-cursor (?since=<byte>) contract stays valid.
+_PUSH_ENABLED = os.environ.get("AEE_PUSH_STATE", "1") != "0"
+
+
+class _StatePushClient:
+    def __init__(self, agent_id: str, base_url: str):
+        self._agent_id = agent_id
+        self._base = base_url.rstrip("/")
+        self._q: "queue.Queue[tuple[str, object]]" = queue.Queue()
+        self._sent: dict[str, int] = {}  # roomId -> bytes acked by the orchestrator
+        self._thread = threading.Thread(target=self._run, name="state-push", daemon=True)
+        self._started = False
+
+    def start(self) -> None:
+        if not self._started:
+            self._started = True
+            self._thread.start()
+
+    def push_status(self, data: dict) -> None:
+        self._q.put(("status", dict(data)))
+
+    def mark_session_dirty(self, room_id: str) -> None:
+        self._q.put(("session", room_id))
+
+    def _run(self) -> None:
+        while True:
+            try:
+                first = self._q.get()
+            except Exception:
+                continue
+            # Debounce: a single Claude turn emits many session lines — let the
+            # burst accumulate, then read each dirty room's tail once.
+            time.sleep(0.25)
+            items = [first]
+            while True:
+                try:
+                    items.append(self._q.get_nowait())
+                except queue.Empty:
+                    break
+            status_data = None
+            dirty: list[str] = []
+            for kind, payload in items:
+                if kind == "status":
+                    status_data = payload
+                elif kind == "session" and payload not in dirty:
+                    dirty.append(payload)  # type: ignore[arg-type]
+            try:
+                if status_data is not None:
+                    self._post_status(status_data)
+                for room_id in dirty:
+                    self._flush_session(room_id)
+            except Exception as exc:  # never let the push thread die
+                print(f"[Runner] state-push tick failed: {exc}", file=sys.stderr)
+
+    def _post_status(self, data: dict) -> None:
+        body = json.dumps(data).encode("utf-8")
+        self._post(f"/internal/agents/{self._agent_id}/status", body)
+
+    def _flush_session(self, room_id: str) -> None:
+        p = _session_log_file(room_id)
+        try:
+            size = p.stat().st_size
+        except OSError:
+            return
+        base = self._sent.get(room_id, 0)
+        if base > size:
+            base = 0  # local file truncated/rotated — resend from the top
+        if base >= size:
+            return
+        try:
+            with p.open("rb") as fh:
+                fh.seek(base)
+                tail = fh.read()
+        except OSError:
+            return
+        body = json.dumps({
+            "roomId": room_id,
+            "baseOffset": base,
+            "dataB64": base64.b64encode(tail).decode("ascii"),
+        }).encode("utf-8")
+        status, resp = self._post(
+            f"/internal/agents/{self._agent_id}/session-events", body,
+        )
+        if status != 200:
+            return  # transient — retry on the next append
+        try:
+            j = json.loads(resp)
+        except Exception:
+            return
+        if j.get("ok"):
+            self._sent[room_id] = int(j.get("offset", base + len(tail)))
+        elif "expected" in j:
+            # Gap: control file is behind us — rewind and resend next tick.
+            self._sent[room_id] = int(j["expected"])
+            self._q.put(("session", room_id))
+
+    def _post(self, route: str, body: bytes) -> tuple[int, str]:
+        url = f"{self._base}{route}"
+        req = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, r.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            try:
+                return exc.code, exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                return exc.code, str(exc)
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            return 0, str(exc)
+
+
+_push_client: _StatePushClient | None = None
+
+
+def _get_push_client() -> _StatePushClient | None:
+    global _push_client
+    if not _PUSH_ENABLED:
+        return None
+    if _push_client is None:
+        _push_client = _StatePushClient(
+            os.environ.get("AGENT_ID", ""),
+            os.environ.get("ORCHESTRATOR_INTERNAL_URL", "http://localhost:4002"),
+        )
+        _push_client.start()
+    return _push_client
+
+
 def _append_event(room_id: str, event: dict) -> None:
     try:
         f = _session_log_file(room_id)
@@ -470,6 +610,11 @@ def _append_event(room_id: str, event: dict) -> None:
               **event}
         with f.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(ev) + "\n")
+        # Mirror to the control plane (#185). The pusher re-reads this file's
+        # tail, so it stays byte-exact; queued + debounced, never blocks here.
+        pc = _get_push_client()
+        if pc:
+            pc.mark_session_dirty(room_id)
     except Exception as exc:
         # Logging never crashes the runner.
         print(f"[Runner] session-log append failed: {exc}", file=sys.stderr)
@@ -613,6 +758,9 @@ def _write_status(state: str) -> None:
         if prev.get("lastResponseAt"):
             data["lastResponseAt"] = prev["lastResponseAt"]
         p.write_text(json.dumps(data), encoding="utf-8")
+        pc = _get_push_client()  # mirror to control plane (#185)
+        if pc:
+            pc.push_status(data)
     except Exception:
         pass  # best-effort
 
@@ -628,6 +776,9 @@ def _write_last_response_at() -> None:
                 prev = {}
         prev["lastResponseAt"] = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
         p.write_text(json.dumps(prev), encoding="utf-8")
+        pc = _get_push_client()  # mirror to control plane (#185)
+        if pc:
+            pc.push_status(prev)
     except Exception:
         pass
 

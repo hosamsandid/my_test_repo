@@ -20,6 +20,11 @@ const CONDUWUIT_ADMIN_ROOM = process.env.CONDUWUIT_ADMIN_ROOM;
 const BP_EXPLORER_URL = process.env.BP_EXPLORER_URL || "http://bp-explorer:8765";
 
 const AGENTS_DIR = "/workspace/agents";
+// Control-plane state pushed by agents (#185). Lives on a dedicated volume
+// mounted only by the orchestrator + admin-console, so monitoring (status,
+// session-log) no longer depends on reading an agent's own workspace — the
+// prerequisite for giving each agent its own isolated volume.
+const CONTROL_DIR = "/control/agents";
 const BLUEPRINTS_DIR = "/workspace/blueprints";
 const WORKSPACE = "/workspace";
 const TEMPLATE_WORKSPACE = "/template-workspace";
@@ -258,6 +263,28 @@ async function startAllEnabledAgents() {
 // ============================================================
 function agentDir(id) {
   return path.join(AGENTS_DIR, id);
+}
+
+// Control-plane location for an agent's pushed state (#185).
+function controlAgentDir(id) {
+  return path.join(CONTROL_DIR, id);
+}
+
+// Resolve a per-agent state file, preferring the pushed control-plane copy and
+// falling back to the agent's own workspace when it hasn't pushed yet (or push
+// is disabled). This keeps the read-repoint non-breaking on the shared volume
+// and lets it transparently work once agents move to isolated volumes (#185).
+function agentStatePath(id, ...segs) {
+  const ctrl = path.join(controlAgentDir(id), ...segs);
+  if (fs.existsSync(ctrl)) return ctrl;
+  return path.join(agentDir(id), ...segs);
+}
+
+// Path-segment guard for values that become filesystem paths (agent id, room
+// id) in the push endpoints. Rejects separators / traversal / NUL.
+function isSafePathSeg(s) {
+  return typeof s === 'string' && s.length > 0 && s.length <= 256 &&
+    !s.includes('/') && !s.includes('\\') && !s.includes('..') && !s.includes('\0');
 }
 
 // Legacy role names used to be `expert` / `expert-group` / `expert-instance`.
@@ -2570,7 +2597,7 @@ class Orchestrator {
       let isBusy = false;
       try {
         const status = JSON.parse(
-          fs.readFileSync(path.join(agentDir(id), 'status.json'), 'utf8'),
+          fs.readFileSync(agentStatePath(id, 'status.json'), 'utf8'), // control-plane copy preferred (#185)
         );
         isBusy = status?.state === 'busy';
       } catch { /* no status file = idle */ }
@@ -2640,7 +2667,7 @@ class Orchestrator {
       let isBusy = false;
       try {
         const status = JSON.parse(
-          fs.readFileSync(path.join(agentDir(id), 'status.json'), 'utf8'),
+          fs.readFileSync(agentStatePath(id, 'status.json'), 'utf8'), // control-plane copy preferred (#185)
         );
         isBusy = status?.state === 'busy';
       } catch { /* no status file = idle */ }
@@ -3498,6 +3525,85 @@ async function main() {
       return;
     }
 
+    // ── Push: agent status (#185) ─────────────────────────────────────────
+    // Agents POST their {state, updatedAt, lastResponseAt} here; we persist it
+    // on the control-plane volume so status reads no longer touch the agent's
+    // workspace. Last-writer-wins — no ordering contract.
+    const pushStatusMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/status$/);
+    if (pushStatusMatch) {
+      const id = decodeURIComponent(pushStatusMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
+      req.on('end', () => {
+        if (!isSafePathSeg(id)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+          return;
+        }
+        try {
+          const data = JSON.parse(body || '{}');
+          const dir = controlAgentDir(id);
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify(data));
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Push: agent session-log lines (#185) ──────────────────────────────
+    // Agents POST { roomId, baseOffset, dataB64 } where dataB64 is the raw
+    // bytes appended to their local sessions/<roomId>.jsonl since baseOffset.
+    // We append byte-for-byte to the control-plane copy so the admin SSE
+    // viewer's byte-cursor contract (?since=<byte>) stays valid. Reconciled on
+    // baseOffset so a lost-ACK retry can't duplicate and a gap is self-healed:
+    //   base == cur          → append all
+    //   base <  cur (retry)  → append only the part beyond cur
+    //   base >  cur (gap)    → reply {expected: cur}; the agent rewinds + resends
+    const sessionEventsMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/session-events$/);
+    if (sessionEventsMatch) {
+      const id = decodeURIComponent(sessionEventsMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 16_000_000) req.destroy(); });
+      req.on('end', () => {
+        try {
+          const { roomId, baseOffset, dataB64 } = JSON.parse(body || '{}');
+          if (!isSafePathSeg(id) || !isSafePathSeg(roomId)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'bad id/roomId' }));
+            return;
+          }
+          const buf = Buffer.from(dataB64 || '', 'base64');
+          const base = Number.isFinite(Number(baseOffset)) ? Number(baseOffset) : 0;
+          const dir = path.join(controlAgentDir(id), 'sessions');
+          fs.mkdirSync(dir, { recursive: true });
+          const fp = path.join(dir, `${roomId}.jsonl`);
+          let cur = 0;
+          try { cur = fs.statSync(fp).size; } catch { cur = 0; }
+          if (base > cur) {
+            // Gap: control file is behind the agent — ask it to resend from cur.
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, expected: cur }));
+            return;
+          }
+          const overlap = cur - base; // bytes the agent re-sent that we already have
+          if (overlap < buf.length) {
+            fs.appendFileSync(fp, buf.subarray(overlap));
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, offset: base + buf.length }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
     // ── Poll agent status ─────────────────────────────────────────────────
     const pollMatch = req.method === 'GET' && req.url.match(/^\/internal\/agents\/([^/]+)\/poll$/);
     if (pollMatch) {
@@ -3507,7 +3613,7 @@ async function main() {
         res.end(JSON.stringify({ error: 'Agent not found' }));
         return;
       }
-      const statusPath = path.join(agentDir(id), 'status.json');
+      const statusPath = agentStatePath(id, 'status.json'); // control-plane copy preferred (#185)
       let status = {};
       try {
         if (fs.existsSync(statusPath)) {
@@ -3542,7 +3648,7 @@ async function main() {
       }
 
       try {
-        const sessionsDir = path.join(agentDir(id), 'sessions');
+        const sessionsDir = agentStatePath(id, 'sessions'); // control-plane copy preferred (#185)
         let newestFile = null;
         let newestMtime = 0;
         if (fs.existsSync(sessionsDir)) {

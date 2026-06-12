@@ -82,8 +82,14 @@ function randomHex(bytes) {
 const agentProcesses = new Map(); // id → ChildProcess
 
 // ============================================================
-// Process lifecycle (each agent runs as a child process)
+// Process lifecycle (each agent runs as its own Podman container)
 // ============================================================
+// Containers start EAGERLY, not on first message: startAgentProcess is invoked
+// when an agent is created (createAgent), enabled/activated (enableAgent, claim),
+// and for every enabled agent at boot (startAllEnabledAgents). There is no
+// spawn-on-first-DM path — the container is up and synced before any message
+// arrives, so the first reply is timely. (DM-room readiness is handled on the
+// admin-console side, which pre-creates the 1:1 room at create/enable time.)
 function startAgentProcess(config) {
   const { id, token, userId, environmentId } = config;
   stopAgentProcess(id); // kill existing if any

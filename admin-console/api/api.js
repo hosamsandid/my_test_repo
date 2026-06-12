@@ -755,6 +755,9 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
       const data = await resp.json();
       if (!resp.ok) return res.status(resp.status).json(data);
       // Re-read the updated config — orchestrator wrote the canonical version.
+      // On enable, eagerly provision the DM room so the agent is ready before
+      // the first message (#184). Best-effort — never blocks the enable result.
+      if (action === 'enable') await preCreateAgentDmRoom(id, 'enable');
     } catch (err) {
       return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
     }
@@ -1306,6 +1309,9 @@ app.post('/api/agents', heavyLimiter, async (req, res) => {
     });
     const data = await resp.json();
     if (!resp.ok) return res.status(resp.status).json(data);
+    // Eagerly provision the DM room for the freshly-created agent so it is
+    // ready before the first message (#184). Best-effort — never fails create.
+    if (data.enabled !== false) await preCreateAgentDmRoom(id, 'create');
     res.status(201).json(data);
   } catch (err) {
     res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
@@ -4997,6 +5003,26 @@ async function ensureAgentDmRoom(agentId) {
     createdBy: adminUserId,
   });
   return { roomId, reused: false, created: true };
+}
+
+// Best-effort DM-room pre-creation. Called right after an agent is created or
+// enabled so the 1:1 room — and the agent's own membership in it (the room is
+// created with the agent's token, so the agent is its creator/member) — exists
+// BEFORE the first user message. The agent's Matrix sync loop then already has
+// the room in context and won't drop a message that races chat-open. Never
+// fatal: a Matrix hiccup here must not fail the create/enable, and the lazy
+// POST /api/matrix/agents/:id/dm path still creates the room on demand as a
+// fallback when the user first opens the chat.
+async function preCreateAgentDmRoom(agentId, context) {
+  try {
+    const r = await ensureAgentDmRoom(agentId);
+    console.log(
+      `[Matrix] Pre-created DM room for ${agentId} (${context}): ${r.roomId}` +
+      `${r.reused ? ' (reused)' : ''}`,
+    );
+  } catch (err) {
+    console.warn(`[Matrix] DM-room pre-create skipped for ${agentId} (${context}): ${err.message}`);
+  }
 }
 
 app.post('/api/matrix/agents/:agentId/dm', heavyLimiter, async (req, res) => {

@@ -16,10 +16,13 @@ orchestrator — *not* to widen the orchestrator's mounts. Push also de-risks a
 future Kubernetes port, where the orchestrator cannot read a pod's local volume
 across nodes.
 
-This is delivered in **phases**. Phase 1 (this change) lands the push
-infrastructure for the two agent-authored surfaces plus the volume-provisioning
-mechanism (gated off). Phase 2 migrates the remaining control-plane-authored
-surfaces and then flips per-agent volumes on by default.
+This was delivered in **phases**, both now implemented behind `AEE_PER_AGENT_VOLUME`
+(default **off**). Phase 1 landed the push infrastructure for the two
+agent-authored surfaces plus the volume-provisioning mechanism. Phase 2 migrated
+the remaining control-plane-authored surfaces (triggers, pending-triggers, session
+pointer/reset, config/dm-room) and added re-seed on edit, volume teardown, and the
+fail-closed seed guard. The remaining step is to flip the flag on by default and
+drop the agent-dir read fallbacks.
 
 ## Data-flow direction is the cut line
 
@@ -103,11 +106,20 @@ needed** in Phase 1.
 | `AEE_PUSH_STATE` | on (`!= "0"`) | agent pushes status + session-log to the orchestrator |
 | `AEE_PER_AGENT_VOLUME` | off (`== "1"` to enable) | dedicated volume per agent instead of a pool subpath |
 
-Keep `AEE_PER_AGENT_VOLUME` **off** until Phase 2 fully lands. Triggers,
-pending-triggers, the session pointer/reset, and config/dm-room propagation
-already work behind the flag (see *Phase 2 — implemented behind the flag*), but
-re-seed on config change and volume teardown do not yet — turning the flag on now
-would leave those surfaces broken for an isolated agent.
+`AEE_PER_AGENT_VOLUME` defaults **off**: every path resolves to the pool subpath,
+byte-identical to before. Phase 2 is now **complete** behind the flag — triggers,
+pending-triggers, session pointer/reset, config/dm-room propagation, **re-seed on
+config change, volume teardown, and the fail-closed seed guard** all work when the
+flag is on (see the sections below). The flag is a safe opt-in; flip it to activate
+isolation.
+
+**One caveat — the flag is effectively one-way.** The orchestrator's
+`controlOrPoolPath` is flag-gated, but the admin's `controlOrAgentPath` is
+*existence-based* (prefers `/control` whenever the file exists). Run with the flag
+**on** (triggers + session pointer persisted to `/control`) and later turn it
+**off**, and the orchestrator writes to the pool subpath while the admin keeps
+reading the stale `/control` copy. There is no migration that scrubs `/control`
+back to the pool, so treat enabling the flag as a forward-only decision per stack.
 
 ## Phase 2 — implemented behind the flag
 
@@ -151,27 +163,45 @@ before. Resolvers: `controlOrPoolPath()` (orchestrator, flag-gated read+write) a
   `config.json`/`dm-room.json` into the dedicated volume, so startup reads are
   correct; the pull only covers later edits.
 
-## Phase 2 backlog (still deferred)
+## Phase 2 — re-seed, teardown, fail-closed guard (implemented)
 
-- **CLAUDE.md / AGENT-PROMPT.md / `.claude/settings.json` / memory / skills / git
-  clones** — with the volume flag on these are handled by the seed helper at
-  provisioning time; the only Phase-2 work is **re-seed on config change**.
-- **Volume teardown** — delete/deactivate currently wipes the pool subpath; with
-  per-agent volumes the dedicated volume must also be removed.
-- **Fail-closed guard** — `startAgentProcess` refuses to spawn unless the pool
-  subpath exists; with full isolation + no pool seeding this must instead confirm
-  the dedicated volume is provisioned + seeded.
+These were the last deferred items; they now ship behind the flag.
 
-When these land, flip `AEE_PER_AGENT_VOLUME` on by default and drop the agent-dir
-read fallbacks.
+- **Re-seed on config change** — `reseedPerAgentVolume(id, paths)`
+  (`spawn-container.js`) mirrors named paths from the pool subpath (`/src`) into
+  the already-populated dedicated volume (`/dst`) without clobbering agent-written
+  state (memory/, the git tree, sessions/). It's an allowlist of literal paths
+  passed as `sh -c` positionals (injection-safe). Wired through `reseedAgent` (a
+  no-op unless the flag is on **and** the agent is running) at every edit site:
+  prompt edits (`saveAgentPrompt` → `['AGENT-PROMPT.md','CLAUDE.md']`), skill
+  install (`notifyAgentReseed`), team-prompt propagation (`updateTeamPrompt`), and
+  the re-enable fast-path (`enableAgent` →
+  `['CLAUDE.md','AGENT-PROMPT.md','.claude/settings.json','skills']`, so an edit
+  made while the agent was disabled lands on the next enable).
+- **Volume teardown** — `removePerAgentVolume(id)` (idempotent; 404 = already gone)
+  is wired into `deactivateAgent`, the delete route, and create-failure rollback.
+  `deleteAgentFiles` additionally removes the per-agent Claude home
+  (`/root/.claude/homes/<id>`, flag-gated) and — **unconditionally**, since push
+  defaults on — the control-plane dir `/control/agents/<id>` so status/session
+  state can't leak to a reused agent id.
+- **Fail-closed seed guard** — `seedPerAgentVolume` exits non-zero (`exit 3`,
+  `FATAL: /dst missing config.json after seed`) if `config.json` is absent after
+  the copy, so `seedPerAgentVolume` throws and the spawn aborts **before** the
+  agent container starts. An isolated agent never boots against an un-seeded or
+  half-seeded volume.
+
+Remaining before flipping the default on: align the admin resolver with the
+orchestrator's flag-gating (see the one-way caveat under *Flags*) and drop the
+agent-dir read fallbacks.
 
 ## Known limitations (flag ON)
 
-- Trigger edits, pending-triggers delivery, session reset, and config/dm-room
-  edits now reach an isolated agent (Phase 2, above).
-- The dedicated volume is not torn down on delete/deactivate yet (deferred).
-- Re-seed on config change (CLAUDE.md / skills / MCP) does not yet reach an
-  isolated agent — only the first provisioning seed does (deferred).
+- Trigger edits, pending-triggers delivery, session reset, config/dm-room edits,
+  re-seed on config change, and volume teardown all reach an isolated agent now
+  (Phase 2, above) — these are no longer limitations.
+- The flag is effectively **one-way** within a stack: the admin resolver is
+  existence-based while the orchestrator's is flag-gated, so turning the flag off
+  again leaves the admin reading stale `/control` copies (see *Flags*).
 - The SSE stream resolves its file path once at connect; with the flag on, a
   brand-new room connected to before the agent's first push has no readable
   source until the first event arrives.
@@ -197,5 +227,12 @@ read fallbacks.
 2. Send a DM → status + session-log arrive via push (the orchestrator can't read
    the isolated volume), the viewer still streams, `/api/agents/statuses` is
    correct.
-3. Confirm the documented limitations (trigger/config edits don't propagate;
-   volume lingers after delete).
+3. Edit the agent's prompt / install a skill → the change re-seeds into the
+   dedicated volume (`reseeded N path(s)` in the orchestrator log) without wiping
+   memory/ or the git tree.
+4. Delete the agent → its `<project>_agent-<id>` volume, `/root/.claude/homes/<id>`,
+   and `/control/agents/<id>` are all gone; deactivate removes the volume and resets
+   to a stub.
+5. Induce a seed with no `config.json` in `/src` → the seed helper logs
+   `FATAL: /dst missing config.json after seed`, exits 3, and no agent container
+   starts.

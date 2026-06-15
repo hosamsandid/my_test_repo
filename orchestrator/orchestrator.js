@@ -86,6 +86,7 @@ function loadLlmBindingForEnv(env) {
 
 const { execFile, execFileSync } = require("child_process");
 const { spawnContainer, libpodRequest, removePerAgentVolume, reseedPerAgentVolume } = require("./spawn-container");
+const { reconcileSessionAppend } = require("./session-cursor");
 const crypto = require("crypto");
 
 function randomHex(bytes) {
@@ -1073,6 +1074,15 @@ function saveTriggers(id, triggers) {
 function deleteAgentFiles(id) {
   const dir = agentDir(id);
   if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true });
+  // Control-plane state pushed by the agent (#185): /control/agents/<id>/
+  // status.json + sessions/<roomId>.jsonl + the session-pointer mirror. This
+  // is UNCONDITIONAL — push (AEE_PUSH_STATE) defaults ON, so the control dir
+  // exists for every agent even on the shared volume, not just under the
+  // per-agent-volume flag. Leaving it behind leaks state and, because
+  // agentStatePath/controlOrAgentPath prefer the /control copy when present,
+  // makes a reused agent id read stale status.json until its first push.
+  try { fs.rmSync(controlAgentDir(id), { recursive: true, force: true }); }
+  catch { /* best effort */ }
   // Per-agent Claude home (SubPath homes/<id> of the shared claude-home volume,
   // mounted at /root/.claude on the orchestrator). Can't be torn down via libpod
   // (it's a subpath, not a dedicated volume), but the orchestrator can rm the
@@ -3690,24 +3700,25 @@ async function main() {
             return;
           }
           const buf = Buffer.from(dataB64 || '', 'base64');
-          const base = Number.isFinite(Number(baseOffset)) ? Number(baseOffset) : 0;
           const dir = path.join(controlAgentDir(id), 'sessions');
           fs.mkdirSync(dir, { recursive: true });
           const fp = path.join(dir, `${roomId}.jsonl`);
           let cur = 0;
           try { cur = fs.statSync(fp).size; } catch { cur = 0; }
-          if (base > cur) {
+          // Reconcile against baseOffset (pure helper, unit-tested in
+          // session-cursor.test.js — the byte-cursor "sharp edge").
+          const recon = reconcileSessionAppend(baseOffset, cur, buf.length);
+          if (recon.gap) {
             // Gap: control file is behind the agent — ask it to resend from cur.
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: false, expected: cur }));
+            res.end(JSON.stringify({ ok: false, expected: recon.expected }));
             return;
           }
-          const overlap = cur - base; // bytes the agent re-sent that we already have
-          if (overlap < buf.length) {
-            fs.appendFileSync(fp, buf.subarray(overlap));
+          if (recon.appendLen > 0) {
+            fs.appendFileSync(fp, buf.subarray(recon.sliceFrom));
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, offset: base + buf.length }));
+          res.end(JSON.stringify({ ok: true, offset: recon.offset }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: err.message }));

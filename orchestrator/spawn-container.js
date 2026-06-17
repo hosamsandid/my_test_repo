@@ -514,6 +514,7 @@ function spawnContainer({ id, env }) {
       const createBody = {
         image: AGENT_IMAGE,
         env: envMap,
+        netns: { nsmode: 'bridge' },
         volumes,
         Networks: { [networkName]: {} },
         labels: { [AGENT_LABEL_KEY]: String(id) },

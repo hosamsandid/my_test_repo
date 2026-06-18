@@ -2,11 +2,11 @@
 # e-vgh-claw stack — Conduwuit + Orchestrator + Admin Console
 #
 # Usage:
-#   make up        # build + start the full stack
+#   make up        # build the agent image + build + start the full stack
 #   make down      # stop the stack
 #   make restart   # down + up
 #   make build     # rebuild orchestrator image
-#   make agent-image # build the per-agent container image (ace-agent:latest)
+#   make agent-image # build the per-agent container image (as-agent:latest)
 #   make update    # git pull + down + up (pulls latest, restarts with rebuild)
 #   make ps        # show container status
 #   make logs      # follow logs of all stack containers
@@ -31,7 +31,13 @@ endif
 
 .PHONY: up down restart build agent-image update ps logs help seed-pool seed-skills seed-memory seed-templates seed-mcp-servers
 
-up:
+# `up` depends on `agent-image` so a fresh bring-up always has the per-agent
+# runtime image built (the agent image is NOT a compose service — it's pulled
+# from the local store by the orchestrator at spawn time via libpod, so
+# `compose up --build` does not build it). `podman build` is layer-cached, so
+# this is a no-op rebuild when agent-image/ is unchanged and rebuilds on change.
+# `restart` and `update` route through `up`, so they inherit the build too.
+up: agent-image
 	@echo "Starting e-vgh-claw stack..."
 	$(COMPOSE) -f $(COMPOSE_FILE) up -d --build
 	@echo ""
@@ -48,7 +54,7 @@ build:
 	$(COMPOSE) -f $(COMPOSE_FILE) build orchestrator
 
 agent-image:
-	podman build -t ace-agent:latest -f agent-image/Dockerfile agent-image/
+	podman build -t as-agent:latest -f agent-image/Dockerfile agent-image/
 
 update:
 	@echo "Pulling latest changes from git..."

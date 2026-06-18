@@ -49,8 +49,8 @@ PIDS_LIMIT = 512
 # ---------------------------------------------------------------------------
 
 def _container_name(agent_id: str, bp_hash: str) -> str:
-    """Derive container name: ace-agent-{agent-id}-{bp-hash[:6]}."""
-    return f"ace-agent-{agent_id}-{bp_hash[:6]}"
+    """Derive container name: as-agent-{agent-id}-{bp-hash[:6]}."""
+    return f"as-agent-{agent_id}-{bp_hash[:6]}"
 
 
 def _podman(
@@ -344,7 +344,7 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
 def cmd_list(args: argparse.Namespace) -> int:
     """List all agent containers."""
     r = _podman(
-        ["ps", "-a", "--filter", "name=ace-agent-", "--format", "json"],
+        ["ps", "-a", "--filter", "name=as-agent-", "--format", "json"],
         check=False,
     )
     if r.returncode != 0:
@@ -400,8 +400,8 @@ def main() -> int:
         help="Execution tier",
     )
     p_create.add_argument(
-        "--image", default="localhost/ace-agent:latest",
-        help="Podman image (default: localhost/ace-agent:latest)",
+        "--image", default="localhost/as-agent:latest",
+        help="Podman image (default: localhost/as-agent:latest)",
     )
     p_create.add_argument("--cpus", type=int, default=None, help="CPU limit")
     p_create.add_argument("--memory", default=None, help="Memory limit (e.g. 4g)")

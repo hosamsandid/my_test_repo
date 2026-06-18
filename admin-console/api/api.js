@@ -15,6 +15,18 @@ const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
 const AGENT_TEMPLATES_DIR = path.join(POOL_DIR, 'agent-templates');
 const AGENTS_DIR = path.join(WORKSPACE, 'agents');
+// Control-plane volume (#185): agents push status + session-log to the
+// orchestrator, which persists them here. Mounted read-write by both services.
+const CONTROL_DIR = '/control/agents';
+// Resolve a per-agent state file, preferring the pushed control-plane copy and
+// falling back to the agent's own workspace when it hasn't pushed yet (or push
+// is off). Keeps the read-repoint non-breaking on the shared volume and lets it
+// transparently survive per-agent volume isolation.
+function controlOrAgentPath(...segs) {
+  const ctrl = path.join(CONTROL_DIR, ...segs);
+  if (fs.existsSync(ctrl)) return ctrl;
+  return path.join(AGENTS_DIR, ...segs);
+}
 const ENVIRONMENTS_DIR = path.join(WORKSPACE, 'environments');
 const SSH_KEYS_DIR = path.join(ENVIRONMENTS_DIR, '_keys');
 const SSH_KEYS_INDEX = path.join(SSH_KEYS_DIR, 'index.json');
@@ -644,7 +656,7 @@ app.get('/api/dashboard', (req, res) => {
       agentSkills += skills.length;
     } catch { /* no skills dir */ }
 
-    const triggers = readJsonFile(path.join(AGENTS_DIR, id, 'triggers.json'), []);
+    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []); // canonical copy (#185)
     if (Array.isArray(triggers)) triggerCount += triggers.length;
   }
 
@@ -697,10 +709,10 @@ app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
     const displayName = cfg.displayName ?? id;
     if (cfg.enabled === false) return { id, displayName, activityState: 'disabled', hasSession: false };
     if (!runningIds.has(id)) return { id, displayName, activityState: 'offline', hasSession: false };
-    const status = readJsonFile(path.join(AGENTS_DIR, id, 'status.json'), null);
+    const status = readJsonFile(controlOrAgentPath(id, 'status.json'), null); // pushed copy preferred (#185)
     const dmRoom = readJsonFile(path.join(AGENTS_DIR, id, 'dm-room.json'), null);
     const hasSession = !!(dmRoom?.roomId &&
-      fs.existsSync(path.join(AGENTS_DIR, id, 'sessions', dmRoom.roomId + '.current.json')));
+      fs.existsSync(controlOrAgentPath(id, 'sessions', dmRoom.roomId + '.current.json'))); // pushed copy preferred (#185)
     return {
       id,
       displayName,
@@ -719,9 +731,33 @@ app.get('/api/agents/:id', (req, res) => {
   const agentDir = path.join(AGENTS_DIR, id);
   const cfg = readJsonFile(path.join(agentDir, 'config.json'), null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const triggers = readJsonFile(path.join(agentDir, 'triggers.json'), []);
+  const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []); // canonical copy (#185)
   res.json({ id, ...cfg, triggers });
 });
+
+// Best-effort: nudge a running agent (SIGUSR2 via the orchestrator) to re-pull
+// its triggers + config + dm-room now instead of waiting for the next 60s sync.
+// No-op if the agent isn't running. (#185 Phase 2)
+function notifyAgentReload(agentId) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/reload-triggers`, { method: 'POST' })
+    .catch(() => {});
+}
+
+// Best-effort: after the admin writes a control-plane file (prompt, skill) to the
+// pool subpath, ask the orchestrator to mirror those named paths into a running
+// isolated agent's dedicated volume (#185 item 5). The orchestrator is the only
+// writer that can reach that volume; it's a no-op there when AEE_PER_AGENT_VOLUME
+// is off or the agent isn't running. Harmless on the shared-volume path — the
+// files we just wrote already live where the agent reads them.
+function notifyAgentReseed(agentId, paths) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/reseed`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths }),
+  }).catch(() => {});
+}
 
 app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const { id } = req.params;
@@ -755,6 +791,9 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
       const data = await resp.json();
       if (!resp.ok) return res.status(resp.status).json(data);
       // Re-read the updated config — orchestrator wrote the canonical version.
+      // On enable, eagerly provision the DM room so the agent is ready before
+      // the first message (#184). Best-effort — never blocks the enable result.
+      if (action === 'enable') await preCreateAgentDmRoom(id, 'enable');
     } catch (err) {
       return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
     }
@@ -811,6 +850,10 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   }
 
   writeJsonAtomic(cfgPath, fresh);
+  // Wake a running agent so it re-pulls config promptly under volume isolation
+  // (#185 Phase 2). On the shared volume the agent re-reads config.json on its
+  // next action anyway, so this is just a harmless idempotent re-sync there.
+  notifyAgentReload(id);
   res.json({ id, ...fresh });
 });
 
@@ -1185,29 +1228,24 @@ app.post('/api/agents/:id/handover', handoverLimiter, async (req, res) => {
       consistencyWarnings,
     });
 
-    // Enqueue the handover message in the target agent's pending-triggers.json
-    // rather than sending a direct Matrix DM. This avoids the race condition
-    // where the DM arrives before the agent-runner's Matrix client has finished
-    // its first sync after being enabled. The agent-runner drains the queue
-    // within 5 s of startup, by which time the client is always ready.
-    const pendingPath = path.join(AGENTS_DIR, targetId, 'pending-triggers.json');
-    let pending = [];
+    // Enqueue the handover message in the target agent's pending queue rather
+    // than sending a direct Matrix DM. This avoids the race where the DM arrives
+    // before the agent's Matrix client has finished its first sync after being
+    // enabled; the agent drains the queue within 5 s of startup, by which time
+    // the client is always ready. The orchestrator owns the queue (#185 Phase 2)
+    // — routing through it keeps the queue single-writer and reaches the agent
+    // even when its volume is isolated.
     try {
-      if (fs.existsSync(pendingPath)) {
-        const raw = fs.readFileSync(pendingPath, 'utf8');
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) pending = parsed;
-      }
-    } catch { /* corrupt file — start fresh */ }
-    pending.push({
-      kind: 'handover-dm',
-      roomId,
-      body,
-      enqueuedAt: new Date().toISOString(),
-    });
-    try {
-      fs.mkdirSync(path.dirname(pendingPath), { recursive: true });
-      fs.writeFileSync(pendingPath, JSON.stringify(pending, null, 2));
+      const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+      const r = await fetch(
+        `${orchestratorUrl}/internal/agents/${encodeURIComponent(targetId)}/enqueue-pending`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind: 'handover-dm', roomId, body, enqueuedAt: new Date().toISOString() }),
+        },
+      );
+      if (!r.ok) throw new Error(`orchestrator HTTP ${r.status}`);
       results.push({
         agentId: targetId,
         ok: true,
@@ -1306,6 +1344,9 @@ app.post('/api/agents', heavyLimiter, async (req, res) => {
     });
     const data = await resp.json();
     if (!resp.ok) return res.status(resp.status).json(data);
+    // Eagerly provision the DM room for the freshly-created agent so it is
+    // ready before the first message (#184). Best-effort — never fails create.
+    if (data.enabled !== false) await preCreateAgentDmRoom(id, 'create');
     res.status(201).json(data);
   } catch (err) {
     res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
@@ -1592,6 +1633,10 @@ app.put('/api/agents/:id/prompt', apiLimiter, (req, res) => {
   const tmp = promptPath + '.tmp';
   fs.writeFileSync(tmp, content, 'utf8');
   fs.renameSync(tmp, promptPath);
+  // Mirror exactly what we wrote into an isolated agent's volume (#185 item 5).
+  // Only AGENT-PROMPT.md — this route does not rebuild CLAUDE.md, so copying the
+  // pool's (stale) CLAUDE.md would be wrong.
+  notifyAgentReseed(id, ['AGENT-PROMPT.md']);
   res.json({ ok: true });
 });
 
@@ -1668,7 +1713,7 @@ app.get('/api/agents/:id/triggers', (req, res) => {
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
-  const triggers = readJsonFile(path.join(agentDir, 'triggers.json'), []);
+  const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []); // canonical copy (#185)
   res.json(Array.isArray(triggers) ? triggers : []);
 });
 
@@ -1691,51 +1736,72 @@ app.get('/api/scripts/:name', apiLimiter, async (req, res) => {
   }
 });
 
-function notifyTriggerReload(agentId) {
+// #185 Phase 2: the orchestrator owns the canonical triggers.json (on the
+// control plane when the agent's volume is isolated). Admin CRUD computes the
+// new full array and PUTs it through the orchestrator, which persists it and
+// signals the agent (SIGUSR2) to re-pull. We read the current array via
+// controlOrAgentPath so it works on both the shared and isolated layouts.
+async function putTriggers(agentId, triggers) {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
-  fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/reload-triggers`, { method: 'POST' })
-    .catch(() => {});
+  const r = await fetch(
+    `${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/triggers`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ triggers }),
+    },
+  );
+  if (!r.ok) throw new Error(`orchestrator HTTP ${r.status}`);
 }
 
-app.post('/api/agents/:id/triggers', apiLimiter, (req, res) => {
+app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
-  const triggersPath = path.join(agentDir, 'triggers.json');
-  const triggers = readJsonFile(triggersPath, []);
+  const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+  const triggers = Array.isArray(cur) ? cur : [];
   const newTrigger = { id: `t${Date.now()}`, ...req.body };
   triggers.push(newTrigger);
-  writeJsonAtomic(triggersPath, triggers);
-  notifyTriggerReload(id);
+  try {
+    await putTriggers(id, triggers);
+  } catch (err) {
+    return res.status(502).json({ error: `Could not save triggers: ${err.message}` });
+  }
   res.status(201).json(newTrigger);
 });
 
-app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, (req, res) => {
+app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   const { id, triggerId } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
-  const triggersPath = path.join(agentDir, 'triggers.json');
-  const triggers = readJsonFile(triggersPath, []);
+  const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+  const triggers = Array.isArray(cur) ? cur : [];
   const idx = triggers.findIndex(t => t.id === triggerId);
   if (idx === -1) return res.status(404).json({ error: 'Trigger not found' });
   triggers[idx] = { ...triggers[idx], ...req.body, id: triggerId };
-  writeJsonAtomic(triggersPath, triggers);
-  notifyTriggerReload(id);
+  try {
+    await putTriggers(id, triggers);
+  } catch (err) {
+    return res.status(502).json({ error: `Could not save triggers: ${err.message}` });
+  }
   res.json(triggers[idx]);
 });
 
-app.delete('/api/agents/:id/triggers/:triggerId', apiLimiter, (req, res) => {
+app.delete('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   const { id, triggerId } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
-  const triggersPath = path.join(agentDir, 'triggers.json');
-  const triggers = readJsonFile(triggersPath, []);
+  const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+  const triggers = Array.isArray(cur) ? cur : [];
   const filtered = triggers.filter(t => t.id !== triggerId);
-  writeJsonAtomic(triggersPath, filtered);
-  notifyTriggerReload(id);
+  try {
+    await putTriggers(id, filtered);
+  } catch (err) {
+    return res.status(502).json({ error: `Could not save triggers: ${err.message}` });
+  }
   res.status(204).end();
 });
 
@@ -2165,6 +2231,9 @@ app.post('/api/skills/install', (req, res) => {
   } catch (err) {
     return res.status(500).json({ error: `Failed to install skill: ${err.message}` });
   }
+  // Mirror the installed skill into an isolated agent's dedicated volume so the
+  // running agent picks it up on its next message (#185 item 5).
+  notifyAgentReseed(agentId, ['skills/' + name]);
   res.status(201).json({ name, agentId, installed: true, overwritten: !!overwrite });
 });
 
@@ -4996,7 +5065,31 @@ async function ensureAgentDmRoom(agentId) {
     createdAt: new Date().toISOString(),
     createdBy: adminUserId,
   });
+  // Nudge a running agent to re-pull dm-room.json now, so an isolated agent
+  // learns its DM room for trigger/claim posts without waiting for the next
+  // 60s sync (#185 Phase 2). No-op if the agent isn't running yet.
+  notifyAgentReload(agentId);
   return { roomId, reused: false, created: true };
+}
+
+// Best-effort DM-room pre-creation. Called right after an agent is created or
+// enabled so the 1:1 room — and the agent's own membership in it (the room is
+// created with the agent's token, so the agent is its creator/member) — exists
+// BEFORE the first user message. The agent's Matrix sync loop then already has
+// the room in context and won't drop a message that races chat-open. Never
+// fatal: a Matrix hiccup here must not fail the create/enable, and the lazy
+// POST /api/matrix/agents/:id/dm path still creates the room on demand as a
+// fallback when the user first opens the chat.
+async function preCreateAgentDmRoom(agentId, context) {
+  try {
+    const r = await ensureAgentDmRoom(agentId);
+    console.log(
+      `[Matrix] Pre-created DM room for ${agentId} (${context}): ${r.roomId}` +
+      `${r.reused ? ' (reused)' : ''}`,
+    );
+  } catch (err) {
+    console.warn(`[Matrix] DM-room pre-create skipped for ${agentId} (${context}): ${err.message}`);
+  }
 }
 
 app.post('/api/matrix/agents/:agentId/dm', heavyLimiter, async (req, res) => {
@@ -5270,7 +5363,7 @@ app.get('/api/agents/:agentId/session/:roomId/current', (req, res) => {
   if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
     return res.status(400).json({ error: 'invalid id' });
   }
-  const ptr = path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.current.json');
+  const ptr = controlOrAgentPath(agentId, 'sessions', roomId + '.current.json'); // pushed copy preferred (#185)
   const flagPath = path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.reset.json');
 
   let sessionId = null, updatedAt = null;
@@ -5312,6 +5405,7 @@ app.delete('/api/agents/:agentId/session/:roomId/current', apiLimiter, async (re
     return res.status(400).json({ error: 'invalid id' });
   }
   try {
+    // Local pool copy (works on the shared volume; a no-op on an isolated one).
     fs.rmSync(path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.current.json'), { force: true });
     const flagPath = path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.reset.json');
     fs.mkdirSync(path.dirname(flagPath), { recursive: true });
@@ -5320,10 +5414,26 @@ app.delete('/api/agents/:agentId/session/:roomId/current', apiLimiter, async (re
     return res.status(500).json({ error: err.message });
   }
 
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+
+  // Drop the pushed pointer mirror (clears the badge) and, when the agent's
+  // volume is isolated, ask the agent to drop its own --resume pointer (#185).
+  try {
+    await fetch(
+      `${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/session-reset`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ roomId }),
+      },
+    );
+  } catch (err) {
+    console.warn(`[API] session-reset call failed for ${agentId}: ${err.message}`);
+  }
+
   // Best-effort repository reset — failures are logged but never block the response.
   let repoResults = [];
   try {
-    const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
     const r = await fetch(
       `${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/reset-repos`,
       { method: 'POST' },
@@ -6197,7 +6307,7 @@ app.get('/api/agents/:agentId/session/:roomId', (req, res) => {
   if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
     return res.status(400).json({ error: 'invalid id' });
   }
-  const filepath = path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.jsonl');
+  const filepath = controlOrAgentPath(agentId, 'sessions', roomId + '.jsonl'); // pushed copy preferred (#185)
 
   if (!fs.existsSync(filepath)) {
     return res.json({ events: [], cursor: 0 });
@@ -6256,7 +6366,7 @@ app.get('/api/agents/:agentId/session/:roomId/stream', (req, res) => {
   if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
     return res.status(400).json({ error: 'invalid id' });
   }
-  const filepath = path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.jsonl');
+  const filepath = controlOrAgentPath(agentId, 'sessions', roomId + '.jsonl'); // pushed copy preferred (#185)
   const dirpath = path.dirname(filepath);
 
   res.setHeader('Content-Type', 'text/event-stream');

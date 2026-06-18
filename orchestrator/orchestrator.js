@@ -20,6 +20,18 @@ const CONDUWUIT_ADMIN_ROOM = process.env.CONDUWUIT_ADMIN_ROOM;
 const BP_EXPLORER_URL = process.env.BP_EXPLORER_URL || "http://bp-explorer:8765";
 
 const AGENTS_DIR = "/workspace/agents";
+// Control-plane state pushed by agents (#185). Lives on a dedicated volume
+// mounted only by the orchestrator + admin-console, so monitoring (status,
+// session-log) no longer depends on reading an agent's own workspace — the
+// prerequisite for giving each agent its own isolated volume.
+const CONTROL_DIR = "/control/agents";
+// Phase 2 (#185): when per-agent volume isolation is on the orchestrator can no
+// longer write control→agent state (triggers, pending-triggers, the pushed
+// session-pointer mirror) into the agent's own volume, so the canonical copy
+// lives on the control plane and the agent pulls it over HTTP. With the flag off
+// (the default) these stay on the shared pool subpath the agent reads directly,
+// so the resolver below is a no-op and behavior is byte-identical to today.
+const PER_AGENT_VOLUME = process.env.AEE_PER_AGENT_VOLUME === '1';
 const BLUEPRINTS_DIR = "/workspace/blueprints";
 const WORKSPACE = "/workspace";
 const TEMPLATE_WORKSPACE = "/template-workspace";
@@ -73,7 +85,8 @@ function loadLlmBindingForEnv(env) {
 }
 
 const { execFile, execFileSync } = require("child_process");
-const { spawnContainer, libpodRequest } = require("./spawn-container");
+const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume } = require("./spawn-container");
+const { reconcileSessionAppend } = require("./session-cursor");
 const crypto = require("crypto");
 
 function randomHex(bytes) {
@@ -82,8 +95,14 @@ function randomHex(bytes) {
 const agentProcesses = new Map(); // id → ChildProcess
 
 // ============================================================
-// Process lifecycle (each agent runs as a child process)
+// Process lifecycle (each agent runs as its own Podman container)
 // ============================================================
+// Containers start EAGERLY, not on first message: startAgentProcess is invoked
+// when an agent is created (createAgent), enabled/activated (enableAgent, claim),
+// and for every enabled agent at boot (startAllEnabledAgents). There is no
+// spawn-on-first-DM path — the container is up and synced before any message
+// arrives, so the first reply is timely. (DM-room readiness is handled on the
+// admin-console side, which pre-creates the 1:1 room at create/enable time.)
 function startAgentProcess(config) {
   const { id, token, userId, environmentId } = config;
   stopAgentProcess(id); // kill existing if any
@@ -210,7 +229,7 @@ function stopAgentSession(id, sessionId) {
 
 async function evictStaleAgentContainers() {
   if (process.env.EVICT_STALE_AGENTS === '0') return;
-  const image = process.env.AGENT_IMAGE || 'ace-agent:latest';
+  const image = process.env.AGENT_IMAGE || 'as-agent:latest';
   try {
     const filters = encodeURIComponent(JSON.stringify({ ancestor: [image] }));
     const list = await libpodRequest('GET', `/containers/json?all=true&filters=${filters}`);
@@ -252,6 +271,40 @@ async function startAllEnabledAgents() {
 // ============================================================
 function agentDir(id) {
   return path.join(AGENTS_DIR, id);
+}
+
+// Control-plane location for an agent's pushed state (#185).
+function controlAgentDir(id) {
+  return path.join(CONTROL_DIR, id);
+}
+
+// Resolve a per-agent state file, preferring the pushed control-plane copy and
+// falling back to the agent's own workspace when it hasn't pushed yet (or push
+// is disabled). This keeps the read-repoint non-breaking on the shared volume
+// and lets it transparently work once agents move to isolated volumes (#185).
+function agentStatePath(id, ...segs) {
+  const ctrl = path.join(controlAgentDir(id), ...segs);
+  if (fs.existsSync(ctrl)) return ctrl;
+  return path.join(agentDir(id), ...segs);
+}
+
+// Canonical location for control→agent state (triggers.json,
+// pending-triggers.json, the session-pointer mirror). With per-agent volume
+// isolation the agent's own volume is unreachable from here, so the canonical
+// copy lives on the control plane (the agent pulls it). Otherwise it stays on
+// the shared pool subpath the agent reads directly. The orchestrator both reads
+// and writes through this resolver, so reads always match where it wrote.
+function controlOrPoolPath(id, ...segs) {
+  return PER_AGENT_VOLUME
+    ? path.join(controlAgentDir(id), ...segs)
+    : path.join(agentDir(id), ...segs);
+}
+
+// Path-segment guard for values that become filesystem paths (agent id, room
+// id) in the push endpoints. Rejects separators / traversal / NUL.
+function isSafePathSeg(s) {
+  return typeof s === 'string' && s.length > 0 && s.length <= 256 &&
+    !s.includes('/') && !s.includes('\\') && !s.includes('..') && !s.includes('\0');
 }
 
 // Legacy role names used to be `expert` / `expert-group` / `expert-instance`.
@@ -997,8 +1050,13 @@ function seedAgentWorkspaceForInstance(id, env, blueprintId) {
 // ============================================================
 // Trigger storage (per-agent triggers.json)
 // ============================================================
+// Triggers are control→agent state: the orchestrator owns the canonical copy
+// (on /control when the agent's volume is isolated, on the pool subpath
+// otherwise — see controlOrPoolPath) and the agent pulls it over HTTP. Admin
+// CRUD routes its writes through us (PUT /internal/agents/:id/triggers) so this
+// stays the single writer.
 function loadTriggers(id) {
-  const p = path.join(agentDir(id), "triggers.json");
+  const p = controlOrPoolPath(id, "triggers.json");
   try {
     if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, "utf8"));
   } catch (err) {
@@ -1008,15 +1066,51 @@ function loadTriggers(id) {
 }
 
 function saveTriggers(id, triggers) {
-  fs.writeFileSync(
-    path.join(agentDir(id), "triggers.json"),
-    JSON.stringify(triggers, null, 2)
-  );
+  const p = controlOrPoolPath(id, "triggers.json");
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(triggers, null, 2));
 }
 
 function deleteAgentFiles(id) {
   const dir = agentDir(id);
   if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true });
+  // Control-plane state pushed by the agent (#185): /control/agents/<id>/
+  // status.json + sessions/<roomId>.jsonl + the session-pointer mirror. This
+  // is UNCONDITIONAL — push (AEE_PUSH_STATE) defaults ON, so the control dir
+  // exists for every agent even on the shared volume, not just under the
+  // per-agent-volume flag. Leaving it behind leaks state and, because
+  // agentStatePath/controlOrAgentPath prefer the /control copy when present,
+  // makes a reused agent id read stale status.json until its first push.
+  try { fs.rmSync(controlAgentDir(id), { recursive: true, force: true }); }
+  catch { /* best effort */ }
+  // Per-agent Claude home (SubPath homes/<id> of the shared claude-home volume,
+  // mounted at /root/.claude on the orchestrator). Can't be torn down via libpod
+  // (it's a subpath, not a dedicated volume), but the orchestrator can rm the
+  // subdir directly. Gated on PER_AGENT_VOLUME to keep the default shared-volume
+  // path byte-for-byte (its pre-existing homes/<id> leak is out of scope). The
+  // dedicated DATA volume is removed separately by removePerAgentVolume at the
+  // async call sites (#185 item 6).
+  if (PER_AGENT_VOLUME) {
+    try { fs.rmSync(path.join('/root/.claude/homes', id), { recursive: true, force: true }); }
+    catch { /* best effort */ }
+  }
+}
+
+// Mirror named control-plane files (CLAUDE.md, AGENT-PROMPT.md, skills/<name>,
+// ...) from the pool subpath into an isolated agent's dedicated volume after an
+// edit (#185 item 5). No-op unless the per-agent-volume flag is on AND the agent
+// is currently running — a stopped/never-spawned agent re-seeds fresh on its
+// next spawn, and a missing volume is skipped inside reseedPerAgentVolume.
+// Best-effort: a re-seed failure must never break the edit that triggered it.
+async function reseedAgent(id, paths) {
+  if (!PER_AGENT_VOLUME) return { skipped: 'flag-off' };
+  if (!agentProcesses.has(id)) return { skipped: 'not-running' };
+  try {
+    return await reseedPerAgentVolume(id, paths);
+  } catch (err) {
+    console.warn(`[Orchestrator] reseed ${id} (${(paths || []).join(',')}): ${err.message}`);
+    return { error: err.message };
+  }
 }
 
 function listAgentIds() {
@@ -1332,29 +1426,53 @@ function patchBriefForClaim(content, stubId) {
   return content.replace(fmMatch[0], `---\n${fm.replace(/\n+$/, "")}\n---`);
 }
 
-// Append a bp-event-batch entry to an agent's pending-triggers.json. The
-// agent-runner drain loop picks it up by `kind` (no triggers.json entry
-// required — the routing decision was already made centrally). Creates
-// the agent dir if it doesn't exist yet (a stub being materialised at
-// the same time may not have written its dir yet).
-function enqueueBpEventBatch(agentId, payload) {
-  const pendingPath = path.join(AGENTS_DIR, agentId, "pending-triggers.json");
+// Pending-triggers queue (#185 Phase 2). The orchestrator owns this queue: all
+// writers (hook server, bp-event router, github-poller, admin handover) funnel
+// through enqueuePending, and the agent drains it (locally when on the shared
+// volume; over HTTP via /pending-drain when isolated). Because every writer and
+// the drain run in this single Node event loop, the read-modify-write needs no
+// lock. controlOrPoolPath puts the file on /control when isolated, on the pool
+// subpath otherwise (the agent's own drain location) — so it's non-breaking.
+function pendingPath(id) {
+  return controlOrPoolPath(id, "pending-triggers.json");
+}
+
+function enqueuePending(agentId, entry) {
+  const p = pendingPath(agentId);
   let pending = [];
   try {
-    if (fs.existsSync(pendingPath)) pending = JSON.parse(fs.readFileSync(pendingPath, "utf8"));
+    if (fs.existsSync(p)) pending = JSON.parse(fs.readFileSync(p, "utf8"));
     if (!Array.isArray(pending)) pending = [];
   } catch { /* corrupt file — start over */ }
-  pending.push({
-    kind: "bp-event-batch",
-    receivedAt: new Date().toISOString(),
-    ...payload,
-  });
+  pending.push({ receivedAt: new Date().toISOString(), ...entry });
   try {
-    fs.mkdirSync(path.dirname(pendingPath), { recursive: true });
-    fs.writeFileSync(pendingPath, JSON.stringify(pending, null, 2));
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(pending, null, 2));
   } catch (err) {
-    console.error(`[Orchestrator] Cannot enqueue bp-event for ${agentId}: ${err.message}`);
+    console.error(`[Orchestrator] Cannot enqueue pending for ${agentId}: ${err.message}`);
   }
+}
+
+// Atomic read-and-clear for the agent's HTTP drain. Single-event-loop atomic.
+function drainPending(agentId) {
+  const p = pendingPath(agentId);
+  let entries = [];
+  try {
+    if (fs.existsSync(p)) entries = JSON.parse(fs.readFileSync(p, "utf8"));
+    if (!Array.isArray(entries)) entries = [];
+  } catch { entries = []; }
+  if (entries.length) {
+    try { fs.writeFileSync(p, "[]"); }
+    catch (err) { console.error(`[Orchestrator] drainPending clear ${agentId}: ${err.message}`); }
+  }
+  return entries;
+}
+
+// Append a bp-event-batch entry to an agent's pending queue. The agent drain
+// loop picks it up by `kind` (no triggers.json entry required — the routing
+// decision was already made centrally).
+function enqueueBpEventBatch(agentId, payload) {
+  enqueuePending(agentId, { kind: "bp-event-batch", ...payload });
 }
 
 // Persistent notified-set per orchestrator. Tracks bpIds we've already
@@ -1678,6 +1796,8 @@ class Orchestrator {
       const cloneWarning = (seedResult.warnings || []).find(w => /^git clone /.test(w));
       if (cloneWarning) {
         deleteAgentFiles(id);
+        if (PER_AGENT_VOLUME) await removePerAgentVolume(id).catch(e =>
+          console.warn(`[Orchestrator] volume teardown ${id}: ${e.message}`));
         await this.deactivateMatrixUser(id).catch(() => { /* best effort */ });
         throw new Error(
           `Cannot create orchestrator '${id}': briefings clone failed — ${cloneWarning}`
@@ -1888,13 +2008,26 @@ class Orchestrator {
     this.agentConfigs.set(teamId, { config: teamCfg });
 
     let propagated = 0;
+    const reseeded = [];
     for (const id of listAgentIds()) {
       const cfg = loadAgentConfig(id);
       if (!cfg || cfg.role !== "team-member" || cfg.parentTeamId !== teamId) continue;
       // Skip members with their own prompt override.
       if (typeof cfg.systemPrompt === 'string' && cfg.systemPrompt.length > 0) continue;
       saveAgentPrompt(id, teamCfg.systemPromptTemplate, "team-member", env);
+      reseeded.push(id);
       propagated++;
+    }
+    // Under volume isolation each member reads CLAUDE.md / AGENT-PROMPT.md from
+    // its own dedicated volume, not the pool subpath just rewritten above —
+    // mirror both files into each running member's volume (#185 item 5). This
+    // is the one orchestrator writer that edits ALREADY-RUNNING agents without a
+    // respawn; every other saveAgentPrompt is followed by startAgentProcess, so
+    // the one-time seed covers it. One helper per member (distinct volumes), run
+    // concurrently to bound latency on large teams. No-op when the flag is off.
+    if (PER_AGENT_VOLUME && reseeded.length > 0) {
+      await Promise.all(reseeded.map(id =>
+        reseedAgent(id, ['AGENT-PROMPT.md', 'CLAUDE.md'])));
     }
     console.log(
       `[Orchestrator] Team ${teamId} prompt updated; pushed to ${propagated} inheriting member(s)`
@@ -2478,6 +2611,19 @@ class Orchestrator {
       const updated = { ...cfg, enabled: true };
       saveAgentConfig(id, updated);
       this.agentConfigs.set(id, { config: updated });
+      // Under volume isolation a previously-disabled agent keeps its dedicated
+      // volume, and seedPerAgentVolume only copies into an EMPTY /dst — so a
+      // prompt/skill edit made WHILE the agent was disabled (which reseedAgent
+      // skipped as 'not-running') would otherwise be lost on this fast-path
+      // respawn. Mirror the control-plane file set from the pool subpath now,
+      // before the container starts; copying only these named paths preserves
+      // agent-written memory/, .claude/projects, the git tree, and sessions/.
+      // No-op when the dedicated volume is absent (#185 item 5).
+      if (PER_AGENT_VOLUME) {
+        await reseedPerAgentVolume(
+          id, ['CLAUDE.md', 'AGENT-PROMPT.md', '.claude/settings.json', 'skills'],
+        ).catch(err => console.warn(`[Orchestrator] re-enable reseed ${id}: ${err.message}`));
+      }
       startAgentProcess(updated);
       return { id, materialized: false, enabled: true };
     }
@@ -2564,16 +2710,14 @@ class Orchestrator {
       let isBusy = false;
       try {
         const status = JSON.parse(
-          fs.readFileSync(path.join(agentDir(id), 'status.json'), 'utf8'),
+          fs.readFileSync(agentStatePath(id, 'status.json'), 'utf8'), // control-plane copy preferred (#185)
         );
         isBusy = status?.state === 'busy';
       } catch { /* no status file = idle */ }
 
       let activeTriggers = [];
       try {
-        const triggers = JSON.parse(
-          fs.readFileSync(path.join(agentDir(id), 'triggers.json'), 'utf8'),
-        );
+        const triggers = loadTriggers(id); // canonical copy (#185 Phase 2)
         if (Array.isArray(triggers)) {
           activeTriggers = triggers
             .filter(t => t.enabled !== false && t.id)
@@ -2634,16 +2778,14 @@ class Orchestrator {
       let isBusy = false;
       try {
         const status = JSON.parse(
-          fs.readFileSync(path.join(agentDir(id), 'status.json'), 'utf8'),
+          fs.readFileSync(agentStatePath(id, 'status.json'), 'utf8'), // control-plane copy preferred (#185)
         );
         isBusy = status?.state === 'busy';
       } catch { /* no status file = idle */ }
 
       let activeTriggers = [];
       try {
-        const triggers = JSON.parse(
-          fs.readFileSync(path.join(agentDir(id), 'triggers.json'), 'utf8'),
-        );
+        const triggers = loadTriggers(id); // canonical copy (#185 Phase 2)
         if (Array.isArray(triggers)) {
           activeTriggers = triggers
             .filter(t => t.enabled !== false && t.id)
@@ -2682,6 +2824,15 @@ class Orchestrator {
           console.error(`[Orchestrator] Could not remove ${entry} from ${id}: ${err.message}`);
         }
       }
+    }
+
+    // Remove the dedicated volume too (#185 item 6). Required, not just tidy:
+    // seedPerAgentVolume only copies into an EMPTY /dst, so leaving the volume
+    // in place would make a later reactivation run against stale state instead
+    // of re-seeding the freshly-wiped pool subpath above.
+    if (PER_AGENT_VOLUME) {
+      await removePerAgentVolume(id).catch(err =>
+        console.warn(`[Orchestrator] volume teardown ${id}: ${err.message}`));
     }
 
     // Strip runtime identity. Keep id, displayName, role, environmentId, and
@@ -3356,6 +3507,10 @@ async function main() {
                     await orchestrator.deactivateMatrixUser(childId);
                   }
                   deleteAgentFiles(childId);
+                  if (PER_AGENT_VOLUME) await removePerAgentVolume(childId).catch(e =>
+                    console.warn(`[Orchestrator] volume teardown ${childId}: ${e.message}`));
+                  await removePerAgentNetwork(childId).catch(e =>
+                    console.warn(`[Orchestrator] network teardown ${childId}: ${e.message}`));
                   orchestrator.agentConfigs.delete(childId);
                   cascaded.push(childId);
                 } catch (err) {
@@ -3372,6 +3527,10 @@ async function main() {
 
           stopAgentProcess(id);
           deleteAgentFiles(id);
+          if (PER_AGENT_VOLUME) await removePerAgentVolume(id).catch(e =>
+            console.warn(`[Orchestrator] volume teardown ${id}: ${e.message}`));
+          await removePerAgentNetwork(id).catch(e =>
+            console.warn(`[Orchestrator] network teardown ${id}: ${e.message}`));
           orchestrator.agentConfigs.delete(id);
           await orchestrator.deactivateMatrixUser(id);
 
@@ -3492,6 +3651,365 @@ async function main() {
       return;
     }
 
+    // ── Push: agent status (#185) ─────────────────────────────────────────
+    // Agents POST their {state, updatedAt, lastResponseAt} here; we persist it
+    // on the control-plane volume so status reads no longer touch the agent's
+    // workspace. Last-writer-wins — no ordering contract.
+    const pushStatusMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/status$/);
+    if (pushStatusMatch) {
+      const id = decodeURIComponent(pushStatusMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
+      req.on('end', () => {
+        if (!isSafePathSeg(id)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+          return;
+        }
+        try {
+          const data = JSON.parse(body || '{}');
+          const dir = controlAgentDir(id);
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify(data));
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Push: agent session-log lines (#185) ──────────────────────────────
+    // Agents POST { roomId, baseOffset, dataB64 } where dataB64 is the raw
+    // bytes appended to their local sessions/<roomId>.jsonl since baseOffset.
+    // We append byte-for-byte to the control-plane copy so the admin SSE
+    // viewer's byte-cursor contract (?since=<byte>) stays valid. Reconciled on
+    // baseOffset so a lost-ACK retry can't duplicate and a gap is self-healed:
+    //   base == cur          → append all
+    //   base <  cur (retry)  → append only the part beyond cur
+    //   base >  cur (gap)    → reply {expected: cur}; the agent rewinds + resends
+    const sessionEventsMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/session-events$/);
+    if (sessionEventsMatch) {
+      const id = decodeURIComponent(sessionEventsMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 16_000_000) req.destroy(); });
+      req.on('end', () => {
+        try {
+          const { roomId, baseOffset, dataB64 } = JSON.parse(body || '{}');
+          if (!isSafePathSeg(id) || !isSafePathSeg(roomId)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'bad id/roomId' }));
+            return;
+          }
+          const buf = Buffer.from(dataB64 || '', 'base64');
+          const dir = path.join(controlAgentDir(id), 'sessions');
+          fs.mkdirSync(dir, { recursive: true });
+          const fp = path.join(dir, `${roomId}.jsonl`);
+          let cur = 0;
+          try { cur = fs.statSync(fp).size; } catch { cur = 0; }
+          // Reconcile against baseOffset (pure helper, unit-tested in
+          // session-cursor.test.js — the byte-cursor "sharp edge").
+          const recon = reconcileSessionAppend(baseOffset, cur, buf.length);
+          if (recon.gap) {
+            // Gap: control file is behind the agent — ask it to resend from cur.
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, expected: recon.expected }));
+            return;
+          }
+          if (recon.appendLen > 0) {
+            fs.appendFileSync(fp, buf.subarray(recon.sliceFrom));
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, offset: recon.offset }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Push: per-room session pointer mirror (#185 Phase 2) ──────────────
+    // Agents POST { roomId, sessionId, updatedAt }. The pointer (<roomId>.
+    // current.json) is agent-authored (it drives --resume) but admin-read (the
+    // "Session aktiv" badge / session-reset). With per-agent volumes the admin
+    // can't read the agent's copy, so the agent mirrors it here. Whole-file,
+    // last-writer-wins like status.json. An empty/absent sessionId clears it
+    // (used by the session-reset path so the badge drops).
+    const sessionPointerMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/session-pointer$/);
+    if (sessionPointerMatch) {
+      const id = decodeURIComponent(sessionPointerMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
+      req.on('end', () => {
+        try {
+          const { roomId, sessionId, updatedAt } = JSON.parse(body || '{}');
+          if (!isSafePathSeg(id) || !isSafePathSeg(roomId)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'bad id/roomId' }));
+            return;
+          }
+          const dir = path.join(controlAgentDir(id), 'sessions');
+          fs.mkdirSync(dir, { recursive: true });
+          const fp = path.join(dir, `${roomId}.current.json`);
+          if (typeof sessionId === 'string' && sessionId) {
+            fs.writeFileSync(fp, JSON.stringify({ sessionId, updatedAt: updatedAt || new Date().toISOString() }));
+          } else {
+            try { fs.unlinkSync(fp); } catch { /* already gone */ }
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Pending-triggers drain (#185 Phase 2) ────────────────────────────
+    // The isolated agent pulls its queue here every ~5s; read-and-clear is
+    // atomic in this single event loop, so no entry is lost between the read
+    // and the clear even with concurrent enqueues.
+    const pendingDrainMatch = req.method === 'GET' && req.url.match(/^\/internal\/agents\/([^/]+)\/pending-drain$/);
+    if (pendingDrainMatch) {
+      const id = decodeURIComponent(pendingDrainMatch[1]);
+      if (!isSafePathSeg(id)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, entries: drainPending(id) }));
+      return;
+    }
+
+    // ── Enqueue a pending entry (#185 Phase 2) ────────────────────────────
+    // The admin-console is a separate process, so to keep this queue
+    // single-writer (and the drain race-free) it hands entries in through us
+    // rather than writing the file itself.
+    const enqueuePendingMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/enqueue-pending$/);
+    if (enqueuePendingMatch) {
+      const id = decodeURIComponent(enqueuePendingMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 4_000_000) req.destroy(); });
+      req.on('end', () => {
+        if (!isSafePathSeg(id)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+          return;
+        }
+        try {
+          const entry = JSON.parse(body || '{}');
+          if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'entry must be an object' }));
+            return;
+          }
+          enqueuePending(id, entry);
+          res.writeHead(202, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Targeted re-seed of an isolated agent's dedicated volume (#185 item 5) ─
+    // After the admin (or orchestrator) rewrites a running agent's control-plane
+    // files on the pool subpath, it asks us to mirror the named paths into the
+    // agent's dedicated volume — the orchestrator is the only writer that can
+    // reach it. No-op with the flag off or when the agent isn't running (see
+    // reseedAgent); reseedPerAgentVolume re-validates each path (allowlist).
+    const reseedMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/reseed$/);
+    if (reseedMatch) {
+      const id = decodeURIComponent(reseedMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
+      req.on('end', async () => {
+        if (!isSafePathSeg(id)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+          return;
+        }
+        try {
+          const { paths } = JSON.parse(body || '{}');
+          if (!Array.isArray(paths)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'paths must be an array' }));
+            return;
+          }
+          const result = await reseedAgent(id, paths);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Session reset (#185 Phase 2) ──────────────────────────────────────
+    // The admin can't delete an isolated agent's session pointer, so it asks
+    // us. We drop the pushed mirror (badge clears now) and, when isolated,
+    // enqueue a command so the agent drops its own --resume pointer. With the
+    // flag off the admin still deletes the pool pointer directly, so we skip
+    // the command to keep that path unchanged.
+    const sessionResetMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/session-reset$/);
+    if (sessionResetMatch) {
+      const id = decodeURIComponent(sessionResetMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
+      req.on('end', () => {
+        try {
+          const { roomId } = JSON.parse(body || '{}');
+          if (!isSafePathSeg(id) || !isSafePathSeg(roomId)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'bad id/roomId' }));
+            return;
+          }
+          try { fs.unlinkSync(path.join(controlAgentDir(id), 'sessions', `${roomId}.current.json`)); } catch { /* already gone */ }
+          if (PER_AGENT_VOLUME) enqueuePending(id, { kind: 'session-reset', roomId });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Triggers: agent pull (#185 Phase 2) ───────────────────────────────
+    // The isolated agent fetches its canonical triggers on each sync tick and
+    // whenever SIGUSR2 wakes it. Read-only.
+    const getTriggersMatch = req.method === 'GET' && req.url.match(/^\/internal\/agents\/([^/]+)\/triggers$/);
+    if (getTriggersMatch) {
+      const id = decodeURIComponent(getTriggersMatch[1]);
+      if (!isSafePathSeg(id)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, triggers: loadTriggers(id) }));
+      return;
+    }
+
+    // ── Triggers: one-shot consumed (#185 Phase 2) ────────────────────────
+    // After firing a `once` trigger the agent reports it consumed so we drop it
+    // from the canonical copy and it won't re-fire on the next pull/restart.
+    const consumeTriggerMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/triggers\/([^/]+)\/consumed$/);
+    if (consumeTriggerMatch) {
+      const id = decodeURIComponent(consumeTriggerMatch[1]);
+      const tid = decodeURIComponent(consumeTriggerMatch[2]);
+      if (!isSafePathSeg(id) || !isSafePathSeg(tid)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad id/triggerId' }));
+        return;
+      }
+      const before = loadTriggers(id);
+      const after = Array.isArray(before) ? before.filter(t => t && t.id !== tid) : [];
+      const removed = after.length !== (Array.isArray(before) ? before.length : 0);
+      if (removed) {
+        try {
+          saveTriggers(id, after);
+        } catch (err) {
+          // Don't claim success — the canonical copy still has the trigger, so
+          // the agent should know its consume report didn't persist.
+          console.error(`[Triggers] consume ${id}/${tid}: ${err.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+          return;
+        }
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, removed }));
+      return;
+    }
+
+    // ── Triggers: admin write-through (#185 Phase 2) ──────────────────────
+    // Admin CRUD computes the new full array and PUTs it here, so the
+    // orchestrator stays the single writer of the canonical copy. We persist
+    // and signal SIGUSR2 so the agent re-pulls immediately.
+    const putTriggersMatch = req.method === 'PUT' && req.url.match(/^\/internal\/agents\/([^/]+)\/triggers$/);
+    if (putTriggersMatch) {
+      const id = decodeURIComponent(putTriggersMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 4_000_000) req.destroy(); });
+      req.on('end', () => {
+        if (!isSafePathSeg(id)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+          return;
+        }
+        try {
+          const { triggers } = JSON.parse(body || '{}');
+          if (!Array.isArray(triggers)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'triggers must be an array' }));
+            return;
+          }
+          saveTriggers(id, triggers);
+          const proc = agentProcesses.get(id);
+          if (proc) proc.kill('SIGUSR2');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Config + dm-room: agent pull (#185 Phase 2 item 3) ────────────────
+    // config.json / dm-room.json are control-plane authored and stay canonical
+    // on the pool subpath (orchestrator + admin own them there). An isolated
+    // agent can't read the pool subpath, so it pulls them from us into its
+    // local cache (refreshed each sync tick / on SIGUSR2). Read-only.
+    const getConfigMatch = req.method === 'GET' && req.url.match(/^\/internal\/agents\/([^/]+)\/config$/);
+    if (getConfigMatch) {
+      const id = decodeURIComponent(getConfigMatch[1]);
+      if (!isSafePathSeg(id)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+        return;
+      }
+      const cfg = loadAgentConfig(id);
+      if (!cfg) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'Agent not found' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, config: cfg }));
+      return;
+    }
+
+    const getDmRoomMatch = req.method === 'GET' && req.url.match(/^\/internal\/agents\/([^/]+)\/dm-room$/);
+    if (getDmRoomMatch) {
+      const id = decodeURIComponent(getDmRoomMatch[1]);
+      if (!isSafePathSeg(id)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+        return;
+      }
+      let dmRoom = null;
+      try {
+        const p = path.join(agentDir(id), 'dm-room.json');
+        if (fs.existsSync(p)) dmRoom = JSON.parse(fs.readFileSync(p, 'utf8'));
+      } catch { /* missing/corrupt → null (chat not opened yet) */ }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, dmRoom }));
+      return;
+    }
+
     // ── Poll agent status ─────────────────────────────────────────────────
     const pollMatch = req.method === 'GET' && req.url.match(/^\/internal\/agents\/([^/]+)\/poll$/);
     if (pollMatch) {
@@ -3501,7 +4019,7 @@ async function main() {
         res.end(JSON.stringify({ error: 'Agent not found' }));
         return;
       }
-      const statusPath = path.join(agentDir(id), 'status.json');
+      const statusPath = agentStatePath(id, 'status.json'); // control-plane copy preferred (#185)
       let status = {};
       try {
         if (fs.existsSync(statusPath)) {
@@ -3536,7 +4054,7 @@ async function main() {
       }
 
       try {
-        const sessionsDir = path.join(agentDir(id), 'sessions');
+        const sessionsDir = agentStatePath(id, 'sessions'); // control-plane copy preferred (#185)
         let newestFile = null;
         let newestMtime = 0;
         if (fs.existsSync(sessionsDir)) {
@@ -4102,11 +4620,7 @@ async function main() {
       }
     } catch { /* no config.json → new agent, allow through */ }
 
-    let triggers = [];
-    try {
-      const tp = path.join(agentDir, 'triggers.json');
-      if (fs.existsSync(tp)) triggers = JSON.parse(fs.readFileSync(tp, 'utf8'));
-    } catch {}
+    const triggers = loadTriggers(agentId); // canonical copy (#185 Phase 2)
 
     const trigger = Array.isArray(triggers)
       ? triggers.find(t => t.id === hookId && t.type === 'http' && t.enabled !== false)
@@ -4132,14 +4646,7 @@ async function main() {
       return;
     }
 
-    const pendingPath = path.join(agentDir, 'pending-triggers.json');
-    let pending = [];
-    try {
-      if (fs.existsSync(pendingPath)) pending = JSON.parse(fs.readFileSync(pendingPath, 'utf8'));
-      if (!Array.isArray(pending)) pending = [];
-    } catch {}
-    pending.push({ triggerId: hookId, receivedAt: new Date().toISOString() });
-    fs.writeFileSync(pendingPath, JSON.stringify(pending, null, 2));
+    enqueuePending(agentId, { triggerId: hookId });
 
     console.log(`[HookServer] Queued trigger '${hookId}' for agent '${agentId}'`);
     res.writeHead(202, { 'Content-Type': 'application/json' });
@@ -4165,6 +4672,8 @@ async function main() {
         return [];
       }
     },
+    enqueuePending, // #185 Phase 2: orchestrator owns the queue (control plane when isolated)
+    triggersPath: (agentId) => controlOrPoolPath(agentId, 'triggers.json'),
   });
   ghPoller.start();
 }

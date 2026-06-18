@@ -219,9 +219,16 @@ function applyFromFilter(originAgentId, subscriberAgentId, fromSpec, lookupTeam)
 }
 
 class GitHubPoller {
-  constructor({ loadEnvironment, listEnvironmentIds }) {
+  constructor({ loadEnvironment, listEnvironmentIds, enqueuePending, triggersPath } = {}) {
     this.loadEnvironment = loadEnvironment;
     this.listEnvironmentIds = listEnvironmentIds;
+    // #185 Phase 2: the orchestrator owns the pending queue (it writes to the
+    // control plane when the agent's volume is isolated). When not injected
+    // (unit tests), we fall back to writing the agent's pool file directly.
+    this.enqueuePending = enqueuePending || null;
+    // Canonical triggers.json location resolver (control plane when isolated).
+    // Falls back to the pool subpath when not injected (unit tests).
+    this.triggersPath = triggersPath || ((agentId) => path.join(AGENTS_DIR, agentId, 'triggers.json'));
     this.state = this._loadState();
     // In-memory throttle buckets, hydrated from disk at startup. Saved
     // back to disk after each fan-out tick (cheap — file is tiny).
@@ -293,7 +300,7 @@ class GitHubPoller {
         if (agentCfg?.enabled === false) continue;
       } catch { /* no config.json = new/stub agent, allow through */ }
 
-      const triggersPath = path.join(AGENTS_DIR, agentId, 'triggers.json');
+      const triggersPath = this.triggersPath(agentId);
       if (!fs.existsSync(triggersPath)) continue;
       let triggers;
       let triggersMtime = null;
@@ -557,16 +564,29 @@ class GitHubPoller {
     if (throttleStateDirty) this._saveThrottleState();
   }
 
-  _enqueue(agentId, triggerId, key, ghEvent) {
+  // Centralised pending-queue writer. Prefers the orchestrator's queue (which
+  // routes to the control plane under volume isolation); otherwise writes the
+  // agent's pool file directly. enqueuePending stamps receivedAt, so callers
+  // pass the entry without it.
+  _enqueuePending(agentId, entry) {
+    if (this.enqueuePending) { this.enqueuePending(agentId, entry); return; }
     const pendingPath = path.join(AGENTS_DIR, agentId, 'pending-triggers.json');
     let pending = [];
     try {
       if (fs.existsSync(pendingPath)) pending = JSON.parse(fs.readFileSync(pendingPath, 'utf8'));
       if (!Array.isArray(pending)) pending = [];
     } catch {}
-    pending.push({
+    pending.push({ receivedAt: new Date().toISOString(), ...entry });
+    try {
+      fs.writeFileSync(pendingPath, JSON.stringify(pending, null, 2));
+    } catch (err) {
+      console.error(`[GH-Poller] Cannot write pending for ${agentId}: ${err.message}`);
+    }
+  }
+
+  _enqueue(agentId, triggerId, key, ghEvent) {
+    this._enqueuePending(agentId, {
       triggerId,
-      receivedAt: new Date().toISOString(),
       github: {
         event: key,
         eventId: ghEvent.id,
@@ -576,12 +596,7 @@ class GitHubPoller {
         payload: ghEvent.payload,
       },
     });
-    try {
-      fs.writeFileSync(pendingPath, JSON.stringify(pending, null, 2));
-      console.log(`[GH-Poller] Queued ${key} (${ghEvent.id}) → agent=${agentId} trigger=${triggerId}`);
-    } catch (err) {
-      console.error(`[GH-Poller] Cannot write pending for ${agentId}: ${err.message}`);
-    }
+    console.log(`[GH-Poller] Queued ${key} (${ghEvent.id}) → agent=${agentId} trigger=${triggerId}`);
   }
 
   _fetchEvents(repoFullName, token, etag) {
@@ -730,25 +745,13 @@ class GitHubPoller {
   // The agent-runner picks this up in its drain loop and posts a plain
   // (non-Claude) DM so the user sees a loop has been clamped.
   _enqueueThrottleWarning(agentId, convKey, decision) {
-    const pendingPath = path.join(AGENTS_DIR, agentId, 'pending-triggers.json');
-    let pending = [];
-    try {
-      if (fs.existsSync(pendingPath)) pending = JSON.parse(fs.readFileSync(pendingPath, 'utf8'));
-      if (!Array.isArray(pending)) pending = [];
-    } catch { /* fall through with empty list */ }
-    pending.push({
+    this._enqueuePending(agentId, {
       kind: 'throttle-warning',
-      receivedAt: new Date().toISOString(),
       convKey,
       count: decision.count,
       threshold: decision.threshold,
       windowEndsAt: decision.windowEndsAt,
     });
-    try {
-      fs.writeFileSync(pendingPath, JSON.stringify(pending, null, 2));
-    } catch (err) {
-      console.error(`[GH-Poller] Cannot write throttle-warning for ${agentId}: ${err.message}`);
-    }
   }
 }
 

@@ -5,7 +5,7 @@ const os = require('os');
 const { EventEmitter, PassThrough } = require('stream');
 
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
-const AGENT_IMAGE = process.env.AGENT_IMAGE || 'ace-agent:latest';
+const AGENT_IMAGE = process.env.AGENT_IMAGE || 'as-agent:latest';
 const COMPOSE_PROJECT = process.env.COMPOSE_PROJECT_NAME || 'vgh-claw-314092';
 const WORKSPACE_VOLUME = process.env.AGENT_WORKSPACE_VOLUME ||
   `${COMPOSE_PROJECT}_agent-pool-workspace`;
@@ -27,6 +27,19 @@ const WORKSPACE_ISOLATION = process.env.AEE_WORKSPACE_ISOLATION !== '0';
 // snapshots under /root/.claude/projects are lost on every container restart.
 const CLAUDE_HOME_VOLUME = process.env.AGENT_CLAUDE_HOME_VOLUME ||
   `${COMPOSE_PROJECT}_claude-home`;
+// Seam #3+ (#185): TRUE per-agent volume isolation. When AEE_PER_AGENT_VOLUME=1
+// each agent gets a DEDICATED podman volume (`<project>_agent-<id>`) mounted at
+// /workspace/agents/<id> with NO SubPath, instead of a subpath of the shared
+// pool volume. Default OFF (explicit opt-in, opposite polarity to
+// AEE_WORKSPACE_ISOLATION) — the remaining control-plane readers (triggers,
+// pending-triggers, config) must move to push first (Phase 2). The orchestrator
+// still seeds the pool subpath `agents/<id>` as today; on first spawn we copy
+// that into the fresh dedicated volume (the seed helper below).
+const PER_AGENT_VOLUME = process.env.AEE_PER_AGENT_VOLUME === '1';
+function perAgentVolumeName(id) {
+  const safe = String(id).replace(/[^a-zA-Z0-9_.-]/g, '_');
+  return `${COMPOSE_PROJECT}_agent-${safe}`;
+}
 // Container hardening (conservative slice). Memory accepts a human suffix
 // (e.g. "2g", "512m"); 0/empty disables that limit.
 function parseBytes(s) {
@@ -238,6 +251,257 @@ async function ensurePerAgentNetwork(agentId) {
   return name;
 }
 
+// ── Seam #3+ helpers — per-agent volume (#185) ──────────────────────────────
+
+// Idempotent: create the dedicated volume; "already exists" is success.
+async function ensurePerAgentVolume(id) {
+  const name = perAgentVolumeName(id);
+  const r = await libpodRequest('POST', '/volumes/create', { name });
+  if (r.status >= 300 && r.status !== 409) {
+    const blob = typeof r.body === 'string' ? r.body : JSON.stringify(r.body || '');
+    if (!/exists/i.test(blob)) {
+      throw new Error(`per-agent volume create ${name}: status=${r.status} body=${blob}`);
+    }
+  }
+  return name;
+}
+
+// Seed a fresh per-agent volume from the orchestrator-seeded pool subpath. The
+// orchestrator cannot add a mount to its own running container, so we run a
+// short-lived helper (the agent image is already present — no extra pull) that
+// mounts BOTH the pool subpath (/src) and the dedicated volume (/dst) and
+// copies once. Idempotent: only copies when /dst is empty, so a respawn never
+// clobbers agent-written state. This is the libpod analogue of a K8s init
+// container. Fatal on failure — we must not spawn an agent against an empty
+// volume. `security_opt: label=disable` matches the compose services so an
+// SELinux host doesn't deny the bind (no-op on macOS).
+async function seedPerAgentVolume(id) {
+  const volName = perAgentVolumeName(id);
+  // Fail-closed sentinel (#185 item 7): after seeding, the dedicated volume MUST
+  // carry config.json (written to the pool subpath by saveAgentConfig before
+  // every spawn). If it's missing the copy produced an empty/corrupt volume —
+  // exit nonzero so seedPerAgentVolume throws and aborts the spawn before the
+  // agent container ever starts (never boot against an un-seeded volume).
+  const seedScript =
+    'if [ -z "$(ls -A /dst 2>/dev/null)" ]; then ' +
+    'cp -a /src/. /dst/ && echo "[seed] populated /dst from pool subpath agents/' + id + '"; ' +
+    'else echo "[seed] /dst already populated — skipping"; fi; ' +
+    'if [ ! -f /dst/config.json ]; then echo "[seed] FATAL: /dst missing config.json after seed" >&2; exit 3; fi';
+  const createBody = {
+    image: AGENT_IMAGE,
+    entrypoint: ['/bin/sh', '-c'],
+    command: [seedScript],
+    volumes: [
+      { Name: WORKSPACE_VOLUME, Dest: '/src', SubPath: `agents/${id}` },
+      { Name: volName, Dest: '/dst' },
+    ],
+    labels: { [AGENT_LABEL_KEY]: `seed-${id}` },
+    security_opt: ['label=disable'],
+    no_new_privileges: true,
+    remove: true,
+  };
+  const cr = await libpodRequest('POST', '/containers/create', createBody);
+  if (cr.status >= 300 || !cr.body || !cr.body.Id) {
+    throw new Error(`seed helper create for ${id}: status=${cr.status} body=${JSON.stringify(cr.body)}`);
+  }
+  const cid = cr.body.Id;
+  const sr = await libpodRequest('POST', `/containers/${cid}/start`);
+  if (sr.status >= 300) {
+    throw new Error(`seed helper start for ${id}: status=${sr.status} body=${JSON.stringify(sr.body)}`);
+  }
+  const code = await waitForExit(cid);
+  if (typeof code === 'number' && code !== 0) {
+    throw new Error(`seed helper for ${id} exited ${code}`);
+  }
+  console.log(`[spawn-container] seeded dedicated volume ${volName}`);
+}
+
+// Idempotent teardown (#185 item 6): remove the agent's dedicated volume on
+// delete / deactivate. 404 / "no such volume" is success (already gone). Without
+// this the dedicated volume leaks, and — because seedPerAgentVolume only copies
+// into an EMPTY /dst — a deactivated agent that keeps its volume would silently
+// reactivate against stale state instead of re-seeding.
+async function removePerAgentVolume(id) {
+  const name = perAgentVolumeName(id);
+  const r = await libpodRequest('DELETE', `/volumes/${name}?force=true`);
+  if (r.status >= 300 && r.status !== 404) {
+    const blob = typeof r.body === 'string' ? r.body : JSON.stringify(r.body || '');
+    if (!/no such volume|no volume with/i.test(blob)) {
+      throw new Error(`per-agent volume remove ${name}: status=${r.status} body=${blob}`);
+    }
+  }
+  return name;
+}
+
+// Seam #2 teardown: remove the per-agent network on agent delete. A per-agent
+// network can't be deleted while containers are attached, and two things keep
+// it occupied after the agent is "stopped":
+//   1. ensurePerAgentNetwork connects orchestrator + conduwuit and leaves them
+//      attached for the agent's whole lifetime — these must stay alive, so we
+//      DISCONNECT them (never force-delete the network, which would remove them).
+//   2. The agent's OWN container only gets a kill SIGNAL on stop (handle.kill →
+//      /containers/{id}/kill); actual removal is async via autoremove-on-exit.
+//      We must let that container be REMOVED (not merely disconnected): force-
+//      disconnecting a still-running agent strands it — it spins forever on
+//      DNS-failed Matrix syncs, never exits, and its autoremove never fires,
+//      leaking the container. So we give the earlier SIGTERM a brief grace
+//      window to exit + autoremove, then force-remove any leftover.
+// Order therefore matters: remove the agent container first, then disconnect the
+// services, then delete the now-empty network.
+// Idempotent and best-effort: a missing network/container (isolation disabled,
+// or already reaped) is success, not an error.
+const NETWORK_REMOVE_RETRIES = 5;
+const NETWORK_REMOVE_DELAY_MS = 1000;
+const AGENT_STOP_GRACE_POLLS = 8;      // ~8s for SIGTERM-driven autoremove
+const AGENT_STOP_GRACE_DELAY_MS = 1000;
+
+// List the agent's own container(s) by the aee.agent.id label, in any state.
+async function listAgentContainers(id) {
+  const filters = encodeURIComponent(JSON.stringify({ label: [`aee.agent.id=${id}`] }));
+  try {
+    const r = await libpodRequest('GET', `/containers/json?all=true&filters=${filters}`);
+    if (r.status < 300 && Array.isArray(r.body)) {
+      return r.body.map((c) => (c.Id || c.ID || (c.Names && c.Names[0]))).filter(Boolean);
+    }
+  } catch (err) {
+    console.warn(`[spawn-container] list containers for ${id}: ${err.message}`);
+  }
+  return [];
+}
+
+// Ensure the agent's own container is gone before we touch the network. Prefer
+// the graceful path (the SIGTERM sent by stopAgentProcess lets the agent exit
+// and autoremove); fall back to force-remove so teardown always makes progress.
+async function ensureAgentContainerGone(id) {
+  for (let attempt = 0; attempt < AGENT_STOP_GRACE_POLLS; attempt++) {
+    if ((await listAgentContainers(id)).length === 0) return;
+    await sleep(AGENT_STOP_GRACE_DELAY_MS);
+  }
+  // Still around after the grace window — force-remove whatever remains. This
+  // also detaches it from the per-agent network.
+  for (const cid of await listAgentContainers(id)) {
+    const r = await libpodRequest('DELETE', `/containers/${cid}?force=true`);
+    if (r.status >= 300 && r.status !== 404) {
+      const blob = typeof r.body === 'string' ? r.body : JSON.stringify(r.body || '');
+      if (!/no such container|no container/i.test(blob)) {
+        console.warn(`[spawn-container] force-remove container ${cid} (${id}): status=${r.status} body=${blob}`);
+      }
+    }
+  }
+}
+
+async function removePerAgentNetwork(id) {
+  const name = perAgentNetworkName(id);
+  // 1. Make sure the agent's own container is gone (graceful, then forced).
+  await ensureAgentContainerGone(id);
+  // 2. Disconnect the persistent service containers (orchestrator + conduwuit).
+  //    Force so a half-attached service still comes off. 404 / "not connected"
+  //    are benign.
+  for (const svc of SERVICE_CONTAINERS) {
+    try {
+      const dr = await libpodRequest('POST', `/networks/${name}/disconnect`, { Container: svc, Force: true });
+      if (dr.status >= 300 && dr.status !== 404) {
+        const blob = typeof dr.body === 'string' ? dr.body : JSON.stringify(dr.body || '');
+        if (!/not connected|no such network|network not found|no container|no such container/i.test(blob)) {
+          console.warn(`[spawn-container] disconnect ${svc} <- ${name}: status=${dr.status} body=${blob}`);
+        }
+      }
+    } catch (err) {
+      console.warn(`[spawn-container] disconnect ${svc} <- ${name}: ${err.message}`);
+    }
+  }
+  // 3. Delete the now-empty network (no force — see header). Retry briefly to
+  //    absorb any lingering async detach.
+  let last = '';
+  for (let attempt = 1; attempt <= NETWORK_REMOVE_RETRIES; attempt++) {
+    const r = await libpodRequest('DELETE', `/networks/${name}`);
+    if (r.status < 300 || r.status === 404) return name;
+    const blob = typeof r.body === 'string' ? r.body : JSON.stringify(r.body || '');
+    if (/no such network|network not found/i.test(blob)) return name;
+    last = `status=${r.status} body=${blob}`;
+    if (attempt < NETWORK_REMOVE_RETRIES) await sleep(NETWORK_REMOVE_DELAY_MS);
+  }
+  throw new Error(`per-agent network remove ${name}: ${last}`);
+}
+
+// Targeted re-seed (#185 item 5): copy NAMED control-plane files from the pool
+// subpath (/src) into the agent's ALREADY-POPULATED dedicated volume (/dst),
+// without clobbering agent-written state (memory/, the git tree, sessions/).
+// Used when a prompt/skill edit rewrites the pool subpath after the one-time
+// seedPerAgentVolume has already run. `paths` are workspace-relative
+// (e.g. 'CLAUDE.md', 'AGENT-PROMPT.md', 'skills/foo'). No-op (skipped) when the
+// dedicated volume doesn't exist yet — never resurrect a torn-down volume.
+async function reseedPerAgentVolume(id, paths) {
+  // Path safety is load-bearing — these become filesystem paths inside the
+  // helper. Allowlist only; reject traversal and absolute paths. (Even so we
+  // pass them as positional args below, not interpolated into the script.) The
+  // ':' is allowed because namespaced skill names (e.g. skills/ace:brief — see
+  // SKILL_NAME_RE) use it; it carries no shell-metachar risk since every $p is
+  // quoted and rooted under /src or /dst.
+  const SAFE = /^[A-Za-z0-9._:/-]+$/;
+  const all = Array.isArray(paths) ? paths : [];
+  const valid = all.filter(
+    (p) => typeof p === 'string' && p.length > 0 && p.length <= 256 &&
+      SAFE.test(p) && !p.includes('..') && !p.startsWith('/'),
+  );
+  // Surface anything we dropped so a silently-unmirrored file (e.g. a skill name
+  // the allowlist doesn't cover) is observable rather than a success no-op.
+  if (valid.length !== all.length) {
+    const rejected = all.filter((p) => !valid.includes(p));
+    console.warn(`[spawn-container] reseed ${id}: dropped unsafe path(s): ${JSON.stringify(rejected)}`);
+  }
+  if (valid.length === 0) return { skipped: 'no-paths' };
+
+  const volName = perAgentVolumeName(id);
+  // Inspect rather than create: a missing volume means the agent isn't
+  // provisioned, so reseeding is a no-op (creating it here would resurrect a
+  // volume that delete/deactivate just tore down).
+  const insp = await libpodRequest('GET', `/volumes/${volName}/json`);
+  if (insp.status === 404) return { skipped: 'no-volume' };
+  if (insp.status >= 300) {
+    throw new Error(`reseed inspect ${volName}: status=${insp.status} body=${JSON.stringify(insp.body)}`);
+  }
+
+  // Per path: skip if absent in /src; replace dirs wholesale (rm -rf + cp, a
+  // sub-second non-atomic window matching the existing seed's risk); files via
+  // cp-to-temp + intra-/dst rename (atomic). Paths arrive as "$@" positionals.
+  const reseedScript =
+    'set -e; for p in "$@"; do ' +
+    'if [ ! -e "/src/$p" ]; then echo "[reseed] skip (absent in /src): $p"; continue; fi; ' +
+    'mkdir -p "/dst/$(dirname "$p")"; ' +
+    'if [ -d "/src/$p" ]; then rm -rf "/dst/$p" && cp -a "/src/$p" "/dst/$p" && echo "[reseed] dir $p"; ' +
+    'else cp -a "/src/$p" "/dst/$p.tmp.$$" && mv -f "/dst/$p.tmp.$$" "/dst/$p" && echo "[reseed] file $p"; fi; ' +
+    'done';
+  const createBody = {
+    image: AGENT_IMAGE,
+    entrypoint: ['/bin/sh', '-c'],
+    command: [reseedScript, 'reseed', ...valid],
+    volumes: [
+      { Name: WORKSPACE_VOLUME, Dest: '/src', SubPath: `agents/${id}` },
+      { Name: volName, Dest: '/dst' },
+    ],
+    labels: { [AGENT_LABEL_KEY]: `reseed-${id}` },
+    security_opt: ['label=disable'],
+    no_new_privileges: true,
+    remove: true,
+  };
+  const cr = await libpodRequest('POST', '/containers/create', createBody);
+  if (cr.status >= 300 || !cr.body || !cr.body.Id) {
+    throw new Error(`reseed helper create for ${id}: status=${cr.status} body=${JSON.stringify(cr.body)}`);
+  }
+  const cid = cr.body.Id;
+  const sr = await libpodRequest('POST', `/containers/${cid}/start`);
+  if (sr.status >= 300) {
+    throw new Error(`reseed helper start for ${id}: status=${sr.status} body=${JSON.stringify(sr.body)}`);
+  }
+  const code = await waitForExit(cid);
+  if (typeof code === 'number' && code !== 0) {
+    throw new Error(`reseed helper for ${id} exited ${code}`);
+  }
+  console.log(`[spawn-container] reseeded ${valid.length} path(s) into ${volName}: ${valid.join(', ')}`);
+  return { reseeded: valid };
+}
+
 function spawnContainer({ id, env }) {
   const handle = new EventEmitter();
   handle.stdout = new PassThrough();
@@ -304,21 +568,34 @@ function spawnContainer({ id, env }) {
     : Promise.resolve(AGENT_NETWORK);
 
   networkPromise
-    .then((networkName) => {
+    .then(async (networkName) => {
       const isolated = PER_AGENT_NETWORK_ENABLED && networkName !== AGENT_NETWORK;
       console.log(
         `[spawn-container] ${id} -> network ${networkName} ` +
         `(${isolated ? 'isolated' : PER_AGENT_NETWORK_ENABLED ? 'shared-fallback' : 'shared'})`,
       );
-      // Seam #3: isolate the agent to its own workspace subdir + give it a
-      // persistent Claude home. The SubPath targets (`agents/<id>`,
-      // `homes/<id>`) are pre-created by the orchestrator before spawn, so the
-      // mount never has to create them. The destination path for the workspace
-      // is kept identical to the legacy layout (`/workspace/agents/<id>`) so
-      // cwd and absolute paths in seeded memory are unaffected.
-      const volumes = WORKSPACE_ISOLATION
+      // Seam #3: isolate the agent to its own workspace + give it a persistent
+      // Claude home. The destination path (`/workspace/agents/<id>`) is kept
+      // identical across all modes so cwd and absolute paths in seeded memory
+      // are unaffected.
+      //   - PER_AGENT_VOLUME (#185): a DEDICATED volume, no SubPath. Provision +
+      //     one-time seed from the pool subpath first (fatal on failure — never
+      //     spawn against an empty volume).
+      //   - WORKSPACE_ISOLATION (default): a SubPath of the shared pool volume,
+      //     pre-created by the orchestrator before spawn.
+      //   - neither: legacy whole-pool mount (debug only — re-exposes secrets).
+      let workspaceMount;
+      if (PER_AGENT_VOLUME) {
+        const volName = await ensurePerAgentVolume(id);
+        await seedPerAgentVolume(id);
+        workspaceMount = { Name: volName, Dest: `/workspace/agents/${id}` };
+        console.log(`[spawn-container] ${id} -> dedicated volume ${volName}`);
+      } else if (WORKSPACE_ISOLATION) {
+        workspaceMount = { Name: WORKSPACE_VOLUME, Dest: `/workspace/agents/${id}`, SubPath: `agents/${id}` };
+      }
+      const volumes = (WORKSPACE_ISOLATION || PER_AGENT_VOLUME)
         ? [
-            { Name: WORKSPACE_VOLUME, Dest: `/workspace/agents/${id}`, SubPath: `agents/${id}` },
+            workspaceMount,
             { Name: CLAUDE_HOME_VOLUME, Dest: '/root/.claude', SubPath: `homes/${id}` },
           ]
         : [{ Name: WORKSPACE_VOLUME, Dest: '/workspace' }];
@@ -328,6 +605,7 @@ function spawnContainer({ id, env }) {
       const createBody = {
         image: AGENT_IMAGE,
         env: envMap,
+        netns: { nsmode: 'bridge' },
         volumes,
         Networks: { [networkName]: {} },
         labels: { [AGENT_LABEL_KEY]: String(id) },
@@ -368,4 +646,4 @@ function spawnContainer({ id, env }) {
   return handle;
 }
 
-module.exports = { spawnContainer, libpodRequest };
+module.exports = { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume };

@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import os
+import queue
 import re
 import signal
 import subprocess
@@ -435,18 +437,20 @@ def _write_session_pointer(room_id: str, session_id: str) -> None:
     if not session_id:
         return
     p = _session_pointer_file(room_id)
+    updated_at = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(
-            json.dumps(
-                {"sessionId": session_id,
-                 "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())},
-                indent=2,
-            ),
+            json.dumps({"sessionId": session_id, "updatedAt": updated_at}, indent=2),
             encoding="utf-8",
         )
     except Exception as exc:
         print(f"[Runner] writeSessionPointer: {exc}", file=sys.stderr)
+    # Mirror to the control plane (#185) so the admin reads it under per-agent
+    # volume isolation. Best-effort, off the hot path.
+    pc = _get_push_client()
+    if pc:
+        pc.push_pointer(room_id, session_id, updated_at)
 
 
 def _clear_session_pointer(room_id: str) -> None:
@@ -454,12 +458,178 @@ def _clear_session_pointer(room_id: str) -> None:
         _session_pointer_file(room_id).unlink(missing_ok=True)
     except Exception:
         pass
+    pc = _get_push_client()
+    if pc:
+        pc.push_pointer(room_id, "", "")  # clears the mirrored copy too
 
 
 # ---- JSONL session log (schema must match orchestrator/session-log.js) ----
 
 def _session_log_file(room_id: str) -> Path:
     return _agent_workdir() / "sessions" / f"{room_id}.jsonl"
+
+
+# ---- Control-plane state push (#185) ----
+#
+# With per-agent volume isolation the orchestrator/admin-console can no longer
+# read this agent's status.json / session-log off a shared filesystem, so we
+# PUSH them to the orchestrator's internal API. Best-effort and off the hot
+# path: a background daemon thread debounces and POSTs; failures never touch the
+# runner. The agent still writes its local files, and those local files are the
+# source of truth we re-read from — so the session-log push is byte-exact and
+# the admin viewer's byte-cursor (?since=<byte>) contract stays valid.
+_PUSH_ENABLED = os.environ.get("AEE_PUSH_STATE", "1") != "0"
+# Phase 2 (#185): with per-agent volume isolation the orchestrator/admin can no
+# longer write control→agent state (triggers, pending-triggers, session reset)
+# into this agent's volume, so we PULL it over HTTP instead of reading the local
+# file. Off (the default) keeps the local-file path, byte-identical to today.
+_PER_AGENT_VOLUME = os.environ.get("AEE_PER_AGENT_VOLUME") == "1"
+
+
+class _StatePushClient:
+    def __init__(self, agent_id: str, base_url: str):
+        self._agent_id = agent_id
+        self._base = base_url.rstrip("/")
+        self._q: "queue.Queue[tuple[str, object]]" = queue.Queue()
+        self._sent: dict[str, int] = {}  # roomId -> bytes acked by the orchestrator
+        self._thread = threading.Thread(target=self._run, name="state-push", daemon=True)
+        self._started = False
+
+    def start(self) -> None:
+        if not self._started:
+            self._started = True
+            self._thread.start()
+
+    def push_status(self, data: dict) -> None:
+        self._q.put(("status", dict(data)))
+
+    def mark_session_dirty(self, room_id: str) -> None:
+        self._q.put(("session", room_id))
+
+    def push_pointer(self, room_id: str, session_id: str | None,
+                     updated_at: str | None) -> None:
+        # session_id="" / None means "clear" (drops the admin's Session-aktiv
+        # badge after a reset). Last write per room wins within a debounce tick.
+        self._q.put(("pointer", (room_id, session_id or "", updated_at or "")))
+
+    def _run(self) -> None:
+        while True:
+            try:
+                first = self._q.get()
+            except Exception:
+                continue
+            # Debounce: a single Claude turn emits many session lines — let the
+            # burst accumulate, then read each dirty room's tail once.
+            time.sleep(0.25)
+            items = [first]
+            while True:
+                try:
+                    items.append(self._q.get_nowait())
+                except queue.Empty:
+                    break
+            status_data = None
+            dirty: list[str] = []
+            pointers: dict[str, tuple[str, str]] = {}
+            for kind, payload in items:
+                if kind == "status":
+                    status_data = payload
+                elif kind == "session" and payload not in dirty:
+                    dirty.append(payload)  # type: ignore[arg-type]
+                elif kind == "pointer":
+                    room_id, sid, upd = payload  # type: ignore[misc]
+                    pointers[room_id] = (sid, upd)
+            try:
+                if status_data is not None:
+                    self._post_status(status_data)
+                for room_id in dirty:
+                    self._flush_session(room_id)
+                for room_id, (sid, upd) in pointers.items():
+                    self._post_pointer(room_id, sid, upd)
+            except Exception as exc:  # never let the push thread die
+                print(f"[Runner] state-push tick failed: {exc}", file=sys.stderr)
+
+    def _post_status(self, data: dict) -> None:
+        body = json.dumps(data).encode("utf-8")
+        self._post(f"/internal/agents/{self._agent_id}/status", body)
+
+    def _post_pointer(self, room_id: str, session_id: str, updated_at: str) -> None:
+        body = json.dumps({
+            "roomId": room_id,
+            "sessionId": session_id,
+            "updatedAt": updated_at,
+        }).encode("utf-8")
+        self._post(f"/internal/agents/{self._agent_id}/session-pointer", body)
+
+    def _flush_session(self, room_id: str) -> None:
+        p = _session_log_file(room_id)
+        try:
+            size = p.stat().st_size
+        except OSError:
+            return
+        base = self._sent.get(room_id, 0)
+        if base > size:
+            base = 0  # local file truncated/rotated — resend from the top
+        if base >= size:
+            return
+        try:
+            with p.open("rb") as fh:
+                fh.seek(base)
+                tail = fh.read()
+        except OSError:
+            return
+        body = json.dumps({
+            "roomId": room_id,
+            "baseOffset": base,
+            "dataB64": base64.b64encode(tail).decode("ascii"),
+        }).encode("utf-8")
+        status, resp = self._post(
+            f"/internal/agents/{self._agent_id}/session-events", body,
+        )
+        if status != 200:
+            return  # transient — retry on the next append
+        try:
+            j = json.loads(resp)
+        except Exception:
+            return
+        if j.get("ok"):
+            self._sent[room_id] = int(j.get("offset", base + len(tail)))
+        elif "expected" in j:
+            # Gap: control file is behind us — rewind and resend next tick.
+            self._sent[room_id] = int(j["expected"])
+            self._q.put(("session", room_id))
+
+    def _post(self, route: str, body: bytes) -> tuple[int, str]:
+        url = f"{self._base}{route}"
+        req = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, r.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            try:
+                return exc.code, exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                return exc.code, str(exc)
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            return 0, str(exc)
+
+
+_push_client: _StatePushClient | None = None
+
+
+def _get_push_client() -> _StatePushClient | None:
+    global _push_client
+    if not _PUSH_ENABLED:
+        return None
+    if _push_client is None:
+        _push_client = _StatePushClient(
+            os.environ.get("AGENT_ID", ""),
+            os.environ.get("ORCHESTRATOR_INTERNAL_URL", "http://localhost:4002"),
+        )
+        _push_client.start()
+    return _push_client
 
 
 def _append_event(room_id: str, event: dict) -> None:
@@ -470,6 +640,11 @@ def _append_event(room_id: str, event: dict) -> None:
               **event}
         with f.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(ev) + "\n")
+        # Mirror to the control plane (#185). The pusher re-reads this file's
+        # tail, so it stays byte-exact; queued + debounced, never blocks here.
+        pc = _get_push_client()
+        if pc:
+            pc.mark_session_dirty(room_id)
     except Exception as exc:
         # Logging never crashes the runner.
         print(f"[Runner] session-log append failed: {exc}", file=sys.stderr)
@@ -613,6 +788,9 @@ def _write_status(state: str) -> None:
         if prev.get("lastResponseAt"):
             data["lastResponseAt"] = prev["lastResponseAt"]
         p.write_text(json.dumps(data), encoding="utf-8")
+        pc = _get_push_client()  # mirror to control plane (#185)
+        if pc:
+            pc.push_status(data)
     except Exception:
         pass  # best-effort
 
@@ -628,6 +806,9 @@ def _write_last_response_at() -> None:
                 prev = {}
         prev["lastResponseAt"] = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
         p.write_text(json.dumps(prev), encoding="utf-8")
+        pc = _get_push_client()  # mirror to control plane (#185)
+        if pc:
+            pc.push_status(prev)
     except Exception:
         pass
 
@@ -728,9 +909,17 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     """
     global _active_claude_proc, _user_stop_requested
 
-    args = _base_claude_args(prompt, _build_memory_hint(blueprint_id), _resolve_model_arg())
+    model_arg = _resolve_model_arg()
+    args = _base_claude_args(prompt, _build_memory_hint(blueprint_id), model_arg)
     if resume_id:
         args = ["--resume", resume_id, *args]
+    # Surface the resolved model so a missing/blank AGENT_DEFAULT_MODEL (a prime
+    # suspect for silent failures) is visible in the container logs (#186).
+    print(
+        f"[Runner] claude invoke: model={model_arg or '(CLI default — AGENT_DEFAULT_MODEL unset)'}, "
+        f"resume={'yes' if resume_id else 'no'}",
+        file=sys.stderr,
+    )
 
     # HOME is the persistent agent workdir so claude's session files (under
     # $HOME/.claude/projects/...) survive container restarts. The default
@@ -1013,6 +1202,7 @@ class TriggerScheduler:
 
         self._cron_tasks: dict[str, dict] = {}  # triggerId -> {"task": Task, "expr": str}
         self._running: set[str] = set()
+        self._fired_once: set[str] = set()  # once-triggers already fired this lifetime (#185)
         self._reload_event = asyncio.Event()
         self._shutdown_event = asyncio.Event()
         self._sync_task: asyncio.Task | None = None
@@ -1085,7 +1275,59 @@ class TriggerScheduler:
                 print(f"[Runner:{self._agent_id}] sync error: {exc}",
                       file=sys.stderr)
 
+    async def _pull_triggers(self) -> None:
+        """When isolated, refresh the local triggers.json cache from the
+        orchestrator's canonical copy. No-op on the shared volume, where the
+        admin/orchestrator already write the agent's own file. On a transient
+        failure we keep the last-synced cache rather than dropping schedules."""
+        if not _PER_AGENT_VOLUME:
+            return
+        status, body = await asyncio.to_thread(
+            self._orch_get,
+            f"/internal/agents/{urllib.parse.quote(self._agent_id, safe='')}/triggers",
+        )
+        if status != 200:
+            return
+        try:
+            data = json.loads(body)
+        except Exception:
+            return
+        triggers = data.get("triggers") if isinstance(data, dict) else data
+        if isinstance(triggers, list):
+            _save_triggers(triggers)
+
+    async def _pull_config_dm(self) -> None:
+        """When isolated, refresh the local config.json + dm-room.json caches
+        from the orchestrator. Both are control-plane authored and canonical on
+        the pool subpath, which an isolated agent can't read — so we pull them
+        and the existing local readers (_load_dm_agent_config / _load_dm_room_id)
+        keep working unchanged. No-op on the shared volume; a failed fetch keeps
+        the last-synced cache."""
+        if not _PER_AGENT_VOLUME:
+            return
+        aid = urllib.parse.quote(self._agent_id, safe='')
+        status, body = await asyncio.to_thread(self._orch_get, f"/internal/agents/{aid}/config")
+        if status == 200:
+            try:
+                data = json.loads(body)
+                cfg = data.get("config") if isinstance(data, dict) else None
+                if isinstance(cfg, dict):
+                    _atomic_write_json(_agent_workdir() / "config.json", cfg)
+            except Exception:
+                pass
+        status, body = await asyncio.to_thread(self._orch_get, f"/internal/agents/{aid}/dm-room")
+        if status == 200:
+            try:
+                data = json.loads(body)
+                dm = data.get("dmRoom") if isinstance(data, dict) else None
+                if isinstance(dm, dict) and dm.get("roomId"):
+                    _atomic_write_json(_agent_workdir() / "dm-room.json", dm)
+            except Exception:
+                pass
+
     async def _sync(self) -> None:
+        await self._pull_triggers()
+        await self._pull_config_dm()
         triggers = _load_triggers()
         active_ids: set[str] = set()
 
@@ -1139,11 +1381,25 @@ class TriggerScheduler:
                     continue
                 now = datetime.now(tz=_TRIGGER_TZ)
                 if now >= fire_at:
+                    # Guard against a re-fire if a pull re-introduces this once
+                    # (e.g. the consumed-report below lagged or failed). #185
+                    if tid in self._fired_once:
+                        continue
+                    self._fired_once.add(tid)
                     # Fire and remove. Spawn as task so a slow Claude run
                     # doesn't block the sync loop.
                     asyncio.create_task(self._execute(dict(trigger)))
                     remaining = [t for t in _load_triggers() if t.get("id") != tid]
                     _save_triggers(remaining)
+                    if _PER_AGENT_VOLUME:
+                        # Tell the orchestrator to drop it from the canonical copy
+                        # so the next pull doesn't bring it back.
+                        asyncio.create_task(asyncio.to_thread(
+                            self._orch_post_json,
+                            f"/internal/agents/{urllib.parse.quote(self._agent_id, safe='')}"
+                            f"/triggers/{urllib.parse.quote(tid, safe='')}/consumed",
+                            {},
+                        ))
                     print(f"[Runner:{self._agent_id}] One-shot fired and removed: {tid}",
                           file=sys.stderr)
                 # Future-dated once-triggers fall through to the next 60 s
@@ -1187,6 +1443,44 @@ class TriggerScheduler:
         except asyncio.CancelledError:
             return
 
+    # -- orchestrator HTTP (control→agent pull channel, #185) ----------------
+
+    @staticmethod
+    def _orch_get(route: str) -> tuple[int, str]:
+        """Blocking GET against the orchestrator; run via asyncio.to_thread."""
+        url = f"{ORCHESTRATOR_INTERNAL_URL.rstrip('/')}{route}"
+        req = urllib.request.Request(url, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            try:
+                return exc.code, exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                return exc.code, str(exc)
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            return 0, str(exc)
+
+    @staticmethod
+    def _orch_post_json(route: str, payload: dict) -> tuple[int, str]:
+        """Blocking JSON POST against the orchestrator; run via asyncio.to_thread."""
+        url = f"{ORCHESTRATOR_INTERNAL_URL.rstrip('/')}{route}"
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            try:
+                return exc.code, exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                return exc.code, str(exc)
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            return 0, str(exc)
+
     # -- pending queue (http / github-event) ---------------------------------
 
     async def _pending_loop(self) -> None:
@@ -1201,18 +1495,36 @@ class TriggerScheduler:
             except asyncio.TimeoutError:
                 pass
 
-    async def _process_pending(self) -> None:
+    async def _drain_pending(self) -> list:
+        """Read-and-clear the pending queue. With per-agent volume isolation the
+        orchestrator owns the queue and we pull it over HTTP (it clears on read);
+        otherwise we read+clear our own local file, byte-identical to before."""
+        if _PER_AGENT_VOLUME:
+            status, body = await asyncio.to_thread(
+                self._orch_get,
+                f"/internal/agents/{urllib.parse.quote(self._agent_id, safe='')}/pending-drain",
+            )
+            if status != 200:
+                if status != 0:  # 0 == orchestrator unreachable; stay quiet, retry next tick
+                    print(f"[Runner:{self._agent_id}] pending-drain HTTP {status}",
+                          file=sys.stderr)
+                return []
+            try:
+                data = json.loads(body)
+            except Exception:
+                return []
+            entries = data.get("entries") if isinstance(data, dict) else data
+            return entries if isinstance(entries, list) else []
+
         pending_path = _agent_workdir() / _PENDING_FILENAME
         if not pending_path.exists():
-            return
+            return []
         try:
-            raw = pending_path.read_text(encoding="utf-8")
-            entries = json.loads(raw)
+            entries = json.loads(pending_path.read_text(encoding="utf-8"))
         except Exception:
-            return
+            return []
         if not isinstance(entries, list) or not entries:
-            return
-
+            return []
         # Clear before firing so a slow run can't double-process the queue
         # (matches agent-runner.js:501).
         try:
@@ -1220,6 +1532,12 @@ class TriggerScheduler:
         except Exception as exc:
             print(f"[Runner:{self._agent_id}] pending clear failed: {exc}",
                   file=sys.stderr)
+        return entries
+
+    async def _process_pending(self) -> None:
+        entries = await self._drain_pending()
+        if not entries:
+            return
 
         triggers = _load_triggers()
 
@@ -1227,6 +1545,15 @@ class TriggerScheduler:
             if not isinstance(entry, dict):
                 continue
             kind = entry.get("kind")
+            if kind == "session-reset":
+                # Control→agent reset command (#185): the admin can't delete our
+                # pointer on an isolated volume, so it asks us to drop it.
+                rid = entry.get("roomId")
+                if rid:
+                    _clear_session_pointer(rid)
+                    print(f"[Runner:{self._agent_id}] session-reset for {rid}",
+                          file=sys.stderr)
+                continue
             if kind == "handover-dm":
                 print(f"[Runner:{self._agent_id}] handover-dm from queue",
                       file=sys.stderr)
@@ -1994,8 +2321,23 @@ async def run_dm_listener() -> None:
             finally:
                 _bump_active(-1)
 
+            # Guard empty/whitespace output: posting a blank message looks like
+            # "no reply" to the user. Substitute a visible notice and log it so
+            # a misconfigured model id / interrupted run is diagnosable (#186).
+            reply = result if (result and result.strip()) else None
+            if reply is None:
+                print(
+                    f"[Runner:{agent_id}] Claude returned no text — posting fallback "
+                    f"notice (check model id / container logs)",
+                    file=sys.stderr,
+                )
+                reply = (
+                    "_(The agent produced no output. This usually means the model id is "
+                    "misconfigured or the run was interrupted — check the agent container logs.)_"
+                )
+
             try:
-                event_id = await send_formatted(room_id, result)
+                event_id = await send_formatted(room_id, reply)
             except Exception as exc:
                 _append_event(room_id, {
                     "type": "error", "correlationId": correlation_id,
@@ -2009,7 +2351,7 @@ async def run_dm_listener() -> None:
                 "correlationId": correlation_id,
                 "eventId": event_id,
             })
-            print(f"[Runner:{agent_id}] Posted direct response ({len(result)} chars)",
+            print(f"[Runner:{agent_id}] Posted direct response ({len(reply)} chars)",
                   file=sys.stderr)
 
         except subprocess.CalledProcessError as err:
@@ -2106,15 +2448,30 @@ async def run_dm_listener() -> None:
             claim_loop = None
 
     _DM_LOOP_RUNNING = True
+    sync_fail_streak = 0
     try:
         while not _shutdown.is_set():
             try:
                 await client.sync(timeout=30000, full_state=False,
                                   since=client.next_batch)
+                sync_fail_streak = 0
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                print(f"[Runner:{agent_id}] sync error: {exc}", file=sys.stderr)
+                sync_fail_streak += 1
+                # Name the homeserver on the first failure and periodically
+                # after. A persistent sync error here almost always means the
+                # agent cannot reach Conduwuit (DNS/network) — e.g. the Seam #2
+                # per-agent-network hostname rewrite is wrong (#186).
+                if sync_fail_streak == 1 or sync_fail_streak % 15 == 0:
+                    print(
+                        f"[Runner:{agent_id}] sync error (x{sync_fail_streak}) against "
+                        f"{homeserver}: {exc} — check Conduwuit reachability/DNS "
+                        f"from this container",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(f"[Runner:{agent_id}] sync error: {exc}", file=sys.stderr)
                 await asyncio.sleep(2)
     finally:
         _DM_LOOP_RUNNING = False

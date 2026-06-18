@@ -41,6 +41,11 @@ services:
       # volume, `--resume <sessionId>` would fail after every container
       # restart because Claude's local session state lives under HOME.
       - claude-home:/root/.claude
+      # Control-plane volume (#185): agents PUSH their status + session-log
+      # here via the orchestrator's internal API. Mounted on orchestrator +
+      # admin-console ONLY (never on agents) so monitoring no longer depends on
+      # reading an agent's (soon per-agent) workspace volume.
+      - agent-control-plane:/control
       - ~/.ssh/id_accenturecodefoundry:/root/.ssh/id_accenturecodefoundry:ro
       - ~/.ssh/id_accenturecodefoundry.pub:/root/.ssh/id_accenturecodefoundry.pub:ro
       # Rootless Podman socket. The default path is the macOS Podman-Desktop
@@ -117,6 +122,9 @@ services:
     volumes:
       - agent-pool-workspace:/workspace
       - skills-pool:/pool
+      # Control-plane volume (#185) — same volume the orchestrator writes to;
+      # the session-log SSE stream + status reads tail it from here.
+      - agent-control-plane:/control
       # ACE / BriefingPack integration: uncomment when ACE_REPO_PATH is set in .env
       # - ${ACE_REPO_PATH}:/ace:rw
       # Rootless Podman socket — same default + override mechanism as the
@@ -151,3 +159,8 @@ volumes:
   # working across orchestrator container restarts.
   claude-home:
     name: ${COMPOSE_PROJECT_NAME}_claude-home
+  # Control-plane state pushed by agents (#185): /control/agents/<id>/status.json
+  # and /control/agents/<id>/sessions/<roomId>.jsonl. Mounted by orchestrator +
+  # admin-console only — the read-side that survives per-agent volume isolation.
+  agent-control-plane:
+    name: ${COMPOSE_PROJECT_NAME}_agent-control-plane

@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 The stack runs locally with Podman as a single compose file with these services:
 
 1. **Conduwuit** — Matrix homeserver
-2. **Orchestrator** — backend service that manages per-agent processes; no Matrix chat identity of its own
+2. **Orchestrator** — control-plane service that spawns and manages one Podman container per agent; no Matrix chat identity of its own
 3. **Admin Console** — web UI on `:4000` for managing agents, working environments, SSH keys, skills, etc. Includes an embedded chat UI at `/chats/:agentId` for direct 1:1 conversations with each agent.
 4. **bp-explorer** — read-only viewer for ACE BriefingPack metadata
 
@@ -24,23 +24,28 @@ Admin Console chat UI (or any Matrix client, e.g. Element)
   → Conduwuit (localhost:8448)
        │
        └── 1:1 DM rooms (one per agent)
-              ├── @cobol-agent:local       ← agent-runner.js
-              ├── @java-agent:local        ← agent-runner.js
-              └── @quality-gate:local      ← agent-runner.js (autonomous)
+              ├── @cobol-agent:local      ← container: as-agent:latest
+              ├── @java-agent:local       ← container: as-agent:latest
+              └── @quality-gate:local     ← container: as-agent:latest (autonomous)
 
-orchestrator.js  (backend service, no Matrix presence)
+orchestrator.js  (control-plane container, no Matrix presence)
   ├── Manages agent lifecycle (create/update/delete via Admin Console)
-  ├── Spawns one agent-runner.js child process per enabled agent
+  ├── Spawns ONE Podman container per enabled agent — over the Podman
+  │     libpod socket (/var/run/podman.sock) via spawn-container.js,
+  │     NOT in-process child processes
+  ├── Provisions per-agent network + volume isolation, and reconciles
+  │     live containers (by the `aee.agent.id` label) against its map
   ├── Uses the admin Matrix client to provision new agent users
   └── Internal HTTP API on :4002 for the admin console
 ```
 
-- **Agents:** dynamically created Matrix users (e.g. `@cobol-agent:local`); each runs its own agent-runner.js process
+- **Agents:** dynamically created Matrix users (e.g. `@cobol-agent:local`); each runs in its **own Podman container** (image `as-agent:latest`), spawned and lifecycle-managed by the orchestrator over the Podman socket
 - DM room IDs persisted at `/workspace/agents/<id>/dm-room.json` (created lazily by the admin console)
 - Agent configs persisted in `/workspace/agents/<id>/` (config.json + CLAUDE.md + AGENT-PROMPT.md)
 - Each agent is bound to a **Working Environment** (see below) which defines what gets seeded into its workspace.
 - Matrix users auto-created via Conduwuit admin room
-- Only 1 container (`orchestrator`) manages all agents — no container-per-agent
+- **Container-per-agent.** The `orchestrator` is a control-plane container that manages **one container per agent** — it does not host agents in-process. Each agent container is isolated three ways: per-agent **network** (Seam #2), per-agent **filesystem** via a SubPath mount of the pool volume (Seam #3, `AEE_WORKSPACE_ISOLATION`, default on), and an optional **dedicated volume** (`AEE_PER_AGENT_VOLUME`, opt-in). Containers carry an `aee.agent.id` label so the orchestrator reconciles live container state against its in-memory process map.
+- **Agent runtime.** The agent container's entrypoint (`agent-image/scripts/agent-entrypoint.py`, with `sase_lib.py`) is a Python port of the legacy Node `orchestrator/agent-runner.js`. References to "agent-runner.js" elsewhere in this doc describe that behaviour (Matrix client + Claude CLI invocations + trigger scheduler), not the process actually running inside agent containers today.
 
 ### Working Environments
 
@@ -326,7 +331,9 @@ The Admin Console embeds a Matrix client at `/chats` (and `/chats/:agentId`) so 
 | `.env` | Secrets: Matrix tokens, LLM proxy URL + auth token (gitignored) |
 | `Makefile` | Build + start convenience targets (`make up`, `make down`, `make logs`, ...) |
 | `orchestrator/orchestrator.js` | Backend service: agent lifecycle, child-process spawning, environment-aware workspace seeding, internal HTTP API for the admin console |
-| `orchestrator/agent-runner.js` | Per-agent child process: Matrix client + Claude CLI invocations + trigger scheduler. Honors `sessionPolicy: per-invocation` and posts plain-text throttle warnings on `kind: throttle-warning` queue entries. |
+| `orchestrator/spawn-container.js` | Spawns/kills the per-agent Podman container over the libpod socket; provisions per-agent network (Seam #2), filesystem SubPath (Seam #3), and dedicated-volume (`AEE_PER_AGENT_VOLUME`) isolation. |
+| `agent-image/` | The per-agent container image `as-agent:latest` (`python:3.12-slim`). Entrypoint `scripts/agent-entrypoint.py` (+ `sase_lib.py`) is the live agent runtime — a Python port of `agent-runner.js`. |
+| `orchestrator/agent-runner.js` | **Legacy** Node per-agent runner: Matrix client + Claude CLI invocations + trigger scheduler. Behaviour ported to `agent-image/`'s Python entrypoint (the process actually run in agent containers); kept as the reference for that behaviour. Honors `sessionPolicy: per-invocation` and posts plain-text throttle warnings on `kind: throttle-warning` queue entries. |
 | `orchestrator/github-poller.js` | Polls the GitHub Events API; applies Layer-0 self-loop, Layer-2 `from` filter, Layer-3 conversation throttle before fanning events out to per-agent `pending-triggers.json`. |
 | `orchestrator/session-log.js` | JSONL session logger: maps Claude `stream-json` NDJSON to normalized events, append-only writer |
 | `orchestrator/Dockerfile` | Node 22 + Claude Code CLI + git + openssh-client |

@@ -60,8 +60,9 @@ cp .env.example .env
 podman compose up -d conduwuit
 ./orchestrator/setup.sh
 
-# 3. Build the per-agent container image. Required before any agent can spawn —
-#    `make up` does NOT build this image automatically.
+# 3. (Optional) Build the per-agent container image on its own. `make up`
+#    (step 5) already builds it automatically, so you only need this for a
+#    standalone rebuild of the agent image.
 make agent-image
 
 # 4. Seed the shared skill pool (one-time): role templates, baseline memory, MCP

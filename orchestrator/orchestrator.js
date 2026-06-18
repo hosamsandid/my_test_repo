@@ -85,7 +85,7 @@ function loadLlmBindingForEnv(env) {
 }
 
 const { execFile, execFileSync } = require("child_process");
-const { spawnContainer, libpodRequest, removePerAgentVolume, reseedPerAgentVolume } = require("./spawn-container");
+const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume } = require("./spawn-container");
 const { reconcileSessionAppend } = require("./session-cursor");
 const crypto = require("crypto");
 
@@ -3509,6 +3509,8 @@ async function main() {
                   deleteAgentFiles(childId);
                   if (PER_AGENT_VOLUME) await removePerAgentVolume(childId).catch(e =>
                     console.warn(`[Orchestrator] volume teardown ${childId}: ${e.message}`));
+                  await removePerAgentNetwork(childId).catch(e =>
+                    console.warn(`[Orchestrator] network teardown ${childId}: ${e.message}`));
                   orchestrator.agentConfigs.delete(childId);
                   cascaded.push(childId);
                 } catch (err) {
@@ -3527,6 +3529,8 @@ async function main() {
           deleteAgentFiles(id);
           if (PER_AGENT_VOLUME) await removePerAgentVolume(id).catch(e =>
             console.warn(`[Orchestrator] volume teardown ${id}: ${e.message}`));
+          await removePerAgentNetwork(id).catch(e =>
+            console.warn(`[Orchestrator] network teardown ${id}: ${e.message}`));
           orchestrator.agentConfigs.delete(id);
           await orchestrator.deactivateMatrixUser(id);
 

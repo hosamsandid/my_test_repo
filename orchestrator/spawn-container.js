@@ -333,6 +333,97 @@ async function removePerAgentVolume(id) {
   return name;
 }
 
+// Seam #2 teardown: remove the per-agent network on agent delete. A per-agent
+// network can't be deleted while containers are attached, and two things keep
+// it occupied after the agent is "stopped":
+//   1. ensurePerAgentNetwork connects orchestrator + conduwuit and leaves them
+//      attached for the agent's whole lifetime — these must stay alive, so we
+//      DISCONNECT them (never force-delete the network, which would remove them).
+//   2. The agent's OWN container only gets a kill SIGNAL on stop (handle.kill →
+//      /containers/{id}/kill); actual removal is async via autoremove-on-exit.
+//      We must let that container be REMOVED (not merely disconnected): force-
+//      disconnecting a still-running agent strands it — it spins forever on
+//      DNS-failed Matrix syncs, never exits, and its autoremove never fires,
+//      leaking the container. So we give the earlier SIGTERM a brief grace
+//      window to exit + autoremove, then force-remove any leftover.
+// Order therefore matters: remove the agent container first, then disconnect the
+// services, then delete the now-empty network.
+// Idempotent and best-effort: a missing network/container (isolation disabled,
+// or already reaped) is success, not an error.
+const NETWORK_REMOVE_RETRIES = 5;
+const NETWORK_REMOVE_DELAY_MS = 1000;
+const AGENT_STOP_GRACE_POLLS = 8;      // ~8s for SIGTERM-driven autoremove
+const AGENT_STOP_GRACE_DELAY_MS = 1000;
+
+// List the agent's own container(s) by the aee.agent.id label, in any state.
+async function listAgentContainers(id) {
+  const filters = encodeURIComponent(JSON.stringify({ label: [`aee.agent.id=${id}`] }));
+  try {
+    const r = await libpodRequest('GET', `/containers/json?all=true&filters=${filters}`);
+    if (r.status < 300 && Array.isArray(r.body)) {
+      return r.body.map((c) => (c.Id || c.ID || (c.Names && c.Names[0]))).filter(Boolean);
+    }
+  } catch (err) {
+    console.warn(`[spawn-container] list containers for ${id}: ${err.message}`);
+  }
+  return [];
+}
+
+// Ensure the agent's own container is gone before we touch the network. Prefer
+// the graceful path (the SIGTERM sent by stopAgentProcess lets the agent exit
+// and autoremove); fall back to force-remove so teardown always makes progress.
+async function ensureAgentContainerGone(id) {
+  for (let attempt = 0; attempt < AGENT_STOP_GRACE_POLLS; attempt++) {
+    if ((await listAgentContainers(id)).length === 0) return;
+    await sleep(AGENT_STOP_GRACE_DELAY_MS);
+  }
+  // Still around after the grace window — force-remove whatever remains. This
+  // also detaches it from the per-agent network.
+  for (const cid of await listAgentContainers(id)) {
+    const r = await libpodRequest('DELETE', `/containers/${cid}?force=true`);
+    if (r.status >= 300 && r.status !== 404) {
+      const blob = typeof r.body === 'string' ? r.body : JSON.stringify(r.body || '');
+      if (!/no such container|no container/i.test(blob)) {
+        console.warn(`[spawn-container] force-remove container ${cid} (${id}): status=${r.status} body=${blob}`);
+      }
+    }
+  }
+}
+
+async function removePerAgentNetwork(id) {
+  const name = perAgentNetworkName(id);
+  // 1. Make sure the agent's own container is gone (graceful, then forced).
+  await ensureAgentContainerGone(id);
+  // 2. Disconnect the persistent service containers (orchestrator + conduwuit).
+  //    Force so a half-attached service still comes off. 404 / "not connected"
+  //    are benign.
+  for (const svc of SERVICE_CONTAINERS) {
+    try {
+      const dr = await libpodRequest('POST', `/networks/${name}/disconnect`, { Container: svc, Force: true });
+      if (dr.status >= 300 && dr.status !== 404) {
+        const blob = typeof dr.body === 'string' ? dr.body : JSON.stringify(dr.body || '');
+        if (!/not connected|no such network|network not found|no container|no such container/i.test(blob)) {
+          console.warn(`[spawn-container] disconnect ${svc} <- ${name}: status=${dr.status} body=${blob}`);
+        }
+      }
+    } catch (err) {
+      console.warn(`[spawn-container] disconnect ${svc} <- ${name}: ${err.message}`);
+    }
+  }
+  // 3. Delete the now-empty network (no force — see header). Retry briefly to
+  //    absorb any lingering async detach.
+  let last = '';
+  for (let attempt = 1; attempt <= NETWORK_REMOVE_RETRIES; attempt++) {
+    const r = await libpodRequest('DELETE', `/networks/${name}`);
+    if (r.status < 300 || r.status === 404) return name;
+    const blob = typeof r.body === 'string' ? r.body : JSON.stringify(r.body || '');
+    if (/no such network|network not found/i.test(blob)) return name;
+    last = `status=${r.status} body=${blob}`;
+    if (attempt < NETWORK_REMOVE_RETRIES) await sleep(NETWORK_REMOVE_DELAY_MS);
+  }
+  throw new Error(`per-agent network remove ${name}: ${last}`);
+}
+
 // Targeted re-seed (#185 item 5): copy NAMED control-plane files from the pool
 // subpath (/src) into the agent's ALREADY-POPULATED dedicated volume (/dst),
 // without clobbering agent-written state (memory/, the git tree, sessions/).
@@ -555,4 +646,4 @@ function spawnContainer({ id, env }) {
   return handle;
 }
 
-module.exports = { spawnContainer, libpodRequest, removePerAgentVolume, reseedPerAgentVolume };
+module.exports = { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume };

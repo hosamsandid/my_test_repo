@@ -132,3 +132,7 @@ git config --global user.email "you@example.com"
 | Persistent memory | [docs/persistent-memory.md](./docs/persistent-memory.md) |
 | Key files and project layout | [docs/key-files.md](./docs/key-files.md) |
 | MCP server configuration | [docs/mcp-servers.md](./docs/mcp-servers.md) |
+
+## Contributing
+
+Bug reports and pull requests are welcome. Please open an issue first to discuss significant changes before submitting a PR.

@@ -2049,9 +2049,11 @@ app.post('/api/skills/import', heavyLimiter, _skillImportUpload.single('file'), 
     fs.writeFileSync(zipPath, req.file.buffer);
     fs.mkdirSync(extractDir);
 
+    // A .skill file is just a ZIP under the hood, so unzip handles both .zip and
+    // .skill uploads — extraction is content-based and ignores the file extension.
     const unzipResult = spawnSync('unzip', ['-o', zipPath, '-d', extractDir]);
     if (unzipResult.status !== 0) {
-      return res.status(400).json({ error: 'Could not extract ZIP — ensure the file is a valid skill archive' });
+      return res.status(400).json({ error: 'Could not extract archive — ensure the file is a valid .zip or .skill skill archive' });
     }
 
     // Zip-slip protection: verify every extracted path stays within extractDir.

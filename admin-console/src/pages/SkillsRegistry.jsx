@@ -736,7 +736,7 @@ export default function SkillsRegistry() {
   const [rowDeleteTarget, setRowDeleteTarget] = useState(null);
   const [rowDeleteError, setRowDeleteError] = useState(null);
   const [rowDeleting, setRowDeleting] = useState(false);
-  // import (ZIP upload → pool skill)
+  // import (.zip / .skill upload → pool skill)
   const importFileRef = useRef(null);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState(null);
@@ -848,7 +848,7 @@ export default function SkillsRegistry() {
           <input
             ref={importFileRef}
             type="file"
-            accept=".zip,application/zip"
+            accept=".zip,.skill,application/zip,application/octet-stream"
             onChange={handleImport}
             style={{ display: 'none' }}
           />
@@ -856,9 +856,9 @@ export default function SkillsRegistry() {
             onClick={() => importFileRef.current?.click()}
             disabled={importing}
             style={secondaryBtnStyle}
-            title="Upload a skill directory packaged as a ZIP and add it to the pool"
+            title="Upload a skill packaged as a .zip or .skill archive and add it to the pool"
           >
-            {importing ? 'Importing…' : 'Import ZIP'}
+            {importing ? 'Importing…' : 'Import skill'}
           </button>
           <button onClick={() => setShowNewForm(f => !f)} style={primaryBtnStyle(false)}>
             {showNewForm ? 'Cancel' : '+ New Skill'}
@@ -885,7 +885,8 @@ export default function SkillsRegistry() {
           <strong>Pool</strong> skills can be edited here and attached to Working Environments so new agents receive them.
           <strong> Agent</strong> skills are read-only — use <em>Promote to pool</em> to lift one back into the pool, or{' '}
           <em>Install into agent</em> to push a pool skill into a running agent. Click a skill to browse its files;
-          use <em>Export ZIP</em> to download a skill directory, or <em>Import ZIP</em> to add one to the pool.
+          use <em>Export ZIP</em> to download a skill directory, or <em>Import skill</em> to add one to the pool
+          from a <code>.zip</code> or <code>.skill</code> archive.
         </p>
       </div>
 

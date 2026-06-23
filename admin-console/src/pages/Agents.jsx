@@ -721,8 +721,10 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.role, form.environmentId, repoDirs]);
 
+  // System prompt is optional for teams: members can be given their own
+  // per-role prompts later, so a team can be created without a default.
   const canSubmit = form.id && form.displayName && form.environmentId &&
-    (form.role === 'orchestrator' || form.systemPrompt);
+    (form.role === 'orchestrator' || form.role === 'team' || form.systemPrompt);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -852,11 +854,13 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
       <div>
         <div style={labelStyle}>
           {form.role === 'team' ? 'System Prompt Template' : 'System Prompt'}
-          {' '}<span style={{ color: 'var(--eb-status-error)' }}>*</span>
+          {form.role === 'team'
+            ? <span style={{ marginLeft: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-normal)' }}>(optional)</span>
+            : <>{' '}<span style={{ color: 'var(--eb-status-error)' }}>*</span></>}
         </div>
         <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-1)' }}>
           {form.role === 'team'
-            ? <>Stored once and reused for every member you spawn from this team. Define the persona, expertise, and tone — each member gets its own workspace but the same instructions.</>
+            ? <>Stored once and reused for every member that inherits it. Define the persona, expertise, and tone — each member gets its own workspace but the same instructions. Leave blank to give members an empty default; you can then set a custom prompt per member.</>
             : <>The persona Claude reads at startup. Describe the agent's role, expertise, communication style and any constraints. Markdown is fine; treat it like the <code>system</code> message in a chat completion.</>}
         </div>
         <textarea

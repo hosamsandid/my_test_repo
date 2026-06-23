@@ -3414,7 +3414,9 @@ async function main() {
             res.end(JSON.stringify({ error: 'id, displayName, role, environmentId required' }));
             return;
           }
-          if (!systemPrompt && role !== 'orchestrator') {
+          // Teams may be created without a default prompt — members can carry
+          // their own per-role prompts, and the team stores an empty template.
+          if (!systemPrompt && role !== 'orchestrator' && role !== 'team') {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'systemPrompt is required for non-orchestrator agents' }));
             return;
@@ -4518,7 +4520,9 @@ async function main() {
           res.end(JSON.stringify({ error: `Invalid role: ${role}. Must be one of: agent, orchestrator, team` }));
           return;
         }
-        if (role !== 'orchestrator' && !systemPrompt) {
+        // Teams may be created without a default prompt — members can carry
+        // their own per-role prompts, and the team stores an empty template.
+        if (role !== 'orchestrator' && role !== 'team' && !systemPrompt) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'systemPrompt required for non-orchestrator roles' }));
           return;

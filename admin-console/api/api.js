@@ -1329,7 +1329,9 @@ app.post('/api/agents', heavyLimiter, async (req, res) => {
   if (!id || !displayName || !role || !environmentId) {
     return res.status(400).json({ error: 'id, displayName, role, environmentId required' });
   }
-  if (!systemPrompt && role !== 'orchestrator') {
+  // Teams may be created without a default prompt — members can carry their
+  // own per-role prompts, and the orchestrator stores an empty template.
+  if (!systemPrompt && role !== 'orchestrator' && role !== 'team') {
     return res.status(400).json({ error: 'systemPrompt is required for non-orchestrator agents' });
   }
   if (!loadEnvironment(environmentId)) {
@@ -4340,7 +4342,9 @@ app.post('/api/blueprints', heavyLimiter, async (req, res) => {
   if (!id || !displayName || !role || !environmentId) {
     return res.status(400).json({ error: 'id, displayName, role, environmentId required' });
   }
-  if (!systemPrompt && role !== 'orchestrator') {
+  // Teams may be created without a default prompt — members can carry their
+  // own per-role prompts, and the orchestrator stores an empty template.
+  if (!systemPrompt && role !== 'orchestrator' && role !== 'team') {
     return res.status(400).json({ error: 'systemPrompt is required for non-orchestrator agents' });
   }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';

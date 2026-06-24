@@ -503,6 +503,12 @@ class _StatePushClient:
     def push_status(self, data: dict) -> None:
         self._q.put(("status", dict(data)))
 
+    def push_running_sessions(self, sessions: list) -> None:
+        # Mirror the running-sessions registry to the control plane so the admin
+        # console's "Sessions" tab can list active work under per-agent volume
+        # isolation (#185), where the agent's own copy is on an unreachable volume.
+        self._q.put(("running", list(sessions)))
+
     def mark_session_dirty(self, room_id: str) -> None:
         self._q.put(("session", room_id))
 
@@ -528,11 +534,14 @@ class _StatePushClient:
                 except queue.Empty:
                     break
             status_data = None
+            running_sessions = None
             dirty: list[str] = []
             pointers: dict[str, tuple[str, str]] = {}
             for kind, payload in items:
                 if kind == "status":
                     status_data = payload
+                elif kind == "running":
+                    running_sessions = payload  # last write within the tick wins
                 elif kind == "session" and payload not in dirty:
                     dirty.append(payload)  # type: ignore[arg-type]
                 elif kind == "pointer":
@@ -541,6 +550,8 @@ class _StatePushClient:
             try:
                 if status_data is not None:
                     self._post_status(status_data)
+                if running_sessions is not None:
+                    self._post_running_sessions(running_sessions)
                 for room_id in dirty:
                     self._flush_session(room_id)
                 for room_id, (sid, upd) in pointers.items():
@@ -551,6 +562,10 @@ class _StatePushClient:
     def _post_status(self, data: dict) -> None:
         body = json.dumps(data).encode("utf-8")
         self._post(f"/internal/agents/{self._agent_id}/status", body)
+
+    def _post_running_sessions(self, sessions: list) -> None:
+        body = json.dumps(sessions).encode("utf-8")
+        self._post(f"/internal/agents/{self._agent_id}/running-sessions", body)
 
     def _post_pointer(self, room_id: str, session_id: str, updated_at: str) -> None:
         body = json.dumps({
@@ -757,14 +772,72 @@ def _map_stream_json_line(line: str, correlation_id: str) -> list[dict]:
 _active_invocations = 0
 _active_invocations_lock = threading.Lock()
 
+# ---- running-sessions registry ----
+#
+# Every Claude invocation registers a "session" here so the Admin Console's
+# "Sessions" tab can list active work per agent and stop a specific run. This
+# is the Python port of agent-runner.js's runningSessions Map (legacy). The
+# registry is serialized to /workspace/agents/<id>/running-sessions.json AND
+# pushed to the control plane (#185), since under per-agent volume isolation
+# the admin-console can't read the agent's own volume.
+#
+# Persisted entry shape (matches the legacy Node writer + RunningSessionsPanel):
+#   { id, type, triggerType, triggerId, label, roomId, startedAt }
+_running_sessions: dict[str, dict] = {}
+_running_sessions_lock = threading.Lock()
 
-def _bump_active(delta: int) -> None:
+
+def _persist_running_sessions() -> None:
+    """Write the registry locally and mirror it to the control plane.
+    Best-effort: a failure here never blocks an invocation."""
+    try:
+        with _running_sessions_lock:
+            arr = list(_running_sessions.values())
+        p = _agent_workdir() / "running-sessions.json"
+        p.write_text(json.dumps(arr), encoding="utf-8")
+        pc = _get_push_client()  # mirror to control plane (#185)
+        if pc:
+            pc.push_running_sessions(arr)
+    except Exception:
+        pass
+
+
+def _new_session(session_type: str, *, room_id: str | None = None, label: str = "",
+                 trigger_type: str | None = None, trigger_id: str | None = None) -> dict:
+    """Build a running-session descriptor for _bump_active. Fields mirror the
+    legacy Node writer so RunningSessionsPanel renders them unchanged."""
+    return {
+        "id": uuid.uuid4().hex,
+        "type": session_type,
+        "triggerType": trigger_type,
+        "triggerId": trigger_id,
+        "label": label,
+        "roomId": room_id,
+        "startedAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+    }
+
+
+def _bump_active(delta: int, session: dict | None = None) -> None:
     """Increment/decrement the active-invocation counter and update status.json
     on the 0↔1 transitions. All Claude-invoking code paths (DM, triggers)
     must funnel through this rather than calling _write_status directly so
     state stays consistent when paths overlap.
+
+    When `session` (a descriptor carrying at least `id`) is supplied, the
+    registry is updated in lockstep: registered on +1, removed on -1. Passing
+    the same descriptor to both calls keeps the running-sessions list paired
+    with the busy/idle counter even when paths overlap.
     """
     global _active_invocations
+    if session and session.get("id"):
+        sid = session["id"]
+        if delta > 0:
+            with _running_sessions_lock:
+                _running_sessions[sid] = session
+        elif delta < 0:
+            with _running_sessions_lock:
+                _running_sessions.pop(sid, None)
+        _persist_running_sessions()
     with _active_invocations_lock:
         _active_invocations += delta
         if _active_invocations == 1 and delta > 0:
@@ -1644,7 +1717,8 @@ class TriggerScheduler:
             print(f"[Runner:{self._agent_id}] session-log warning: {exc}",
                   file=sys.stderr)
 
-        _bump_active(+1)
+        session = _new_session("handover", room_id=room_id, label="Hand-off")
+        _bump_active(+1, session)
         try:
             result = await asyncio.to_thread(
                 _call_claude,
@@ -1665,7 +1739,7 @@ class TriggerScheduler:
                   file=sys.stderr)
             return
         finally:
-            _bump_active(-1)
+            _bump_active(-1, session)
 
         if not result or not result.strip():
             return
@@ -1857,7 +1931,11 @@ class TriggerScheduler:
             print(f"[Runner:{self._agent_id}] session-log warning: {exc}",
                   file=sys.stderr)
 
-        _bump_active(+1)
+        session = _new_session(
+            "trigger", room_id=room_id, label=str(tid),
+            trigger_type=trigger.get("type"), trigger_id=tid,
+        )
+        _bump_active(+1, session)
         try:
             try:
                 await self._post_trigger_notice(trigger, ctx, room_id)
@@ -1896,7 +1974,7 @@ class TriggerScheduler:
                     pass
                 raise
         finally:
-            _bump_active(-1)
+            _bump_active(-1, session)
 
         # [PASS] means "nothing to report" — do not post to Matrix, just log.
         if result and result.strip().startswith("[PASS]"):
@@ -2170,6 +2248,9 @@ async def run_dm_listener() -> None:
     workdir = _agent_workdir()
     workdir.mkdir(parents=True, exist_ok=True)
     _write_status("idle")
+    # Clear any registry a prior (possibly crashed) run left behind — the
+    # in-memory map is empty here, so this writes/pushes an empty list.
+    _persist_running_sessions()
 
     # Install SIGUSR1 (SIGTERM is already installed in main()).
     signal.signal(signal.SIGUSR1, _handle_stop_session)
@@ -2310,7 +2391,8 @@ async def run_dm_listener() -> None:
                 "promptChars": len(body),
             })
 
-            _bump_active(+1)
+            session = _new_session("dm", room_id=room_id, label="Direct message")
+            _bump_active(+1, session)
             try:
                 # claude invocation is blocking — run it off the event loop so
                 # matrix-nio can keep syncing (otherwise no follow-on messages
@@ -2319,7 +2401,7 @@ async def run_dm_listener() -> None:
                     _call_claude, body, room_id, correlation_id, blueprint_id,
                 )
             finally:
-                _bump_active(-1)
+                _bump_active(-1, session)
 
             # Guard empty/whitespace output: posting a blank message looks like
             # "no reply" to the user. Substitute a visible notice and log it so

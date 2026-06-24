@@ -3924,6 +3924,37 @@ async function main() {
       return;
     }
 
+    // ── Push: agent running-sessions registry (#185) ──────────────────────
+    // Agents POST their running-sessions array; we persist it to the control
+    // plane so the admin's "Sessions" tab works under per-agent volume
+    // isolation (where the agent's own running-sessions.json is unreachable).
+    const pushRunningMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/running-sessions$/);
+    if (pushRunningMatch) {
+      const id = decodeURIComponent(pushRunningMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
+      req.on('end', () => {
+        if (!isSafePathSeg(id)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+          return;
+        }
+        try {
+          const data = JSON.parse(body || '[]');
+          const dir = controlAgentDir(id);
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(path.join(dir, 'running-sessions.json'),
+            JSON.stringify(Array.isArray(data) ? data : []));
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
     // ── Push: agent session-log lines (#185) ──────────────────────────────
     // Agents POST { roomId, baseOffset, dataB64 } where dataB64 is the raw
     // bytes appended to their local sessions/<roomId>.jsonl since baseOffset.

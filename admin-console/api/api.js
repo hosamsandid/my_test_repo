@@ -169,7 +169,9 @@ function podmanRequest(method, urlPath) {
 function readJsonFile(filePath, fallback = null) {
   if (typeof filePath !== 'string' ||
       filePath.includes('..') ||
-      !(filePath.startsWith(WORKSPACE + path.sep) || filePath.startsWith(POOL_DIR + path.sep))) {
+      !(filePath.startsWith(WORKSPACE + path.sep) ||
+        filePath.startsWith(POOL_DIR + path.sep) ||
+        filePath.startsWith(CONTROL_DIR + path.sep))) {
     return fallback;
   }
   try {
@@ -5527,7 +5529,10 @@ const SESSION_ID_RE = /^[a-zA-Z0-9_-]+$/;
 app.get('/api/agents/:agentId/sessions/active', apiLimiter, (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'invalid agent id' });
-  const filePath = path.join(AGENTS_DIR, agentId, 'running-sessions.json');
+  // Pushed control-plane copy preferred (#185): under per-agent volume
+  // isolation the agent's own running-sessions.json lives on a volume the
+  // admin-console can't see, so it must be read from the control plane.
+  const filePath = controlOrAgentPath(agentId, 'running-sessions.json');
   if (!fs.existsSync(filePath)) return res.json({ sessions: [] });
   try {
     const raw = fs.readFileSync(filePath, 'utf8');

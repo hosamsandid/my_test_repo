@@ -55,6 +55,7 @@ export default function ChatPanel({
   const [error, setError]            = useState(null);
   const [creating, setCreating]      = useState(false);
   const [sending, setSending]        = useState(false);
+  const [uploading, setUploading]    = useState(false);
 
   // Backfill (scroll-up) state. `endToken` is the Matrix `end` field from
   // `dir=b` /messages, which marks the older boundary — pass it back as
@@ -548,6 +549,36 @@ export default function ChatPanel({
     }
   }
 
+  /* ─── 5b. Attach files ───────────────────────────────────────────────
+   * Upload dropped / picked files into the agent's `chat-uploads/` dir and
+   * return the uploaded descriptors so the composer can insert a
+   * `@chat-uploads/<name>` reference for each. Multipart, so plain fetch
+   * rather than the JSON apiCall helper. Resolves to [] on failure (error is
+   * surfaced via setError) so the composer can simply skip token insertion.
+   */
+  async function handleUpload(files) {
+    const list = Array.from(files || []);
+    if (list.length === 0 || !agent?.id) return [];
+    setUploading(true);
+    setError(null);
+    try {
+      const form = new FormData();
+      for (const f of list) form.append('files', f);
+      const r = await fetch(`/api/agents/${encodeURIComponent(agent.id)}/chat-upload`, {
+        method: 'POST',
+        body: form,
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j?.error || `HTTP ${r.status}`);
+      return Array.isArray(j.uploaded) ? j.uploaded : [];
+    } catch (err) {
+      setError(`Upload failed: ${err.message}`);
+      return [];
+    } finally {
+      setUploading(false);
+    }
+  }
+
   /* ─── Cross-panel hover correlation ─────────────────────────────────
    * Best-effort correlation: each agent bubble is "the response to the most
    * recent prior user message" — its correlationId is that user message's
@@ -973,6 +1004,8 @@ export default function ChatPanel({
         onSend={handleSend}
         disabled={disabled || !roomId || sending}
         agentDisplayName={agent.displayName || agent.id}
+        onUpload={handleUpload}
+        uploading={uploading}
       />
 
       {/* Local keyframes for the spinner; scoped to this page render. */}

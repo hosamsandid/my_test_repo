@@ -6351,6 +6351,85 @@ app.post('/api/agents/:agentId/workspace/upload', heavyLimiter, requireAgentIdPa
   res.json({ uploaded, ...(errors.length ? { errors } : {}) });
 });
 
+// Return a filename that doesn't yet exist in `dir`, appending " (n)" before
+// the extension on collision so a second upload of `report.pdf` becomes
+// `report (2).pdf` rather than clobbering the first. The " ()" chars are within
+// the upload filename allowlist, so the result is still a legal workspace name.
+function uniqueFileName(dir, name) {
+  if (!fs.existsSync(path.join(dir, name))) return name;
+  const ext = path.extname(name);
+  const base = name.slice(0, name.length - ext.length);
+  for (let n = 2; n < 10000; n++) {
+    const candidate = `${base} (${n})${ext}`;
+    if (!fs.existsSync(path.join(dir, candidate))) return candidate;
+  }
+  return `${base} (${Date.now()})${ext}`;
+}
+
+// Chat attachments: files dropped or picked directly in the chat composer land
+// in a dedicated, server-controlled `chat-uploads/` directory (the client can't
+// choose the path) and are referenced in the message body as
+// `@chat-uploads/<name>`. The agent's cwd is its workspace root, so that token
+// resolves to a file it can open. Mirrors the workspace/upload handler's multer
+// config + filename sanitisation, but auto-creates the target dir and de-dupes
+// colliding names.
+const CHAT_UPLOADS_DIR = 'chat-uploads';
+app.post('/api/agents/:agentId/chat-upload', heavyLimiter, requireAgentIdParam, uploadFiles, (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+
+  let agentRoot;
+  try {
+    agentRoot = fs.realpathSync(path.join(AGENTS_DIR, agentId));
+  } catch {
+    return res.status(404).json({ error: 'Agent workspace not found' });
+  }
+
+  if (!Array.isArray(req.files) || req.files.length === 0) {
+    return res.status(400).json({ error: 'No files provided' });
+  }
+
+  const targetDir = path.join(agentRoot, CHAT_UPLOADS_DIR);
+  try {
+    fs.mkdirSync(targetDir, { recursive: true });
+  } catch (err) {
+    return res.status(500).json({ error: `Could not create upload directory: ${err.message}` });
+  }
+
+  const uploaded = [];
+  const errors = [];
+  for (const file of req.files) {
+    const safeName = path.basename(file.originalname).replace(/[^\w\-. ()[\]]/g, '_').trim();
+    if (!safeName) {
+      errors.push({ name: file.originalname, error: 'Invalid filename' });
+      continue;
+    }
+    const finalName = uniqueFileName(targetDir, safeName);
+    const destPath = path.join(targetDir, finalName);
+    // Defence-in-depth: the dest must stay strictly inside the agent root.
+    if (!destPath.startsWith(agentRoot + path.sep)) {
+      errors.push({ name: file.originalname, error: 'Path escapes workspace' });
+      continue;
+    }
+    try {
+      fs.writeFileSync(destPath, file.buffer);
+      uploaded.push({
+        name: finalName,
+        ref: `${CHAT_UPLOADS_DIR}/${finalName}`,
+        path: path.relative(agentRoot, destPath),
+        size: file.size,
+      });
+    } catch (err) {
+      errors.push({ name: file.originalname, error: err.message });
+    }
+  }
+
+  if (uploaded.length === 0 && errors.length > 0) {
+    return res.status(500).json({ error: 'All uploads failed', details: errors });
+  }
+  res.json({ uploaded, ...(errors.length ? { errors } : {}) });
+});
+
 function parseJsonlLine(line) {
   try {
     return JSON.parse(line);

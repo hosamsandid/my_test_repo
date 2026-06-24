@@ -1,12 +1,19 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Send } from 'lucide-react';
+import { Send, Paperclip, Loader2 } from 'lucide-react';
 
 /**
- * Auto-resizing textarea with a send button.
+ * Auto-resizing textarea with a send button and inline file attachments.
  *
  * Keys:
  *   - Cmd/Ctrl + Enter   ⇒ submit
  *   - Plain Enter        ⇒ newline (default behaviour)
+ *
+ * Attachments: drag-and-drop files onto the composer, paste files from the
+ * clipboard, or use the paperclip button. Each file is uploaded into the
+ * agent's `chat-uploads/` directory via `onUpload` and a
+ * `@chat-uploads/<name>` reference is inserted into the draft at the caret —
+ * the agent's cwd is its workspace root, so that token resolves to a file it
+ * can open.
  *
  * Auto-resize: line height ~20 px, min 1 row, max 8 rows; we measure via
  * scrollHeight after each input event and clamp.
@@ -14,10 +21,18 @@ import { Send } from 'lucide-react';
  * @param {(text:string)=>void} onSend
  * @param {boolean} [disabled]
  * @param {string}  [agentDisplayName]   used in placeholder
+ * @param {(files:FileList|File[])=>Promise<Array<{name:string,ref:string}>>} [onUpload]
+ *        Uploads files and resolves to the uploaded descriptors (empty on failure).
+ * @param {boolean} [uploading]          true while an upload is in flight
  */
-export default function MessageInput({ onSend, disabled = false, agentDisplayName }) {
+export default function MessageInput({ onSend, disabled = false, agentDisplayName, onUpload, uploading = false }) {
   const [value, setValue] = useState('');
+  const [dragging, setDragging] = useState(false);
   const taRef = useRef(null);
+  const fileRef = useRef(null);
+  // dragenter/dragleave fire for every child element; count them so the
+  // overlay only clears when the pointer truly leaves the composer.
+  const dragDepth = useRef(0);
   // Track IME composition: pressing Enter while a Japanese/Chinese/Korean
   // (or any IME) candidate is active must NOT submit the message — that
   // Enter is consumed by the IME to commit the candidate.
@@ -50,9 +65,76 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
     }
   }
 
+  // Insert `@chat-uploads/<name>` tokens at the caret (or replace the
+  // selection), padding with spaces so each reference stays a discrete token.
+  function insertRefs(refs) {
+    if (!refs.length) return;
+    const snippet = refs.map(r => `@${r.ref}`).join(' ');
+    const ta = taRef.current;
+    setValue(prev => {
+      const start = ta?.selectionStart ?? prev.length;
+      const end = ta?.selectionEnd ?? prev.length;
+      const before = prev.slice(0, start);
+      const after = prev.slice(end);
+      const lead = before && !/\s$/.test(before) ? ' ' : '';
+      const trail = /^\s/.test(after) ? '' : ' ';
+      const next = `${before}${lead}${snippet}${trail}${after}`;
+      // Restore the caret just after the inserted snippet on the next frame.
+      const caret = (before + lead + snippet + trail).length;
+      requestAnimationFrame(() => {
+        if (ta) { ta.focus(); ta.setSelectionRange(caret, caret); }
+      });
+      return next;
+    });
+  }
+
+  async function doUpload(files) {
+    const list = Array.from(files || []);
+    if (!onUpload || disabled || list.length === 0) return;
+    const uploaded = await onUpload(list);
+    if (Array.isArray(uploaded) && uploaded.length) insertRefs(uploaded);
+  }
+
+  const hasFiles = (e) => Array.from(e.dataTransfer?.types || []).includes('Files');
+
+  function handleDragEnter(e) {
+    if (!onUpload || disabled || !hasFiles(e)) return;
+    e.preventDefault();
+    dragDepth.current += 1;
+    setDragging(true);
+  }
+  function handleDragOver(e) {
+    if (!onUpload || disabled || !hasFiles(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  }
+  function handleDragLeave() {
+    if (!onUpload || disabled) return;
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDragging(false);
+  }
+  function handleDrop(e) {
+    if (!onUpload || disabled) return;
+    e.preventDefault();
+    dragDepth.current = 0;
+    setDragging(false);
+    const files = e.dataTransfer?.files;
+    if (files && files.length) doUpload(files);
+  }
+  function handlePaste(e) {
+    if (!onUpload || disabled) return;
+    const files = e.clipboardData?.files;
+    if (files && files.length) {
+      e.preventDefault(); // don't also paste the file as a text/image blob
+      doUpload(files);
+    }
+  }
+
   const placeholder = agentDisplayName
     ? `Message ${agentDisplayName}…  (⌘↩ to send)`
     : 'Message…  (⌘↩ to send)';
+
+  const canAttach = !!onUpload && !disabled && !uploading;
 
   return (
     <div style={{
@@ -61,21 +143,83 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
       background: 'var(--eb-bg-surface)',
       flexShrink: 0,
     }}>
-      <div style={{
-        display: 'flex',
-        alignItems: 'flex-end',
-        gap: 'var(--eb-space-2)',
-        background: 'var(--eb-bg-elevated)',
-        border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-md)',
-        padding: 'var(--eb-space-2)',
-      }}>
+      <div
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+        style={{
+          position: 'relative',
+          display: 'flex',
+          alignItems: 'flex-end',
+          gap: 'var(--eb-space-2)',
+          background: 'var(--eb-bg-elevated)',
+          border: `1px solid ${dragging ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+          borderRadius: 'var(--eb-radius-md)',
+          padding: 'var(--eb-space-2)',
+          transition: 'border-color var(--eb-transition-fast)',
+        }}
+      >
+        {dragging && (
+          <div style={{
+            position: 'absolute',
+            inset: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 'var(--eb-space-2)',
+            background: 'var(--eb-status-info-bg, var(--eb-bg-hover))',
+            border: '2px dashed var(--eb-accent-primary)',
+            borderRadius: 'var(--eb-radius-md)',
+            color: 'var(--eb-accent-primary)',
+            fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-medium)',
+            pointerEvents: 'none',
+            zIndex: 2,
+          }}>
+            <Paperclip size={16} /> Drop files to attach
+          </div>
+        )}
+
+        {onUpload && (
+          <>
+            <input
+              ref={fileRef}
+              type="file"
+              multiple
+              hidden
+              onChange={e => { doUpload(e.target.files); e.target.value = ''; }}
+            />
+            <button
+              onClick={() => fileRef.current?.click()}
+              disabled={!canAttach}
+              aria-label="Attach files"
+              title="Attach files"
+              style={{
+                width: 32, height: 32,
+                background: 'transparent',
+                color: canAttach ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)',
+                border: 'none',
+                borderRadius: 'var(--eb-radius-md)',
+                cursor: canAttach ? 'pointer' : 'not-allowed',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0,
+              }}
+            >
+              {uploading
+                ? <Loader2 size={16} style={{ animation: 'spin 0.8s linear infinite' }} />
+                : <Paperclip size={16} />}
+            </button>
+          </>
+        )}
+
         <textarea
           ref={taRef}
           value={value}
           disabled={disabled}
           onChange={e => setValue(e.target.value)}
           onKeyDown={handleKey}
+          onPaste={handlePaste}
           onCompositionStart={() => { composingRef.current = true; }}
           onCompositionEnd={()   => { composingRef.current = false; }}
           placeholder={placeholder}
@@ -122,7 +266,11 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
         marginTop: 'var(--eb-space-1)',
         paddingLeft: 'var(--eb-space-1)',
       }}>
-        Markdown supported · <kbd style={kbdStyle}>⌘</kbd>+<kbd style={kbdStyle}>↩</kbd> to send · <kbd style={kbdStyle}>↩</kbd> for newline
+        {uploading
+          ? 'Uploading attachment…'
+          : onUpload
+            ? <>Markdown supported · attach with <Paperclip size={11} style={{ verticalAlign: '-1px' }} /> or drag &amp; drop · <kbd style={kbdStyle}>⌘</kbd>+<kbd style={kbdStyle}>↩</kbd> to send</>
+            : <>Markdown supported · <kbd style={kbdStyle}>⌘</kbd>+<kbd style={kbdStyle}>↩</kbd> to send · <kbd style={kbdStyle}>↩</kbd> for newline</>}
       </div>
     </div>
   );

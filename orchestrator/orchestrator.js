@@ -157,6 +157,11 @@ function startAgentProcess(config) {
     }
   }
 
+  // Per-agent SSH identity (see materializeAgentSshKey). Always runs — even for
+  // envless agents — because it also strips the orchestrator's inherited
+  // GIT_SSH_COMMAND, which would otherwise dangle in every agent.
+  materializeAgentSshKey(id, env, childEnv);
+
   // Seam #3 fail-closed guard. With per-agent filesystem isolation the
   // container mounts only `agents/<id>` (SubPath) of the pool volume. If the
   // workspace wasn't seeded the SubPath target is missing — refuse to spawn
@@ -1195,6 +1200,82 @@ function shouldWarnMissingWorkspace(orchestratorId) {
   if (Date.now() - last < _MISSING_WORKSPACE_WARN_MS) return false;
   _missingWorkspaceWarns.set(orchestratorId, Date.now());
   return true;
+}
+
+// Where the agent's persistent Claude home is mounted *inside the orchestrator*
+// (the whole claude-home volume) vs. *inside the agent* (only its homes/<id>
+// SubPath). Files the orchestrator writes under <ORCH>/homes/<id>/X surface to
+// the agent at <AGENT>/X — the bridge we use to hand a per-env SSH key to an
+// agent container that does not mount the _keys store.
+const CLAUDE_HOME_ORCH_DIR = "/root/.claude";
+const CLAUDE_HOME_AGENT_DIR = "/root/.claude";
+
+// Install the environment's SSH deploy key into a running agent.
+//
+// The agent container mounts neither the _keys store nor the host deploy key,
+// yet startAgentProcess copies the orchestrator's whole process.env into the
+// agent — including the GIT_SSH_COMMAND that docker-compose sets for the
+// orchestrator itself (pointing at /root/.ssh/id_accenturecodefoundry, a file
+// that only exists in the orchestrator). Inherited blindly, that var made every
+// agent's `git push` reference a key it does not have ("SSH key missing").
+//
+// So we ALWAYS strip the inherited value first, then — only when the env has an
+// SSH key — copy that key into the agent's claude-home SubPath (orchestrator
+// path <ORCH>/homes/<id>/.ssh, agent path <AGENT>/.ssh) and write a self-
+// contained ssh config beside it. GIT_SSH_COMMAND is set to `ssh -F <config>`
+// so it applies regardless of the agent's HOME (agent git runs with
+// HOME=/workspace/agents/<id>, so the image-baked /root/.ssh/config is never
+// read). The config carries the github.com -> ssh.github.com:443 routing that
+// corporate networks blocking outbound TCP 22 require.
+function materializeAgentSshKey(id, env, childEnv) {
+  delete childEnv.GIT_SSH_COMMAND;
+
+  const orchSshDir = path.join(CLAUDE_HOME_ORCH_DIR, "homes", id, ".ssh");
+  const orchKeyPath = path.join(orchSshDir, "id_env");
+  const orchCfgPath = path.join(orchSshDir, "config");
+  const agentSshDir = path.join(CLAUDE_HOME_AGENT_DIR, ".ssh");
+  const agentKeyPath = path.join(agentSshDir, "id_env");
+  const agentCfgPath = path.join(agentSshDir, "config");
+  const agentKnownHosts = path.join(agentSshDir, "known_hosts");
+
+  const repos = Array.isArray(env?.repositories) ? env.repositories : [];
+  const sshKeyId = repos.find((r) => r && r.sshKeyId)?.sshKeyId;
+  if (!sshKeyId) {
+    // No key for this env — make sure no stale identity lingers from a prior
+    // spawn under a different (key-bearing) environment.
+    try { fs.rmSync(orchKeyPath, { force: true }); } catch { /* best effort */ }
+    try { fs.rmSync(orchCfgPath, { force: true }); } catch { /* best effort */ }
+    return;
+  }
+
+  const srcKeyPath = path.join(SSH_KEYS_DIR, sshKeyId);
+  if (!fs.existsSync(srcKeyPath)) {
+    console.error(`[Orchestrator] Agent ${id} → SSH key ${sshKeyId} not found at ${srcKeyPath}; SSH git ops will fail`);
+    return;
+  }
+
+  try {
+    fs.mkdirSync(orchSshDir, { recursive: true });
+    fs.writeFileSync(orchKeyPath, fs.readFileSync(srcKeyPath), { mode: 0o600 });
+    fs.chmodSync(orchKeyPath, 0o600);
+    const sshConfig = [
+      "Host github.com",
+      "  HostName ssh.github.com",
+      "  Port 443",
+      "  User git",
+      `  IdentityFile ${agentKeyPath}`,
+      "  IdentitiesOnly yes",
+      `  UserKnownHostsFile ${agentKnownHosts}`,
+      "  StrictHostKeyChecking accept-new",
+      "  BatchMode yes",
+      "",
+    ].join("\n");
+    fs.writeFileSync(orchCfgPath, sshConfig, { mode: 0o600 });
+    childEnv.GIT_SSH_COMMAND = `ssh -F ${agentCfgPath}`;
+    console.log(`[Orchestrator] Agent ${id} → SSH identity installed (env=${env.id}, key=${sshKeyId})`);
+  } catch (err) {
+    console.error(`[Orchestrator] Agent ${id} → failed to install SSH key ${sshKeyId}: ${err.message}`);
+  }
 }
 
 // Build the GIT_SSH_COMMAND value for an env with an attached SSH key. Falls

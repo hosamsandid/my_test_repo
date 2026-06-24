@@ -16,6 +16,7 @@ const ScheduledJobs       = lazy(() => import('./pages/ScheduledJobs'));
 const ModelRegistry       = lazy(() => import('./pages/ModelRegistry'));
 const McpServers          = lazy(() => import('./pages/McpServers'));
 const Briefings           = lazy(() => import('./pages/Briefings'));
+const OrchestratorWizard  = lazy(() => import('./pages/OrchestratorWizard'));
 
 export default function App() {
   const [setupComplete, setSetupComplete] = useState(null); // null = loading
@@ -63,6 +64,7 @@ export default function App() {
           <Route path="/mcp"          element={<McpServers />} />
           <Route path="/flows"         element={<Briefings />} />
           <Route path="/briefings"    element={<Navigate to="/flows" replace />} />
+          <Route path="/orchestrator-wizard" element={<OrchestratorWizard />} />
         </Routes>
       </Suspense>
     </Shell>

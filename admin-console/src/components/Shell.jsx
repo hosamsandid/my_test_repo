@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight, Bot,
   Boxes, Key, MessageCircle, Github, Layers, GitBranch,
-  Sun, Moon, Rocket, Users2,
+  Sun, Moon, Rocket, Users2, Wand2,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 
@@ -47,6 +47,7 @@ const NAV = [
     { path: '/agents',       label: 'Agents',              Icon: Layers },
     { path: '/flows',         label: 'Flows',               Icon: GitBranch },
     { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
+    { path: '/orchestrator-wizard', label: 'Orchestrator Wizard', Icon: Wand2 },
   ]},
   { section: 'WORKSPACES', items: [
     { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key },
@@ -75,6 +76,7 @@ const BREADCRUMBS = {
   '/jobs':         'Triggers',
   '/models':       'Model Providers',
   '/mcp':          'MCP Servers',
+  '/orchestrator-wizard': 'Orchestrator Wizard',
 };
 
 function breadcrumbFor(pathname) {

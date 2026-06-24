@@ -1530,12 +1530,18 @@ const _importUpload = multer({
   limits: { fileSize: 500 * 1024 * 1024 },
 });
 
-app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), (req, res) => {
+// Optional form fields (multipart text parts, alongside `file`):
+//   - newId        — assign a different id (e.g. when the exported id is taken).
+//   - parentTeamId — graft the imported agent into an existing team as a member.
+// On id conflict the response is 409 with `{ code: 'id-conflict', agentId }`
+// so the UI can prompt for a new id and resubmit.
+app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file provided (field name: file)' });
 
   const tmpDir = fs.mkdtempSync(path.join('/tmp', 'aee-import-'));
   const zipPath = path.join(tmpDir, 'upload.zip');
   const extractDir = path.join(tmpDir, 'extracted');
+  let stagingDir = null;
   try {
     fs.writeFileSync(zipPath, req.file.buffer);
     fs.mkdirSync(extractDir);
@@ -1575,10 +1581,20 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), (req,
     } catch {
       return res.status(400).json({ error: 'Corrupt manifest.json' });
     }
-    const agentId = typeof manifest.agentId === 'string' ? manifest.agentId : null;
-    if (!agentId || !AGENT_ID_RE.test(agentId)) {
+    const exportedId = typeof manifest.agentId === 'string' ? manifest.agentId : null;
+    if (!exportedId || !AGENT_ID_RE.test(exportedId)) {
       return res.status(400).json({ error: 'Invalid or missing agentId in manifest' });
     }
+
+    // Resolve the target id — operator-supplied `newId` wins over the export's.
+    const newIdRaw = typeof req.body.newId === 'string' ? req.body.newId.trim() : '';
+    if (newIdRaw && !AGENT_ID_RE.test(newIdRaw)) {
+      return res.status(400).json({ error: `Invalid agent id '${newIdRaw}' (allowed: letters, digits, _ - .)` });
+    }
+    const agentId = newIdRaw || exportedId;
+    const parentTeamId = typeof req.body.parentTeamId === 'string' && req.body.parentTeamId.trim()
+      ? req.body.parentTeamId.trim() : null;
+
     // Containment check — path.resolve + path.relative is the in-flow
     // sanitiser pattern CodeQL recognises for js/path-injection.
     const agentsBaseDir = path.resolve(AGENTS_DIR);
@@ -1588,23 +1604,54 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), (req,
       return res.status(400).json({ error: 'Invalid agent id path' });
     }
 
-    // Conflict check
+    // Conflict check — structured so the UI can offer a new id.
     if (fs.existsSync(targetDir)) {
-      return res.status(409).json({ error: `Agent '${agentId}' already exists — delete or rename it before importing` });
+      return res.status(409).json({
+        error: `Agent '${agentId}' already exists — choose a different id to import it under.`,
+        code: 'id-conflict',
+        agentId,
+      });
     }
 
-    // Restore workspace
+    // Locate the exported workspace.
     const workspaceDir = path.join(extractDir, 'workspace');
     if (!fs.existsSync(workspaceDir)) {
       return res.status(400).json({ error: 'Missing workspace/ directory in ZIP' });
     }
-    copyDirRecursive(workspaceDir, targetDir);
+
+    // Stage the workspace on the shared volume so the orchestrator can read it,
+    // then hand off provisioning (fresh Matrix identity, role/team wiring,
+    // process spawn) to the orchestrator. The orchestrator owns the agent map
+    // and Matrix admin client; the admin-console only prepares the files.
+    const stagingRoot = path.join(WORKSPACE, '.import-staging');
+    fs.mkdirSync(stagingRoot, { recursive: true });
+    stagingDir = path.join(stagingRoot, crypto.randomUUID());
+    copyDirRecursive(workspaceDir, stagingDir);
+
+    const orchResp = await fetch(`${ORCH_URL()}/internal/agents/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stagingDir, agentId, parentTeamId }),
+    });
+    const data = await orchResp.json().catch(() => ({}));
+    if (!orchResp.ok) {
+      // Orchestrator cleans staging on success only; remove it on failure here.
+      try { fs.rmSync(stagingDir, { recursive: true, force: true }); } catch { /* noop */ }
+      return res.status(orchResp.status).json(data.error ? data : { error: `Import failed (orchestrator ${orchResp.status})` });
+    }
 
     const img = manifest.image || {};
-    console.log(`[API] Imported agent '${agentId}': image=${img.name}:${img.tag} digest=${img.digest || 'n/a'} exportedAt=${manifest.exportedAt}`);
+    console.log(`[API] Imported agent '${exportedId}' → '${agentId}'${parentTeamId ? ` (team=${parentTeamId})` : ''}: image=${img.name}:${img.tag} digest=${img.digest || 'n/a'} exportedAt=${manifest.exportedAt}`);
 
-    res.status(201).json({ ok: true, agentId, image: manifest.image || null });
+    res.status(201).json({
+      ok: true,
+      agentId: data.id || agentId,
+      role: data.role || null,
+      parentTeamId: data.parentTeamId || null,
+      image: manifest.image || null,
+    });
   } catch (err) {
+    if (stagingDir) { try { fs.rmSync(stagingDir, { recursive: true, force: true }); } catch { /* noop */ } }
     console.error(`[API] Import failed: ${err.message}`);
     res.status(500).json({ error: `Import failed: ${err.message}` });
   } finally {

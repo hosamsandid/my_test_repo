@@ -55,11 +55,14 @@ Agents can be snapshotted as a ZIP and restored on any compatible AEE instance.
 
 API: `GET /api/agents/:id/export` → streams `agent-<id>-export.zip`.
 
-**Import** — click **Import Agent** at the top-right of `/agents` and select a ZIP produced by export. The agent id from `manifest.json` is used as-is; the call returns `409` if an agent with that id already exists. After import, activate the agent card normally.
+**Import** — click **Import Agent** at the top-right of `/agents` and select a ZIP produced by export. An import dialog opens with two optional choices:
 
-API: `POST /api/agents/import` (multipart `file` field, max 500 MB) → `201 { agentId, image }`.
+- **New Agent ID** — import the agent under a different id. Leave blank to keep the exported id. If that id is already taken the dialog surfaces the conflict and pre-fills a non-colliding suggestion, so you can re-id and retry without re-selecting the file.
+- **Assign to Team** — graft the imported agent into an existing team as a `team-member`. It inherits the team's working environment but keeps its own imported system prompt as a per-member override (so a later team-prompt edit won't overwrite it). Leave as *Standalone* to import it as an independent `agent`.
 
-Note: sensitive Matrix credentials are **not** included in the ZIP. After import you will need to configure them via the agent edit form or by starting a chat session.
+The imported workspace (memory, skills, repo clone, prompt files) is preserved 1:1 — nothing the agent learned is re-seeded away. A **fresh Matrix identity** is provisioned on import (the exported credentials belong to the source homeserver and are dropped), and the agent is started immediately — open it in Agent Chat.
+
+API: `POST /api/agents/import` (multipart, max 500 MB). Fields: `file` (the ZIP), optional `newId`, optional `parentTeamId`. → `201 { agentId, role, parentTeamId, image }`. On an id collision the response is `409 { error, code: "id-conflict", agentId }`. The admin-console stages the workspace on the shared volume and hands provisioning off to the orchestrator (`POST /internal/agents/import`), which owns the agent map and Matrix admin client.
 
 ## Hover Correlation
 

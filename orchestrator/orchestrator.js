@@ -35,6 +35,9 @@ const PER_AGENT_VOLUME = process.env.AEE_PER_AGENT_VOLUME === '1';
 const BLUEPRINTS_DIR = "/workspace/blueprints";
 const WORKSPACE = "/workspace";
 const TEMPLATE_WORKSPACE = "/template-workspace";
+// Agent id grammar — mirrors AGENT_ID_RE in admin-console/api/api.js. Used to
+// validate ids that arrive from outside (e.g. on import).
+const AGENT_ID_RE = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/;
 const ENVIRONMENTS_DIR = "/workspace/environments";
 const SSH_KEYS_DIR = path.join(ENVIRONMENTS_DIR, "_keys");
 const SSH_KEYS_INDEX = path.join(SSH_KEYS_DIR, "index.json");
@@ -3097,6 +3100,133 @@ class Orchestrator {
     console.log(`[Orchestrator] Cloned agent ${sourceId} → ${newId}`);
     return { id: newId, userId, clonedFrom: sourceId };
   }
+
+  // ===========================================================
+  // Agent import
+  // ===========================================================
+  // Materialize an agent from an extracted export workspace staged on the
+  // shared volume (written by the admin-console import endpoint). Mirrors
+  // cloneAgent: a FRESH Matrix identity is provisioned for `agentId` — the
+  // export's old `userId`/`token` are dropped, because they belong to the
+  // source homeserver/user and are invalid here (the source user may even
+  // have been deactivated on delete). The imported workspace (memory/,
+  // skills/, repo clone, prompt files) is preserved 1:1; we never re-seed,
+  // so nothing the agent learned is lost.
+  //
+  // opts:
+  //   - displayName   — override; defaults to the imported config's name.
+  //   - parentTeamId  — when set, the agent is grafted into an existing team
+  //                     as a `team-member`. Its imported system prompt is kept
+  //                     as a per-member override (so a later team-prompt edit
+  //                     won't wipe it), and it inherits the team's environment.
+  //                     Absent → imported as a standalone `agent`.
+  async importAgent(stagingDir, agentId, opts = {}) {
+    if (!agentId || !AGENT_ID_RE.test(agentId)) throw new Error(`Invalid agent id '${agentId}'`);
+    if (loadAgentConfig(agentId)) throw new Error(`Agent '${agentId}' already exists`);
+
+    // Containment: staging dirs live under WORKSPACE/.import-staging only.
+    const stagingRoot = path.resolve(path.join(WORKSPACE, ".import-staging"));
+    const resolvedStaging = path.resolve(stagingDir);
+    if (resolvedStaging !== stagingRoot &&
+        !resolvedStaging.startsWith(stagingRoot + path.sep)) {
+      throw new Error("Invalid staging path");
+    }
+    const stagedConfigPath = path.join(resolvedStaging, "config.json");
+    if (!fs.existsSync(stagedConfigPath)) {
+      throw new Error("Staged workspace is missing config.json — not a valid agent export");
+    }
+    let sourceCfg;
+    try {
+      sourceCfg = JSON.parse(fs.readFileSync(stagedConfigPath, "utf8"));
+    } catch (err) {
+      throw new Error(`Corrupt config.json in export: ${err.message}`);
+    }
+
+    // Resolve role + environment binding.
+    let role, parentTeamId = null, environmentId;
+    if (opts.parentTeamId) {
+      const teamCfg = loadAgentConfig(opts.parentTeamId);
+      if (!teamCfg) throw new Error(`Team '${opts.parentTeamId}' not found`);
+      if (teamCfg.role !== "team") {
+        throw new Error(`Agent '${opts.parentTeamId}' is not a team (role=${teamCfg.role})`);
+      }
+      role = "team-member";
+      parentTeamId = opts.parentTeamId;
+      environmentId = teamCfg.environmentId;
+    } else {
+      // Standalone import — never resurrect a dangling team-member/bp-instance
+      // shape (it would render as an orphan with a missing parent).
+      role = "agent";
+      environmentId = sourceCfg.environmentId;
+    }
+
+    const displayName = opts.displayName || sourceCfg.displayName || agentId;
+    const password = `agent-${agentId}-${Date.now()}`;
+    const userId = `@${agentId}:local`;
+
+    if (this.adminClient) await ensureMatrixUser(this.adminClient, agentId, password);
+    const token = await loginMatrixUser(agentId, password);
+    await setDisplayName(token, userId, displayName);
+
+    // Copy the staged workspace into place, skipping runtime-only files we
+    // regenerate (config rewritten below; session/DM/status are host-specific).
+    const dstDir = agentDir(agentId);
+    fs.mkdirSync(dstDir, { recursive: true });
+    const SKIP = new Set(["config.json", "status.json", "dm-room.json", "sessions"]);
+    for (const entry of fs.readdirSync(resolvedStaging)) {
+      if (SKIP.has(entry)) continue;
+      fs.cpSync(path.join(resolvedStaging, entry), path.join(dstDir, entry), { recursive: true });
+    }
+
+    // Rebuild the config: keep imported fields, swap in fresh identity + role.
+    const newConfig = {
+      ...sourceCfg,
+      id: agentId,
+      displayName,
+      userId,
+      token,
+      role,
+      enabled: true,
+    };
+    delete newConfig._provisioning;
+    // Drop linkage that doesn't apply to the import target.
+    delete newConfig.parentOrchestratorId;
+    delete newConfig.bpId;
+    delete newConfig.bpSlug;
+    delete newConfig.briefingsPath;
+
+    if (role === "team-member") {
+      newConfig.parentTeamId = parentTeamId;
+      newConfig.environmentId = environmentId;
+      // Keep the imported prompt as a member override so team-prompt
+      // propagation (updateTeamPrompt) won't overwrite it. Fall back to the
+      // exported AGENT-PROMPT.md when the config carried no explicit prompt.
+      if (typeof sourceCfg.systemPrompt === "string" && sourceCfg.systemPrompt.length > 0) {
+        newConfig.systemPrompt = sourceCfg.systemPrompt;
+      } else {
+        const promptPath = path.join(dstDir, "AGENT-PROMPT.md");
+        try {
+          const p = fs.existsSync(promptPath) ? fs.readFileSync(promptPath, "utf8").trim() : "";
+          if (p) newConfig.systemPrompt = p;
+        } catch { /* leave prompt unset → inherits team template */ }
+      }
+    } else {
+      delete newConfig.parentTeamId;
+      delete newConfig.systemPromptTemplate;
+    }
+
+    saveAgentConfig(agentId, newConfig);
+    this.agentConfigs.set(agentId, { config: newConfig });
+    startAgentProcess(newConfig);
+
+    try { fs.rmSync(resolvedStaging, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+
+    console.log(
+      `[Orchestrator] Imported agent → ${agentId} (role=${role}` +
+      `${parentTeamId ? `, team=${parentTeamId}` : ""})`
+    );
+    return { id: agentId, userId, role, parentTeamId };
+  }
 }
 
 // ============================================================
@@ -3465,6 +3595,36 @@ async function main() {
         } catch (err) {
           console.error(`[Orchestrator] Clone error: ${err.message}`);
           const status = /not found/i.test(err.message) ? 404 : /already exists/i.test(err.message) ? 409 : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/internal/agents/import') {
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        try {
+          const { stagingDir, agentId, displayName, parentTeamId } = JSON.parse(body || '{}');
+          if (!stagingDir || !agentId) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'stagingDir and agentId required' }));
+            return;
+          }
+          const result = await orchestrator.importAgent(stagingDir, agentId, {
+            displayName: displayName || undefined,
+            parentTeamId: parentTeamId || undefined,
+          });
+          res.writeHead(201, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] Import error: ${err.message}`);
+          const status = /already exists/i.test(err.message) ? 409
+                       : /not found/i.test(err.message) ? 404
+                       : /invalid|missing|corrupt|not a valid/i.test(err.message) ? 400
+                       : 500;
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));
         }

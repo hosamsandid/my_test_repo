@@ -883,6 +883,103 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
   );
 }
 
+/* ── Import Agent Form ──────────────────────────────────────────────── */
+// Import dialog: pick an optional new id (e.g. when the exported id collides)
+// and optionally graft the agent into an existing team. The imported workspace
+// (memory, skills, repo, prompt) is preserved 1:1; only a fresh Matrix identity
+// is provisioned on the server side.
+function ImportAgentForm({ file, teams, onSubmit, onCancel }) {
+  const [newId, setNewId] = useState('');
+  const [parentTeamId, setParentTeamId] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [conflict, setConflict] = useState(false);
+
+  async function submit() {
+    setBusy(true);
+    setError(null);
+    try {
+      const { ok, data } = await onSubmit({
+        newId: newId.trim() || undefined,
+        parentTeamId: parentTeamId || undefined,
+      });
+      if (!ok) {
+        if (data?.code === 'id-conflict') {
+          setConflict(true);
+          // Seed a non-colliding suggestion so the operator can just confirm.
+          if (!newId.trim() && data.agentId) setNewId(`${data.agentId}-2`);
+          setError(data.error || 'That id is already in use — choose a different one.');
+        } else {
+          setError(data?.error || 'Import failed.');
+        }
+      }
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      {error && (
+        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-md)' }}>
+          {error}
+        </div>
+      )}
+
+      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.55 }}>
+        Importing <strong style={{ color: 'var(--eb-text-primary)' }}>{file?.name}</strong>.
+        The agent's memory, skills and repo clone are kept as-is; a fresh chat identity
+        is provisioned on import. Activate it from its card afterwards.
+      </div>
+
+      <div>
+        <FormInput
+          label={conflict ? 'New Agent ID *' : 'New Agent ID'}
+          value={newId}
+          onChange={setNewId}
+          placeholder="leave blank to keep the exported id"
+        />
+        <div style={helpTextStyle}>
+          {conflict
+            ? 'The exported id already exists — pick an unused id to import under.'
+            : 'Optional. Provide an id only to rename the agent or avoid a collision.'}
+        </div>
+      </div>
+
+      <div>
+        <div style={labelStyle}>
+          Assign to Team
+          <span style={{ marginLeft: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-normal)' }}>(optional)</span>
+        </div>
+        <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-1)' }}>
+          Graft the imported agent into an existing team as a member. It inherits the
+          team's working environment but keeps its own imported system prompt as an override.
+          Leave as <em>Standalone</em> to import it as an independent agent.
+        </div>
+        <select
+          value={parentTeamId}
+          onChange={e => setParentTeamId(e.target.value)}
+          style={inputStyle}
+        >
+          <option value="">Standalone agent (no team)</option>
+          {(teams || []).map(t => (
+            <option key={t.id} value={t.id}>{t.displayName || t.id}</option>
+          ))}
+        </select>
+      </div>
+
+      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+        <PrimaryBtn onClick={submit} saving={busy} disabled={busy || (conflict && !newId.trim())}>
+          {busy ? 'Importing…' : 'Import Agent'}
+        </PrimaryBtn>
+        <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
+      </div>
+    </div>
+  );
+}
+
 /* ── Agent Edit Form ────────────────────────────────────────────────── */
 function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
   // Initial values for the inheritance toggles. `agent.systemPrompt` /
@@ -1704,6 +1801,7 @@ export default function Agents() {
   const [busyIds, setBusyIds] = useState(new Set());
   const [importError, setImportError] = useState(null);
   const [importSuccess, setImportSuccess] = useState(null);
+  const [importFile, setImportFile] = useState(null);
   const importFileRef = useRef(null);
 
   const agents = rawAgents || [];
@@ -1754,24 +1852,40 @@ export default function Agents() {
     window.open(`/api/agents/${encodeURIComponent(agentId)}/export`, '_blank');
   }
 
-  async function handleImport(e) {
+  // Step 1: a file was picked — open the import dialog (id / team options)
+  // instead of submitting immediately, so the operator can re-id the agent
+  // or assign it to a team before it lands.
+  function handleImportFileSelected(e) {
     const file = e.target.files?.[0];
-    if (!importFileRef.current) return;
-    importFileRef.current.value = '';
+    if (importFileRef.current) importFileRef.current.value = '';
     if (!file) return;
     setImportError(null);
     setImportSuccess(null);
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
-      const resp = await fetch('/api/agents/import', { method: 'POST', body: formData });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-      setImportSuccess(`Agent '${data.agentId}' imported. Activate it from the card below.`);
+    setImportFile(file);
+    setSelectedAgent(null);
+    setSaveError(null);
+    setPanelMode('import');
+  }
+
+  // Step 2: dialog submitted. Returns the parsed response so the form can
+  // react to a 409 id-conflict (reveal/seed the new-id field).
+  async function handleImportSubmit({ newId, parentTeamId }) {
+    const formData = new FormData();
+    formData.append('file', importFile);
+    if (newId) formData.append('newId', newId);
+    if (parentTeamId) formData.append('parentTeamId', parentTeamId);
+    const resp = await fetch('/api/agents/import', { method: 'POST', body: formData });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok) {
+      setImportSuccess(
+        `Agent '${data.agentId}' imported${data.parentTeamId ? ` into team '${data.parentTeamId}'` : ''} ` +
+        `and started — open it in Agent Chat.`,
+      );
+      setImportFile(null);
+      closePanel();
       refetch();
-    } catch (e) {
-      setImportError(e.message);
     }
+    return { ok: resp.ok, status: resp.status, data };
   }
 
   async function handleCreateAgent(form) {
@@ -1966,7 +2080,7 @@ export default function Agents() {
             type="file"
             accept=".zip"
             style={{ display: 'none' }}
-            onChange={handleImport}
+            onChange={handleImportFileSelected}
           />
           <button
             onClick={() => importFileRef.current?.click()}
@@ -2138,6 +2252,22 @@ export default function Agents() {
 
       <SidePanel open={panelMode === 'create'} onClose={closePanel} title="New Agent" width="600px" loading={saving}>
         <AgentCreateForm onSave={handleCreateAgent} onCancel={closePanel} saving={saving} error={saveError} />
+      </SidePanel>
+
+      <SidePanel
+        open={panelMode === 'import'}
+        onClose={() => { setImportFile(null); closePanel(); }}
+        title="Import Agent"
+        width="480px"
+      >
+        {panelMode === 'import' && importFile && (
+          <ImportAgentForm
+            file={importFile}
+            teams={teams}
+            onSubmit={handleImportSubmit}
+            onCancel={() => { setImportFile(null); closePanel(); }}
+          />
+        )}
       </SidePanel>
 
       <SidePanel

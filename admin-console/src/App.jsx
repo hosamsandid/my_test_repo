@@ -16,6 +16,7 @@ const ScheduledJobs       = lazy(() => import('./pages/ScheduledJobs'));
 const ModelRegistry       = lazy(() => import('./pages/ModelRegistry'));
 const McpServers          = lazy(() => import('./pages/McpServers'));
 const Briefings           = lazy(() => import('./pages/Briefings'));
+const ProcessCanvas       = lazy(() => import('./pages/ProcessCanvas'));
 const OrchestratorWizard  = lazy(() => import('./pages/OrchestratorWizard'));
 
 export default function App() {
@@ -64,6 +65,8 @@ export default function App() {
           <Route path="/mcp"          element={<McpServers />} />
           <Route path="/flows"         element={<Briefings />} />
           <Route path="/briefings"    element={<Navigate to="/flows" replace />} />
+          <Route path="/process"      element={<ProcessCanvas />} />
+          <Route path="/process/:teamId" element={<ProcessCanvas />} />
           <Route path="/orchestrator-wizard" element={<OrchestratorWizard />} />
         </Routes>
       </Suspense>

@@ -1878,7 +1878,10 @@ function readAgentSystemPrompt(id) {
 app.get('/api/agents/:id/triggers/:triggerId/emit-suggestions', (req, res) => {
   const { id, triggerId } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  if (!fs.existsSync(path.join(AGENTS_DIR, id))) return res.status(404).json({ error: 'Agent not found' });
+  const agentsRoot = path.resolve(AGENTS_DIR) + path.sep;
+  const agentDir = path.resolve(AGENTS_DIR, id);
+  if (!(agentDir + path.sep).startsWith(agentsRoot)) return res.status(400).json({ error: 'Invalid agent id' });
+  if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
   const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
   const trigger = (Array.isArray(triggers) ? triggers : []).find(t => t.id === triggerId);
   if (!trigger) return res.status(404).json({ error: 'Trigger not found' });

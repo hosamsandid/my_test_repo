@@ -1866,8 +1866,12 @@ app.delete('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) =
  * set through the same single-writer trigger path. */
 
 function readAgentSystemPrompt(id) {
-  try { return fs.readFileSync(path.join(AGENTS_DIR, id, 'AGENT-PROMPT.md'), 'utf8'); }
-  catch { return ''; }
+  try {
+    const agentsRoot = path.resolve(AGENTS_DIR);
+    const promptPath = path.resolve(agentsRoot, id, 'AGENT-PROMPT.md');
+    if (promptPath !== agentsRoot && !promptPath.startsWith(agentsRoot + path.sep)) return '';
+    return fs.readFileSync(promptPath, 'utf8');
+  } catch { return ''; }
 }
 
 // Heuristic draft only — advisory, never persisted by this call.

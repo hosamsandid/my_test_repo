@@ -5826,6 +5826,64 @@ app.get('/api/agents/:agentId/workspace/download', apiLimiter, (req, res) => {
   stream.pipe(res);
 });
 
+// Delete a file or directory in the agent workspace. Directories are removed
+// recursively. Refuses to delete the workspace root itself.
+//
+// Containment is enforced the same way as the upload handler: the *parent*
+// directory is resolved through safeAgentPath (the canonical traversal /
+// outward-symlink sanitizer), then the basename is appended. Operating on the
+// entry via its parent means a symlink is unlinked rather than followed, and a
+// final startsWith check against the realpath'd agent root rules out any escape.
+app.delete('/api/agents/:agentId/workspace/file', apiLimiter, (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  const normalized = path.normalize(relPath.replace(/^\/+/, ''));
+  if (!normalized || normalized === '.' || normalized === path.sep) {
+    return res.status(400).json({ error: 'Refusing to delete workspace root' });
+  }
+  if (normalized.split(path.sep).some(seg => seg === '..')) {
+    return res.status(400).json({ error: 'invalid path' });
+  }
+
+  const parentRel = path.dirname(normalized);
+  const baseName  = path.basename(normalized);
+  const parentDir = safeAgentPath(agentId, parentRel === '.' ? '' : parentRel);
+  if (!parentDir) return res.status(400).json({ error: 'invalid path' });
+  const target = path.join(parentDir, baseName);
+
+  // Defence-in-depth: the resolved target must stay strictly inside the root.
+  let agentRoot;
+  try {
+    agentRoot = fs.realpathSync(path.join(AGENTS_DIR, agentId));
+  } catch {
+    return res.status(404).json({ error: 'Agent workspace not found' });
+  }
+  if (!target.startsWith(agentRoot + path.sep)) {
+    return res.status(400).json({ error: 'invalid path' });
+  }
+
+  let st;
+  try {
+    st = fs.lstatSync(target);
+  } catch (err) {
+    if (err.code === 'ENOENT') return res.status(404).json({ error: 'not found' });
+    return res.status(500).json({ error: err.message });
+  }
+  const type = st.isDirectory() ? 'dir' : (st.isSymbolicLink() ? 'link' : 'file');
+
+  try {
+    // target = safeAgentPath(parent) + sanitised basename, verified inside the
+    // agent root above; recursive removal is intended for directories.
+    fs.rmSync(target, { recursive: true, force: false }); // codeql[js/path-injection]
+  } catch (err) {
+    if (err.code === 'EACCES') return res.status(403).json({ error: 'permission denied' });
+    return res.status(500).json({ error: err.message });
+  }
+
+  res.json({ deleted: path.relative(agentRoot, target), type });
+});
+
 /* ─── Workspace git-diff (read-only) ───────────────────────────────────
  *
  * Two endpoints for the Diff tab in the Workspace browser:

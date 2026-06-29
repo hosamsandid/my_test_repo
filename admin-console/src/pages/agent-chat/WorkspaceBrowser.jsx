@@ -6,9 +6,10 @@ import rehypeSanitize from 'rehype-sanitize';
 import {
   ChevronRight, ChevronDown, Folder, FolderOpen, FileText, FileCode,
   Brain, Sparkles, BookOpen, Loader2, X, RefreshCw, AlertCircle, FileWarning,
-  Maximize2, Minimize2, Code2, Eye, GitBranch, Upload, GitCompare, Download,
+  Maximize2, Minimize2, Code2, Eye, GitBranch, Upload, GitCompare, Download, Trash2,
 } from 'lucide-react';
 import DiffView from './DiffView';
+import ConfirmDialog from '../../components/ConfirmDialog';
 
 const MODE_KEY = 'agentChat.workspaceMode';
 
@@ -59,6 +60,11 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
   const folderInputRef = useRef(null);
   const uploadResetTimerRef = useRef(null);
 
+  // Delete confirmation state. deleteTarget = { path, type, name } | null.
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+
   // Bump generation counter on agent change so a slow response from the
   // previous agent can't poison the new agent's cache.
   const reqIdRef = useRef(0);
@@ -73,6 +79,9 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
     setUploadDir('');
     setUploadStatus('idle');
     setUploadMessage('');
+    setDeleteTarget(null);
+    setDeleteBusy(false);
+    setDeleteError('');
     return () => { clearTimeout(uploadResetTimerRef.current); };
   }, [agentId]);
 
@@ -199,6 +208,38 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
     setUploadStatus('idle');
     setUploadMessage('');
   }, []);
+
+  // Opens the delete-confirmation dialog for one file or directory.
+  const requestDelete = useCallback((relPath, type, name) => {
+    setDeleteError('');
+    setDeleteTarget({ path: relPath, type, name });
+  }, []);
+
+  const confirmDelete = useCallback(async () => {
+    if (!deleteTarget || !agentId) return;
+    setDeleteBusy(true);
+    setDeleteError('');
+    try {
+      const r = await fetch(
+        `/api/agents/${encodeURIComponent(agentId)}/workspace/file?path=${encodeURIComponent(deleteTarget.path)}`,
+        { method: 'DELETE' },
+      );
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j?.error || `HTTP ${r.status}`);
+      // Close the viewer if the open file lived under the deleted path.
+      setSelectedFile(prev => {
+        if (!prev) return prev;
+        if (prev.path === deleteTarget.path || prev.path.startsWith(deleteTarget.path + '/')) return null;
+        return prev;
+      });
+      setDeleteTarget(null);
+      refreshAll();
+    } catch (err) {
+      setDeleteError(err.message || 'Delete failed');
+    } finally {
+      setDeleteBusy(false);
+    }
+  }, [deleteTarget, agentId, refreshAll]);
 
   /* ─── Render ─────────────────────────────────────────────────────── */
   if (!agentId) {
@@ -419,6 +460,7 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
             onSelectFile={(p) => setSelectedFile({ path: p })}
             selectedFilePath={selectedFile?.path || null}
             onUploadToDir={handleUploadToDir}
+            onRequestDelete={requestDelete}
             agentId={agentId}
           />
         </div>
@@ -432,6 +474,34 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
           onClose={() => setSelectedFile(null)}
         />
       )}
+
+      {/* Delete confirmation */}
+      <ConfirmDialog
+        open={!!deleteTarget}
+        variant="danger"
+        title={deleteTarget?.type === 'dir' ? 'Delete directory' : 'Delete file'}
+        confirmLabel={deleteBusy ? 'Deleting…' : 'Delete'}
+        onConfirm={confirmDelete}
+        onCancel={() => { if (!deleteBusy) { setDeleteTarget(null); setDeleteError(''); } }}
+        message={(
+          <div>
+            <p style={{ margin: 0 }}>
+              Delete {deleteTarget?.type === 'dir' ? 'directory' : 'file'}{' '}
+              <code style={{ fontFamily: 'var(--eb-font-mono)', wordBreak: 'break-all' }}>{deleteTarget?.name}</code>?
+            </p>
+            <p style={{ margin: 'var(--eb-space-2) 0 0', color: 'var(--eb-text-muted)' }}>
+              {deleteTarget?.type === 'dir'
+                ? 'This removes the directory and all of its contents. This cannot be undone.'
+                : 'This cannot be undone.'}
+            </p>
+            {deleteError && (
+              <p style={{ margin: 'var(--eb-space-2) 0 0', color: 'var(--eb-status-error)' }}>
+                {deleteError}
+              </p>
+            )}
+          </div>
+        )}
+      />
     </div>
   );
 }
@@ -467,7 +537,7 @@ function ModeButton({ icon, label, active, onClick }) {
 
 /* ─── Tree node ───────────────────────────────────────────────────── */
 
-function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, gitBranch, onUploadToDir, agentId }) {
+function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, gitBranch, onUploadToDir, onRequestDelete, agentId }) {
   const isRoot = relPath === '';
   const isOpen = expanded.has(relPath);
   const cache  = dirCache.get(relPath);
@@ -550,6 +620,27 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
           >
             <Upload size={11} />
           </button>
+          {/* Per-directory delete icon — visible on hover */}
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onRequestDelete(relPath, 'dir', name); }}
+            title={`Delete ${name}/`}
+            style={{
+              ...iconBtnStyle,
+              flexShrink: 0,
+              padding: '3px 6px',
+              marginRight: 2,
+              opacity: hovered ? 1 : 0,
+              pointerEvents: hovered ? 'auto' : 'none',
+              color: 'var(--eb-text-muted)',
+              background: hovered ? 'var(--eb-bg-hover)' : 'none',
+              transition: 'opacity 0.1s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-status-error)'; }}
+            onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
+          >
+            <Trash2 size={11} />
+          </button>
         </div>
       )}
       {(isRoot || isOpen) && (
@@ -563,6 +654,7 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
           onSelectFile={onSelectFile}
           selectedFilePath={selectedFilePath}
           onUploadToDir={onUploadToDir}
+          onRequestDelete={onRequestDelete}
           agentId={agentId}
         />
       )}
@@ -570,7 +662,7 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
   );
 }
 
-function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, onUploadToDir, agentId }) {
+function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, onUploadToDir, onRequestDelete, agentId }) {
   if (!cache) {
     return null; // not yet fetched (open root state pre-fetch)
   }
@@ -634,6 +726,7 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
               selectedFilePath={selectedFilePath}
               gitBranch={item.gitBranch || null}
               onUploadToDir={onUploadToDir}
+              onRequestDelete={onRequestDelete}
               agentId={agentId}
             />
           );
@@ -654,6 +747,7 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
               a.download = item.name;
               a.click();
             } : null}
+            onDelete={onRequestDelete ? () => onRequestDelete(childRel, 'file', item.name) : null}
           />
         );
       })}
@@ -661,7 +755,7 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
   );
 }
 
-function Row({ indent, icon, label, secondary, dim, active, onClick, gitBranch, onDownload }) {
+function Row({ indent, icon, label, secondary, dim, active, onClick, gitBranch, onDownload, onDelete }) {
   const [hovered, setHovered] = useState(false);
   return (
     <div
@@ -680,7 +774,7 @@ function Row({ indent, icon, label, secondary, dim, active, onClick, gitBranch, 
           minWidth: 0,
           textAlign: 'left',
           paddingLeft: 16 + (indent || 0),
-          paddingRight: onDownload ? 2 : 8,
+          paddingRight: (onDownload || onDelete) ? 2 : 8,
           paddingTop: 3,
           paddingBottom: 3,
           background: active ? 'var(--eb-accent-muted)' : (hovered ? 'var(--eb-bg-hover)' : 'none'),
@@ -748,6 +842,28 @@ function Row({ indent, icon, label, secondary, dim, active, onClick, gitBranch, 
           }}
         >
           <Download size={11} />
+        </button>
+      )}
+      {onDelete && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onDelete(); }}
+          title={`Delete ${label}`}
+          style={{
+            ...iconBtnStyle,
+            flexShrink: 0,
+            padding: '3px 6px',
+            marginRight: 2,
+            opacity: hovered ? 1 : 0,
+            pointerEvents: hovered ? 'auto' : 'none',
+            color: 'var(--eb-text-muted)',
+            background: hovered ? 'var(--eb-bg-hover)' : 'none',
+            transition: 'opacity 0.1s',
+          }}
+          onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-status-error)'; }}
+          onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
+        >
+          <Trash2 size={11} />
         </button>
       )}
     </div>

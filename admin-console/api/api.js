@@ -11,6 +11,7 @@ const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const matrix = require('./matrix');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
+const { buildProcessGraph } = require('./process-graph');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -1904,6 +1905,83 @@ app.put('/api/agents/:id/triggers/:triggerId/emits', apiLimiter, async (req, res
     return res.status(502).json({ error: `Could not save triggers: ${err.message}` });
   }
   res.json(list[idx]);
+});
+
+/* ─── Process graph (Process Canvas #329) ───────────────────────────────
+ * Aggregates agents (or role templates) + their triggers into the
+ * orchestration graph the canvas renders, in one call. Edge wiring is
+ * deterministic from each trigger's effective `emits` set:
+ *   - live level (default, or ?team=<id> to scope to one team): uses the
+ *     persisted `emits` only — labels are already concrete in triggers.json.
+ *   - template level (?templates=1 or ?templates=a,b): reads the role-template
+ *     catalog, leaves `{{var}}` tokens raw, and (unless ?derive=0) falls back to
+ *     the #328 heuristic so the blueprint shows wiring before emits are set. */
+
+function effectiveTriggers(triggers, { derive, systemPrompt }) {
+  return (Array.isArray(triggers) ? triggers : []).map(t => {
+    if (Array.isArray(t.emits)) return t; // operator-confirmed — authoritative
+    if (!derive) return { ...t, emits: [] };
+    const sug = deriveEmitsForTrigger(t, systemPrompt);
+    return { ...t, emits: sug.map(s => s.label), emitsDerived: sug.length > 0 };
+  });
+}
+
+function truthyParam(v) { return v === '1' || v === 'true' || v === ''; }
+
+app.get('/api/process/graph', (req, res) => {
+  const templatesParam = req.query.templates;
+
+  // Template-level blueprint graph.
+  if (templatesParam !== undefined) {
+    const derive = req.query.derive !== undefined
+      ? truthyParam(String(req.query.derive)) : true;
+    const ids = truthyParam(String(templatesParam))
+      ? listAgentTemplateIds()
+      : String(templatesParam).split(',').map(s => s.trim()).filter(Boolean);
+    const agents = [];
+    for (const id of ids) {
+      const t = loadAgentTemplate(id);
+      if (!t) continue;
+      const triggers = effectiveTriggers(
+        (t.triggers || []).map(tr => ({
+          id: tr.id, type: tr.type, events: tr.events, labelFilter: tr.labelFilter,
+          from: tr.from, cron: tr.cron, at: tr.at, enabled: tr.enabled,
+          emits: tr.emits, prompt: tr.promptTemplate,
+        })),
+        { derive, systemPrompt: t.promptTemplate || '' },
+      );
+      agents.push({
+        id: t.id, role: 'template', displayName: t.displayName || t.id,
+        sessionPolicy: t.sessionPolicy || 'persistent', environmentId: null, triggers,
+      });
+    }
+    return res.json({ level: 'template', team: null, ...buildProcessGraph(agents) });
+  }
+
+  // Live graph — persisted emits only (the hybrid default: deterministic, no
+  // silent derivation). Optionally scoped to one team.
+  const team = typeof req.query.team === 'string' && req.query.team.trim()
+    ? req.query.team.trim() : null;
+  if (team && !AGENT_ID_RE.test(team)) return res.status(400).json({ error: 'Invalid team id' });
+  const derive = req.query.derive !== undefined && truthyParam(String(req.query.derive));
+
+  const agents = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    const role = cfg.role || 'agent';
+    if (role === 'team') continue; // template holder — no triggers of its own
+    if (team && cfg.parentTeamId !== team) continue;
+    const raw = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+    const triggers = effectiveTriggers(raw, {
+      derive, systemPrompt: derive ? readAgentSystemPrompt(id) : '',
+    });
+    agents.push({
+      id, role, displayName: cfg.displayName || id,
+      sessionPolicy: cfg.sessionPolicy || 'persistent',
+      environmentId: cfg.environmentId || null, triggers,
+    });
+  }
+  res.json({ level: 'live', team, ...buildProcessGraph(agents) });
 });
 
 /* ─── Skills ────────────────────────────────────────────────────────── */

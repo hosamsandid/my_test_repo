@@ -8,8 +8,10 @@ import DraftNodeInspector from './process/DraftNodeInspector';
 import { CreateHandoffDialog, EditHandoffDialog } from './process/EdgeDialogs';
 import MaterializeDialog from './process/MaterializeDialog';
 import AddApprovalDialog from './process/AddApprovalDialog';
+import StageView from './process/StageView';
 import SidePanel from '../components/SidePanel';
 import { liveOps, makeDraftOps } from './process/edit-adapters';
+import { buildStageBundle } from './process/stage-model';
 
 // Process Canvas (#330) — data-driven view of the agent orchestration: which
 // agent reacts to which label, in what order. Read-only render here; the node
@@ -53,6 +55,7 @@ export default function ProcessCanvas() {
   const [materializeOpen, setMaterializeOpen] = useState(false);
   const [addRoleOpen, setAddRoleOpen] = useState(false);
   const [approvalOpen, setApprovalOpen] = useState(false);
+  const [viewMode, setViewMode] = useState('graph'); // 'graph' | 'stages' (draft only)
   const fileInputRef = useRef(null);
 
   // Draft bundle + its derived graph. The bundle is the source of truth; the
@@ -124,6 +127,8 @@ export default function ProcessCanvas() {
 
   // Clear selection/dialogs when the scope (and thus the graph) changes.
   useEffect(() => { setSelectedId(null); setConnectPair(null); setSelectedEdge(null); }, [scope, imported]);
+  // The stage view only applies to drafts.
+  useEffect(() => { if (!isDraft) setViewMode('graph'); }, [isDraft]);
 
   const nodeName = (id) => (displayGraph?.nodes || []).find(n => n.id === id)?.displayName || id;
   const selectedNode = useMemo(
@@ -161,6 +166,12 @@ export default function ProcessCanvas() {
       refetchDrafts();
       setScope(`draft:${d.id}`);
     } catch (e) { setImportError(e.message); }
+  }
+
+  // Stage view (#349): regenerate the draft's wiring from the stage list.
+  async function applyStages(stages) {
+    if (!draftBundleRef.current) return;
+    await persistDraft(buildStageBundle(stages, draftBundleRef.current));
   }
 
   // Source bundle for the Materialize dialog: an imported file or the open draft.
@@ -229,6 +240,18 @@ export default function ProcessCanvas() {
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+          {isDraft && (
+            <div style={{ display: 'inline-flex', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', overflow: 'hidden', marginRight: 'var(--eb-space-1)' }}>
+              {['graph', 'stages'].map(m => (
+                <button key={m} onClick={() => setViewMode(m)} style={{
+                  background: viewMode === m ? 'var(--eb-bg-selected)' : 'var(--eb-bg-surface)',
+                  color: viewMode === m ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
+                  border: 'none', padding: 'var(--eb-space-1) var(--eb-space-3)', cursor: 'pointer',
+                  fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', textTransform: 'capitalize',
+                }}>{m}</button>
+              ))}
+            </div>
+          )}
           {isDraft && (
             <>
               <ToolbarButton onClick={() => setAddRoleOpen('agent')} icon={Plus}>Add role</ToolbarButton>
@@ -318,6 +341,13 @@ export default function ProcessCanvas() {
           lints={displayGraph?.lints || []}
           onFocus={(nodeId) => { if (nodeId) { setSelectedId(nodeId); graphRef.current?.setSelected(nodeId); } }}
         />
+
+        {/* Stage view overlays the graph (which stays mounted underneath). */}
+        {isDraft && viewMode === 'stages' && (
+          <div style={{ position: 'absolute', inset: 0, background: 'var(--eb-bg-app)', overflowY: 'auto', zIndex: 15 }}>
+            <StageView bundle={draftBundle} onApply={applyStages} />
+          </div>
+        )}
       </div>
 
       {/* Inspector — draft roles use the lightweight draft inspector. */}

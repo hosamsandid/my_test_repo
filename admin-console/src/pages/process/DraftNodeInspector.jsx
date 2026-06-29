@@ -6,13 +6,15 @@ import SidePanel from '../../components/SidePanel';
 // displayName, system prompt, and triggers' emits directly on the draft bundle
 // via the draft adapter (`ops`). Lighter than the live inspector — no Matrix,
 // no inherit/override, no live status.
-export default function DraftNodeInspector({ role, ops, onClose, onDeleted, onChanged }) {
+export default function DraftNodeInspector({ role, roles = [], ops, onClose, onDeleted, onChanged }) {
   const [name, setName] = useState(role.displayName || role.id);
   const [prompt, setPrompt] = useState(role.systemPrompt || '');
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
 
   const triggers = role.triggers || [];
+  const isReview = role.kind === 'pr-review';
+  const others = roles.filter(r => r.id !== role.id);
 
   async function saveMeta() {
     setBusy(true); setSaved(false);
@@ -25,11 +27,17 @@ export default function DraftNodeInspector({ role, ops, onClose, onDeleted, onCh
 
   async function setEmits(tid, emits) { await ops.setEmits(role.id, tid, emits); onChanged?.(); }
   async function deleteTrigger(tid) { await ops.deleteTrigger(role.id, tid); onChanged?.(); }
+  async function patchReview(patch) {
+    await ops.patchRole(role.id, { review: { ...(role.review || {}), ...patch } });
+    onChanged?.();
+  }
 
   return (
     <SidePanel open onClose={onClose} title={role.displayName || role.id} width="520px">
       <div style={{ display: 'flex', gap: 6, marginBottom: 'var(--eb-space-4)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-        <span style={badge}>draft role</span>
+        <span style={{ ...badge, ...(isReview ? { color: 'var(--eb-status-warning)', borderColor: 'var(--eb-status-warning)' } : {}) }}>
+          {isReview ? 'PR-review step' : 'draft role'}
+        </span>
         <code style={{ color: 'var(--eb-text-muted)' }}>{role.id}</code>
       </div>
 
@@ -49,22 +57,48 @@ export default function DraftNodeInspector({ role, ops, onClose, onDeleted, onCh
           {saved && <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-success)' }}>Saved.</span>}
         </div>
 
-        {/* Triggers */}
-        <div style={{ marginTop: 'var(--eb-space-2)' }}>
-          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginBottom: 6 }}>
-            Triggers <span style={{ color: 'var(--eb-text-muted)' }}>— wire hand-offs by dragging the ● port on the canvas</span>
-          </div>
-          {triggers.length === 0 && (
-            <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
-              No triggers yet. Draw an edge into another role to create one.
+        {/* PR-review routing (#347) */}
+        {isReview ? (
+          <div style={{ marginTop: 'var(--eb-space-2)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+            <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+              PR review — submits a native Approve / Request-changes review.
             </div>
-          )}
-          {triggers.map(t => (
-            <TriggerCard key={t.id} trigger={t}
-              onEmits={(emits) => setEmits(t.id, emits)}
-              onDelete={() => deleteTrigger(t.id)} />
-          ))}
-        </div>
+            <RoleSelect label="Reviews PRs from" value={role.review?.reviewsPrFrom} options={others}
+              onChange={(v) => patchReview({ reviewsPrFrom: v || undefined })} />
+            <RoleSelect label="On Approve → proceed to" value={role.review?.onApprove} options={others}
+              onChange={(v) => patchReview({ onApprove: v || undefined })} />
+            <RoleSelect label="On Request-changes → back to" value={role.review?.onChangesRequested} options={others}
+              onChange={(v) => patchReview({ onChangesRequested: v || undefined })} />
+            <Field label="Path scope (CODEOWNERS-style, one per line — optional)">
+              <textarea
+                value={(role.review?.paths || []).join('\n')}
+                onChange={(e) => patchReview({ paths: e.target.value.split('\n').map(s => s.trim()).filter(Boolean) })}
+                placeholder={'features/**/*-td.md'}
+                style={{ ...input, minHeight: 70, resize: 'vertical', fontFamily: 'var(--eb-font-mono)' }} />
+            </Field>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
+              On materialise: this reviewer gets a <code>pull_request.opened/reopened</code> trigger + a review protocol;
+              the producer gets a <code>pull_request_review.submitted</code> rework trigger.
+            </div>
+          </div>
+        ) : (
+          /* Triggers */
+          <div style={{ marginTop: 'var(--eb-space-2)' }}>
+            <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginBottom: 6 }}>
+              Triggers <span style={{ color: 'var(--eb-text-muted)' }}>— wire hand-offs by dragging the ● port on the canvas</span>
+            </div>
+            {triggers.length === 0 && (
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
+                No triggers yet. Draw an edge into another role to create one.
+              </div>
+            )}
+            {triggers.map(t => (
+              <TriggerCard key={t.id} trigger={t}
+                onEmits={(emits) => setEmits(t.id, emits)}
+                onDelete={() => deleteTrigger(t.id)} />
+            ))}
+          </div>
+        )}
 
         <div style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)' }}>
           <button onClick={async () => { await ops.deleteRole(role.id); onDeleted?.(); }}
@@ -112,6 +146,17 @@ function TriggerCard({ trigger, onEmits, onDelete }) {
         </span>
       </div>
     </div>
+  );
+}
+
+function RoleSelect({ label, value, options, onChange }) {
+  return (
+    <Field label={label}>
+      <select value={value || ''} onChange={e => onChange(e.target.value)} style={input}>
+        <option value="">— none —</option>
+        {options.map(r => <option key={r.id} value={r.id}>{r.displayName || r.id}</option>)}
+      </select>
+    </Field>
   );
 }
 

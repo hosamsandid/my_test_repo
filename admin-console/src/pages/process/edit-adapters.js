@@ -72,16 +72,24 @@ export function makeDraftOps(getBundle, persist) {
     },
 
     // ── roles (draft-only; no live equivalent) ──
-    addRole: async ({ displayName, systemPrompt, sessionPolicy }) => {
+    addRole: async ({ displayName, systemPrompt, sessionPolicy, kind }) => {
       const b = clone(getBundle());
       b.roles = b.roles || [];
       const id = slugRole(displayName, new Set(b.roles.map(r => r.id)));
       b.roles.push({
         id, displayName: displayName || id, role: 'team-member',
-        sessionPolicy: sessionPolicy || 'persistent', systemPrompt: systemPrompt || '', triggers: [],
+        ...(kind === 'pr-review' ? { kind: 'pr-review', review: {} } : {}),
+        sessionPolicy: kind === 'pr-review' ? 'per-invocation' : (sessionPolicy || 'persistent'),
+        systemPrompt: systemPrompt || '', triggers: [],
       });
       await persist(b);
       return id;
+    },
+    patchRole: async (roleId, patch) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (r) Object.assign(r, patch);
+      await persist(b);
     },
     renameRole: async (roleId, displayName) => {
       const b = clone(getBundle());

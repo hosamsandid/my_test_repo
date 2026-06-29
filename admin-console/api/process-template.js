@@ -28,6 +28,18 @@ function roleKeyOf(id, teamId) {
   return id;
 }
 
+// Remap a PR-review step's role references through roleKeyOf so an exported
+// team's review wiring uses portable role keys (#347).
+function remapReview(review, teamId) {
+  const r = review || {};
+  const out = {};
+  if (r.reviewsPrFrom) out.reviewsPrFrom = roleKeyOf(r.reviewsPrFrom, teamId);
+  if (r.onApprove) out.onApprove = roleKeyOf(r.onApprove, teamId);
+  if (r.onChangesRequested) out.onChangesRequested = roleKeyOf(r.onChangesRequested, teamId);
+  if (Array.isArray(r.paths) && r.paths.length) out.paths = r.paths.slice();
+  return out;
+}
+
 // Slim a trigger for the bundle: keep what defines the wiring + behaviour, drop
 // team-specific/runtime cruft (repo is re-applied at materialise time; secrets
 // never live on triggers).
@@ -69,6 +81,8 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels }) {
       id: roleKeyOf(r.id, teamId),
       displayName: r.displayName || r.id,
       role: r.role || 'team-member',
+      // PR-review steps carry their structured routing (#347); plain agents omit it.
+      ...(r.kind === 'pr-review' ? { kind: 'pr-review', review: remapReview(r.review, teamId) } : {}),
       sessionPolicy: r.sessionPolicy || 'persistent',
       systemPrompt: r.systemPrompt || '',
       triggers: (r.triggers || []).map(bundleTrigger),
@@ -136,4 +150,83 @@ function templateToCustomRoles(bundle) {
   }));
 }
 
-module.exports = { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, emptyDraftBundle, roleKeyOf, VERSION };
+// ─── PR-review steps (#347) ──────────────────────────────────────────────
+// Native GitHub PR reviews (Approve / Request changes), CODEOWNERS-style — not
+// a custom label. A `pr-review` role is a real reviewer agent; this expansion
+// (run only at materialise time) turns its structured routing into concrete
+// triggers and injects the producer's rework trigger, then drops the meta so
+// the role materialises like any other agent.
+
+function reviewerPrompt(paths) {
+  const scope = Array.isArray(paths) && paths.length
+    ? `\n\nReview only changes touching: ${paths.map(p => `\`${p}\``).join(', ')}.`
+    : '';
+  return [
+    'A pull request was opened or reopened in this repo (see the event payload above).',
+    'Review it and submit a **native GitHub PR review**:',
+    '- if it meets the bar, **Approve** it;',
+    '- otherwise **Request changes** with specific, actionable line comments.',
+    'Use `gh-as-agent` so your review is attributed to you. Do not merge — approval is the human/branch-protection step.' + scope,
+    '',
+    'Reply `[PASS]` if there is nothing to review (e.g. the PR is a draft or already reviewed).',
+  ].join('\n');
+}
+
+function reworkPrompt(reviewerName) {
+  return [
+    `A PR review was submitted (see the event payload above). If the verdict from **${reviewerName}** is *Request changes*:`,
+    '- address every comment, push new commits (this dismisses the stale review), and re-request review;',
+    '- if you disagree, reply on the PR explaining why rather than silently ignoring it.',
+    'If the verdict is *Approve* or *Comment*, reply `[PASS]`.',
+  ].join('\n');
+}
+
+/**
+ * Expand `pr-review` roles in a bundle into concrete agent wiring (materialise
+ * time). Returns a NEW bundle: reviewer gets a PR-opened trigger + review
+ * protocol; the reviewed producer gets a `pull_request_review.submitted` rework
+ * trigger; the `kind`/`review` meta is removed. Non-review roles pass through.
+ */
+function expandReviewSteps(bundle) {
+  const roles = (bundle.roles || []).map(r => ({ ...r, triggers: (r.triggers || []).slice() }));
+  const byId = new Map(roles.map(r => [r.id, r]));
+
+  for (const r of roles) {
+    if (r.kind !== 'pr-review') continue;
+    const rv = r.review || {};
+    // Reviewer reacts to opened/reopened PRs and submits a native review.
+    r.triggers.push({
+      id: `${r.id}-review`,
+      type: 'github-event',
+      events: ['pull_request.opened', 'pull_request.reopened'],
+      from: 'any-except-self',
+      enabled: true,
+      description: `Review PRs${rv.reviewsPrFrom ? ` from ${rv.reviewsPrFrom}` : ''}`,
+      prompt: reviewerPrompt(rv.paths),
+    });
+    r.sessionPolicy = 'per-invocation';
+
+    // Producer reacts to review submissions to rework on "Request changes".
+    const producer = rv.reviewsPrFrom && byId.get(rv.reviewsPrFrom);
+    if (producer && !producer.triggers.some(t => t.id === `${producer.id}-rework-${r.id}`)) {
+      producer.triggers.push({
+        id: `${producer.id}-rework-${r.id}`,
+        type: 'github-event',
+        events: ['pull_request_review.submitted'],
+        from: 'any-except-self',
+        enabled: true,
+        description: `Rework on review from ${r.displayName || r.id}`,
+        prompt: reworkPrompt(r.displayName || r.id),
+      });
+    }
+    // The role is now a plain reviewer agent — drop the modeling meta.
+    delete r.kind;
+    delete r.review;
+  }
+  return { ...bundle, roles };
+}
+
+module.exports = {
+  buildProcessTemplate, validateProcessTemplate, templateToCustomRoles,
+  expandReviewSteps, emptyDraftBundle, roleKeyOf, VERSION,
+};

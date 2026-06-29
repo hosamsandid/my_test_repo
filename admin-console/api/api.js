@@ -12,7 +12,7 @@ const { spawnSync } = require('child_process');
 const matrix = require('./matrix');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, emptyDraftBundle } = require('./process-template');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -2068,6 +2068,104 @@ app.get('/api/process/template', (req, res) => {
     name: teamName || 'process', level: 'live', teamId: team || undefined,
     roles: roleEntries, gates: g.gates, labels: g.labels,
   }));
+});
+
+/* ─── Process drafts (Process Canvas v2, #344) ──────────────────────────
+ * A draft is an editable process-template bundle that exists before any team
+ * is materialised. Pure document storage — no agent/Matrix side effects.
+ * Persisted at /workspace/process-drafts/<id>.json. */
+const PROCESS_DRAFTS_DIR = path.join(WORKSPACE, 'process-drafts');
+const DRAFT_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+// Resolve a draft path, hard-guarding against traversal (CodeQL-friendly:
+// AGENT_ID_RE-style regex + path.resolve containment check).
+function draftPath(id) {
+  const root = path.resolve(PROCESS_DRAFTS_DIR);
+  const p = path.resolve(root, `${id}.json`);
+  if (p !== path.join(root, `${id}.json`)) return null;
+  if (!p.startsWith(root + path.sep)) return null;
+  return p;
+}
+function slugifyDraft(name) {
+  const base = String(name || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
+  return base || 'process';
+}
+function readDraft(id) {
+  const p = draftPath(id);
+  if (!p || !fs.existsSync(p)) return null;
+  return readJsonFile(p, null);
+}
+
+app.get('/api/process/drafts', (req, res) => {
+  let ids = [];
+  try {
+    ids = fs.readdirSync(PROCESS_DRAFTS_DIR).filter(f => f.endsWith('.json')).map(f => f.slice(0, -5));
+  } catch { /* dir not created yet */ }
+  const drafts = ids.map(id => {
+    const d = readDraft(id);
+    if (!d) return null;
+    return { id, name: d.name || id, roleCount: Array.isArray(d.roles) ? d.roles.length : 0, updatedAt: d.updatedAt || null };
+  }).filter(Boolean).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  res.json(drafts);
+});
+
+app.post('/api/process/drafts', apiLimiter, (req, res) => {
+  const name = typeof req.body?.name === 'string' && req.body.name.trim() ? req.body.name.trim() : 'Untitled process';
+  // Derive a unique slug id.
+  let base = slugifyDraft(name);
+  if (!DRAFT_ID_RE.test(base)) base = 'process';
+  let id = base, n = 2;
+  while (fs.existsSync(draftPath(id))) { id = `${base}-${n++}`; }
+  const now = new Date().toISOString();
+  // Seed from an imported bundle if provided, else an empty skeleton.
+  let bundle = emptyDraftBundle(name);
+  if (req.body?.processTemplate) {
+    const v = validateProcessTemplate(req.body.processTemplate, { allowEmptyRoles: true });
+    if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
+    bundle = { ...req.body.processTemplate, name };
+  }
+  const draft = { ...bundle, id, createdAt: now, updatedAt: now };
+  fs.mkdirSync(PROCESS_DRAFTS_DIR, { recursive: true });
+  writeJsonAtomic(draftPath(id), draft);
+  res.status(201).json(draft);
+});
+
+app.get('/api/process/drafts/:id', (req, res) => {
+  const { id } = req.params;
+  if (!DRAFT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid draft id' });
+  const d = readDraft(id);
+  if (!d) return res.status(404).json({ error: 'Draft not found' });
+  res.json(d);
+});
+
+app.put('/api/process/drafts/:id', apiLimiter, (req, res) => {
+  const { id } = req.params;
+  if (!DRAFT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid draft id' });
+  const existing = readDraft(id);
+  if (!existing) return res.status(404).json({ error: 'Draft not found' });
+  const body = req.body || {};
+  // Drafts are works-in-progress — empty role sets are allowed here (only
+  // materialisation requires a non-empty set).
+  const v = validateProcessTemplate(body, { allowEmptyRoles: true });
+  if (!v.ok) return res.status(400).json({ error: v.error });
+  const draft = {
+    ...body,
+    id,
+    name: typeof body.name === 'string' && body.name.trim() ? body.name.trim() : existing.name,
+    createdAt: existing.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  writeJsonAtomic(draftPath(id), draft);
+  res.json(draft);
+});
+
+app.delete('/api/process/drafts/:id', apiLimiter, (req, res) => {
+  const { id } = req.params;
+  if (!DRAFT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid draft id' });
+  const p = draftPath(id);
+  if (!p || !fs.existsSync(p)) return res.status(404).json({ error: 'Draft not found' });
+  fs.rmSync(p);
+  res.status(204).end();
 });
 
 /* ─── Skills ────────────────────────────────────────────────────────── */

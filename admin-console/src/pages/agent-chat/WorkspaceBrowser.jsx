@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -65,6 +65,14 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState('');
 
+  // Drag-and-drop move state.
+  //   dragItem    = { path, type } currently being dragged | null
+  //   dragOverDir = rel path of the directory under the cursor ('' = root) | null
+  //   moveError   = message shown in an alert dialog when a move fails | ''
+  const [dragItem, setDragItem] = useState(null);
+  const [dragOverDir, setDragOverDir] = useState(null);
+  const [moveError, setMoveError] = useState('');
+
   // Bump generation counter on agent change so a slow response from the
   // previous agent can't poison the new agent's cache.
   const reqIdRef = useRef(0);
@@ -82,6 +90,9 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
     setDeleteTarget(null);
     setDeleteBusy(false);
     setDeleteError('');
+    setDragItem(null);
+    setDragOverDir(null);
+    setMoveError('');
     return () => { clearTimeout(uploadResetTimerRef.current); };
   }, [agentId]);
 
@@ -240,6 +251,75 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
       setDeleteBusy(false);
     }
   }, [deleteTarget, agentId, refreshAll]);
+
+  /* ─── Drag-and-drop move ──────────────────────────────────────────── */
+
+  const parentOf = (relPath) => (relPath.includes('/') ? relPath.slice(0, relPath.lastIndexOf('/')) : '');
+
+  // Whether the current drag item may be dropped into targetDir ('' = root).
+  const canDropInto = useCallback((targetDir) => {
+    if (!dragItem) return false;
+    const src = dragItem.path;
+    if (targetDir === parentOf(src)) return false;          // already there
+    if (dragItem.type === 'dir') {
+      if (targetDir === src) return false;                   // into itself
+      if (targetDir.startsWith(src + '/')) return false;     // into own descendant
+    }
+    return true;
+  }, [dragItem]);
+
+  const performMove = useCallback(async (targetDir) => {
+    const item = dragItem;
+    setDragItem(null);
+    setDragOverDir(null);
+    if (!item || !agentId || !canDropInto(targetDir)) return;
+    const from = item.path;
+    const movedName = from.includes('/') ? from.slice(from.lastIndexOf('/') + 1) : from;
+    try {
+      const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/workspace/move`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from, toDir: targetDir }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j?.error || `HTTP ${r.status}`);
+      const newPath = targetDir ? `${targetDir}/${movedName}` : movedName;
+      // Follow the open file if it (or its ancestor) moved.
+      setSelectedFile(prev => {
+        if (!prev) return prev;
+        if (prev.path === from) return { path: newPath };
+        if (prev.path.startsWith(from + '/')) return { path: newPath + prev.path.slice(from.length) };
+        return prev;
+      });
+      // Refresh source + destination (and expand the destination so the moved
+      // item is visible). Recompute from the current expanded set + targetDir.
+      const paths = new Set(expanded);
+      paths.add(targetDir);
+      setExpanded(paths);
+      setDirCache(new Map());
+      paths.forEach(p => fetchDir(p));
+    } catch (err) {
+      setMoveError(err.message || 'Move failed');
+    }
+  }, [dragItem, agentId, canDropInto, expanded, fetchDir]);
+
+  // Bundle of handlers/state threaded down to every tree row.
+  const dnd = useMemo(() => ({
+    dragItemPath: dragItem?.path ?? null,
+    dragOverDir,
+    canDropInto,
+    onDragStart: (relPath, type) => setDragItem({ path: relPath, type }),
+    onDragEnd: () => { setDragItem(null); setDragOverDir(null); },
+    onDirDragOver: (relPath, e) => {
+      if (!canDropInto(relPath)) return;     // not a valid target → no-drop cursor
+      e.preventDefault();
+      e.stopPropagation();                   // don't let the root container also claim it
+      e.dataTransfer.dropEffect = 'move';
+      setDragOverDir(prev => (prev === relPath ? prev : relPath));
+    },
+    onDirDragLeave: (relPath) => setDragOverDir(prev => (prev === relPath ? null : prev)),
+    onDirDrop: (relPath, e) => { e.preventDefault(); e.stopPropagation(); performMove(relPath); },
+  }), [dragItem, dragOverDir, canDropInto, performMove]);
 
   /* ─── Render ─────────────────────────────────────────────────────── */
   if (!agentId) {
@@ -440,14 +520,31 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
         </div>
       )}
 
-      {/* Tree (top) — shrinks when a file viewer is open below. */}
+      {/* Tree (top) — shrinks when a file viewer is open below. The container
+          itself is the drop target for "move to workspace root": children that
+          are directories stop propagation, so this only fires over empty space
+          or non-directory rows. */}
       {mode === 'tree' && (
         <div
+          onDragOver={(e) => {
+            if (!canDropInto('')) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            setDragOverDir(prev => (prev === '' ? prev : ''));
+          }}
+          onDragLeave={(e) => {
+            // Only clear when the pointer actually leaves the container.
+            if (e.currentTarget.contains(e.relatedTarget)) return;
+            setDragOverDir(prev => (prev === '' ? null : prev));
+          }}
+          onDrop={(e) => { if (canDropInto('')) { e.preventDefault(); performMove(''); } }}
           style={{
             flex: selectedFile ? '0 0 40%' : '1 1 auto',
             minHeight: 0,
             overflowY: 'auto',
             padding: '4px 0',
+            outline: dragOverDir === '' ? '2px dashed var(--eb-accent-primary)' : 'none',
+            outlineOffset: '-2px',
           }}
         >
           <DirNode
@@ -461,6 +558,7 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
             selectedFilePath={selectedFile?.path || null}
             onUploadToDir={handleUploadToDir}
             onRequestDelete={requestDelete}
+            dnd={dnd}
             agentId={agentId}
           />
         </div>
@@ -502,6 +600,17 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
           </div>
         )}
       />
+
+      {/* Move-failure alert */}
+      <ConfirmDialog
+        open={!!moveError}
+        alertOnly
+        variant="danger"
+        title="Move failed"
+        message={moveError}
+        onConfirm={() => setMoveError('')}
+        onCancel={() => setMoveError('')}
+      />
     </div>
   );
 }
@@ -537,7 +646,7 @@ function ModeButton({ icon, label, active, onClick }) {
 
 /* ─── Tree node ───────────────────────────────────────────────────── */
 
-function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, gitBranch, onUploadToDir, onRequestDelete, agentId }) {
+function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, gitBranch, onUploadToDir, onRequestDelete, dnd, agentId }) {
   const isRoot = relPath === '';
   const isOpen = expanded.has(relPath);
   const cache  = dirCache.get(relPath);
@@ -546,18 +655,33 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
 
   const Caret = isOpen ? ChevronDown : ChevronRight;
   const FolderIcon = isOpen ? FolderOpen : Folder;
+  const isDropTarget = dnd?.dragOverDir === relPath && dnd?.dragItemPath != null;
 
   return (
     <div>
       {!isRoot && (
         <div
-          style={{ display: 'flex', alignItems: 'center', width: '100%' }}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            width: '100%',
+            background: isDropTarget ? 'var(--eb-accent-muted)' : 'transparent',
+            outline: isDropTarget ? '2px dashed var(--eb-accent-primary)' : 'none',
+            outlineOffset: '-2px',
+          }}
           onMouseEnter={() => setHovered(true)}
           onMouseLeave={() => setHovered(false)}
+          onDragOver={dnd ? (e) => dnd.onDirDragOver(relPath, e) : undefined}
+          onDragLeave={dnd ? () => dnd.onDirDragLeave(relPath) : undefined}
+          onDrop={dnd ? (e) => dnd.onDirDrop(relPath, e) : undefined}
         >
-          {/* Directory toggle button — takes all available width */}
+          {/* Directory toggle button — takes all available width. Also the drag
+              source for moving this directory. */}
           <button
             type="button"
+            draggable={!!dnd}
+            onDragStart={dnd ? (e) => { e.dataTransfer.effectAllowed = 'move'; dnd.onDragStart(relPath, 'dir'); } : undefined}
+            onDragEnd={dnd ? dnd.onDragEnd : undefined}
             onClick={() => onToggleDir(relPath)}
             style={{
               display: 'flex',
@@ -570,7 +694,7 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
               paddingRight: 4,
               paddingTop: 3,
               paddingBottom: 3,
-              background: hovered ? 'var(--eb-bg-hover)' : 'none',
+              background: hovered && !isDropTarget ? 'var(--eb-bg-hover)' : 'none',
               border: 'none',
               cursor: 'pointer',
               fontSize: 'var(--eb-text-xs)',
@@ -655,6 +779,7 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
           selectedFilePath={selectedFilePath}
           onUploadToDir={onUploadToDir}
           onRequestDelete={onRequestDelete}
+          dnd={dnd}
           agentId={agentId}
         />
       )}
@@ -662,7 +787,7 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
   );
 }
 
-function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, onUploadToDir, onRequestDelete, agentId }) {
+function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, onUploadToDir, onRequestDelete, dnd, agentId }) {
   if (!cache) {
     return null; // not yet fetched (open root state pre-fetch)
   }
@@ -727,6 +852,7 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
               gitBranch={item.gitBranch || null}
               onUploadToDir={onUploadToDir}
               onRequestDelete={onRequestDelete}
+              dnd={dnd}
               agentId={agentId}
             />
           );
@@ -748,6 +874,8 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
               a.click();
             } : null}
             onDelete={onRequestDelete ? () => onRequestDelete(childRel, 'file', item.name) : null}
+            relPath={childRel}
+            dnd={dnd}
           />
         );
       })}
@@ -755,16 +883,23 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
   );
 }
 
-function Row({ indent, icon, label, secondary, dim, active, onClick, gitBranch, onDownload, onDelete }) {
+function Row({ indent, icon, label, secondary, dim, active, onClick, gitBranch, onDownload, onDelete, relPath, dnd }) {
   const [hovered, setHovered] = useState(false);
   return (
     <div
       style={{ display: 'flex', alignItems: 'center', width: '100%' }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      // Files are not drop targets; swallow drag-over/drop so a drop landing on
+      // a file row doesn't bubble to the root container and become a root move.
+      onDragOver={dnd ? (e) => e.stopPropagation() : undefined}
+      onDrop={dnd ? (e) => e.stopPropagation() : undefined}
     >
       <button
         type="button"
+        draggable={!!dnd}
+        onDragStart={dnd ? (e) => { e.dataTransfer.effectAllowed = 'move'; dnd.onDragStart(relPath, 'file'); } : undefined}
+        onDragEnd={dnd ? dnd.onDragEnd : undefined}
         onClick={onClick}
         style={{
           display: 'flex',

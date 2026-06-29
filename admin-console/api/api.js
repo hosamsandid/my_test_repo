@@ -5884,6 +5884,106 @@ app.delete('/api/agents/:agentId/workspace/file', apiLimiter, (req, res) => {
   res.json({ deleted: path.relative(agentRoot, target), type });
 });
 
+// Move (rename) a file or directory within the agent workspace. Body:
+//   { from: "<rel path of source>", toDir: "<rel path of destination dir>" }
+// The entry keeps its basename; it is relocated under toDir. Both the source's
+// parent and the destination dir are resolved through safeAgentPath (parent +
+// basename, like the delete handler) so traversal / outward symlinks are
+// rejected, and both endpoints are re-checked against the realpath'd agent root.
+// Refuses to move a directory into itself or one of its own descendants, and
+// refuses to clobber an existing entry at the destination.
+app.post('/api/agents/:agentId/workspace/move', apiLimiter, (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+
+  const fromRaw = typeof req.body?.from === 'string' ? req.body.from : '';
+  const toDirRaw = typeof req.body?.toDir === 'string' ? req.body.toDir : '';
+
+  const fromNorm = path.normalize(fromRaw.replace(/^\/+/, ''));
+  if (!fromNorm || fromNorm === '.' || fromNorm === path.sep) {
+    return res.status(400).json({ error: 'Refusing to move workspace root' });
+  }
+  if (fromNorm.split(path.sep).some(seg => seg === '..')) {
+    return res.status(400).json({ error: 'invalid source path' });
+  }
+  const toDirNorm = path.normalize(toDirRaw.replace(/^\/+/, ''));
+  if (toDirNorm.split(path.sep).some(seg => seg === '..')) {
+    return res.status(400).json({ error: 'invalid target path' });
+  }
+
+  // Resolve the source via its parent + basename (so a symlink entry is moved,
+  // not its target) and the destination directory directly.
+  const srcParentRel = path.dirname(fromNorm);
+  const srcBase = path.basename(fromNorm);
+  const srcParent = safeAgentPath(agentId, srcParentRel === '.' ? '' : srcParentRel);
+  const destDir   = safeAgentPath(agentId, toDirNorm === '.' ? '' : toDirNorm);
+  if (!srcParent) return res.status(400).json({ error: 'invalid source path' });
+  if (!destDir)   return res.status(404).json({ error: 'Target directory not found' });
+
+  const src = path.join(srcParent, srcBase);
+  const dest = path.join(destDir, srcBase);
+
+  let agentRoot;
+  try {
+    agentRoot = fs.realpathSync(path.join(AGENTS_DIR, agentId));
+  } catch {
+    return res.status(404).json({ error: 'Agent workspace not found' });
+  }
+  // Containment barriers in the plain `value.startsWith(root + sep)` form that
+  // CodeQL's path-injection analysis recognises as a sanitizer — applied to the
+  // exact values passed to fs calls below. Both src and dest carry a non-empty
+  // basename, so they are always *strictly* inside the root (no root-equality
+  // edge case to special-case, which would force a compound guard CodeQL can't
+  // read). destDir is only used in string comparisons below, never as an fs sink.
+  if (!src.startsWith(agentRoot + path.sep)) {
+    return res.status(400).json({ error: 'invalid source path' });
+  }
+  if (!dest.startsWith(agentRoot + path.sep)) {
+    return res.status(400).json({ error: 'invalid target path' });
+  }
+
+  // Source must exist (and tells us whether it is a directory).
+  let srcStat;
+  try {
+    srcStat = fs.lstatSync(src);
+  } catch (err) {
+    if (err.code === 'ENOENT') return res.status(404).json({ error: 'Source not found' });
+    return res.status(500).json({ error: err.message });
+  }
+
+  // No-op: already in the destination directory. (String comparison only.)
+  if (path.dirname(src) === destDir) {
+    return res.status(400).json({ error: 'Item is already in that directory' });
+  }
+  // A directory cannot be moved into itself or one of its descendants.
+  if (srcStat.isDirectory() && (destDir === src || destDir.startsWith(src + path.sep))) {
+    return res.status(400).json({ error: 'Cannot move a directory into itself' });
+  }
+  // Refuse to clobber an existing entry — renameSync would otherwise silently
+  // overwrite a destination file.
+  if (fs.existsSync(dest)) {
+    return res.status(409).json({ error: `"${srcBase}" already exists in the target directory` });
+  }
+
+  try {
+    fs.renameSync(src, dest);
+  } catch (err) {
+    // The destination directory's existence / type is validated here via
+    // renameSync's own errors rather than a separate stat on destDir.
+    if (err.code === 'ENOENT')  return res.status(404).json({ error: 'Target directory not found' });
+    if (err.code === 'ENOTDIR') return res.status(400).json({ error: 'Target is not a directory' });
+    if (err.code === 'EACCES')  return res.status(403).json({ error: 'permission denied' });
+    if (err.code === 'EXDEV')   return res.status(500).json({ error: 'cross-device move not supported' });
+    return res.status(500).json({ error: err.message });
+  }
+
+  res.json({
+    from: path.relative(agentRoot, src),
+    to: path.relative(agentRoot, dest),
+    type: srcStat.isDirectory() ? 'dir' : (srcStat.isSymbolicLink() ? 'link' : 'file'),
+  });
+});
+
 /* ─── Workspace git-diff (read-only) ───────────────────────────────────
  *
  * Two endpoints for the Diff tab in the Workspace browser:

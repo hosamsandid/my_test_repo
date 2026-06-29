@@ -246,6 +246,14 @@ export default function AgentChat() {
   // whose correlationId doesn't match.
   const [hoveredCorrelationId, setHoveredCorrelationId] = useState(null);
 
+  // Bumped by ChatPanel after a chat attachment is uploaded into the agent's
+  // workspace, so the Workspace tab in the right rail refreshes its tree
+  // automatically instead of forcing a manual refresh.
+  const [workspaceRefreshKey, setWorkspaceRefreshKey] = useState(0);
+  const handleWorkspaceChanged = useCallback(() => {
+    setWorkspaceRefreshKey(k => k + 1);
+  }, []);
+
   // Aggregated cost for the current agent+room, fed by SessionLogPanel via onCostUpdate.
   const [sessionCost, setSessionCost] = useState(null); // null = no data yet
   const handleCostUpdate = useCallback((usd, tokIn, tokOut) => {
@@ -472,6 +480,7 @@ export default function AgentChat() {
             hoveredCorrelationId={hoveredCorrelationId}
             onHoverCorrelation={setHoveredCorrelationId}
             sessionCost={sessionCost}
+            onWorkspaceChanged={handleWorkspaceChanged}
           />
         ) : (
           <EmptyState />
@@ -499,6 +508,7 @@ export default function AgentChat() {
             onHoverCorrelation={setHoveredCorrelationId}
             onClose={() => setLogOpen(false)}
             onCostUpdate={handleCostUpdate}
+            workspaceRefreshKey={workspaceRefreshKey}
           />
         </div>
         </>

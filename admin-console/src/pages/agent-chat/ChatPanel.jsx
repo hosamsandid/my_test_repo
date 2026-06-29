@@ -46,9 +46,12 @@ const LEARN_PROMPT =
  * @param {(roomId:string)=>void} onRoomCreated  Notify parent when we POST to /dm
  * @param {string|null} hoveredCorrelationId      Cross-panel hover state from parent
  * @param {(id:string|null)=>void} onHoverCorrelation
+ * @param {()=>void} [onWorkspaceChanged]  Notify parent after a chat upload lands
+ *        in the workspace, so the Workspace tab can refresh its tree.
  */
 export default function ChatPanel({
   agent, roomId, onRoomCreated, hoveredCorrelationId, onHoverCorrelation, sessionCost,
+  onWorkspaceChanged,
 }) {
   const [messages, setMessages]      = useState([]);
   const [loading, setLoading]        = useState(false);
@@ -570,7 +573,10 @@ export default function ChatPanel({
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j?.error || `HTTP ${r.status}`);
-      return Array.isArray(j.uploaded) ? j.uploaded : [];
+      const uploaded = Array.isArray(j.uploaded) ? j.uploaded : [];
+      // Let the workspace tree pick up the freshly uploaded file(s).
+      if (uploaded.length) onWorkspaceChanged?.();
+      return uploaded;
     } catch (err) {
       setError(`Upload failed: ${err.message}`);
       return [];

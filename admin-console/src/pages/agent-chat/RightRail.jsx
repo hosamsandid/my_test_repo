@@ -29,6 +29,7 @@ const COMPACT_WIDTH_PX = 360;
  */
 export default function RightRail({
   agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate,
+  workspaceRefreshKey = 0,
 }) {
   const [tab, setTab] = useState(() => {
     try {
@@ -162,7 +163,7 @@ export default function RightRail({
           />
         </div>
         <div style={{ display: tab === 'workspace' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
-          <WorkspaceBrowser agentId={agentId} active={tab === 'workspace'} />
+          <WorkspaceBrowser agentId={agentId} active={tab === 'workspace'} refreshKey={workspaceRefreshKey} />
         </div>
         <div style={{ display: tab === 'triggers' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           <TriggersPanel agentId={agentId} active={tab === 'triggers'} />

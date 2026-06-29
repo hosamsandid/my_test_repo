@@ -29,7 +29,7 @@ const MODE_KEY = 'agentChat.workspaceMode';
  *   - active   Whether this tab is currently visible. Used to skip the
  *              initial fetch while the panel is hidden behind another tab.
  */
-export default function WorkspaceBrowser({ agentId, active }) {
+export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
   // dirCache:  Map<relativePath, { items, loading, error }>  (resolved listings)
   // expanded:  Set<relativePath>   currently open directories (root is "")
   const [dirCache, setDirCache] = useState(() => new Map());
@@ -134,6 +134,19 @@ export default function WorkspaceBrowser({ agentId, active }) {
     setDirCache(new Map());
     paths.forEach(p => fetchDir(p));
   }, [agentId, expanded, fetchDir]);
+
+  /* ─── External refresh signal ───────────────────────────────────────
+   * The chat composer bumps `refreshKey` after it uploads a file into the
+   * agent's `chat-uploads/` dir, so the tree picks up the new file without a
+   * manual refresh. Same effect as clicking the toolbar refresh button. We
+   * track the previous value so this never fires on mount / agent switch.
+   */
+  const prevRefreshKeyRef = useRef(refreshKey);
+  useEffect(() => {
+    if (refreshKey === prevRefreshKeyRef.current) return;
+    prevRefreshKeyRef.current = refreshKey;
+    refreshAll();
+  }, [refreshKey, refreshAll]);
 
   // isFolder=true: files carry webkitRelativePath for directory tree reconstruction.
   const handleUpload = useCallback(async (files, isFolder = false) => {

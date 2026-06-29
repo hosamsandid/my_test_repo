@@ -15,12 +15,16 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
   const [error, setError] = useState(null);
 
   const slug = (bundle?.name || 'team').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'team';
-  const [teamId, setTeamId] = useState(slug);
+  // A draft opened from a live team (#348) remembers its origin so we can default
+  // to extending it rather than creating a colliding new team.
+  const sourceTeamId = bundle?.sourceTeamId || null;
+  const [teamId, setTeamId] = useState(sourceTeamId || slug);
   const [teamName, setTeamName] = useState(bundle?.name || 'Team');
   const [repoUrl, setRepoUrl] = useState('');
   const [branch, setBranch] = useState('main');
   const [sshKeyId, setSshKeyId] = useState('');
   const [githubTokenId, setGithubTokenId] = useState('');
+  const [extend, setExtend] = useState(!!sourceTeamId);
 
   useEffect(() => {
     let alive = true;
@@ -51,6 +55,7 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
     try {
       await apiCall('POST', '/api/teams', {
         teamId, teamName,
+        mode: extend ? 'extend' : 'create',
         repository: { url: repoUrl.trim(), branch: branch.trim() || 'main', sshKeyId },
         githubTokenId,
         processTemplate: bundle,
@@ -88,13 +93,18 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
           </select>
         </Field>
 
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+          <input type="checkbox" checked={extend} onChange={e => setExtend(e.target.checked)} />
+          Add to an existing team (extend) — only the missing roles are created
+        </label>
+
         {error && <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</span>}
 
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)' }}>
           <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
           <button onClick={submit} disabled={saving} style={primary}>
             {saving ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : null}
-            {saving ? ' Creating…' : 'Create team'}
+            {saving ? (extend ? ' Extending…' : ' Creating…') : (extend ? 'Extend team' : 'Create team')}
           </button>
         </div>
       </div>

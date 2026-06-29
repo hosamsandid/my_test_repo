@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
-import { apiCall } from '../../hooks/useApi';
+import { liveOps } from './edit-adapters';
 
 // Only these GitHub events carry a label name, so a labelFilter is meaningful.
 const LABEL_EVENTS = [
@@ -24,7 +24,7 @@ function firstRepo(...triggerLists) {
 }
 
 /* ── Create a hand-off: emitter A → label → listener B ─────────────────── */
-export function CreateHandoffDialog({ from, to, fromName, toName, labels, onClose, onDone }) {
+export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = liveOps, onClose, onDone }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -44,8 +44,8 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, onClos
     (async () => {
       try {
         const [ft, tt] = await Promise.all([
-          apiCall('GET', `/api/agents/${from}/triggers`),
-          apiCall('GET', `/api/agents/${to}/triggers`),
+          ops.listTriggers(from),
+          ops.listTriggers(to),
         ]);
         if (!alive) return;
         const fl = Array.isArray(ft) ? ft : [];
@@ -89,7 +89,7 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, onClos
       // 1. Listener on B — skip if one already filters on this label.
       const existing = toTriggers.find(t => t.type === 'github-event' && t.labelFilter === trimmed);
       if (!existing) {
-        await apiCall('POST', `/api/agents/${to}/triggers`, {
+        await ops.createTrigger(to, {
           type: 'github-event',
           events,
           from: fromFilter,
@@ -107,7 +107,7 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, onClos
       if (!humanLabel) {
         const emitter = fromTriggers.find(t => t.id === emitterId);
         const nextEmits = uniq([...(emitter?.emits || []), trimmed]);
-        await apiCall('PUT', `/api/agents/${from}/triggers/${emitterId}/emits`, { emits: nextEmits });
+        await ops.setEmits(from, emitterId, nextEmits);
       }
       onDone?.();
     } catch (e) {
@@ -192,7 +192,7 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, onClos
 }
 
 /* ── Edit / delete an existing hand-off ────────────────────────────────── */
-export function EditHandoffDialog({ edge, fromName, toName, onClose, onDone }) {
+export function EditHandoffDialog({ edge, fromName, toName, ops = liveOps, onClose, onDone }) {
   const { from, to, label, triggerId } = edge;
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -207,7 +207,7 @@ export function EditHandoffDialog({ edge, fromName, toName, onClose, onDone }) {
     let alive = true;
     (async () => {
       try {
-        const tt = await apiCall('GET', `/api/agents/${to}/triggers`);
+        const tt = await ops.listTriggers(to);
         if (!alive) return;
         const t = (Array.isArray(tt) ? tt : []).find(x => x.id === triggerId);
         if (t) {
@@ -229,7 +229,7 @@ export function EditHandoffDialog({ edge, fromName, toName, onClose, onDone }) {
   async function saveEdits() {
     setSaving(true); setError(null);
     try {
-      await apiCall('PUT', `/api/agents/${to}/triggers/${triggerId}`, { events, from: fromFilter });
+      await ops.updateTrigger(to, triggerId, { events, from: fromFilter });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
   }
@@ -238,15 +238,14 @@ export function EditHandoffDialog({ edge, fromName, toName, onClose, onDone }) {
     setSaving(true); setError(null);
     try {
       if (delListener) {
-        await apiCall('DELETE', `/api/agents/${to}/triggers/${triggerId}`);
+        await ops.deleteTrigger(to, triggerId);
       }
       if (delEmit) {
         // Strip the label from any emitter trigger on the source that declares it.
-        const ft = await apiCall('GET', `/api/agents/${from}/triggers`);
+        const ft = await ops.listTriggers(from);
         for (const t of (Array.isArray(ft) ? ft : [])) {
           if (Array.isArray(t.emits) && t.emits.includes(label)) {
-            await apiCall('PUT', `/api/agents/${from}/triggers/${t.id}/emits`,
-              { emits: t.emits.filter(l => l !== label) });
+            await ops.setEmits(from, t.id, t.emits.filter(l => l !== label));
           }
         }
       }

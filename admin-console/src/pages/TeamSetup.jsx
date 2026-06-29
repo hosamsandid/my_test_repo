@@ -9,7 +9,6 @@ import {
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import ScriptViewerPanel from '../components/ScriptViewerPanel';
-import WorkflowDiagramModal from '../components/WorkflowDiagramModal';
 
 function scriptNameFromPath(scriptPath) {
   if (typeof scriptPath !== 'string') return null;
@@ -1154,7 +1153,6 @@ const READY_LABEL_ROLES = new Set([
 const DISPATCH_LABEL_ROLES = new Set(['dispatcher']);
 
 function StepTeam({ form, setForm, templates, roleConfig, setRoleConfig, error, extendMode, existingRoles, existingRoleCounts }) {
-  const [diagramOpen, setDiagramOpen] = useState(false);
   if (!templates) return <Card>Loading templates…</Card>;
   const existingSet = new Set(extendMode ? (existingRoles || []) : []);
   const counts = existingRoleCounts || {};
@@ -1185,16 +1183,11 @@ function StepTeam({ form, setForm, templates, roleConfig, setRoleConfig, error, 
         <div style={diagramLinkCopyStyle}>
           Not sure which roles you need? See how they fit into the trigger- and label-driven flow.
         </div>
-        <button
-          type="button"
-          onClick={() => setDiagramOpen(true)}
-          style={diagramLinkButtonStyle}
-        >
+        <Link to="/process?scope=templates" style={{ ...diagramLinkButtonStyle, textDecoration: 'none' }}>
           <Workflow size={14} />
-          View workflow diagram
-        </button>
+          Open Process Canvas
+        </Link>
       </div>
-      <WorkflowDiagramModal open={diagramOpen} onClose={() => setDiagramOpen(false)} />
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 'var(--eb-space-3)' }}>
         {templates.map(t => {
           if (extendMode && existingSet.has(t.id)) {

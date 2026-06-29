@@ -78,20 +78,35 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels }) {
   };
 }
 
-// Basic shape validation for an imported bundle. Returns { ok, error }.
-function validateProcessTemplate(b) {
+// Basic shape validation for a bundle. Returns { ok, error }.
+// `allowEmptyRoles` is for in-progress drafts (#344) — materialisation still
+// requires a non-empty role set, so the default stays strict.
+function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
   if (!b || typeof b !== 'object') return { ok: false, error: 'not an object' };
   if (b.processTemplateVersion !== VERSION) {
     return { ok: false, error: `unsupported processTemplateVersion (expected ${VERSION})` };
   }
-  if (!Array.isArray(b.roles) || b.roles.length === 0) {
-    return { ok: false, error: 'roles must be a non-empty array' };
-  }
+  if (!Array.isArray(b.roles)) return { ok: false, error: 'roles must be an array' };
+  if (!allowEmptyRoles && b.roles.length === 0) return { ok: false, error: 'roles must be a non-empty array' };
   for (const r of b.roles) {
     if (!r || typeof r.id !== 'string' || !r.id) return { ok: false, error: 'each role needs a string id' };
     if (r.triggers && !Array.isArray(r.triggers)) return { ok: false, error: `role ${r.id}: triggers must be an array` };
   }
+  if (b.gates && !Array.isArray(b.gates)) return { ok: false, error: 'gates must be an array' };
+  if (b.labels && !Array.isArray(b.labels)) return { ok: false, error: 'labels must be an array' };
   return { ok: true };
+}
+
+// An empty draft skeleton (#344).
+function emptyDraftBundle(name) {
+  return {
+    processTemplateVersion: VERSION,
+    name: name || 'Untitled process',
+    level: 'template',
+    roles: [],
+    gates: [],
+    labels: [],
+  };
 }
 
 // Transform a bundle's roles into the `customRoles` shape consumed by
@@ -121,4 +136,4 @@ function templateToCustomRoles(bundle) {
   }));
 }
 
-module.exports = { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, roleKeyOf, VERSION };
+module.exports = { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, emptyDraftBundle, roleKeyOf, VERSION };

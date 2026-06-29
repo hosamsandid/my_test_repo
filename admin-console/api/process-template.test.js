@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, roleKeyOf } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, emptyDraftBundle, roleKeyOf } = require('./process-template');
 
 const sampleRoles = [
   {
@@ -74,6 +74,23 @@ test('round-trip: build → validate → customRoles preserves wiring', () => {
   const cr = templateToCustomRoles(b);
   assert.deepEqual(cr.map(r => r.id), ['developer']);
   assert.deepEqual(cr[0].triggers.find(t => t.id === 'dev-assigned').emits, ['started:dev']);
+});
+
+test('emptyDraftBundle is a valid draft (empty roles) but not a materialisable template', () => {
+  const d = emptyDraftBundle('My Process');
+  assert.equal(d.processTemplateVersion, 1);
+  assert.equal(d.name, 'My Process');
+  assert.deepEqual(d.roles, []);
+  // strict (materialise) rejects empty roles; draft mode allows it
+  assert.equal(validateProcessTemplate(d).ok, false);
+  assert.equal(validateProcessTemplate(d, { allowEmptyRoles: true }).ok, true);
+});
+
+test('validateProcessTemplate checks gates/labels are arrays', () => {
+  const base = emptyDraftBundle('x');
+  assert.equal(validateProcessTemplate({ ...base, gates: {} }, { allowEmptyRoles: true }).ok, false);
+  assert.equal(validateProcessTemplate({ ...base, labels: 'no' }, { allowEmptyRoles: true }).ok, false);
+  assert.equal(validateProcessTemplate({ ...base, roles: [{ id: 'a', triggers: 'no' }] }, { allowEmptyRoles: true }).ok, false);
 });
 
 test('an agent-studio-shaped bundle (custom role ids, gates) validates', () => {

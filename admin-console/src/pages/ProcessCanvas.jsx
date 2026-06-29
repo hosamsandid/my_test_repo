@@ -4,6 +4,7 @@ import { GitBranch } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import { initProcessGraph } from './process/process-graph-render';
 import ProcessNodeInspector from './process/ProcessNodeInspector';
+import { CreateHandoffDialog, EditHandoffDialog } from './process/EdgeDialogs';
 
 // Process Canvas (#330) — data-driven view of the agent orchestration: which
 // agent reacts to which label, in what order. Read-only render here; the node
@@ -29,25 +30,34 @@ export default function ProcessCanvas() {
   const { data: graph, loading, error, refetch } = useApi(graphUrl);
 
   const [selectedId, setSelectedId] = useState(null);
+  const [connectPair, setConnectPair] = useState(null); // { from, to }
+  const [selectedEdge, setSelectedEdge] = useState(null);
   const viewportRef = useRef(null);
   const graphRef = useRef(null);
+  const editableRef = useRef(true); // template level is read-only
 
   useEffect(() => {
     if (!viewportRef.current) return;
     const g = initProcessGraph(viewportRef.current, {
       onSelectNode: (id) => setSelectedId(id),
+      onConnect: (from, to) => { if (editableRef.current) setConnectPair({ from, to }); },
+      onSelectEdge: (edge) => { if (editableRef.current) setSelectedEdge(edge); },
     });
     graphRef.current = g;
     return () => { g.cleanup(); graphRef.current = null; };
   }, []);
 
   useEffect(() => {
-    if (graphRef.current && graph) graphRef.current.setData(graph);
+    if (!graphRef.current || !graph) return;
+    editableRef.current = graph.level !== 'template';
+    graphRef.current.setEditable(editableRef.current);
+    graphRef.current.setData(graph);
   }, [graph]);
 
-  // Clear selection when the scope (and thus the graph) changes.
-  useEffect(() => { setSelectedId(null); }, [graphUrl]);
+  // Clear selection/dialogs when the scope (and thus the graph) changes.
+  useEffect(() => { setSelectedId(null); setConnectPair(null); setSelectedEdge(null); }, [graphUrl]);
 
+  const nodeName = (id) => (graph?.nodes || []).find(n => n.id === id)?.displayName || id;
   const selectedNode = useMemo(
     () => (graph?.nodes || []).find(n => n.id === selectedId) || null,
     [graph, selectedId],
@@ -64,7 +74,9 @@ export default function ProcessCanvas() {
               Process Canvas
             </h1>
             <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-              Agents wired by the labels they emit and react to.
+              {scope === 'templates'
+                ? 'Blueprint view (read-only). Switch scope to a team to model.'
+                : 'Click a node to edit · drag the ● port to wire a hand-off · click an edge to edit it.'}
             </div>
           </div>
         </div>
@@ -110,6 +122,28 @@ export default function ProcessCanvas() {
           level={graph?.level}
           onClose={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
           onChanged={() => refetch()}
+        />
+      )}
+
+      {connectPair && (
+        <CreateHandoffDialog
+          from={connectPair.from}
+          to={connectPair.to}
+          fromName={nodeName(connectPair.from)}
+          toName={nodeName(connectPair.to)}
+          labels={graph?.labels || []}
+          onClose={() => setConnectPair(null)}
+          onDone={() => { setConnectPair(null); refetch(); }}
+        />
+      )}
+
+      {selectedEdge && (
+        <EditHandoffDialog
+          edge={selectedEdge}
+          fromName={nodeName(selectedEdge.from)}
+          toName={nodeName(selectedEdge.to)}
+          onClose={() => setSelectedEdge(null)}
+          onDone={() => { setSelectedEdge(null); refetch(); }}
         />
       )}
     </div>

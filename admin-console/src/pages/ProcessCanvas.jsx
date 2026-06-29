@@ -32,6 +32,10 @@ export default function ProcessCanvas() {
   const { data: draftsList, refetch: refetchDrafts } = useApi('/api/process/drafts');
   const draftId = scope.startsWith('draft:') ? scope.slice(6) : null;
   const isDraft = !!draftId;
+  const isTeamScope = useMemo(
+    () => Array.isArray(teams) && teams.some(t => t.id === scope),
+    [teams, scope],
+  );
 
   const graphUrl = scope === 'templates'
     ? '/api/process/graph?templates=1'
@@ -144,6 +148,24 @@ export default function ProcessCanvas() {
 
   function afterEdit() { if (!isDraft) refetch(); /* draft re-derives via persist */ }
 
+  // Round-trip (#348): open a live team as an editable draft copy.
+  async function editAsDraft() {
+    try {
+      const res = await fetch(`/api/process/template?team=${encodeURIComponent(scope)}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const tpl = await res.json();
+      const d = await apiCall('POST', '/api/process/drafts', {
+        name: `${tpl.name || scope} (draft)`,
+        processTemplate: { ...tpl, sourceTeamId: scope },
+      });
+      refetchDrafts();
+      setScope(`draft:${d.id}`);
+    } catch (e) { setImportError(e.message); }
+  }
+
+  // Source bundle for the Materialize dialog: an imported file or the open draft.
+  const materializeBundle = imported ? imported.bundle : isDraft ? draftBundle : null;
+
   async function exportBundle() {
     let bundle;
     if (isDraft) {
@@ -212,7 +234,12 @@ export default function ProcessCanvas() {
               <ToolbarButton onClick={() => setAddRoleOpen('agent')} icon={Plus}>Add role</ToolbarButton>
               <ToolbarButton onClick={() => setAddRoleOpen('pr-review')} icon={Plus}>PR review</ToolbarButton>
               <ToolbarButton onClick={() => setApprovalOpen(true)} icon={ShieldCheck}>Human approval</ToolbarButton>
+              <ToolbarButton onClick={() => setMaterializeOpen(true)} icon={Boxes}
+                disabled={!draftBundle?.roles?.length}>Materialize…</ToolbarButton>
             </>
+          )}
+          {isTeamScope && !imported && (
+            <ToolbarButton onClick={editAsDraft} icon={Boxes}>Edit as draft</ToolbarButton>
           )}
           <input ref={fileInputRef} type="file" accept="application/json,.json" onChange={onImportFile} style={{ display: 'none' }} />
           <ToolbarButton onClick={() => fileInputRef.current?.click()} icon={Upload}>Import</ToolbarButton>
@@ -371,11 +398,11 @@ export default function ProcessCanvas() {
         />
       )}
 
-      {materializeOpen && imported && (
+      {materializeOpen && materializeBundle && (
         <MaterializeDialog
-          bundle={imported.bundle}
+          bundle={materializeBundle}
           onClose={() => setMaterializeOpen(false)}
-          onDone={() => { setMaterializeOpen(false); setImported(null); }}
+          onDone={() => { setMaterializeOpen(false); if (imported) setImported(null); }}
         />
       )}
     </div>

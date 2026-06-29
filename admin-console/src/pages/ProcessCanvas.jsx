@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { GitBranch } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import { initProcessGraph } from './process/process-graph-render';
+import ProcessNodeInspector from './process/ProcessNodeInspector';
 
 // Process Canvas (#330) — data-driven view of the agent orchestration: which
 // agent reacts to which label, in what order. Read-only render here; the node
@@ -25,15 +26,16 @@ export default function ProcessCanvas() {
     : scope === 'all'
       ? '/api/process/graph'
       : `/api/process/graph?team=${encodeURIComponent(scope)}`;
-  const { data: graph, loading, error } = useApi(graphUrl);
+  const { data: graph, loading, error, refetch } = useApi(graphUrl);
 
+  const [selectedId, setSelectedId] = useState(null);
   const viewportRef = useRef(null);
   const graphRef = useRef(null);
 
   useEffect(() => {
     if (!viewportRef.current) return;
     const g = initProcessGraph(viewportRef.current, {
-      onSelectNode: () => {}, // inspector wired in #331
+      onSelectNode: (id) => setSelectedId(id),
     });
     graphRef.current = g;
     return () => { g.cleanup(); graphRef.current = null; };
@@ -42,6 +44,14 @@ export default function ProcessCanvas() {
   useEffect(() => {
     if (graphRef.current && graph) graphRef.current.setData(graph);
   }, [graph]);
+
+  // Clear selection when the scope (and thus the graph) changes.
+  useEffect(() => { setSelectedId(null); }, [graphUrl]);
+
+  const selectedNode = useMemo(
+    () => (graph?.nodes || []).find(n => n.id === selectedId) || null,
+    [graph, selectedId],
+  );
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - var(--eb-header-height) - 2 * var(--eb-space-6))', minHeight: 480 }}>
@@ -92,6 +102,16 @@ export default function ProcessCanvas() {
           <Overlay tone="error">Could not load graph: {error}</Overlay>
         )}
       </div>
+
+      {selectedNode && (
+        <ProcessNodeInspector
+          key={selectedNode.id}
+          node={selectedNode}
+          level={graph?.level}
+          onClose={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
+          onChanged={() => refetch()}
+        />
+      )}
     </div>
   );
 }

@@ -6,7 +6,9 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 
-const { buildProcessGraph, listenKeys, classifyKind } = require('./process-graph');
+const { buildProcessGraph, computeLints, listenKeys, classifyKind } = require('./process-graph');
+
+function lintCodes(g) { return g.lints.map(l => l.code); }
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 
 const TEMPLATES_DIR = path.join(
@@ -170,6 +172,60 @@ test('all shipped templates build a graph without throwing', () => {
     .filter(f => f.endsWith('.json'))
     .map(f => templateNode(JSON.parse(fs.readFileSync(path.join(TEMPLATES_DIR, f), 'utf8'))));
   assert.doesNotThrow(() => buildProcessGraph(nodes));
+});
+
+test('lint: orphan listener fires and is keyed to the target node', () => {
+  const g = buildProcessGraph([
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', from: 'any-except-self', labelFilter: 'dispatch' }] },
+  ]);
+  const orphan = g.lints.find(l => l.code === 'orphan-listener');
+  assert.ok(orphan);
+  assert.equal(orphan.nodeId, 'b');
+  assert.equal(orphan.label, 'dispatch');
+});
+
+test('lint: dead-end emitter fires', () => {
+  const g = buildProcessGraph([
+    { id: 'a', triggers: [{ id: 't', type: 'github-event', from: 'any-except-self', events: ['x'], emits: ['stage:done'] }] },
+  ]);
+  assert.ok(g.lints.some(l => l.code === 'dead-end-emitter' && l.nodeId === 'a'));
+});
+
+test('lint: unguarded self-trigger when from is absent', () => {
+  const g = buildProcessGraph([
+    { id: 'a', triggers: [{ id: 't', type: 'github-event', events: ['issues.opened'] }] },
+  ]);
+  assert.ok(g.lints.some(l => l.code === 'unguarded-self-trigger' && l.triggerId === 't'));
+  // ...and does NOT fire when a from filter is present
+  const g2 = buildProcessGraph([
+    { id: 'a', triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['issues.opened'] }] },
+  ]);
+  assert.ok(!g2.lints.some(l => l.code === 'unguarded-self-trigger'));
+});
+
+test('lint: competing stage labels', () => {
+  const g = buildProcessGraph([
+    { id: 'a', triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['x'], emits: ['stage:td', 'stage:build'] }] },
+  ]);
+  assert.ok(g.lints.some(l => l.code === 'competing-stage' && l.nodeId === 'a'));
+});
+
+test('lint: gate-violation when an agent emits a human:* label (error severity)', () => {
+  const g = buildProcessGraph([
+    { id: 'a', triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['x'], emits: ['human:fdd-approved'] }] },
+  ]);
+  const v = g.lints.find(l => l.code === 'gate-violation');
+  assert.ok(v);
+  assert.equal(v.severity, 'error');
+  assert.equal(v.nodeId, 'a');
+});
+
+test('lint: a clean wired pair produces no lints', () => {
+  const g = buildProcessGraph([
+    { id: 'a', triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['x'], emits: ['dispatch'] }] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', from: 'any-except-self', labelFilter: 'dispatch' }] },
+  ]);
+  assert.deepEqual(g.lints, []);
 });
 
 test('node view exposes the expected fields', () => {

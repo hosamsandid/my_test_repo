@@ -73,11 +73,17 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, onClos
   const toggleEvent = (v) => setEvents(prev =>
     prev.includes(v) ? prev.filter(x => x !== v) : [...prev, v]);
 
+  // Human gates (human:*) and the universal brakes are set by humans, never by
+  // an agent — so we wire only the listener, never an agent emit (#333).
+  const isGate = label.trim().startsWith('human:');
+  const isBrake = label.trim() === 'hold' || label.trim() === 'needs:human';
+  const humanLabel = isGate || isBrake;
+
   async function submit() {
     const trimmed = label.trim();
     if (!trimmed) { setError('Pick or type a hand-off label.'); return; }
     if (events.length === 0) { setError('Select at least one event.'); return; }
-    if (!emitterId) { setError('Pick which trigger on the source emits this label.'); return; }
+    if (!humanLabel && !emitterId) { setError('Pick which trigger on the source emits this label.'); return; }
     setSaving(true); setError(null);
     try {
       // 1. Listener on B — skip if one already filters on this label.
@@ -90,14 +96,19 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, onClos
           repo: repo || undefined,
           labelFilter: trimmed,
           enabled: true,
-          description: `Wake on \`${trimmed}\` (wired from ${fromName || from})`,
+          description: humanLabel
+            ? `Wait for human gate \`${trimmed}\``
+            : `Wake on \`${trimmed}\` (wired from ${fromName || from})`,
           prompt: effectivePrompt,
         });
       }
-      // 2. Record the emission on A's chosen trigger.
-      const emitter = fromTriggers.find(t => t.id === emitterId);
-      const nextEmits = uniq([...(emitter?.emits || []), trimmed]);
-      await apiCall('PUT', `/api/agents/${from}/triggers/${emitterId}/emits`, { emits: nextEmits });
+      // 2. Record the emission on A's chosen trigger — but never for a human
+      // gate/brake (the lint would flag an agent that claims to set it).
+      if (!humanLabel) {
+        const emitter = fromTriggers.find(t => t.id === emitterId);
+        const nextEmits = uniq([...(emitter?.emits || []), trimmed]);
+        await apiCall('PUT', `/api/agents/${from}/triggers/${emitterId}/emits`, { emits: nextEmits });
+      }
       onDone?.();
     } catch (e) {
       setError(e.message);
@@ -122,15 +133,22 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, onClos
             </datalist>
           </Field>
 
-          <Field label={`Emitting trigger on ${fromName || from}`}>
-            <select value={emitterId} onChange={e => setEmitterId(e.target.value)} style={input}>
-              {fromTriggers.length === 0 && <option value="">(no triggers — add one first)</option>}
-              {fromTriggers.map(t => (
-                <option key={t.id} value={t.id}>{t.id} · {t.type}</option>
-              ))}
-            </select>
-            <small style={small}>The label is added to this trigger's <code>emits</code>.</small>
-          </Field>
+          {humanLabel ? (
+            <div style={{ ...small, padding: 'var(--eb-space-2)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-status-warning)' }}>
+              <code>{label.trim()}</code> is a {isGate ? 'human gate' : 'brake'} — only a human sets it.
+              This wires <strong>{toName || to}</strong> to wait on it; no agent is recorded as emitting it.
+            </div>
+          ) : (
+            <Field label={`Emitting trigger on ${fromName || from}`}>
+              <select value={emitterId} onChange={e => setEmitterId(e.target.value)} style={input}>
+                {fromTriggers.length === 0 && <option value="">(no triggers — add one first)</option>}
+                {fromTriggers.map(t => (
+                  <option key={t.id} value={t.id}>{t.id} · {t.type}</option>
+                ))}
+              </select>
+              <small style={small}>The label is added to this trigger's <code>emits</code>.</small>
+            </Field>
+          )}
 
           <Field label="Listener events (on target)">
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-2)' }}>

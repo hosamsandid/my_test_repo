@@ -36,6 +36,15 @@ function listenKeys(trigger) {
   return Array.isArray(trigger.events) ? trigger.events.slice() : [];
 }
 
+// The single label a github-event trigger filters on, or null when it reacts to
+// raw events. Only label keys participate in agent→agent wiring and orphan
+// detection; raw events come from external actors (GitHub), not agent `emits`.
+function labelListenKey(trigger) {
+  if (!trigger || trigger.type !== 'github-event') return null;
+  return (typeof trigger.labelFilter === 'string' && trigger.labelFilter.trim())
+    ? trigger.labelFilter.trim() : null;
+}
+
 function classifyKind(key) {
   if (isHumanGate(key)) return 'gate';
   if (isBrake(key)) return 'brake';
@@ -105,7 +114,8 @@ function buildProcessGraph(agents) {
         emitIndex.get(e).add(n.id);
         noteLabel(e);
       }
-      for (const k of listenKeys(t)) { allListenKeys.add(k); noteLabel(k); }
+      const lk = labelListenKey(t);
+      if (lk) { allListenKeys.add(lk); noteLabel(lk); }
     }
   }
 
@@ -122,23 +132,31 @@ function buildProcessGraph(agents) {
         });
         continue;
       }
-      for (const key of listenKeys(t)) {
+      const key = labelListenKey(t);
+      if (key) {
+        // Label listener — participates in agent→agent wiring.
         const kind = classifyKind(key);
         if (kind === 'gate') gateSet.add(key);
         if (kind === 'gate' || kind === 'brake') {
           // No agent may emit these — the edge comes from outside (a human).
           edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id });
-          continue;
-        }
-        const emitters = [...(emitIndex.get(key) || [])];
-        if (emitters.length === 0) {
-          // Orphan listener: nothing emits this label. Represented from null so
-          // the lint layer (#333) can flag it; the renderer shows a dangling in.
-          edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, orphan: true });
         } else {
-          for (const s of emitters) {
-            edges.push({ from: s, to: n.id, label: key, kind, triggerId: t.id });
+          const emitters = [...(emitIndex.get(key) || [])];
+          if (emitters.length === 0) {
+            // Orphan listener: nothing emits this label. Represented from null so
+            // the lint layer flags it; the renderer shows a dangling-in node.
+            edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, orphan: true });
+          } else {
+            for (const s of emitters) {
+              edges.push({ from: s, to: n.id, label: key, kind, triggerId: t.id });
+            }
           }
+        }
+      } else {
+        // Raw GitHub events (no label filter) come from external actors, not
+        // agent emits — record as external (renderer drops, lints ignore).
+        for (const ev of (Array.isArray(t.events) ? t.events : [])) {
+          edges.push({ from: null, to: n.id, label: ev, kind: classifyKind(ev), triggerId: t.id, external: true });
         }
       }
     }
@@ -157,7 +175,45 @@ function buildProcessGraph(agents) {
   const gates = [...gateSet].sort().map(label => ({ label, humanOnly: true }));
   const labels = [...labelMeta.keys()].sort().map(name => ({ name, ...labelMeta.get(name) }));
 
-  return { nodes, edges, gates, labels };
+  return { nodes, edges, gates, labels, lints: computeLints(nodes, edges) };
 }
 
-module.exports = { buildProcessGraph, listenKeys, classifyKind, isHumanGate, isBrake };
+// Advisory wiring checks (#333) — surfaced as a panel + inline badges, never
+// block saving. Derived purely from the built nodes/edges.
+function computeLints(nodes, edges) {
+  const lints = [];
+  for (const e of edges) {
+    if (e.orphan) {
+      lints.push({ code: 'orphan-listener', severity: 'warning', label: e.label, nodeId: e.to,
+        message: `\`${e.to}\` listens on \`${e.label}\` but no agent emits it.` });
+    }
+    if (e.deadEnd) {
+      lints.push({ code: 'dead-end-emitter', severity: 'warning', label: e.label, nodeId: e.from,
+        message: `\`${e.from}\` emits \`${e.label}\` but nothing listens on it.` });
+    }
+  }
+  for (const n of nodes) {
+    if (n.synthetic) continue;
+    const stageEmits = new Set();
+    for (const t of n.triggers || []) {
+      if (t.type === 'github-event' && !t.from) {
+        lints.push({ code: 'unguarded-self-trigger', severity: 'warning', nodeId: n.id, triggerId: t.id,
+          message: `Trigger \`${t.id}\` on \`${n.id}\` has no origin filter (\`from\`) — self-loop risk.` });
+      }
+      for (const lbl of t.emits || []) {
+        if (isHumanGate(lbl)) {
+          lints.push({ code: 'gate-violation', severity: 'error', nodeId: n.id, label: lbl, triggerId: t.id,
+            message: `\`${n.id}\` declares emit of gate label \`${lbl}\` — only humans may set it.` });
+        }
+        if (lbl.startsWith('stage:')) stageEmits.add(lbl);
+      }
+    }
+    if (stageEmits.size > 1) {
+      lints.push({ code: 'competing-stage', severity: 'warning', nodeId: n.id,
+        message: `\`${n.id}\` emits multiple stage labels: ${[...stageEmits].join(', ')}.` });
+    }
+  }
+  return lints;
+}
+
+module.exports = { buildProcessGraph, computeLints, listenKeys, classifyKind, isHumanGate, isBrake };

@@ -1,0 +1,96 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, roleKeyOf } = require('./process-template');
+
+const sampleRoles = [
+  {
+    id: 'acme-developer', displayName: 'Developer', role: 'team-member', sessionPolicy: 'per-invocation',
+    systemPrompt: 'You implement issues.',
+    triggers: [
+      { id: 'dev-assigned', type: 'github-event', enabled: true, events: ['issues.labeled'],
+        from: 'any-except-self', labelFilter: 'assigned:dev', emits: ['started:dev'], repo: 'acme/app',
+        prompt: 'Implement it.', description: 'assigned' },
+      { id: 'curate', type: 'cron', enabled: true, cron: '5 3 * * 1', prompt: 'Tidy memory.' },
+    ],
+  },
+];
+
+test('roleKeyOf strips the team prefix', () => {
+  assert.equal(roleKeyOf('acme-developer', 'acme'), 'developer');
+  assert.equal(roleKeyOf('developer', 'acme'), 'developer');
+  assert.equal(roleKeyOf('developer', undefined), 'developer');
+});
+
+test('buildProcessTemplate shapes a versioned bundle and drops team-specifics', () => {
+  const b = buildProcessTemplate({
+    name: 'Acme', level: 'live', teamId: 'acme', roles: sampleRoles,
+    gates: [{ label: 'human:td-approved' }], labels: [{ name: 'assigned:dev', humanGate: false, brake: false }],
+  });
+  assert.equal(b.processTemplateVersion, 1);
+  assert.equal(b.name, 'Acme');
+  assert.equal(b.roles.length, 1);
+  const r = b.roles[0];
+  assert.equal(r.id, 'developer');         // team prefix stripped
+  assert.equal(r.sessionPolicy, 'per-invocation');
+  assert.equal(r.systemPrompt, 'You implement issues.');
+  const t = r.triggers[0];
+  assert.equal(t.labelFilter, 'assigned:dev');
+  assert.deepEqual(t.emits, ['started:dev']);
+  assert.equal(t.prompt, 'Implement it.');
+  assert.ok(!('repo' in t), 'repo is team-specific and must not be in the bundle');
+  assert.deepEqual(b.gates, [{ label: 'human:td-approved' }]);
+});
+
+test('validateProcessTemplate accepts a built bundle and rejects junk', () => {
+  const b = buildProcessTemplate({ name: 'x', level: 'template', roles: sampleRoles });
+  assert.equal(validateProcessTemplate(b).ok, true);
+  assert.equal(validateProcessTemplate(null).ok, false);
+  assert.equal(validateProcessTemplate({ processTemplateVersion: 99, roles: [] }).ok, false);
+  assert.equal(validateProcessTemplate({ processTemplateVersion: 1, roles: [] }).ok, false);
+  assert.equal(validateProcessTemplate({ processTemplateVersion: 1, roles: [{}] }).ok, false);
+});
+
+test('templateToCustomRoles maps to the /api/teams pseudo-template shape', () => {
+  const b = buildProcessTemplate({ name: 'x', level: 'live', teamId: 'acme', roles: sampleRoles });
+  const cr = templateToCustomRoles(b);
+  assert.equal(cr.length, 1);
+  const role = cr[0];
+  assert.equal(role.id, 'developer');
+  assert.equal(role.sessionPolicy, 'per-invocation');
+  assert.equal(role.promptTemplate, 'You implement issues.');
+  // trigger prompt is carried as promptTemplate (what the materialiser renders)
+  const t = role.triggers.find(x => x.id === 'dev-assigned');
+  assert.equal(t.promptTemplate, 'Implement it.');
+  assert.equal(t.labelFilter, 'assigned:dev');
+  assert.deepEqual(t.emits, ['started:dev']);
+});
+
+test('round-trip: build → validate → customRoles preserves wiring', () => {
+  const b = buildProcessTemplate({ name: 'rt', level: 'live', teamId: 'acme', roles: sampleRoles });
+  assert.equal(validateProcessTemplate(b).ok, true);
+  const cr = templateToCustomRoles(b);
+  assert.deepEqual(cr.map(r => r.id), ['developer']);
+  assert.deepEqual(cr[0].triggers.find(t => t.id === 'dev-assigned').emits, ['started:dev']);
+});
+
+test('an agent-studio-shaped bundle (custom role ids, gates) validates', () => {
+  const bundle = {
+    processTemplateVersion: 1,
+    name: 'accessio-lifecycle',
+    level: 'template',
+    roles: [
+      { id: 'requirements', displayName: 'Requirements', role: 'team-member', systemPrompt: '…',
+        triggers: [{ id: 'r1', type: 'github-event', events: ['issues.labeled'], labelFilter: 'stage:requirements', from: 'any-except-self', emits: ['stage:fdd'] }] },
+      { id: 'functional-design', displayName: 'Functional Design', role: 'team-member', systemPrompt: '…',
+        triggers: [{ id: 'f1', type: 'github-event', events: ['issues.labeled'], labelFilter: 'stage:fdd', from: 'any-except-self' }] },
+    ],
+    gates: [{ label: 'human:fdd-approved' }],
+    labels: [{ name: 'stage:fdd', humanGate: false, brake: false }],
+  };
+  assert.equal(validateProcessTemplate(bundle).ok, true);
+  const cr = templateToCustomRoles(bundle);
+  assert.deepEqual(cr.map(r => r.id), ['requirements', 'functional-design']);
+});

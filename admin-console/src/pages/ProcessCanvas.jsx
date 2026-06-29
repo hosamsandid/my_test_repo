@@ -1,18 +1,20 @@
 import React, { useRef, useEffect, useState, useMemo } from 'react';
-import { useParams } from 'react-router-dom';
-import { GitBranch, AlertTriangle } from 'lucide-react';
+import { useParams, useSearchParams } from 'react-router-dom';
+import { GitBranch, AlertTriangle, Download, Upload, Boxes, X } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import { initProcessGraph } from './process/process-graph-render';
 import ProcessNodeInspector from './process/ProcessNodeInspector';
 import { CreateHandoffDialog, EditHandoffDialog } from './process/EdgeDialogs';
+import MaterializeDialog from './process/MaterializeDialog';
 
 // Process Canvas (#330) — data-driven view of the agent orchestration: which
 // agent reacts to which label, in what order. Read-only render here; the node
 // inspector (#331) and edge modeling (#332) build on the same renderer.
 export default function ProcessCanvas() {
   const { teamId } = useParams();
+  const [searchParams] = useSearchParams();
   // Scope: 'all' (whole fleet, live), a team id (live, scoped), or 'templates'.
-  const [scope, setScope] = useState(teamId || 'all');
+  const [scope, setScope] = useState(teamId || searchParams.get('scope') || 'all');
 
   useEffect(() => { if (teamId) setScope(teamId); }, [teamId]);
 
@@ -29,12 +31,21 @@ export default function ProcessCanvas() {
       : `/api/process/graph?team=${encodeURIComponent(scope)}`;
   const { data: graph, loading, error, refetch } = useApi(graphUrl);
 
+  // An imported bundle (#334) overrides the fetched graph until closed — shown
+  // as a read-only blueprint that can be materialised into a real team.
+  const [imported, setImported] = useState(null); // { bundle, graph }
+  const [importError, setImportError] = useState(null);
+  const [materializeOpen, setMaterializeOpen] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const displayGraph = imported ? imported.graph : graph;
+
   const [selectedId, setSelectedId] = useState(null);
   const [connectPair, setConnectPair] = useState(null); // { from, to }
   const [selectedEdge, setSelectedEdge] = useState(null);
   const viewportRef = useRef(null);
   const graphRef = useRef(null);
-  const editableRef = useRef(true); // template level is read-only
+  const editableRef = useRef(true); // template level / imported = read-only
 
   useEffect(() => {
     if (!viewportRef.current) return;
@@ -48,20 +59,57 @@ export default function ProcessCanvas() {
   }, []);
 
   useEffect(() => {
-    if (!graphRef.current || !graph) return;
-    editableRef.current = graph.level !== 'template';
+    if (!graphRef.current || !displayGraph) return;
+    editableRef.current = !imported && displayGraph.level !== 'template';
     graphRef.current.setEditable(editableRef.current);
-    graphRef.current.setData(graph);
-  }, [graph]);
+    graphRef.current.setData(displayGraph);
+  }, [displayGraph, imported]);
 
   // Clear selection/dialogs when the scope (and thus the graph) changes.
   useEffect(() => { setSelectedId(null); setConnectPair(null); setSelectedEdge(null); }, [graphUrl]);
 
-  const nodeName = (id) => (graph?.nodes || []).find(n => n.id === id)?.displayName || id;
+  const nodeName = (id) => (displayGraph?.nodes || []).find(n => n.id === id)?.displayName || id;
   const selectedNode = useMemo(
-    () => (graph?.nodes || []).find(n => n.id === selectedId) || null,
-    [graph, selectedId],
+    () => (displayGraph?.nodes || []).find(n => n.id === selectedId) || null,
+    [displayGraph, selectedId],
   );
+
+  async function exportBundle() {
+    const url = scope === 'templates' ? '/api/process/template?templates=1'
+      : scope === 'all' ? '/api/process/template'
+        : `/api/process/template?team=${encodeURIComponent(scope)}`;
+    const res = await fetch(url);
+    if (!res.ok) { setImportError(`Export failed: HTTP ${res.status}`); return; }
+    const bundle = await res.json();
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${(bundle.name || 'process').replace(/[^a-z0-9._-]/gi, '-')}.process.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  async function onImportFile(e) {
+    setImportError(null);
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-importing the same file
+    if (!file) return;
+    let bundle;
+    try { bundle = JSON.parse(await file.text()); }
+    catch { setImportError('Not valid JSON.'); return; }
+    try {
+      const res = await fetch('/api/process/graph', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ processTemplate: bundle }),
+      });
+      const g = await res.json();
+      if (!res.ok) { setImportError(g.error || `HTTP ${res.status}`); return; }
+      setImported({ bundle, graph: g });
+      setSelectedId(null);
+    } catch (err) {
+      setImportError(err.message);
+    }
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - var(--eb-header-height) - 2 * var(--eb-space-6))', minHeight: 480 }}>
@@ -80,42 +128,74 @@ export default function ProcessCanvas() {
             </div>
           </div>
         </div>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-          Scope
-          <select
-            value={scope}
-            onChange={e => setScope(e.target.value)}
-            style={{
-              background: 'var(--eb-bg-surface)', color: 'var(--eb-text-primary)',
-              border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
-              padding: 'var(--eb-space-1) var(--eb-space-2)', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
-            }}
-          >
-            <option value="all">All agents (live)</option>
-            {teams.length > 0 && (
-              <optgroup label="Teams (live)">
-                {teams.map(t => (
-                  <option key={t.id} value={t.id}>{t.displayName || t.id}</option>
-                ))}
-              </optgroup>
-            )}
-            <option value="templates">Role templates (blueprint)</option>
-          </select>
-        </label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+          <input ref={fileInputRef} type="file" accept="application/json,.json" onChange={onImportFile} style={{ display: 'none' }} />
+          <ToolbarButton onClick={() => fileInputRef.current?.click()} icon={Upload}>Import</ToolbarButton>
+          <ToolbarButton onClick={exportBundle} icon={Download} disabled={!!imported}>Export</ToolbarButton>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+            Scope
+            <select
+              value={scope}
+              onChange={e => setScope(e.target.value)}
+              disabled={!!imported}
+              style={{
+                background: 'var(--eb-bg-surface)', color: 'var(--eb-text-primary)',
+                border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+                padding: 'var(--eb-space-1) var(--eb-space-2)', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
+                opacity: imported ? 0.5 : 1,
+              }}
+            >
+              <option value="all">All agents (live)</option>
+              {teams.length > 0 && (
+                <optgroup label="Teams (live)">
+                  {teams.map(t => (
+                    <option key={t.id} value={t.id}>{t.displayName || t.id}</option>
+                  ))}
+                </optgroup>
+              )}
+              <option value="templates">Role templates (blueprint)</option>
+            </select>
+          </label>
+        </div>
       </div>
+
+      {/* Imported-bundle banner */}
+      {imported && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', marginBottom: 'var(--eb-space-3)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)', flexShrink: 0,
+          background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-accent-primary)', borderRadius: 'var(--eb-radius-md)',
+        }}>
+          <Boxes size={16} style={{ color: 'var(--eb-accent-primary)' }} />
+          <span style={{ flex: 1, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+            Imported blueprint <strong>{imported.bundle?.name}</strong> ({imported.graph?.nodes?.length || 0} roles) — read-only preview.
+          </span>
+          <button onClick={() => setMaterializeOpen(true)} style={{
+            background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
+            borderRadius: 'var(--eb-radius-md)', padding: '4px 12px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
+          }}>Materialize as team…</button>
+          <button onClick={() => { setImported(null); setSelectedId(null); }} title="Close blueprint" style={{
+            background: 'none', border: 'none', color: 'var(--eb-text-secondary)', cursor: 'pointer', display: 'flex',
+          }}><X size={16} /></button>
+        </div>
+      )}
+      {importError && (
+        <div style={{ marginBottom: 'var(--eb-space-3)', color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{importError}</div>
+      )}
 
       {/* Graph viewport */}
       <div style={{ position: 'relative', flex: 1, border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-lg)', background: 'var(--eb-bg-app)', overflow: 'hidden' }}>
         <div ref={viewportRef} style={{ width: '100%', height: '100%' }} />
-        {loading && !graph && (
+        {loading && !graph && !imported && (
           <Overlay>Loading graph…</Overlay>
         )}
-        {error && (
+        {error && !imported && (
           <Overlay tone="error">Could not load graph: {error}</Overlay>
         )}
 
         <LintsPanel
-          lints={graph?.lints || []}
+          lints={displayGraph?.lints || []}
           onFocus={(nodeId) => { if (nodeId) { setSelectedId(nodeId); graphRef.current?.setSelected(nodeId); } }}
         />
       </div>
@@ -124,7 +204,7 @@ export default function ProcessCanvas() {
         <ProcessNodeInspector
           key={selectedNode.id}
           node={selectedNode}
-          level={graph?.level}
+          level={imported ? 'template' : displayGraph?.level}
           onClose={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
           onChanged={() => refetch()}
         />
@@ -136,7 +216,7 @@ export default function ProcessCanvas() {
           to={connectPair.to}
           fromName={nodeName(connectPair.from)}
           toName={nodeName(connectPair.to)}
-          labels={graph?.labels || []}
+          labels={displayGraph?.labels || []}
           onClose={() => setConnectPair(null)}
           onDone={() => { setConnectPair(null); refetch(); }}
         />
@@ -151,7 +231,29 @@ export default function ProcessCanvas() {
           onDone={() => { setSelectedEdge(null); refetch(); }}
         />
       )}
+
+      {materializeOpen && imported && (
+        <MaterializeDialog
+          bundle={imported.bundle}
+          onClose={() => setMaterializeOpen(false)}
+          onDone={() => { setMaterializeOpen(false); setImported(null); }}
+        />
+      )}
     </div>
+  );
+}
+
+function ToolbarButton({ onClick, icon: Icon, disabled, children }) {
+  return (
+    <button onClick={onClick} disabled={disabled} style={{
+      display: 'inline-flex', alignItems: 'center', gap: 6,
+      background: 'var(--eb-bg-surface)', color: 'var(--eb-text-secondary)',
+      border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+      padding: 'var(--eb-space-1) var(--eb-space-3)', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
+      cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.5 : 1,
+    }}>
+      <Icon size={14} /> {children}
+    </button>
   );
 }
 

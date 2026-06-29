@@ -29,7 +29,7 @@ const KIND_COLOR = {
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
-export function initProcessGraph(viewport, { onSelectNode } = {}) {
+export function initProcessGraph(viewport, { onSelectNode, onConnect, onSelectEdge } = {}) {
   viewport.style.position = 'relative';
   viewport.style.overflow = 'hidden';
   viewport.style.width = '100%';
@@ -67,7 +67,19 @@ export function initProcessGraph(viewport, { onSelectNode } = {}) {
     userTransform: false,
     dragging: false, dragStart: { x: 0, y: 0 }, panStart: { x: 0, y: 0 },
     selectedId: null,
+    synthetic: new Set(), // ids of synthetic (gate/brake/orphan/deadend) nodes
+    connecting: null,     // { fromId } while dragging a new hand-off edge
+    editable: true,       // false for the read-only template/blueprint level
   };
+
+  // Convert a client point to canvas (graph) coordinates given pan/zoom.
+  function toCanvas(clientX, clientY) {
+    const r = viewport.getBoundingClientRect();
+    return {
+      x: (clientX - r.left - state.pan.x) / state.zoom,
+      y: (clientY - r.top - state.pan.y) / state.zoom,
+    };
+  }
 
   // ── Layered (Sugiyama-ish) layout — pure helpers in process-layout.js ──
   function layout() {
@@ -155,6 +167,18 @@ export function initProcessGraph(viewport, { onSelectNode } = {}) {
     for (const t of n.triggers || []) {
       el.appendChild(triggerRow(t));
     }
+
+    // Connect port: drag from here to another node to wire a hand-off (#332).
+    if (onConnect && state.editable) {
+      const port = document.createElement('div');
+      port.title = 'Drag to another agent to wire a hand-off';
+      port.style.cssText = `position:absolute;right:-7px;top:calc(50% - 7px);width:14px;height:14px;border-radius:50%;background:var(--eb-accent-primary);border:2px solid var(--eb-bg-surface);cursor:crosshair;z-index:2;`;
+      port.addEventListener('mousedown', (e) => {
+        e.stopPropagation(); e.preventDefault();
+        startConnect(n.id);
+      });
+      el.appendChild(port);
+    }
     return el;
   }
 
@@ -217,9 +241,34 @@ export function initProcessGraph(viewport, { onSelectNode } = {}) {
       // Back-edge (target sits left of source): route from left of source to
       // right of target so the arrow reads correctly.
       if (b.x < a.x) { x1 = a.x; x2 = b.x + b.w; }
-      drawBezier(x1, y1, x2, y2, color, dashed);
+      const d = drawBezier(x1, y1, x2, y2, color, dashed);
       if (e.label) drawLabel((x1 + x2) / 2, (y1 + y2) / 2, e.label, color);
+      if (onSelectEdge && state.editable && isEditableEdge(e)) addEdgeHit(d, e);
     }
+  }
+
+  // A wired hand-off (agent/review between two real agents) can be edited/
+  // deleted; gates, brakes, timers, orphans and dead-ends cannot.
+  function isEditableEdge(e) {
+    if (e.orphan || e.deadEnd || e.kind === 'timer') return false;
+    if (e.kind === 'gate' || e.kind === 'brake') return false;
+    if (e.from === e.to) return false;
+    return !state.synthetic.has(e.from) && !state.synthetic.has(e.to);
+  }
+  function addEdgeHit(d, e) {
+    const hit = document.createElementNS(SVG_NS, 'path');
+    hit.setAttribute('d', d);
+    hit.setAttribute('stroke', 'transparent');
+    hit.setAttribute('stroke-width', '14');
+    hit.setAttribute('fill', 'none');
+    hit.style.cursor = 'pointer';
+    hit.style.pointerEvents = 'stroke';
+    hit.addEventListener('mousedown', (ev) => ev.stopPropagation());
+    hit.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      onSelectEdge({ from: e.from, to: e.to, label: e.label, kind: e.kind, triggerId: e.triggerId });
+    });
+    svg.appendChild(hit);
   }
 
   function nodeBox(id) {
@@ -252,6 +301,7 @@ export function initProcessGraph(viewport, { onSelectNode } = {}) {
     tri.setAttribute('fill', stroke);
     tri.setAttribute('opacity', '0.8');
     svg.appendChild(tri);
+    return d;
   }
 
   function drawSelfLoop(box, color, label) {
@@ -301,12 +351,51 @@ export function initProcessGraph(viewport, { onSelectNode } = {}) {
     viewport.style.cursor = 'grabbing';
   }
   function onMousemove(e) {
+    if (state.connecting) { updateTempEdge(e.clientX, e.clientY); return; }
     if (!state.dragging) return;
     state.pan.x = state.panStart.x + (e.clientX - state.dragStart.x);
     state.pan.y = state.panStart.y + (e.clientY - state.dragStart.y);
     applyTransform();
   }
-  function onMouseup() { state.dragging = false; viewport.style.cursor = 'grab'; }
+  function onMouseup(e) {
+    if (state.connecting) { finishConnect(e); return; }
+    state.dragging = false; viewport.style.cursor = 'grab';
+  }
+
+  // ── Connect-to-wire (#332) ────────────────────────────────────────────
+  let tempEdge = null;
+  function startConnect(fromId) {
+    state.connecting = { fromId };
+    viewport.style.cursor = 'crosshair';
+    tempEdge = document.createElementNS(SVG_NS, 'path');
+    tempEdge.setAttribute('stroke', 'var(--eb-accent-primary)');
+    tempEdge.setAttribute('stroke-width', '2');
+    tempEdge.setAttribute('stroke-dasharray', '5 4');
+    tempEdge.setAttribute('fill', 'none');
+    svg.appendChild(tempEdge);
+  }
+  function updateTempEdge(clientX, clientY) {
+    if (!tempEdge) return;
+    const src = nodeBox(state.connecting.fromId);
+    if (!src) return;
+    const x1 = src.x + src.w, y1 = src.y + src.h / 2;
+    const p = toCanvas(clientX, clientY);
+    const cx = x1 + (p.x - x1) * 0.4, cx2 = p.x - (p.x - x1) * 0.4;
+    tempEdge.setAttribute('d', `M ${x1} ${y1} C ${cx} ${y1}, ${cx2} ${p.y}, ${p.x} ${p.y}`);
+  }
+  function finishConnect(e) {
+    const fromId = state.connecting.fromId;
+    state.connecting = null;
+    viewport.style.cursor = 'grab';
+    if (tempEdge) { tempEdge.remove(); tempEdge = null; }
+    // Which node is under the cursor?
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const nodeEl = el && el.closest ? el.closest('.pc-node') : null;
+    const toId = nodeEl && nodeEl.dataset ? nodeEl.dataset.id : null;
+    if (!toId || toId === fromId) return;
+    if (state.synthetic.has(toId)) return; // can't wire into a gate/brake/etc.
+    onConnect?.(fromId, toId);
+  }
   function onWheel(e) {
     e.preventDefault();
     state.userTransform = true;
@@ -346,6 +435,7 @@ export function initProcessGraph(viewport, { onSelectNode } = {}) {
     const norm = normalizeGraph(graph || { nodes: [], edges: [] });
     state.nodes = norm.nodes;
     state.edges = norm.edges;
+    state.synthetic = new Set(norm.nodes.filter(n => n.synthetic).map(n => n.id));
     state.userTransform = false;
     const has = state.nodes.length > 0;
     emptyEl.style.display = has ? 'none' : 'block';
@@ -358,6 +448,7 @@ export function initProcessGraph(viewport, { onSelectNode } = {}) {
     setData,
     fit: () => { state.userTransform = false; fit(); },
     setSelected: (id) => { state.selectedId = id; render(); },
+    setEditable: (v) => { if (state.editable !== v) { state.editable = v; render(); } },
     cleanup() {
       viewport.removeEventListener('mousedown', onMousedown);
       window.removeEventListener('mousemove', onMousemove);

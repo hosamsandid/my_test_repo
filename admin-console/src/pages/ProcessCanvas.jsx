@@ -1,12 +1,13 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
-import { GitBranch, AlertTriangle, Download, Upload, Boxes, X, Plus } from 'lucide-react';
+import { GitBranch, AlertTriangle, Download, Upload, Boxes, X, Plus, ShieldCheck } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { initProcessGraph } from './process/process-graph-render';
 import ProcessNodeInspector from './process/ProcessNodeInspector';
 import DraftNodeInspector from './process/DraftNodeInspector';
 import { CreateHandoffDialog, EditHandoffDialog } from './process/EdgeDialogs';
 import MaterializeDialog from './process/MaterializeDialog';
+import AddApprovalDialog from './process/AddApprovalDialog';
 import SidePanel from '../components/SidePanel';
 import { liveOps, makeDraftOps } from './process/edit-adapters';
 
@@ -47,6 +48,7 @@ export default function ProcessCanvas() {
   const [importError, setImportError] = useState(null);
   const [materializeOpen, setMaterializeOpen] = useState(false);
   const [addRoleOpen, setAddRoleOpen] = useState(false);
+  const [approvalOpen, setApprovalOpen] = useState(false);
   const fileInputRef = useRef(null);
 
   // Draft bundle + its derived graph. The bundle is the source of truth; the
@@ -209,6 +211,7 @@ export default function ProcessCanvas() {
             <>
               <ToolbarButton onClick={() => setAddRoleOpen('agent')} icon={Plus}>Add role</ToolbarButton>
               <ToolbarButton onClick={() => setAddRoleOpen('pr-review')} icon={Plus}>PR review</ToolbarButton>
+              <ToolbarButton onClick={() => setApprovalOpen(true)} icon={ShieldCheck}>Human approval</ToolbarButton>
             </>
           )}
           <input ref={fileInputRef} type="file" accept="application/json,.json" onChange={onImportFile} style={{ display: 'none' }} />
@@ -344,6 +347,26 @@ export default function ProcessCanvas() {
             const id = await draftOps.addRole({ displayName, systemPrompt, kind: addRoleOpen === 'pr-review' ? 'pr-review' : undefined });
             setAddRoleOpen(false);
             setSelectedId(id);
+          }}
+        />
+      )}
+
+      {approvalOpen && isDraft && (
+        <AddApprovalDialog
+          roles={draftBundle?.roles || []}
+          onClose={() => setApprovalOpen(false)}
+          onCreate={async ({ label, description, downstream }) => {
+            // The downstream step waits on the gate label; a human sets it.
+            await draftOps.createTrigger(downstream, {
+              type: 'github-event',
+              events: ['issues.labeled', 'pull_request.labeled'],
+              from: 'humans',
+              labelFilter: label,
+              enabled: true,
+              description: description || `Human approval: ${label}`,
+              prompt: `A human granted the approval \`${label}\` (the label was added). Proceed with your part of the process. Reply \`[PASS]\` if there is nothing to do yet.`,
+            });
+            setApprovalOpen(false);
           }}
         />
       )}

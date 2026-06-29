@@ -251,6 +251,22 @@ test('pr-review review edges skip targets that are not in the graph', () => {
   assert.equal(g.edges.filter(e => e.kind === 'review').length, 0);
 });
 
+test('a human-approval gate (downstream waits on human:*) renders as a gate and never trips gate-violation', () => {
+  // The #346 shape: downstream listens on the gate label; nobody emits it.
+  const g = buildProcessGraph([
+    { id: 'release', triggers: [
+      { id: 'gate', type: 'github-event', from: 'humans', events: ['issues.labeled'], labelFilter: 'human:go-live-approved' },
+    ] },
+  ]);
+  const gateEdge = g.edges.find(e => e.label === 'human:go-live-approved');
+  assert.equal(gateEdge.kind, 'gate');
+  assert.equal(gateEdge.from, null);
+  assert.deepEqual(g.gates, [{ label: 'human:go-live-approved', humanOnly: true }]);
+  assert.ok(!g.lints.some(l => l.code === 'gate-violation'));
+  // and it is NOT an orphan-listener (gates are external, not orphans)
+  assert.ok(!g.lints.some(l => l.code === 'orphan-listener'));
+});
+
 test('lint: an unwired pr-review step is flagged', () => {
   const g = buildProcessGraph([{ id: 'rev', kind: 'pr-review', triggers: [], review: {} }]);
   assert.ok(g.lints.some(l => l.code === 'review-unwired' && l.nodeId === 'rev'));

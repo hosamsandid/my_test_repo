@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight, Bot,
   Boxes, Key, MessageCircle, Github, Layers, GitBranch,
-  Sun, Moon, Rocket, Users2, Wand2,
+  Sun, Moon, Rocket, Users2, Wand2, BookOpen,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 
@@ -47,7 +47,7 @@ const NAV = [
     { path: '/agents',       label: 'Agents',              Icon: Layers },
     { path: '/flows',         label: 'Flows',               Icon: GitBranch },
     { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
-    { path: '/orchestrator-wizard', label: 'Orchestrator Wizard', Icon: Wand2 },
+    // { path: '/orchestrator-wizard', label: 'Orchestrator Wizard', Icon: Wand2 },
   ]},
   { section: 'WORKSPACES', items: [
     { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key },
@@ -59,6 +59,7 @@ const NAV = [
     { path: '/jobs',         label: 'Triggers',            Icon: Clock },
     { path: '/models',       label: 'Model Providers',     Icon: Sparkles },
     { path: '/mcp',          label: 'MCP Servers',         Icon: Server },
+    { path: '/patterns',     label: 'Patterns Catalog',    Icon: BookOpen },
   ]},
 ];
 
@@ -76,6 +77,9 @@ const BREADCRUMBS = {
   '/jobs':         'Triggers',
   '/models':       'Model Providers',
   '/mcp':          'MCP Servers',
+  '/patterns':               'Patterns Catalog',
+  '/patterns/sdlc':          'Patterns Catalog / SDLC',
+  '/patterns/mainframe':     'Patterns Catalog / Mainframe Modernization',
   '/orchestrator-wizard': 'Orchestrator Wizard',
 };
 

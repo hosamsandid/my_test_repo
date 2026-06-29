@@ -17,6 +17,9 @@ const ModelRegistry       = lazy(() => import('./pages/ModelRegistry'));
 const McpServers          = lazy(() => import('./pages/McpServers'));
 const Briefings           = lazy(() => import('./pages/Briefings'));
 const OrchestratorWizard  = lazy(() => import('./pages/OrchestratorWizard'));
+const PatternsCatalog     = lazy(() => import('./pages/PatternsCatalog'));
+const SdlcCatalogPage     = lazy(() => import('./pages/SdlcCatalogPage'));
+const MainframeCatalogPage = lazy(() => import('./pages/MainframeCatalogPage'));
 
 export default function App() {
   const [setupComplete, setSetupComplete] = useState(null); // null = loading
@@ -65,6 +68,9 @@ export default function App() {
           <Route path="/flows"         element={<Briefings />} />
           <Route path="/briefings"    element={<Navigate to="/flows" replace />} />
           <Route path="/orchestrator-wizard" element={<OrchestratorWizard />} />
+          <Route path="/patterns"           element={<PatternsCatalog />} />
+          <Route path="/patterns/sdlc"      element={<SdlcCatalogPage />} />
+          <Route path="/patterns/mainframe" element={<MainframeCatalogPage />} />
         </Routes>
       </Suspense>
     </Shell>

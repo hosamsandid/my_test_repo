@@ -136,6 +136,8 @@ Autonomous agents are driven by **triggers** stored in a per-agent `triggers.jso
 | `http` | `secret` (auto-generated) | Fired by an external HTTP POST; see Webhook Server below |
 | `github-event` | `repo` (`owner/name`), `events` (string list, e.g. `pull_request.opened`), optional `from` (origin filter — see *Layered loop protection* below) | Fired by the GitHub poller when the GitHub Events API reports a matching event for the repo. The agent receives the trigger's `prompt` plus the full event payload as JSON. |
 
+**Optional `emits` field (Process Canvas, #328).** Any trigger may carry an optional `emits: string[]` — the label tokens the trigger's run is expected to *set* (e.g. `["dispatch", "started:{{agentId}}"]`). It is purely declarative: the agent still sets the label itself at runtime; `emits` only records the outbound edge so the Process Canvas can draw "this trigger → label → the trigger that listens on it". The field is backwards-compatible (absent = unknown) and round-trips verbatim through `saveTriggers`. Role templates may author it (resolved per-member like `labelFilter`). It is never written silently: `GET /api/agents/:id/triggers/:triggerId/emit-suggestions` returns a heuristic draft derived from the prompt prose (`admin-console/api/emits-derivation.js`), and `PUT /api/agents/:id/triggers/:triggerId/emits` persists the operator-confirmed set.
+
 **Webhook Server (`http` triggers)**
 
 The orchestrator exposes a second HTTP server on `HOOK_PORT` (default `4003`). External systems (GitHub, CI) can trigger an agent prompt with:

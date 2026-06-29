@@ -10,6 +10,7 @@ const http = require('http');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const matrix = require('./matrix');
+const { deriveEmitsForTrigger } = require('./emits-derivation');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -1854,6 +1855,62 @@ app.delete('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) =
     return res.status(502).json({ error: `Could not save triggers: ${err.message}` });
   }
   res.status(204).end();
+});
+
+/* ─── Trigger emits (Process Canvas #328) ───────────────────────────────
+ * A trigger's `emits` array declares the labels its run is expected to set —
+ * the outbound edges of the orchestration graph. We never author it silently:
+ * the suggestions endpoint heuristically *derives* a draft from the prompt
+ * prose (the trigger's own prompt folded with the agent's system prompt), the
+ * operator confirms/corrects it, and the emits endpoint persists the confirmed
+ * set through the same single-writer trigger path. */
+
+function readAgentSystemPrompt(id) {
+  try {
+    const agentsRoot = path.resolve(AGENTS_DIR);
+    const promptPath = path.resolve(agentsRoot, id, 'AGENT-PROMPT.md');
+    if (promptPath !== agentsRoot && !promptPath.startsWith(agentsRoot + path.sep)) return '';
+    return fs.readFileSync(promptPath, 'utf8');
+  } catch { return ''; }
+}
+
+// Heuristic draft only — advisory, never persisted by this call.
+app.get('/api/agents/:id/triggers/:triggerId/emit-suggestions', (req, res) => {
+  const { id, triggerId } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const agentsRoot = path.resolve(AGENTS_DIR) + path.sep;
+  const agentDir = path.resolve(AGENTS_DIR, id);
+  if (!(agentDir + path.sep).startsWith(agentsRoot)) return res.status(400).json({ error: 'Invalid agent id' });
+  if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
+  const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+  const trigger = (Array.isArray(triggers) ? triggers : []).find(t => t.id === triggerId);
+  if (!trigger) return res.status(404).json({ error: 'Trigger not found' });
+  const suggestions = deriveEmitsForTrigger(trigger, readAgentSystemPrompt(id));
+  res.json({ current: Array.isArray(trigger.emits) ? trigger.emits : [], suggestions });
+});
+
+// Persist the operator-confirmed emits set onto the trigger.
+app.put('/api/agents/:id/triggers/:triggerId/emits', apiLimiter, async (req, res) => {
+  const { id, triggerId } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  if (!fs.existsSync(path.join(AGENTS_DIR, id))) return res.status(404).json({ error: 'Agent not found' });
+  const { emits } = req.body || {};
+  if (!Array.isArray(emits) || emits.some(e => typeof e !== 'string' || !e.trim())) {
+    return res.status(400).json({ error: 'emits must be an array of non-empty strings' });
+  }
+  // Normalise: trim, drop blanks, de-duplicate while preserving order.
+  const clean = [...new Set(emits.map(e => e.trim()))];
+  const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+  const list = Array.isArray(cur) ? cur : [];
+  const idx = list.findIndex(t => t.id === triggerId);
+  if (idx === -1) return res.status(404).json({ error: 'Trigger not found' });
+  list[idx] = { ...list[idx], emits: clean };
+  try {
+    await putTriggers(id, list);
+  } catch (err) {
+    return res.status(502).json({ error: `Could not save triggers: ${err.message}` });
+  }
+  res.json(list[idx]);
 });
 
 /* ─── Skills ────────────────────────────────────────────────────────── */
@@ -3877,6 +3934,12 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
             Object.entries(tr.preCheckEnv).map(([k, v]) => [k, applyTemplateVars(v, memberVars)])
           );
         }
+        // Carry the optional declarative `emits` set through (Process Canvas
+        // #328) — the labels this trigger's run is expected to set. Template
+        // tokens (e.g. `started:{{agentId}}`) are resolved per-member.
+        if (Array.isArray(tr.emits)) {
+          out.emits = tr.emits.map(e => applyTemplateVars(String(e), memberVars));
+        }
         return out;
       });
 
@@ -4297,6 +4360,12 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           out.preCheckEnv = Object.fromEntries(
             Object.entries(tr.preCheckEnv).map(([k, v]) => [k, applyTemplateVars(v, memberVars)])
           );
+        }
+        // Carry the optional declarative `emits` set through (Process Canvas
+        // #328) — the labels this trigger's run is expected to set. Template
+        // tokens (e.g. `started:{{agentId}}`) are resolved per-member.
+        if (Array.isArray(tr.emits)) {
+          out.emits = tr.emits.map(e => applyTemplateVars(String(e), memberVars));
         }
         return out;
       });

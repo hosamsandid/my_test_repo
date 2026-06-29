@@ -70,6 +70,7 @@ export function initProcessGraph(viewport, { onSelectNode, onConnect, onSelectEd
     synthetic: new Set(), // ids of synthetic (gate/brake/orphan/deadend) nodes
     connecting: null,     // { fromId } while dragging a new hand-off edge
     editable: true,       // false for the read-only template/blueprint level
+    lintsByNode: new Map(), // nodeId -> [lint, ...] (#333)
   };
 
   // Convert a client point to canvas (graph) coordinates given pan/zoom.
@@ -153,9 +154,18 @@ export function initProcessGraph(viewport, { onSelectNode, onConnect, onSelectEd
 
     const head = document.createElement('div');
     head.style.cssText = 'display:flex;align-items:center;gap:6px;font-weight:600;font-size:13px;margin-bottom:6px;';
+    const nodeLints = state.lintsByNode.get(n.id) || [];
+    const lintBadge = nodeLints.length
+      ? (() => {
+          const sev = nodeLints.some(l => l.severity === 'error') ? 'var(--eb-status-error)' : 'var(--eb-status-warning)';
+          const title = nodeLints.map(l => '• ' + (l.message || l.code)).join('\n').replace(/`/g, '');
+          return `<span title="${esc(title)}" style="flex-shrink:0;color:${sev};font-size:12px">⚠ ${nodeLints.length}</span>`;
+        })()
+      : '';
     head.innerHTML =
       (n.isEntryPoint ? `<span title="DM entry point" style="flex-shrink:0">💬</span>` : '') +
-      `<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(n.displayName || n.id)}</span>`;
+      `<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(n.displayName || n.id)}</span>` +
+      lintBadge;
     el.appendChild(head);
 
     const badges = document.createElement('div');
@@ -436,6 +446,12 @@ export function initProcessGraph(viewport, { onSelectNode, onConnect, onSelectEd
     state.nodes = norm.nodes;
     state.edges = norm.edges;
     state.synthetic = new Set(norm.nodes.filter(n => n.synthetic).map(n => n.id));
+    state.lintsByNode = new Map();
+    for (const l of (graph && graph.lints) || []) {
+      if (!l.nodeId) continue;
+      if (!state.lintsByNode.has(l.nodeId)) state.lintsByNode.set(l.nodeId, []);
+      state.lintsByNode.get(l.nodeId).push(l);
+    }
     state.userTransform = false;
     const has = state.nodes.length > 0;
     emptyEl.style.display = has ? 'none' : 'block';

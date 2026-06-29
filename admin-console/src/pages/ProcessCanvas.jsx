@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useState, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
-import { GitBranch } from 'lucide-react';
+import { GitBranch, AlertTriangle } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import { initProcessGraph } from './process/process-graph-render';
 import ProcessNodeInspector from './process/ProcessNodeInspector';
@@ -113,6 +113,11 @@ export default function ProcessCanvas() {
         {error && (
           <Overlay tone="error">Could not load graph: {error}</Overlay>
         )}
+
+        <LintsPanel
+          lints={graph?.lints || []}
+          onFocus={(nodeId) => { if (nodeId) { setSelectedId(nodeId); graphRef.current?.setSelected(nodeId); } }}
+        />
       </div>
 
       {selectedNode && (
@@ -149,6 +154,59 @@ export default function ProcessCanvas() {
     </div>
   );
 }
+
+function LintsPanel({ lints, onFocus }) {
+  const [open, setOpen] = useState(false);
+  if (!lints || lints.length === 0) return null;
+  const errors = lints.filter(l => l.severity === 'error').length;
+  const accent = errors > 0 ? 'var(--eb-status-error)' : 'var(--eb-status-warning)';
+
+  return (
+    <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 20, maxWidth: 360 }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 6,
+          background: 'var(--eb-bg-elevated)', border: `1px solid ${accent}`,
+          color: accent, borderRadius: 'var(--eb-radius-md)', padding: '4px 10px',
+          fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', cursor: 'pointer',
+          marginLeft: 'auto',
+        }}
+      >
+        <AlertTriangle size={14} />
+        {lints.length} issue{lints.length === 1 ? '' : 's'}{errors > 0 ? ` · ${errors} error${errors === 1 ? '' : 's'}` : ''}
+      </button>
+      {open && (
+        <div style={{
+          marginTop: 6, background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-md)', boxShadow: 'var(--eb-shadow-lg)', maxHeight: '50vh', overflowY: 'auto',
+        }}>
+          {lints.map((l, i) => (
+            <button
+              key={i}
+              onClick={() => onFocus(l.nodeId)}
+              title={l.nodeId ? 'Focus node' : undefined}
+              style={{
+                display: 'block', width: '100%', textAlign: 'left',
+                background: 'none', border: 'none', borderTop: i ? '1px solid var(--eb-border-default)' : 'none',
+                padding: 'var(--eb-space-2) var(--eb-space-3)', cursor: l.nodeId ? 'pointer' : 'default',
+                fontFamily: 'inherit', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)',
+              }}
+            >
+              <span style={{
+                color: l.severity === 'error' ? 'var(--eb-status-error)' : 'var(--eb-status-warning)',
+                fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', textTransform: 'uppercase',
+              }}>{l.code}</span>
+              <div style={{ marginTop: 2, lineHeight: 1.4 }}>{stripTicks(l.message)}</div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function stripTicks(s) { return typeof s === 'string' ? s.replace(/`/g, '') : s; }
 
 function Overlay({ children, tone }) {
   return (

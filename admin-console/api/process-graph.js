@@ -86,6 +86,7 @@ function buildProcessGraph(agents) {
     return {
       id: a.id,
       role: a.role || 'agent',
+      kind: a.kind || 'agent', // 'pr-review' (#347) renders distinctly
       displayName: a.displayName || a.id,
       sessionPolicy: a.sessionPolicy || 'persistent',
       environmentId: a.environmentId || null,
@@ -94,6 +95,7 @@ function buildProcessGraph(agents) {
       isEntryPoint: !hasGithubEvent,
     };
   });
+  const nodeIds = new Set(nodes.map(n => n.id));
 
   // label -> Set(agentId) that emits it
   const emitIndex = new Map();
@@ -172,6 +174,23 @@ function buildProcessGraph(agents) {
     }
   }
 
+  // PR-review steps (#347): structured outcome edges, not label-derived. A
+  // reviewer reviews a producer's PRs (in), then Approve → proceed / Request
+  // changes → back to the producer (the rework loop).
+  for (const a of list) {
+    if (a.kind !== 'pr-review' || !a.review) continue;
+    const rv = a.review;
+    if (rv.reviewsPrFrom && nodeIds.has(rv.reviewsPrFrom)) {
+      edges.push({ from: rv.reviewsPrFrom, to: a.id, label: 'PR', kind: 'review', reviewFlow: 'in' });
+    }
+    if (rv.onApprove && nodeIds.has(rv.onApprove)) {
+      edges.push({ from: a.id, to: rv.onApprove, label: '✓ approve', kind: 'review', outcome: 'approve' });
+    }
+    if (rv.onChangesRequested && nodeIds.has(rv.onChangesRequested)) {
+      edges.push({ from: a.id, to: rv.onChangesRequested, label: '✗ changes', kind: 'review', outcome: 'changes' });
+    }
+  }
+
   const gates = [...gateSet].sort().map(label => ({ label, humanOnly: true }));
   const labels = [...labelMeta.keys()].sort().map(name => ({ name, ...labelMeta.get(name) }));
 
@@ -192,8 +211,13 @@ function computeLints(nodes, edges) {
         message: `\`${e.from}\` emits \`${e.label}\` but nothing listens on it.` });
     }
   }
+  const reviewedTargets = new Set(edges.filter(e => e.kind === 'review' && e.reviewFlow === 'in').map(e => e.to));
   for (const n of nodes) {
     if (n.synthetic) continue;
+    if (n.kind === 'pr-review' && !reviewedTargets.has(n.id)) {
+      lints.push({ code: 'review-unwired', severity: 'warning', nodeId: n.id,
+        message: `PR-review step \`${n.id}\` isn't pointed at a producer (set "reviews PRs from").` });
+    }
     const stageEmits = new Set();
     for (const t of n.triggers || []) {
       if (t.type === 'github-event' && !t.from) {

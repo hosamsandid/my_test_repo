@@ -206,7 +206,10 @@ export default function ProcessCanvas() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
           {isDraft && (
-            <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus}>Add role</ToolbarButton>
+            <>
+              <ToolbarButton onClick={() => setAddRoleOpen('agent')} icon={Plus}>Add role</ToolbarButton>
+              <ToolbarButton onClick={() => setAddRoleOpen('pr-review')} icon={Plus}>PR review</ToolbarButton>
+            </>
           )}
           <input ref={fileInputRef} type="file" accept="application/json,.json" onChange={onImportFile} style={{ display: 'none' }} />
           <ToolbarButton onClick={() => fileInputRef.current?.click()} icon={Upload}>Import</ToolbarButton>
@@ -292,6 +295,7 @@ export default function ProcessCanvas() {
         <DraftNodeInspector
           key={selectedRole.id}
           role={selectedRole}
+          roles={draftBundle?.roles || []}
           ops={draftOps}
           onClose={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
           onDeleted={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
@@ -334,9 +338,10 @@ export default function ProcessCanvas() {
 
       {addRoleOpen && isDraft && (
         <AddRoleDialog
+          kind={addRoleOpen}
           onClose={() => setAddRoleOpen(false)}
           onCreate={async ({ displayName, systemPrompt }) => {
-            const id = await draftOps.addRole({ displayName, systemPrompt });
+            const id = await draftOps.addRole({ displayName, systemPrompt, kind: addRoleOpen === 'pr-review' ? 'pr-review' : undefined });
             setAddRoleOpen(false);
             setSelectedId(id);
           }}
@@ -354,7 +359,8 @@ export default function ProcessCanvas() {
   );
 }
 
-function AddRoleDialog({ onClose, onCreate }) {
+function AddRoleDialog({ kind, onClose, onCreate }) {
+  const isReview = kind === 'pr-review';
   const [displayName, setDisplayName] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('');
   const [busy, setBusy] = useState(false);
@@ -370,19 +376,26 @@ function AddRoleDialog({ onClose, onCreate }) {
     boxSizing: 'border-box', width: '100%', outline: 'none',
   };
   return (
-    <SidePanel open onClose={onClose} title="Add role" width="480px">
+    <SidePanel open onClose={onClose} title={isReview ? 'Add PR-review step' : 'Add role'} width="480px">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
         <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Role name</span>
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>{isReview ? 'Reviewer name' : 'Role name'}</span>
           <input autoFocus value={displayName} onChange={e => setDisplayName(e.target.value)}
-            placeholder="e.g. Business Analyst" style={field}
+            placeholder={isReview ? 'e.g. Code Reviewer' : 'e.g. Business Analyst'} style={field}
             onKeyDown={e => { if (e.key === 'Enter') submit(); }} />
         </label>
-        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>System prompt (optional now)</span>
-          <textarea value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)}
-            placeholder="What this role does…" style={{ ...field, minHeight: 160, resize: 'vertical', fontFamily: 'var(--eb-font-mono)' }} />
-        </label>
+        {isReview ? (
+          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
+            A PR-review step submits a native Approve / Request-changes review. After adding it,
+            point it at a producer and wire the outcomes in the inspector.
+          </div>
+        ) : (
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>System prompt (optional now)</span>
+            <textarea value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)}
+              placeholder="What this role does…" style={{ ...field, minHeight: 160, resize: 'vertical', fontFamily: 'var(--eb-font-mono)' }} />
+          </label>
+        )}
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)' }}>
           <button onClick={onClose} disabled={busy} style={{
             background: 'none', color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',
@@ -391,7 +404,7 @@ function AddRoleDialog({ onClose, onCreate }) {
           <button onClick={submit} disabled={busy || !displayName.trim()} style={{
             background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
             borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
-          }}>Add role</button>
+          }}>{isReview ? 'Add PR review' : 'Add role'}</button>
         </div>
       </div>
     </SidePanel>

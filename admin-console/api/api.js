@@ -12,7 +12,7 @@ const { spawnSync } = require('child_process');
 const matrix = require('./matrix');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, emptyDraftBundle } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandReviewSteps, emptyDraftBundle } = require('./process-template');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -1996,11 +1996,14 @@ app.get('/api/process/graph', (req, res) => {
 // render it as a blueprint (#334). Reuses the same pure builder.
 app.post('/api/process/graph', (req, res) => {
   const bundle = req.body && req.body.processTemplate;
-  const v = validateProcessTemplate(bundle);
+  // Drafts (#345) may be empty works-in-progress.
+  const v = validateProcessTemplate(bundle, { allowEmptyRoles: true });
   if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
   const agents = bundle.roles.map(r => ({
     id: r.id, role: 'template', displayName: r.displayName || r.id,
     sessionPolicy: r.sessionPolicy || 'persistent',
+    // Carry PR-review routing (#347) so the builder draws outcome edges.
+    ...(r.kind === 'pr-review' ? { kind: 'pr-review', review: r.review || {} } : {}),
     triggers: (r.triggers || []).map(t => ({ ...t, emits: Array.isArray(t.emits) ? t.emits : [] })),
   }));
   res.json({ level: 'template', team: null, imported: true, name: bundle.name, ...buildProcessGraph(agents) });
@@ -3965,7 +3968,9 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   if (body.processTemplate) {
     const v = validateProcessTemplate(body.processTemplate);
     if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
-    customRolesRaw = templateToCustomRoles(body.processTemplate);
+    // Expand PR-review steps (#347) into concrete reviewer + producer-rework
+    // triggers before flattening to custom roles.
+    customRolesRaw = templateToCustomRoles(expandReviewSteps(body.processTemplate));
   }
   const customMap = new Map(customRolesRaw.map(r => [r.id, r]));
   const resolveTemplate = (id) => customMap.get(id) || loadAgentTemplate(id);

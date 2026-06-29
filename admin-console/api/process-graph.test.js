@@ -228,6 +228,34 @@ test('lint: a clean wired pair produces no lints', () => {
   assert.deepEqual(g.lints, []);
 });
 
+test('pr-review node yields outcome edges (in / approve / changes)', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', triggers: [] },
+    { id: 'rel', triggers: [] },
+    { id: 'rev', kind: 'pr-review', triggers: [],
+      review: { reviewsPrFrom: 'dev', onApprove: 'rel', onChangesRequested: 'dev' } },
+  ]);
+  const inEdge = g.edges.find(e => e.kind === 'review' && e.reviewFlow === 'in');
+  assert.equal(inEdge.from, 'dev'); assert.equal(inEdge.to, 'rev');
+  const approve = g.edges.find(e => e.outcome === 'approve');
+  assert.equal(approve.from, 'rev'); assert.equal(approve.to, 'rel');
+  const changes = g.edges.find(e => e.outcome === 'changes');
+  assert.equal(changes.from, 'rev'); assert.equal(changes.to, 'dev'); // rework back-edge
+  assert.equal(g.nodes.find(n => n.id === 'rev').kind, 'pr-review');
+});
+
+test('pr-review review edges skip targets that are not in the graph', () => {
+  const g = buildProcessGraph([
+    { id: 'rev', kind: 'pr-review', triggers: [], review: { reviewsPrFrom: 'ghost', onApprove: 'nope' } },
+  ]);
+  assert.equal(g.edges.filter(e => e.kind === 'review').length, 0);
+});
+
+test('lint: an unwired pr-review step is flagged', () => {
+  const g = buildProcessGraph([{ id: 'rev', kind: 'pr-review', triggers: [], review: {} }]);
+  assert.ok(g.lints.some(l => l.code === 'review-unwired' && l.nodeId === 'rev'));
+});
+
 test('node view exposes the expected fields', () => {
   const g = buildProcessGraph([{
     id: 'dev', role: 'team-member', displayName: 'Developer', sessionPolicy: 'per-invocation',

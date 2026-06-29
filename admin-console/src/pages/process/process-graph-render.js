@@ -170,7 +170,12 @@ export function initProcessGraph(viewport, { onSelectNode, onConnect, onSelectEd
 
     const badges = document.createElement('div');
     badges.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px;';
-    badges.appendChild(pill(n.role || 'agent', 'var(--eb-text-muted)'));
+    if (n.kind === 'pr-review') {
+      badges.appendChild(pill('PR review', 'var(--eb-status-warning)'));
+      el.style.borderColor = 'var(--eb-status-warning)';
+    } else {
+      badges.appendChild(pill(n.role || 'agent', 'var(--eb-text-muted)'));
+    }
     if (n.sessionPolicy === 'per-invocation') badges.appendChild(pill('per-invocation', 'var(--eb-status-info)'));
     el.appendChild(badges);
 

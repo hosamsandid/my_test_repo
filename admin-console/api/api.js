@@ -10,6 +10,9 @@ const http = require('http');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const matrix = require('./matrix');
+const { deriveEmitsForTrigger } = require('./emits-derivation');
+const { buildProcessGraph } = require('./process-graph');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandReviewSteps, emptyDraftBundle } = require('./process-template');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -1856,6 +1859,318 @@ app.delete('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) =
   res.status(204).end();
 });
 
+/* ─── Trigger emits (Process Canvas #328) ───────────────────────────────
+ * A trigger's `emits` array declares the labels its run is expected to set —
+ * the outbound edges of the orchestration graph. We never author it silently:
+ * the suggestions endpoint heuristically *derives* a draft from the prompt
+ * prose (the trigger's own prompt folded with the agent's system prompt), the
+ * operator confirms/corrects it, and the emits endpoint persists the confirmed
+ * set through the same single-writer trigger path. */
+
+function readAgentSystemPrompt(id) {
+  try {
+    const agentsRoot = path.resolve(AGENTS_DIR);
+    const promptPath = path.resolve(agentsRoot, id, 'AGENT-PROMPT.md');
+    if (promptPath !== agentsRoot && !promptPath.startsWith(agentsRoot + path.sep)) return '';
+    return fs.readFileSync(promptPath, 'utf8');
+  } catch { return ''; }
+}
+
+// Heuristic draft only — advisory, never persisted by this call.
+app.get('/api/agents/:id/triggers/:triggerId/emit-suggestions', (req, res) => {
+  const { id, triggerId } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const agentsRoot = path.resolve(AGENTS_DIR) + path.sep;
+  const agentDir = path.resolve(AGENTS_DIR, id);
+  if (!(agentDir + path.sep).startsWith(agentsRoot)) return res.status(400).json({ error: 'Invalid agent id' });
+  if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
+  const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+  const trigger = (Array.isArray(triggers) ? triggers : []).find(t => t.id === triggerId);
+  if (!trigger) return res.status(404).json({ error: 'Trigger not found' });
+  const suggestions = deriveEmitsForTrigger(trigger, readAgentSystemPrompt(id));
+  res.json({ current: Array.isArray(trigger.emits) ? trigger.emits : [], suggestions });
+});
+
+// Persist the operator-confirmed emits set onto the trigger.
+app.put('/api/agents/:id/triggers/:triggerId/emits', apiLimiter, async (req, res) => {
+  const { id, triggerId } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  if (!fs.existsSync(path.join(AGENTS_DIR, id))) return res.status(404).json({ error: 'Agent not found' });
+  const { emits } = req.body || {};
+  if (!Array.isArray(emits) || emits.some(e => typeof e !== 'string' || !e.trim())) {
+    return res.status(400).json({ error: 'emits must be an array of non-empty strings' });
+  }
+  // Normalise: trim, drop blanks, de-duplicate while preserving order.
+  const clean = [...new Set(emits.map(e => e.trim()))];
+  const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+  const list = Array.isArray(cur) ? cur : [];
+  const idx = list.findIndex(t => t.id === triggerId);
+  if (idx === -1) return res.status(404).json({ error: 'Trigger not found' });
+  list[idx] = { ...list[idx], emits: clean };
+  try {
+    await putTriggers(id, list);
+  } catch (err) {
+    return res.status(502).json({ error: `Could not save triggers: ${err.message}` });
+  }
+  res.json(list[idx]);
+});
+
+/* ─── Process graph (Process Canvas #329) ───────────────────────────────
+ * Aggregates agents (or role templates) + their triggers into the
+ * orchestration graph the canvas renders, in one call. Edge wiring is
+ * deterministic from each trigger's effective `emits` set:
+ *   - live level (default, or ?team=<id> to scope to one team): uses the
+ *     persisted `emits` only — labels are already concrete in triggers.json.
+ *   - template level (?templates=1 or ?templates=a,b): reads the role-template
+ *     catalog, leaves `{{var}}` tokens raw, and (unless ?derive=0) falls back to
+ *     the #328 heuristic so the blueprint shows wiring before emits are set. */
+
+function effectiveTriggers(triggers, { derive, systemPrompt }) {
+  return (Array.isArray(triggers) ? triggers : []).map(t => {
+    if (Array.isArray(t.emits)) return t; // operator-confirmed — authoritative
+    if (!derive) return { ...t, emits: [] };
+    const sug = deriveEmitsForTrigger(t, systemPrompt);
+    return { ...t, emits: sug.map(s => s.label), emitsDerived: sug.length > 0 };
+  });
+}
+
+function truthyParam(v) { return v === '1' || v === 'true' || v === ''; }
+
+app.get('/api/process/graph', (req, res) => {
+  const templatesParam = req.query.templates;
+
+  // Template-level blueprint graph.
+  if (templatesParam !== undefined) {
+    const derive = req.query.derive !== undefined
+      ? truthyParam(String(req.query.derive)) : true;
+    const ids = truthyParam(String(templatesParam))
+      ? listAgentTemplateIds()
+      : String(templatesParam).split(',').map(s => s.trim()).filter(Boolean);
+    const agents = [];
+    for (const id of ids) {
+      const t = loadAgentTemplate(id);
+      if (!t) continue;
+      const triggers = effectiveTriggers(
+        (t.triggers || []).map(tr => ({
+          id: tr.id, type: tr.type, events: tr.events, labelFilter: tr.labelFilter,
+          from: tr.from, cron: tr.cron, at: tr.at, enabled: tr.enabled,
+          emits: tr.emits, prompt: tr.promptTemplate,
+        })),
+        { derive, systemPrompt: t.promptTemplate || '' },
+      );
+      agents.push({
+        id: t.id, role: 'template', displayName: t.displayName || t.id,
+        sessionPolicy: t.sessionPolicy || 'persistent', environmentId: null, triggers,
+      });
+    }
+    return res.json({ level: 'template', team: null, ...buildProcessGraph(agents) });
+  }
+
+  // Live graph — persisted emits only (the hybrid default: deterministic, no
+  // silent derivation). Optionally scoped to one team.
+  const team = typeof req.query.team === 'string' && req.query.team.trim()
+    ? req.query.team.trim() : null;
+  if (team && !AGENT_ID_RE.test(team)) return res.status(400).json({ error: 'Invalid team id' });
+  const derive = req.query.derive !== undefined && truthyParam(String(req.query.derive));
+
+  const agents = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    const role = cfg.role || 'agent';
+    if (role === 'team') continue; // template holder — no triggers of its own
+    if (team && cfg.parentTeamId !== team) continue;
+    const raw = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+    const triggers = effectiveTriggers(raw, {
+      derive, systemPrompt: derive ? readAgentSystemPrompt(id) : '',
+    });
+    agents.push({
+      id, role, displayName: cfg.displayName || id,
+      sessionPolicy: cfg.sessionPolicy || 'persistent',
+      environmentId: cfg.environmentId || null, triggers,
+    });
+  }
+  res.json({ level: 'live', team, ...buildProcessGraph(agents) });
+});
+
+// Build a graph from an imported bundle (no persistence) so the canvas can
+// render it as a blueprint (#334). Reuses the same pure builder.
+app.post('/api/process/graph', (req, res) => {
+  const bundle = req.body && req.body.processTemplate;
+  // Drafts (#345) may be empty works-in-progress.
+  const v = validateProcessTemplate(bundle, { allowEmptyRoles: true });
+  if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
+  const agents = bundle.roles.map(r => ({
+    id: r.id, role: 'template', displayName: r.displayName || r.id,
+    sessionPolicy: r.sessionPolicy || 'persistent',
+    // Carry PR-review routing (#347) so the builder draws outcome edges.
+    ...(r.kind === 'pr-review' ? { kind: 'pr-review', review: r.review || {} } : {}),
+    triggers: (r.triggers || []).map(t => ({ ...t, emits: Array.isArray(t.emits) ? t.emits : [] })),
+  }));
+  res.json({ level: 'template', team: null, imported: true, name: bundle.name, ...buildProcessGraph(agents) });
+});
+
+/* ─── Process template bundle (export, #334) ────────────────────────────
+ * GET /api/process/template?team=<id> | ?templates=1
+ * Returns a portable bundle (roles + prompts + triggers incl emits, gates,
+ * labels) — the Process Canvas export / import format. */
+app.get('/api/process/template', (req, res) => {
+  const templatesParam = req.query.templates;
+  const roleEntries = [];   // for the bundle (prompt + full triggers)
+  const graphAgents = [];   // for gates/labels via buildProcessGraph
+
+  if (templatesParam !== undefined) {
+    const ids = truthyParam(String(templatesParam))
+      ? listAgentTemplateIds()
+      : String(templatesParam).split(',').map(s => s.trim()).filter(Boolean);
+    for (const id of ids) {
+      const t = loadAgentTemplate(id);
+      if (!t) continue;
+      const triggers = (t.triggers || []).map(tr => ({
+        ...tr, prompt: tr.promptTemplate,
+        emits: Array.isArray(tr.emits)
+          ? tr.emits
+          : deriveEmitsForTrigger({ promptTemplate: tr.promptTemplate }, t.promptTemplate || '').map(s => s.label),
+      }));
+      roleEntries.push({
+        id: t.id, displayName: t.displayName || t.id, role: 'team-member',
+        sessionPolicy: t.sessionPolicy || 'persistent', systemPrompt: t.promptTemplate || '', triggers,
+      });
+      graphAgents.push({ id: t.id, role: 'template', triggers });
+    }
+    const g = buildProcessGraph(graphAgents);
+    return res.json(buildProcessTemplate({
+      name: 'role-templates', level: 'template', roles: roleEntries, gates: g.gates, labels: g.labels,
+    }));
+  }
+
+  const team = typeof req.query.team === 'string' && req.query.team.trim() ? req.query.team.trim() : null;
+  if (team && !AGENT_ID_RE.test(team)) return res.status(400).json({ error: 'Invalid team id' });
+  let teamName = team;
+  if (team) {
+    const teamCfg = readJsonFile(path.join(AGENTS_DIR, team, 'config.json'), null);
+    if (teamCfg?.displayName) teamName = teamCfg.displayName;
+  }
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    const role = cfg.role || 'agent';
+    if (role === 'team') continue;
+    if (team && cfg.parentTeamId !== team) continue;
+    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+    const tlist = Array.isArray(triggers) ? triggers : [];
+    // Effective prompt the agent actually runs (rendered AGENT-PROMPT.md),
+    // falling back to the config override.
+    const systemPrompt = readAgentSystemPrompt(id) || cfg.systemPrompt || '';
+    roleEntries.push({
+      id, displayName: cfg.displayName || id, role,
+      sessionPolicy: cfg.sessionPolicy || 'persistent', systemPrompt, triggers: tlist,
+    });
+    graphAgents.push({ id, role, triggers: tlist });
+  }
+  const g = buildProcessGraph(graphAgents);
+  res.json(buildProcessTemplate({
+    name: teamName || 'process', level: 'live', teamId: team || undefined,
+    roles: roleEntries, gates: g.gates, labels: g.labels,
+  }));
+});
+
+/* ─── Process drafts (Process Canvas v2, #344) ──────────────────────────
+ * A draft is an editable process-template bundle that exists before any team
+ * is materialised. Pure document storage — no agent/Matrix side effects.
+ * Persisted at /workspace/process-drafts/<id>.json. */
+const PROCESS_DRAFTS_DIR = path.join(WORKSPACE, 'process-drafts');
+const DRAFT_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+// Resolve a draft path, hard-guarding against traversal (CodeQL-friendly:
+// AGENT_ID_RE-style regex + path.resolve containment check).
+function draftPath(id) {
+  const root = path.resolve(PROCESS_DRAFTS_DIR);
+  const p = path.resolve(root, `${id}.json`);
+  if (p !== path.join(root, `${id}.json`)) return null;
+  if (!p.startsWith(root + path.sep)) return null;
+  return p;
+}
+function slugifyDraft(name) {
+  const base = String(name || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
+  return base || 'process';
+}
+function readDraft(id) {
+  const p = draftPath(id);
+  if (!p || !fs.existsSync(p)) return null;
+  return readJsonFile(p, null);
+}
+
+app.get('/api/process/drafts', (req, res) => {
+  let ids = [];
+  try {
+    ids = fs.readdirSync(PROCESS_DRAFTS_DIR).filter(f => f.endsWith('.json')).map(f => f.slice(0, -5));
+  } catch { /* dir not created yet */ }
+  const drafts = ids.map(id => {
+    const d = readDraft(id);
+    if (!d) return null;
+    return { id, name: d.name || id, roleCount: Array.isArray(d.roles) ? d.roles.length : 0, updatedAt: d.updatedAt || null };
+  }).filter(Boolean).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  res.json(drafts);
+});
+
+app.post('/api/process/drafts', apiLimiter, (req, res) => {
+  const name = typeof req.body?.name === 'string' && req.body.name.trim() ? req.body.name.trim() : 'Untitled process';
+  // Derive a unique slug id.
+  let base = slugifyDraft(name);
+  if (!DRAFT_ID_RE.test(base)) base = 'process';
+  let id = base, n = 2;
+  while (fs.existsSync(draftPath(id))) { id = `${base}-${n++}`; }
+  const now = new Date().toISOString();
+  // Seed from an imported bundle if provided, else an empty skeleton.
+  let bundle = emptyDraftBundle(name);
+  if (req.body?.processTemplate) {
+    const v = validateProcessTemplate(req.body.processTemplate, { allowEmptyRoles: true });
+    if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
+    bundle = { ...req.body.processTemplate, name };
+  }
+  const draft = { ...bundle, id, createdAt: now, updatedAt: now };
+  fs.mkdirSync(PROCESS_DRAFTS_DIR, { recursive: true });
+  writeJsonAtomic(draftPath(id), draft);
+  res.status(201).json(draft);
+});
+
+app.get('/api/process/drafts/:id', (req, res) => {
+  const { id } = req.params;
+  if (!DRAFT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid draft id' });
+  const d = readDraft(id);
+  if (!d) return res.status(404).json({ error: 'Draft not found' });
+  res.json(d);
+});
+
+app.put('/api/process/drafts/:id', apiLimiter, (req, res) => {
+  const { id } = req.params;
+  if (!DRAFT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid draft id' });
+  const existing = readDraft(id);
+  if (!existing) return res.status(404).json({ error: 'Draft not found' });
+  const body = req.body || {};
+  // Drafts are works-in-progress — empty role sets are allowed here (only
+  // materialisation requires a non-empty set).
+  const v = validateProcessTemplate(body, { allowEmptyRoles: true });
+  if (!v.ok) return res.status(400).json({ error: v.error });
+  const draft = {
+    ...body,
+    id,
+    name: typeof body.name === 'string' && body.name.trim() ? body.name.trim() : existing.name,
+    createdAt: existing.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  writeJsonAtomic(draftPath(id), draft);
+  res.json(draft);
+});
+
+app.delete('/api/process/drafts/:id', apiLimiter, (req, res) => {
+  const { id } = req.params;
+  if (!DRAFT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid draft id' });
+  const p = draftPath(id);
+  if (!p || !fs.existsSync(p)) return res.status(404).json({ error: 'Draft not found' });
+  fs.rmSync(p);
+  res.status(204).end();
+});
+
 /* ─── Skills ────────────────────────────────────────────────────────── */
 
 app.get('/api/skills', (req, res) => {
@@ -3644,13 +3959,33 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     return res.status(400).json({ error: err.message });
   }
 
-  // ── 3. Roles must map to known templates ──────────────────────────
-  const normalizedRoles = normalizeRolesInput(body.roles);
+  // ── 3. Roles must map to known catalog templates OR inline custom roles ──
+  // Inline roles come from an imported Process Canvas bundle (#334): either as
+  // `customRoles` (pseudo-template shape) or a whole `processTemplate` bundle.
+  // They are resolved exactly like catalog templates by the materialisation
+  // loop below (var substitution over prompt + triggers).
+  let customRolesRaw = Array.isArray(body.customRoles) ? body.customRoles : [];
+  if (body.processTemplate) {
+    const v = validateProcessTemplate(body.processTemplate);
+    if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
+    // Expand PR-review steps (#347) into concrete reviewer + producer-rework
+    // triggers before flattening to custom roles.
+    customRolesRaw = templateToCustomRoles(expandReviewSteps(body.processTemplate));
+  }
+  const customMap = new Map(customRolesRaw.map(r => [r.id, r]));
+  const resolveTemplate = (id) => customMap.get(id) || loadAgentTemplate(id);
+
+  // `roles` may be omitted when inline roles are supplied — synthesise it.
+  let rolesInput = body.roles;
+  if ((!Array.isArray(rolesInput) || rolesInput.length === 0) && customMap.size > 0) {
+    rolesInput = [...customMap.keys()].map(id => ({ id, count: 1 }));
+  }
+  const normalizedRoles = normalizeRolesInput(rolesInput);
   if (!normalizedRoles || normalizedRoles.length === 0) {
-    return res.status(400).json({ error: 'roles must be a non-empty array of template ids' });
+    return res.status(400).json({ error: 'roles must be a non-empty array of template ids (or supply customRoles / processTemplate)' });
   }
   const knownIds = new Set(listAgentTemplateIds());
-  const unknown = normalizedRoles.map(r => r.id).filter(id => !knownIds.has(id));
+  const unknown = normalizedRoles.map(r => r.id).filter(id => !knownIds.has(id) && !customMap.has(id));
   if (unknown.length) {
     return res.status(400).json({
       error: `Unknown roles: ${unknown.join(', ')}`,
@@ -3670,7 +4005,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   //   member id     = `<teamId>-<roleId>` (count=1) or `<teamId>-<roleId>-N` (count>1)
   const envId = teamId;
   const teamAgentId = teamId;
-  const planned = planMembers(teamId, normalizedRoles, loadAgentTemplate);
+  const planned = planMembers(teamId, normalizedRoles, resolveTemplate);
   for (const p of planned) {
     if (!AGENT_ID_RE.test(p.memberId)) {
       return res.status(400).json({ error: `Computed memberId '${p.memberId}' is invalid` });
@@ -3876,6 +4211,12 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           out.preCheckEnv = Object.fromEntries(
             Object.entries(tr.preCheckEnv).map(([k, v]) => [k, applyTemplateVars(v, memberVars)])
           );
+        }
+        // Carry the optional declarative `emits` set through (Process Canvas
+        // #328) — the labels this trigger's run is expected to set. Template
+        // tokens (e.g. `started:{{agentId}}`) are resolved per-member.
+        if (Array.isArray(tr.emits)) {
+          out.emits = tr.emits.map(e => applyTemplateVars(String(e), memberVars));
         }
         return out;
       });
@@ -4301,6 +4642,12 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           out.preCheckEnv = Object.fromEntries(
             Object.entries(tr.preCheckEnv).map(([k, v]) => [k, applyTemplateVars(v, memberVars)])
           );
+        }
+        // Carry the optional declarative `emits` set through (Process Canvas
+        // #328) — the labels this trigger's run is expected to set. Template
+        // tokens (e.g. `started:{{agentId}}`) are resolved per-member.
+        if (Array.isArray(tr.emits)) {
+          out.emits = tr.emits.map(e => applyTemplateVars(String(e), memberVars));
         }
         return out;
       });

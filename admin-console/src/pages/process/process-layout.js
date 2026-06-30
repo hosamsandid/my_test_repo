@@ -82,9 +82,11 @@ export function orderWithinRanks(nodes, edges, rank) {
 // the renderer (process-graph-render.js) draws the bands.
 
 // Edges that drive forward order: agent hand-offs + the forward review edges.
+// Unified Orchestration (#366) adds `dependency` (BP depends_on) so BriefingPack
+// graphs lay out left→right instead of collapsing into the cross-cutting band.
 // Human gates (kind 'gate', synthetic source) are folded into lane *titles*,
 // not ranked; rework (review 'changes') and timers never push order forward.
-const SPINE_KINDS = new Set(['agent', 'review']);
+const SPINE_KINDS = new Set(['agent', 'review', 'dependency']);
 
 function isSpineEdge(e, isReal) {
   if (e.from === e.to) return false;

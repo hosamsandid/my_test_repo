@@ -19,6 +19,8 @@ const V_GAP = 28;   // vertical gap between stacked nodes in a column
 const LANE_HEADER_H = 34; // stage-lane header band height (#357)
 
 // Edge colour per kind. CSS custom properties so light/dark switch for free.
+// Unified Orchestration (#366) adds dependency (BP depends_on) + artifact
+// (BP data flow) + manual (hand-off) on top of the Process kinds.
 const KIND_COLOR = {
   agent:  'var(--eb-status-info)',
   review: 'var(--eb-status-warning)',
@@ -26,6 +28,9 @@ const KIND_COLOR = {
   brake:  '#a855f7',
   timer:  'var(--eb-text-muted)',
   dangling: 'var(--eb-text-muted)',
+  dependency: '#ef4444',  // BP ordering edge (depends_on)
+  artifact:   '#10b981',  // BP data-flow edge (output → input)
+  manual:     'var(--eb-status-info)',
 };
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -296,7 +301,7 @@ export function initProcessGraph(viewport, { onSelectNode, onConnect, onSelectEd
       const a = nodeBox(e.from), b = nodeBox(e.to);
       if (!a || !b) continue;
       const color = KIND_COLOR[e.kind] || KIND_COLOR.agent;
-      const dashed = e.orphan || e.deadEnd || e.kind === 'timer';
+      const dashed = e.orphan || e.deadEnd || e.kind === 'timer' || e.kind === 'dependency';
 
       if (e.from === e.to) { drawSelfLoop(a, color, e.label); continue; }
 
@@ -553,6 +558,8 @@ function legend() {
   el.innerHTML =
     sw('var(--eb-status-info)', 'hand-off') +
     sw('var(--eb-status-warning)', 'review') +
+    sw('#ef4444', 'depends-on', true) +
+    sw('#10b981', 'data flow') +
     `<span style="color:var(--eb-status-error);font-weight:700;font-size:10px">🔒 stage gate</span>` +
     sw('#a855f7', 'brake') +
     sw('var(--eb-text-muted)', 'timer / unwired', true);

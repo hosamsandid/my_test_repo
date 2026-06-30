@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
-import { BPGraph } from './briefings/BPGraph';
+import { FlowGraph } from './process/FlowGraph';
 
 const BANNER_KEY = 'aee.flows.infoBanner.dismissed';
 
@@ -173,6 +173,26 @@ function InfoBanner({ onDismiss }) {
   );
 }
 
+function SourceTab({ label, active, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        padding: '4px 12px',
+        fontSize: 'var(--eb-text-sm)',
+        borderRadius: 6,
+        border: `1px solid ${active ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+        background: active ? 'var(--eb-bg-selected)' : 'var(--eb-bg-surface)',
+        color: active ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
 function FlowRow({ agent, environmentName, selected, onSelect }) {
   return (
     <button
@@ -241,6 +261,9 @@ export default function Briefings() {
   const [bannerDismissed, setBannerDismissed] = useState(
     () => localStorage.getItem(BANNER_KEY) === 'true'
   );
+  // Unified viewer source (#366): 'bp' = selected orchestrator's BriefingPack
+  // graph; 'live' = the live agent choreography across all agents.
+  const [viewMode, setViewMode] = useState('bp');
   const selectedFlow = searchParams.get('flow');
   const { data: agents } = useApi('/api/agents');
   const { data: environments } = useApi('/api/environments');
@@ -416,21 +439,35 @@ export default function Briefings() {
         {/* AC 1: dismissible info banner, shown on first visit */}
         {!bannerDismissed && <InfoBanner onDismiss={dismissBanner} />}
 
+        {/* Source switcher (#366): BriefingPack graph ↔ live agent choreography */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+          padding: 'var(--eb-space-2) var(--eb-space-4)',
+          borderBottom: '1px solid var(--eb-border-default)', flexShrink: 0,
+        }}>
+          <SourceTab label="BriefingPacks" active={viewMode === 'bp'} onClick={() => setViewMode('bp')} />
+          <SourceTab label="Live agents" active={viewMode === 'live'} onClick={() => setViewMode('live')} />
+        </div>
+
         <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
-          {!selectedAgent ? (
-            <div style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              height: '100%', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)',
-            }}>
-              Select a Flow to view its dependency graph
-            </div>
+          {viewMode === 'bp' ? (
+            !selectedAgent ? (
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                height: '100%', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)',
+              }}>
+                Select a Flow to view its dependency graph
+              </div>
+            ) : (
+              <FlowGraph
+                key={selectedAgent.id}
+                workspace={selectedAgent.briefingsPath
+                    ? `/workspace/agents/${selectedAgent.id}/${selectedAgent.briefingsPath}`
+                    : `/workspace/agents/${selectedAgent.id}`}
+              />
+            )
           ) : (
-            <BPGraph
-              orchestratorId={selectedAgent.id}
-              workspacePath={selectedAgent.briefingsPath
-                  ? `/workspace/agents/${selectedAgent.id}/${selectedAgent.briefingsPath}`
-                  : `/workspace/agents/${selectedAgent.id}`}
-            />
+            <FlowGraph key="live" />
           )}
         </div>
 

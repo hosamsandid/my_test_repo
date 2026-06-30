@@ -51,6 +51,8 @@ orchestrator.js  (control-plane container, no Matrix presence)
 
 A **Team** (the *human* grouping) is the tenant/scope that resources and human users are assigned to — the foundation of the multi-user concept. **Do not confuse it with the `role: "team"` agent construct**, which is always called an **Agent Team** (an agent squad working a repo); the two only share a word. The data model is three JSON collections under `/workspace` (`teams/`, `users/`, `memberships/index.json`), with these roles: **System Admin** (global, `user.systemAdmin` flag), **Team Admin** and **Team Member** (per-team membership roles). Every agent construct, Working Environment, and credential carries a `teamId` and is owned by exactly one Team (default: `default`).
 
+**Resource scoping (#302).** List endpoints are filtered by the caller's team membership. `admin-console/api/scope.js` (`computeScope` / `visibleTeam` / `visibleAgent`, unit-tested) resolves the logged-in subject (from the #276/#374 session) to a scope: the **env admin** and any **System Admin** get `all: true` (full visibility — so the single-operator setup is unaffected); other users see only resources whose `teamId` is one of their memberships. `getScope(req)` reads the users/memberships indexes and is applied to `GET /api/{agents,environments,ssh-keys,github-tokens,mcp-servers,mcp-credentials,matrix/agents,skills}` (global/pool skills always visible). Agents also honour `visibility` (`private`→owner-only) + `ownerId`, inert until populated by #304. Enforcement on by-id reads and mutations, and SSO-driven identity, are follow-ups (#304/#307).
+
 The single source of truth is `orchestrator/teams-store.js` (a pure, unit-tested factory). The orchestrator bootstraps the default team + an optional System Admin (`BOOTSTRAP_SYSTEM_ADMIN_SUBJECT` env) and backfills `teamId` onto pre-existing resources at startup. CRUD lives at `/internal/admin/{teams,users,memberships}` (orchestrator), proxied as `/api/admin/...` by the admin console — distinct from `/internal/teams/*` and `POST /api/teams`, which manage **Agent Teams**. The **Teams** admin page (`/teams`, `admin-console/src/pages/Teams.jsx`, #308) drives all of this: team CRUD, user CRUD, per-team role assignment, and reassigning agents/environments to a team (agent reassign added `teamId` to `PUT /api/agents/:id`). Per-role *enforcement* and list-filtering remain follow-ups (#302/#304). Full spec: `docs/teams-data-model.md`.
 
 ### Working Environments
@@ -263,6 +265,8 @@ Every bp-instance chat in the Admin Console has a hand-off action that lets the 
 
 The whole console is gated by a login screen — every `/api/*` data endpoint requires a valid session cookie (`admin-console/api/auth.js` registers public `POST/GET /api/auth/{login,session,logout}` then mounts `auth.gate` over `/api`). A single env-configured credential pair (`ADMIN_USERNAME` / `ADMIN_PASSWORD`, default `admin`/`admin`) is checked by `verifyCredentials()`, which is the **only** seam an SSO/OIDC integration replaces; the HMAC-signed HttpOnly cookie (`aee_session`), the gate, and the React `AuthProvider` + `Login` screen are provider-agnostic. Static assets and the SPA fallback stay open so the login screen can load. See `docs/admin-console.md` → *Authentication* and `docs/multi-user-concept.md`.
 
+**Per-user local passwords (#374, interim).** Users created on the Teams page can be given a local scrypt password (stored on the user record in the orchestrator's teams-store, never returned by the API). The login route checks the user store first (match by `subject`, via the orchestrator's internal `POST /internal/admin/users/verify`), then falls back to the env admin — best-effort, so the env admin always works even if the orchestrator is down (no lock-out). A per-user session's `sub` is the user's `subject`, so audit (#305) names the person. Set via Teams → Manage Users (🔑). Superseded by SSO (#307).
+
 ### Admin Console audit trail (#305)
 
 Every mutating `/api` request (`POST`/`PUT`/`PATCH`/`DELETE`) is recorded as one append-only JSONL line at `/workspace/audit/audit-<date>.jsonl` (override via `AUDIT_DIR`). `admin-console/api/audit.js` exposes `auditMutations` — a global middleware mounted **before** the auth gate (so it sees denied/unauthenticated attempts too) that logs from a `res.on('finish')` handler reading the acting human from `req.user` (#276). Each entry carries `ts, actor, action, method, resource, teamId (best-effort from body, pending #302), status, outcome, ip`. Logging is strictly best-effort — wrapped so it can never block or break a request. Read via `GET /api/audit?limit=<n>` (protected, newest-first). Matrix chat history is intentionally **not** the config-mutation audit log. See `docs/admin-console.md` → *Audit trail*.
@@ -418,6 +422,17 @@ Matrix users are managed via the Conduwuit admin room (`!cUxr0SyfINf9yEvBOD:loca
 Skills are added to the skill-pool volume (`vgh-claw_claude-workspace`) under `skills/<name>/SKILL.md`. They appear in the Admin Console's Working Environment skill picker.
 
 The intended domain is **Mainframe Migration** — skills will cover COBOL analysis, JCL conversion, DB2 schema mapping, IMS/VSAM migration patterns, and related topics.
+
+### Two-tier skill pool (#306)
+
+Skills live on two tiers, resolved **team-first then global** at agent seeding:
+
+| Tier | Path | Managed by | Visibility |
+|---|---|---|---|
+| **Global** | `/template-workspace/skills/` (orchestrator, RO) = `/pool/skills/` (admin-console, RW) | System Admin | All teams |
+| **Team** | `/workspace/teams/<teamId>/skills/` (both mount `agent-pool-workspace` at `/workspace`, RW) | Team Admin | That team's agents only |
+
+`orchestrator/skill-source.js` (`makeSkillSourceResolver`, unit-tested) does the resolution: `seedAgentWorkspace(id, env, { teamId })` copies each `env.skills` name from the owning team's pool when present, else the global pool — so a team with no own pool behaves exactly as before. The admin-console `/api/skills` endpoints carry a `source` of `pool` (global) / `team` (+`teamId`) / `agent`: `GET /api/skills[?teamId=]` lists global + team skills tagged with tier; POST/PUT/DELETE accept `source:'team'`+`teamId`; `POST /api/skills/promote-to-global` lifts a team skill into the global pool (two-stage promotion, relates to #173). The Skills Registry UI exposes the tier (Global/Team), a target selector on create, team-skill edit/delete, and *Promote to global*. Membership-based filtering of which team skills a caller sees is a follow-up (#302).
 
 ## MCP Servers (operator notes)
 

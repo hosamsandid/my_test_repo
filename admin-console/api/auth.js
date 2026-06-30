@@ -40,6 +40,29 @@ const SESSION_SECRET =
 // the console sits behind HTTPS.
 const COOKIE_SECURE = String(process.env.AUTH_COOKIE_SECURE || '').toLowerCase() === 'true';
 
+// Orchestrator base URL — used to verify per-user local passwords (#374). The
+// user store lives in the orchestrator; verification is best-effort so the env
+// admin below always works even when the orchestrator is unreachable.
+const ORCHESTRATOR_URL = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+
+// Best-effort per-user login (#374). Returns an authenticated principal
+// { sub: <subject> } when the user store accepts the credentials, else null
+// (unknown user, no password, wrong password, or orchestrator unreachable).
+async function verifyViaUserStore(username, password) {
+  try {
+    const resp = await fetch(`${ORCHESTRATOR_URL}/internal/admin/users/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    if (!resp.ok) return null;
+    const user = await resp.json();
+    return user && typeof user.subject === 'string' ? { sub: user.subject } : null;
+  } catch {
+    return null; // orchestrator down → fall through to the env admin credential
+  }
+}
+
 // Brute-force protection for the login endpoint.
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -154,9 +177,11 @@ function requireAuth(req, res, next) {
 // Registers the public auth endpoints. Must be called BEFORE the gate so these
 // routes stay reachable without a session.
 function registerAuthRoutes(app) {
-  app.post('/api/auth/login', loginLimiter, (req, res) => {
+  app.post('/api/auth/login', loginLimiter, async (req, res) => {
     const { username, password } = req.body || {};
-    const principal = verifyCredentials(username, password);
+    // 1) Per-user local password (#374), best-effort. 2) the env single-admin
+    // credential (#276), which always works even if the user store is down.
+    const principal = (await verifyViaUserStore(username, password)) || verifyCredentials(username, password);
     if (!principal) {
       return res.status(401).json({ error: 'Invalid username or password' });
     }

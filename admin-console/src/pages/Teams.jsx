@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { Plus, Trash2, Users2, UserPlus, Settings2, ShieldCheck } from 'lucide-react';
+import { Plus, Trash2, Users2, UserPlus, Settings2, ShieldCheck, KeyRound } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
@@ -229,6 +229,22 @@ function ManageUsersPanel({ users, onRefresh, onError }) {
   const [systemAdmin, setSystemAdmin] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
+  // Inline per-user password setting (#374).
+  const [pwUserId, setPwUserId] = useState(null);
+  const [pwValue, setPwValue] = useState('');
+  const [pwSaving, setPwSaving] = useState(false);
+  const [pwMsg, setPwMsg] = useState(null);
+
+  async function savePassword(userId) {
+    if (!pwValue) return;
+    setPwSaving(true);
+    try {
+      await apiCall('POST', `/api/admin/users/${encodeURIComponent(userId)}/password`, { password: pwValue });
+      setPwUserId(null); setPwValue(''); setPwMsg(userId);
+      setTimeout(() => setPwMsg(null), 2500);
+    } catch (e) { onError(e.message); }
+    finally { setPwSaving(false); }
+  }
 
   async function createUser() {
     if (!subject.trim()) return;
@@ -278,6 +294,7 @@ function ManageUsersPanel({ users, onRefresh, onError }) {
         </div>
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
           The <strong>subject</strong> is the stable identifier a future SSO login maps onto (OIDC subject claim or corporate email).
+          To let a user log in <em>today</em>, set a password with the <KeyRound size={11} style={{ verticalAlign: 'middle' }} /> button below — they then sign in with their <strong>subject</strong> + that password. This is interim until enterprise SSO (#307); the operator's env admin login always keeps working.
         </div>
       </Section>
 
@@ -285,20 +302,47 @@ function ManageUsersPanel({ users, onRefresh, onError }) {
         {users.length === 0 && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>No users yet.</div>}
         {users.map(u => (
           <div key={u.id} style={{
-            display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+            display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
             padding: 'var(--eb-space-2) var(--eb-space-3)',
             background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
           }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 'var(--eb-text-sm)' }}>{u.displayName || u.subject}</div>
-              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{u.email || u.subject}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 'var(--eb-text-sm)' }}>{u.displayName || u.subject}</div>
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{u.email || u.subject}</div>
+              </div>
+              {pwMsg === u.id && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-success)' }}>password set</span>}
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+                <input type="checkbox" checked={!!u.systemAdmin} onChange={() => toggleSysadmin(u)} /> sysadmin
+              </label>
+              <button onClick={() => { setPwUserId(pwUserId === u.id ? null : u.id); setPwValue(''); }} title="Set login password" style={ghostBtn}>
+                <KeyRound size={13} />
+              </button>
+              <button onClick={() => setDeleteTarget(u)} title="Delete user" style={{ ...ghostBtn, borderColor: 'var(--eb-status-error)', color: 'var(--eb-status-error)' }}>
+                <Trash2 size={13} />
+              </button>
             </div>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
-              <input type="checkbox" checked={!!u.systemAdmin} onChange={() => toggleSysadmin(u)} /> sysadmin
-            </label>
-            <button onClick={() => setDeleteTarget(u)} title="Delete user" style={{ ...ghostBtn, borderColor: 'var(--eb-status-error)', color: 'var(--eb-status-error)' }}>
-              <Trash2 size={13} />
-            </button>
+            {pwUserId === u.id && (
+              <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+                <input
+                  type="password"
+                  value={pwValue}
+                  onChange={e => setPwValue(e.target.value)}
+                  placeholder={`New login password for "${u.subject}"`}
+                  autoComplete="new-password"
+                  onKeyDown={e => { if (e.key === 'Enter') savePassword(u.id); }}
+                  style={{
+                    flex: 1, padding: 'var(--eb-space-2) var(--eb-space-3)',
+                    background: 'var(--eb-bg-app)', border: '1px solid var(--eb-border-default)',
+                    borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)',
+                    fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', boxSizing: 'border-box',
+                  }}
+                />
+                <button onClick={() => savePassword(u.id)} disabled={pwSaving || !pwValue} style={{ ...primaryBtn, padding: 'var(--eb-space-2) var(--eb-space-3)', opacity: (pwSaving || !pwValue) ? 0.6 : 1 }}>
+                  {pwSaving ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+            )}
           </div>
         ))}
       </Section>

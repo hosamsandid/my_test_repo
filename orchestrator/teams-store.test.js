@@ -17,6 +17,48 @@ test('createTeamsStore requires a root', () => {
   assert.throws(() => createTeamsStore({}), /root.*required/);
 });
 
+// ---- local passwords (#374) -----------------------------------------------
+
+test('passwords: set, verify, and never leak the hash', () => {
+  const { store } = freshStore();
+  const u = store.createUser({ subject: 'jane@corp.com', displayName: 'Jane' });
+  assert.equal(u.passwordHash, undefined); // not set yet
+
+  // No password yet → cannot log in.
+  assert.equal(store.verifyUserCredentials('jane@corp.com', 'whatever'), null);
+
+  const updated = store.setUserPassword(u.id, 's3cret-pass');
+  assert.equal(updated.passwordHash, undefined); // sanitized return
+
+  // The raw stored record carries a scrypt hash, but sanitizeUser hides it.
+  const raw = store.listUsers().find(x => x.id === u.id);
+  assert.match(raw.passwordHash, /^scrypt\$[0-9a-f]+\$[0-9a-f]+$/);
+  assert.equal(store.sanitizeUser(raw).passwordHash, undefined);
+
+  // Correct password → authenticated (matched by subject), wrong → null.
+  const ok = store.verifyUserCredentials('jane@corp.com', 's3cret-pass');
+  assert.equal(ok.subject, 'jane@corp.com');
+  assert.equal(ok.passwordHash, undefined);
+  assert.equal(store.verifyUserCredentials('jane@corp.com', 'wrong'), null);
+  assert.equal(store.verifyUserCredentials('nobody@corp.com', 's3cret-pass'), null);
+});
+
+test('passwords: clearing disables login again', () => {
+  const { store } = freshStore();
+  const u = store.createUser({ subject: 'bob@corp.com' });
+  store.setUserPassword(u.id, 'pw');
+  assert.ok(store.verifyUserCredentials('bob@corp.com', 'pw'));
+  store.clearUserPassword(u.id);
+  assert.equal(store.verifyUserCredentials('bob@corp.com', 'pw'), null);
+});
+
+test('passwords: setUserPassword requires an existing user and a non-empty password', () => {
+  const { store } = freshStore();
+  assert.throws(() => store.setUserPassword('nope', 'pw'), /not found/);
+  const u = store.createUser({ subject: 'x@corp.com' });
+  assert.throws(() => store.setUserPassword(u.id, ''), /password is required/);
+});
+
 // ---- teams ----------------------------------------------------------------
 
 test('teams: create / get / list / update', () => {

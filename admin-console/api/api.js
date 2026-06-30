@@ -12,6 +12,7 @@ const { spawnSync } = require('child_process');
 const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
+const { computeScope, visibleTeam, visibleAgent } = require('./scope');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandReviewSteps, expandDataFlowSteps, emptyDraftBundle } = require('./process-template');
@@ -47,7 +48,12 @@ const MCP_CREDENTIALS_KEYS_DIR = path.join(MCP_CREDENTIALS_DIR, '_keys');
 const MCP_CREDENTIALS_INDEX = path.join(MCP_CREDENTIALS_KEYS_DIR, 'index.json');
 // Teams data model (#299): resources are owned by exactly one human Team.
 const TEAMS_INDEX = path.join(WORKSPACE, 'teams', 'index.json');
+const USERS_INDEX = path.join(WORKSPACE, 'users', 'index.json');
+const MEMBERSHIPS_INDEX = path.join(WORKSPACE, 'memberships', 'index.json');
 const DEFAULT_TEAM_ID = 'default';
+// The env single-admin login (#276); its session subject is this value and it
+// is treated as the operator (full visibility) by the scope filter (#302).
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 const STATIC_DIR = path.join(__dirname, '..', 'dist');
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 const BP_EXPLORER_URL = process.env.BP_EXPLORER_URL || 'http://bp-explorer:8765';
@@ -228,6 +234,19 @@ function resolveOwnerTeamId(teamId) {
     throw err;
   }
   return teamId;
+}
+
+// Resolve what the logged-in caller may see (#302). Reads the users/memberships
+// indexes fresh each call (cheap; small JSON). The env admin and System Admins
+// get `all: true` — so the single-operator setup is entirely unaffected.
+function getScope(req) {
+  const username = req && req.user && req.user.username;
+  return computeScope({
+    username,
+    adminUsername: ADMIN_USERNAME,
+    users: readJsonFile(USERS_INDEX, []),
+    memberships: readJsonFile(MEMBERSHIPS_INDEX, []),
+  });
 }
 
 function listAgentDirs() {
@@ -740,11 +759,14 @@ app.get('/api/dashboard', (req, res) => {
 /* ─── Agents ────────────────────────────────────────────────────────── */
 
 app.get('/api/agents', (req, res) => {
+  const scope = getScope(req);
   const ids = listAgentDirs();
-  const agents = ids.map(id => {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    return { id, ...cfg };
-  });
+  const agents = ids
+    .map(id => {
+      const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+      return { id, ...cfg };
+    })
+    .filter(a => visibleAgent(scope, a)); // team + visibility scoping (#302)
   res.json(agents);
 });
 
@@ -2385,11 +2407,57 @@ app.post('/api/process/drafts/import-briefings', apiLimiter, async (req, res) =>
 
 /* ─── Skills ────────────────────────────────────────────────────────── */
 
+// ── Two-tier skill pool (#306) ──────────────────────────────────────────
+// Global pool: /pool/skills (System-Admin managed, visible to all).
+// Team pool:   /workspace/teams/<teamId>/skills (Team-Admin managed, scoped
+// to the team). Agents receive global + their owning team's pool at seed time
+// (the orchestrator resolves team-first then global). These helpers manage the
+// team pool; the global pool keeps its existing /pool/skills paths untouched.
+const POOL_TEAM_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+// True when a human Team with this id exists in the teams index.
+function resolveTeamExists(teamId) {
+  const teams = readJsonFile(TEAMS_INDEX, []);
+  return Array.isArray(teams) && teams.some(t => t.id === teamId);
+}
+
+// Resolve a team skill directory with a containment check, or null if invalid.
+function safeTeamSkillDir(teamId, name) {
+  if (!POOL_TEAM_ID_RE.test(teamId || '') || !SKILL_NAME_RE.test(name || '')) return null;
+  const base = path.resolve(WORKSPACE, 'teams', teamId, 'skills');
+  const dir = path.resolve(base, name);
+  const rel = path.relative(base, dir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return dir;
+}
+
+// List team skills, optionally filtered to one team. Each is tagged with its
+// owning teamId so the UI (and a future membership filter, #302) can scope it.
+function listTeamSkills(filterTeamId) {
+  const out = [];
+  const teamsRoot = path.join(WORKSPACE, 'teams');
+  let teamDirs;
+  try { teamDirs = fs.readdirSync(teamsRoot); } catch { return out; }
+  for (const teamId of teamDirs) {
+    if (!POOL_TEAM_ID_RE.test(teamId)) continue;
+    if (filterTeamId && teamId !== filterTeamId) continue;
+    const dir = path.join(teamsRoot, teamId, 'skills');
+    let names;
+    try { names = fs.readdirSync(dir); } catch { continue; }
+    for (const name of names) {
+      const skillMd = path.join(dir, name, 'SKILL.md');
+      if (fs.existsSync(skillMd)) out.push({ name, source: 'team', teamId, path: skillMd });
+    }
+  }
+  return out;
+}
+
 app.get('/api/skills', (req, res) => {
+  const scope = getScope(req);
   const skills = [];
   const seen = new Set();
 
-  // Pool (shared) skills
+  // Pool (shared / global) skills — always visible to everyone.
   const poolSkillsDir = path.join(POOL_DIR, 'skills');
   try {
     fs.readdirSync(poolSkillsDir).forEach(name => {
@@ -2401,8 +2469,17 @@ app.get('/api/skills', (req, res) => {
     });
   } catch { /* no pool skills dir */ }
 
-  // Agent skills
+  // Team-scoped skills (#306), narrowed to the caller's teams (#302). An
+  // explicit `?teamId=<id>` narrows further; a team the caller can't see is
+  // dropped by visibleTeam.
+  const filterTeam = typeof req.query.teamId === 'string' ? req.query.teamId : null;
+  skills.push(...listTeamSkills(filterTeam).filter(s => visibleTeam(scope, s.teamId)));
+
+  // Agent skills — visible only when the owning agent is visible (#302), so an
+  // agent's skills don't leak its existence across teams.
   for (const agentId of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), {});
+    if (!visibleAgent(scope, cfg)) continue;
     const agentSkillsDir = path.join(AGENTS_DIR, agentId, 'skills');
     try {
       fs.readdirSync(agentSkillsDir).forEach(name => {
@@ -2428,11 +2505,15 @@ app.get('/api/skills/:name/content', (req, res) => {
 
   let skillPath;
   if (source === 'agent' && typeof agentId === 'string' && AGENT_ID_RE.test(agentId)) {
-    skillPath = path.join(AGENTS_DIR, agentId, 'skills', name, 'SKILL.md');
+    skillPath = path.join(AGENTS_DIR, path.basename(agentId), 'skills', path.basename(name), 'SKILL.md');
   } else if (source === 'agent') {
     return res.status(400).json({ error: 'Invalid agent id' });
+  } else if (source === 'team') {
+    const dir = safeTeamSkillDir(req.query.teamId, name);
+    if (!dir) return res.status(400).json({ error: 'Invalid team id or skill name' });
+    skillPath = path.join(dir, 'SKILL.md');
   } else {
-    skillPath = path.join(POOL_DIR, 'skills', name, 'SKILL.md');
+    skillPath = path.join(POOL_DIR, 'skills', path.basename(name), 'SKILL.md');
   }
 
   if (!fs.existsSync(skillPath)) return res.status(404).json({ error: 'Skill not found' });
@@ -2447,13 +2528,16 @@ const SKILL_FILE_MAX_BYTES = 512 * 1024; // 512 KB read cap per file
 // Resolve a skill's root directory for the given source. Returns the absolute
 // path or null when the source/name/agentId are invalid. Does not check that
 // the directory exists.
-function skillRootDir(source, name, agentId) {
+function skillRootDir(source, name, agentId, teamId) {
   if (typeof name !== 'string' || !SKILL_NAME_RE.test(name)) return null;
   if (source === 'agent') {
     if (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId)) return null;
-    return path.join(AGENTS_DIR, agentId, 'skills', name);
+    return path.join(AGENTS_DIR, path.basename(agentId), 'skills', path.basename(name));
   }
-  return path.join(POOL_DIR, 'skills', name);
+  if (source === 'team') {
+    return safeTeamSkillDir(teamId, name); // null when teamId/name invalid
+  }
+  return path.join(POOL_DIR, 'skills', path.basename(name));
 }
 
 // Resolve a relative file path inside a skill directory, refusing anything
@@ -2503,9 +2587,9 @@ function listSkillFiles(rootDir) {
 // show what a skill actually contains (scripts, data, sub-skills, …).
 app.get('/api/skills/:name/files', (req, res) => {
   const { name } = req.params;
-  const { source, agentId } = req.query;
-  const root = skillRootDir(source, name, agentId);
-  if (!root) return res.status(400).json({ error: 'Invalid skill name or agent id' });
+  const { source, agentId, teamId } = req.query;
+  const root = skillRootDir(source, name, agentId, teamId);
+  if (!root) return res.status(400).json({ error: 'Invalid skill name, agent id or team id' });
   if (!fs.existsSync(path.join(root, 'SKILL.md'))) return res.status(404).json({ error: 'Skill not found' });
   res.json({ files: listSkillFiles(root) });
 });
@@ -2514,9 +2598,9 @@ app.get('/api/skills/:name/files', (req, res) => {
 // (NUL byte in the prefix) so the UI can show a placeholder instead of garbage.
 app.get('/api/skills/:name/file', (req, res) => {
   const { name } = req.params;
-  const { source, agentId, file } = req.query;
-  const root = skillRootDir(source, name, agentId);
-  if (!root) return res.status(400).json({ error: 'Invalid skill name or agent id' });
+  const { source, agentId, file, teamId } = req.query;
+  const root = skillRootDir(source, name, agentId, teamId);
+  if (!root) return res.status(400).json({ error: 'Invalid skill name, agent id or team id' });
   const target = safeSkillFilePath(root, file);
   if (!target) return res.status(400).json({ error: 'invalid path' });
 
@@ -2554,12 +2638,12 @@ app.get('/api/skills/:name/file', (req, res) => {
 // so this cannot create new files or escape the skill directory.
 app.put('/api/skills/:name/file', (req, res) => {
   const { name } = req.params;
-  const { source, file } = req.query;
+  const { source, file, teamId } = req.query;
   if (source === 'agent') {
     return res.status(403).json({ error: 'Agent skills are read-only from the registry. Promote the skill to the pool to edit it.' });
   }
-  const root = skillRootDir(source, name);
-  if (!root) return res.status(400).json({ error: 'Invalid skill name' });
+  const root = skillRootDir(source, name, undefined, teamId);
+  if (!root) return res.status(400).json({ error: 'Invalid skill name or team id' });
   const target = safeSkillFilePath(root, file);
   if (!target) return res.status(400).json({ error: 'invalid path' });
   if (!fs.statSync(target).isFile()) return res.status(400).json({ error: 'not a file' });
@@ -2579,9 +2663,9 @@ app.put('/api/skills/:name/file', (req, res) => {
 // round-trips cleanly through POST /api/skills/import.
 app.get('/api/skills/:name/export', heavyLimiter, (req, res) => {
   const { name } = req.params;
-  const { source, agentId } = req.query;
-  const root = skillRootDir(source, name, agentId);
-  if (!root) return res.status(400).json({ error: 'Invalid skill name or agent id' });
+  const { source, agentId, teamId } = req.query;
+  const root = skillRootDir(source, name, agentId, teamId);
+  if (!root) return res.status(400).json({ error: 'Invalid skill name, agent id or team id' });
   if (!fs.existsSync(path.join(root, 'SKILL.md'))) return res.status(404).json({ error: 'Skill not found' });
 
   const parentDir = path.dirname(root);
@@ -2699,11 +2783,24 @@ app.post('/api/skills/import', heavyLimiter, _skillImportUpload.single('file'), 
 });
 
 app.post('/api/skills', (req, res) => {
-  const { name, content = '' } = req.body || {};
+  const { name, content = '', source, teamId } = req.body || {};
   if (typeof name !== 'string' || !SKILL_NAME_RE.test(name)) {
     return res.status(400).json({ error: 'Invalid skill name' });
   }
-  const skillDir = path.join(POOL_DIR, 'skills', name);
+  // Team-scoped skill (#306): write into /workspace/teams/<teamId>/skills.
+  if (source === 'team') {
+    const skillDir = safeTeamSkillDir(teamId, name);
+    if (!skillDir) return res.status(400).json({ error: 'Invalid team id or skill name' });
+    if (!resolveTeamExists(teamId)) return res.status(400).json({ error: `Team '${teamId}' not found` });
+    const skillPath = path.join(skillDir, 'SKILL.md');
+    if (fs.existsSync(skillPath)) {
+      return res.status(409).json({ error: `Skill '${name}' already exists in team '${teamId}'` });
+    }
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(skillPath, typeof content === 'string' ? content : '', 'utf8');
+    return res.status(201).json({ name, source: 'team', teamId });
+  }
+  const skillDir = path.join(POOL_DIR, 'skills', path.basename(name));
   const skillPath = path.join(skillDir, 'SKILL.md');
   if (fs.existsSync(skillPath)) {
     return res.status(409).json({ error: `Skill '${name}' already exists` });
@@ -2824,10 +2921,18 @@ app.put('/api/skills/:name', (req, res) => {
   if (source === 'agent') {
     return res.status(403).json({ error: 'Agent skills are read-only from the registry. Use the propagation flow to promote a skill to the pool.' });
   }
-  const skillPath = path.join(POOL_DIR, 'skills', name, 'SKILL.md');
-  if (!fs.existsSync(skillPath)) return res.status(404).json({ error: 'Skill not found' });
   const { content } = req.body || {};
   if (typeof content !== 'string') return res.status(400).json({ error: 'content must be a string' });
+  if (source === 'team') {
+    const dir = safeTeamSkillDir(req.query.teamId, name);
+    if (!dir) return res.status(400).json({ error: 'Invalid team id or skill name' });
+    const teamSkillPath = path.join(dir, 'SKILL.md');
+    if (!fs.existsSync(teamSkillPath)) return res.status(404).json({ error: 'Skill not found' });
+    fs.writeFileSync(teamSkillPath, content, 'utf8');
+    return res.json({ name, source: 'team', teamId: req.query.teamId });
+  }
+  const skillPath = path.join(POOL_DIR, 'skills', path.basename(name), 'SKILL.md');
+  if (!fs.existsSync(skillPath)) return res.status(404).json({ error: 'Skill not found' });
   fs.writeFileSync(skillPath, content, 'utf8');
   res.json({ name, source: 'pool' });
 });
@@ -2839,7 +2944,15 @@ app.delete('/api/skills/:name', (req, res) => {
   if (source === 'agent') {
     return res.status(403).json({ error: 'Agent skills cannot be deleted from the registry.' });
   }
-  const skillDir = path.join(POOL_DIR, 'skills', name);
+  // Team-scoped skill (#306).
+  if (source === 'team') {
+    const dir = safeTeamSkillDir(req.query.teamId, name);
+    if (!dir) return res.status(400).json({ error: 'Invalid team id or skill name' });
+    if (!fs.existsSync(path.join(dir, 'SKILL.md'))) return res.status(404).json({ error: 'Skill not found' });
+    fs.rmSync(dir, { recursive: true, force: true });
+    return res.json({ deleted: name, source: 'team', teamId: req.query.teamId });
+  }
+  const skillDir = path.join(POOL_DIR, 'skills', path.basename(name));
   const skillPath = path.join(skillDir, 'SKILL.md');
   if (!fs.existsSync(skillPath)) return res.status(404).json({ error: 'Skill not found' });
 
@@ -2853,6 +2966,40 @@ app.delete('/api/skills/:name', (req, res) => {
 
   fs.rmSync(skillDir, { recursive: true, force: true });
   res.json({ deleted: name });
+});
+
+// Two-stage promotion (#306, relates to #173): promote a TEAM skill up to the
+// GLOBAL pool. The team-tier copy is the Team-Admin's curation; lifting it to
+// the global pool is a System-Admin / governance action. Copies the whole skill
+// directory recursively. Refuses to clobber an existing global skill unless
+// `overwrite: true`.
+app.post('/api/skills/promote-to-global', (req, res) => {
+  const { name, teamId, overwrite = false } = req.body || {};
+  if (typeof name !== 'string' || !SKILL_NAME_RE.test(name)) {
+    return res.status(400).json({ error: 'Invalid skill name' });
+  }
+  const srcDir = safeTeamSkillDir(teamId, name);
+  if (!srcDir) return res.status(400).json({ error: 'Invalid team id or skill name' });
+  if (!fs.existsSync(path.join(srcDir, 'SKILL.md'))) {
+    return res.status(404).json({ error: `Skill '${name}' not found in team '${teamId}'` });
+  }
+  // Containment for the global destination (matches the /promote pattern).
+  const poolSkillsBaseDir = path.resolve(POOL_DIR, 'skills');
+  const dstDir = path.resolve(poolSkillsBaseDir, name);
+  const dstRel = path.relative(poolSkillsBaseDir, dstDir);
+  if (dstRel.startsWith('..') || path.isAbsolute(dstRel)) {
+    return res.status(400).json({ error: 'Invalid skill name' });
+  }
+  if (fs.existsSync(dstDir) && !overwrite) {
+    return res.status(409).json({ error: `Skill '${name}' already exists in the global pool`, exists: true });
+  }
+  try {
+    if (overwrite) fs.rmSync(dstDir, { recursive: true, force: true });
+    fs.cpSync(srcDir, dstDir, { recursive: true });
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to promote skill: ${err.message}` });
+  }
+  res.status(201).json({ name, source: 'pool', fromTeam: teamId, overwritten: !!overwrite });
 });
 
 /* ─── LLM Config ─────────────────────────────────────────────────────── */
@@ -3182,9 +3329,11 @@ app.post('/api/llm-endpoints/probe-discover-models', heavyLimiter, async (req, r
 // MCP block into each agent's own .claude/settings.json at seed time.
 
 app.get('/api/mcp-servers', (req, res) => {
+  const scope = getScope(req);
   const out = listMcpServerIds()
     .map(id => loadMcpServer(id))
     .filter(Boolean)
+    .filter(s => visibleTeam(scope, s.teamId)) // (#302); missing teamId → default team
     .map(s => {
       const transport = s.transport || 'stdio';
       const tplKey = transport === 'stdio' ? 'env' : 'headers';
@@ -3269,9 +3418,14 @@ app.post('/api/mcp-servers', apiLimiter, (req, res) => {
   const built = buildMcpServerStanza({ existing: null, body });
   if (built.error) return res.status(400).json({ error: built.error });
 
+  let ownerTeamId;
+  try { ownerTeamId = resolveOwnerTeamId(body.teamId); }
+  catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+
   const data = {
     id,
     name,
+    teamId: ownerTeamId,
     description: built.stanza.description || '',
     transport: built.stanza.transport,
     ...(built.stanza.transport === 'stdio'
@@ -3293,6 +3447,14 @@ app.put('/api/mcp-servers/:id', apiLimiter, (req, res) => {
   if (built.error) return res.status(400).json({ error: built.error });
 
   const merged = { ...built.stanza, updatedAt: new Date().toISOString() };
+  // Preserve (or update) the owning team (#302) — buildMcpServerStanza only
+  // covers transport fields, so carry teamId across explicitly.
+  if (req.body && req.body.teamId !== undefined) {
+    try { merged.teamId = resolveOwnerTeamId(req.body.teamId); }
+    catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+  } else if (existing.teamId !== undefined) {
+    merged.teamId = existing.teamId;
+  }
   saveMcpServer(id, merged);
   res.json(merged);
 });
@@ -3311,7 +3473,8 @@ app.delete('/api/mcp-servers/:id', apiLimiter, (req, res) => {
 
 app.get('/api/mcp-credentials', (req, res) => {
   // Metadata only — never the raw secret.
-  res.json(listMcpCredentials());
+  const scope = getScope(req);
+  res.json(listMcpCredentials().filter(c => visibleTeam(scope, c.teamId))); // (#302)
 });
 
 app.post('/api/mcp-credentials', apiLimiter, (req, res) => {
@@ -3544,13 +3707,19 @@ app.post('/api/admin/users', apiLimiter, (req, res) => proxyAdmin(req, res, 'use
 app.get('/api/admin/users/:id', (req, res) => proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}`));
 app.put('/api/admin/users/:id', apiLimiter, (req, res) => proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}`));
 app.delete('/api/admin/users/:id', apiLimiter, (req, res) => proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}`));
+// Local password set/clear (#374). The verify path is NOT proxied here — it is
+// called directly by the public login route (see auth.js), pre-session.
+app.post('/api/admin/users/:id/password', apiLimiter, (req, res) => proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}/password`));
+app.delete('/api/admin/users/:id/password', apiLimiter, (req, res) => proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}/password`));
 
 app.get('/api/admin/memberships', (req, res) => proxyAdmin(req, res, `memberships${adminQuery(req)}`));
 app.post('/api/admin/memberships', apiLimiter, (req, res) => proxyAdmin(req, res, 'memberships'));
 app.delete('/api/admin/memberships', apiLimiter, (req, res) => proxyAdmin(req, res, `memberships${adminQuery(req)}`));
 
 app.get('/api/environments', (req, res) => {
-  const envs = listEnvironmentIds().map(loadEnvironment).filter(Boolean);
+  const scope = getScope(req);
+  const envs = listEnvironmentIds().map(loadEnvironment).filter(Boolean)
+    .filter(e => visibleTeam(scope, e.teamId)); // (#302)
   res.json(envs);
 });
 
@@ -5171,7 +5340,8 @@ app.put('/api/blueprints/:id/memory/:file', apiLimiter, express.text({ type: '*/
 
 app.get('/api/ssh-keys', (req, res) => {
   // Return only metadata — never the private key
-  res.json(listSshKeys());
+  const scope = getScope(req);
+  res.json(listSshKeys().filter(k => visibleTeam(scope, k.teamId))); // (#302)
 });
 
 app.post('/api/ssh-keys', apiLimiter, (req, res) => {
@@ -5285,7 +5455,8 @@ app.delete('/api/ssh-keys/:id', apiLimiter, (req, res) => {
 
 app.get('/api/github-tokens', (req, res) => {
   // Metadata only — never the raw token
-  res.json(listGithubTokens());
+  const scope = getScope(req);
+  res.json(listGithubTokens().filter(t => visibleTeam(scope, t.teamId))); // (#302)
 });
 
 app.post('/api/github-tokens', apiLimiter, (req, res) => {
@@ -5711,6 +5882,7 @@ jobs:
 
 // 1. List enabled agents that have Matrix identities
 app.get('/api/matrix/agents', (req, res) => {
+  const scope = getScope(req);
   const ids = listAgentDirs();
   const out = [];
   for (const id of ids) {
@@ -5718,6 +5890,7 @@ app.get('/api/matrix/agents', (req, res) => {
     if (!cfg) continue;
     if (cfg.enabled === false) continue;
     if (!cfg.token) continue;
+    if (!visibleAgent(scope, cfg)) continue; // team + visibility scoping (#302)
     const dm = matrix.getAgentDmRoom(id);
     const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
     out.push({

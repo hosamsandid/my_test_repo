@@ -11,6 +11,7 @@ const bpEventRouter = require("./bp-event-router");
 const { findEnclosingGitRepo } = require("./git-workspace");
 const { bpsToBriefingsMap } = require("./briefings-graph");
 const { createTeamsStore, DEFAULT_TEAM_ID } = require("./teams-store");
+const { makeSkillSourceResolver } = require("./skill-source");
 
 // ============================================================
 // Config
@@ -53,6 +54,12 @@ const MCP_CREDENTIALS_KEYS_DIR = "/workspace/mcp-credentials/_keys";
 // is the single writer for tenancy/identity data and owns the startup
 // bootstrap + ownership backfill below.
 const teamsStore = createTeamsStore({ root: WORKSPACE });
+// Two-tier skill resolution (#306): owning team's pool wins over the global pool.
+const { resolveSkillSourceDir } = makeSkillSourceResolver({
+  workspace: WORKSPACE,
+  templateWorkspace: TEMPLATE_WORKSPACE,
+  defaultTeamId: DEFAULT_TEAM_ID,
+});
 
 // Resolve the LLM binding for an environment:
 //  - reads /workspace/llm-endpoints/index.json
@@ -738,20 +745,23 @@ function seedAgentWorkspace(id, env, opts = {}) {
     }
   }
 
-  // 2. Copy selected skills from the central pool. Team-members may override
-  // the team-env's skill list — pass `opts.skillsOverride` (an array) to use
-  // it instead of `env.skills`. The override is verbatim, no merge.
+  // 2. Copy selected skills, resolving each name team-first then global (#306).
+  // Team-members may override the team-env's skill list — pass `opts.skillsOverride`
+  // (an array) to use it instead of `env.skills`. The override is verbatim, no merge.
+  // The owning team's pool (/workspace/teams/<teamId>/skills) takes precedence over
+  // the global pool (/template-workspace/skills); when a team has no skill of that
+  // name this falls back to global, so the global-only behaviour is unchanged.
   const selectedSkills = Array.isArray(opts.skillsOverride)
     ? opts.skillsOverride
     : ((env && Array.isArray(env.skills)) ? env.skills : []);
   if (selectedSkills.length > 0) {
-    const skillsSrc = path.join(TEMPLATE_WORKSPACE, "skills");
+    const ownerTeamId = opts.teamId || DEFAULT_TEAM_ID;
     const skillsDst = path.join(dest, "skills");
     fs.mkdirSync(skillsDst, { recursive: true });
     for (const skillName of selectedSkills) {
-      const src = path.join(skillsSrc, skillName);
+      const src = resolveSkillSourceDir(skillName, ownerTeamId);
       const dst = path.join(skillsDst, skillName);
-      if (!fs.existsSync(src)) {
+      if (!src) {
         warnings.push(`skill not found in pool: ${skillName}`);
         continue;
       }
@@ -1982,7 +1992,7 @@ class Orchestrator {
     await setDisplayName(token, userId, displayName);
 
     // Seed agent workspace using the chosen environment
-    const seedResult = seedAgentWorkspace(id, env);
+    const seedResult = seedAgentWorkspace(id, env, { teamId: ownerTeamId });
 
     // For orchestrators the briefings repo is load-bearing: without the clone
     // the BP discovery pipeline silently returns zero stubs and the user sees
@@ -2144,6 +2154,7 @@ class Orchestrator {
     await setDisplayName(token, userId, memberDisplayName);
 
     const seedResult = seedAgentWorkspace(memberId, env, {
+      teamId: ownerTeamId,
       skillsOverride: Array.isArray(opts.skillsOverride) ? opts.skillsOverride : undefined,
       mcpServersOverride: Array.isArray(opts.mcpServersOverride) ? opts.mcpServersOverride : undefined,
     });
@@ -2855,6 +2866,7 @@ class Orchestrator {
     await setDisplayName(token, userId, cfg.displayName);
 
     const seedResult = seedAgentWorkspace(id, env, {
+      teamId: cfg.teamId || DEFAULT_TEAM_ID,
       skillsOverride: Array.isArray(cfg.skillsOverride) ? cfg.skillsOverride : undefined,
       mcpServersOverride: Array.isArray(cfg.mcpServersOverride) ? cfg.mcpServersOverride : undefined,
     });
@@ -3538,26 +3550,49 @@ async function handleTeamsAdminApi(req, res) {
     }
 
     if (collection === 'users') {
+      const subAction = segs[4] || null; // e.g. /internal/admin/users/<id>/password
+      const clean = teamsStore.sanitizeUser; // strip passwordHash from every response
+
+      // Verify a login (#374). Internal-only; called by the admin-console's
+      // public login route. Returns the sanitized user on success, else 401.
+      if (req.method === 'POST' && resourceId === 'verify' && !subAction) {
+        const body = await readBody(req);
+        const user = teamsStore.verifyUserCredentials(body.username, body.password);
+        if (!user) return sendJson(res, 401, { error: 'invalid credentials' }), true;
+        return sendJson(res, 200, user), true;
+      }
+
+      // Set / clear a user's local password (System-Admin action).
+      if (resourceId && subAction === 'password') {
+        if (req.method === 'POST') {
+          const body = await readBody(req);
+          return sendJson(res, 200, teamsStore.setUserPassword(resourceId, body.password)), true;
+        }
+        if (req.method === 'DELETE') {
+          return sendJson(res, 200, teamsStore.clearUserPassword(resourceId)), true;
+        }
+      }
+
       if (req.method === 'GET' && !resourceId) {
         const subject = parsed.searchParams.get('subject');
         if (subject) {
           const u = teamsStore.getUserBySubject(subject);
-          return sendJson(res, 200, u ? [u] : []), true;
+          return sendJson(res, 200, u ? [clean(u)] : []), true;
         }
-        return sendJson(res, 200, teamsStore.listUsers()), true;
+        return sendJson(res, 200, teamsStore.listUsers().map(clean)), true;
       }
       if (req.method === 'POST' && !resourceId) {
         const body = await readBody(req);
-        return sendJson(res, 201, teamsStore.createUser(body)), true;
+        return sendJson(res, 201, clean(teamsStore.createUser(body))), true;
       }
       if (req.method === 'GET' && resourceId) {
         const u = teamsStore.getUser(resourceId);
         if (!u) return sendJson(res, 404, { error: `User '${resourceId}' not found` }), true;
-        return sendJson(res, 200, u), true;
+        return sendJson(res, 200, clean(u)), true;
       }
       if (req.method === 'PUT' && resourceId) {
         const body = await readBody(req);
-        return sendJson(res, 200, teamsStore.updateUser(resourceId, body)), true;
+        return sendJson(res, 200, clean(teamsStore.updateUser(resourceId, body))), true;
       }
       if (req.method === 'DELETE' && resourceId) {
         return sendJson(res, 200, teamsStore.deleteUser(resourceId)), true;

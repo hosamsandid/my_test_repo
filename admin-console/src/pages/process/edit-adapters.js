@@ -21,6 +21,41 @@ export const liveOps = {
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const uid = () => `t${Date.now()}${Math.floor(Math.random() * 1000)}`;
 
+// BP mode (#362 UI rework Phase D) — edits a BriefingPack's brief.md in the
+// orchestrator's workspace via bp-explorer's raw endpoints (GET → modify → PUT,
+// which writes + git-commits). v1 supports the body (the node's prompt/content);
+// frontmatter editing (depends_on / artifacts) lands in D2.
+export function makeBpOps(workspace) {
+  const base = '/api/bp-explorer';
+  const q = `?workspace=${encodeURIComponent(workspace)}`;
+
+  async function getRaw(bpId) {
+    const r = await apiCall('GET', `${base}/bp/${bpId}/raw${q}`);
+    return r && typeof r.content === 'string' ? r.content : '';
+  }
+  async function putRaw(bpId, content, message) {
+    return apiCall('PUT', `${base}/bp/${bpId}/raw${q}`, {
+      content,
+      commit_message: message || `refine(bp:${bpId.slice(0, 6)}): edit brief via Flows`,
+    });
+  }
+  // Split a brief.md into its leading YAML frontmatter block and the body that
+  // follows. The body is exactly what bp-explorer returns as `body` (= the
+  // node's content), so replacing it round-trips cleanly without touching YAML.
+  function splitFrontmatter(content) {
+    const m = content.match(/^(---\n[\s\S]*?\n---\n?)([\s\S]*)$/);
+    return m ? { fm: m[1], body: m[2] } : { fm: '', body: content };
+  }
+
+  return {
+    mode: 'bp',
+    setPrompt: async (bpId, text) => {
+      const { fm } = splitFrontmatter(await getRaw(bpId));
+      await putRaw(bpId, fm + (text || ''));
+    },
+  };
+}
+
 function slugRole(name, taken) {
   let base = String(name || 'role').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'role';
   let id = base, n = 2;

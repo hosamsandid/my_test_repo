@@ -1,11 +1,15 @@
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useCallback, useState } from 'react';
 import { initFlowGraph } from './flow-graph-render';
+import { makeBpOps } from './edit-adapters';
 
 // Unified flow viewer (#362, UI rework). Renders any source of the unified
 // orchestration graph — live agents, a draft bundle, or a BriefingPack
 // directory — through the rich BP-Explorer-style renderer: expandable node
 // cards with the prompt/Content panel, parent-child hierarchy, data flow, and
 // the process-linking edges.
+//
+// For a BriefingPack source the prompt/Content panel is inline-editable and
+// writes back to brief.md (via bp-explorer raw endpoints + git commit, Phase D).
 //
 //   <FlowGraph workspace="/workspace/agents/<id>/<briefingsPath>" />  // BP source
 //   <FlowGraph team="acme" />                                        // live, scoped
@@ -16,35 +20,38 @@ export function FlowGraph({ workspace, team }) {
   const selectedRef = useRef(null);
   const [error, setError] = useState(null);
 
-  // Mount the renderer once.
-  useEffect(() => {
-    if (!viewportRef.current) return undefined;
-    const g = initFlowGraph(viewportRef.current, {
-      onSelectNode: (id) => { selectedRef.current = id; },
-    });
-    apiRef.current = g;
-    return () => { g.cleanup(); apiRef.current = null; };
-  }, []);
-
-  // (Re)load whenever the source changes.
-  useEffect(() => {
+  // Load the unified graph for the current source.
+  const load = useCallback(() => {
     const g = apiRef.current;
-    if (!g) return undefined;
+    if (!g) return;
     const params = new URLSearchParams();
     if (workspace) params.set('workspace', workspace);
     else if (team) params.set('team', team);
-
-    let cancelled = false;
     setError(null);
     fetch(`/api/flows/graph?${params.toString()}`)
-      .then(async (r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((graph) => { if (!cancelled) g.setData(graph); })
-      .catch((err) => { if (!cancelled) setError(err.message || 'Failed to load graph'); });
-    return () => { cancelled = true; };
+      .then(async (r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then((graph) => g.setData(graph))
+      .catch((err) => setError(err.message || 'Failed to load graph'));
   }, [workspace, team]);
+
+  // Mount the renderer once. BP sources allow inline prompt editing → brief.md.
+  useEffect(() => {
+    if (!viewportRef.current) return undefined;
+    const bpOps = workspace ? makeBpOps(workspace) : null;
+    const g = initFlowGraph(viewportRef.current, {
+      onSelectNode: (id) => { selectedRef.current = id; },
+      onSaveContent: bpOps
+        ? async (id, text) => { await bpOps.setPrompt(id, text); load(); }
+        : undefined,
+    });
+    apiRef.current = g;
+    g.setContentEditable(!!bpOps);  // BP prompt editing; live/draft handled elsewhere
+    return () => { g.cleanup(); apiRef.current = null; };
+    // Re-mount when the BP workspace changes so bpOps targets the right repo.
+  }, [workspace]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // (Re)load whenever the source changes.
+  useEffect(() => { load(); }, [load]);
 
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative' }}>

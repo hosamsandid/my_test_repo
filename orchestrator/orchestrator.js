@@ -11,6 +11,7 @@ const bpEventRouter = require("./bp-event-router");
 const { findEnclosingGitRepo } = require("./git-workspace");
 const { bpsToBriefingsMap } = require("./briefings-graph");
 const { createTeamsStore, DEFAULT_TEAM_ID } = require("./teams-store");
+const { makeSkillSourceResolver } = require("./skill-source");
 
 // ============================================================
 // Config
@@ -53,6 +54,12 @@ const MCP_CREDENTIALS_KEYS_DIR = "/workspace/mcp-credentials/_keys";
 // is the single writer for tenancy/identity data and owns the startup
 // bootstrap + ownership backfill below.
 const teamsStore = createTeamsStore({ root: WORKSPACE });
+// Two-tier skill resolution (#306): owning team's pool wins over the global pool.
+const { resolveSkillSourceDir } = makeSkillSourceResolver({
+  workspace: WORKSPACE,
+  templateWorkspace: TEMPLATE_WORKSPACE,
+  defaultTeamId: DEFAULT_TEAM_ID,
+});
 
 // Resolve the LLM binding for an environment:
 //  - reads /workspace/llm-endpoints/index.json
@@ -738,20 +745,23 @@ function seedAgentWorkspace(id, env, opts = {}) {
     }
   }
 
-  // 2. Copy selected skills from the central pool. Team-members may override
-  // the team-env's skill list — pass `opts.skillsOverride` (an array) to use
-  // it instead of `env.skills`. The override is verbatim, no merge.
+  // 2. Copy selected skills, resolving each name team-first then global (#306).
+  // Team-members may override the team-env's skill list — pass `opts.skillsOverride`
+  // (an array) to use it instead of `env.skills`. The override is verbatim, no merge.
+  // The owning team's pool (/workspace/teams/<teamId>/skills) takes precedence over
+  // the global pool (/template-workspace/skills); when a team has no skill of that
+  // name this falls back to global, so the global-only behaviour is unchanged.
   const selectedSkills = Array.isArray(opts.skillsOverride)
     ? opts.skillsOverride
     : ((env && Array.isArray(env.skills)) ? env.skills : []);
   if (selectedSkills.length > 0) {
-    const skillsSrc = path.join(TEMPLATE_WORKSPACE, "skills");
+    const ownerTeamId = opts.teamId || DEFAULT_TEAM_ID;
     const skillsDst = path.join(dest, "skills");
     fs.mkdirSync(skillsDst, { recursive: true });
     for (const skillName of selectedSkills) {
-      const src = path.join(skillsSrc, skillName);
+      const src = resolveSkillSourceDir(skillName, ownerTeamId);
       const dst = path.join(skillsDst, skillName);
-      if (!fs.existsSync(src)) {
+      if (!src) {
         warnings.push(`skill not found in pool: ${skillName}`);
         continue;
       }
@@ -1982,7 +1992,7 @@ class Orchestrator {
     await setDisplayName(token, userId, displayName);
 
     // Seed agent workspace using the chosen environment
-    const seedResult = seedAgentWorkspace(id, env);
+    const seedResult = seedAgentWorkspace(id, env, { teamId: ownerTeamId });
 
     // For orchestrators the briefings repo is load-bearing: without the clone
     // the BP discovery pipeline silently returns zero stubs and the user sees
@@ -2144,6 +2154,7 @@ class Orchestrator {
     await setDisplayName(token, userId, memberDisplayName);
 
     const seedResult = seedAgentWorkspace(memberId, env, {
+      teamId: ownerTeamId,
       skillsOverride: Array.isArray(opts.skillsOverride) ? opts.skillsOverride : undefined,
       mcpServersOverride: Array.isArray(opts.mcpServersOverride) ? opts.mcpServersOverride : undefined,
     });
@@ -2851,6 +2862,7 @@ class Orchestrator {
     await setDisplayName(token, userId, cfg.displayName);
 
     const seedResult = seedAgentWorkspace(id, env, {
+      teamId: cfg.teamId || DEFAULT_TEAM_ID,
       skillsOverride: Array.isArray(cfg.skillsOverride) ? cfg.skillsOverride : undefined,
       mcpServersOverride: Array.isArray(cfg.mcpServersOverride) ? cfg.mcpServersOverride : undefined,
     });

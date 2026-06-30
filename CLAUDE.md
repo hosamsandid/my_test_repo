@@ -419,6 +419,17 @@ Skills are added to the skill-pool volume (`vgh-claw_claude-workspace`) under `s
 
 The intended domain is **Mainframe Migration** — skills will cover COBOL analysis, JCL conversion, DB2 schema mapping, IMS/VSAM migration patterns, and related topics.
 
+### Two-tier skill pool (#306)
+
+Skills live on two tiers, resolved **team-first then global** at agent seeding:
+
+| Tier | Path | Managed by | Visibility |
+|---|---|---|---|
+| **Global** | `/template-workspace/skills/` (orchestrator, RO) = `/pool/skills/` (admin-console, RW) | System Admin | All teams |
+| **Team** | `/workspace/teams/<teamId>/skills/` (both mount `agent-pool-workspace` at `/workspace`, RW) | Team Admin | That team's agents only |
+
+`orchestrator/skill-source.js` (`makeSkillSourceResolver`, unit-tested) does the resolution: `seedAgentWorkspace(id, env, { teamId })` copies each `env.skills` name from the owning team's pool when present, else the global pool — so a team with no own pool behaves exactly as before. The admin-console `/api/skills` endpoints carry a `source` of `pool` (global) / `team` (+`teamId`) / `agent`: `GET /api/skills[?teamId=]` lists global + team skills tagged with tier; POST/PUT/DELETE accept `source:'team'`+`teamId`; `POST /api/skills/promote-to-global` lifts a team skill into the global pool (two-stage promotion, relates to #173). The Skills Registry UI exposes the tier (Global/Team), a target selector on create, team-skill edit/delete, and *Promote to global*. Membership-based filtering of which team skills a caller sees is a follow-up (#302).
+
 ## MCP Servers (operator notes)
 
 Reference servers ship in-repo under `mcp-servers/<id>/`. `make seed-mcp-servers` (chained from `make seed-pool`) syncs them into the pool volume at `/template-workspace/mcp-servers/`. Operators add new servers through the **MCP Servers** admin page (catalog + credentials), and Working Environments / team-members reference them by id. Adding a new backend (vector store, graph DB) is a matter of:

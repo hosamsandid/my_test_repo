@@ -12,7 +12,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 /* ─── Skill name validation (mirrors SKILL_NAME_RE in api.js) ─────────── */
 const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
 
-const FILTER_OPTIONS = ['All', 'Pool', 'Agent'];
+const FILTER_OPTIONS = ['All', 'Global', 'Team', 'Agent'];
 
 /* ─── Full markdown renderer (same pipeline as the chat UI) ───────────── */
 
@@ -127,9 +127,10 @@ const dangerBtnStyle = {
 };
 
 /* ─── New skill form ───────────────────────────────────────────────────── */
-function NewSkillForm({ onCreated, onCancel }) {
+function NewSkillForm({ onCreated, onCancel, teams = [] }) {
   const [name, setName] = useState('');
   const [content, setContent] = useState('');
+  const [target, setTarget] = useState('global'); // 'global' or 'team:<id>'
   const [preview, setPreview] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -142,10 +143,15 @@ function NewSkillForm({ onCreated, onCancel }) {
     setSaving(true);
     setError(null);
     try {
+      const body = { name, content };
+      if (target.startsWith('team:')) {
+        body.source = 'team';
+        body.teamId = target.slice('team:'.length);
+      }
       const res = await fetch('/api/skills', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, content }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -159,6 +165,27 @@ function NewSkillForm({ onCreated, onCancel }) {
 
   return (
     <form onSubmit={handleCreate} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+      <div>
+        <label style={{ display: 'block', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', marginBottom: 4 }}>
+          Target pool
+        </label>
+        <select
+          value={target}
+          onChange={e => setTarget(e.target.value)}
+          style={{
+            width: '100%', padding: '6px 10px',
+            border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
+            background: 'var(--eb-bg-surface)', color: 'var(--eb-text-primary)',
+            fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', boxSizing: 'border-box',
+          }}
+        >
+          <option value="global">Global pool (visible to all teams)</option>
+          {teams.map(t => <option key={t.id} value={`team:${t.id}`}>Team: {t.name} ({t.id})</option>)}
+        </select>
+        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+          A team skill is seeded only into agents owned by that team; global skills go to everyone.
+        </span>
+      </div>
       <div>
         <label style={{ display: 'block', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', marginBottom: 4 }}>
           Skill name (slug)
@@ -269,8 +296,19 @@ function CodeBlock({ content }) {
 /* ─── Skill viewer / inline editor ────────────────────────────────────── */
 function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgents, agentSkills }) {
   const isPool = skill.source === 'pool';
+  const isTeam = skill.source === 'team';
+  const isAgent = skill.source === 'agent';
+  const isManaged = isPool || isTeam; // editable / deletable here
   const inPool = poolNames?.has(skill.name);
-  const skillKey = `${skill.source}:${skill.agentId ?? ''}:${skill.name}`;
+  const skillKey = `${skill.source}:${skill.agentId ?? ''}:${skill.teamId ?? ''}:${skill.name}`;
+
+  // Append the source-specific scope params (agentId for agent skills, teamId
+  // for team skills) so the API resolves the right pool.
+  const withScope = (params) => {
+    if (skill.agentId) params.set('agentId', skill.agentId);
+    if (skill.teamId) params.set('teamId', skill.teamId);
+    return params;
+  };
 
   // File listing for the skill directory.
   const [files, setFiles] = useState([]);
@@ -306,8 +344,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
   useEffect(() => {
     let cancelled = false;
     setFilesLoading(true); setFilesError(null); setFiles([]); setEditing(false);
-    const params = new URLSearchParams({ source: skill.source });
-    if (skill.agentId) params.set('agentId', skill.agentId);
+    const params = withScope(new URLSearchParams({ source: skill.source }));
     fetch(`/api/skills/${encodeURIComponent(skill.name)}/files?${params}`)
       .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`); return d; })
       .then(d => {
@@ -327,8 +364,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
     if (!selectedFile) { setFileData(null); return; }
     let cancelled = false;
     setFileLoading(true); setFileError(null); setFileData(null); setEditing(false);
-    const params = new URLSearchParams({ source: skill.source, file: selectedFile });
-    if (skill.agentId) params.set('agentId', skill.agentId);
+    const params = withScope(new URLSearchParams({ source: skill.source, file: selectedFile }));
     fetch(`/api/skills/${encodeURIComponent(skill.name)}/file?${params}`)
       .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`); return d; })
       .then(d => { if (!cancelled) setFileData(d); })
@@ -337,12 +373,35 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
     return () => { cancelled = true; };
   }, [skillKey, selectedFile]);
 
-  const fileEditable = isPool && fileData && !fileData.binary && !fileData.truncated;
+  const fileEditable = isManaged && fileData && !fileData.binary && !fileData.truncated;
 
   function exportSkill() {
-    const params = new URLSearchParams({ source: skill.source });
-    if (skill.agentId) params.set('agentId', skill.agentId);
+    const params = withScope(new URLSearchParams({ source: skill.source }));
     window.open(`/api/skills/${encodeURIComponent(skill.name)}/export?${params}`, '_blank');
+  }
+
+  // Promote a team skill up to the global pool (#306 two-stage promotion).
+  async function promoteToGlobal(overwrite) {
+    setPromoting(true);
+    setPromoteError(null);
+    try {
+      const res = await fetch('/api/skills/promote-to-global', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: skill.name, teamId: skill.teamId, overwrite }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (res.status === 409 && data.exists) { setConfirmOverwrite(true); setPromoting(false); return; }
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      setConfirmOverwrite(false);
+      onPromoted?.(data);
+    } catch (e) {
+      setPromoteError(e.message);
+    } finally {
+      setPromoting(false);
+    }
   }
 
   async function install(overwrite) {
@@ -412,7 +471,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
     setSaving(true);
     setError(null);
     try {
-      const params = new URLSearchParams({ source: skill.source, file: selectedFile });
+      const params = withScope(new URLSearchParams({ source: skill.source, file: selectedFile }));
       const res = await fetch(`/api/skills/${encodeURIComponent(skill.name)}/file?${params}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -433,7 +492,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
     setDeleting(true);
     setDeleteError(null);
     try {
-      const params = new URLSearchParams({ source: skill.source });
+      const params = withScope(new URLSearchParams({ source: skill.source }));
       const res = await fetch(`/api/skills/${encodeURIComponent(skill.name)}?${params}`, { method: 'DELETE' });
       const data = await res.json();
       if (!res.ok) {
@@ -462,7 +521,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
             Export ZIP
           </button>
         )}
-        {isPool && !editing && (
+        {isManaged && !editing && (
           <>
             <button
               onClick={() => { setEditing(true); setEditContent(fileData?.content ?? ''); setPreview(false); setError(null); }}
@@ -472,12 +531,17 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
             >
               Edit {files.length > 1 ? 'file' : ''}
             </button>
+            {isTeam && (
+              <button onClick={() => promoteToGlobal(false)} disabled={promoting} style={primaryBtnStyle(promoting)} title="Copy this team skill into the global pool (visible to all teams)">
+                {promoting ? 'Promoting…' : 'Promote to global'}
+              </button>
+            )}
             <button onClick={() => { setDeleteError(null); setConfirmDelete(true); }} style={dangerBtnStyle}>
               Delete skill
             </button>
           </>
         )}
-        {isPool && editing && (
+        {isManaged && editing && (
           <>
             {isMarkdownPath(selectedFile) && (
               <button
@@ -496,7 +560,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
             </button>
           </>
         )}
-        {!isPool && (
+        {isAgent && (
           <>
             <button onClick={() => promote(false)} disabled={promoting} style={primaryBtnStyle(promoting)}>
               {promoting ? 'Promoting…' : (inPool ? 'Update pool copy' : 'Promote to pool')}
@@ -658,14 +722,16 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
         onCancel={() => { setConfirmDelete(false); setDeleteError(null); }}
       />
 
-      {/* Overwrite confirmation (pool already has a skill with this name) */}
+      {/* Overwrite confirmation (global pool already has a skill with this name) */}
       <ConfirmDialog
         open={confirmOverwrite}
-        title="Skill already in pool"
+        title="Skill already in global pool"
         variant="danger"
-        message={`A pool skill named "${skill.name}" already exists. Overwrite it with the version from agent "${skill.agentId}"? This replaces the entire pool skill directory.`}
+        message={isTeam
+          ? `A global skill named "${skill.name}" already exists. Overwrite it with this team's version? This replaces the entire global skill directory.`
+          : `A pool skill named "${skill.name}" already exists. Overwrite it with the version from agent "${skill.agentId}"? This replaces the entire pool skill directory.`}
         confirmLabel={promoting ? 'Overwriting…' : 'Overwrite'}
-        onConfirm={() => promote(true)}
+        onConfirm={() => (isTeam ? promoteToGlobal(true) : promote(true))}
         onCancel={() => setConfirmOverwrite(false)}
       />
 
@@ -684,18 +750,27 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
 }
 
 /* ─── Source badge ─────────────────────────────────────────────────────── */
+const BADGE_LABEL = { pool: 'global', team: 'team', agent: 'agent' };
 function SourceBadge({ value: v }) {
+  const isPool = v === 'pool';
+  const isTeam = v === 'team';
+  const color = isPool ? 'var(--eb-accent-primary)'
+    : isTeam ? 'var(--eb-status-warning)'
+    : 'var(--eb-status-info)';
+  const bg = isPool ? 'var(--eb-accent-muted)'
+    : isTeam ? 'var(--eb-status-warning-bg)'
+    : 'var(--eb-status-info-bg)';
   return (
     <span style={{
       padding: '1px 8px',
       borderRadius: 'var(--eb-radius-sm)',
       fontSize: 'var(--eb-text-xs)',
       fontWeight: 'var(--eb-font-medium)',
-      background: v === 'pool' ? 'var(--eb-accent-muted)' : 'var(--eb-status-info-bg)',
-      color: v === 'pool' ? 'var(--eb-accent-primary)' : 'var(--eb-status-info)',
-      border: `1px solid ${v === 'pool' ? 'var(--eb-accent-primary)' : 'var(--eb-status-info)'}`,
+      background: bg,
+      color,
+      border: `1px solid ${color}`,
     }}>
-      {v}
+      {BADGE_LABEL[v] || v}
     </span>
   );
 }
@@ -703,16 +778,18 @@ function SourceBadge({ value: v }) {
 function makeColumns(onDeleteRow) {
   return [
     { key: 'name', label: 'Skill Name' },
-    { key: 'source', label: 'Source', render: v => <SourceBadge value={v} /> },
-    { key: 'agentId', label: 'Agent', render: v => v
-      ? <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span>
-      : <span style={{ color: 'var(--eb-text-muted)' }}>—</span>
-    },
+    { key: 'source', label: 'Tier', render: v => <SourceBadge value={v} /> },
+    { key: '_scope', label: 'Scope', sortable: false, render: (_, row) => {
+      const v = row.source === 'agent' ? row.agentId : row.source === 'team' ? row.teamId : null;
+      return v
+        ? <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span>
+        : <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
+    } },
     {
       key: '_del',
       label: '',
       sortable: false,
-      render: (_, row) => row.source === 'pool' ? (
+      render: (_, row) => (row.source === 'pool' || row.source === 'team') ? (
         <button
           onClick={e => { e.stopPropagation(); onDeleteRow(row); }}
           title="Delete skill"
@@ -729,6 +806,7 @@ function makeColumns(onDeleteRow) {
 export default function SkillsRegistry() {
   const { data: allSkills, loading, error, refetch } = useApi('/api/skills');
   const { data: allAgents } = useApi('/api/agents');
+  const { data: allTeams } = useApi('/api/admin/teams');
   const [filter, setFilter] = useState('All');
   const [showNewForm, setShowNewForm] = useState(false);
   const [selectedSkill, setSelectedSkill] = useState(null);
@@ -743,7 +821,8 @@ export default function SkillsRegistry() {
   const [importSuccess, setImportSuccess] = useState(null);
 
   const filteredSkills = (allSkills ?? []).filter(s => {
-    if (filter === 'Pool') return s.source === 'pool';
+    if (filter === 'Global') return s.source === 'pool';
+    if (filter === 'Team') return s.source === 'team';
     if (filter === 'Agent') return s.source === 'agent';
     return true;
   });
@@ -805,6 +884,7 @@ export default function SkillsRegistry() {
     setRowDeleteError(null);
     try {
       const params = new URLSearchParams({ source: rowDeleteTarget.source });
+      if (rowDeleteTarget.teamId) params.set('teamId', rowDeleteTarget.teamId);
       const res = await fetch(`/api/skills/${encodeURIComponent(rowDeleteTarget.name)}?${params}`, { method: 'DELETE' });
       const data = await res.json();
       if (!res.ok) {
@@ -882,11 +962,12 @@ export default function SkillsRegistry() {
           the shared <strong>pool</strong> as well as the copies living inside individual <strong>agents</strong>.
         </p>
         <p style={{ margin: 0 }}>
-          <strong>Pool</strong> skills can be edited here and attached to Working Environments so new agents receive them.
-          <strong> Agent</strong> skills are read-only — use <em>Promote to pool</em> to lift one back into the pool, or{' '}
-          <em>Install into agent</em> to push a pool skill into a running agent. Click a skill to browse its files;
-          use <em>Export ZIP</em> to download a skill directory, or <em>Import skill</em> to add one to the pool
-          from a <code>.zip</code> or <code>.skill</code> archive.
+          Skills live in two tiers (#306): <strong>Global</strong> skills are visible to everyone, while{' '}
+          <strong>Team</strong> skills are seeded only into agents owned by that team. Both can be edited here and are
+          attached to Working Environments by name (an agent resolves a name from its own team's pool first, then global).
+          A team skill can be lifted to the global pool with <em>Promote to global</em>.{' '}
+          <strong>Agent</strong> skills are read-only — use <em>Promote to pool</em> to lift one into the global pool, or{' '}
+          <em>Install into agent</em> to push a global skill into a running agent. Click a skill to browse its files.
         </p>
       </div>
 
@@ -911,9 +992,9 @@ export default function SkillsRegistry() {
           borderRadius: 'var(--eb-radius-md)',
         }}>
           <h2 style={{ fontSize: 'var(--eb-text-base)', fontWeight: 'var(--eb-font-semibold)', margin: '0 0 var(--eb-space-3)' }}>
-            Create pool skill
+            Create skill
           </h2>
-          <NewSkillForm onCreated={handleCreated} onCancel={() => setShowNewForm(false)} />
+          <NewSkillForm onCreated={handleCreated} onCancel={() => setShowNewForm(false)} teams={allTeams ?? []} />
         </div>
       )}
 
@@ -945,18 +1026,18 @@ export default function SkillsRegistry() {
         data={filteredSkills}
         onRowClick={openSkill}
         emptyText="No skills found."
-        getRowKey={row => `${row.source}:${row.agentId ?? ''}:${row.name}`}
+        getRowKey={row => `${row.source}:${row.agentId ?? ''}:${row.teamId ?? ''}:${row.name}`}
       />
 
       <SidePanel
         open={!!selectedSkill}
         onClose={() => setSelectedSkill(null)}
-        title={selectedSkill ? `${selectedSkill.name} (${selectedSkill.source})` : ''}
+        title={selectedSkill ? `${selectedSkill.name} (${selectedSkill.source === 'pool' ? 'global' : selectedSkill.source}${selectedSkill.teamId ? `: ${selectedSkill.teamId}` : ''})` : ''}
         width="560px"
       >
         {selectedSkill && (
           <SkillViewer
-            key={`${selectedSkill.source}:${selectedSkill.agentId ?? ''}:${selectedSkill.name}`}
+            key={`${selectedSkill.source}:${selectedSkill.agentId ?? ''}:${selectedSkill.teamId ?? ''}:${selectedSkill.name}`}
             skill={selectedSkill}
             onDeleted={handleDeleted}
             onPromoted={handlePromoted}

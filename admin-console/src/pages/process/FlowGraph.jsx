@@ -2,16 +2,16 @@ import React, { useRef, useEffect, useCallback, useMemo, useState } from 'react'
 import { initFlowGraph } from './flow-graph-render';
 import { makeBpOps } from './edit-adapters';
 import { CreateEdgeDialog } from './EdgeDialogs';
+import BpNodeInspector from './BpNodeInspector';
 
 // Unified flow viewer (#362, UI rework). Renders any source of the unified
 // orchestration graph — live agents, a draft bundle, or a BriefingPack
-// directory — through the rich BP-Explorer-style renderer: expandable node
-// cards with the prompt/Content panel, parent-child hierarchy, data flow, and
-// the process-linking edges.
+// directory — through the rich BP-Explorer-style renderer.
 //
-// For a BriefingPack source the graph is editable: the Content/prompt panel
-// writes back to brief.md (body), and dragging the node port wires a dependency
-// or data-flow link — both committed to brief.md via bp-explorer (Phase D).
+// For a BriefingPack source the graph is editable, consistent with the process
+// flows: selecting a node opens a right-side inspector (prompt, stage, link
+// removal) and dragging the node port wires a dependency / data-flow link —
+// all committed to brief.md via bp-explorer (Phase D).
 //
 //   <FlowGraph workspace="/workspace/agents/<id>/<briefingsPath>" />  // BP source
 //   <FlowGraph team="acme" />                                        // live, scoped
@@ -22,6 +22,7 @@ export function FlowGraph({ workspace, team }) {
   const nodesRef = useRef([]);
   const [error, setError] = useState(null);
   const [connectPair, setConnectPair] = useState(null); // { from, to } (BP only)
+  const [selectedId, setSelectedId] = useState(null);    // node inspector (BP only)
 
   const bpOps = useMemo(() => (workspace ? makeBpOps(workspace) : null), [workspace]);
 
@@ -38,29 +39,26 @@ export function FlowGraph({ workspace, team }) {
       .catch((err) => setError(err.message || 'Failed to load graph'));
   }, [workspace, team]);
 
-  // Mount the renderer once per source. BP sources are editable.
+  // Mount the renderer once per source. BP sources are editable, but prompt /
+  // stage editing happens in the right inspector (not inline) — consistent with
+  // the process flows. The node port still wires links (connect-to-wire).
   useEffect(() => {
     if (!viewportRef.current) return undefined;
     const editable = !!bpOps;
     const g = initFlowGraph(viewportRef.current, {
-      onSelectNode: () => {},
+      onSelectNode: (id) => setSelectedId(id),
       onConnect: editable ? (from, to) => setConnectPair({ from, to }) : undefined,
-      onSaveContent: bpOps
-        ? async (id, text) => { await bpOps.setPrompt(id, text); load(); }
-        : undefined,
-      onSetStage: bpOps
-        ? async (id, stage) => { await bpOps.setStage(id, stage); load(); }
-        : undefined,
     });
     apiRef.current = g;
-    g.setEditable(editable);        // connect-to-wire port (BP)
-    g.setContentEditable(editable); // inline prompt panel (BP)
+    g.setEditable(editable);     // connect-to-wire port (BP)
+    g.setContentEditable(false); // editing is in the inspector, not inline
     return () => { g.cleanup(); apiRef.current = null; };
   }, [bpOps]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { load(); }, [load]);
 
   const nodeName = (id) => (nodesRef.current.find(n => n.id === id)?.displayName) || id;
+  const selectedNode = bpOps ? nodesRef.current.find(n => n.id === selectedId) : null;
 
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative' }}>
@@ -74,6 +72,16 @@ export function FlowGraph({ workspace, team }) {
         }}>
           Could not load flow: {error}
         </div>
+      )}
+      {selectedNode && (
+        <BpNodeInspector
+          key={selectedNode.id}
+          node={selectedNode}
+          nodes={nodesRef.current}
+          ops={bpOps}
+          onClose={() => { setSelectedId(null); apiRef.current?.setSelected(null); }}
+          onChanged={load}
+        />
       )}
       {connectPair && bpOps && (
         <CreateEdgeDialog

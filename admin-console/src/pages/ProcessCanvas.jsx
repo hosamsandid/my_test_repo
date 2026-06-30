@@ -138,9 +138,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
     const ed = isDraft ? true : (!imported && displayGraph.level !== 'template');
     editableRef.current = ed;
     graphRef.current.setEditable(ed);
-    // Inline prompt editing only for drafts (live agents have no prompt write
-    // path; BP write-back is Phase D).
-    graphRef.current.setContentEditable(isDraft);
+    // Prompt/stage editing happens in the right inspector (DraftNodeInspector),
+    // not inline — consistent with BP flows. Inline content editing stays off.
+    graphRef.current.setContentEditable(false);
     graphRef.current.setData(displayGraph);
   }, [displayGraph, imported, isDraft]);
 

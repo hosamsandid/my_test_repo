@@ -9,6 +9,7 @@ import SidePanel from '../../components/SidePanel';
 export default function DraftNodeInspector({ role, roles = [], ops, onClose, onDeleted, onChanged }) {
   const [name, setName] = useState(role.displayName || role.id);
   const [prompt, setPrompt] = useState(role.systemPrompt || '');
+  const [stage, setStage] = useState(role.stage || '');
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -21,6 +22,7 @@ export default function DraftNodeInspector({ role, roles = [], ops, onClose, onD
     try {
       if (name !== role.displayName) await ops.renameRole(role.id, name);
       if (prompt !== (role.systemPrompt || '')) await ops.setPrompt(role.id, prompt);
+      if (stage !== (role.stage || '') && ops.setStage) await ops.setStage(role.id, stage);
       setSaved(true); onChanged?.();
     } finally { setBusy(false); }
   }
@@ -49,6 +51,10 @@ export default function DraftNodeInspector({ role, roles = [], ops, onClose, onD
           <textarea value={prompt} onChange={e => { setPrompt(e.target.value); setSaved(false); }}
             placeholder="What this role does, its responsibilities and tone…"
             style={{ ...input, minHeight: 220, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', lineHeight: 1.5 }} />
+        </Field>
+        <Field label="Stage (optional)">
+          <input value={stage} onChange={e => { setStage(e.target.value); setSaved(false); }}
+            placeholder="e.g. Build" style={input} />
         </Field>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
           <button onClick={saveMeta} disabled={busy} style={primary}>

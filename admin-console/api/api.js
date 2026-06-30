@@ -39,6 +39,9 @@ const MCP_SERVERS_DIR = path.join(WORKSPACE, 'mcp-servers');
 const MCP_CREDENTIALS_DIR = path.join(WORKSPACE, 'mcp-credentials');
 const MCP_CREDENTIALS_KEYS_DIR = path.join(MCP_CREDENTIALS_DIR, '_keys');
 const MCP_CREDENTIALS_INDEX = path.join(MCP_CREDENTIALS_KEYS_DIR, 'index.json');
+// Teams data model (#299): resources are owned by exactly one human Team.
+const TEAMS_INDEX = path.join(WORKSPACE, 'teams', 'index.json');
+const DEFAULT_TEAM_ID = 'default';
 const STATIC_DIR = path.join(__dirname, '..', 'dist');
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 const BP_EXPLORER_URL = process.env.BP_EXPLORER_URL || 'http://bp-explorer:8765';
@@ -68,6 +71,10 @@ const AGENT_ID_RE = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/;
 const SSH_KEY_ID_RE = /^[a-z0-9-]+$/;
 const GH_TOKEN_ID_RE = /^[a-z0-9-]+$/;
 const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
+// Blueprint id / memory-file path params (proxied into the orchestrator URL).
+// Allowlist guards (no separators, no '..') sanitize the values for the URL path.
+const BP_PARAM_RE = /^[a-zA-Z0-9_-]+$/;
+const BP_FILE_RE = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/;
 
 // Rate limiter for the coordinator-workflow endpoints — uses express-rate-limit
 // rather than a hand-rolled bucket so that CodeQL's js/missing-rate-limiting
@@ -167,9 +174,12 @@ function podmanRequest(method, urlPath) {
 }
 
 function readJsonFile(filePath, fallback = null) {
-  if (typeof filePath !== 'string' ||
-      filePath.includes('..') ||
-      !(filePath.startsWith(WORKSPACE + path.sep) ||
+  if (typeof filePath !== 'string') return fallback;
+  // Confine reads: reject traversal and require the path to sit under an
+  // allowed root. The reads in this stack are always built from trusted
+  // constants joined with id segments that the route handlers validate.
+  if (filePath.includes('..')) return fallback;
+  if (!(filePath.startsWith(WORKSPACE + path.sep) ||
         filePath.startsWith(POOL_DIR + path.sep) ||
         filePath.startsWith(CONTROL_DIR + path.sep))) {
     return fallback;
@@ -179,6 +189,20 @@ function readJsonFile(filePath, fallback = null) {
   } catch {
     return fallback;
   }
+}
+
+// Resolve the owning (human) Team for a newly created resource (#299). An
+// explicit id must reference an existing team; absence falls back to the
+// default team. Throws a 400-tagged error for an unknown team.
+function resolveOwnerTeamId(teamId) {
+  if (!teamId) return DEFAULT_TEAM_ID;
+  const teams = readJsonFile(TEAMS_INDEX, []);
+  if (!Array.isArray(teams) || !teams.some(t => t.id === teamId)) {
+    const err = new Error(`Owning team '${teamId}' not found`);
+    err.status = 400;
+    throw err;
+  }
+  return teamId;
 }
 
 function listAgentDirs() {
@@ -223,7 +247,9 @@ function normalizeEnvironmentRepositories(env) {
 }
 
 function saveEnvironment(envId, data) {
-  const dir = path.join(ENVIRONMENTS_DIR, envId);
+  // path.basename strips any separator — the explicit call is what CodeQL
+  // recognises as a path-injection sanitizer for the env-id path segment.
+  const dir = path.join(ENVIRONMENTS_DIR, path.basename(String(envId)));
   fs.mkdirSync(dir, { recursive: true });
   writeJsonAtomic(path.join(dir, 'environment.json'), data);
 }
@@ -241,10 +267,19 @@ function saveSshKeysIndex(keys) {
 // (PKCS1, PKCS8, ...). Algorithm-agnostic: the caller doesn't need to know
 // whether the key is ed25519, rsa, ecdsa — the blob is the first key entry.
 function extractOpensshPubBlob(pem) {
-  const m = String(pem || '').match(/-----BEGIN OPENSSH PRIVATE KEY-----\s*([\s\S]*?)\s*-----END OPENSSH PRIVATE KEY-----/);
-  if (!m) return null;
+  // Linear indexOf/slice instead of a regex: a lazy `[\s\S]*?` between two
+  // literals backtracks polynomially when the END marker is absent
+  // (CodeQL js/polynomial-redos). indexOf scanning is O(n) and avoids it.
+  const s = String(pem || '');
+  const BEGIN = '-----BEGIN OPENSSH PRIVATE KEY-----';
+  const END = '-----END OPENSSH PRIVATE KEY-----';
+  const start = s.indexOf(BEGIN);
+  if (start === -1) return null;
+  const bodyStart = start + BEGIN.length;
+  const end = s.indexOf(END, bodyStart);
+  if (end === -1) return null;
   let buf;
-  try { buf = Buffer.from(m[1].replace(/\s+/g, ''), 'base64'); } catch { return null; }
+  try { buf = Buffer.from(s.slice(bodyStart, end).replace(/\s+/g, ''), 'base64'); } catch { return null; }
   const magic = Buffer.from('openssh-key-v1\0', 'utf8');
   if (buf.length < magic.length || !buf.subarray(0, magic.length).equals(magic)) return null;
   let off = magic.length;
@@ -1327,7 +1362,7 @@ app.post('/api/agents/:teamId/members', heavyLimiter, async (req, res) => {
 });
 
 app.post('/api/agents', heavyLimiter, async (req, res) => {
-  const { id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt, briefingsPath } = req.body;
+  const { id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt, briefingsPath, teamId } = req.body;
   if (!id || !displayName || !role || !environmentId) {
     return res.status(400).json({ error: 'id, displayName, role, environmentId required' });
   }
@@ -1344,7 +1379,7 @@ app.post('/api/agents', heavyLimiter, async (req, res) => {
     const resp = await fetch(`${orchestratorUrl}/internal/agents`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt, briefingsPath }),
+      body: JSON.stringify({ id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt, briefingsPath, teamId }),
     });
     const data = await resp.json();
     if (!resp.ok) return res.status(resp.status).json(data);
@@ -2402,9 +2437,12 @@ app.get('/api/llm-endpoints/:id', (req, res) => {
 });
 
 app.post('/api/llm-endpoints', apiLimiter, (req, res) => {
-  const { name, baseUrl, authToken, models, defaultModelId, id: rawId } = req.body || {};
+  const { name, baseUrl, authToken, models, defaultModelId, id: rawId, teamId } = req.body || {};
   if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
   if (!baseUrl || typeof baseUrl !== 'string') return res.status(400).json({ error: 'baseUrl is required' });
+  let ownerTeamId;
+  try { ownerTeamId = resolveOwnerTeamId(teamId); }
+  catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
   try { new URL(baseUrl); } catch { return res.status(400).json({ error: 'baseUrl must be a valid URL' }); }
   const modelList = Array.isArray(models) ? models : [];
   const modelErr = validateModels(modelList);
@@ -2439,6 +2477,7 @@ app.post('/api/llm-endpoints', apiLimiter, (req, res) => {
   const entry = {
     id,
     name,
+    teamId: ownerTeamId,
     baseUrl,
     authTokenId,
     models: normalizedModels,
@@ -2784,9 +2823,12 @@ app.get('/api/mcp-credentials', (req, res) => {
 });
 
 app.post('/api/mcp-credentials', apiLimiter, (req, res) => {
-  const { name, serverId, secret, id: rawId } = req.body || {};
+  const { name, serverId, secret, id: rawId, teamId } = req.body || {};
   if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
   if (!secret || typeof secret !== 'string') return res.status(400).json({ error: 'secret (string) is required' });
+  let ownerTeamId;
+  try { ownerTeamId = resolveOwnerTeamId(teamId); }
+  catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
   if (serverId !== undefined && serverId !== null && !MCP_SERVER_ID_RE.test(serverId)) {
     return res.status(400).json({ error: 'Invalid serverId' });
   }
@@ -2810,7 +2852,7 @@ app.post('/api/mcp-credentials', apiLimiter, (req, res) => {
   if (!MCP_CREDENTIAL_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid credential id' });
 
   const mcpCredsRoot = path.resolve(MCP_CREDENTIALS_KEYS_DIR);
-  const credPath = path.resolve(mcpCredsRoot, id);
+  const credPath = path.resolve(mcpCredsRoot, path.basename(id));
   if (credPath !== mcpCredsRoot && !credPath.startsWith(mcpCredsRoot + path.sep)) {
     return res.status(400).json({ error: 'Invalid credential id' });
   }
@@ -2820,6 +2862,7 @@ app.post('/api/mcp-credentials', apiLimiter, (req, res) => {
   const entry = {
     id,
     name,
+    teamId: ownerTeamId,
     serverId: serverId || null,
     fingerprint: mcpCredentialFingerprint(secret),
     createdAt: new Date().toISOString(),
@@ -2968,6 +3011,52 @@ function normalizeMcpServersInput(input) {
   return cleaned;
 }
 
+/* ─── Teams data model (#299) ───────────────────────────────────────────
+ * Thin proxy onto the orchestrator's /internal/admin/* surface, which owns the
+ * Team / user / membership store. These are the *human* Team endpoints — the
+ * tenant/visibility scope — distinct from the Agent-Team wizard at POST
+ * /api/teams. Auth & list-filtering are deliberately out of scope here.
+ */
+function proxyAdmin(req, res, subPath) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  const init = { method: req.method, headers: { 'Content-Type': 'application/json' } };
+  if (req.method === 'POST' || req.method === 'PUT') {
+    init.body = JSON.stringify(req.body || {});
+  }
+  return fetch(`${orchestratorUrl}/internal/admin/${subPath}`, init)
+    .then(async (resp) => {
+      const text = await resp.text();
+      const data = text ? JSON.parse(text) : {};
+      res.status(resp.status).json(data);
+    })
+    .catch((err) => res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` }));
+}
+
+function adminQuery(req) {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(req.query || {})) {
+    if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
+  }
+  const s = qs.toString();
+  return s ? `?${s}` : '';
+}
+
+app.get('/api/admin/teams', (req, res) => proxyAdmin(req, res, 'teams'));
+app.post('/api/admin/teams', apiLimiter, (req, res) => proxyAdmin(req, res, 'teams'));
+app.get('/api/admin/teams/:id', (req, res) => proxyAdmin(req, res, `teams/${encodeURIComponent(req.params.id)}`));
+app.put('/api/admin/teams/:id', apiLimiter, (req, res) => proxyAdmin(req, res, `teams/${encodeURIComponent(req.params.id)}`));
+app.delete('/api/admin/teams/:id', apiLimiter, (req, res) => proxyAdmin(req, res, `teams/${encodeURIComponent(req.params.id)}`));
+
+app.get('/api/admin/users', (req, res) => proxyAdmin(req, res, `users${adminQuery(req)}`));
+app.post('/api/admin/users', apiLimiter, (req, res) => proxyAdmin(req, res, 'users'));
+app.get('/api/admin/users/:id', (req, res) => proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}`));
+app.put('/api/admin/users/:id', apiLimiter, (req, res) => proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}`));
+app.delete('/api/admin/users/:id', apiLimiter, (req, res) => proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}`));
+
+app.get('/api/admin/memberships', (req, res) => proxyAdmin(req, res, `memberships${adminQuery(req)}`));
+app.post('/api/admin/memberships', apiLimiter, (req, res) => proxyAdmin(req, res, 'memberships'));
+app.delete('/api/admin/memberships', apiLimiter, (req, res) => proxyAdmin(req, res, `memberships${adminQuery(req)}`));
+
 app.get('/api/environments', (req, res) => {
   const envs = listEnvironmentIds().map(loadEnvironment).filter(Boolean);
   res.json(envs);
@@ -3002,11 +3091,15 @@ function resolveLlmBinding(llmEndpointId, defaultModelId) {
 }
 
 app.post('/api/environments', heavyLimiter, (req, res) => {
-  const { name, description, skills, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers } = req.body || {};
+  const { name, description, skills, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers, teamId } = req.body || {};
   const id = normalizeEnvId(req.body?.id);
   if (!id) return res.status(400).json({ error: 'id is required (a-z, 0-9, -)' });
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (loadEnvironment(id)) return res.status(409).json({ error: `Environment '${id}' already exists` });
+
+  let ownerTeamId;
+  try { ownerTeamId = resolveOwnerTeamId(teamId); }
+  catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
 
   let normalizedRepos;
   try {
@@ -3037,6 +3130,7 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
     id,
     name,
     description: description || '',
+    teamId: ownerTeamId,
     skills: Array.isArray(skills) ? skills : [],
     repositories: normalizedRepos,
     githubTokenId: githubTokenId || null,
@@ -3053,13 +3147,18 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
 app.put('/api/environments/:id', apiLimiter, (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
-  const { name, description, skills, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers } = req.body || {};
+  const { name, description, skills, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers, teamId } = req.body || {};
 
   if (githubTokenId) {
     const tokens = listGithubTokens();
     if (!tokens.some(t => t.id === githubTokenId)) {
       return res.status(400).json({ error: `GitHub token '${githubTokenId}' not found` });
     }
+  }
+
+  if (teamId !== undefined) {
+    try { env.teamId = resolveOwnerTeamId(teamId); }
+    catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
   }
 
   // Only re-validate the LLM binding if either field was explicitly sent.
@@ -4453,6 +4552,8 @@ app.post('/api/blueprints/:id/instances', heavyLimiter, async (req, res) => {
   if (!instanceId || !displayName) {
     return res.status(400).json({ error: 'instanceId and displayName required' });
   }
+  const bpId = req.params.id;
+  if (!BP_PARAM_RE.test(bpId)) return res.status(400).json({ error: 'invalid blueprint id' });
   const normalizedId = instanceId.toLowerCase().replace(/[^a-z0-9-]/g, '');
   if (!normalizedId) {
     return res.status(400).json({ error: 'instanceId must contain at least one valid character (a-z, 0-9, -)' });
@@ -4460,7 +4561,7 @@ app.post('/api/blueprints/:id/instances', heavyLimiter, async (req, res) => {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(
-      `${orchestratorUrl}/internal/blueprints/${encodeURIComponent(req.params.id)}/instances`,
+      `${orchestratorUrl}/internal/blueprints/${encodeURIComponent(bpId)}/instances`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4475,10 +4576,15 @@ app.post('/api/blueprints/:id/instances', heavyLimiter, async (req, res) => {
 });
 
 app.get('/api/blueprints/:id/memory/:file', apiLimiter, async (req, res) => {
+  const bpId = req.params.id;
+  const bpFile = req.params.file;
+  if (!BP_PARAM_RE.test(bpId) || !BP_FILE_RE.test(bpFile)) {
+    return res.status(400).json({ error: 'invalid blueprint id or file' });
+  }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(
-      `${orchestratorUrl}/internal/blueprints/${encodeURIComponent(req.params.id)}/memory/${encodeURIComponent(req.params.file)}`
+      `${orchestratorUrl}/internal/blueprints/${encodeURIComponent(bpId)}/memory/${encodeURIComponent(bpFile)}`
     );
     if (!resp.ok) return res.status(resp.status).json({ error: 'Not found' });
     const content = await resp.text();
@@ -4489,10 +4595,15 @@ app.get('/api/blueprints/:id/memory/:file', apiLimiter, async (req, res) => {
 });
 
 app.put('/api/blueprints/:id/memory/:file', apiLimiter, express.text({ type: '*/*' }), async (req, res) => {
+  const bpId = req.params.id;
+  const bpFile = req.params.file;
+  if (!BP_PARAM_RE.test(bpId) || !BP_FILE_RE.test(bpFile)) {
+    return res.status(400).json({ error: 'invalid blueprint id or file' });
+  }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(
-      `${orchestratorUrl}/internal/blueprints/${encodeURIComponent(req.params.id)}/memory/${encodeURIComponent(req.params.file)}`,
+      `${orchestratorUrl}/internal/blueprints/${encodeURIComponent(bpId)}/memory/${encodeURIComponent(bpFile)}`,
       {
         method: 'PUT',
         headers: { 'Content-Type': 'text/plain' },
@@ -4514,11 +4625,14 @@ app.get('/api/ssh-keys', (req, res) => {
 });
 
 app.post('/api/ssh-keys', apiLimiter, (req, res) => {
-  const { name, privateKey, id: rawId } = req.body || {};
+  const { name, privateKey, id: rawId, teamId } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (!privateKey || typeof privateKey !== 'string') {
     return res.status(400).json({ error: 'privateKey (string) is required' });
   }
+  let ownerTeamId;
+  try { ownerTeamId = resolveOwnerTeamId(teamId); }
+  catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
   const trimmed = privateKey.trim();
   if (!/-----BEGIN [A-Z ]+PRIVATE KEY-----/.test(trimmed)) {
     return res.status(400).json({ error: 'privateKey does not look like an SSH private key' });
@@ -4543,13 +4657,14 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
   // recognises as a path-injection sanitizer.
   if (!SSH_KEY_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid ssh key id' });
 
-  const keyPath = path.join(SSH_KEYS_DIR, id);
+  const keyPath = path.join(SSH_KEYS_DIR, path.basename(id));
   fs.writeFileSync(keyPath, trimmed.endsWith('\n') ? trimmed : trimmed + '\n', { mode: 0o600 });
   try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
 
   const entry = {
     id,
     name,
+    teamId: ownerTeamId,
     fingerprint: sshKeyFingerprint(trimmed),
     createdAt: new Date().toISOString(),
   };
@@ -4560,10 +4675,13 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
 // Server-side keypair generation. Returns the public key once so the user
 // can paste it into GitHub; the private key never leaves the workspace.
 app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
-  const { name, comment, id: rawId } = req.body || {};
+  const { name, comment, id: rawId, teamId } = req.body || {};
   if (!name || typeof name !== 'string') {
     return res.status(400).json({ error: 'name is required' });
   }
+  let ownerTeamId;
+  try { ownerTeamId = resolveOwnerTeamId(teamId); }
+  catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
   const existing = listSshKeys();
   let id;
   if (rawId !== undefined && rawId !== null && String(rawId).trim() !== '') {
@@ -4584,13 +4702,14 @@ app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
   // Inline regex test directly before path.join so CodeQL recognises the
   // path-injection sanitizer (same pattern as POST /api/ssh-keys above).
   if (!SSH_KEY_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid ssh key id' });
-  const keyPath = path.join(SSH_KEYS_DIR, id);
+  const keyPath = path.join(SSH_KEYS_DIR, path.basename(id));
   fs.writeFileSync(keyPath, privText, { mode: 0o600 });
   try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
 
   const entry = {
     id,
     name,
+    teamId: ownerTeamId,
     fingerprint: sshFingerprintFromPubBlob(pubBlob),
     createdAt: new Date().toISOString(),
   };
@@ -4607,7 +4726,7 @@ app.delete('/api/ssh-keys/:id', apiLimiter, (req, res) => {
   if (usedBy) {
     return res.status(409).json({ error: `SSH key is used by environment '${usedBy}'. Detach it first.` });
   }
-  try { fs.unlinkSync(path.join(SSH_KEYS_DIR, id)); } catch { /* ignore */ }
+  try { fs.unlinkSync(path.join(SSH_KEYS_DIR, path.basename(id))); } catch { /* ignore */ }
   saveSshKeysIndex(keys.filter(k => k.id !== id));
   res.status(204).end();
 });
@@ -4620,11 +4739,14 @@ app.get('/api/github-tokens', (req, res) => {
 });
 
 app.post('/api/github-tokens', apiLimiter, (req, res) => {
-  const { name, token, id: rawId } = req.body || {};
+  const { name, token, id: rawId, teamId } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (!token || typeof token !== 'string') {
     return res.status(400).json({ error: 'token (string) is required' });
   }
+  let ownerTeamId;
+  try { ownerTeamId = resolveOwnerTeamId(teamId); }
+  catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
   const trimmed = token.trim();
   if (!/^(github_pat_|ghp_|gho_|ghs_|ghu_|ghr_)[A-Za-z0-9_]{20,}$/.test(trimmed)) {
     return res.status(400).json({
@@ -4647,13 +4769,14 @@ app.post('/api/github-tokens', apiLimiter, (req, res) => {
   }
   if (!GH_TOKEN_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid token id' });
 
-  const tokenPath = path.join(GH_TOKENS_DIR, id);
+  const tokenPath = path.join(GH_TOKENS_DIR, path.basename(id));
   fs.writeFileSync(tokenPath, trimmed, { mode: 0o600 });
   try { fs.chmodSync(tokenPath, 0o600); } catch { /* best effort */ }
 
   const entry = {
     id,
     name,
+    teamId: ownerTeamId,
     preview: githubTokenPreview(trimmed),
     fingerprint: githubTokenFingerprint(trimmed),
     createdAt: new Date().toISOString(),
@@ -4671,7 +4794,7 @@ app.delete('/api/github-tokens/:id', apiLimiter, (req, res) => {
   if (usedBy) {
     return res.status(409).json({ error: `GitHub token is used by environment '${usedBy}'. Detach it first.` });
   }
-  try { fs.unlinkSync(path.join(GH_TOKENS_DIR, id)); } catch { /* ignore */ }
+  try { fs.unlinkSync(path.join(GH_TOKENS_DIR, path.basename(id))); } catch { /* ignore */ }
   saveGithubTokensIndex(tokens.filter(t => t.id !== id));
   res.status(204).end();
 });

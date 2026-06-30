@@ -1,0 +1,342 @@
+'use strict';
+
+// ============================================================
+// Teams data model (#299)
+// ============================================================
+//
+// A **Team** here is the *human* collaboration & visibility scope — the
+// tenant. It is deliberately distinct from the existing `role: "team"` agent
+// construct (the "Agent Team" / squad that works a repo); the two only share a
+// word. Every agent construct, Working Environment and credential is owned by
+// exactly one Team via a `teamId` field stamped onto its record.
+//
+// This module is the single source of truth for the three persistent
+// collections that back the model:
+//
+//   /workspace/teams/index.json        [{ id, name, description, createdAt, updatedAt }]
+//   /workspace/users/index.json        [{ id, subject, email, displayName, systemAdmin, createdAt, updatedAt }]
+//   /workspace/memberships/index.json  [{ id, userId, teamId, role, createdAt }]
+//
+// Roles:
+//   - System Admin  — global, modeled as `user.systemAdmin === true` (NOT a membership)
+//   - Team Admin    — per-team, membership.role === "team-admin"
+//   - Team Member   — per-team, membership.role === "team-member"
+//
+// A human may hold different per-team roles in different teams. Membership is
+// at most one record per (userId, teamId) — re-asserting it updates the role.
+//
+// The module is a pure factory (`createTeamsStore({ root })`) with no global
+// state so it can be unit-tested against a temp directory. Writes are atomic
+// (write-temp + rename). Auth, list-endpoint filtering and UI are explicitly
+// out of scope here (separate issues) — this is the data model only.
+
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+const DEFAULT_TEAM_ID = 'default';
+const DEFAULT_TEAM_NAME = 'Default Team';
+
+const MEMBERSHIP_ROLES = Object.freeze(['team-admin', 'team-member']);
+
+// A team id is an operator-facing slug, same rules as Working Environment ids.
+const TEAM_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function isNonEmptyString(v) {
+  return typeof v === 'string' && v.trim().length > 0;
+}
+
+function createTeamsStore({ root } = {}) {
+  if (!isNonEmptyString(root)) {
+    throw new Error('createTeamsStore: { root } is required');
+  }
+
+  const TEAMS_INDEX = path.join(root, 'teams', 'index.json');
+  const USERS_INDEX = path.join(root, 'users', 'index.json');
+  const MEMBERSHIPS_INDEX = path.join(root, 'memberships', 'index.json');
+
+  // ---- low-level IO -------------------------------------------------------
+
+  function readArray(file) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      return Array.isArray(raw) ? raw : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function writeArray(file, arr) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(arr, null, 2));
+    fs.renameSync(tmp, file);
+  }
+
+  // ---- teams --------------------------------------------------------------
+
+  function listTeams() {
+    return readArray(TEAMS_INDEX);
+  }
+
+  function getTeam(id) {
+    return listTeams().find(t => t.id === id) || null;
+  }
+
+  function createTeam({ id, name, description } = {}) {
+    if (!isNonEmptyString(id) || !TEAM_ID_RE.test(id)) {
+      throw badRequest('team id is required (a-z, 0-9, -; must start alphanumeric)');
+    }
+    if (!isNonEmptyString(name)) {
+      throw badRequest('team name is required');
+    }
+    const teams = listTeams();
+    if (teams.some(t => t.id === id)) {
+      throw conflict(`Team '${id}' already exists`);
+    }
+    const team = {
+      id,
+      name: name.trim(),
+      description: isNonEmptyString(description) ? description.trim() : '',
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    teams.push(team);
+    writeArray(TEAMS_INDEX, teams);
+    return team;
+  }
+
+  function updateTeam(id, patch = {}) {
+    const teams = listTeams();
+    const idx = teams.findIndex(t => t.id === id);
+    if (idx === -1) throw notFound(`Team '${id}' not found`);
+    const team = teams[idx];
+    if (patch.name !== undefined) {
+      if (!isNonEmptyString(patch.name)) throw badRequest('team name cannot be empty');
+      team.name = patch.name.trim();
+    }
+    if (patch.description !== undefined) {
+      team.description = isNonEmptyString(patch.description) ? patch.description.trim() : '';
+    }
+    team.updatedAt = nowIso();
+    teams[idx] = team;
+    writeArray(TEAMS_INDEX, teams);
+    return team;
+  }
+
+  // Deletes a team and cascades its memberships. Refuses to delete the default
+  // team. Resource-ownership guarding (does any agent/env/credential still
+  // belong to this team?) lives in the caller, which knows about those
+  // collections — the store only owns teams/users/memberships.
+  function deleteTeam(id) {
+    if (id === DEFAULT_TEAM_ID) {
+      throw conflict('The default team cannot be deleted');
+    }
+    const teams = listTeams();
+    const idx = teams.findIndex(t => t.id === id);
+    if (idx === -1) throw notFound(`Team '${id}' not found`);
+    teams.splice(idx, 1);
+    writeArray(TEAMS_INDEX, teams);
+    // cascade memberships
+    const memberships = readArray(MEMBERSHIPS_INDEX);
+    const remaining = memberships.filter(m => m.teamId !== id);
+    if (remaining.length !== memberships.length) {
+      writeArray(MEMBERSHIPS_INDEX, remaining);
+    }
+    return { id, deleted: true };
+  }
+
+  // ---- users --------------------------------------------------------------
+
+  function listUsers() {
+    return readArray(USERS_INDEX);
+  }
+
+  function getUser(id) {
+    return listUsers().find(u => u.id === id) || null;
+  }
+
+  // The `subject` is the stable identifier from the (future) IdP — e.g. the
+  // OIDC subject claim or the corporate email. It is unique per user so that
+  // SSO login can map a corporate identity onto exactly one account.
+  function getUserBySubject(subject) {
+    if (!isNonEmptyString(subject)) return null;
+    const s = subject.trim().toLowerCase();
+    return listUsers().find(u => (u.subject || '').toLowerCase() === s) || null;
+  }
+
+  function createUser({ subject, email, displayName, systemAdmin } = {}) {
+    if (!isNonEmptyString(subject)) {
+      throw badRequest('user subject is required');
+    }
+    if (getUserBySubject(subject)) {
+      throw conflict(`User with subject '${subject}' already exists`);
+    }
+    const users = listUsers();
+    const user = {
+      id: crypto.randomUUID(),
+      subject: subject.trim(),
+      email: isNonEmptyString(email) ? email.trim() : '',
+      displayName: isNonEmptyString(displayName) ? displayName.trim() : subject.trim(),
+      systemAdmin: systemAdmin === true,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    users.push(user);
+    writeArray(USERS_INDEX, users);
+    return user;
+  }
+
+  function updateUser(id, patch = {}) {
+    const users = listUsers();
+    const idx = users.findIndex(u => u.id === id);
+    if (idx === -1) throw notFound(`User '${id}' not found`);
+    const user = users[idx];
+    if (patch.email !== undefined) {
+      user.email = isNonEmptyString(patch.email) ? patch.email.trim() : '';
+    }
+    if (patch.displayName !== undefined) {
+      if (!isNonEmptyString(patch.displayName)) throw badRequest('displayName cannot be empty');
+      user.displayName = patch.displayName.trim();
+    }
+    if (patch.systemAdmin !== undefined) {
+      user.systemAdmin = patch.systemAdmin === true;
+    }
+    user.updatedAt = nowIso();
+    users[idx] = user;
+    writeArray(USERS_INDEX, users);
+    return user;
+  }
+
+  // Deletes a user and cascades their memberships.
+  function deleteUser(id) {
+    const users = listUsers();
+    const idx = users.findIndex(u => u.id === id);
+    if (idx === -1) throw notFound(`User '${id}' not found`);
+    users.splice(idx, 1);
+    writeArray(USERS_INDEX, users);
+    const memberships = readArray(MEMBERSHIPS_INDEX);
+    const remaining = memberships.filter(m => m.userId !== id);
+    if (remaining.length !== memberships.length) {
+      writeArray(MEMBERSHIPS_INDEX, remaining);
+    }
+    return { id, deleted: true };
+  }
+
+  // ---- memberships --------------------------------------------------------
+
+  function listMemberships({ userId, teamId } = {}) {
+    let list = readArray(MEMBERSHIPS_INDEX);
+    if (userId) list = list.filter(m => m.userId === userId);
+    if (teamId) list = list.filter(m => m.teamId === teamId);
+    return list;
+  }
+
+  // Upsert: at most one membership per (userId, teamId). Re-asserting updates
+  // the role in place rather than creating a duplicate.
+  function setMembership({ userId, teamId, role } = {}) {
+    if (!isNonEmptyString(userId)) throw badRequest('userId is required');
+    if (!isNonEmptyString(teamId)) throw badRequest('teamId is required');
+    if (!MEMBERSHIP_ROLES.includes(role)) {
+      throw badRequest(`role must be one of: ${MEMBERSHIP_ROLES.join(', ')}`);
+    }
+    if (!getUser(userId)) throw notFound(`User '${userId}' not found`);
+    if (!getTeam(teamId)) throw notFound(`Team '${teamId}' not found`);
+
+    const memberships = readArray(MEMBERSHIPS_INDEX);
+    const existing = memberships.find(m => m.userId === userId && m.teamId === teamId);
+    if (existing) {
+      existing.role = role;
+      writeArray(MEMBERSHIPS_INDEX, memberships);
+      return existing;
+    }
+    const membership = {
+      id: crypto.randomUUID(),
+      userId,
+      teamId,
+      role,
+      createdAt: nowIso(),
+    };
+    memberships.push(membership);
+    writeArray(MEMBERSHIPS_INDEX, memberships);
+    return membership;
+  }
+
+  function removeMembership({ userId, teamId } = {}) {
+    const memberships = readArray(MEMBERSHIPS_INDEX);
+    const remaining = memberships.filter(m => !(m.userId === userId && m.teamId === teamId));
+    if (remaining.length === memberships.length) {
+      throw notFound(`No membership for user '${userId}' in team '${teamId}'`);
+    }
+    writeArray(MEMBERSHIPS_INDEX, remaining);
+    return { userId, teamId, deleted: true };
+  }
+
+  // ---- bootstrap ----------------------------------------------------------
+
+  // Idempotent: guarantees the default team exists. Every resource that lacks
+  // an explicit owner falls back to this team, so it must always be present.
+  function ensureDefaultTeam() {
+    const existing = getTeam(DEFAULT_TEAM_ID);
+    if (existing) return existing;
+    const teams = listTeams();
+    const team = {
+      id: DEFAULT_TEAM_ID,
+      name: DEFAULT_TEAM_NAME,
+      description: 'Auto-created default team. All resources without an explicit owner belong here.',
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    teams.push(team);
+    writeArray(TEAMS_INDEX, teams);
+    return team;
+  }
+
+  // Idempotent: ensures a global System Admin exists for the given subject,
+  // creating the user (or promoting an existing one) if necessary. Used to
+  // seed an initial operator from environment config so a fresh stack isn't
+  // left with zero admins. Returns null when no subject is supplied.
+  function ensureSystemAdmin({ subject, email, displayName } = {}) {
+    if (!isNonEmptyString(subject)) return null;
+    const existing = getUserBySubject(subject);
+    if (existing) {
+      if (!existing.systemAdmin) return updateUser(existing.id, { systemAdmin: true });
+      return existing;
+    }
+    return createUser({ subject, email, displayName, systemAdmin: true });
+  }
+
+  return {
+    DEFAULT_TEAM_ID,
+    MEMBERSHIP_ROLES,
+    listTeams, getTeam, createTeam, updateTeam, deleteTeam,
+    listUsers, getUser, getUserBySubject, createUser, updateUser, deleteUser,
+    listMemberships, setMembership, removeMembership,
+    ensureDefaultTeam, ensureSystemAdmin,
+  };
+}
+
+// ---- typed errors ---------------------------------------------------------
+// `statusHint` lets the HTTP layer map store errors to status codes without
+// string-matching messages.
+
+function tagged(message, statusHint) {
+  const err = new Error(message);
+  err.statusHint = statusHint;
+  return err;
+}
+function badRequest(m) { return tagged(m, 400); }
+function notFound(m) { return tagged(m, 404); }
+function conflict(m) { return tagged(m, 409); }
+
+module.exports = {
+  createTeamsStore,
+  DEFAULT_TEAM_ID,
+  DEFAULT_TEAM_NAME,
+  MEMBERSHIP_ROLES,
+  TEAM_ID_RE,
+};

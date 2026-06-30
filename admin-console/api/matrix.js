@@ -110,7 +110,10 @@ function getAgentToken(agentId) {
   if (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId)) {
     throw new Error(`Invalid agent id: ${String(agentId).slice(0, 80)}`);
   }
-  const cfgPath = path.join(AGENTS_DIR, agentId, 'config.json');
+  // path.basename strips any separator the id might carry — the explicit call
+  // is what CodeQL recognises as a path-injection sanitizer (AGENT_ID_RE alone
+  // permits dotted ids, which CodeQL conservatively treats as traversal-capable).
+  const cfgPath = path.join(AGENTS_DIR, path.basename(agentId), 'config.json');
   const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
   if (!cfg.token) throw new Error(`agent ${agentId} has no Matrix token`);
   return cfg.token;
@@ -122,7 +125,7 @@ function getAgentToken(agentId) {
  */
 function getAgentDmRoom(agentId) {
   if (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId)) return null;
-  const p = path.join(AGENTS_DIR, agentId, 'dm-room.json');
+  const p = path.join(AGENTS_DIR, path.basename(agentId), 'dm-room.json');
   if (!fs.existsSync(p)) return null;
   try {
     return JSON.parse(fs.readFileSync(p, 'utf8'));
@@ -138,7 +141,7 @@ function setAgentDmRoom(agentId, data) {
   if (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId)) {
     throw new Error(`Invalid agent id: ${String(agentId).slice(0, 80)}`);
   }
-  const p = path.join(AGENTS_DIR, agentId, 'dm-room.json');
+  const p = path.join(AGENTS_DIR, path.basename(agentId), 'dm-room.json');
   const tmp = p + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
   fs.renameSync(tmp, p);

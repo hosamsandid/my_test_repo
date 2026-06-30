@@ -10,6 +10,7 @@ const path = require("path");
 const bpEventRouter = require("./bp-event-router");
 const { findEnclosingGitRepo } = require("./git-workspace");
 const { bpsToBriefingsMap } = require("./briefings-graph");
+const { createTeamsStore, DEFAULT_TEAM_ID } = require("./teams-store");
 
 // ============================================================
 // Config
@@ -46,6 +47,12 @@ const LLM_ENDPOINTS_INDEX = "/workspace/llm-endpoints/index.json";
 const LLM_KEYS_DIR = "/workspace/llm-endpoints/_keys";
 const MCP_SERVERS_DIR = "/workspace/mcp-servers";
 const MCP_CREDENTIALS_KEYS_DIR = "/workspace/mcp-credentials/_keys";
+
+// Teams data model (#299): the human collaboration & visibility scope. Stored
+// under /workspace alongside the other persistent collections; the orchestrator
+// is the single writer for tenancy/identity data and owns the startup
+// bootstrap + ownership backfill below.
+const teamsStore = createTeamsStore({ root: WORKSPACE });
 
 // Resolve the LLM binding for an environment:
 //  - reads /workspace/llm-endpoints/index.json
@@ -378,6 +385,106 @@ function migrateLegacyAgentConfigs() {
   if (migrated > 0) {
     console.log(`[Orchestrator] Migrated ${migrated} legacy agent config(s) to agent/team/team-member naming`);
   }
+}
+
+// ============================================================
+// Teams: bootstrap + ownership backfill (#299)
+// ============================================================
+//
+// Every agent construct, Working Environment and credential is owned by exactly
+// one Team via a `teamId` field. On startup we guarantee the default team
+// exists, optionally seed a System Admin from environment config, and stamp any
+// pre-existing resource that predates this model with the default team. The
+// pass is idempotent — once stamped, a resource is skipped on subsequent boots.
+function bootstrapTeams() {
+  teamsStore.ensureDefaultTeam();
+  const subject = process.env.BOOTSTRAP_SYSTEM_ADMIN_SUBJECT;
+  if (subject) {
+    try {
+      teamsStore.ensureSystemAdmin({
+        subject,
+        email: process.env.BOOTSTRAP_SYSTEM_ADMIN_EMAIL,
+        displayName: process.env.BOOTSTRAP_SYSTEM_ADMIN_NAME,
+      });
+      console.log(`[Orchestrator] Ensured System Admin for subject '${subject}'`);
+    } catch (err) {
+      console.error(`[Orchestrator] System Admin bootstrap failed: ${err.message}`);
+    }
+  }
+}
+
+// Stamp `teamId: "default"` onto any resource that lacks an owner. Rewrites the
+// JSON in place only when it actually changes (so it's cheap on a warm stack).
+function backfillResourceOwnership() {
+  let stamped = 0;
+
+  // Agents
+  if (fs.existsSync(AGENTS_DIR)) {
+    for (const id of listAgentIds()) {
+      const cfg = loadAgentConfig(id);
+      if (cfg && cfg.teamId === undefined) {
+        cfg.teamId = DEFAULT_TEAM_ID;
+        saveAgentConfig(id, cfg);
+        stamped++;
+      }
+    }
+  }
+
+  // Working Environments
+  if (fs.existsSync(ENVIRONMENTS_DIR)) {
+    for (const name of fs.readdirSync(ENVIRONMENTS_DIR)) {
+      const p = path.join(ENVIRONMENTS_DIR, name, "environment.json");
+      if (!fs.existsSync(p)) continue;
+      try {
+        const env = JSON.parse(fs.readFileSync(p, "utf8"));
+        if (env.teamId === undefined) {
+          env.teamId = DEFAULT_TEAM_ID;
+          fs.writeFileSync(p, JSON.stringify(env, null, 2));
+          stamped++;
+        }
+      } catch { /* skip unparsable env */ }
+    }
+  }
+
+  // Credentials: each index is an array of metadata entries.
+  const CREDENTIAL_INDEXES = [
+    SSH_KEYS_INDEX,
+    path.join(GH_TOKENS_DIR, "index.json"),
+    path.join(MCP_CREDENTIALS_KEYS_DIR, "index.json"),
+    LLM_ENDPOINTS_INDEX,
+  ];
+  for (const idx of CREDENTIAL_INDEXES) {
+    if (!fs.existsSync(idx)) continue;
+    try {
+      const list = JSON.parse(fs.readFileSync(idx, "utf8"));
+      if (!Array.isArray(list)) continue;
+      let changed = false;
+      for (const entry of list) {
+        if (entry && typeof entry === "object" && entry.teamId === undefined) {
+          entry.teamId = DEFAULT_TEAM_ID;
+          changed = true;
+        }
+      }
+      if (changed) {
+        fs.writeFileSync(idx, JSON.stringify(list, null, 2));
+        stamped += list.length;
+      }
+    } catch { /* skip unparsable index */ }
+  }
+
+  if (stamped > 0) {
+    console.log(`[Orchestrator] Backfilled team ownership onto ${stamped} pre-existing resource(s)`);
+  }
+}
+
+// Resolve the owning (human) Team for a newly created resource. An explicit id
+// must reference an existing team; absence falls back to the default team.
+function resolveOwnerTeamId(teamId) {
+  if (teamId === undefined || teamId === null || teamId === '') return DEFAULT_TEAM_ID;
+  if (!teamsStore.getTeam(teamId)) {
+    throw new Error(`Owning team '${teamId}' not found`);
+  }
+  return teamId;
 }
 
 function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
@@ -1840,12 +1947,18 @@ class Orchestrator {
     // immediately materialize the first member — unless `extra.skipFirstMember`
     // is set (used by the Team-Setup wizard, which then adds members itself
     // with role-specific overrides).
+    // Owning (human) Team — the tenant this construct belongs to (#299).
+    // Defaults to the default team; an explicit `extra.teamId` must reference
+    // an existing team.
+    const ownerTeamId = resolveOwnerTeamId(extra.teamId);
+
     if (role === "team") {
       const teamConfig = {
         id,
         displayName,
         role: "team",
         environmentId: env.id,
+        teamId: ownerTeamId,
         systemPromptTemplate: systemPrompt || "",
         enabled: true,
       };
@@ -1901,6 +2014,7 @@ class Orchestrator {
       token,
       role,
       environmentId: env.id,
+      teamId: ownerTeamId,
       ...(role === "orchestrator" && extra.briefingsPath && { briefingsPath: extra.briefingsPath }),
       // Optional fields written by the Team-Setup wizard. `team` ties the
       // agent to its sibling team-mates (used by the Layer-2 `from: team`
@@ -2008,12 +2122,16 @@ class Orchestrator {
       memberDisplayName = opts.displayName || `Member #${n}`;
     }
 
+    // A team-member inherits its parent team agent's owning (human) Team.
+    const ownerTeamId = teamCfg.teamId || DEFAULT_TEAM_ID;
+
     saveAgentConfig(memberId, {
       id: memberId,
       displayName: memberDisplayName,
       role: "team-member",
       parentTeamId: teamId,
       environmentId: teamCfg.environmentId,
+      teamId: ownerTeamId,
       enabled: false,
       _provisioning: true,
     });
@@ -2045,6 +2163,7 @@ class Orchestrator {
       role: "team-member",
       parentTeamId: teamId,
       environmentId: teamCfg.environmentId,
+      teamId: ownerTeamId,
       ...(typeof opts.systemPromptOverride === 'string' && opts.systemPromptOverride.length > 0
         ? { systemPrompt: opts.systemPromptOverride } : {}),
       ...(Array.isArray(opts.skillsOverride) ? { skillsOverride: opts.skillsOverride } : {}),
@@ -2203,6 +2322,7 @@ class Orchestrator {
         // construct an exact filesystem path to its brief.md.
         briefingsPath: orchCfg.briefingsPath,
         environmentId: orchCfg.environmentId,
+        teamId: orchCfg.teamId || DEFAULT_TEAM_ID,
         enabled: false,
       };
       saveAgentConfig(stubId, stubConfig);
@@ -2284,6 +2404,7 @@ class Orchestrator {
         ...(bp._rel_path && { bpRelPath: bp._rel_path }),
         briefingsPath: orchCfg.briefingsPath,
         environmentId: orchCfg.environmentId,
+        teamId: orchCfg.teamId || DEFAULT_TEAM_ID,
         enabled: false,
       };
       saveAgentConfig(stubId, stubConfig);
@@ -3123,6 +3244,9 @@ class Orchestrator {
       role: blueprint.role,
       environmentId: env.id,
       blueprintId,
+      // Preserve the owning Team of the stub being activated (#299); fall back
+      // to the default team for a fresh instance.
+      teamId: (loadAgentConfig(instanceId)?.teamId) || DEFAULT_TEAM_ID,
       ...(blueprint.briefingsPath && { briefingsPath: blueprint.briefingsPath }),
       enabled: true,
     };
@@ -3314,6 +3438,156 @@ class Orchestrator {
 }
 
 // ============================================================
+// Teams admin API (#299) — CRUD for the human Team data model.
+// ============================================================
+//
+// Mounted under /internal/admin/{teams,users,memberships}. Deliberately
+// separate from the /internal/teams/* routes, which operate on the *Agent
+// Team* construct (members, prompt template). Auth lives in a later issue; this
+// is the data-model surface the admin console proxies to.
+function sendJson(res, status, payload) {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(payload));
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', d => { body += d; });
+    req.on('end', () => {
+      if (!body) return resolve({});
+      try { resolve(JSON.parse(body)); }
+      catch { reject(new Error('invalid JSON body')); }
+    });
+    req.on('error', reject);
+  });
+}
+
+// Does any agent / environment / credential still name this team as its owner?
+// Used to refuse deletion of a non-empty team so resources aren't orphaned.
+function teamHasOwnedResources(teamId) {
+  if (fs.existsSync(AGENTS_DIR)) {
+    for (const id of listAgentIds()) {
+      const cfg = loadAgentConfig(id);
+      if (cfg && cfg.teamId === teamId) return true;
+    }
+  }
+  if (fs.existsSync(ENVIRONMENTS_DIR)) {
+    for (const name of fs.readdirSync(ENVIRONMENTS_DIR)) {
+      const p = path.join(ENVIRONMENTS_DIR, name, 'environment.json');
+      if (!fs.existsSync(p)) continue;
+      try {
+        if (JSON.parse(fs.readFileSync(p, 'utf8')).teamId === teamId) return true;
+      } catch { /* ignore */ }
+    }
+  }
+  const indexes = [
+    SSH_KEYS_INDEX,
+    path.join(GH_TOKENS_DIR, 'index.json'),
+    path.join(MCP_CREDENTIALS_KEYS_DIR, 'index.json'),
+    LLM_ENDPOINTS_INDEX,
+  ];
+  for (const idx of indexes) {
+    if (!fs.existsSync(idx)) continue;
+    try {
+      const list = JSON.parse(fs.readFileSync(idx, 'utf8'));
+      if (Array.isArray(list) && list.some(e => e && e.teamId === teamId)) return true;
+    } catch { /* ignore */ }
+  }
+  return false;
+}
+
+// Returns true if the request was a /internal/admin/* route (handled here),
+// false otherwise so the caller can fall through to other routes.
+async function handleTeamsAdminApi(req, res) {
+  const parsed = new URL(req.url, 'http://internal');
+  const segs = parsed.pathname.split('/').filter(Boolean); // ['internal','admin',...]
+  if (segs[0] !== 'internal' || segs[1] !== 'admin') return false;
+
+  const collection = segs[2];
+  const resourceId = segs[3] ? decodeURIComponent(segs[3]) : null;
+
+  try {
+    if (collection === 'teams') {
+      if (req.method === 'GET' && !resourceId) return sendJson(res, 200, teamsStore.listTeams()), true;
+      if (req.method === 'POST' && !resourceId) {
+        const body = await readBody(req);
+        return sendJson(res, 201, teamsStore.createTeam(body)), true;
+      }
+      if (req.method === 'GET' && resourceId) {
+        const team = teamsStore.getTeam(resourceId);
+        if (!team) return sendJson(res, 404, { error: `Team '${resourceId}' not found` }), true;
+        return sendJson(res, 200, team), true;
+      }
+      if (req.method === 'PUT' && resourceId) {
+        const body = await readBody(req);
+        return sendJson(res, 200, teamsStore.updateTeam(resourceId, body)), true;
+      }
+      if (req.method === 'DELETE' && resourceId) {
+        if (teamHasOwnedResources(resourceId)) {
+          return sendJson(res, 409, {
+            error: `Team '${resourceId}' still owns agents, environments or credentials — reassign them first`,
+          }), true;
+        }
+        return sendJson(res, 200, teamsStore.deleteTeam(resourceId)), true;
+      }
+    }
+
+    if (collection === 'users') {
+      if (req.method === 'GET' && !resourceId) {
+        const subject = parsed.searchParams.get('subject');
+        if (subject) {
+          const u = teamsStore.getUserBySubject(subject);
+          return sendJson(res, 200, u ? [u] : []), true;
+        }
+        return sendJson(res, 200, teamsStore.listUsers()), true;
+      }
+      if (req.method === 'POST' && !resourceId) {
+        const body = await readBody(req);
+        return sendJson(res, 201, teamsStore.createUser(body)), true;
+      }
+      if (req.method === 'GET' && resourceId) {
+        const u = teamsStore.getUser(resourceId);
+        if (!u) return sendJson(res, 404, { error: `User '${resourceId}' not found` }), true;
+        return sendJson(res, 200, u), true;
+      }
+      if (req.method === 'PUT' && resourceId) {
+        const body = await readBody(req);
+        return sendJson(res, 200, teamsStore.updateUser(resourceId, body)), true;
+      }
+      if (req.method === 'DELETE' && resourceId) {
+        return sendJson(res, 200, teamsStore.deleteUser(resourceId)), true;
+      }
+    }
+
+    if (collection === 'memberships' && !resourceId) {
+      if (req.method === 'GET') {
+        return sendJson(res, 200, teamsStore.listMemberships({
+          userId: parsed.searchParams.get('userId') || undefined,
+          teamId: parsed.searchParams.get('teamId') || undefined,
+        })), true;
+      }
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        return sendJson(res, 200, teamsStore.setMembership(body)), true;
+      }
+      if (req.method === 'DELETE') {
+        return sendJson(res, 200, teamsStore.removeMembership({
+          userId: parsed.searchParams.get('userId'),
+          teamId: parsed.searchParams.get('teamId'),
+        })), true;
+      }
+    }
+
+    sendJson(res, 404, { error: 'unknown admin route' });
+    return true;
+  } catch (err) {
+    sendJson(res, err.statusHint || 500, { error: err.message });
+    return true;
+  }
+}
+
+// ============================================================
 // Main
 // ============================================================
 async function main() {
@@ -3322,12 +3596,23 @@ async function main() {
     process.exit(1);
   }
   migrateLegacyAgentConfigs();
+  bootstrapTeams();
+  backfillResourceOwnership();
 
   const orchestrator = new Orchestrator();
   await orchestrator.init();
 
   // Internal API — used by admin-console to manage agents
   const internalApi = http.createServer((req, res) => {
+    // Teams data model (#299) — CRUD for the human Team / users / memberships.
+    if (req.url.startsWith('/internal/admin/')) {
+      handleTeamsAdminApi(req, res).catch(err => {
+        console.error(`[Orchestrator] admin API error: ${err.message}`);
+        if (!res.headersSent) sendJson(res, 500, { error: err.message });
+      });
+      return;
+    }
+
     // Read-only access to baked-in helper scripts referenced by agent
     // templates' preCheckScript. The allowlist is the only way to obtain a
     // path — no user-supplied path ever reaches the filesystem.
@@ -3862,6 +4147,7 @@ async function main() {
             token,
             role: 'agent',
             environmentId: env.id,
+            teamId: DEFAULT_TEAM_ID,
             ephemeral: true,
             enabled: true,
             ...(blueprintId && { blueprintId }),
@@ -4781,6 +5067,8 @@ async function main() {
           schedule, taskPrompt, briefingsPath,
           // Team-Setup wizard fields (all optional, additive):
           team, sessionPolicy, triggers,
+          // Owning (human) Team — the tenant this construct belongs to (#299).
+          teamId,
           // For role: 'team' — suppress the auto-numbered first member
           // (the wizard adds members itself with role overrides instead).
           skipFirstMember,
@@ -4816,6 +5104,7 @@ async function main() {
         if (sessionPolicy) extra.sessionPolicy = sessionPolicy;
         if (Array.isArray(triggers)) extra.triggers = triggers;
         if (skipFirstMember) extra.skipFirstMember = true;
+        if (teamId) extra.teamId = teamId;
         const result = await orchestrator.createAgent(id, displayName, role, systemPrompt, environmentId, extra);
         res.writeHead(201, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));

@@ -2002,7 +2002,10 @@ class Orchestrator {
       let n = 1;
       while (loadAgentConfig(`${teamId}-${n}`)) n++;
       memberId = `${teamId}-${n}`;
-      memberDisplayName = opts.displayName || `${teamCfg.displayName} #${n}`;
+      // Auto-numbered fallback name. The parent team name is intentionally NOT
+      // prepended — UIs group members under their team already, so a team
+      // prefix would only duplicate the team name and bloat every label.
+      memberDisplayName = opts.displayName || `Member #${n}`;
     }
 
     saveAgentConfig(memberId, {

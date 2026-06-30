@@ -266,6 +266,72 @@ function createTeamsStore({ root } = {}) {
     return membership;
   }
 
+  // ---- local passwords (#374, interim before SSO #307) -------------------
+  // A user may carry an optional scrypt password hash so they can log in
+  // before enterprise SSO lands. The hash is stored on the record and is
+  // NEVER returned by the API (sanitizeUser strips it at the boundary).
+
+  function hashPassword(password) {
+    const salt = crypto.randomBytes(16);
+    const hash = crypto.scryptSync(String(password), salt, 64);
+    return `scrypt$${salt.toString('hex')}$${hash.toString('hex')}`;
+  }
+
+  function verifyPassword(password, stored) {
+    if (typeof stored !== 'string') return false;
+    const parts = stored.split('$');
+    if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
+    let salt, expected, actual;
+    try {
+      salt = Buffer.from(parts[1], 'hex');
+      expected = Buffer.from(parts[2], 'hex');
+      actual = crypto.scryptSync(String(password), salt, expected.length);
+    } catch {
+      return false;
+    }
+    return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+  }
+
+  // Strip the password hash (and any future secret) before a record leaves the
+  // process. Apply at every API response that carries a user.
+  function sanitizeUser(u) {
+    if (!u || typeof u !== 'object') return u;
+    const { passwordHash, ...rest } = u;
+    return rest;
+  }
+
+  function setUserPassword(id, password) {
+    if (!isNonEmptyString(password)) throw badRequest('password is required');
+    const users = listUsers();
+    const idx = users.findIndex(u => u.id === id);
+    if (idx === -1) throw notFound(`User '${id}' not found`);
+    users[idx].passwordHash = hashPassword(password);
+    users[idx].updatedAt = nowIso();
+    writeArray(USERS_INDEX, users);
+    return sanitizeUser(users[idx]);
+  }
+
+  function clearUserPassword(id) {
+    const users = listUsers();
+    const idx = users.findIndex(u => u.id === id);
+    if (idx === -1) throw notFound(`User '${id}' not found`);
+    delete users[idx].passwordHash;
+    users[idx].updatedAt = nowIso();
+    writeArray(USERS_INDEX, users);
+    return sanitizeUser(users[idx]);
+  }
+
+  // Verify a login: match by subject, then check the scrypt hash. Returns the
+  // sanitized user on success, or null (unknown subject / no password / wrong
+  // password are all indistinguishable to the caller).
+  function verifyUserCredentials(username, password) {
+    if (!isNonEmptyString(username) || !isNonEmptyString(password)) return null;
+    const user = getUserBySubject(username);
+    if (!user || !user.passwordHash) return null;
+    if (!verifyPassword(password, user.passwordHash)) return null;
+    return sanitizeUser(user);
+  }
+
   function removeMembership({ userId, teamId } = {}) {
     const memberships = readArray(MEMBERSHIPS_INDEX);
     const remaining = memberships.filter(m => !(m.userId === userId && m.teamId === teamId));
@@ -315,6 +381,7 @@ function createTeamsStore({ root } = {}) {
     MEMBERSHIP_ROLES,
     listTeams, getTeam, createTeam, updateTeam, deleteTeam,
     listUsers, getUser, getUserBySubject, createUser, updateUser, deleteUser,
+    setUserPassword, clearUserPassword, verifyUserCredentials, sanitizeUser,
     listMemberships, setMembership, removeMembership,
     ensureDefaultTeam, ensureSystemAdmin,
   };

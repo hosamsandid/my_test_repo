@@ -3515,6 +3515,10 @@ app.post('/api/admin/users', apiLimiter, (req, res) => proxyAdmin(req, res, 'use
 app.get('/api/admin/users/:id', (req, res) => proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}`));
 app.put('/api/admin/users/:id', apiLimiter, (req, res) => proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}`));
 app.delete('/api/admin/users/:id', apiLimiter, (req, res) => proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}`));
+// Local password set/clear (#374). The verify path is NOT proxied here — it is
+// called directly by the public login route (see auth.js), pre-session.
+app.post('/api/admin/users/:id/password', apiLimiter, (req, res) => proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}/password`));
+app.delete('/api/admin/users/:id/password', apiLimiter, (req, res) => proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}/password`));
 
 app.get('/api/admin/memberships', (req, res) => proxyAdmin(req, res, `memberships${adminQuery(req)}`));
 app.post('/api/admin/memberships', apiLimiter, (req, res) => proxyAdmin(req, res, 'memberships'));

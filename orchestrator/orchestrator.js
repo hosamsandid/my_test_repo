@@ -3546,26 +3546,49 @@ async function handleTeamsAdminApi(req, res) {
     }
 
     if (collection === 'users') {
+      const subAction = segs[4] || null; // e.g. /internal/admin/users/<id>/password
+      const clean = teamsStore.sanitizeUser; // strip passwordHash from every response
+
+      // Verify a login (#374). Internal-only; called by the admin-console's
+      // public login route. Returns the sanitized user on success, else 401.
+      if (req.method === 'POST' && resourceId === 'verify' && !subAction) {
+        const body = await readBody(req);
+        const user = teamsStore.verifyUserCredentials(body.username, body.password);
+        if (!user) return sendJson(res, 401, { error: 'invalid credentials' }), true;
+        return sendJson(res, 200, user), true;
+      }
+
+      // Set / clear a user's local password (System-Admin action).
+      if (resourceId && subAction === 'password') {
+        if (req.method === 'POST') {
+          const body = await readBody(req);
+          return sendJson(res, 200, teamsStore.setUserPassword(resourceId, body.password)), true;
+        }
+        if (req.method === 'DELETE') {
+          return sendJson(res, 200, teamsStore.clearUserPassword(resourceId)), true;
+        }
+      }
+
       if (req.method === 'GET' && !resourceId) {
         const subject = parsed.searchParams.get('subject');
         if (subject) {
           const u = teamsStore.getUserBySubject(subject);
-          return sendJson(res, 200, u ? [u] : []), true;
+          return sendJson(res, 200, u ? [clean(u)] : []), true;
         }
-        return sendJson(res, 200, teamsStore.listUsers()), true;
+        return sendJson(res, 200, teamsStore.listUsers().map(clean)), true;
       }
       if (req.method === 'POST' && !resourceId) {
         const body = await readBody(req);
-        return sendJson(res, 201, teamsStore.createUser(body)), true;
+        return sendJson(res, 201, clean(teamsStore.createUser(body))), true;
       }
       if (req.method === 'GET' && resourceId) {
         const u = teamsStore.getUser(resourceId);
         if (!u) return sendJson(res, 404, { error: `User '${resourceId}' not found` }), true;
-        return sendJson(res, 200, u), true;
+        return sendJson(res, 200, clean(u)), true;
       }
       if (req.method === 'PUT' && resourceId) {
         const body = await readBody(req);
-        return sendJson(res, 200, teamsStore.updateUser(resourceId, body)), true;
+        return sendJson(res, 200, clean(teamsStore.updateUser(resourceId, body))), true;
       }
       if (req.method === 'DELETE' && resourceId) {
         return sendJson(res, 200, teamsStore.deleteUser(resourceId)), true;

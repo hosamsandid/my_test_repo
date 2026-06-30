@@ -50,10 +50,26 @@ to the login screen; an expired session (any `401`) does the same automatically.
 - `GET /api/auth/session` — `{ authenticated, user }`.
 - `POST /api/auth/logout` — clears the cookie.
 
+**Per-user local passwords (#374, interim).** Human users created on the Teams
+page (#308) can be given a local password (Teams → Manage Users → the
+🔑 button), letting more than one person log in before SSO lands. Login then
+resolves in two steps: first the **user store** (match by `subject`, verify a
+salted **scrypt** hash held in the user record and never returned by any API),
+then the **env single-admin** credential. Key properties:
+
+- A per-user session's subject is the user's `subject`, so the audit trail (#305)
+  names the real person.
+- The env `ADMIN_USERNAME`/`ADMIN_PASSWORD` **always** works — the per-user check
+  is best-effort and calls the orchestrator's internal user store; if that store
+  is unreachable, login falls through to the env admin (no operator lock-out).
+- This is explicitly interim and is superseded by SSO (#307); there is no
+  self-service signup, reset, policy, or MFA.
+
 **SSO swap-point.** The credential check lives in a single `verifyCredentials()`
-function in `admin-console/api/auth.js`. Swapping it for an OIDC/SAML token
-exchange (and adding the IdP callback route) requires no change to the session
-format, cookie handling, gate middleware, or the login UI/routing.
+function in `admin-console/api/auth.js` (with the per-user store check alongside
+it in the login route). Swapping it for an OIDC/SAML token exchange (and adding
+the IdP callback route) requires no change to the session format, cookie
+handling, gate middleware, or the login UI/routing.
 
 ## Teams (#308)
 

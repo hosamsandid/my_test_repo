@@ -43,10 +43,10 @@ function NavBadge({ count, color }) {
 const NAV = [
   { section: 'OVERVIEW', items: [
     { path: '/',             label: 'Dashboard',           Icon: LayoutDashboard },
-    { path: '/quickstart',   label: 'Single Agent',        Icon: Rocket,   subtitle: 'One agent, one repo' },
-    { path: '/team-setup',   label: 'Team Wizard',         Icon: Users2,   subtitle: 'Multi-role GitHub team' },
+    { path: '/quickstart',   label: 'Single Agent',        Icon: Rocket },
+    { path: '/team-setup',   label: 'Team Wizard',         Icon: Users2 },
     { path: '/agents',       label: 'Agents',              Icon: Layers },
-    { path: '/flows',         label: 'Flows',               Icon: GitBranch, subtitle: 'BriefingPacks & process graphs' },
+    { path: '/flows',         label: 'Flows',               Icon: GitBranch },
     { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
     // { path: '/orchestrator-wizard', label: 'Orchestrator Wizard', Icon: Wand2 },
   ]},

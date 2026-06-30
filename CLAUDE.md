@@ -263,6 +263,10 @@ Every bp-instance chat in the Admin Console has a hand-off action that lets the 
 
 The whole console is gated by a login screen — every `/api/*` data endpoint requires a valid session cookie (`admin-console/api/auth.js` registers public `POST/GET /api/auth/{login,session,logout}` then mounts `auth.gate` over `/api`). A single env-configured credential pair (`ADMIN_USERNAME` / `ADMIN_PASSWORD`, default `admin`/`admin`) is checked by `verifyCredentials()`, which is the **only** seam an SSO/OIDC integration replaces; the HMAC-signed HttpOnly cookie (`aee_session`), the gate, and the React `AuthProvider` + `Login` screen are provider-agnostic. Static assets and the SPA fallback stay open so the login screen can load. See `docs/admin-console.md` → *Authentication* and `docs/multi-user-concept.md`.
 
+### Admin Console audit trail (#305)
+
+Every mutating `/api` request (`POST`/`PUT`/`PATCH`/`DELETE`) is recorded as one append-only JSONL line at `/workspace/audit/audit-<date>.jsonl` (override via `AUDIT_DIR`). `admin-console/api/audit.js` exposes `auditMutations` — a global middleware mounted **before** the auth gate (so it sees denied/unauthenticated attempts too) that logs from a `res.on('finish')` handler reading the acting human from `req.user` (#276). Each entry carries `ts, actor, action, method, resource, teamId (best-effort from body, pending #302), status, outcome, ip`. Logging is strictly best-effort — wrapped so it can never block or break a request. Read via `GET /api/audit?limit=<n>` (protected, newest-first). Matrix chat history is intentionally **not** the config-mutation audit log. See `docs/admin-console.md` → *Audit trail*.
+
 ### Agent Management
 
 All agent lifecycle operations (create / enable / disable / edit prompt / delete) happen via the **Admin Console** at `http://localhost:4000`.

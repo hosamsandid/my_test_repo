@@ -54,6 +54,30 @@ function in `admin-console/api/auth.js`. Swapping it for an OIDC/SAML token
 exchange (and adding the IdP callback route) requires no change to the session
 format, cookie handling, gate middleware, or the login UI/routing.
 
+## Audit trail (#305)
+
+Every **mutating** API action (`POST`/`PUT`/`PATCH`/`DELETE` under `/api`)
+produces one append-only audit entry naming the acting human — a separate log
+from the Matrix chat history, which does not capture config mutations. See
+[docs/multi-user-concept.md](./multi-user-concept.md) §7.
+
+- **Storage:** append-only JSONL at `/workspace/audit/audit-<YYYY-MM-DD>.jsonl`
+  (override the directory with `AUDIT_DIR`).
+- **Each entry:** `ts`, `actor` (the logged-in username from #276, or the
+  attempted username for a login, or `anonymous`), `action` (`<METHOD> <path>`),
+  `method`, `resource`, `teamId` (when the request body carries one — full
+  per-resource team attribution arrives with team scoping, #302), `status`,
+  `outcome` (`success` / `denied` / `error`), and `ip`.
+- **Coverage:** the logger is a global middleware, so it captures *all* mutating
+  endpoints — agent create/delete, credential create/delete, skill promotion,
+  handover, team-membership and environment changes — plus denied and
+  unauthenticated attempts (`outcome: denied`).
+- **Read API:** `GET /api/audit?limit=<n>` (protected; newest first, capped at 1000).
+
+**Safety:** auditing is strictly best-effort. It runs from a response-`finish`
+handler (after the response is already sent) and every file operation is
+swallowed on error, so a logging failure can never block or break a request.
+
 ## Agent Chat
 
 The Agent Chat page (`/chats/:agentId`) embeds a full Matrix chat client with a three-panel layout.

@@ -11,6 +11,7 @@ const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const matrix = require('./matrix');
 const auth = require('./auth');
+const audit = require('./audit');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandReviewSteps, emptyDraftBundle } = require('./process-template');
@@ -135,6 +136,12 @@ const globalApiLimiter = rateLimit({
 
 app.use('/api/', globalApiLimiter);
 
+// Audit trail (#305). Mounted before the auth wiring so it observes every
+// mutating /api request — including denied/unauthenticated ones — and reads the
+// acting human from req.user lazily at response-finish time. Best-effort: it can
+// never block or break a request (see audit.js).
+app.use('/api', audit.auditMutations);
+
 // Authentication (#276). Mounted after the global limiter (so the gate itself
 // is rate-limited) and before every protected route definition below. Public
 // auth endpoints are registered first; the gate then requires a valid session
@@ -142,6 +149,11 @@ app.use('/api/', globalApiLimiter);
 // open so the console can load and render its login screen.
 auth.registerAuthRoutes(app);
 app.use('/api', auth.gate);
+
+// Read recent audit entries (newest first). Protected by the gate above.
+app.get('/api/audit', (req, res) => {
+  res.json(audit.recentEntries(Number(req.query.limit) || 200));
+});
 
 const MCP_SERVER_ID_RE = /^[a-z0-9-]+$/;
 const MCP_CREDENTIAL_ID_RE = /^[a-z0-9-]+$/;

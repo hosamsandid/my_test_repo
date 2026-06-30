@@ -13,6 +13,7 @@ const matrix = require('./matrix');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandReviewSteps, emptyDraftBundle } = require('./process-template');
+const { buildUnifiedGraph, briefingsToUnified } = require('./unified-graph');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -2007,6 +2008,63 @@ app.post('/api/process/graph', (req, res) => {
     triggers: (r.triggers || []).map(t => ({ ...t, emits: Array.isArray(t.emits) ? t.emits : [] })),
   }));
   res.json({ level: 'template', team: null, imported: true, name: bundle.name, ...buildProcessGraph(agents) });
+});
+
+/* ─── Unified orchestration graph (Unified Orchestration #362 / #365) ───────
+ * One graph over BOTH orchestration concepts, via the pure builder in
+ * unified-graph.js. The `/flows` source switcher picks the source:
+ *   - default (live):  live agents → process-style nodes (label/timer/review/
+ *                      event edges). Optional ?team=<id> scope. Persisted emits
+ *                      only (no silent derivation, unless ?derive=1).
+ *   - ?workspace=<path>: BP source — fetch briefings from bp-explorer and map
+ *                      via briefingsToUnified (dependency + artifact edges; BP
+ *                      status dropped). Read-only projection over brief.md.
+ * Both shapes are { unifiedFlowVersion, source, nodes, edges, gates, labels, lints }. */
+app.get('/api/flows/graph', async (req, res) => {
+  // BP source — read-only projection of a briefings directory.
+  if (typeof req.query.workspace === 'string' && req.query.workspace.trim()) {
+    const workspace = req.query.workspace.trim();
+    try {
+      const url = `${BP_EXPLORER_URL}/api/briefings?workspace=${encodeURIComponent(workspace)}`;
+      const upstream = await fetch(url);
+      if (!upstream.ok) {
+        return res.status(502).json({ error: `BP-Explorer returned ${upstream.status}` });
+      }
+      const bps = await upstream.json();
+      const flow = briefingsToUnified(bps, { name: workspace });
+      return res.json({
+        unifiedFlowVersion: flow.unifiedFlowVersion, source: 'briefings', workspace,
+        ...buildUnifiedGraph(flow.nodes, flow.edges),
+      });
+    } catch (err) {
+      return res.status(502).json({ error: `BP-Explorer unreachable: ${err.message}` });
+    }
+  }
+
+  // Live source — agents as unified nodes (data-flow ports empty for now).
+  const team = typeof req.query.team === 'string' && req.query.team.trim()
+    ? req.query.team.trim() : null;
+  if (team && !AGENT_ID_RE.test(team)) return res.status(400).json({ error: 'Invalid team id' });
+  const derive = req.query.derive !== undefined && truthyParam(String(req.query.derive));
+
+  const nodes = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    const role = cfg.role || 'agent';
+    if (role === 'team') continue; // template holder — no triggers of its own
+    if (team && cfg.parentTeamId !== team) continue;
+    const raw = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+    const triggers = effectiveTriggers(raw, {
+      derive, systemPrompt: derive ? readAgentSystemPrompt(id) : '',
+    });
+    nodes.push({
+      id, role, displayName: cfg.displayName || id,
+      sessionPolicy: cfg.sessionPolicy || 'persistent',
+      environmentId: cfg.environmentId || null, triggers,
+      inputs: [], outputs: [], dependsOn: [],
+    });
+  }
+  res.json({ unifiedFlowVersion: 1, source: 'live', team, ...buildUnifiedGraph(nodes) });
 });
 
 /* ─── Process template bundle (export, #334) ────────────────────────────

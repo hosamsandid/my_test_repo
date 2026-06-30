@@ -47,12 +47,24 @@ export function makeBpOps(workspace) {
     return m ? { fm: m[1], body: m[2] } : { fm: '', body: content };
   }
 
+  const fmEdit = (bpId, op, value) =>
+    apiCall('POST', `${base}/bp/${bpId}/frontmatter-edit${q}`, { op, value });
+
   return {
     mode: 'bp',
     setPrompt: async (bpId, text) => {
       const { fm } = splitFrontmatter(await getRaw(bpId));
       await putRaw(bpId, fm + (text || ''));
     },
+    // Frontmatter edits (#362 D2) — structured ops applied server-side + commit.
+    // Same signatures as makeDraftOps so the on-type picker (CreateEdgeDialog)
+    // works unchanged. Dependency A→B = "B depends on A".
+    addDependency: (bpId, dependsOnId) => fmEdit(bpId, 'add-dependency', dependsOnId),
+    removeDependency: (bpId, dependsOnId) => fmEdit(bpId, 'remove-dependency', dependsOnId),
+    addArtifact: (bpId, { direction, path, description }) =>
+      fmEdit(bpId, 'add-artifact', { direction, path, description }),
+    removeArtifact: (bpId, { direction, path }) =>
+      fmEdit(bpId, 'remove-artifact', { direction, path }),
   };
 }
 

@@ -194,8 +194,9 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
 /* ── on-type picker: choose how A hands off to B (#367) ─────────────────────
  * Label hand-off delegates to CreateHandoffDialog (unchanged). Dependency and
  * data-flow are BP mechanisms, written via the draft ops onto node ports. */
-export function CreateEdgeDialog({ from, to, fromName, toName, labels, ops = liveOps, onClose, onDone }) {
-  const [type, setType] = useState(null); // null = chooser; 'label' | 'dependency' | 'artifact'
+export function CreateEdgeDialog({ from, to, fromName, toName, labels, ops = liveOps, types, onClose, onDone }) {
+  const allowed = Array.isArray(types) && types.length ? types : ['label', 'dependency', 'artifact'];
+  const [type, setType] = useState(allowed.length === 1 ? allowed[0] : null);
 
   if (type === 'label') {
     return (
@@ -222,7 +223,7 @@ export function CreateEdgeDialog({ from, to, fromName, toName, labels, ops = liv
     { id: 'label', title: 'Label hand-off', desc: `${fromName || from} emits a label that wakes ${toName || to}.` },
     { id: 'dependency', title: 'Dependency', desc: `${toName || to} depends on ${fromName || from} — it can't start until that is done.` },
     { id: 'artifact', title: 'Data flow', desc: `${fromName || from} produces a file that ${toName || to} consumes.` },
-  ];
+  ].filter(c => allowed.includes(c.id));
 
   return (
     <SidePanel open onClose={onClose} title="Connect roles" width="520px">

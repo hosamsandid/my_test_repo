@@ -11,7 +11,7 @@
 //   g.setData(unifiedGraph);   // { nodes, edges, lints } from /api/flows/graph
 //   g.fit(); g.cleanup();
 
-export function initFlowGraph(viewport, { onSelectNode } = {}) {
+export function initFlowGraph(viewport, { onSelectNode, onSaveContent } = {}) {
 
   // ─── Constants ──────────────────────────────────────────────────────
   const NODE_W      = 320;
@@ -147,6 +147,8 @@ export function initFlowGraph(viewport, { onSelectNode } = {}) {
     panStart:           { x: 0, y: 0 },
     showArchived:       localStorage.getItem('ace-graph-show-archived') === 'true',
     orientation:        localStorage.getItem('ace-graph-orientation') === 'vertical' ? 'vertical' : 'horizontal',
+    selectedId:         null,   // #362 UI rework Phase C: node selection
+    editable:           false,  // inline content/prompt editing
   };
 
   // ─── Data Loading ────────────────────────────────────────────────────
@@ -798,6 +800,7 @@ export function initFlowGraph(viewport, { onSelectNode } = {}) {
       if (!bp || !pos) return;
 
       const node = document.createElement('div');
+      const selected = state.selectedId === n.id;
       node.className = 'bp-node' + (bp.status ? ` bp-node-status-${bp.status}` : '');
       node.dataset.id = n.id;
       node.style.cssText = `
@@ -806,16 +809,25 @@ export function initFlowGraph(viewport, { onSelectNode } = {}) {
         top:${pos.y}px;
         width:${NODE_W}px;
         background:var(--eb-bg-surface);
-        border:1px solid var(--eb-border-default);
+        border:${selected ? '2px solid var(--eb-accent-primary)' : '1px solid var(--eb-border-default)'};
         border-radius:8px;
         padding:10px 12px;
         box-sizing:border-box;
         font-size:12px;
         color:var(--eb-text-primary);
         box-shadow:var(--eb-shadow-sm);
+        cursor:pointer;
       `;
       applyStatusBorderColor(node, bp.status);
       node.addEventListener('mousedown', e => e.stopPropagation());
+      // Select on click — but not when interacting with a button, link or the
+      // inline editor inputs inside the card.
+      node.addEventListener('click', (e) => {
+        if (e.target.closest('button, a, input, textarea')) return;
+        state.selectedId = n.id;
+        if (onSelectNode) onSelectNode(n.id);
+        render();
+      });
 
       // Header
       const header = document.createElement('div');
@@ -914,13 +926,50 @@ export function initFlowGraph(viewport, { onSelectNode } = {}) {
         node.appendChild(details);
       }
 
-      // Content panel
-      if (state.contentVisible.has(n.id) && bp.body) {
-        const body = document.createElement('div');
-        body.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid var(--eb-border-default);font-size:11px;max-height:300px;overflow-y:auto;line-height:1.5;';
-        body.innerHTML = renderMarkdown(bp.body);
-        body.addEventListener('wheel', e => e.stopPropagation());
-        node.appendChild(body);
+      // Content panel — the node's prompt/brief. Read-only markdown, or an
+      // inline editor when the renderer is editable and a save handler is wired
+      // (#362 UI rework Phase C). "Content = the prompt", for BP and process alike.
+      const canEditContent = state.editable && typeof onSaveContent === 'function';
+      if (state.contentVisible.has(n.id) && (bp.body || canEditContent)) {
+        if (canEditContent) {
+          const wrap = document.createElement('div');
+          wrap.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid var(--eb-border-default);display:flex;flex-direction:column;gap:6px;';
+          const ta = document.createElement('textarea');
+          ta.value = bp.body || '';
+          ta.placeholder = 'Prompt / briefing for this node…';
+          ta.style.cssText = 'width:100%;min-height:140px;box-sizing:border-box;resize:vertical;font-family:var(--eb-font-mono);font-size:11px;line-height:1.5;background:var(--eb-bg-app);color:var(--eb-text-primary);border:1px solid var(--eb-border-default);border-radius:6px;padding:6px;';
+          ta.addEventListener('wheel', e => e.stopPropagation());
+          ta.addEventListener('mousedown', e => e.stopPropagation());
+          const bar = document.createElement('div');
+          bar.style.cssText = 'display:flex;gap:6px;align-items:center;';
+          const saveBtn = makeBtn('Save prompt', false);
+          const saved = document.createElement('span');
+          saved.style.cssText = 'font-size:10px;color:var(--eb-status-success);';
+          saveBtn.addEventListener('click', async () => {
+            saveBtn.disabled = true;
+            try {
+              await onSaveContent(n.id, ta.value);
+              bp.body = ta.value;       // optimistic local update
+              saved.textContent = 'Saved.';
+            } catch (err) {
+              saved.style.color = 'var(--eb-status-error)';
+              saved.textContent = err.message || 'Save failed';
+            } finally {
+              saveBtn.disabled = false;
+            }
+          });
+          bar.appendChild(saveBtn);
+          bar.appendChild(saved);
+          wrap.appendChild(ta);
+          wrap.appendChild(bar);
+          node.appendChild(wrap);
+        } else if (bp.body) {
+          const body = document.createElement('div');
+          body.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid var(--eb-border-default);font-size:11px;max-height:300px;overflow-y:auto;line-height:1.5;';
+          body.innerHTML = renderMarkdown(bp.body);
+          body.addEventListener('wheel', e => e.stopPropagation());
+          node.appendChild(body);
+        }
       }
 
       canvas.appendChild(node);
@@ -1693,6 +1742,8 @@ export function initFlowGraph(viewport, { onSelectNode } = {}) {
   return {
     setData,
     fit: () => { state.userTransform = false; fitToView(); },
+    setSelected: (id) => { state.selectedId = id; render(); },
+    setEditable: (v) => { if (state.editable !== !!v) { state.editable = !!v; render(); } },
     cleanup,
   };
 }

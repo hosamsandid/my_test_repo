@@ -13,12 +13,15 @@ import { initFlowGraph } from './flow-graph-render';
 export function FlowGraph({ workspace, team }) {
   const viewportRef = useRef(null);
   const apiRef = useRef(null);
+  const selectedRef = useRef(null);
   const [error, setError] = useState(null);
 
   // Mount the renderer once.
   useEffect(() => {
     if (!viewportRef.current) return undefined;
-    const g = initFlowGraph(viewportRef.current, {});
+    const g = initFlowGraph(viewportRef.current, {
+      onSelectNode: (id) => { selectedRef.current = id; },
+    });
     apiRef.current = g;
     return () => { g.cleanup(); apiRef.current = null; };
   }, []);

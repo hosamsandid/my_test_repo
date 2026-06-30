@@ -133,6 +133,7 @@ function buildUnifiedGraph(nodes, edges) {
       parent: n.parent || null,
       children: asArray(n.children),
       isParent: n.isParent === true || asArray(n.children).length > 0,
+      stage: typeof n.stage === 'string' ? n.stage : '',  // manual stage band (#362 E)
     };
   });
 
@@ -312,6 +313,7 @@ function processTemplateToUnified(bundle) {
       systemPrompt: r.systemPrompt || '',
       // Content = the expandable prompt; for process roles it mirrors systemPrompt.
       content: r.systemPrompt || '',
+      stage: typeof r.stage === 'string' ? r.stage : '',
       // Unified editing (#367): roles may carry data-flow ports + dependencies.
       inputs: asArray(r.inputs),
       outputs: asArray(r.outputs),
@@ -348,6 +350,7 @@ function briefingsToUnified(bps, { name = 'briefings' } = {}) {
       systemPrompt: '',
       // The brief.md body is the node's expandable content/prompt.
       content: typeof bp.body === 'string' ? bp.body : '',
+      stage: typeof bp.stage === 'string' ? bp.stage : '',
       triggers: [],
       inputs: artifacts.filter(a => a && a.direction === 'input'),
       outputs: artifacts.filter(a => a && a.direction === 'output'),
@@ -399,6 +402,7 @@ function unifiedToProcessTemplate(flow) {
     if (asArray(n.inputs).length) extra.inputs = n.inputs;
     if (asArray(n.outputs).length) extra.outputs = n.outputs;
     if (asArray(n.dependsOn).length) extra.dependsOn = n.dependsOn;
+    if (n.stage) extra.stage = n.stage;
     return { ...r, ...extra };
   });
   return bundle;

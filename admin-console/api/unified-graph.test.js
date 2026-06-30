@@ -246,6 +246,20 @@ test('briefingsToUnified keeps parents, carries body as content, builds hierarch
   assert.equal(g.nodes.find(n => n.id === 'aa01').content, '# Do the upstream work');
 });
 
+test('stage is carried from briefings and round-trips through the bundle (#362 E)', () => {
+  const flow = briefingsToUnified([{ id: 'aa01', title: 'A', stage: 'Build', body: 'x' }]);
+  assert.equal(flow.nodes[0].stage, 'Build');
+  const g = buildUnifiedGraph(flow.nodes, flow.edges);
+  assert.equal(g.nodes.find(n => n.id === 'aa01').stage, 'Build');
+
+  const bundle = { processTemplateVersion: 1, name: 'd', level: 'template',
+    roles: [{ id: 'dev', displayName: 'Dev', role: 'team-member', sessionPolicy: 'persistent', systemPrompt: '', triggers: [], stage: 'Design' }], gates: [], labels: [] };
+  const u = processTemplateToUnified(bundle);
+  assert.equal(u.nodes[0].stage, 'Design');
+  const back = unifiedToProcessTemplate(u);
+  assert.equal(back.roles[0].stage, 'Design');
+});
+
 test('process node content mirrors systemPrompt', () => {
   const flow = processTemplateToUnified({
     processTemplateVersion: 1, name: 'd', level: 'template',

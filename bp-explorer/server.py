@@ -549,6 +549,7 @@ def load_all_briefings(project_root: Path) -> list[dict]:
             "title": meta.get("mission", meta.get("title", "")),
             "status": meta.get("status", ""),
             "rigor": meta.get("rigor", ""),
+            "stage": meta.get("stage", ""),
             "created": meta.get("created", ""),
             "parent": parent,
             "children": meta.get("children", []),
@@ -2343,6 +2344,11 @@ async def edit_bp_frontmatter(bp_id: str, body: BpFrontmatterEditRequest, worksp
                     entry["description"] = v["description"]
                 arts.append(entry)
             new_block, aliases = _serialize_artifacts(arts), {"artifacts"}
+        elif op == "set-stage":
+            stage = body.value if isinstance(body.value, str) else (body.value or {}).get("stage", "")
+            stage = (stage or "").strip()
+            new_block = [f"stage: {_yaml_scalar(stage)}"] if stage else []
+            aliases = {"stage"}
         else:
             raise HTTPException(status_code=400, detail=f"unknown op: {op}")
 

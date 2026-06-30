@@ -65,6 +65,7 @@ export function makeBpOps(workspace) {
       fmEdit(bpId, 'add-artifact', { direction, path, description }),
     removeArtifact: (bpId, { direction, path }) =>
       fmEdit(bpId, 'remove-artifact', { direction, path }),
+    setStage: (bpId, stage) => fmEdit(bpId, 'set-stage', stage || ''),
   };
 }
 
@@ -148,6 +149,12 @@ export function makeDraftOps(getBundle, persist) {
       const b = clone(getBundle());
       const r = role(b, roleId);
       if (r) r.systemPrompt = systemPrompt;
+      await persist(b);
+    },
+    setStage: async (roleId, stage) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (r) { if (stage) r.stage = stage; else delete r.stage; }
       await persist(b);
     },
     deleteRole: async (roleId) => {

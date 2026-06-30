@@ -105,6 +105,14 @@ function buildAgentTree(agents, bps, collapsedSet) {
   const collapsed = collapsedSet instanceof Set ? collapsedSet : new Set();
 
   if (!Array.isArray(bps) || bps.length === 0) {
+    // Team members carry a `parentMemberId` (imported BP hierarchy, #377). When
+    // any member declares one, render the parent-child tree like the
+    // orchestrator does for bp-instances; otherwise fall back to a flat list.
+    const hasHierarchy = list.some(
+      (a) => a.parentMemberId && list.some((x) => x.id === a.parentMemberId),
+    );
+    if (hasHierarchy) return buildParentTree(list, collapsed);
+
     const sorted = [...list].sort(
       (a, b) => (a.displayName || a.id).localeCompare(b.displayName || b.id),
     );
@@ -180,6 +188,53 @@ function buildAgentTree(agents, bps, collapsedSet) {
   }
 
   walk(depth1, 1, []);
+  return rows;
+}
+
+// Parent-child tree from team members' `parentMemberId` pointers (imported BP
+// hierarchy, #377). Produces the same row shape as buildAgentTree so the tree
+// connectors render identically to the orchestrator's bp-instance view.
+// Siblings are sorted alphabetically; cycles / dangling parents degrade to
+// roots. Children of a collapsed node are omitted.
+function buildParentTree(list, collapsed) {
+  const byId = {};
+  list.forEach((a) => { byId[a.id] = a; });
+  const nameOf = (id) => (byId[id]?.displayName || id);
+  const byName = (x, y) => nameOf(x).localeCompare(nameOf(y));
+
+  const childrenOf = {};
+  const roots = [];
+  list.forEach((a) => {
+    const p = a.parentMemberId && byId[a.parentMemberId] && a.parentMemberId !== a.id
+      ? a.parentMemberId : null;
+    if (p) (childrenOf[p] = childrenOf[p] || []).push(a.id);
+    else roots.push(a.id);
+  });
+  roots.sort(byName);
+  Object.values(childrenOf).forEach((arr) => arr.sort(byName));
+
+  const rows = [];
+  const emitted = new Set();
+  function walk(ids, depth, ancestorTrail) {
+    ids.forEach((id, idx) => {
+      const agent = byId[id];
+      if (!agent || emitted.has(id)) return;
+      const isLast = idx === ids.length - 1;
+      const kids = (childrenOf[id] || []).filter((c) => !emitted.has(c));
+      const hasChildren = kids.length > 0;
+      const isCollapsed = hasChildren && collapsed.has(id);
+      rows.push({ agent, depth, ancestorMore: ancestorTrail.slice(), isLast, hasChildren, isCollapsed });
+      emitted.add(id);
+      if (hasChildren && !isCollapsed) walk(kids, depth + 1, [...ancestorTrail, !isLast]);
+    });
+  }
+  walk(roots, 1, []);
+
+  // Safety net: any member not emitted (e.g. a parent cycle) is appended flat.
+  const leftovers = list.filter((a) => !emitted.has(a.id)).sort((a, b) => byName(a.id, b.id));
+  leftovers.forEach((a, i) => {
+    rows.push({ agent: a, depth: 1, ancestorMore: [], isLast: i === leftovers.length - 1, hasChildren: false, isCollapsed: false });
+  });
   return rows;
 }
 

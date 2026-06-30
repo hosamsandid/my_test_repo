@@ -2154,6 +2154,7 @@ class Orchestrator {
         ...(Array.isArray(opts.mcpServersOverride) ? { mcpServersOverride: opts.mcpServersOverride } : {}),
         ...(opts.sessionPolicy === 'per-invocation' ? { sessionPolicy: 'per-invocation' } : {}),
         ...(opts.dataFlow && typeof opts.dataFlow === 'object' ? { dataFlow: opts.dataFlow } : {}),
+        ...(typeof opts.parentMemberId === 'string' && opts.parentMemberId ? { parentMemberId: opts.parentMemberId } : {}),
         enabled: false, // no token → isStub; UI shows it, enableAgent materializes it
       };
       saveAgentConfig(memberId, stubConfig);
@@ -2216,6 +2217,8 @@ class Orchestrator {
       // renders this member's dependency/artifact edges. Runtime hand-offs are
       // driven by the push triggers, not this block.
       ...(opts.dataFlow && typeof opts.dataFlow === 'object' ? { dataFlow: opts.dataFlow } : {}),
+      // Parent member id for the agent-overview / live-graph hierarchy.
+      ...(typeof opts.parentMemberId === 'string' && opts.parentMemberId ? { parentMemberId: opts.parentMemberId } : {}),
       enabled: true,
     };
     saveAgentConfig(memberId, memberConfig);

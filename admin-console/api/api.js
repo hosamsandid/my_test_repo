@@ -2184,6 +2184,7 @@ app.get('/api/flows/graph', async (req, res) => {
       inputs: Array.isArray(df.inputs) ? df.inputs : [],
       outputs: Array.isArray(df.outputs) ? df.outputs : [],
       dependsOn: Array.isArray(df.dependsOn) ? df.dependsOn : [],
+      parent: typeof cfg.parentMemberId === 'string' ? cfg.parentMemberId : null,
       content: readAgentSystemPrompt(id), // expandable prompt in the unified viewer
       stage: typeof cfg.stage === 'string' ? cfg.stage : '',
     });
@@ -4721,6 +4722,10 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           // mapped to member ids (`<teamId>-<roleId>`) so the graph connects
           // members; artifact paths match across nodes unchanged.
           ...(dataFlowForMember(p.template, teamId) || {}),
+          // Parent-child hierarchy: map the role's parent id → member id so the
+          // agent overview + live graph render the tree like an orchestrator.
+          ...(typeof p.template.parent === 'string' && p.template.parent
+            ? { parentMemberId: `${teamId}-${p.template.parent}` } : {}),
           // Deferred materialization — create as a stub when requested.
           materialize: materializeMembers,
         }),

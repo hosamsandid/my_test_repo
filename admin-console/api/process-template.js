@@ -139,6 +139,9 @@ function templateToCustomRoles(bundle) {
     ...(Array.isArray(r.inputs) && r.inputs.length ? { inputs: r.inputs } : {}),
     ...(Array.isArray(r.outputs) && r.outputs.length ? { outputs: r.outputs } : {}),
     ...(Array.isArray(r.dependsOn) && r.dependsOn.length ? { dependsOn: r.dependsOn } : {}),
+    // Parent role id (hierarchy) — the materialiser maps it to a member id so
+    // the agent overview + live graph render the parent-child tree (#377).
+    ...(typeof r.parent === 'string' && r.parent ? { parent: r.parent } : {}),
     triggers: (r.triggers || []).map(t => ({
       id: t.id,
       type: t.type,

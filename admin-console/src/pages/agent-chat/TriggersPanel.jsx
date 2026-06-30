@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Terminal, FileCode2 } from 'lucide-react';
+import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Terminal, FileCode2, GitBranch } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
 import ScriptViewerPanel from '../../components/ScriptViewerPanel';
@@ -17,6 +17,19 @@ function scriptNameFromPath(scriptPath) {
 }
 
 const POLL_MS = 30_000;
+
+// A data-flow trigger is an agent dependency: a push by an upstream agent wakes
+// this one with a hand-off prompt. Under the hood it's a github-event/push
+// trigger scoped via a `from` allowlist of upstream member ids (#379). The
+// `dataFlow` marker is authoritative; we also detect the shape for robustness.
+function isDataFlowTrigger(t) {
+  if (!t) return false;
+  if (t.dataFlow === true) return true;
+  return t.type === 'github-event'
+    && Array.isArray(t.events) && t.events.length === 1 && t.events[0] === 'push'
+    && Array.isArray(t.from);
+}
+const upstreamsOf = (t) => (Array.isArray(t?.from) ? t.from : []);
 
 // Subset of GitHub Events API event types most useful for agent workflows.
 // (The Events API does not emit every webhook action — e.g. pull_request
@@ -92,13 +105,15 @@ function ToggleSwitch({ checked, onChange }) {
 }
 
 /* ── Type badge ─────────────────────────────────────────────────────── */
-function TypeBadge({ type }) {
+function TypeBadge({ type, dataFlow }) {
   const isCron   = type === 'cron' || type === 'recurring';
   const isOnce   = type === 'once';
   const isHttp   = type === 'http';
   const isGithub = type === 'github-event';
   let bg, color, label, Icon;
-  if (isCron) {
+  if (dataFlow) {
+    bg = 'var(--eb-accent-muted)'; color = 'var(--eb-accent-primary)'; label = 'data flow'; Icon = GitBranch;
+  } else if (isCron) {
     bg = 'var(--eb-accent-muted)'; color = 'var(--eb-accent-primary)'; label = 'cron'; Icon = Clock;
   } else if (isOnce) {
     bg = 'var(--eb-bg-elevated)'; color = 'var(--eb-text-secondary)'; label = 'once'; Icon = CalendarClock;
@@ -527,15 +542,21 @@ const ghostBtnStyle = {
   padding: '2px 10px', cursor: 'pointer',
 };
 
-function TriggerRow({ trigger, agentId, onEdit, onDeleted, onToggled }) {
+function TriggerRow({ trigger, agentId, onEdit, onDeleted, onToggled, nameOf = (id) => id }) {
   const [toggling, setToggling] = useState(false);
   const [scriptPanelName, setScriptPanelName] = useState(null);
   const preCheckScriptName = scriptNameFromPath(trigger.preCheckScript);
   const preCheckEnvEntries = trigger.preCheckEnv && typeof trigger.preCheckEnv === 'object'
     ? Object.entries(trigger.preCheckEnv)
     : [];
+  const isDataFlow = isDataFlowTrigger(trigger);
   let schedule;
-  if (trigger.type === 'http') {
+  if (isDataFlow) {
+    const ups = upstreamsOf(trigger).map(nameOf);
+    schedule = ups.length
+      ? `wakes on push from ${ups.join(', ')}`
+      : 'push from (no upstream agent set)';
+  } else if (trigger.type === 'http') {
     schedule = `/hooks/${agentId}/${trigger.id}`;
   } else if (trigger.type === 'github-event') {
     const evCount = Array.isArray(trigger.events) ? trigger.events.length : 0;
@@ -567,7 +588,7 @@ function TriggerRow({ trigger, agentId, onEdit, onDeleted, onToggled }) {
       display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-        <TypeBadge type={trigger.type} />
+        <TypeBadge type={trigger.type} dataFlow={isDataFlow} />
         <code style={{
           flex: 1, fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)',
           color: 'var(--eb-text-primary)', overflow: 'hidden',
@@ -719,10 +740,14 @@ function generateSecret() {
 }
 
 /* ── Trigger form (create & edit) ───────────────────────────────────── */
-function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
+function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, siblings = [] }) {
   const isEdit = !!initialValues;
   const knownTypes = new Set(['cron', 'once', 'http', 'github-event']);
-  const initialType = knownTypes.has(initialValues?.type) ? initialValues.type : 'cron';
+  const startedAsDataFlow = isDataFlowTrigger(initialValues);
+  // 'data-flow' is a UI-only type that serializes to github-event / push / from.
+  const initialType = startedAsDataFlow
+    ? 'data-flow'
+    : (knownTypes.has(initialValues?.type) ? initialValues.type : 'cron');
   const [form, setForm] = useState(() => ({
     id:          initialValues?.id          ?? '',
     type:        initialType,
@@ -734,10 +759,20 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
     // Empty string = match any label (legacy behavior). The poller treats
     // missing or empty as no filter, so the wire format is `string | undefined`.
     labelFilter: initialValues?.labelFilter ?? '',
+    // `from` preserved verbatim for non-data-flow github triggers (keyword like
+    // 'any-except-self' or an allowlist) so editing never silently drops it.
+    from:        initialValues?.from ?? null,
+    // Data-flow upstreams: agent ids whose push wakes this agent.
+    upstreams:   Array.isArray(initialValues?.from) ? initialValues.from.filter(x => x !== 'humans') : [],
     secret:      initialValues?.secret      ?? (initialType === 'http' ? '' : generateSecret()),
     description: initialValues?.description ?? '',
     prompt:      initialValues?.prompt      ?? '',
     enabled:     initialValues?.enabled !== false,
+  }));
+  const isDataFlow = form.type === 'data-flow';
+  const toggleUpstream = (id) => setForm(f => ({
+    ...f,
+    upstreams: f.upstreams.includes(id) ? f.upstreams.filter(u => u !== id) : [...f.upstreams, id],
   }));
   const showLabelFilter = form.type === 'github-event'
     && form.events.some(e => LABEL_FILTERABLE_EVENTS.has(e));
@@ -754,7 +789,7 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
   // environment. Only fetched when github-event is the active type.
   const [availableRepos, setAvailableRepos] = useState(null); // null = not loaded
   useEffect(() => {
-    if (form.type !== 'github-event' || availableRepos !== null) return;
+    if ((form.type !== 'github-event' && form.type !== 'data-flow') || availableRepos !== null) return;
     let cancelled = false;
     (async () => {
       try {
@@ -775,6 +810,14 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
     })();
     return () => { cancelled = true; };
   }, [form.type, agentId, availableRepos]);
+
+  // Auto-pick the repo when the env has exactly one — a data-flow dependency
+  // always lives on the team repo, so the user shouldn't have to choose.
+  useEffect(() => {
+    if (Array.isArray(availableRepos) && availableRepos.length === 1 && !form.repo) {
+      setForm(f => (f.repo ? f : { ...f, repo: availableRepos[0].fullName }));
+    }
+  }, [availableRepos, form.repo]);
 
   // Lazy-generate a secret the first time http is selected, so users get a
   // working default without having to click "regenerate".
@@ -803,16 +846,26 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
       if (!form.repo)             { setFormError('Repository is required.'); return; }
       if (form.events.length === 0) { setFormError('Select at least one event.'); return; }
     }
+    if (isDataFlow) {
+      if (!form.repo) { setFormError('A repository is required (the team repo agents push to).'); return; }
+      if (form.upstreams.length === 0) { setFormError('Pick at least one upstream agent.'); return; }
+    }
     if (form.type === 'http' && !form.secret.trim()) { setFormError('Secret is required for HTTP triggers.'); return; }
     if (!form.prompt.trim()) { setFormError('Prompt is required.'); return; }
     const body = {
-      type:        form.type,
+      type:        isDataFlow ? 'github-event' : form.type,
       description: form.description.trim() || undefined,
       prompt:      form.prompt.trim(),
       enabled:     form.enabled,
     };
     if (!isEdit) body.id = form.id.trim() || undefined;
-    if (form.type === 'cron')              body.cron = form.cron.trim();
+    if (isDataFlow) {
+      // A data-flow dependency is a push trigger scoped to the upstream agents.
+      body.repo = form.repo;
+      body.events = ['push'];
+      body.from = form.upstreams;
+      body.dataFlow = true;
+    } else if (form.type === 'cron')       body.cron = form.cron.trim();
     else if (form.type === 'once')         body.at   = form.at.trim();
     else if (form.type === 'http')         body.secret = form.secret.trim();
     else if (form.type === 'github-event') {
@@ -825,6 +878,9 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
       // path clear an existing filter when the user blanks the field.
       const lf = (form.labelFilter || '').trim();
       body.labelFilter = (showLabelFilter && lf) ? lf : null;
+      // Preserve an existing origin filter (keyword or allowlist) so editing
+      // events/label never silently drops it.
+      if (form.from != null) body.from = form.from;
     }
     await onSave(body);
   }
@@ -860,6 +916,7 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
           <option value="once">Once (one-shot)</option>
           <option value="http">HTTP webhook</option>
           <option value="github-event">GitHub event</option>
+          <option value="data-flow">Data flow (agent dependency)</option>
         </select>
       </div>
 
@@ -869,6 +926,69 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
 
       {form.type === 'once' && (
         <DateTimePicker value={form.at} onChange={v => set('at', v)} />
+      )}
+
+      {isDataFlow && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+          <div style={{
+            padding: 'var(--eb-space-2) var(--eb-space-3)',
+            background: 'var(--eb-accent-muted)', border: '1px solid var(--eb-accent-primary)',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5,
+          }}>
+            <GitBranch size={11} style={{ verticalAlign: 'middle', marginRight: 4, color: 'var(--eb-accent-primary)' }} />
+            This agent is woken when an <strong>upstream agent pushes</strong> to the team repo
+            (its committed work is the hand-off). Pick the upstream agents this one depends on.
+          </div>
+
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+              Upstream agents (their push wakes this agent)
+            </div>
+            {siblings.length === 0 ? (
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', padding: 'var(--eb-space-2)' }}>
+                No other agents in this team to depend on.
+              </div>
+            ) : (
+              <div style={{
+                display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)',
+                padding: 'var(--eb-space-2)', background: 'var(--eb-bg-elevated)',
+                border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+                maxHeight: 200, overflowY: 'auto',
+              }}>
+                {siblings.map(s => (
+                  <label key={s.id} style={{
+                    display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+                    padding: '2px 4px', cursor: 'pointer', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)',
+                  }}>
+                    <input type="checkbox" checked={form.upstreams.includes(s.id)} onChange={() => toggleUpstream(s.id)} />
+                    <span style={{ flex: 1 }}>{s.displayName}</span>
+                    <code style={{ fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)' }}>{s.id}</code>
+                  </label>
+                ))}
+              </div>
+            )}
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+              Only pushes by the selected agents wake this one — not every push to the repo.
+            </div>
+          </div>
+
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+              Repository
+            </div>
+            {availableRepos === null ? (
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', padding: 'var(--eb-space-2)' }}>
+                <Loader2 size={12} style={{ animation: 'spin 1s linear infinite', marginRight: 6, verticalAlign: 'middle' }} />
+                Loading repositories…
+              </div>
+            ) : (
+              <select value={form.repo} onChange={e => set('repo', e.target.value)} style={{ ...FIELD_STYLE, width: '100%' }}>
+                <option value="">— Select a repository —</option>
+                {availableRepos.map(r => <option key={r.fullName} value={r.fullName}>{r.fullName}</option>)}
+              </select>
+            )}
+          </div>
+        </div>
       )}
 
       {form.type === 'github-event' && (
@@ -1134,6 +1254,33 @@ export default function TriggersPanel({ agentId, active, onChanged }) {
   const [saving, setSaving]             = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
 
+  // Sibling agents (same parent team) — the candidate upstreams a data-flow
+  // dependency can listen to, and the source for resolving member ids to names.
+  const [siblings, setSiblings] = useState([]); // [{ id, displayName }]
+  useEffect(() => {
+    if (!agentId || !active) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [me, all] = await Promise.all([
+          apiCall('GET', `/api/agents/${agentId}`),
+          apiCall('GET', '/api/agents'),
+        ]);
+        const list = Array.isArray(all) ? all : [];
+        const team = me?.parentTeamId;
+        const sibs = (team ? list.filter(a => a.parentTeamId === team) : list)
+          .filter(a => a.id !== agentId)
+          .map(a => ({ id: a.id, displayName: a.displayName || a.id }));
+        if (!cancelled) setSiblings(sibs);
+      } catch { if (!cancelled) setSiblings([]); }
+    })();
+    return () => { cancelled = true; };
+  }, [agentId, active]);
+  const nameOf = useCallback(
+    (id) => siblings.find(s => s.id === id)?.displayName || id,
+    [siblings],
+  );
+
   const fetchTriggers = useCallback(async (id) => {
     if (!id) { setTriggers([]); return; }
     setLoading(true);
@@ -1292,6 +1439,7 @@ export default function TriggersPanel({ agentId, active, onChanged }) {
             key={t.id || i}
             trigger={t}
             agentId={agentId}
+            nameOf={nameOf}
             onEdit={setEditTarget}
             onDeleted={setDeleteTarget}
             onToggled={afterRowMutation}
@@ -1302,6 +1450,7 @@ export default function TriggersPanel({ agentId, active, onChanged }) {
       <SidePanel open={addOpen} onClose={() => setAddOpen(false)} title="Add Trigger">
         <TriggerForm
           agentId={agentId}
+          siblings={siblings}
           saving={saving}
           onSave={handleSave}
           onCancel={() => setAddOpen(false)}
@@ -1312,6 +1461,7 @@ export default function TriggersPanel({ agentId, active, onChanged }) {
         {editTarget && (
           <TriggerForm
             agentId={agentId}
+            siblings={siblings}
             initialValues={editTarget}
             saving={saving}
             onSave={handleEditSave}

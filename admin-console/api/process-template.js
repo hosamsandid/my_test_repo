@@ -55,6 +55,7 @@ function bundleTrigger(t) {
     out.at = t.at || null;
   }
   if (Array.isArray(t.emits) && t.emits.length) out.emits = t.emits.slice();
+  if (t.dataFlow) out.dataFlow = true; // data-flow (agent dependency) marker (#379)
   if (t.description) out.description = t.description;
   if (t.prompt) out.prompt = t.prompt;
   if (t.preCheckScript) out.preCheckScript = t.preCheckScript;
@@ -152,6 +153,7 @@ function templateToCustomRoles(bundle) {
       cron: t.cron,
       at: t.at,
       emits: t.emits,
+      dataFlow: t.dataFlow,
       description: t.description,
       promptTemplate: t.prompt || '',
       preCheckScript: t.preCheckScript,
@@ -320,6 +322,10 @@ function expandDataFlowSteps(bundle, { teamId } = {}) {
         type: 'github-event',
         events: ['push'],
         from: [memberId(upId)],
+        // Marker so the UI renders this as an agent data-flow dependency (an
+        // editable "push from <upstream>" hand-off) rather than a raw push
+        // trigger. The poller ignores unknown fields. (#379)
+        dataFlow: true,
         enabled: true,
         description: `Data flow: wake on push from ${byId.get(upId)?.displayName || upId}`,
         prompt: dataFlowPrompt(byId.get(upId)?.displayName || upId, [...paths].sort()),

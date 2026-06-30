@@ -189,6 +189,7 @@ test('expandDataFlowSteps: depends_on becomes a push trigger scoped to the upstr
   assert.ok(t, 'consumer gets a push trigger for its upstream');
   assert.equal(t.type, 'github-event');
   assert.deepEqual(t.events, ['push']);
+  assert.equal(t.dataFlow, true, 'marked as a data-flow dependency for the UI');
   assert.deepEqual(t.from, ['acme-a'], 'scoped to the upstream member id, not a generic push');
   assert.match(t.prompt, /Analyst/);
   // The upstream itself gets no data-flow trigger.

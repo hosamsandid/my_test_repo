@@ -4677,6 +4677,9 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           if (typeof tr.labelFilter === 'string' && tr.labelFilter.trim()) {
             out.labelFilter = applyTemplateVars(tr.labelFilter, memberVars);
           }
+          // Data-flow (agent dependency) marker so the trigger UI renders it as
+          // an editable "push from <upstream>" hand-off rather than a raw push.
+          if (tr.dataFlow) out.dataFlow = true;
         } else if (tr.type === 'cron') {
           out.cron = tr.cron;
         }
@@ -5124,6 +5127,9 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           if (typeof tr.labelFilter === 'string' && tr.labelFilter.trim()) {
             out.labelFilter = applyTemplateVars(tr.labelFilter, memberVars);
           }
+          // Data-flow (agent dependency) marker so the trigger UI renders it as
+          // an editable "push from <upstream>" hand-off rather than a raw push.
+          if (tr.dataFlow) out.dataFlow = true;
         } else if (tr.type === 'cron') {
           out.cron = tr.cron;
         }

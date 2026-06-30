@@ -16,6 +16,7 @@ The Admin Console at `http://localhost:4000` (configurable via `.env`) is the ce
 | **Scheduled Jobs** | `/jobs` | Cross-agent view of all triggers; add/edit/delete cron, one-shot, webhook, and GitHub event triggers |
 | **Model Providers** | `/models` | Register and test model providers; discover available models; set per-agent model overrides |
 | **MCP Servers** | `/mcp` | View Model Context Protocol servers configured in the Claude settings file |
+| **Teams** | `/teams` | Manage human **Teams** (tenant scope): team CRUD, users, per-team roles, and assigning agents/environments to a team |
 | **Flows** | `/flows` | BriefingPack graph: visualize BP dependencies, claim/activate/deactivate orchestrator-managed BPs |
 
 ## Authentication (#276)
@@ -53,6 +54,24 @@ to the login screen; an expired session (any `401`) does the same automatically.
 function in `admin-console/api/auth.js`. Swapping it for an OIDC/SAML token
 exchange (and adding the IdP callback route) requires no change to the session
 format, cookie handling, gate middleware, or the login UI/routing.
+
+## Teams (#308)
+
+The **Teams** page (`/teams`) is the UI for the human **Team** scope (the
+tenant) introduced by the teams data model (#299). It is distinct from the
+*Agent Team* squad created by the **Team Wizard** — see
+[docs/teams-data-model.md](./teams-data-model.md).
+
+A System Admin can:
+- **Team CRUD** — create / edit / delete teams. The `default` team cannot be deleted.
+- **Manage Users** — create human users (keyed by a stable `subject` an SSO login will later map onto), toggle the global **System Admin** flag, and delete users (their memberships cascade).
+- **Members & roles** — per team, add/remove human members and set their per-team role (**Team Admin** / **Team Member**). Membership is an upsert: re-adding a user updates their role.
+- **Resource ownership** — reassign any agent or Working Environment to a team via a per-row team selector. Agents reassign through `PUT /api/agents/:id { teamId }`, environments through `PUT /api/environments/:id { teamId }`; both validate the target team exists.
+
+The page is built on the `/api/admin/{teams,users,memberships}` endpoints
+(proxied to the orchestrator's teams store). Per-role *enforcement* of these
+actions — and per-resource visibility — arrive with later tickets (#302/#304);
+today any authenticated operator can manage teams.
 
 ## Audit trail (#305)
 

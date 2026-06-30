@@ -23,6 +23,7 @@ const SkillsRegistry      = lazy(() => import('./pages/SkillsRegistry'));
 const ScheduledJobs       = lazy(() => import('./pages/ScheduledJobs'));
 const ModelRegistry       = lazy(() => import('./pages/ModelRegistry'));
 const McpServers          = lazy(() => import('./pages/McpServers'));
+const Teams               = lazy(() => import('./pages/Teams'));
 const Briefings           = lazy(() => import('./pages/Briefings'));
 const OrchestratorWizard  = lazy(() => import('./pages/OrchestratorWizard'));
 const PatternsCatalog     = lazy(() => import('./pages/PatternsCatalog'));
@@ -96,6 +97,7 @@ export default function App() {
           <Route path="/jobs"         element={<ScheduledJobs />} />
           <Route path="/models"       element={<ModelRegistry />} />
           <Route path="/mcp"          element={<McpServers />} />
+          <Route path="/teams"        element={<Teams />} />
           <Route path="/flows"         element={<Briefings />} />
           <Route path="/briefings"    element={<Navigate to="/flows" replace />} />
           <Route path="/process"      element={<Navigate to="/flows" replace />} />

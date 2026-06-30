@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight, Bot,
   Boxes, Key, MessageCircle, Github, Layers, GitBranch,
-  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut,
+  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
@@ -56,6 +56,7 @@ const NAV = [
     { path: '/environments',  label: 'Working Environments', Icon: Boxes },
   ]},
   { section: 'CONFIGURATION', items: [
+    { path: '/teams',        label: 'Teams',               Icon: Building2 },
     { path: '/skills',       label: 'Skills Registry',     Icon: Zap },
     { path: '/jobs',         label: 'Triggers',            Icon: Clock },
     { path: '/models',       label: 'Model Providers',     Icon: Sparkles },
@@ -78,6 +79,7 @@ const BREADCRUMBS = {
   '/jobs':         'Triggers',
   '/models':       'Model Providers',
   '/mcp':          'MCP Servers',
+  '/teams':        'Teams',
   '/patterns':               'Patterns Catalog',
   '/patterns/sdlc':          'Patterns Catalog / SDLC',
   '/patterns/mainframe':     'Patterns Catalog / Mainframe Modernization',

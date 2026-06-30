@@ -3880,9 +3880,13 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
         return out;
       });
 
+      // Member display name is the role name only (optionally numbered for
+      // multi-instance roles). The parent team name is intentionally NOT
+      // prepended — UIs already group members under their team, so prefixing
+      // would just duplicate the team name and make every label long.
       const memberDisplayName = p.instanceIndex !== null
-        ? `${teamName} · ${p.template.displayName} ${p.instanceIndex}`
-        : `${teamName} · ${p.template.displayName}`;
+        ? `${p.template.displayName} ${p.instanceIndex}`
+        : p.template.displayName;
       const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(teamAgentId)}/members`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4301,9 +4305,13 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
         return out;
       });
 
+      // Member display name is the role name only (optionally numbered for
+      // multi-instance roles). The parent team name is intentionally NOT
+      // prepended — UIs already group members under their team, so prefixing
+      // would just duplicate the team name and make every label long.
       const memberDisplayName = p.instanceIndex !== null
-        ? `${teamName} · ${p.template.displayName} ${p.instanceIndex}`
-        : `${teamName} · ${p.template.displayName}`;
+        ? `${p.template.displayName} ${p.instanceIndex}`
+        : p.template.displayName;
       const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(teamAgentId)}/members`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

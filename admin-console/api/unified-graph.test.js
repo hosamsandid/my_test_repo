@@ -188,6 +188,43 @@ test('round-trip: process bundle → unified → process bundle preserves roles/
   assert.deepEqual(back.roles[0].triggers[0].emits, ['done']);
 });
 
+test('processTemplateToUnified reads inputs/outputs/dependsOn from roles (#367)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'd', level: 'template',
+    roles: [
+      { id: 'a', triggers: [], outputs: [{ path: 'spec.md' }] },
+      { id: 'b', triggers: [], inputs: [{ path: 'spec.md' }], dependsOn: ['a'] },
+    ],
+    gates: [], labels: [],
+  };
+  const flow = processTemplateToUnified(bundle);
+  const b = flow.nodes.find(n => n.id === 'b');
+  assert.deepEqual(b.dependsOn, ['a']);
+  assert.deepEqual(b.inputs, [{ path: 'spec.md' }]);
+  const g = buildUnifiedGraph(flow.nodes, flow.edges);
+  assert.ok(findEdge(g, e => e.on === 'dependency' && e.from === 'a' && e.to === 'b'));
+  assert.ok(findEdge(g, e => e.on === 'artifact' && e.from === 'a' && e.to === 'b'));
+});
+
+test('round-trip preserves inputs/outputs/dependsOn through unified ↔ bundle (#367)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'd', level: 'template',
+    roles: [
+      { id: 'a', displayName: 'A', role: 'team-member', sessionPolicy: 'persistent', systemPrompt: '', triggers: [], outputs: [{ path: 'spec.md', description: 'the spec' }] },
+      { id: 'b', displayName: 'B', role: 'team-member', sessionPolicy: 'persistent', systemPrompt: '', triggers: [], inputs: [{ path: 'spec.md' }], dependsOn: ['a'] },
+    ],
+    gates: [], labels: [],
+  };
+  const back = unifiedToProcessTemplate(processTemplateToUnified(bundle));
+  const a = back.roles.find(r => r.id === 'a');
+  const b = back.roles.find(r => r.id === 'b');
+  assert.deepEqual(a.outputs, [{ path: 'spec.md', description: 'the spec' }]);
+  assert.deepEqual(b.inputs, [{ path: 'spec.md' }]);
+  assert.deepEqual(b.dependsOn, ['a']);
+  // Roles without ports stay clean (no empty arrays injected).
+  assert.ok(!('inputs' in a));
+});
+
 test('explicit manual hand-off edge passes through', () => {
   const g = buildUnifiedGraph(
     [{ id: 'a', triggers: [] }, { id: 'b', triggers: [] }],

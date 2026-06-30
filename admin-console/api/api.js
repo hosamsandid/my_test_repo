@@ -13,7 +13,7 @@ const matrix = require('./matrix');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandReviewSteps, emptyDraftBundle } = require('./process-template');
-const { buildUnifiedGraph, briefingsToUnified } = require('./unified-graph');
+const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified } = require('./unified-graph');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -2065,6 +2065,21 @@ app.get('/api/flows/graph', async (req, res) => {
     });
   }
   res.json({ unifiedFlowVersion: 1, source: 'live', team, ...buildUnifiedGraph(nodes) });
+});
+
+/* Derive a unified graph from a draft/imported bundle (#367) — the editable
+ * counterpart of POST /api/process/graph. Maps the process-template bundle
+ * (roles may carry inputs/outputs/dependsOn) through the unified model so the
+ * draft editor renders label + dependency + artifact edges and unified lints. */
+app.post('/api/flows/graph', (req, res) => {
+  const bundle = req.body && req.body.processTemplate;
+  const v = validateProcessTemplate(bundle, { allowEmptyRoles: true });
+  if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
+  const flow = processTemplateToUnified(bundle);
+  res.json({
+    unifiedFlowVersion: flow.unifiedFlowVersion, source: 'draft', imported: true, name: bundle.name,
+    ...buildUnifiedGraph(flow.nodes, flow.edges),
+  });
 });
 
 /* ─── Process template bundle (export, #334) ────────────────────────────

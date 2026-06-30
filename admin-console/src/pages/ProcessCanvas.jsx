@@ -5,7 +5,8 @@ import { useApi, apiCall } from '../hooks/useApi';
 import { initProcessGraph } from './process/process-graph-render';
 import ProcessNodeInspector from './process/ProcessNodeInspector';
 import DraftNodeInspector from './process/DraftNodeInspector';
-import { CreateHandoffDialog, EditHandoffDialog } from './process/EdgeDialogs';
+import { CreateHandoffDialog, EditHandoffDialog, CreateEdgeDialog } from './process/EdgeDialogs';
+import { unifiedToRenderGraph } from './process/unified-render-adapter';
 import MaterializeDialog from './process/MaterializeDialog';
 import AddApprovalDialog from './process/AddApprovalDialog';
 import StageView from './process/StageView';
@@ -76,8 +77,10 @@ export default function ProcessCanvas() {
   useEffect(() => {
     if (!draftBundle) return;
     let alive = true;
-    apiCall('POST', '/api/process/graph', { processTemplate: draftBundle })
-      .then(g => { if (alive) setDraftGraph(g); }).catch(() => {});
+    // Derive via the unified builder so the draft editor shows label +
+    // dependency + artifact edges, then map onto the renderer's kind contract.
+    apiCall('POST', '/api/flows/graph', { processTemplate: draftBundle })
+      .then(g => { if (alive) setDraftGraph(unifiedToRenderGraph(g)); }).catch(() => {});
     return () => { alive = false; };
   }, [draftBundle]);
 
@@ -372,7 +375,18 @@ export default function ProcessCanvas() {
         />
       )}
 
-      {connectPair && (
+      {connectPair && (isDraft ? (
+        <CreateEdgeDialog
+          from={connectPair.from}
+          to={connectPair.to}
+          fromName={nodeName(connectPair.from)}
+          toName={nodeName(connectPair.to)}
+          labels={displayGraph?.labels || []}
+          ops={ops}
+          onClose={() => setConnectPair(null)}
+          onDone={() => { setConnectPair(null); afterEdit(); }}
+        />
+      ) : (
         <CreateHandoffDialog
           from={connectPair.from}
           to={connectPair.to}
@@ -383,7 +397,7 @@ export default function ProcessCanvas() {
           onClose={() => setConnectPair(null)}
           onDone={() => { setConnectPair(null); afterEdit(); }}
         />
-      )}
+      ))}
 
       {selectedEdge && (
         <EditHandoffDialog

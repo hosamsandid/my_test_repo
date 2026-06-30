@@ -322,6 +322,9 @@ export function initProcessGraph(viewport, { onSelectNode, onConnect, onSelectEd
   function isEditableEdge(e) {
     if (e.orphan || e.deadEnd || e.kind === 'timer') return false;
     if (e.kind === 'gate' || e.kind === 'brake') return false;
+    // Unified (#367): dependency/artifact/manual edges aren't label hand-offs —
+    // the EditHandoffDialog doesn't apply. They're edited via the inspector.
+    if (e.kind === 'dependency' || e.kind === 'artifact' || e.kind === 'manual') return false;
     if (e.from === e.to) return false;
     return !state.synthetic.has(e.from) && !state.synthetic.has(e.to);
   }

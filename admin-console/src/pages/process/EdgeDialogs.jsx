@@ -191,6 +191,124 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
   );
 }
 
+/* ── on-type picker: choose how A hands off to B (#367) ─────────────────────
+ * Label hand-off delegates to CreateHandoffDialog (unchanged). Dependency and
+ * data-flow are BP mechanisms, written via the draft ops onto node ports. */
+export function CreateEdgeDialog({ from, to, fromName, toName, labels, ops = liveOps, onClose, onDone }) {
+  const [type, setType] = useState(null); // null = chooser; 'label' | 'dependency' | 'artifact'
+
+  if (type === 'label') {
+    return (
+      <CreateHandoffDialog
+        from={from} to={to} fromName={fromName} toName={toName}
+        labels={labels} ops={ops} onClose={onClose} onDone={onDone}
+      />
+    );
+  }
+  if (type === 'dependency') {
+    return (
+      <DependencyEdgeForm from={from} to={to} fromName={fromName} toName={toName}
+        ops={ops} onBack={() => setType(null)} onClose={onClose} onDone={onDone} />
+    );
+  }
+  if (type === 'artifact') {
+    return (
+      <ArtifactEdgeForm from={from} to={to} fromName={fromName} toName={toName}
+        ops={ops} onBack={() => setType(null)} onClose={onClose} onDone={onDone} />
+    );
+  }
+
+  const choices = [
+    { id: 'label', title: 'Label hand-off', desc: `${fromName || from} emits a label that wakes ${toName || to}.` },
+    { id: 'dependency', title: 'Dependency', desc: `${toName || to} depends on ${fromName || from} — it can't start until that is done.` },
+    { id: 'artifact', title: 'Data flow', desc: `${fromName || from} produces a file that ${toName || to} consumes.` },
+  ];
+
+  return (
+    <SidePanel open onClose={onClose} title="Connect roles" width="520px">
+      <p style={hint}>
+        How does <strong>{fromName || from}</strong> hand off to <strong>{toName || to}</strong>?
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+        {choices.map(c => (
+          <button key={c.id} onClick={() => setType(c.id)} style={{
+            textAlign: 'left', background: 'var(--eb-bg-app)', cursor: 'pointer',
+            border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+            padding: 'var(--eb-space-3)', fontFamily: 'inherit',
+          }}>
+            <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>{c.title}</div>
+            <div style={{ ...small, marginTop: 2 }}>{c.desc}</div>
+          </button>
+        ))}
+      </div>
+    </SidePanel>
+  );
+}
+
+function DependencyEdgeForm({ from, to, fromName, toName, ops, onBack, onClose, onDone }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  async function submit() {
+    setSaving(true); setError(null);
+    try { await ops.addDependency(to, from); onDone?.(); }
+    catch (e) { setError(e.message); setSaving(false); }
+  }
+  return (
+    <SidePanel open onClose={onClose} title="Add dependency" width="520px">
+      <p style={hint}>
+        <strong>{toName || to}</strong> depends on <strong>{fromName || from}</strong>.
+        It becomes ready only once <strong>{fromName || from}</strong> is complete.
+      </p>
+      {error && <span style={errStyle}>{error}</span>}
+      <div style={actions}>
+        <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>
+        <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+        <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Adding…' : 'Add dependency'}</button>
+      </div>
+    </SidePanel>
+  );
+}
+
+function ArtifactEdgeForm({ from, to, fromName, toName, ops, onBack, onClose, onDone }) {
+  const [path, setPath] = useState('');
+  const [description, setDescription] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  async function submit() {
+    const p = path.trim();
+    if (!p) { setError('Enter the artifact path.'); return; }
+    setSaving(true); setError(null);
+    try {
+      await ops.addArtifact(from, { direction: 'output', path: p, description });
+      await ops.addArtifact(to, { direction: 'input', path: p, description });
+      onDone?.();
+    } catch (e) { setError(e.message); setSaving(false); }
+  }
+  return (
+    <SidePanel open onClose={onClose} title="Add data flow" width="520px">
+      <p style={hint}>
+        <strong>{fromName || from}</strong> produces a file that <strong>{toName || to}</strong> consumes.
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <Field label="Artifact path">
+          <input value={path} onChange={e => setPath(e.target.value)}
+            placeholder="e.g. artifacts/spec.md" style={input} />
+        </Field>
+        <Field label="Description (optional)">
+          <input value={description} onChange={e => setDescription(e.target.value)}
+            placeholder="What this file carries" style={input} />
+        </Field>
+        {error && <span style={errStyle}>{error}</span>}
+        <div style={actions}>
+          <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>
+          <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+          <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Adding…' : 'Add data flow'}</button>
+        </div>
+      </div>
+    </SidePanel>
+  );
+}
+
 /* ── Edit / delete an existing hand-off ────────────────────────────────── */
 export function EditHandoffDialog({ edge, fromName, toName, ops = liveOps, onClose, onDone }) {
   const { from, to, label, triggerId } = edge;

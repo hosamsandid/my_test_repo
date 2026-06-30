@@ -297,9 +297,10 @@ function processTemplateToUnified(bundle) {
       environmentId: null,
       systemPrompt: r.systemPrompt || '',
       triggers: asArray(r.triggers),
-      inputs: [],
-      outputs: [],
-      dependsOn: [],
+      // Unified editing (#367): roles may carry data-flow ports + dependencies.
+      inputs: asArray(r.inputs),
+      outputs: asArray(r.outputs),
+      dependsOn: asArray(r.dependsOn),
     })),
     edges: [],
     gates: asArray(b.gates),
@@ -350,7 +351,7 @@ function briefingsToUnified(bps, { name = 'briefings' } = {}) {
 // this adapter round-trips the Process-expressible structure.
 function unifiedToProcessTemplate(flow) {
   const f = flow || {};
-  return buildProcessTemplate({
+  const bundle = buildProcessTemplate({
     name: f.name,
     level: f.level,
     roles: asArray(f.nodes).map(n => ({
@@ -365,6 +366,18 @@ function unifiedToProcessTemplate(flow) {
     gates: asArray(f.gates),
     labels: asArray(f.labels),
   });
+  // buildProcessTemplate emits a fixed role shape; re-attach the BP data-flow
+  // ports + dependencies so the round-trip is loss-free (#367).
+  const nodeById = new Map(asArray(f.nodes).map(n => [n.id, n]));
+  bundle.roles = bundle.roles.map(r => {
+    const n = nodeById.get(r.id) || {};
+    const extra = {};
+    if (asArray(n.inputs).length) extra.inputs = n.inputs;
+    if (asArray(n.outputs).length) extra.outputs = n.outputs;
+    if (asArray(n.dependsOn).length) extra.dependsOn = n.dependsOn;
+    return { ...r, ...extra };
+  });
+  return bundle;
 }
 
 module.exports = {

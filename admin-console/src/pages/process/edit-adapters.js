@@ -106,6 +106,51 @@ export function makeDraftOps(getBundle, persist) {
     deleteRole: async (roleId) => {
       const b = clone(getBundle());
       b.roles = (b.roles || []).filter(r => r.id !== roleId);
+      // Drop any dependency references to the removed role so no edge dangles.
+      for (const r of b.roles) {
+        if (Array.isArray(r.dependsOn)) r.dependsOn = r.dependsOn.filter(d => d !== roleId);
+      }
+      await persist(b);
+    },
+
+    // ── unified edges (#367): BP dependency + data-flow, draft-only ──
+    // Dependency A→B means "B depends on A" (A upstream), stored on B.dependsOn.
+    addDependency: async (roleId, dependsOnId) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (!r) throw new Error(`role ${roleId} not found`);
+      r.dependsOn = Array.isArray(r.dependsOn) ? r.dependsOn : [];
+      if (dependsOnId && dependsOnId !== roleId && !r.dependsOn.includes(dependsOnId)) {
+        r.dependsOn.push(dependsOnId);
+      }
+      await persist(b);
+    },
+    removeDependency: async (roleId, dependsOnId) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (r) r.dependsOn = (r.dependsOn || []).filter(d => d !== dependsOnId);
+      await persist(b);
+    },
+    // Data flow: a producer's `outputs` path becomes a consumer's `inputs` path.
+    addArtifact: async (roleId, { direction, path, description }) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (!r) throw new Error(`role ${roleId} not found`);
+      const key = direction === 'output' ? 'outputs' : 'inputs';
+      r[key] = Array.isArray(r[key]) ? r[key] : [];
+      const p = String(path || '').trim();
+      if (p && !r[key].some(a => (a.path || a) === p)) {
+        r[key].push({ path: p, ...(description ? { description } : {}) });
+      }
+      await persist(b);
+    },
+    removeArtifact: async (roleId, { direction, path }) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (r) {
+        const key = direction === 'output' ? 'outputs' : 'inputs';
+        r[key] = (r[key] || []).filter(a => (a.path || a) !== path);
+      }
       await persist(b);
     },
   };

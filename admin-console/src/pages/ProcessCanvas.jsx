@@ -108,6 +108,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
   // Current inline-prompt save handler (draft only) — kept in a ref so the
   // renderer, created once, always calls the live one.
   const saveContentRef = useRef(null);
+  const setStageRef = useRef(null);
 
   useEffect(() => {
     if (!viewportRef.current) return;
@@ -116,17 +117,17 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
       onConnect: (from, to) => { if (editableRef.current) setConnectPair({ from, to }); },
       onSelectEdge: (edge) => { if (editableRef.current) setSelectedEdge(edge); },
       onSaveContent: (id, text) => saveContentRef.current && saveContentRef.current(id, text),
+      onSetStage: (id, stage) => setStageRef.current && setStageRef.current(id, stage),
     });
     graphRef.current = g;
     return () => { g.cleanup(); graphRef.current = null; };
   }, []);
 
-  // Inline prompt editing writes to the draft role's systemPrompt (drafts only;
-  // live agents / templates keep the content read-only). BP write-back is Phase D.
+  // Inline prompt + stage editing write to the draft role (drafts only; live
+  // agents / templates stay read-only). BP write-back is Phase D.
   useEffect(() => {
-    saveContentRef.current = isDraft
-      ? (id, text) => draftOps.setPrompt(id, text)
-      : null;
+    saveContentRef.current = isDraft ? (id, text) => draftOps.setPrompt(id, text) : null;
+    setStageRef.current = isDraft ? (id, stage) => draftOps.setStage(id, stage) : null;
   }, [isDraft, draftOps]);
 
   useEffect(() => {

@@ -11,7 +11,7 @@
 //   g.setData(unifiedGraph);   // { nodes, edges, lints } from /api/flows/graph
 //   g.fit(); g.cleanup();
 
-export function initFlowGraph(viewport, { onSelectNode, onSaveContent, onConnect, onSelectEdge } = {}) {
+export function initFlowGraph(viewport, { onSelectNode, onSaveContent, onConnect, onSelectEdge, onSetStage } = {}) {
 
   // ─── Constants ──────────────────────────────────────────────────────
   const NODE_W      = 320;
@@ -36,6 +36,11 @@ export function initFlowGraph(viewport, { onSelectNode, onSaveContent, onConnect
   canvas.style.transformOrigin = '0 0';
   canvas.style.userSelect     = 'none';
   viewport.appendChild(canvas);
+
+  // Stage bands sit behind everything (#362 E). One <div> per stage group.
+  const stageLayer = document.createElement('div');
+  stageLayer.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;';
+  canvas.appendChild(stageLayer);
 
   const svgEdges = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svgEdges.style.position     = 'absolute';
@@ -151,6 +156,7 @@ export function initFlowGraph(viewport, { onSelectNode, onSaveContent, onConnect
     editable:           false,  // structural editing (connect-to-wire, edges)
     contentEditable:    false,  // inline prompt/content editing (separate gate)
     connecting:         null,   // { fromId } while dragging a new edge
+    showStages:         localStorage.getItem('flow-graph-show-stages') === 'true', // #362 E stage bands
   };
 
   // ─── Data Loading ────────────────────────────────────────────────────
@@ -187,6 +193,7 @@ export function initFlowGraph(viewport, { onSelectNode, onSaveContent, onConnect
       ],
       archived: false,
       rigor: n.rigor || '',
+      stage: typeof n.stage === 'string' ? n.stage : '',
       _role: n.role,
       _isParent: n.isParent === true,
     }));
@@ -376,6 +383,22 @@ export function initFlowGraph(viewport, { onSelectNode, onSaveContent, onConnect
     return ARTIFACT_H;
   }
 
+  // When stage bands are on, group root nodes by their (manual) stage so each
+  // stage's subtrees are contiguous along the main axis → clean, non-overlapping
+  // bands. Stable within a stage; unstaged roots come last (#362 E).
+  function orderRootsByStage(ids) {
+    if (!state.showStages) return ids;
+    const groups = new Map();
+    const order = [];
+    ids.forEach(id => {
+      const s = (state.byId[id] && state.byId[id].stage) || '';
+      if (!groups.has(s)) { groups.set(s, []); order.push(s); }
+      groups.get(s).push(id);
+    });
+    order.sort((a, b) => (a === '' ? 1 : 0) - (b === '' ? 1 : 0)); // unstaged last
+    return order.flatMap(s => groups.get(s));
+  }
+
   function layout() {
     const visible = getVisibleNodes();
     if (visible.length === 0) return;
@@ -433,7 +456,7 @@ export function initFlowGraph(viewport, { onSelectNode, onSaveContent, onConnect
     }
 
     let xCursor = 0;
-    const sortedRoots = topoSortRoots(state.roots).filter(id => visibleIds.has(id));
+    const sortedRoots = orderRootsByStage(topoSortRoots(state.roots).filter(id => visibleIds.has(id)));
     sortedRoots.forEach(id => {
       assignX(id, xCursor);
       xCursor += subtreeW[id] + H_GAP * 2;
@@ -513,7 +536,7 @@ export function initFlowGraph(viewport, { onSelectNode, onSaveContent, onConnect
     }
 
     let yCursor = 0;
-    const sortedRoots = topoSortRoots(state.roots).filter(id => visibleIds.has(id));
+    const sortedRoots = orderRootsByStage(topoSortRoots(state.roots).filter(id => visibleIds.has(id)));
     sortedRoots.forEach(id => {
       assignY(id, yCursor);
       yCursor += subtreeH[id] + V_GAP;
@@ -939,6 +962,33 @@ export function initFlowGraph(viewport, { onSelectNode, onSaveContent, onConnect
         }
 
         details.innerHTML = rows.join('');
+
+        // Manual stage assignment (#362 E) — editable scopes only.
+        if (state.contentEditable && typeof onSetStage === 'function') {
+          const stageRow = document.createElement('div');
+          stageRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:6px;';
+          const lbl = document.createElement('span');
+          lbl.textContent = 'Stage';
+          lbl.style.cssText = 'color:var(--eb-text-muted);min-width:42px;';
+          const input = document.createElement('input');
+          input.value = bp.stage || '';
+          input.placeholder = 'e.g. Build';
+          input.style.cssText = 'flex:1;background:var(--eb-bg-app);color:var(--eb-text-primary);border:1px solid var(--eb-border-default);border-radius:4px;padding:2px 6px;font-size:11px;';
+          input.addEventListener('mousedown', e => e.stopPropagation());
+          input.addEventListener('click', e => e.stopPropagation());
+          const commit = async () => {
+            const v = input.value.trim();
+            if (v === (bp.stage || '')) return;
+            input.disabled = true;
+            try { await onSetStage(n.id, v); bp.stage = v; } finally { input.disabled = false; }
+          };
+          input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); commit(); } });
+          input.addEventListener('blur', commit);
+          stageRow.appendChild(lbl);
+          stageRow.appendChild(input);
+          details.appendChild(stageRow);
+        }
+
         node.appendChild(details);
       }
 
@@ -1014,7 +1064,49 @@ export function initFlowGraph(viewport, { onSelectNode, onSaveContent, onConnect
         }
       });
       drawEdges();
+      drawStages();
     });
+  }
+
+  // Stage bands (#362 E): a faint labeled rectangle behind the nodes that share
+  // a (manual) stage. Computed from actual node positions, so it follows the
+  // layout; root grouping by stage keeps each band contiguous.
+  function drawStages() {
+    stageLayer.innerHTML = '';
+    if (!state.showStages) return;
+    const visible = getVisibleNodes();
+    const boxes = new Map(); // stage -> {minX,minY,maxX,maxY}
+    visible.forEach(n => {
+      const bp = state.byId[n.id];
+      const stage = bp && bp.stage;
+      const pos = state.positions[n.id];
+      if (!stage || !pos) return;
+      const h = getNodeHeight(n.id);
+      const b = boxes.get(stage) || { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+      b.minX = Math.min(b.minX, pos.x);
+      b.minY = Math.min(b.minY, pos.y);
+      b.maxX = Math.max(b.maxX, pos.x + NODE_W);
+      b.maxY = Math.max(b.maxY, pos.y + h);
+      boxes.set(stage, b);
+    });
+    const PAD = 18;
+    let i = 0;
+    const hues = [210, 280, 150, 30, 330, 90];
+    for (const [stage, b] of boxes) {
+      const hue = hues[i % hues.length];
+      i += 1;
+      const band = document.createElement('div');
+      band.style.cssText = `position:absolute;left:${b.minX - PAD}px;top:${b.minY - PAD - 18}px;`
+        + `width:${b.maxX - b.minX + PAD * 2}px;height:${b.maxY - b.minY + PAD * 2 + 18}px;`
+        + `background:hsla(${hue},70%,50%,0.06);border:1px dashed hsla(${hue},60%,55%,0.5);`
+        + `border-radius:10px;`;
+      const label = document.createElement('div');
+      label.textContent = stage;
+      label.style.cssText = `position:absolute;left:8px;top:2px;font-size:10px;font-weight:700;`
+        + `letter-spacing:0.04em;text-transform:uppercase;color:hsla(${hue},60%,55%,0.95);`;
+      band.appendChild(label);
+      stageLayer.appendChild(band);
+    }
   }
 
   function renderArtifactNodes() {
@@ -1798,6 +1890,21 @@ export function initFlowGraph(viewport, { onSelectNode, onSaveContent, onConnect
   });
   updateArchivedBtn(archivedBtn);
   toolbarEl.appendChild(archivedBtn);
+
+  // Stages toggle (#362 E): group + band nodes by their manual stage.
+  const updateStagesBtn = (btn) => {
+    btn.textContent = state.showStages ? 'Stages: on' : 'Stages';
+    btn.style.color = state.showStages ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)';
+  };
+  const stagesBtn = makeToolBtn('Stages', () => {
+    state.showStages = !state.showStages;
+    localStorage.setItem('flow-graph-show-stages', state.showStages);
+    updateStagesBtn(stagesBtn);
+    state.userTransform = false;
+    render();
+  });
+  updateStagesBtn(stagesBtn);
+  toolbarEl.appendChild(stagesBtn);
 
   // ─── Init ─────────────────────────────────────────────────────────────
 

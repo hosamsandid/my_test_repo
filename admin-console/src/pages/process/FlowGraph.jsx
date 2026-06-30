@@ -48,6 +48,9 @@ export function FlowGraph({ workspace, team }) {
       onSaveContent: bpOps
         ? async (id, text) => { await bpOps.setPrompt(id, text); load(); }
         : undefined,
+      onSetStage: bpOps
+        ? async (id, stage) => { await bpOps.setStage(id, stage); load(); }
+        : undefined,
     });
     apiRef.current = g;
     g.setEditable(editable);        // connect-to-wire port (BP)

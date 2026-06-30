@@ -18,6 +18,42 @@ The Admin Console at `http://localhost:4000` (configurable via `.env`) is the ce
 | **MCP Servers** | `/mcp` | View Model Context Protocol servers configured in the Claude settings file |
 | **Flows** | `/flows` | BriefingPack graph: visualize BP dependencies, claim/activate/deactivate orchestrator-managed BPs |
 
+## Authentication (#276)
+
+The entire console is served behind a login screen — no page or `/api/*` data
+endpoint is reachable without an active session. This is the minimal,
+SSO-ready auth foundation described in [docs/multi-user-concept.md](./multi-user-concept.md).
+
+**Login.** A single credential pair, read from environment variables so it can
+change without a redeploy:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ADMIN_USERNAME` | `admin` | Console login username |
+| `ADMIN_PASSWORD` | `admin` | Console login password |
+| `AUTH_SESSION_SECRET` | derived from the credentials | Signs session cookies. When unset, a stable secret is derived from the credentials, so sessions survive a server restart and are auto-invalidated when the password changes. Set an explicit value to rotate sessions independently. |
+| `AUTH_COOKIE_SECURE` | `false` | Set to `true` only when the console is served over HTTPS (adds the cookie's `Secure` attribute). |
+
+> The defaults (`admin` / `admin`) are for first-boot local use only — change
+> them for any shared deployment. This is a placeholder until enterprise SSO
+> replaces the credential check.
+
+**Session.** On successful login the server issues an HMAC-signed, stateless
+session token in an **HttpOnly, SameSite=Lax cookie** (`aee_session`, 7-day
+TTL). A browser refresh re-validates via `GET /api/auth/session` rather than
+re-prompting. A **Sign out** button in the header clears the cookie and returns
+to the login screen; an expired session (any `401`) does the same automatically.
+
+**API surface** (all public — everything else under `/api` requires the cookie):
+- `POST /api/auth/login` — `{ username, password }` → sets the cookie, or `401` with an inline error.
+- `GET /api/auth/session` — `{ authenticated, user }`.
+- `POST /api/auth/logout` — clears the cookie.
+
+**SSO swap-point.** The credential check lives in a single `verifyCredentials()`
+function in `admin-console/api/auth.js`. Swapping it for an OIDC/SAML token
+exchange (and adding the IdP callback route) requires no change to the session
+format, cookie handling, gate middleware, or the login UI/routing.
+
 ## Agent Chat
 
 The Agent Chat page (`/chats/:agentId`) embeds a full Matrix chat client with a three-panel layout.

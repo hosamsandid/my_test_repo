@@ -2,6 +2,8 @@ import React, { Suspense, lazy, useState, useEffect } from 'react';
 import { Routes, Route, Navigate, useParams } from 'react-router-dom';
 import Shell from './components/Shell';
 import SetupWizard from './pages/SetupWizard';
+import Login from './pages/Login';
+import { useAuth } from './auth/AuthContext';
 
 // The Process Canvas now lives inside Flows; preserve old deep links.
 function ProcessTeamRedirect() {
@@ -28,14 +30,37 @@ const SdlcCatalogPage     = lazy(() => import('./pages/SdlcCatalogPage'));
 const MainframeCatalogPage = lazy(() => import('./pages/MainframeCatalogPage'));
 
 export default function App() {
+  const { loading: authLoading, authenticated } = useAuth();
   const [setupComplete, setSetupComplete] = useState(null); // null = loading
 
+  // Setup status is itself a protected endpoint, so only probe it once the
+  // user is authenticated — otherwise the request 401s and tells us nothing.
   useEffect(() => {
+    if (!authenticated) {
+      setSetupComplete(null);
+      return;
+    }
     fetch('/api/setup/status')
       .then(r => r.json())
       .then(data => setSetupComplete(data.isComplete))
       .catch(() => setSetupComplete(true)); // on error, don't block the UI
-  }, []);
+  }, [authenticated]);
+
+  if (authLoading) {
+    return (
+      <div style={{
+        position: 'fixed', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: 'var(--eb-bg-app)', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)',
+      }}>
+        Loading…
+      </div>
+    );
+  }
+
+  // The login screen replaces the entire console until a session exists.
+  if (!authenticated) {
+    return <Login />;
+  }
 
   if (setupComplete === null) {
     return (

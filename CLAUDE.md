@@ -259,6 +259,10 @@ Every bp-instance chat in the Admin Console has a hand-off action that lets the 
 5. For each target, the server materializes/enables the stub, ensures a DM room, and posts a structured Markdown body containing: the source-of-work block (per repo: name, branch, `headShort`, last-commit subject, remote URL, upstream, dirty markers), input-artifact paths from the briefings graph when present, the user's free-text note, the override reason (if any), per-target consistency warnings, and an explicit "Before you start" checklist (`cd <repo> && git fetch && git checkout <branch> && git pull --ff-only`, `git log --oneline -5`, confirm with user). The receiving agent picks the message up via the standard DM heuristic.
 6. **Repo consistency check.** Each target's environment is compared against the source repos: missing repo URLs and branch mismatches surface as warnings both inline in the DM body (so the receiving agent reads them) and in the dialog's per-target results list (so the user sees them).
 
+### Admin Console authentication (#276)
+
+The whole console is gated by a login screen — every `/api/*` data endpoint requires a valid session cookie (`admin-console/api/auth.js` registers public `POST/GET /api/auth/{login,session,logout}` then mounts `auth.gate` over `/api`). A single env-configured credential pair (`ADMIN_USERNAME` / `ADMIN_PASSWORD`, default `admin`/`admin`) is checked by `verifyCredentials()`, which is the **only** seam an SSO/OIDC integration replaces; the HMAC-signed HttpOnly cookie (`aee_session`), the gate, and the React `AuthProvider` + `Login` screen are provider-agnostic. Static assets and the SPA fallback stay open so the login screen can load. See `docs/admin-console.md` → *Authentication* and `docs/multi-user-concept.md`.
+
 ### Agent Management
 
 All agent lifecycle operations (create / enable / disable / edit prompt / delete) happen via the **Admin Console** at `http://localhost:4000`.

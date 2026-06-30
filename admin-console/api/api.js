@@ -10,6 +10,7 @@ const http = require('http');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const matrix = require('./matrix');
+const auth = require('./auth');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandReviewSteps, emptyDraftBundle } = require('./process-template');
@@ -133,6 +134,14 @@ const globalApiLimiter = rateLimit({
 });
 
 app.use('/api/', globalApiLimiter);
+
+// Authentication (#276). Mounted after the global limiter (so the gate itself
+// is rate-limited) and before every protected route definition below. Public
+// auth endpoints are registered first; the gate then requires a valid session
+// cookie for all other /api/* routes. Static assets + the SPA fallback stay
+// open so the console can load and render its login screen.
+auth.registerAuthRoutes(app);
+app.use('/api', auth.gate);
 
 const MCP_SERVER_ID_RE = /^[a-z0-9-]+$/;
 const MCP_CREDENTIAL_ID_RE = /^[a-z0-9-]+$/;

@@ -1,4 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { UNAUTHORIZED_EVENT } from '../auth/AuthContext';
+
+// A 401 means the session expired or was cleared — notify the AuthProvider so
+// the console drops back to the login screen instead of showing broken pages.
+function notifyIfUnauthorized(status) {
+  if (status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+}
 
 export function useApi(url) {
   const [data, setData] = useState(null);
@@ -14,7 +21,10 @@ export function useApi(url) {
     setError(null);
     try {
       const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        notifyIfUnauthorized(res.status);
+        throw new Error(`HTTP ${res.status}`);
+      }
       hasData.current = true;
       setData(await res.json());
     } catch (e) {
@@ -39,6 +49,7 @@ export async function apiCall(method, url, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
+    notifyIfUnauthorized(res.status);
     const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
     throw new Error(err.error || `HTTP ${res.status}`);
   }

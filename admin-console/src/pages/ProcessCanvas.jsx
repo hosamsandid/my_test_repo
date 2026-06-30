@@ -107,8 +107,6 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
   const editableRef = useRef(true);
   // Current inline-prompt save handler (draft only) — kept in a ref so the
   // renderer, created once, always calls the live one.
-  const saveContentRef = useRef(null);
-  const setStageRef = useRef(null);
 
   useEffect(() => {
     if (!viewportRef.current) return;
@@ -116,19 +114,10 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
       onSelectNode: (id) => setSelectedId(id),
       onConnect: (from, to) => { if (editableRef.current) setConnectPair({ from, to }); },
       onSelectEdge: (edge) => { if (editableRef.current) setSelectedEdge(edge); },
-      onSaveContent: (id, text) => saveContentRef.current && saveContentRef.current(id, text),
-      onSetStage: (id, stage) => setStageRef.current && setStageRef.current(id, stage),
     });
     graphRef.current = g;
     return () => { g.cleanup(); graphRef.current = null; };
   }, []);
-
-  // Inline prompt + stage editing write to the draft role (drafts only; live
-  // agents / templates stay read-only). BP write-back is Phase D.
-  useEffect(() => {
-    saveContentRef.current = isDraft ? (id, text) => draftOps.setPrompt(id, text) : null;
-    setStageRef.current = isDraft ? (id, stage) => draftOps.setStage(id, stage) : null;
-  }, [isDraft, draftOps]);
 
   useEffect(() => {
     if (!graphRef.current || !displayGraph) return;
@@ -139,8 +128,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
     editableRef.current = ed;
     graphRef.current.setEditable(ed);
     // Prompt/stage editing happens in the right inspector (DraftNodeInspector),
-    // not inline — consistent with BP flows. Inline content editing stays off.
-    graphRef.current.setContentEditable(false);
+    // consistent with BP flows — there is no inline editing.
     graphRef.current.setData(displayGraph);
   }, [displayGraph, imported, isDraft]);
 

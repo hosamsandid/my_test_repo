@@ -50,8 +50,7 @@ export function FlowGraph({ workspace, team }) {
       onConnect: editable ? (from, to) => setConnectPair({ from, to }) : undefined,
     });
     apiRef.current = g;
-    g.setEditable(editable);     // connect-to-wire port (BP)
-    g.setContentEditable(false); // editing is in the inspector, not inline
+    g.setEditable(editable);     // connect-to-wire port (BP); editing is in the inspector
     return () => { g.cleanup(); apiRef.current = null; };
   }, [bpOps]); // eslint-disable-line react-hooks/exhaustive-deps
 

@@ -11,7 +11,7 @@
 //   g.setData(unifiedGraph);   // { nodes, edges, lints } from /api/flows/graph
 //   g.fit(); g.cleanup();
 
-export function initFlowGraph(viewport, { onSelectNode, onSaveContent, onConnect, onSelectEdge, onSetStage } = {}) {
+export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge } = {}) {
 
   // ─── Constants ──────────────────────────────────────────────────────
   const NODE_W      = 320;
@@ -154,7 +154,6 @@ export function initFlowGraph(viewport, { onSelectNode, onSaveContent, onConnect
     orientation:        localStorage.getItem('ace-graph-orientation') === 'vertical' ? 'vertical' : 'horizontal',
     selectedId:         null,   // #362 UI rework Phase C: node selection
     editable:           false,  // structural editing (connect-to-wire, edges)
-    contentEditable:    false,  // inline prompt/content editing (separate gate)
     connecting:         null,   // { fromId } while dragging a new edge
     showStages:         localStorage.getItem('flow-graph-show-stages') === 'true', // #362 E stage bands
   };
@@ -962,80 +961,17 @@ export function initFlowGraph(viewport, { onSelectNode, onSaveContent, onConnect
         }
 
         details.innerHTML = rows.join('');
-
-        // Manual stage assignment (#362 E) — editable scopes only.
-        if (state.contentEditable && typeof onSetStage === 'function') {
-          const stageRow = document.createElement('div');
-          stageRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:6px;';
-          const lbl = document.createElement('span');
-          lbl.textContent = 'Stage';
-          lbl.style.cssText = 'color:var(--eb-text-muted);min-width:42px;';
-          const input = document.createElement('input');
-          input.value = bp.stage || '';
-          input.placeholder = 'e.g. Build';
-          input.style.cssText = 'flex:1;background:var(--eb-bg-app);color:var(--eb-text-primary);border:1px solid var(--eb-border-default);border-radius:4px;padding:2px 6px;font-size:11px;';
-          input.addEventListener('mousedown', e => e.stopPropagation());
-          input.addEventListener('click', e => e.stopPropagation());
-          const commit = async () => {
-            const v = input.value.trim();
-            if (v === (bp.stage || '')) return;
-            input.disabled = true;
-            try { await onSetStage(n.id, v); bp.stage = v; } finally { input.disabled = false; }
-          };
-          input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); commit(); } });
-          input.addEventListener('blur', commit);
-          stageRow.appendChild(lbl);
-          stageRow.appendChild(input);
-          details.appendChild(stageRow);
-        }
-
         node.appendChild(details);
       }
 
-      // Content panel — the node's prompt/brief. Read-only markdown, or an
-      // inline editor when the renderer is editable and a save handler is wired
-      // (#362 UI rework Phase C). "Content = the prompt", for BP and process alike.
-      const canEditContent = state.contentEditable && typeof onSaveContent === 'function';
-      if (state.contentVisible.has(n.id) && (bp.body || canEditContent)) {
-        if (canEditContent) {
-          const wrap = document.createElement('div');
-          wrap.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid var(--eb-border-default);display:flex;flex-direction:column;gap:6px;';
-          const ta = document.createElement('textarea');
-          ta.value = bp.body || '';
-          ta.placeholder = 'Prompt / briefing for this node…';
-          ta.style.cssText = 'width:100%;min-height:140px;box-sizing:border-box;resize:vertical;font-family:var(--eb-font-mono);font-size:11px;line-height:1.5;background:var(--eb-bg-app);color:var(--eb-text-primary);border:1px solid var(--eb-border-default);border-radius:6px;padding:6px;';
-          ta.addEventListener('wheel', e => e.stopPropagation());
-          ta.addEventListener('mousedown', e => e.stopPropagation());
-          const bar = document.createElement('div');
-          bar.style.cssText = 'display:flex;gap:6px;align-items:center;';
-          const saveBtn = makeBtn('Save prompt', false);
-          const saved = document.createElement('span');
-          saved.style.cssText = 'font-size:10px;color:var(--eb-status-success);';
-          saveBtn.addEventListener('click', async () => {
-            saveBtn.disabled = true;
-            try {
-              await onSaveContent(n.id, ta.value);
-              bp.body = ta.value;       // optimistic local update
-              saved.textContent = 'Saved.';
-            } catch (err) {
-              saved.style.color = 'var(--eb-status-error)';
-              saved.textContent = err.message || 'Save failed';
-            } finally {
-              saveBtn.disabled = false;
-            }
-          });
-          bar.appendChild(saveBtn);
-          bar.appendChild(saved);
-          wrap.appendChild(ta);
-          wrap.appendChild(bar);
-          node.appendChild(wrap);
-        } else if (bp.body) {
-          const body = document.createElement('div');
-          body.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid var(--eb-border-default);font-size:11px;max-height:300px;overflow-y:auto;line-height:1.5;';
-          body.innerHTML = renderMarkdown(bp.body);
-          body.addEventListener('wheel', e => e.stopPropagation());
-          node.appendChild(body);
-        }
+      // Content panel — the node's prompt/brief, read-only markdown. Editing
+      // (prompt, stage, links) is in the right-side inspector (#362 unification).
+      if (state.contentVisible.has(n.id) && bp.body) {
+        const body = document.createElement('div');
+        body.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid var(--eb-border-default);font-size:11px;max-height:300px;overflow-y:auto;line-height:1.5;';
+        body.innerHTML = renderMarkdown(bp.body);
+        body.addEventListener('wheel', e => e.stopPropagation());
+        node.appendChild(body);
       }
 
       canvas.appendChild(node);
@@ -1928,7 +1864,6 @@ export function initFlowGraph(viewport, { onSelectNode, onSaveContent, onConnect
     fit: () => { state.userTransform = false; fitToView(); },
     setSelected: (id) => { state.selectedId = id; render(); },
     setEditable: (v) => { if (state.editable !== !!v) { state.editable = !!v; render(); } },
-    setContentEditable: (v) => { if (state.contentEditable !== !!v) { state.contentEditable = !!v; render(); } },
     cleanup,
   };
 }

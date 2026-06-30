@@ -12,6 +12,7 @@ const { spawnSync } = require('child_process');
 const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
+const { computeScope, visibleTeam, visibleAgent } = require('./scope');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandReviewSteps, emptyDraftBundle } = require('./process-template');
@@ -46,7 +47,12 @@ const MCP_CREDENTIALS_KEYS_DIR = path.join(MCP_CREDENTIALS_DIR, '_keys');
 const MCP_CREDENTIALS_INDEX = path.join(MCP_CREDENTIALS_KEYS_DIR, 'index.json');
 // Teams data model (#299): resources are owned by exactly one human Team.
 const TEAMS_INDEX = path.join(WORKSPACE, 'teams', 'index.json');
+const USERS_INDEX = path.join(WORKSPACE, 'users', 'index.json');
+const MEMBERSHIPS_INDEX = path.join(WORKSPACE, 'memberships', 'index.json');
 const DEFAULT_TEAM_ID = 'default';
+// The env single-admin login (#276); its session subject is this value and it
+// is treated as the operator (full visibility) by the scope filter (#302).
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 const STATIC_DIR = path.join(__dirname, '..', 'dist');
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 const BP_EXPLORER_URL = process.env.BP_EXPLORER_URL || 'http://bp-explorer:8765';
@@ -227,6 +233,19 @@ function resolveOwnerTeamId(teamId) {
     throw err;
   }
   return teamId;
+}
+
+// Resolve what the logged-in caller may see (#302). Reads the users/memberships
+// indexes fresh each call (cheap; small JSON). The env admin and System Admins
+// get `all: true` — so the single-operator setup is entirely unaffected.
+function getScope(req) {
+  const username = req && req.user && req.user.username;
+  return computeScope({
+    username,
+    adminUsername: ADMIN_USERNAME,
+    users: readJsonFile(USERS_INDEX, []),
+    memberships: readJsonFile(MEMBERSHIPS_INDEX, []),
+  });
 }
 
 function listAgentDirs() {
@@ -739,11 +758,14 @@ app.get('/api/dashboard', (req, res) => {
 /* ─── Agents ────────────────────────────────────────────────────────── */
 
 app.get('/api/agents', (req, res) => {
+  const scope = getScope(req);
   const ids = listAgentDirs();
-  const agents = ids.map(id => {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    return { id, ...cfg };
-  });
+  const agents = ids
+    .map(id => {
+      const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+      return { id, ...cfg };
+    })
+    .filter(a => visibleAgent(scope, a)); // team + visibility scoping (#302)
   res.json(agents);
 });
 
@@ -2282,10 +2304,11 @@ function listTeamSkills(filterTeamId) {
 }
 
 app.get('/api/skills', (req, res) => {
+  const scope = getScope(req);
   const skills = [];
   const seen = new Set();
 
-  // Pool (shared / global) skills
+  // Pool (shared / global) skills — always visible to everyone.
   const poolSkillsDir = path.join(POOL_DIR, 'skills');
   try {
     fs.readdirSync(poolSkillsDir).forEach(name => {
@@ -2297,13 +2320,17 @@ app.get('/api/skills', (req, res) => {
     });
   } catch { /* no pool skills dir */ }
 
-  // Team-scoped skills (#306). Global skills above are always returned;
-  // `?teamId=<id>` narrows the team tier to a single team.
+  // Team-scoped skills (#306), narrowed to the caller's teams (#302). An
+  // explicit `?teamId=<id>` narrows further; a team the caller can't see is
+  // dropped by visibleTeam.
   const filterTeam = typeof req.query.teamId === 'string' ? req.query.teamId : null;
-  skills.push(...listTeamSkills(filterTeam));
+  skills.push(...listTeamSkills(filterTeam).filter(s => visibleTeam(scope, s.teamId)));
 
-  // Agent skills
+  // Agent skills — visible only when the owning agent is visible (#302), so an
+  // agent's skills don't leak its existence across teams.
   for (const agentId of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), {});
+    if (!visibleAgent(scope, cfg)) continue;
     const agentSkillsDir = path.join(AGENTS_DIR, agentId, 'skills');
     try {
       fs.readdirSync(agentSkillsDir).forEach(name => {
@@ -3153,9 +3180,11 @@ app.post('/api/llm-endpoints/probe-discover-models', heavyLimiter, async (req, r
 // MCP block into each agent's own .claude/settings.json at seed time.
 
 app.get('/api/mcp-servers', (req, res) => {
+  const scope = getScope(req);
   const out = listMcpServerIds()
     .map(id => loadMcpServer(id))
     .filter(Boolean)
+    .filter(s => visibleTeam(scope, s.teamId)) // (#302); missing teamId → default team
     .map(s => {
       const transport = s.transport || 'stdio';
       const tplKey = transport === 'stdio' ? 'env' : 'headers';
@@ -3240,9 +3269,14 @@ app.post('/api/mcp-servers', apiLimiter, (req, res) => {
   const built = buildMcpServerStanza({ existing: null, body });
   if (built.error) return res.status(400).json({ error: built.error });
 
+  let ownerTeamId;
+  try { ownerTeamId = resolveOwnerTeamId(body.teamId); }
+  catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+
   const data = {
     id,
     name,
+    teamId: ownerTeamId,
     description: built.stanza.description || '',
     transport: built.stanza.transport,
     ...(built.stanza.transport === 'stdio'
@@ -3264,6 +3298,14 @@ app.put('/api/mcp-servers/:id', apiLimiter, (req, res) => {
   if (built.error) return res.status(400).json({ error: built.error });
 
   const merged = { ...built.stanza, updatedAt: new Date().toISOString() };
+  // Preserve (or update) the owning team (#302) — buildMcpServerStanza only
+  // covers transport fields, so carry teamId across explicitly.
+  if (req.body && req.body.teamId !== undefined) {
+    try { merged.teamId = resolveOwnerTeamId(req.body.teamId); }
+    catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+  } else if (existing.teamId !== undefined) {
+    merged.teamId = existing.teamId;
+  }
   saveMcpServer(id, merged);
   res.json(merged);
 });
@@ -3282,7 +3324,8 @@ app.delete('/api/mcp-servers/:id', apiLimiter, (req, res) => {
 
 app.get('/api/mcp-credentials', (req, res) => {
   // Metadata only — never the raw secret.
-  res.json(listMcpCredentials());
+  const scope = getScope(req);
+  res.json(listMcpCredentials().filter(c => visibleTeam(scope, c.teamId))); // (#302)
 });
 
 app.post('/api/mcp-credentials', apiLimiter, (req, res) => {
@@ -3525,7 +3568,9 @@ app.post('/api/admin/memberships', apiLimiter, (req, res) => proxyAdmin(req, res
 app.delete('/api/admin/memberships', apiLimiter, (req, res) => proxyAdmin(req, res, `memberships${adminQuery(req)}`));
 
 app.get('/api/environments', (req, res) => {
-  const envs = listEnvironmentIds().map(loadEnvironment).filter(Boolean);
+  const scope = getScope(req);
+  const envs = listEnvironmentIds().map(loadEnvironment).filter(Boolean)
+    .filter(e => visibleTeam(scope, e.teamId)); // (#302)
   res.json(envs);
 });
 
@@ -5120,7 +5165,8 @@ app.put('/api/blueprints/:id/memory/:file', apiLimiter, express.text({ type: '*/
 
 app.get('/api/ssh-keys', (req, res) => {
   // Return only metadata — never the private key
-  res.json(listSshKeys());
+  const scope = getScope(req);
+  res.json(listSshKeys().filter(k => visibleTeam(scope, k.teamId))); // (#302)
 });
 
 app.post('/api/ssh-keys', apiLimiter, (req, res) => {
@@ -5234,7 +5280,8 @@ app.delete('/api/ssh-keys/:id', apiLimiter, (req, res) => {
 
 app.get('/api/github-tokens', (req, res) => {
   // Metadata only — never the raw token
-  res.json(listGithubTokens());
+  const scope = getScope(req);
+  res.json(listGithubTokens().filter(t => visibleTeam(scope, t.teamId))); // (#302)
 });
 
 app.post('/api/github-tokens', apiLimiter, (req, res) => {
@@ -5660,6 +5707,7 @@ jobs:
 
 // 1. List enabled agents that have Matrix identities
 app.get('/api/matrix/agents', (req, res) => {
+  const scope = getScope(req);
   const ids = listAgentDirs();
   const out = [];
   for (const id of ids) {
@@ -5667,6 +5715,7 @@ app.get('/api/matrix/agents', (req, res) => {
     if (!cfg) continue;
     if (cfg.enabled === false) continue;
     if (!cfg.token) continue;
+    if (!visibleAgent(scope, cfg)) continue; // team + visibility scoping (#302)
     const dm = matrix.getAgentDmRoom(id);
     const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
     out.push({

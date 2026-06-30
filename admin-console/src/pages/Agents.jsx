@@ -24,9 +24,8 @@ function repoDirName(url) {
 }
 
 /* ── BP-dependency hierarchy helpers ────────────────────────────────────
-   Mirrors the topo-sort logic in admin-console/src/pages/briefings/bp-graph.js
-   so the bp-instance children of an orchestrator are listed in the same
-   dependency order as the BP-explorer flow view. */
+   Topo-sorts the bp-instance children of an orchestrator so they are listed
+   in dependency order, matching how the unified Flows viewer lays them out. */
 
 function topoSortBpIds(ids, byId) {
   const idSet = new Set(ids);

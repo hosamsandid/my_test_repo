@@ -11,11 +11,12 @@
 //   g.fit();
 //   g.cleanup();
 
-import { normalizeGraph, computeRanks, orderWithinRanks } from './process-layout';
+import { normalizeGraph, assignStageLanes, stageNumber } from './process-layout';
 
 const NODE_W = 260;
 const H_GAP = 90;   // horizontal gap between rank columns
 const V_GAP = 28;   // vertical gap between stacked nodes in a column
+const LANE_HEADER_H = 34; // stage-lane header band height (#357)
 
 // Edge colour per kind. CSS custom properties so light/dark switch for free.
 const KIND_COLOR = {
@@ -40,6 +41,11 @@ export function initProcessGraph(viewport, { onSelectNode, onConnect, onSelectEd
   canvas.style.cssText = 'position:absolute;top:0;left:0;transform-origin:0 0;user-select:none;';
   viewport.appendChild(canvas);
 
+  // Stage-lane bands + headers (#357) — first child so it sits behind edges/nodes.
+  const laneLayer = document.createElement('div');
+  laneLayer.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;';
+  canvas.appendChild(laneLayer);
+
   const svg = document.createElementNS(SVG_NS, 'svg');
   svg.style.cssText = 'position:absolute;top:0;left:0;overflow:visible;pointer-events:none;';
   canvas.appendChild(svg);
@@ -63,6 +69,7 @@ export function initProcessGraph(viewport, { onSelectNode, onConnect, onSelectEd
 
   const state = {
     nodes: [], edges: [], positions: {},
+    lanes: [], folded: new Set(),
     pan: { x: 0, y: 0 }, zoom: 1,
     userTransform: false,
     dragging: false, dragStart: { x: 0, y: 0 }, panStart: { x: 0, y: 0 },
@@ -82,24 +89,37 @@ export function initProcessGraph(viewport, { onSelectNode, onConnect, onSelectEd
     };
   }
 
-  // ── Layered (Sugiyama-ish) layout — pure helpers in process-layout.js ──
+  // ── Stage-lane layout — pure helpers in process-layout.js (#357) ──
+  // Nodes are grouped into ordered stage lanes (columns); human-gate nodes are
+  // folded into lane titles. Within a lane, agents stack top→bottom.
   function layout() {
     const { nodes } = state;
     if (!nodes.length) return;
-    const rank = computeRanks(nodes, state.edges);
-    const { cols, ranksSorted } = orderWithinRanks(nodes, state.edges, rank);
+    const { laneOf, lanes, folded } = assignStageLanes(nodes, state.edges);
+    state.lanes = lanes;
+    state.folded = folded;
 
     const pos = {};
-    let x = 0;
-    for (const r of ranksSorted) {
-      let y = 0;
-      for (const id of cols[r]) {
+    lanes.forEach((lane) => {
+      const x = lane.index * (NODE_W + H_GAP);
+      let y = LANE_HEADER_H;
+      const ids = lane.ids
+        .filter(id => !folded.has(id))
+        .sort((a, b) => laneSortKey(a) - laneSortKey(b));
+      for (const id of ids) {
         pos[id] = { x, y };
         y += nodeHeight(id) + V_GAP;
       }
-      x += NODE_W + H_GAP;
-    }
+    });
     state.positions = pos;
+    void laneOf;
+  }
+
+  // Stable within-lane vertical order: numbered display names first, in order.
+  function laneSortKey(id) {
+    const n = state.nodes.find(x => x.id === id);
+    const num = stageNumber((n && n.displayName) || '');
+    return num == null ? Number.MAX_SAFE_INTEGER : num;
   }
 
   function nodeHeight(id) {
@@ -133,9 +153,39 @@ export function initProcessGraph(viewport, { onSelectNode, onConnect, onSelectEd
         const p = state.positions[el.dataset.id];
         if (p) { el.style.left = p.x + 'px'; el.style.top = p.y + 'px'; }
       });
+      drawLanes();
       drawEdges();
       if (!state.userTransform) fit();
     });
+  }
+
+  // ── Stage-lane bands (#357) ─────────────────────────────────────────────
+  function drawLanes() {
+    laneLayer.innerHTML = '';
+    if (!state.lanes.length) return;
+    let maxY = 200;
+    Object.entries(state.positions).forEach(([id, p]) => { maxY = Math.max(maxY, p.y + nodeHeight(id)); });
+    const height = maxY + 40;
+    for (const lane of state.lanes) {
+      const x = lane.index * (NODE_W + H_GAP) - H_GAP / 2;
+      const w = NODE_W + H_GAP;
+      const gated = !!lane.gate;
+
+      const band = document.createElement('div');
+      band.style.cssText = `position:absolute;top:0;left:${x}px;width:${w}px;height:${height}px;`
+        + `border-left:${gated ? 2 : 1}px ${lane.crossCutting ? 'dashed' : 'solid'} ${gated ? 'var(--eb-status-error)' : 'var(--eb-border-default)'};`
+        + (lane.index % 2 ? 'background:var(--eb-bg-surface);opacity:0.35;' : '');
+      laneLayer.appendChild(band);
+
+      const hd = document.createElement('div');
+      hd.style.cssText = `position:absolute;top:0;left:${x + 10}px;width:${w - 20}px;height:${LANE_HEADER_H}px;`
+        + 'display:flex;align-items:center;gap:8px;font-size:11px;font-weight:700;letter-spacing:0.04em;'
+        + 'text-transform:uppercase;overflow:hidden;white-space:nowrap;'
+        + `color:${lane.crossCutting ? 'var(--eb-text-muted)' : 'var(--eb-text-secondary)'};`;
+      hd.innerHTML = `<span style="overflow:hidden;text-overflow:ellipsis">${esc(lane.title)}</span>`
+        + (gated ? `<span style="flex-shrink:0;color:var(--eb-status-error);font-weight:700">${esc(lane.gate)}</span>` : '');
+      laneLayer.appendChild(hd);
+    }
   }
 
   function renderAgent(n) {
@@ -462,7 +512,7 @@ export function initProcessGraph(viewport, { onSelectNode, onConnect, onSelectEd
     emptyEl.style.display = has ? 'none' : 'block';
     emptyEl.textContent = has ? '' : 'No agents with triggers to display.';
     svg.innerHTML = '';
-    if (has) render(); else canvas.querySelectorAll('.pc-node').forEach(el => el.remove());
+    if (has) render(); else { laneLayer.innerHTML = ''; canvas.querySelectorAll('.pc-node').forEach(el => el.remove()); }
   }
 
   return {
@@ -503,7 +553,7 @@ function legend() {
   el.innerHTML =
     sw('var(--eb-status-info)', 'hand-off') +
     sw('var(--eb-status-warning)', 'review') +
-    sw('var(--eb-status-error)', 'human gate') +
+    `<span style="color:var(--eb-status-error);font-weight:700;font-size:10px">🔒 stage gate</span>` +
     sw('#a855f7', 'brake') +
     sw('var(--eb-text-muted)', 'timer / unwired', true);
   return el;

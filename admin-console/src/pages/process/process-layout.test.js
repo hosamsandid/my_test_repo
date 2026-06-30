@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { normalizeGraph, computeRanks, orderWithinRanks } from './process-layout.js';
+import { normalizeGraph, computeRanks, orderWithinRanks, assignStageLanes, prettifyStageLabel } from './process-layout.js';
 
 test('normalizeGraph expands null endpoints into synthetic nodes', () => {
   const { nodes, edges } = normalizeGraph({
@@ -83,6 +83,69 @@ test('orderWithinRanks: groups by rank and sorts columns', () => {
   assert.deepEqual(ranksSorted, [0, 1]);
   assert.deepEqual(cols[0], ['src']);
   assert.deepEqual(new Set(cols[1]), new Set(['l1', 'l2']));
+});
+
+// ── Stage lanes (#357) ──────────────────────────────────────────────────────
+function accessioLike() {
+  return normalizeGraph({
+    nodes: [
+      { id: 'req', displayName: '01 Requirements' },
+      { id: 'fd', displayName: '02 Functional Design' },
+      { id: 'data', displayName: '03 Data Architect' },
+      { id: 'td', displayName: '05 Technical Design' },
+      { id: 'build', displayName: '06 Build' },
+      { id: 'test', displayName: '08 Test' },
+    ],
+    edges: [
+      { from: 'req', to: 'fd', label: 'stage:fdd', kind: 'agent' },
+      { from: null, to: 'td', label: 'human:fdd-approved', kind: 'gate' },
+      { from: null, to: 'build', label: 'human:td-approved', kind: 'gate' },
+      { from: 'build', to: 'test', label: 'stage:test', kind: 'agent' },
+      { from: 'test', to: 'build', label: 'test:sit-fail', kind: 'agent' }, // rework back-edge
+      { from: null, to: 'data', label: 'pull_request.opened', kind: 'agent', external: true },
+    ],
+  });
+}
+
+test('prettifyStageLabel: strips prefix, upcases known tokens, marks gates', () => {
+  assert.equal(prettifyStageLabel('stage:fdd'), 'FDD');
+  assert.equal(prettifyStageLabel('human:td-approved'), 'TD approved 🔒');
+  assert.equal(prettifyStageLabel('test:uat-pass'), 'UAT pass');
+});
+
+test('assignStageLanes: numbered fragments linearize across a human-gate gap', () => {
+  const { nodes, edges } = accessioLike();
+  const { laneOf } = assignStageLanes(nodes, edges);
+  // FDD → (gate) → TD → (gate) → Build, even though no edge connects fd→td→build.
+  assert.ok(laneOf.fd < laneOf.td, 'fd left of td');
+  assert.ok(laneOf.td < laneOf.build, 'td left of build');
+});
+
+test('assignStageLanes: a rework back-edge does not pull the target forward', () => {
+  const { nodes, edges } = accessioLike();
+  const { laneOf } = assignStageLanes(nodes, edges);
+  assert.ok(laneOf.build < laneOf.test, 'build stays left of test despite test→build');
+});
+
+test('assignStageLanes: a node reacting only to external PR events is cross-cutting', () => {
+  const { nodes, edges } = accessioLike();
+  const { lanes, laneOf } = assignStageLanes(nodes, edges);
+  const cross = lanes.find(l => l.crossCutting);
+  assert.ok(cross, 'a cross-cutting lane exists');
+  assert.ok(cross.ids.includes('data'), 'data architect is in it');
+  assert.equal(laneOf.data, cross.index);
+});
+
+test('assignStageLanes: titles name the work; gates surface as a boundary marker', () => {
+  const { nodes, edges } = accessioLike();
+  const { lanes, laneOf } = assignStageLanes(nodes, edges);
+  const laneAt = (col) => lanes.find(l => l.index === col);
+  assert.equal(laneAt(laneOf.fd).title, 'FDD');          // stage:fdd in → title
+  assert.equal(laneAt(laneOf.fd).gate, null);
+  // Build is woken by the human:td-approved gate → title stays the work name,
+  // the gate is exposed separately for the boundary chip.
+  assert.equal(laneAt(laneOf.build).title, 'Build');
+  assert.equal(laneAt(laneOf.build).gate, 'TD approved 🔒');
 });
 
 test('end-to-end: normalize → rank places a gate left of its consumer', () => {

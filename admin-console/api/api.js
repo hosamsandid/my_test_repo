@@ -14,7 +14,7 @@ const auth = require('./auth');
 const audit = require('./audit');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandReviewSteps, emptyDraftBundle } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandReviewSteps, expandDataFlowSteps, emptyDraftBundle } = require('./process-template');
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
 
 const WORKSPACE = '/workspace';
@@ -2148,11 +2148,16 @@ app.get('/api/flows/graph', async (req, res) => {
     const triggers = effectiveTriggers(raw, {
       derive, systemPrompt: derive ? readAgentSystemPrompt(id) : '',
     });
+    // Data-flow ports persisted at materialise time (#379) so the live graph
+    // of an imported team still renders its dependency/artifact edges.
+    const df = cfg.dataFlow && typeof cfg.dataFlow === 'object' ? cfg.dataFlow : {};
     nodes.push({
       id, role, displayName: cfg.displayName || id,
       sessionPolicy: cfg.sessionPolicy || 'persistent',
       environmentId: cfg.environmentId || null, triggers,
-      inputs: [], outputs: [], dependsOn: [],
+      inputs: Array.isArray(df.inputs) ? df.inputs : [],
+      outputs: Array.isArray(df.outputs) ? df.outputs : [],
+      dependsOn: Array.isArray(df.dependsOn) ? df.dependsOn : [],
       content: readAgentSystemPrompt(id), // expandable prompt in the unified viewer
       stage: typeof cfg.stage === 'string' ? cfg.stage : '',
     });
@@ -4151,6 +4156,24 @@ function planMembers(teamId, normalizedRoles, loadTemplate) {
   return planned;
 }
 
+// Build the `dataFlow` config block for a materialised member from its custom
+// role's ports (#379). dependsOn role ids → member ids so the live graph
+// connects members; artifact paths are global and pass through unchanged.
+// Returns null when the role carries no ports (keeps ordinary teams clean).
+function dataFlowForMember(template, teamId) {
+  const inputs = Array.isArray(template?.inputs) ? template.inputs : [];
+  const outputs = Array.isArray(template?.outputs) ? template.outputs : [];
+  const dependsOn = Array.isArray(template?.dependsOn) ? template.dependsOn : [];
+  if (!inputs.length && !outputs.length && !dependsOn.length) return null;
+  return {
+    dataFlow: {
+      ...(inputs.length ? { inputs } : {}),
+      ...(outputs.length ? { outputs } : {}),
+      ...(dependsOn.length ? { dependsOn: dependsOn.map(d => `${teamId}-${d}`) } : {}),
+    },
+  };
+}
+
 app.post('/api/teams', heavyLimiter, async (req, res) => {
   const body = req.body || {};
   const { teamId, teamName, repository, githubTokenId, mcpServers } = body;
@@ -4239,9 +4262,12 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   if (body.processTemplate) {
     const v = validateProcessTemplate(body.processTemplate);
     if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
-    // Expand PR-review steps (#347) into concrete reviewer + producer-rework
-    // triggers before flattening to custom roles.
-    customRolesRaw = templateToCustomRoles(expandReviewSteps(body.processTemplate));
+    // Expand PR-review steps (#347) into reviewer + producer-rework triggers,
+    // then data-flow edges (#379) into `push` triggers scoped to each upstream
+    // agent, before flattening to custom roles.
+    customRolesRaw = templateToCustomRoles(
+      expandDataFlowSteps(expandReviewSteps(body.processTemplate), { teamId })
+    );
   }
   const customMap = new Map(customRolesRaw.map(r => [r.id, r]));
   const resolveTemplate = (id) => customMap.get(id) || loadAgentTemplate(id);
@@ -4511,6 +4537,11 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           // packs they'll plug in here.
           sessionPolicy: p.template.sessionPolicy === 'per-invocation' ? 'per-invocation' : undefined,
           triggers: triggersOut,
+          // BP data-flow ports (#379), recorded on the member config so the live
+          // graph renders dependency/artifact edges. dependsOn role ids are
+          // mapped to member ids (`<teamId>-<roleId>`) so the graph connects
+          // members; artifact paths match across nodes unchanged.
+          ...(dataFlowForMember(p.template, teamId) || {}),
         }),
       });
       const data = await resp.json().catch(() => ({}));

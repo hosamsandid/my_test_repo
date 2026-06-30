@@ -2169,6 +2169,10 @@ class Orchestrator {
       ...(Array.isArray(opts.skillsOverride) ? { skillsOverride: opts.skillsOverride } : {}),
       ...(Array.isArray(opts.mcpServersOverride) ? { mcpServersOverride: opts.mcpServersOverride } : {}),
       ...(opts.sessionPolicy === 'per-invocation' ? { sessionPolicy: 'per-invocation' } : {}),
+      // BP data-flow ports (#379) — recorded verbatim so the live process graph
+      // renders this member's dependency/artifact edges. Runtime hand-offs are
+      // driven by the push triggers, not this block.
+      ...(opts.dataFlow && typeof opts.dataFlow === 'object' ? { dataFlow: opts.dataFlow } : {}),
       enabled: true,
     };
     saveAgentConfig(memberId, memberConfig);

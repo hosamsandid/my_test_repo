@@ -132,6 +132,13 @@ function templateToCustomRoles(bundle) {
     displayName: r.displayName || r.id,
     sessionPolicy: r.sessionPolicy === 'per-invocation' ? 'per-invocation' : undefined,
     promptTemplate: r.systemPrompt || '',
+    // Carry the BP data-flow ports + dependencies through so the materialised
+    // member's config can record them — the live graph then renders the
+    // dependency/artifact edges of an imported flow, not just the push triggers
+    // (#379). No-op for ordinary catalog roles (they carry none).
+    ...(Array.isArray(r.inputs) && r.inputs.length ? { inputs: r.inputs } : {}),
+    ...(Array.isArray(r.outputs) && r.outputs.length ? { outputs: r.outputs } : {}),
+    ...(Array.isArray(r.dependsOn) && r.dependsOn.length ? { dependsOn: r.dependsOn } : {}),
     triggers: (r.triggers || []).map(t => ({
       id: t.id,
       type: t.type,
@@ -226,7 +233,101 @@ function expandReviewSteps(bundle) {
   return { ...bundle, roles };
 }
 
+// ─── Data-flow steps (#379) ───────────────────────────────────────────────
+// Core principle: agents hand files off via `git commit` + `git push`, so a
+// push by an upstream agent IS the signal that downstream data is ready. This
+// expansion (run only at materialise time) turns each data-flow edge —
+// `depends_on` (ordering) and artifact output→input matches (data) — into a
+// concrete `push` github-event trigger on the *consumer*, scoped via
+// `from: ['<teamId>-<upstream>']` to that one upstream agent. Far more targeted
+// than a generic push trigger: it fires only when a predecessor in the data
+// chain pushes. The poller's existing origin attribution (commit author
+// `<id>@agents.local`), `from` allowlist, and loop protection (layers 0/2/3)
+// carry it — no runtime/router change.
+//
+// Path-level precision is deliberately NOT applied: the trigger fires on any
+// push by the upstream and the woken agent decides whether the change is
+// relevant (it can `[PASS]`). This also covers the case where an agent chose to
+// produce something other than its declared artifact.
+
+function dataFlowPrompt(upstreamName, paths) {
+  const inputs = paths.length
+    ? `Your declared inputs from it: ${paths.map(p => `\`${p}\``).join(', ')}.`
+    : 'It is an upstream dependency of yours.';
+  return [
+    `Your upstream **${upstreamName}** just pushed to the team repo (the event payload above has the branch and commits).`,
+    inputs,
+    '',
+    'Before you act:',
+    '1. `git fetch`, then check out the pushed branch and `git pull --ff-only` (the ref is in the payload).',
+    '2. Inspect what changed and confirm the inputs you need are present and complete.',
+    '3. If this push does not actually affect your work, reply `[PASS]` — skipping is fine.',
+    '',
+    'Then do your part and commit + push your own outputs so your downstream agents are notified the same way.',
+  ].join('\n');
+}
+
+/**
+ * Expand data-flow edges into `push` triggers (materialise time). Returns a NEW
+ * bundle; roles without dependencies/inputs are untouched (no-op for catalog
+ * teams). `inputs/outputs/dependsOn` stay on the roles (carried to config by
+ * templateToCustomRoles for the live graph).
+ * @param {object} bundle
+ * @param {{ teamId?: string }} [opts] - teamId to map a role id → member id
+ *   (`<teamId>-<roleId>`) for the `from` allowlist.
+ */
+function expandDataFlowSteps(bundle, { teamId } = {}) {
+  const roles = (bundle.roles || []).map(r => ({ ...r, triggers: (r.triggers || []).slice() }));
+  const byId = new Map(roles.map(r => [r.id, r]));
+  const memberId = (roleId) => (teamId ? `${teamId}-${roleId}` : roleId);
+  const pathOf = (a) => (typeof a === 'string' ? a : (a && a.path)) || '';
+
+  // Producers by artifact output path.
+  const producersByPath = new Map();
+  for (const r of roles) {
+    for (const a of (r.outputs || [])) {
+      const p = pathOf(a);
+      if (!p) continue;
+      if (!producersByPath.has(p)) producersByPath.set(p, []);
+      producersByPath.get(p).push(r.id);
+    }
+  }
+
+  for (const b of roles) {
+    // upstream role id -> Set(path); empty set = pure dependency edge.
+    const upstream = new Map();
+    const ensure = (id) => { if (!upstream.has(id)) upstream.set(id, new Set()); return upstream.get(id); };
+
+    for (const dep of (b.dependsOn || [])) {
+      if (typeof dep === 'string' && dep && dep !== b.id && byId.has(dep)) ensure(dep);
+    }
+    for (const a of (b.inputs || [])) {
+      const p = pathOf(a);
+      if (!p) continue;
+      for (const producer of (producersByPath.get(p) || [])) {
+        if (producer !== b.id) ensure(producer).add(p);
+      }
+    }
+
+    for (const [upId, paths] of upstream) {
+      const triggerId = `${b.id}-on-push-${upId}`;
+      if (b.triggers.some(t => t.id === triggerId)) continue; // idempotent
+      b.triggers.push({
+        id: triggerId,
+        type: 'github-event',
+        events: ['push'],
+        from: [memberId(upId)],
+        enabled: true,
+        description: `Data flow: wake on push from ${byId.get(upId)?.displayName || upId}`,
+        prompt: dataFlowPrompt(byId.get(upId)?.displayName || upId, [...paths].sort()),
+      });
+    }
+  }
+
+  return { ...bundle, roles };
+}
+
 module.exports = {
   buildProcessTemplate, validateProcessTemplate, templateToCustomRoles,
-  expandReviewSteps, emptyDraftBundle, roleKeyOf, VERSION,
+  expandReviewSteps, expandDataFlowSteps, emptyDraftBundle, roleKeyOf, VERSION,
 };

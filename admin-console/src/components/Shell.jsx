@@ -45,7 +45,7 @@ const NAV = [
     { path: '/quickstart',   label: 'Single Agent',        Icon: Rocket,   subtitle: 'One agent, one repo' },
     { path: '/team-setup',   label: 'Team Wizard',         Icon: Users2,   subtitle: 'Multi-role GitHub team' },
     { path: '/agents',       label: 'Agents',              Icon: Layers },
-    { path: '/flows',         label: 'Flows',               Icon: GitBranch },
+    { path: '/flows',         label: 'Flows',               Icon: GitBranch, subtitle: 'BriefingPacks & process graphs' },
     { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
     // { path: '/orchestrator-wizard', label: 'Orchestrator Wizard', Icon: Wand2 },
   ]},

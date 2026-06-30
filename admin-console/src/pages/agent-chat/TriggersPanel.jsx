@@ -332,6 +332,201 @@ function DateTimePicker({ value, onChange }) {
 }
 
 /* ── Trigger row ────────────────────────────────────────────────────── */
+/* ── Emits (Process Canvas #328/#331) ──────────────────────────────────
+ * The labels this trigger's run is expected to set — the outbound edges of the
+ * orchestration graph. Read view shows the confirmed set; the editor seeds from
+ * the heuristic suggestions (GET .../emit-suggestions) and persists the
+ * operator-confirmed set (PUT .../emits). */
+function EmitsSection({ trigger, agentId, onSaved }) {
+  const [open, setOpen] = useState(false);
+  const emits = Array.isArray(trigger.emits) ? trigger.emits : [];
+
+  return (
+    <div style={{ marginTop: 2 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', flexShrink: 0 }}>emits</span>
+        {emits.length === 0 && (
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>none</span>
+        )}
+        {emits.map(label => (
+          <span key={label} style={{
+            fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)',
+            background: 'var(--eb-status-info-bg)', color: 'var(--eb-status-info)',
+            border: '1px solid var(--eb-status-info)', borderRadius: 'var(--eb-radius-sm)',
+            padding: '0 5px',
+          }}>{label}</span>
+        ))}
+        {!open && (
+          <button
+            onClick={() => setOpen(true)}
+            title="Edit emitted labels"
+            style={{
+              background: 'none', border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-sm)', color: 'var(--eb-text-muted)',
+              cursor: 'pointer', padding: '0 5px', fontSize: 'var(--eb-text-xs)',
+              display: 'inline-flex', alignItems: 'center', gap: 3,
+            }}
+          >
+            <Pencil size={10} /> edit
+          </button>
+        )}
+      </div>
+      {open && (
+        <EmitsEditor
+          trigger={trigger}
+          agentId={agentId}
+          onClose={() => setOpen(false)}
+          onSaved={() => { setOpen(false); onSaved?.(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function EmitsEditor({ trigger, agentId, onClose, onSaved }) {
+  const [selected, setSelected] = useState(() => new Set(Array.isArray(trigger.emits) ? trigger.emits : []));
+  const [suggestions, setSuggestions] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [newLabel, setNewLabel] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await fetch(`/api/agents/${agentId}/triggers/${trigger.id}/emit-suggestions`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!alive) return;
+        setSuggestions(Array.isArray(data.suggestions) ? data.suggestions : []);
+      } catch (e) {
+        if (alive) setError(e.message);
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, [agentId, trigger.id]);
+
+  const toggle = (label) => setSelected(prev => {
+    const next = new Set(prev);
+    next.has(label) ? next.delete(label) : next.add(label);
+    return next;
+  });
+
+  const addLabel = () => {
+    const l = newLabel.trim();
+    if (!l) return;
+    setSelected(prev => new Set(prev).add(l));
+    setNewLabel('');
+  };
+
+  async function save() {
+    setSaving(true);
+    setError(null);
+    try {
+      await apiCall('PUT', `/api/agents/${agentId}/triggers/${trigger.id}/emits`, { emits: [...selected] });
+      onSaved?.();
+    } catch (e) {
+      setError(e.message);
+      setSaving(false);
+    }
+  }
+
+  // Suggestions not already selected, ordered high→low confidence by the API.
+  const unpicked = suggestions.filter(s => !selected.has(s.label));
+
+  return (
+    <div style={{
+      marginTop: 'var(--eb-space-2)', padding: 'var(--eb-space-2)',
+      background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+      borderRadius: 'var(--eb-radius-sm)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+    }}>
+      {/* Selected labels (removable) */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        {[...selected].length === 0 && (
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
+            No emitted labels selected.
+          </span>
+        )}
+        {[...selected].map(label => (
+          <button key={label} onClick={() => toggle(label)} title="Remove"
+            style={{
+              fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)',
+              background: 'var(--eb-status-info-bg)', color: 'var(--eb-status-info)',
+              border: '1px solid var(--eb-status-info)', borderRadius: 'var(--eb-radius-sm)',
+              padding: '0 5px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3,
+            }}>
+            {label} <XCircle size={10} />
+          </button>
+        ))}
+      </div>
+
+      {/* Heuristic suggestions */}
+      {loading ? (
+        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Analysing prompt…</span>
+      ) : unpicked.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Suggested from prompt:</span>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+            {unpicked.map(s => (
+              <button key={s.label} onClick={() => toggle(s.label)} title={s.sourceSnippet || ''}
+                style={{
+                  fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)',
+                  background: 'none', color: 'var(--eb-text-secondary)',
+                  border: '1px dashed var(--eb-border-hover)', borderRadius: 'var(--eb-radius-sm)',
+                  padding: '0 5px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3,
+                }}>
+                <Plus size={10} /> {s.label}
+                <span style={{ opacity: 0.6 }}>{s.confidence === 'high' ? '●' : '○'}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Free-text add */}
+      <div style={{ display: 'flex', gap: 4 }}>
+        <input
+          value={newLabel}
+          onChange={e => setNewLabel(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addLabel(); } }}
+          placeholder="add label…"
+          style={{
+            flex: 1, fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)',
+            background: 'var(--eb-bg-surface)', color: 'var(--eb-text-primary)',
+            border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
+            padding: '2px 6px', outline: 'none',
+          }}
+        />
+        <button onClick={addLabel} style={ghostBtnStyle}>Add</button>
+      </div>
+
+      {error && (
+        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>{error}</span>
+      )}
+
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 4 }}>
+        <button onClick={onClose} disabled={saving} style={ghostBtnStyle}>Cancel</button>
+        <button onClick={save} disabled={saving} style={{
+          fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit', fontWeight: 'var(--eb-font-medium)',
+          background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+          border: 'none', borderRadius: 'var(--eb-radius-sm)', padding: '2px 10px',
+          cursor: saving ? 'wait' : 'pointer',
+        }}>{saving ? 'Saving…' : 'Save emits'}</button>
+      </div>
+    </div>
+  );
+}
+
+const ghostBtnStyle = {
+  fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
+  background: 'none', color: 'var(--eb-text-secondary)',
+  border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
+  padding: '2px 10px', cursor: 'pointer',
+};
+
 function TriggerRow({ trigger, agentId, onEdit, onDeleted, onToggled }) {
   const [toggling, setToggling] = useState(false);
   const [scriptPanelName, setScriptPanelName] = useState(null);
@@ -409,6 +604,8 @@ function TriggerRow({ trigger, agentId, onEdit, onDeleted, onToggled }) {
           {trigger.description}
         </div>
       )}
+
+      <EmitsSection trigger={trigger} agentId={agentId} onSaved={onToggled} />
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginTop: 2 }}>
         <ToggleSwitch checked={trigger.enabled !== false} onChange={handleToggle} />
@@ -927,7 +1124,7 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId }) {
  * Read/write panel listing and managing the scheduled triggers for the
  * selected agent. Polls every 30 s for changes the agent itself makes.
  */
-export default function TriggersPanel({ agentId, active }) {
+export default function TriggersPanel({ agentId, active, onChanged }) {
   const [triggers, setTriggers]   = useState([]);
   const [loading, setLoading]     = useState(false);
   const [error, setError]         = useState(null);
@@ -966,6 +1163,7 @@ export default function TriggersPanel({ agentId, active }) {
       await apiCall('POST', `/api/agents/${agentId}/triggers`, body);
       setAddOpen(false);
       fetchTriggers(agentId);
+      onChanged?.();
     } catch (e) {
       throw e;
     } finally {
@@ -979,6 +1177,7 @@ export default function TriggersPanel({ agentId, active }) {
       await apiCall('PUT', `/api/agents/${agentId}/triggers/${editTarget.id}`, body);
       setEditTarget(null);
       fetchTriggers(agentId);
+      onChanged?.();
     } catch (e) {
       throw e;
     } finally {
@@ -992,11 +1191,17 @@ export default function TriggersPanel({ agentId, active }) {
       await apiCall('DELETE', `/api/agents/${agentId}/triggers/${deleteTarget.id}`);
       setDeleteTarget(null);
       fetchTriggers(agentId);
+      onChanged?.();
     } catch (e) {
       setError(`Delete failed: ${e.message}`);
       setDeleteTarget(null);
     }
   }
+
+  const afterRowMutation = useCallback(() => {
+    fetchTriggers(agentId);
+    onChanged?.();
+  }, [fetchTriggers, agentId, onChanged]);
 
   /* ── Toolbar ──────────────────────────────────────────────────────── */
   const toolbar = (
@@ -1089,7 +1294,7 @@ export default function TriggersPanel({ agentId, active }) {
             agentId={agentId}
             onEdit={setEditTarget}
             onDeleted={setDeleteTarget}
-            onToggled={() => fetchTriggers(agentId)}
+            onToggled={afterRowMutation}
           />
         ))}
       </div>

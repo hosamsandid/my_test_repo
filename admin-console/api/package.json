@@ -1,6 +1,9 @@
 {
   "name": "e-vgh-claw-admin-api",
   "version": "1.0.0",
+  "scripts": {
+    "test": "node --test"
+  },
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.19.2",

@@ -11,7 +11,7 @@
 //   g.setData(unifiedGraph);   // { nodes, edges, lints } from /api/flows/graph
 //   g.fit(); g.cleanup();
 
-export function initFlowGraph(viewport, { onSelectNode, onSaveContent } = {}) {
+export function initFlowGraph(viewport, { onSelectNode, onSaveContent, onConnect, onSelectEdge } = {}) {
 
   // ─── Constants ──────────────────────────────────────────────────────
   const NODE_W      = 320;
@@ -148,7 +148,9 @@ export function initFlowGraph(viewport, { onSelectNode, onSaveContent } = {}) {
     showArchived:       localStorage.getItem('ace-graph-show-archived') === 'true',
     orientation:        localStorage.getItem('ace-graph-orientation') === 'vertical' ? 'vertical' : 'horizontal',
     selectedId:         null,   // #362 UI rework Phase C: node selection
-    editable:           false,  // inline content/prompt editing
+    editable:           false,  // structural editing (connect-to-wire, edges)
+    contentEditable:    false,  // inline prompt/content editing (separate gate)
+    connecting:         null,   // { fromId } while dragging a new edge
   };
 
   // ─── Data Loading ────────────────────────────────────────────────────
@@ -887,6 +889,20 @@ export function initFlowGraph(viewport, { onSelectNode, onSaveContent } = {}) {
 
       node.appendChild(actions);
 
+      // Connect-to-wire port (#362 Phase C2): drag to another node to wire a
+      // hand-off / link. Only when editable and a handler is wired.
+      if (state.editable && onConnect) {
+        const port = document.createElement('div');
+        port.title = 'Drag to another node to connect them';
+        port.style.cssText = 'position:absolute;right:-7px;top:calc(50% - 7px);width:14px;height:14px;border-radius:50%;background:var(--eb-accent-primary);border:2px solid var(--eb-bg-surface);cursor:crosshair;z-index:3;';
+        port.addEventListener('mousedown', (ev) => {
+          ev.stopPropagation();
+          ev.preventDefault();
+          startConnect(n.id);
+        });
+        node.appendChild(port);
+      }
+
       // Details panel
       if (state.expanded.has(n.id)) {
         const details = document.createElement('div');
@@ -929,7 +945,7 @@ export function initFlowGraph(viewport, { onSelectNode, onSaveContent } = {}) {
       // Content panel — the node's prompt/brief. Read-only markdown, or an
       // inline editor when the renderer is editable and a save handler is wired
       // (#362 UI rework Phase C). "Content = the prompt", for BP and process alike.
-      const canEditContent = state.editable && typeof onSaveContent === 'function';
+      const canEditContent = state.contentEditable && typeof onSaveContent === 'function';
       if (state.contentVisible.has(n.id) && (bp.body || canEditContent)) {
         if (canEditContent) {
           const wrap = document.createElement('div');
@@ -1256,7 +1272,23 @@ export function initFlowGraph(viewport, { onSelectNode, onSaveContent } = {}) {
         x1 = fromPos.x + NODE_W / 2; y1 = fromPos.y + fromH;
         x2 = toPos.x + NODE_W / 2;   y2 = toPos.y;  flow = 'vertical';
       }
-      drawBezierEdge(x1, y1, x2, y2, color, 1.5, '', true, flow);
+      const d = drawBezierEdge(x1, y1, x2, y2, color, 1.5, '', true, flow);
+      // Clickable hit-area so the edge can be edited/removed (#362 Phase C2).
+      if (onSelectEdge && d) {
+        const hit = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        hit.setAttribute('d', d);
+        hit.setAttribute('stroke', 'transparent');
+        hit.setAttribute('stroke-width', '14');
+        hit.setAttribute('fill', 'none');
+        hit.style.pointerEvents = 'stroke';
+        hit.style.cursor = 'pointer';
+        hit.addEventListener('mousedown', (ev) => ev.stopPropagation());
+        hit.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          onSelectEdge({ from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on, triggerId: e.triggerId });
+        });
+        svgEdges.appendChild(hit);
+      }
       if (e.label) {
         const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         t.textContent = e.label;
@@ -1368,6 +1400,7 @@ export function initFlowGraph(viewport, { onSelectNode, onSaveContent } = {}) {
       tri.setAttribute('opacity', '0.7');
       svgEdges.appendChild(tri);
     }
+    return d;
   }
 
   function makeSvgPath(d) {
@@ -1500,15 +1533,59 @@ export function initFlowGraph(viewport, { onSelectNode, onSaveContent } = {}) {
   }
 
   function onMousemove(e) {
+    if (state.connecting) { updateTempEdge(e.clientX, e.clientY); return; }
     if (!state.dragging) return;
     state.pan.x = state.panStart.x + (e.clientX - state.dragStart.x);
     state.pan.y = state.panStart.y + (e.clientY - state.dragStart.y);
     applyTransform();
   }
 
-  function onMouseup() {
+  function onMouseup(e) {
+    if (state.connecting) { finishConnect(e); return; }
     state.dragging = false;
     viewport.style.cursor = 'grab';
+  }
+
+  // ── Connect-to-wire (#362 UI rework Phase C2) ──────────────────────────────
+  let tempEdge = null;
+  function toCanvas(clientX, clientY) {
+    const r = viewport.getBoundingClientRect();
+    return {
+      x: (clientX - r.left - state.pan.x) / state.zoom,
+      y: (clientY - r.top - state.pan.y) / state.zoom,
+    };
+  }
+  function startConnect(fromId) {
+    state.connecting = { fromId };
+    viewport.style.cursor = 'crosshair';
+    tempEdge = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    tempEdge.setAttribute('stroke', 'var(--eb-accent-primary)');
+    tempEdge.setAttribute('stroke-width', '2');
+    tempEdge.setAttribute('stroke-dasharray', '5 4');
+    tempEdge.setAttribute('fill', 'none');
+    svgEdges.appendChild(tempEdge);
+  }
+  function updateTempEdge(clientX, clientY) {
+    if (!tempEdge) return;
+    const pos = state.positions[state.connecting.fromId];
+    const el = canvas.querySelector(`.bp-node[data-id="${state.connecting.fromId}"]`);
+    if (!pos || !el) return;
+    const x1 = pos.x + NODE_W;
+    const y1 = pos.y + el.offsetHeight / 2;
+    const p = toCanvas(clientX, clientY);
+    const cx = x1 + (p.x - x1) * 0.4;
+    const cx2 = p.x - (p.x - x1) * 0.4;
+    tempEdge.setAttribute('d', `M ${x1} ${y1} C ${cx} ${y1}, ${cx2} ${p.y}, ${p.x} ${p.y}`);
+  }
+  function finishConnect(e) {
+    const fromId = state.connecting.fromId;
+    state.connecting = null;
+    viewport.style.cursor = 'grab';
+    if (tempEdge) { tempEdge.remove(); tempEdge = null; }
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const nodeEl = el && el.closest ? el.closest('.bp-node') : null;
+    const toId = nodeEl && nodeEl.dataset ? nodeEl.dataset.id : null;
+    if (toId && toId !== fromId && onConnect) onConnect(fromId, toId);
   }
 
   function onWheel(e) {
@@ -1744,6 +1821,7 @@ export function initFlowGraph(viewport, { onSelectNode, onSaveContent } = {}) {
     fit: () => { state.userTransform = false; fitToView(); },
     setSelected: (id) => { state.selectedId = id; render(); },
     setEditable: (v) => { if (state.editable !== !!v) { state.editable = !!v; render(); } },
+    setContentEditable: (v) => { if (state.contentEditable !== !!v) { state.contentEditable = !!v; render(); } },
     cleanup,
   };
 }

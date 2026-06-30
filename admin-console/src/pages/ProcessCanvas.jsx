@@ -1,11 +1,10 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
 import { AlertTriangle, Download, Upload, Boxes, X, Plus, ShieldCheck } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
-import { initProcessGraph } from './process/process-graph-render';
+import { initFlowGraph } from './process/flow-graph-render';
 import ProcessNodeInspector from './process/ProcessNodeInspector';
 import DraftNodeInspector from './process/DraftNodeInspector';
 import { CreateHandoffDialog, EditHandoffDialog, CreateEdgeDialog } from './process/EdgeDialogs';
-import { unifiedToRenderGraph } from './process/unified-render-adapter';
 import MaterializeDialog from './process/MaterializeDialog';
 import AddApprovalDialog from './process/AddApprovalDialog';
 import StageView from './process/StageView';
@@ -42,12 +41,13 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
 
   // Scope is always one of: a team id (live graph), 'templates' (blueprint),
   // or 'draft:<id>' (derived client-side from the bundle, so no fetch).
+  // All scopes feed the unified rich renderer (#362 UI rework C3).
   const graphUrl = scope === 'templates'
-    ? '/api/process/graph?templates=1'
+    ? '/api/flows/graph?templates=1'
     : isDraft
       ? null
-      : `/api/process/graph?team=${encodeURIComponent(scope)}`;
-  const { data: graph, loading, error, refetch } = useApi(graphUrl || '/api/process/graph?templates=__none__');
+      : `/api/flows/graph?team=${encodeURIComponent(scope)}`;
+  const { data: graph, loading, error, refetch } = useApi(graphUrl || '/api/flows/graph?templates=__none__');
 
   // An imported bundle (#334) overrides the fetched graph until closed — shown
   // as a read-only blueprint that can be materialised into a real team.
@@ -77,10 +77,10 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
   useEffect(() => {
     if (!draftBundle) return;
     let alive = true;
-    // Derive via the unified builder so the draft editor shows label +
-    // dependency + artifact edges, then map onto the renderer's kind contract.
+    // Derive the unified graph from the bundle — the rich renderer consumes it
+    // directly (label + dependency + artifact edges + the content/prompt).
     apiCall('POST', '/api/flows/graph', { processTemplate: draftBundle })
-      .then(g => { if (alive) setDraftGraph(unifiedToRenderGraph(g)); }).catch(() => {});
+      .then(g => { if (alive) setDraftGraph(g); }).catch(() => {});
     return () => { alive = false; };
   }, [draftBundle]);
 
@@ -105,17 +105,29 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
   const viewportRef = useRef(null);
   const graphRef = useRef(null);
   const editableRef = useRef(true);
+  // Current inline-prompt save handler (draft only) — kept in a ref so the
+  // renderer, created once, always calls the live one.
+  const saveContentRef = useRef(null);
 
   useEffect(() => {
     if (!viewportRef.current) return;
-    const g = initProcessGraph(viewportRef.current, {
+    const g = initFlowGraph(viewportRef.current, {
       onSelectNode: (id) => setSelectedId(id),
       onConnect: (from, to) => { if (editableRef.current) setConnectPair({ from, to }); },
       onSelectEdge: (edge) => { if (editableRef.current) setSelectedEdge(edge); },
+      onSaveContent: (id, text) => saveContentRef.current && saveContentRef.current(id, text),
     });
     graphRef.current = g;
     return () => { g.cleanup(); graphRef.current = null; };
   }, []);
+
+  // Inline prompt editing writes to the draft role's systemPrompt (drafts only;
+  // live agents / templates keep the content read-only). BP write-back is Phase D.
+  useEffect(() => {
+    saveContentRef.current = isDraft
+      ? (id, text) => draftOps.setPrompt(id, text)
+      : null;
+  }, [isDraft, draftOps]);
 
   useEffect(() => {
     if (!graphRef.current || !displayGraph) return;
@@ -125,6 +137,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
     const ed = isDraft ? true : (!imported && displayGraph.level !== 'template');
     editableRef.current = ed;
     graphRef.current.setEditable(ed);
+    // Inline prompt editing only for drafts (live agents have no prompt write
+    // path; BP write-back is Phase D).
+    graphRef.current.setContentEditable(isDraft);
     graphRef.current.setData(displayGraph);
   }, [displayGraph, imported, isDraft]);
 
@@ -199,7 +214,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
     try { bundle = JSON.parse(await file.text()); }
     catch { setImportError('Not valid JSON.'); return; }
     try {
-      const res = await fetch('/api/process/graph', {
+      const res = await fetch('/api/flows/graph', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ processTemplate: bundle }),
       });

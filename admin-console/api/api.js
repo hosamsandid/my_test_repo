@@ -2084,6 +2084,34 @@ app.post('/api/process/graph', (req, res) => {
  *                      status dropped). Read-only projection over brief.md.
  * Both shapes are { unifiedFlowVersion, source, nodes, edges, gates, labels, lints }. */
 app.get('/api/flows/graph', async (req, res) => {
+  // Template-level blueprint (read-only) — the role-template catalog as a
+  // unified graph, so the rich viewer can render it like any other flow.
+  if (req.query.templates !== undefined) {
+    const derive = req.query.derive !== undefined ? truthyParam(String(req.query.derive)) : true;
+    const ids = truthyParam(String(req.query.templates))
+      ? listAgentTemplateIds()
+      : String(req.query.templates).split(',').map(s => s.trim()).filter(Boolean);
+    const tnodes = [];
+    for (const id of ids) {
+      const t = loadAgentTemplate(id);
+      if (!t) continue;
+      const triggers = effectiveTriggers(
+        (t.triggers || []).map(tr => ({
+          id: tr.id, type: tr.type, events: tr.events, labelFilter: tr.labelFilter,
+          from: tr.from, cron: tr.cron, at: tr.at, enabled: tr.enabled,
+          emits: tr.emits, prompt: tr.promptTemplate,
+        })),
+        { derive, systemPrompt: t.promptTemplate || '' },
+      );
+      tnodes.push({
+        id: t.id, role: 'template', displayName: t.displayName || t.id,
+        sessionPolicy: t.sessionPolicy || 'persistent', environmentId: null, triggers,
+        inputs: [], outputs: [], dependsOn: [], content: t.promptTemplate || '',
+      });
+    }
+    return res.json({ unifiedFlowVersion: 1, source: 'templates', level: 'template', ...buildUnifiedGraph(tnodes) });
+  }
+
   // BP source — read-only projection of a briefings directory.
   if (typeof req.query.workspace === 'string' && req.query.workspace.trim()) {
     const workspace = req.query.workspace.trim();

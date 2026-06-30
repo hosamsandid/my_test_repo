@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight, Bot,
   Boxes, Key, MessageCircle, Github, Layers, GitBranch,
-  Sun, Moon, Rocket, Users2, Wand2, Workflow,
+  Sun, Moon, Rocket, Users2, Wand2,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 
@@ -45,8 +45,7 @@ const NAV = [
     { path: '/quickstart',   label: 'Single Agent',        Icon: Rocket,   subtitle: 'One agent, one repo' },
     { path: '/team-setup',   label: 'Team Wizard',         Icon: Users2,   subtitle: 'Multi-role GitHub team' },
     { path: '/agents',       label: 'Agents',              Icon: Layers },
-    { path: '/flows',         label: 'Flows',               Icon: GitBranch },
-    { path: '/process',      label: 'Process Canvas',      Icon: Workflow, subtitle: 'Model agent orchestration' },
+    { path: '/flows',         label: 'Flows',               Icon: GitBranch, subtitle: 'BriefingPacks & process graphs' },
     { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
     { path: '/orchestrator-wizard', label: 'Orchestrator Wizard', Icon: Wand2 },
   ]},
@@ -69,7 +68,6 @@ const BREADCRUMBS = {
   '/team-setup':   'Team Wizard',
   '/agents':       'Agents',
   '/flows':        'Flows',
-  '/process':      'Process Canvas',
   '/chats':        'Agent Chat',
   '/environments': 'Working Environments',
   '/ssh-keys':     'SSH Keys',

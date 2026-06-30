@@ -1,8 +1,13 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, lazy, Suspense } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
-import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X } from 'lucide-react';
-import { useApi } from '../hooks/useApi';
+import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, Boxes, FileText, Plus } from 'lucide-react';
+import { useApi, apiCall } from '../hooks/useApi';
 import { BPGraph } from './briefings/BPGraph';
+
+// The process graph/editor is a heavy module (custom SVG renderer + dialogs) —
+// load it only when a process scope is actually selected.
+const ProcessGraphPanel = lazy(() =>
+  import('./ProcessCanvas').then(m => ({ default: m.ProcessGraphPanel })));
 
 const BANNER_KEY = 'aee.flows.infoBanner.dismissed';
 
@@ -57,10 +62,42 @@ function HelpPanel({ onClose }) {
         <div style={{ flex: 1, overflowY: 'auto', padding: 'var(--eb-space-4)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
           <section style={{ marginBottom: 'var(--eb-space-5)' }}>
             <h3 style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-md)' }}>
-              What is a Flow?
+              What can I do here?
+            </h3>
+            <p style={{ margin: '0 0 var(--eb-space-2)' }}>
+              Flows hosts two kinds of orchestration, selectable in the left list:
+            </p>
+            <ul style={{ paddingLeft: 'var(--eb-space-4)', margin: 0 }}>
+              <li><strong>Process graphs</strong> — for each <strong>Team</strong> (and editable <strong>Drafts</strong>),
+                a label-driven graph of which agent reacts to which event, in what order.</li>
+              <li><strong>BriefingPack flows</strong> — an <strong>Orchestrator</strong> agent that monitors a
+                directory of BriefingPacks and renders their dependency graph.</li>
+            </ul>
+          </section>
+
+          <section style={{ marginBottom: 'var(--eb-space-5)' }}>
+            <h3 style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-md)' }}>
+              Process graphs (Teams &amp; Drafts)
+            </h3>
+            <p style={{ margin: '0 0 var(--eb-space-2)' }}>
+              Selecting a <strong>Team</strong> shows its live orchestration graph. Agents don't call each other
+              directly — they communicate through labels: one trigger <em>emits</em> a label, another
+              <em> listens</em> on it, and that wiring is the graph.
+            </p>
+            <p style={{ margin: 0 }}>
+              Click <strong>New process</strong> to author a <strong>Draft</strong> from scratch (add roles, wire
+              hand-offs, add PR-review steps and human-approval gates), then <strong>Materialize</strong> it into a
+              real team. The read-only <strong>Role templates</strong> blueprint shows the catalog wiring before any
+              team exists.
+            </p>
+          </section>
+
+          <section style={{ marginBottom: 'var(--eb-space-5)' }}>
+            <h3 style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-md)' }}>
+              What is a BriefingPack flow?
             </h3>
             <p style={{ margin: 0 }}>
-              A <strong>Flow</strong> is an Orchestrator agent bound to a directory of BriefingPacks.
+              A <strong>BriefingPack flow</strong> is an Orchestrator agent bound to a directory of BriefingPacks.
               It continuously monitors that directory, renders the dependency graph of all BriefingPacks,
               and manages their lifecycle — dispatching, claiming, and tracking work state across your team.
             </p>
@@ -89,13 +126,18 @@ function HelpPanel({ onClose }) {
 
           <section style={{ marginBottom: 'var(--eb-space-5)' }}>
             <h3 style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-md)' }}>
-              How do you create a Flow?
+              How do you create one?
             </h3>
+            <p style={{ margin: '0 0 var(--eb-space-1)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>Process graph</p>
+            <ol style={{ paddingLeft: 'var(--eb-space-4)', margin: '0 0 var(--eb-space-3)' }}>
+              <li>Click <strong>New process</strong> to start a draft, or pick an existing <strong>Team</strong>.</li>
+              <li>Add roles and wire hand-offs, then <strong>Materialize</strong> the draft into a team.</li>
+            </ol>
+            <p style={{ margin: '0 0 var(--eb-space-1)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>BriefingPack flow</p>
             <ol style={{ paddingLeft: 'var(--eb-space-4)', margin: 0 }}>
-              <li>Go to the <strong>Agents</strong> page.</li>
-              <li>Create a new agent and set its role to <strong>Orchestrator</strong>.</li>
+              <li>Go to the <strong>Agents</strong> page and create an agent with role <strong>Orchestrator</strong>.</li>
               <li>Set the <strong>Briefings Path</strong> to the directory containing your BriefingPacks.</li>
-              <li>The new Flow will appear in this sidebar once the agent is enabled.</li>
+              <li>The new flow appears under <strong>BriefingPack flows</strong> once the agent is enabled.</li>
             </ol>
           </section>
 
@@ -155,19 +197,20 @@ function InfoBanner({ onDismiss }) {
         Welcome to Flows
       </p>
       <p style={{ margin: '0 0 var(--eb-space-2)' }}>
-        A <strong>Flow</strong> is an Orchestrator agent that monitors a directory of <strong>BriefingPacks</strong>,
-        renders their dependency graph, and manages their lifecycle.
+        Flows hosts two kinds of orchestration, selectable on the left:
       </p>
       <p style={{ margin: '0 0 var(--eb-space-2)' }}>
-        A <strong>BriefingPack (BP)</strong> is a discrete unit of work with a lifecycle:
-        draft → ready → dispatched → claimed → completed → reviewed.
+        <strong>Process graphs</strong> — pick a <strong>Team</strong> to see its label-driven orchestration graph
+        (which agent reacts to which event, in what order), or click <strong>New process</strong> to author a
+        <strong> Draft</strong> from scratch and materialize it into a team.
       </p>
       <p style={{ margin: '0 0 var(--eb-space-2)' }}>
-        On this page you can: select a Flow to visualise its BP dependency graph; activate or deactivate
-        individual BPs; and track work state across your team.
+        <strong>BriefingPack flows</strong> — an <strong>Orchestrator</strong> agent that monitors a directory of
+        <strong> BriefingPacks</strong> (discrete units of work: draft → ready → dispatched → claimed → completed →
+        reviewed) and renders their dependency graph. Create one from the <strong>Agents</strong> page.
       </p>
       <p style={{ margin: 0 }}>
-        To create a Flow: go to the <strong>Agents</strong> page, create an agent, and set its role to <strong>Orchestrator</strong>.
+        Open the <HelpCircle size={12} style={{ verticalAlign: 'middle' }} /> help for details.
       </p>
     </div>
   );
@@ -234,6 +277,56 @@ function FlowRow({ agent, environmentName, selected, onSelect }) {
   );
 }
 
+// Section header inside the left list (Flows / Teams / Drafts …).
+function SectionHeader({ children, action }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      padding: 'var(--eb-space-3) var(--eb-space-4) var(--eb-space-1)',
+      fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)',
+      color: 'var(--eb-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em',
+    }}>
+      <span>{children}</span>
+      {action}
+    </div>
+  );
+}
+
+// Generic selectable row (teams, drafts, role-templates). Mirrors FlowRow's look.
+function ListRow({ icon: Icon, label, sub, selected, onSelect }) {
+  return (
+    <button
+      onClick={onSelect}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', width: '100%',
+        padding: 'var(--eb-space-2) var(--eb-space-3)',
+        background: selected ? 'var(--eb-bg-selected)' : 'transparent',
+        borderLeft: selected ? '3px solid var(--eb-accent-primary)' : '3px solid transparent',
+        borderTop: 'none', borderRight: 'none', borderBottom: '1px solid transparent',
+        color: selected ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
+        cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
+        transition: 'background var(--eb-transition-fast)',
+      }}
+      onMouseEnter={e => { if (!selected) e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
+      onMouseLeave={e => { if (!selected) e.currentTarget.style.background = 'transparent'; }}
+    >
+      <Icon size={18} style={{ flexShrink: 0, color: selected ? 'var(--eb-accent-primary)' : 'var(--eb-text-muted)' }} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)',
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>{label}</div>
+        {sub && (
+          <div style={{
+            marginTop: 2, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>{sub}</div>
+        )}
+      </div>
+    </button>
+  );
+}
+
 export default function Briefings() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [navCollapsed, setNavCollapsed] = useState(false);
@@ -241,15 +334,32 @@ export default function Briefings() {
   const [bannerDismissed, setBannerDismissed] = useState(
     () => localStorage.getItem(BANNER_KEY) === 'true'
   );
-  const selectedFlow = searchParams.get('flow');
+  // Selection: a process scope (`proc`) takes precedence over a BriefingPack
+  // flow (`flow`). `proc` is a team id, 'templates', or 'draft:<id>'.
+  const proc = searchParams.get('proc');
+  const selectedFlow = proc ? null : searchParams.get('flow');
   const { data: agents } = useApi('/api/agents');
   const { data: environments } = useApi('/api/environments');
+  const { data: draftsList, refetch: refetchDrafts } = useApi('/api/process/drafts');
 
   const orchestrators = (agents || []).filter(a => a.role === 'orchestrator');
+  const teams = (agents || []).filter(a => a.role === 'team');
+  const drafts = Array.isArray(draftsList) ? draftsList : [];
   const envNameById = new Map((environments || []).map(e => [e.id, e.name]));
 
   function selectFlow(id) {
     setSearchParams({ flow: id });
+  }
+  function selectProc(scope) {
+    setSearchParams({ proc: scope });
+  }
+
+  async function newProcess() {
+    try {
+      const d = await apiCall('POST', '/api/process/drafts', { name: 'Untitled process' });
+      refetchDrafts();
+      setSearchParams({ proc: `draft:${d.id}` });
+    } catch { /* surfaced elsewhere; keep the list usable */ }
   }
 
   const dismissBanner = useCallback(() => {
@@ -370,30 +480,78 @@ export default function Briefings() {
             </div>
 
             <div style={{ flex: 1, overflowY: 'auto' }}>
+              {/* Start a new process (a draft) from scratch */}
+              <div style={{ padding: 'var(--eb-space-3) var(--eb-space-3) var(--eb-space-1)' }}>
+                <button
+                  onClick={newProcess}
+                  style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, width: '100%',
+                    padding: 'var(--eb-space-2)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+                    border: 'none', borderRadius: 'var(--eb-radius-md)', cursor: 'pointer',
+                    fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+                  }}
+                >
+                  <Plus size={15} /> New process
+                </button>
+              </div>
+
+              {/* Teams — each team is a process (live orchestration graph) */}
+              <SectionHeader>Teams</SectionHeader>
+              {teams.length === 0 ? (
+                <div style={{ padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                  No teams yet.
+                </div>
+              ) : (
+                teams.map(t => (
+                  <ListRow
+                    key={t.id}
+                    icon={Users}
+                    label={t.displayName || t.id}
+                    sub={envNameById.get(t.environmentId) || t.environmentId || null}
+                    selected={proc === t.id}
+                    onSelect={() => selectProc(t.id)}
+                  />
+                ))
+              )}
+
+              {/* Drafts — processes being authored, not yet materialised */}
+              <SectionHeader>Drafts</SectionHeader>
+              {drafts.length === 0 ? (
+                <div style={{ padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                  No drafts. Use “New process”.
+                </div>
+              ) : (
+                drafts.map(d => (
+                  <ListRow
+                    key={d.id}
+                    icon={FileText}
+                    label={d.name}
+                    sub={`${d.roleCount} role${d.roleCount === 1 ? '' : 's'}`}
+                    selected={proc === `draft:${d.id}`}
+                    onSelect={() => selectProc(`draft:${d.id}`)}
+                  />
+                ))
+              )}
+
+              {/* Role templates — read-only blueprint of the catalog */}
+              <SectionHeader>Blueprint</SectionHeader>
+              <ListRow
+                icon={Boxes}
+                label="Role templates"
+                sub="Read-only catalog"
+                selected={proc === 'templates'}
+                onSelect={() => selectProc('templates')}
+              />
+
+              {/* BriefingPack flows (Orchestrator agents) */}
+              <SectionHeader>BriefingPack flows</SectionHeader>
               {orchestrators.length === 0 ? (
-                /* AC 3: improved empty state with React Router link */
-                <div style={{
-                  padding: 'var(--eb-space-4)',
-                  fontSize: 'var(--eb-text-sm)',
-                  color: 'var(--eb-text-muted)',
-                  lineHeight: 1.6,
-                }}>
-                  <p style={{ margin: '0 0 var(--eb-space-2)' }}>
-                    No Flows yet. A Flow is created when you add an agent with the
-                    role <strong>Orchestrator</strong>.
-                  </p>
-                  <p style={{ margin: 0 }}>
-                    Go to the{' '}
-                    <Link
-                      to="/agents"
-                      style={{ color: 'var(--eb-accent-primary)', textDecoration: 'none', borderBottom: '1px solid transparent', transition: 'border-color var(--eb-transition-fast)' }}
-                      onMouseEnter={e => { e.currentTarget.style.borderBottomColor = 'var(--eb-accent-primary)'; }}
-                      onMouseLeave={e => { e.currentTarget.style.borderBottomColor = 'transparent'; }}
-                    >
-                      Agents page
-                    </Link>
-                    {' '}to create one.
-                  </p>
+                <div style={{ padding: '0 var(--eb-space-4) var(--eb-space-3)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.6 }}>
+                  None. Create an agent with role{' '}
+                  <Link
+                    to="/agents"
+                    style={{ color: 'var(--eb-accent-primary)', textDecoration: 'none' }}
+                  >Orchestrator</Link>.
                 </div>
               ) : (
                 orchestrators.map(a => (
@@ -413,16 +571,29 @@ export default function Briefings() {
 
       {/* Right pane: banner + graph */}
       <div style={{ flex: 1, overflow: 'hidden', position: 'relative', display: 'flex', flexDirection: 'column' }}>
-        {/* AC 1: dismissible info banner, shown on first visit */}
-        {!bannerDismissed && <InfoBanner onDismiss={dismissBanner} />}
+        {/* AC 1: dismissible info banner — only in the BriefingPack-flow context */}
+        {!bannerDismissed && !proc && <InfoBanner onDismiss={dismissBanner} />}
 
         <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
-          {!selectedAgent ? (
+          {proc ? (
+            <Suspense fallback={
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
+                Loading…
+              </div>
+            }>
+              <ProcessGraphPanel
+                key={proc}
+                scope={proc}
+                onNavigate={selectProc}
+                onDraftsChanged={refetchDrafts}
+              />
+            </Suspense>
+          ) : !selectedAgent ? (
             <div style={{
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               height: '100%', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)',
             }}>
-              Select a Flow to view its dependency graph
+              Select a team, draft or flow on the left
             </div>
           ) : (
             <BPGraph

@@ -1,7 +1,13 @@
 import React, { Suspense, lazy, useState, useEffect } from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useParams } from 'react-router-dom';
 import Shell from './components/Shell';
 import SetupWizard from './pages/SetupWizard';
+
+// The Process Canvas now lives inside Flows; preserve old deep links.
+function ProcessTeamRedirect() {
+  const { teamId } = useParams();
+  return <Navigate to={`/flows?proc=${encodeURIComponent(teamId)}`} replace />;
+}
 
 const Dashboard           = lazy(() => import('./pages/Dashboard'));
 const Agents              = lazy(() => import('./pages/Agents'));
@@ -16,7 +22,6 @@ const ScheduledJobs       = lazy(() => import('./pages/ScheduledJobs'));
 const ModelRegistry       = lazy(() => import('./pages/ModelRegistry'));
 const McpServers          = lazy(() => import('./pages/McpServers'));
 const Briefings           = lazy(() => import('./pages/Briefings'));
-const ProcessCanvas       = lazy(() => import('./pages/ProcessCanvas'));
 const OrchestratorWizard  = lazy(() => import('./pages/OrchestratorWizard'));
 
 export default function App() {
@@ -65,8 +70,8 @@ export default function App() {
           <Route path="/mcp"          element={<McpServers />} />
           <Route path="/flows"         element={<Briefings />} />
           <Route path="/briefings"    element={<Navigate to="/flows" replace />} />
-          <Route path="/process"      element={<ProcessCanvas />} />
-          <Route path="/process/:teamId" element={<ProcessCanvas />} />
+          <Route path="/process"      element={<Navigate to="/flows" replace />} />
+          <Route path="/process/:teamId" element={<ProcessTeamRedirect />} />
           <Route path="/orchestrator-wizard" element={<OrchestratorWizard />} />
         </Routes>
       </Suspense>

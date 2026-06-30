@@ -1,6 +1,5 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
-import { useParams, useSearchParams } from 'react-router-dom';
-import { GitBranch, AlertTriangle, Download, Upload, Boxes, X, Plus, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, Download, Upload, Boxes, X, Plus, ShieldCheck } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { initProcessGraph } from './process/process-graph-render';
 import ProcessNodeInspector from './process/ProcessNodeInspector';
@@ -13,16 +12,18 @@ import SidePanel from '../components/SidePanel';
 import { liveOps, makeDraftOps } from './process/edit-adapters';
 import { buildStageBundle } from './process/stage-model';
 
-// Process Canvas (#330) — data-driven view of the agent orchestration: which
-// agent reacts to which label, in what order. Read-only render here; the node
+// Process graph panel (#330) — data-driven view of the agent orchestration:
+// which agent reacts to which label, in what order. Embedded into the Flows
+// view; the scope (a team id, 'templates', or 'draft:<id>') is supplied by the
+// parent, which also owns the scope picker (the left Flows list). The node
 // inspector (#331) and edge modeling (#332) build on the same renderer.
-export default function ProcessCanvas() {
-  const { teamId } = useParams();
-  const [searchParams] = useSearchParams();
-  // Scope: 'all' (whole fleet, live), a team id (live, scoped), or 'templates'.
-  const [scope, setScope] = useState(teamId || searchParams.get('scope') || 'all');
-
-  useEffect(() => { if (teamId) setScope(teamId); }, [teamId]);
+//
+// Props:
+//   scope           — '<teamId>' | 'templates' | 'draft:<id>'
+//   onNavigate(s)   — switch scope (e.g. after creating/opening a draft)
+//   onDraftsChanged — notify the parent that the drafts list changed (counts)
+export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
+  const navigate = useCallback((s) => { if (onNavigate) onNavigate(s); }, [onNavigate]);
 
   const { data: agents } = useApi('/api/agents');
   const teams = useMemo(
@@ -31,21 +32,20 @@ export default function ProcessCanvas() {
   );
 
   // Drafts (#345): a process being authored from scratch. Scope `draft:<id>`.
-  const { data: draftsList, refetch: refetchDrafts } = useApi('/api/process/drafts');
-  const draftId = scope.startsWith('draft:') ? scope.slice(6) : null;
+  const draftId = scope && scope.startsWith('draft:') ? scope.slice(6) : null;
   const isDraft = !!draftId;
   const isTeamScope = useMemo(
     () => Array.isArray(teams) && teams.some(t => t.id === scope),
     [teams, scope],
   );
 
+  // Scope is always one of: a team id (live graph), 'templates' (blueprint),
+  // or 'draft:<id>' (derived client-side from the bundle, so no fetch).
   const graphUrl = scope === 'templates'
     ? '/api/process/graph?templates=1'
-    : scope === 'all'
-      ? '/api/process/graph'
-      : isDraft
-        ? null
-        : `/api/process/graph?team=${encodeURIComponent(scope)}`;
+    : isDraft
+      ? null
+      : `/api/process/graph?team=${encodeURIComponent(scope)}`;
   const { data: graph, loading, error, refetch } = useApi(graphUrl || '/api/process/graph?templates=__none__');
 
   // An imported bundle (#334) overrides the fetched graph until closed — shown
@@ -85,8 +85,8 @@ export default function ProcessCanvas() {
     const saved = await apiCall('PUT', `/api/process/drafts/${draftId}`, next);
     draftBundleRef.current = saved;
     setDraftBundle(saved);
-    refetchDrafts();
-  }, [draftId, refetchDrafts]);
+    if (onDraftsChanged) onDraftsChanged();
+  }, [draftId, onDraftsChanged]);
 
   const draftOps = useMemo(
     () => makeDraftOps(() => draftBundleRef.current, persistDraft),
@@ -125,8 +125,10 @@ export default function ProcessCanvas() {
     graphRef.current.setData(displayGraph);
   }, [displayGraph, imported, isDraft]);
 
-  // Clear selection/dialogs when the scope (and thus the graph) changes.
+  // Clear selection/dialogs when the scope (and thus the graph) changes. A
+  // scope change from the parent also drops any imported blueprint preview.
   useEffect(() => { setSelectedId(null); setConnectPair(null); setSelectedEdge(null); }, [scope, imported]);
+  useEffect(() => { setImported(null); setImportError(null); }, [scope]);
   // The stage view only applies to drafts.
   useEffect(() => { if (!isDraft) setViewMode('graph'); }, [isDraft]);
 
@@ -138,18 +140,6 @@ export default function ProcessCanvas() {
   const selectedRole = isDraft && draftBundle
     ? (draftBundle.roles || []).find(r => r.id === selectedId) || null
     : null;
-
-  async function handleScopeChange(v) {
-    if (v === '__new__') {
-      try {
-        const d = await apiCall('POST', '/api/process/drafts', { name: 'Untitled process' });
-        refetchDrafts();
-        setScope(`draft:${d.id}`);
-      } catch (e) { setImportError(e.message); }
-      return;
-    }
-    setScope(v);
-  }
 
   function afterEdit() { if (!isDraft) refetch(); /* draft re-derives via persist */ }
 
@@ -163,8 +153,8 @@ export default function ProcessCanvas() {
         name: `${tpl.name || scope} (draft)`,
         processTemplate: { ...tpl, sourceTeamId: scope },
       });
-      refetchDrafts();
-      setScope(`draft:${d.id}`);
+      if (onDraftsChanged) onDraftsChanged();
+      navigate(`draft:${d.id}`);
     } catch (e) { setImportError(e.message); }
   }
 
@@ -183,8 +173,7 @@ export default function ProcessCanvas() {
       bundle = draftBundle;
     } else {
       const url = scope === 'templates' ? '/api/process/template?templates=1'
-        : scope === 'all' ? '/api/process/template'
-          : `/api/process/template?team=${encodeURIComponent(scope)}`;
+        : `/api/process/template?team=${encodeURIComponent(scope)}`;
       const res = await fetch(url);
       if (!res.ok) { setImportError(`Export failed: HTTP ${res.status}`); return; }
       bundle = await res.json();
@@ -221,85 +210,43 @@ export default function ProcessCanvas() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - var(--eb-header-height) - 2 * var(--eb-space-6))', minHeight: 480 }}>
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--eb-space-4)', marginBottom: 'var(--eb-space-4)', flexShrink: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-          <GitBranch size={20} style={{ color: 'var(--eb-accent-primary)' }} />
-          <div>
-            <h1 style={{ margin: 0, fontSize: 'var(--eb-text-lg)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
-              Process Canvas
-            </h1>
-            <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-              {scope === 'templates'
-                ? 'Blueprint view (read-only). Switch scope to a team or draft to model.'
-                : isDraft
-                  ? 'Draft — design from scratch: + Add role, drag the ● port to wire, click nodes/edges to edit. Nothing is created until you materialize.'
-                  : 'Click a node to edit · drag the ● port to wire a hand-off · click an edge to edit it.'}
-            </div>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+      {/* Toolbar — the scope picker lives in the Flows left list, not here. */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-3) var(--eb-space-4)', borderBottom: '1px solid var(--eb-border-default)', flexShrink: 0, flexWrap: 'wrap' }}>
+        <div style={{ flex: 1, minWidth: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+          {scope === 'templates'
+            ? 'Blueprint view (read-only). Select a team or draft on the left to model.'
+            : isDraft
+              ? 'Draft — design from scratch: + Add role, drag the ● port to wire, click nodes/edges to edit. Nothing is created until you materialize.'
+              : 'Click a node to edit · drag the ● port to wire a hand-off · click an edge to edit it.'}
+        </div>
+        {isDraft && (
+          <div style={{ display: 'inline-flex', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', overflow: 'hidden', marginRight: 'var(--eb-space-1)' }}>
+            {['graph', 'stages'].map(m => (
+              <button key={m} onClick={() => setViewMode(m)} style={{
+                background: viewMode === m ? 'var(--eb-bg-selected)' : 'var(--eb-bg-surface)',
+                color: viewMode === m ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
+                border: 'none', padding: 'var(--eb-space-1) var(--eb-space-3)', cursor: 'pointer',
+                fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', textTransform: 'capitalize',
+              }}>{m}</button>
+            ))}
           </div>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-          {isDraft && (
-            <div style={{ display: 'inline-flex', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', overflow: 'hidden', marginRight: 'var(--eb-space-1)' }}>
-              {['graph', 'stages'].map(m => (
-                <button key={m} onClick={() => setViewMode(m)} style={{
-                  background: viewMode === m ? 'var(--eb-bg-selected)' : 'var(--eb-bg-surface)',
-                  color: viewMode === m ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
-                  border: 'none', padding: 'var(--eb-space-1) var(--eb-space-3)', cursor: 'pointer',
-                  fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', textTransform: 'capitalize',
-                }}>{m}</button>
-              ))}
-            </div>
-          )}
-          {isDraft && (
-            <>
-              <ToolbarButton onClick={() => setAddRoleOpen('agent')} icon={Plus}>Add role</ToolbarButton>
-              <ToolbarButton onClick={() => setAddRoleOpen('pr-review')} icon={Plus}>PR review</ToolbarButton>
-              <ToolbarButton onClick={() => setApprovalOpen(true)} icon={ShieldCheck}>Human approval</ToolbarButton>
-              <ToolbarButton onClick={() => setMaterializeOpen(true)} icon={Boxes}
-                disabled={!draftBundle?.roles?.length}>Materialize…</ToolbarButton>
-            </>
-          )}
-          {isTeamScope && !imported && (
-            <ToolbarButton onClick={editAsDraft} icon={Boxes}>Edit as draft</ToolbarButton>
-          )}
-          <input ref={fileInputRef} type="file" accept="application/json,.json" onChange={onImportFile} style={{ display: 'none' }} />
-          <ToolbarButton onClick={() => fileInputRef.current?.click()} icon={Upload}>Import</ToolbarButton>
-          <ToolbarButton onClick={exportBundle} icon={Download} disabled={!!imported}>Export</ToolbarButton>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-            Scope
-            <select
-              value={scope}
-              onChange={e => handleScopeChange(e.target.value)}
-              disabled={!!imported}
-              style={{
-                background: 'var(--eb-bg-surface)', color: 'var(--eb-text-primary)',
-                border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
-                padding: 'var(--eb-space-1) var(--eb-space-2)', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
-                opacity: imported ? 0.5 : 1,
-              }}
-            >
-              <option value="all">All agents (live)</option>
-              {teams.length > 0 && (
-                <optgroup label="Teams (live)">
-                  {teams.map(t => (
-                    <option key={t.id} value={t.id}>{t.displayName || t.id}</option>
-                  ))}
-                </optgroup>
-              )}
-              <option value="templates">Role templates (blueprint)</option>
-              {Array.isArray(draftsList) && draftsList.length > 0 && (
-                <optgroup label="Drafts">
-                  {draftsList.map(d => (
-                    <option key={d.id} value={`draft:${d.id}`}>{d.name} ({d.roleCount})</option>
-                  ))}
-                </optgroup>
-              )}
-              <option value="__new__">＋ New process…</option>
-            </select>
-          </label>
-        </div>
+        )}
+        {isDraft && (
+          <>
+            <ToolbarButton onClick={() => setAddRoleOpen('agent')} icon={Plus}>Add role</ToolbarButton>
+            <ToolbarButton onClick={() => setAddRoleOpen('pr-review')} icon={Plus}>PR review</ToolbarButton>
+            <ToolbarButton onClick={() => setApprovalOpen(true)} icon={ShieldCheck}>Human approval</ToolbarButton>
+            <ToolbarButton onClick={() => setMaterializeOpen(true)} icon={Boxes}
+              disabled={!draftBundle?.roles?.length}>Materialize…</ToolbarButton>
+          </>
+        )}
+        {isTeamScope && !imported && (
+          <ToolbarButton onClick={editAsDraft} icon={Boxes}>Edit as draft</ToolbarButton>
+        )}
+        <input ref={fileInputRef} type="file" accept="application/json,.json" onChange={onImportFile} style={{ display: 'none' }} />
+        <ToolbarButton onClick={() => fileInputRef.current?.click()} icon={Upload}>Import</ToolbarButton>
+        <ToolbarButton onClick={exportBundle} icon={Download} disabled={!!imported}>Export</ToolbarButton>
       </div>
 
       {/* Imported-bundle banner */}

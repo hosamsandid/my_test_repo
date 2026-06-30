@@ -1183,7 +1183,7 @@ function StepTeam({ form, setForm, templates, roleConfig, setRoleConfig, error, 
         <div style={diagramLinkCopyStyle}>
           Not sure which roles you need? See how they fit into the trigger- and label-driven flow.
         </div>
-        <Link to="/process?scope=templates" style={{ ...diagramLinkButtonStyle, textDecoration: 'none' }}>
+        <Link to="/flows?proc=templates" style={{ ...diagramLinkButtonStyle, textDecoration: 'none' }}>
           <Workflow size={14} />
           Open Process Canvas
         </Link>

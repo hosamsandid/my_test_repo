@@ -1,10 +1,11 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { initProcessGraph } from './process-graph-render';
-import { unifiedToRenderGraph } from './unified-render-adapter';
+import { initFlowGraph } from './flow-graph-render';
 
-// Unified, read-only flow viewer (#366). Renders any source of the unified
-// orchestration graph — live agents (process choreography) or a BriefingPack
-// directory (dependency + data-flow) — through the one Process Canvas renderer.
+// Unified flow viewer (#362, UI rework). Renders any source of the unified
+// orchestration graph — live agents, a draft bundle, or a BriefingPack
+// directory — through the rich BP-Explorer-style renderer: expandable node
+// cards with the prompt/Content panel, parent-child hierarchy, data flow, and
+// the process-linking edges.
 //
 //   <FlowGraph workspace="/workspace/agents/<id>/<briefingsPath>" />  // BP source
 //   <FlowGraph team="acme" />                                        // live, scoped
@@ -14,11 +15,10 @@ export function FlowGraph({ workspace, team }) {
   const apiRef = useRef(null);
   const [error, setError] = useState(null);
 
-  // Mount the renderer once; read-only (no onConnect / onSelectEdge).
+  // Mount the renderer once.
   useEffect(() => {
     if (!viewportRef.current) return undefined;
-    const g = initProcessGraph(viewportRef.current, {});
-    g.setEditable(false);
+    const g = initFlowGraph(viewportRef.current, {});
     apiRef.current = g;
     return () => { g.cleanup(); apiRef.current = null; };
   }, []);
@@ -38,7 +38,7 @@ export function FlowGraph({ workspace, team }) {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       })
-      .then((graph) => { if (!cancelled) g.setData(unifiedToRenderGraph(graph)); })
+      .then((graph) => { if (!cancelled) g.setData(graph); })
       .catch((err) => { if (!cancelled) setError(err.message || 'Failed to load graph'); });
     return () => { cancelled = true; };
   }, [workspace, team]);

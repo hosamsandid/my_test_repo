@@ -42,7 +42,13 @@ export default function BpNodeInspector({ node, nodes = [], ops, onClose, onChan
         </Field>
         <Field label="Stage (optional)">
           <input value={stage} onChange={e => { setStage(e.target.value); setSaved(false); }}
-            placeholder="e.g. Build" style={input} />
+            placeholder={!stage && node.effectiveStage ? `inherits: ${node.effectiveStage}` : 'e.g. Build'}
+            style={input} />
+          {!stage && node.effectiveStage && (
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+              Inherited from parent — leave empty to keep, or type to override.
+            </span>
+          )}
         </Field>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
           <button

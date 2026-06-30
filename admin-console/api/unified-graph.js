@@ -133,9 +133,22 @@ function buildUnifiedGraph(nodes, edges) {
       parent: n.parent || null,
       children: asArray(n.children),
       isParent: n.isParent === true || asArray(n.children).length > 0,
-      stage: typeof n.stage === 'string' ? n.stage : '',  // manual stage band (#362 E)
+      stage: typeof n.stage === 'string' ? n.stage : '',  // own stage (#362 E)
     };
   });
+
+  // Effective stage: a node inherits its parent's stage by default and may
+  // override it with its own (#362). Walked up the parent chain (cycle-safe).
+  const byIdForStage = new Map(outNodes.map(n => [n.id, n]));
+  const resolveStage = (n, seen) => {
+    if (n.stage) return n.stage;
+    if (!n.parent || seen.has(n.id)) return '';
+    const p = byIdForStage.get(n.parent);
+    if (!p) return '';
+    seen.add(n.id);
+    return resolveStage(p, seen);
+  };
+  outNodes.forEach(n => { n.effectiveStage = resolveStage(n, new Set()); });
 
   const unifiedEdges = [];
   const seen = new Set();

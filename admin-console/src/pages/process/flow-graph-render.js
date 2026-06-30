@@ -192,7 +192,9 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
       ],
       archived: false,
       rigor: n.rigor || '',
-      stage: typeof n.stage === 'string' ? n.stage : '',
+      // Bands group by the effective (inherited) stage; fall back to own.
+      stage: (typeof n.effectiveStage === 'string' && n.effectiveStage)
+        || (typeof n.stage === 'string' ? n.stage : ''),
       _role: n.role,
       _isParent: n.isParent === true,
     }));

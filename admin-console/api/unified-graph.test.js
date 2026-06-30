@@ -260,6 +260,20 @@ test('stage is carried from briefings and round-trips through the bundle (#362 E
   assert.equal(back.roles[0].stage, 'Design');
 });
 
+test('stage inherits from parent by default and is overridable (#362)', () => {
+  const flow = briefingsToUnified([
+    { id: 'p', title: 'Parent', stage: 'Build', children: ['c1', 'c2'] },
+    { id: 'c1', title: 'Child 1', parent: 'p' },                  // inherits Build
+    { id: 'c2', title: 'Child 2', parent: 'p', stage: 'Review' }, // overrides
+  ]);
+  const g = buildUnifiedGraph(flow.nodes, flow.edges);
+  const byId = Object.fromEntries(g.nodes.map(n => [n.id, n]));
+  assert.equal(byId.c1.stage, '');               // own stage unchanged
+  assert.equal(byId.c1.effectiveStage, 'Build'); // inherited
+  assert.equal(byId.c2.effectiveStage, 'Review'); // override wins
+  assert.equal(byId.p.effectiveStage, 'Build');
+});
+
 test('process node content mirrors systemPrompt', () => {
   const flow = processTemplateToUnified({
     processTemplateVersion: 1, name: 'd', level: 'template',

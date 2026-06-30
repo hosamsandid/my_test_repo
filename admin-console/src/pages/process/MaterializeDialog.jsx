@@ -25,6 +25,10 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
   const [sshKeyId, setSshKeyId] = useState('');
   const [githubTokenId, setGithubTokenId] = useState('');
   const [extend, setExtend] = useState(!!sourceTeamId);
+  // Default to deferred materialization: a process can have dozens of members,
+  // and materializing each one clones the repo. Create them as stubs (shown in
+  // the UI) and materialize on demand by enabling. Opt in to clone-now here.
+  const [materializeNow, setMaterializeNow] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -59,6 +63,7 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
         repository: { url: repoUrl.trim(), branch: branch.trim() || 'main', sshKeyId },
         githubTokenId,
         processTemplate: bundle,
+        materializeMembers: materializeNow,
       });
       onDone?.();
       navigate(`/process/${encodeURIComponent(teamId)}`);
@@ -98,13 +103,22 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
           Add to an existing team (extend) — only the missing roles are created
         </label>
 
+        <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+          <input type="checkbox" checked={materializeNow} onChange={e => setMaterializeNow(e.target.checked)} style={{ marginTop: 3 }} />
+          <span>
+            Materialize agents now — clones the repo for every member immediately.
+            Leave off to create them as stubs (shown in the team, no clone) and
+            materialize each on demand by enabling it.
+          </span>
+        </label>
+
         {error && <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</span>}
 
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)' }}>
           <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
           <button onClick={submit} disabled={saving} style={primary}>
             {saving ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : null}
-            {saving ? (extend ? ' Extending…' : ' Creating…') : (extend ? 'Extend team' : 'Create team')}
+            {saving ? (extend ? ' Extending…' : ' Creating…') : (extend ? 'Extend team' : (materializeNow ? 'Create team' : 'Create team (stubs)'))}
           </button>
         </div>
       </div>

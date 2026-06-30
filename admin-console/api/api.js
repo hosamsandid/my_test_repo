@@ -4351,6 +4351,12 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   const body = req.body || {};
   const { teamId, teamName, repository, githubTokenId, mcpServers } = body;
   const mode = body.mode === 'extend' ? 'extend' : 'create';
+  // Deferred materialization: when false, members are created as stubs (config
+  // + triggers only, no Matrix user / clone / process), shown in the UI and
+  // materialized on demand via enable — same model as an orchestrator's
+  // bp-instance stubs. Avoids dozens of clones up front for a large process.
+  // Default true preserves the existing immediate-materialization behaviour.
+  const materializeMembers = body.materializeMembers !== false;
   const readyLabel = (typeof body.readyLabel === 'string' && body.readyLabel.trim())
     ? body.readyLabel.trim()
     : 'ready';
@@ -4715,6 +4721,8 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           // mapped to member ids (`<teamId>-<roleId>`) so the graph connects
           // members; artifact paths match across nodes unchanged.
           ...(dataFlowForMember(p.template, teamId) || {}),
+          // Deferred materialization — create as a stub when requested.
+          materialize: materializeMembers,
         }),
       });
       const data = await resp.json().catch(() => ({}));
@@ -4733,13 +4741,17 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     }
 
     // Phase D — DM rooms (best-effort). Members without DMs miss trigger
-    // output until a chat is opened; we keep going on failure.
-    for (const p of toCreate) {
-      try {
-        const r = await ensureAgentDmRoom(p.memberId);
-        created.dms.push({ agentId: p.memberId, roomId: r.roomId });
-      } catch (err) {
-        console.warn(`[Team] DM pre-create skipped for ${p.memberId}: ${err.message}`);
+    // output until a chat is opened; we keep going on failure. Skipped for
+    // deferred (stub) members — they have no Matrix user yet; the DM room is
+    // created when the stub is materialized + a chat is opened.
+    if (materializeMembers) {
+      for (const p of toCreate) {
+        try {
+          const r = await ensureAgentDmRoom(p.memberId);
+          created.dms.push({ agentId: p.memberId, roomId: r.roomId });
+        } catch (err) {
+          console.warn(`[Team] DM pre-create skipped for ${p.memberId}: ${err.message}`);
+        }
       }
     }
 
@@ -4749,6 +4761,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
       env: envId,
       team: teamAgentId,
       created: created.members,
+      materialized: materializeMembers,
       skipped: planned
         .filter(p => !toCreate.some(c => c.memberId === p.memberId))
         .map(p => p.memberId),

@@ -15,7 +15,7 @@ const audit = require('./audit');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandReviewSteps, emptyDraftBundle } = require('./process-template');
-const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified } = require('./unified-graph');
+const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -2335,6 +2335,47 @@ app.delete('/api/process/drafts/:id', apiLimiter, (req, res) => {
   if (!p || !fs.existsSync(p)) return res.status(404).json({ error: 'Draft not found' });
   fs.rmSync(p);
   res.status(204).end();
+});
+
+/* Import a BriefingPack hierarchy as a process draft (#377). Reads a briefings
+ * directory from bp-explorer and maps it through briefingsToUnified →
+ * unifiedToProcessTemplate, so the brief.md body becomes each role's prompt and
+ * the parent-child hierarchy, depends_on, artifacts and stage are preserved.
+ * The result is persisted as a new editable draft — BP-Flows and Process-Flows
+ * now share one storage format. Read-only against the BP source (no brief.md
+ * write-back). */
+app.post('/api/process/drafts/import-briefings', apiLimiter, async (req, res) => {
+  const workspace = typeof req.body?.workspace === 'string' && req.body.workspace.trim()
+    ? req.body.workspace.trim() : null;
+  if (!workspace) return res.status(400).json({ error: 'workspace (briefings path) is required' });
+
+  let bps;
+  try {
+    const url = `${BP_EXPLORER_URL}/api/briefings?workspace=${encodeURIComponent(workspace)}`;
+    const upstream = await fetch(url);
+    if (!upstream.ok) return res.status(502).json({ error: `BP-Explorer returned ${upstream.status}` });
+    bps = await upstream.json();
+  } catch (err) {
+    return res.status(502).json({ error: `BP-Explorer unreachable: ${err.message}` });
+  }
+  if (!Array.isArray(bps) || bps.length === 0) {
+    return res.status(422).json({ error: 'No briefing packs found at that workspace' });
+  }
+
+  const name = typeof req.body?.name === 'string' && req.body.name.trim()
+    ? req.body.name.trim() : `Imported: ${workspace}`;
+  const bundle = { ...unifiedToProcessTemplate(briefingsToUnified(bps, { name })), name };
+
+  // Persist as a new draft (same id derivation as POST /api/process/drafts).
+  let base = slugifyDraft(name);
+  if (!DRAFT_ID_RE.test(base)) base = 'process';
+  let id = base, n = 2;
+  while (fs.existsSync(draftPath(id))) { id = `${base}-${n++}`; }
+  const now = new Date().toISOString();
+  const draft = { ...bundle, id, sourceBriefings: workspace, createdAt: now, updatedAt: now };
+  fs.mkdirSync(PROCESS_DRAFTS_DIR, { recursive: true });
+  writeJsonAtomic(draftPath(id), draft);
+  res.status(201).json(draft);
 });
 
 /* ─── Skills ────────────────────────────────────────────────────────── */

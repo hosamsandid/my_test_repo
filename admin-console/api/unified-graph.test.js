@@ -295,6 +295,46 @@ test('hierarchy (on:parent) edges are view-only — resolveHandoffs ignores them
   assert.equal(parentEdges[0].from, 'p');
 });
 
+test('import: BP hierarchy → process bundle preserves prompt/hierarchy/deps/artifacts/stage (#377)', () => {
+  // The import composes briefingsToUnified → unifiedToProcessTemplate.
+  const bps = [
+    { id: 'parent01', title: 'Parent', status: 'ready', children: ['aa01', 'bb02'], body: '# Parent brief', stage: 'Design' },
+    { id: 'aa01', title: 'Upstream', parent: 'parent01', body: '# Do the upstream work',
+      artifacts: [{ path: 'spec.md', direction: 'output' }] },
+    { id: 'bb02', title: 'Downstream', parent: 'parent01', depends_on: ['aa01'], stage: 'Build',
+      artifacts: [{ path: 'spec.md', direction: 'input' }] },
+  ];
+  const bundle = unifiedToProcessTemplate(briefingsToUnified(bps, { name: 'imported' }));
+  assert.equal(bundle.processTemplateVersion, 1);
+
+  const byId = Object.fromEntries(bundle.roles.map(r => [r.id, r]));
+  // Content (brief.md body) became the role prompt.
+  assert.equal(byId.parent01.systemPrompt, '# Parent brief');
+  assert.equal(byId.aa01.systemPrompt, '# Do the upstream work');
+  // Hierarchy round-trips via `parent`.
+  assert.equal(byId.aa01.parent, 'parent01');
+  assert.equal(byId.bb02.parent, 'parent01');
+  // depends_on + artifact ports + stage survive.
+  assert.deepEqual(byId.bb02.dependsOn, ['aa01']);
+  assert.deepEqual(byId.aa01.outputs, [{ path: 'spec.md', direction: 'output' }]);
+  assert.deepEqual(byId.bb02.inputs, [{ path: 'spec.md', direction: 'input' }]);
+  assert.equal(byId.bb02.stage, 'Build');
+
+  // Re-importing the bundle into the graph rebuilds the same edges + hierarchy.
+  const flow = processTemplateToUnified(bundle);
+  const g = buildUnifiedGraph(flow.nodes, flow.edges);
+  assert.ok(findEdge(g, e => e.on === 'parent' && e.from === 'parent01' && e.to === 'aa01'));
+  assert.ok(findEdge(g, e => e.on === 'dependency' && e.from === 'aa01' && e.to === 'bb02'));
+  assert.ok(findEdge(g, e => e.on === 'artifact' && e.from === 'aa01' && e.to === 'bb02'));
+  // Parent grouping is reconstructed from `parent` pointers alone.
+  const parent = g.nodes.find(n => n.id === 'parent01');
+  assert.equal(parent.isParent, true);
+  assert.deepEqual(parent.children.sort(), ['aa01', 'bb02']);
+  // Child inherits the parent's stage; own override wins.
+  assert.equal(g.nodes.find(n => n.id === 'aa01').effectiveStage, 'Design');
+  assert.equal(g.nodes.find(n => n.id === 'bb02').effectiveStage, 'Build');
+});
+
 test('explicit manual hand-off edge passes through', () => {
   const g = buildUnifiedGraph(
     [{ id: 'a', triggers: [] }, { id: 'b', triggers: [] }],

@@ -150,6 +150,23 @@ function buildUnifiedGraph(nodes, edges) {
   };
   outNodes.forEach(n => { n.effectiveStage = resolveStage(n, new Set()); });
 
+  // Derive children from parent pointers so the parent-child hierarchy survives
+  // a round-trip through the bundle (which persists only `parent`, the single
+  // source of truth). Union with any explicitly-supplied children
+  // (briefingsToUnified passes bp.children).
+  const childrenByParent = new Map();
+  for (const n of outNodes) {
+    if (n.parent && nodeIds.has(n.parent) && n.parent !== n.id) {
+      if (!childrenByParent.has(n.parent)) childrenByParent.set(n.parent, []);
+      childrenByParent.get(n.parent).push(n.id);
+    }
+  }
+  outNodes.forEach(n => {
+    const derived = childrenByParent.get(n.id) || [];
+    n.children = [...new Set([...asArray(n.children), ...derived])];
+    n.isParent = n.isParent === true || n.children.length > 0;
+  });
+
   const unifiedEdges = [];
   const seen = new Set();
   const push = (e) => {
@@ -331,6 +348,8 @@ function processTemplateToUnified(bundle) {
       inputs: asArray(r.inputs),
       outputs: asArray(r.outputs),
       dependsOn: asArray(r.dependsOn),
+      // Parent-child hierarchy round-trips through the bundle (#377).
+      parent: typeof r.parent === 'string' && r.parent ? r.parent : null,
       triggers: asArray(r.triggers),
     })),
     edges: [],
@@ -400,7 +419,9 @@ function unifiedToProcessTemplate(flow) {
       role: n.role,
       ...(n.kind === 'pr-review' ? { kind: 'pr-review', review: n.review } : {}),
       sessionPolicy: n.sessionPolicy,
-      systemPrompt: n.systemPrompt,
+      // "Content = the prompt": BP nodes carry the brief.md body in `content`
+      // with an empty systemPrompt, so fall back to content on import (#377).
+      systemPrompt: n.systemPrompt || n.content || '',
       triggers: asArray(n.triggers),
     })),
     gates: asArray(f.gates),
@@ -416,6 +437,7 @@ function unifiedToProcessTemplate(flow) {
     if (asArray(n.outputs).length) extra.outputs = n.outputs;
     if (asArray(n.dependsOn).length) extra.dependsOn = n.dependsOn;
     if (n.stage) extra.stage = n.stage;
+    if (n.parent) extra.parent = n.parent;
     return { ...r, ...extra };
   });
   return bundle;

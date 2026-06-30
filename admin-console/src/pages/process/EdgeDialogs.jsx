@@ -23,19 +23,31 @@ function firstRepo(...triggerLists) {
   return '';
 }
 
-/* ── Create a hand-off: emitter A → label → listener B ─────────────────── */
+/* ── Create a label hand-off: A → label → B ─────────────────────────────────
+ * Mirrors the data-flow dialog: draw A→B, choose the label kind (issue / PR),
+ * whether it's added or removed, and the name. Both sides are wired
+ * automatically — B gets a listener (the derived event + labelFilter) and A is
+ * recorded as emitting the label (an agent-level emit, no pre-existing trigger
+ * required). Human gates/brakes are listener-only (no agent emits them). */
+const LABEL_TARGETS = [
+  { value: 'issues', label: 'Issue label' },
+  { value: 'pull_request', label: 'Pull-request label' },
+];
+const LABEL_ACTIONS = [
+  { value: 'labeled', label: 'added' },
+  { value: 'unlabeled', label: 'removed' },
+];
+
 export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = liveOps, onClose, onDone }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
-  const [fromTriggers, setFromTriggers] = useState([]);
   const [toTriggers, setToTriggers] = useState([]);
-
   const [label, setLabel] = useState('');
-  const [events, setEvents] = useState(['issues.labeled']);
+  const [target, setTarget] = useState('issues');       // issues | pull_request
+  const [action, setAction] = useState('labeled');       // labeled | unlabeled
   const [fromFilter, setFromFilter] = useState('any-except-self');
-  const [emitterId, setEmitterId] = useState('');
   const [repo, setRepo] = useState('');
   const [prompt, setPrompt] = useState('');
 
@@ -43,16 +55,11 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
     let alive = true;
     (async () => {
       try {
-        const [ft, tt] = await Promise.all([
-          ops.listTriggers(from),
-          ops.listTriggers(to),
-        ]);
+        const [ft, tt] = await Promise.all([ops.listTriggers(from), ops.listTriggers(to)]);
         if (!alive) return;
         const fl = Array.isArray(ft) ? ft : [];
         const tl = Array.isArray(tt) ? tt : [];
-        setFromTriggers(fl);
         setToTriggers(tl);
-        setEmitterId(fl[0]?.id || '');
         setRepo(firstRepo(fl, tl));
       } catch (e) {
         if (alive) setError(e.message);
@@ -63,51 +70,48 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
     return () => { alive = false; };
   }, [from, to]);
 
-  // Keep a sensible default listener prompt in sync with label/repo.
-  useEffect(() => {
-    setPrompt(p => p || '');
-  }, []);
-  const effectivePrompt = prompt
-    || `An issue in \`${repo || '<repo>'}\` was labeled \`${label || '<label>'}\`. The event payload above has the issue number, title and body.\n\n<Describe what this agent should do.> Reply \`[PASS]\` if there's nothing to do.`;
-
-  const toggleEvent = (v) => setEvents(prev =>
-    prev.includes(v) ? prev.filter(x => x !== v) : [...prev, v]);
+  const event = `${target}.${action}`; // e.g. issues.labeled, pull_request.unlabeled
+  const verb = action === 'labeled' ? 'added to' : 'removed from';
+  const targetNoun = target === 'issues' ? 'an issue' : 'a pull request';
 
   // Human gates (human:*) and the universal brakes are set by humans, never by
-  // an agent — so we wire only the listener, never an agent emit (#333).
+  // an agent — wire only the listener, never an agent emit (#333).
   const isGate = label.trim().startsWith('human:');
   const isBrake = label.trim() === 'hold' || label.trim() === 'needs:human';
   const humanLabel = isGate || isBrake;
 
+  const effectivePrompt = prompt
+    || `\`${label || '<label>'}\` was ${verb} ${targetNoun} in \`${repo || '<repo>'}\` by ${fromName || from}. The event payload above has the details.\n\n<Describe what ${toName || to} should do.> Reply \`[PASS]\` if there's nothing to do.`;
+
   async function submit() {
     const trimmed = label.trim();
-    if (!trimmed) { setError('Pick or type a hand-off label.'); return; }
-    if (events.length === 0) { setError('Select at least one event.'); return; }
-    if (!humanLabel && !emitterId) { setError('Pick which trigger on the source emits this label.'); return; }
+    if (!trimmed) { setError('Enter the label name.'); return; }
     setSaving(true); setError(null);
     try {
-      // 1. Listener on B — skip if one already filters on this label.
-      const existing = toTriggers.find(t => t.type === 'github-event' && t.labelFilter === trimmed);
+      // 1. Listener on B — skip if one already filters on this label + event.
+      const existing = toTriggers.find(t =>
+        t.type === 'github-event' && t.labelFilter === trimmed &&
+        Array.isArray(t.events) && t.events.includes(event));
       if (!existing) {
         await ops.createTrigger(to, {
           type: 'github-event',
-          events,
+          events: [event],
           from: fromFilter,
           repo: repo || undefined,
           labelFilter: trimmed,
           enabled: true,
           description: humanLabel
             ? `Wait for human gate \`${trimmed}\``
-            : `Wake on \`${trimmed}\` (wired from ${fromName || from})`,
+            : `Wake when \`${trimmed}\` is ${verb} ${targetNoun} (from ${fromName || from})`,
           prompt: effectivePrompt,
         });
       }
-      // 2. Record the emission on A's chosen trigger — but never for a human
-      // gate/brake (the lint would flag an agent that claims to set it).
+      // 2. Record A as emitting the label — an agent-level emit, so the edge is
+      // wired without depending on a pre-existing trigger on A. Skipped for
+      // human gates/brakes (no agent may claim to set those).
       if (!humanLabel) {
-        const emitter = fromTriggers.find(t => t.id === emitterId);
-        const nextEmits = uniq([...(emitter?.emits || []), trimmed]);
-        await ops.setEmits(from, emitterId, nextEmits);
+        const current = await ops.getRoleEmits(from);
+        await ops.setRoleEmits(from, uniq([...(Array.isArray(current) ? current : []), trimmed]));
       }
       onDone?.();
     } catch (e) {
@@ -117,17 +121,31 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
   }
 
   return (
-    <SidePanel open onClose={onClose} title="Wire a hand-off" width="520px">
+    <SidePanel open onClose={onClose} title="Wire a label hand-off" width="520px">
       <p style={hint}>
-        <strong>{fromName || from}</strong> emits a label that wakes <strong>{toName || to}</strong>.
+        <strong>{fromName || from}</strong> sets a label that wakes <strong>{toName || to}</strong>.
       </p>
       {loading ? (
-        <Center><Loader2 size={14} style={spin} /> Loading triggers…</Center>
+        <Center><Loader2 size={14} style={spin} /> Loading…</Center>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-          <Field label="Hand-off label">
+          <Field label="Label kind">
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+              <select value={target} onChange={e => setTarget(e.target.value)} style={{ ...input, flex: 1 }}>
+                {LABEL_TARGETS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+              <select value={action} onChange={e => setAction(e.target.value)} style={{ ...input, flex: 1 }}>
+                {LABEL_ACTIONS.map(o => <option key={o.value} value={o.value}>label {o.label}</option>)}
+              </select>
+            </div>
+            <small style={small}>
+              Listens on <code>{event}</code> — wakes when the label is {verb} {targetNoun}.
+            </small>
+          </Field>
+
+          <Field label="Label name">
             <input list="pc-label-list" value={label} onChange={e => setLabel(e.target.value)}
-              placeholder="e.g. dispatch, stage:td, assigned:dev-1" style={input} />
+              placeholder="e.g. dispatch, stage:td, ready-for-review" style={input} />
             <datalist id="pc-label-list">
               {(labels || []).map(l => <option key={l.name} value={l.name} />)}
             </datalist>
@@ -136,30 +154,14 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
           {humanLabel ? (
             <div style={{ ...small, padding: 'var(--eb-space-2)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-status-warning)' }}>
               <code>{label.trim()}</code> is a {isGate ? 'human gate' : 'brake'} — only a human sets it.
-              This wires <strong>{toName || to}</strong> to wait on it; no agent is recorded as emitting it.
+              This wires <strong>{toName || to}</strong> to wait on it; <strong>{fromName || from}</strong> is not recorded as emitting it.
             </div>
           ) : (
-            <Field label={`Emitting trigger on ${fromName || from}`}>
-              <select value={emitterId} onChange={e => setEmitterId(e.target.value)} style={input}>
-                {fromTriggers.length === 0 && <option value="">(no triggers — add one first)</option>}
-                {fromTriggers.map(t => (
-                  <option key={t.id} value={t.id}>{t.id} · {t.type}</option>
-                ))}
-              </select>
-              <small style={small}>The label is added to this trigger's <code>emits</code>.</small>
-            </Field>
-          )}
-
-          <Field label="Listener events (on target)">
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-2)' }}>
-              {LABEL_EVENTS.map(ev => (
-                <label key={ev.value} style={check}>
-                  <input type="checkbox" checked={events.includes(ev.value)} onChange={() => toggleEvent(ev.value)} />
-                  {ev.label}
-                </label>
-              ))}
+            <div style={{ ...small, padding: 'var(--eb-space-2)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)' }}>
+              <strong>{fromName || from}</strong> will be recorded as emitting <code>{label.trim() || '<label>'}</code>,
+              and <strong>{toName || to}</strong> gets a listener — no need to pre-configure a trigger on {fromName || from}.
             </div>
-          </Field>
+          )}
 
           <Field label="Origin filter (from)">
             <select value={fromFilter} onChange={e => setFromFilter(e.target.value)} style={input}>
@@ -391,7 +393,15 @@ export function EditHandoffDialog({ edge, fromName, toName, ops = liveOps, onClo
         await ops.deleteTrigger(to, triggerId);
       }
       if (delEmit) {
-        // Strip the label from any emitter trigger on the source that declares it.
+        // Strip the label from the source's agent-level emits (the new default
+        // wiring) …
+        if (ops.getRoleEmits && ops.setRoleEmits) {
+          const cur = await ops.getRoleEmits(from);
+          if (Array.isArray(cur) && cur.includes(label)) {
+            await ops.setRoleEmits(from, cur.filter(l => l !== label));
+          }
+        }
+        // … and from any legacy per-trigger emits that still declare it.
         const ft = await ops.listTriggers(from);
         for (const t of (Array.isArray(ft) ? ft : [])) {
           if (Array.isArray(t.emits) && t.emits.includes(label)) {

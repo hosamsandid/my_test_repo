@@ -2155,6 +2155,7 @@ class Orchestrator {
         ...(opts.sessionPolicy === 'per-invocation' ? { sessionPolicy: 'per-invocation' } : {}),
         ...(opts.dataFlow && typeof opts.dataFlow === 'object' ? { dataFlow: opts.dataFlow } : {}),
         ...(typeof opts.parentMemberId === 'string' && opts.parentMemberId ? { parentMemberId: opts.parentMemberId } : {}),
+        ...(Array.isArray(opts.emits) && opts.emits.length ? { emits: opts.emits } : {}),
         enabled: false, // no token → isStub; UI shows it, enableAgent materializes it
       };
       saveAgentConfig(memberId, stubConfig);
@@ -2219,6 +2220,8 @@ class Orchestrator {
       ...(opts.dataFlow && typeof opts.dataFlow === 'object' ? { dataFlow: opts.dataFlow } : {}),
       // Parent member id for the agent-overview / live-graph hierarchy.
       ...(typeof opts.parentMemberId === 'string' && opts.parentMemberId ? { parentMemberId: opts.parentMemberId } : {}),
+      // Agent-level emitted labels (label hand-offs) for the process graph.
+      ...(Array.isArray(opts.emits) && opts.emits.length ? { emits: opts.emits } : {}),
       enabled: true,
     };
     saveAgentConfig(memberId, memberConfig);

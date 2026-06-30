@@ -853,7 +853,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skillsOverride, mcpServersOverride, disableMode, teamId } = req.body;
+  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skillsOverride, mcpServersOverride, disableMode, teamId, emits } = req.body;
 
   // Enable/disable goes through the orchestrator so stubs (no token yet)
   // get fully materialized — Matrix user, workspace seeding, agent-runner
@@ -912,6 +912,12 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   if (displayName !== undefined) fresh.displayName = displayName;
   if (role !== undefined) fresh.role = role;
   if (briefingsPath !== undefined) fresh.briefingsPath = briefingsPath;
+  // Agent-level emitted labels (label hand-offs wired from the process editor).
+  // `null` / [] clears the set.
+  if (emits !== undefined) {
+    if (Array.isArray(emits) && emits.length) fresh.emits = emits.filter(e => typeof e === 'string' && e);
+    else delete fresh.emits;
+  }
 
   // Reassign the agent to a human Team (#308). Validates against existing
   // teams; metadata-only, so no respawn is needed.
@@ -2181,6 +2187,7 @@ app.get('/api/flows/graph', async (req, res) => {
       id, role, displayName: cfg.displayName || id,
       sessionPolicy: cfg.sessionPolicy || 'persistent',
       environmentId: cfg.environmentId || null, triggers,
+      emits: Array.isArray(cfg.emits) ? cfg.emits : [], // agent-level label hand-offs
       inputs: Array.isArray(df.inputs) ? df.inputs : [],
       outputs: Array.isArray(df.outputs) ? df.outputs : [],
       dependsOn: Array.isArray(df.dependsOn) ? df.dependsOn : [],
@@ -2261,8 +2268,9 @@ app.get('/api/process/template', (req, res) => {
     roleEntries.push({
       id, displayName: cfg.displayName || id, role,
       sessionPolicy: cfg.sessionPolicy || 'persistent', systemPrompt, triggers: tlist,
+      ...(Array.isArray(cfg.emits) && cfg.emits.length ? { emits: cfg.emits } : {}),
     });
-    graphAgents.push({ id, role, triggers: tlist });
+    graphAgents.push({ id, role, triggers: tlist, emits: cfg.emits });
   }
   const g = buildProcessGraph(graphAgents);
   res.json(buildProcessTemplate({
@@ -4729,6 +4737,9 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           // agent overview + live graph render the tree like an orchestrator.
           ...(typeof p.template.parent === 'string' && p.template.parent
             ? { parentMemberId: `${teamId}-${p.template.parent}` } : {}),
+          // Agent-level emitted labels (label hand-offs) — recorded on config.
+          ...(Array.isArray(p.template.emits) && p.template.emits.length
+            ? { emits: p.template.emits } : {}),
           // Deferred materialization — create as a stub when requested.
           materialize: materializeMembers,
         }),

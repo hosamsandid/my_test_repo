@@ -17,6 +17,12 @@ export const liveOps = {
   updateTrigger: (roleId, tid, body) => apiCall('PUT', `/api/agents/${roleId}/triggers/${tid}`, body),
   deleteTrigger: (roleId, tid) => apiCall('DELETE', `/api/agents/${roleId}/triggers/${tid}`),
   setEmits: (roleId, tid, emits) => apiCall('PUT', `/api/agents/${roleId}/triggers/${tid}/emits`, { emits }),
+  // Agent-level emitted labels (label hand-offs) — independent of any trigger.
+  getRoleEmits: async (roleId) => {
+    const a = await apiCall('GET', `/api/agents/${roleId}`);
+    return Array.isArray(a?.emits) ? a.emits : [];
+  },
+  setRoleEmits: (roleId, emits) => apiCall('PUT', `/api/agents/${roleId}`, { emits }),
 };
 
 const clone = (x) => JSON.parse(JSON.stringify(x));
@@ -117,6 +123,17 @@ export function makeDraftOps(getBundle, persist) {
       const b = clone(getBundle());
       const t = (role(b, roleId)?.triggers || []).find(x => x.id === tid);
       if (t) t.emits = emits;
+      await persist(b);
+    },
+    // Agent-level emitted labels (label hand-offs) — on the role, no trigger.
+    getRoleEmits: async (roleId) => {
+      const r = role(getBundle(), roleId);
+      return Array.isArray(r?.emits) ? r.emits.slice() : [];
+    },
+    setRoleEmits: async (roleId, emits) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (r) { if (Array.isArray(emits) && emits.length) r.emits = emits; else delete r.emits; }
       await persist(b);
     },
 

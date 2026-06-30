@@ -350,6 +350,8 @@ function processTemplateToUnified(bundle) {
       dependsOn: asArray(r.dependsOn),
       // Parent-child hierarchy round-trips through the bundle (#377).
       parent: typeof r.parent === 'string' && r.parent ? r.parent : null,
+      // Agent-level emitted labels (operator-declared label hand-offs).
+      emits: asArray(r.emits),
       triggers: asArray(r.triggers),
     })),
     edges: [],
@@ -438,6 +440,7 @@ function unifiedToProcessTemplate(flow) {
     if (asArray(n.dependsOn).length) extra.dependsOn = n.dependsOn;
     if (n.stage) extra.stage = n.stage;
     if (n.parent) extra.parent = n.parent;
+    if (asArray(n.emits).length) extra.emits = n.emits;
     return { ...r, ...extra };
   });
   return bundle;

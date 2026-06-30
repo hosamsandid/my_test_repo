@@ -86,6 +86,8 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels }) {
       ...(r.kind === 'pr-review' ? { kind: 'pr-review', review: remapReview(r.review, teamId) } : {}),
       sessionPolicy: r.sessionPolicy || 'persistent',
       systemPrompt: r.systemPrompt || '',
+      // Agent-level emitted labels (label hand-offs) — keep in the portable bundle.
+      ...(Array.isArray(r.emits) && r.emits.length ? { emits: r.emits.slice() } : {}),
       triggers: (r.triggers || []).map(bundleTrigger),
     })),
     gates: (gates || []).map(g => ({ label: g.label })),
@@ -143,6 +145,8 @@ function templateToCustomRoles(bundle) {
     // Parent role id (hierarchy) — the materialiser maps it to a member id so
     // the agent overview + live graph render the parent-child tree (#377).
     ...(typeof r.parent === 'string' && r.parent ? { parent: r.parent } : {}),
+    // Agent-level emitted labels (label hand-offs) — recorded on member config.
+    ...(Array.isArray(r.emits) && r.emits.length ? { emits: r.emits } : {}),
     triggers: (r.triggers || []).map(t => ({
       id: t.id,
       type: t.type,

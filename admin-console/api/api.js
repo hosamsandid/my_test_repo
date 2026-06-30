@@ -68,7 +68,11 @@ fs.mkdirSync(MCP_CREDENTIALS_KEYS_DIR, { recursive: true });
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+// Document-bundle endpoints (process drafts, the unified flow graph, imported
+// BriefingPack flows) carry the full brief.md / prompt bodies inline, which
+// easily exceeds body-parser's 100kb default. Raise the limit so importing /
+// rendering / saving a multi-BP flow doesn't 413 (#377). Behind the auth gate.
+app.use(express.json({ limit: '10mb' }));
 app.use(express.static(STATIC_DIR));
 
 // Allowlist for ids that turn into filesystem path segments. The dotted-

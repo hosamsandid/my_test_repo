@@ -7,6 +7,7 @@
 // same surface so the UI doesn't branch on mode.
 
 import { apiCall } from '../../hooks/useApi';
+import { wouldCreateCycle } from './hierarchy-utils';
 
 // Live mode — every op is an HTTP call against the running agent.
 export const liveOps = {
@@ -157,12 +158,30 @@ export function makeDraftOps(getBundle, persist) {
       if (r) { if (stage) r.stage = stage; else delete r.stage; }
       await persist(b);
     },
+    // Parent-child hierarchy (#378). setParent(child, parent) makes `parent` the
+    // grouping node of `child`; clear with a falsy parentId. Self-parenting and
+    // direct cycles (parent already a descendant) are rejected.
+    setParent: async (roleId, parentId) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (!r) throw new Error(`role ${roleId} not found`);
+      if (parentId && parentId !== roleId) {
+        if (wouldCreateCycle(b.roles, roleId, parentId)) {
+          throw new Error('that would create a parent cycle');
+        }
+        r.parent = parentId;
+      } else {
+        delete r.parent;
+      }
+      await persist(b);
+    },
     deleteRole: async (roleId) => {
       const b = clone(getBundle());
       b.roles = (b.roles || []).filter(r => r.id !== roleId);
-      // Drop any dependency references to the removed role so no edge dangles.
+      // Drop references to the removed role so no edge/parent dangles.
       for (const r of b.roles) {
         if (Array.isArray(r.dependsOn)) r.dependsOn = r.dependsOn.filter(d => d !== roleId);
+        if (r.parent === roleId) delete r.parent; // orphaned children become roots
       }
       await persist(b);
     },

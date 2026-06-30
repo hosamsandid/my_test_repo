@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Save, Trash2, X, Plus } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
+import { resolveInheritedStage } from './hierarchy-utils';
 
 // Node inspector for a DRAFT role (Process Canvas v2, #345). Edits the role's
 // displayName, system prompt, and triggers' emits directly on the draft bundle
@@ -16,6 +17,12 @@ export default function DraftNodeInspector({ role, roles = [], ops, onClose, onD
   const triggers = role.triggers || [];
   const isReview = role.kind === 'pr-review';
   const others = roles.filter(r => r.id !== role.id);
+  const inheritedStage = resolveInheritedStage(roles, role);
+
+  async function setParent(v) {
+    try { await ops.setParent(role.id, v || null); onChanged?.(); }
+    catch (e) { window.alert(e?.message || String(e)); }
+  }
 
   async function saveMeta() {
     setBusy(true); setSaved(false);
@@ -54,8 +61,15 @@ export default function DraftNodeInspector({ role, roles = [], ops, onClose, onD
         </Field>
         <Field label="Stage (optional)">
           <input value={stage} onChange={e => { setStage(e.target.value); setSaved(false); }}
-            placeholder="e.g. Build" style={input} />
+            placeholder={!stage && inheritedStage ? `inherits: ${inheritedStage}` : 'e.g. Build'} style={input} />
+          {!stage && inheritedStage && (
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+              Inherited from parent — leave empty to keep, or type to override.
+            </span>
+          )}
         </Field>
+        <RoleSelect label="Parent (optional)" value={role.parent} options={others}
+          onChange={setParent} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
           <button onClick={saveMeta} disabled={busy} style={primary}>
             <Save size={14} /> Save

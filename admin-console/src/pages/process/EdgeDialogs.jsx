@@ -218,11 +218,18 @@ export function CreateEdgeDialog({ from, to, fromName, toName, labels, ops = liv
         ops={ops} onBack={() => setType(null)} onClose={onClose} onDone={onDone} />
     );
   }
+  if (type === 'hierarchy') {
+    return (
+      <HierarchyEdgeForm from={from} to={to} fromName={fromName} toName={toName}
+        ops={ops} onBack={() => setType(null)} onClose={onClose} onDone={onDone} />
+    );
+  }
 
   const choices = [
     { id: 'label', title: 'Label hand-off', desc: `${fromName || from} emits a label that wakes ${toName || to}.` },
     { id: 'dependency', title: 'Dependency', desc: `${toName || to} depends on ${fromName || from} — it can't start until that is done.` },
     { id: 'artifact', title: 'Data flow', desc: `${fromName || from} produces a file that ${toName || to} consumes.` },
+    { id: 'hierarchy', title: 'Parent / child', desc: `${fromName || from} groups ${toName || to} as a child — it inherits its parent's stage.` },
   ].filter(c => allowed.includes(c.id));
 
   return (
@@ -305,6 +312,30 @@ function ArtifactEdgeForm({ from, to, fromName, toName, ops, onBack, onClose, on
           <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
           <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Adding…' : 'Add data flow'}</button>
         </div>
+      </div>
+    </SidePanel>
+  );
+}
+
+function HierarchyEdgeForm({ from, to, fromName, toName, ops, onBack, onClose, onDone }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  async function submit() {
+    setSaving(true); setError(null);
+    try { await ops.setParent(to, from); onDone?.(); }
+    catch (e) { setError(e.message); setSaving(false); }
+  }
+  return (
+    <SidePanel open onClose={onClose} title="Set parent" width="520px">
+      <p style={hint}>
+        <strong>{fromName || from}</strong> becomes the parent of <strong>{toName || to}</strong>.
+        Children inherit their parent's stage by default and can override it.
+      </p>
+      {error && <span style={errStyle}>{error}</span>}
+      <div style={actions}>
+        <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>
+        <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+        <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Setting…' : 'Set parent'}</button>
       </div>
     </SidePanel>
   );

@@ -16,7 +16,86 @@ The Admin Console at `http://localhost:4000` (configurable via `.env`) is the ce
 | **Scheduled Jobs** | `/jobs` | Cross-agent view of all triggers; add/edit/delete cron, one-shot, webhook, and GitHub event triggers |
 | **Model Providers** | `/models` | Register and test model providers; discover available models; set per-agent model overrides |
 | **MCP Servers** | `/mcp` | View Model Context Protocol servers configured in the Claude settings file |
+| **Teams** | `/teams` | Manage human **Teams** (tenant scope): team CRUD, users, per-team roles, and assigning agents/environments to a team |
 | **Flows** | `/flows` | BriefingPack graph: visualize BP dependencies, claim/activate/deactivate orchestrator-managed BPs |
+
+## Authentication (#276)
+
+The entire console is served behind a login screen — no page or `/api/*` data
+endpoint is reachable without an active session. This is the minimal,
+SSO-ready auth foundation described in [docs/multi-user-concept.md](./multi-user-concept.md).
+
+**Login.** A single credential pair, read from environment variables so it can
+change without a redeploy:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ADMIN_USERNAME` | `admin` | Console login username |
+| `ADMIN_PASSWORD` | `admin` | Console login password |
+| `AUTH_SESSION_SECRET` | derived from the credentials | Signs session cookies. When unset, a stable secret is derived from the credentials, so sessions survive a server restart and are auto-invalidated when the password changes. Set an explicit value to rotate sessions independently. |
+| `AUTH_COOKIE_SECURE` | `false` | Set to `true` only when the console is served over HTTPS (adds the cookie's `Secure` attribute). |
+
+> The defaults (`admin` / `admin`) are for first-boot local use only — change
+> them for any shared deployment. This is a placeholder until enterprise SSO
+> replaces the credential check.
+
+**Session.** On successful login the server issues an HMAC-signed, stateless
+session token in an **HttpOnly, SameSite=Lax cookie** (`aee_session`, 7-day
+TTL). A browser refresh re-validates via `GET /api/auth/session` rather than
+re-prompting. A **Sign out** button in the header clears the cookie and returns
+to the login screen; an expired session (any `401`) does the same automatically.
+
+**API surface** (all public — everything else under `/api` requires the cookie):
+- `POST /api/auth/login` — `{ username, password }` → sets the cookie, or `401` with an inline error.
+- `GET /api/auth/session` — `{ authenticated, user }`.
+- `POST /api/auth/logout` — clears the cookie.
+
+**SSO swap-point.** The credential check lives in a single `verifyCredentials()`
+function in `admin-console/api/auth.js`. Swapping it for an OIDC/SAML token
+exchange (and adding the IdP callback route) requires no change to the session
+format, cookie handling, gate middleware, or the login UI/routing.
+
+## Teams (#308)
+
+The **Teams** page (`/teams`) is the UI for the human **Team** scope (the
+tenant) introduced by the teams data model (#299). It is distinct from the
+*Agent Team* squad created by the **Team Wizard** — see
+[docs/teams-data-model.md](./teams-data-model.md).
+
+A System Admin can:
+- **Team CRUD** — create / edit / delete teams. The `default` team cannot be deleted.
+- **Manage Users** — create human users (keyed by a stable `subject` an SSO login will later map onto), toggle the global **System Admin** flag, and delete users (their memberships cascade).
+- **Members & roles** — per team, add/remove human members and set their per-team role (**Team Admin** / **Team Member**). Membership is an upsert: re-adding a user updates their role.
+- **Resource ownership** — reassign any agent or Working Environment to a team via a per-row team selector. Agents reassign through `PUT /api/agents/:id { teamId }`, environments through `PUT /api/environments/:id { teamId }`; both validate the target team exists.
+
+The page is built on the `/api/admin/{teams,users,memberships}` endpoints
+(proxied to the orchestrator's teams store). Per-role *enforcement* of these
+actions — and per-resource visibility — arrive with later tickets (#302/#304);
+today any authenticated operator can manage teams.
+
+## Audit trail (#305)
+
+Every **mutating** API action (`POST`/`PUT`/`PATCH`/`DELETE` under `/api`)
+produces one append-only audit entry naming the acting human — a separate log
+from the Matrix chat history, which does not capture config mutations. See
+[docs/multi-user-concept.md](./multi-user-concept.md) §7.
+
+- **Storage:** append-only JSONL at `/workspace/audit/audit-<YYYY-MM-DD>.jsonl`
+  (override the directory with `AUDIT_DIR`).
+- **Each entry:** `ts`, `actor` (the logged-in username from #276, or the
+  attempted username for a login, or `anonymous`), `action` (`<METHOD> <path>`),
+  `method`, `resource`, `teamId` (when the request body carries one — full
+  per-resource team attribution arrives with team scoping, #302), `status`,
+  `outcome` (`success` / `denied` / `error`), and `ip`.
+- **Coverage:** the logger is a global middleware, so it captures *all* mutating
+  endpoints — agent create/delete, credential create/delete, skill promotion,
+  handover, team-membership and environment changes — plus denied and
+  unauthenticated attempts (`outcome: denied`).
+- **Read API:** `GET /api/audit?limit=<n>` (protected; newest first, capped at 1000).
+
+**Safety:** auditing is strictly best-effort. It runs from a response-`finish`
+handler (after the response is already sent) and every file operation is
+swallowed on error, so a logging failure can never block or break a request.
 
 ## Agent Chat
 

@@ -142,6 +142,11 @@ services:
       MATRIX_ACCESS_TOKEN: "${MATRIX_ACCESS_TOKEN}"
       ADMIN_USER_ID: "@${ADMIN_USER:-admin}:local"
       ACE_REPO_PATH: "${ACE_REPO_PATH:-}"
+      # Admin Console login (#276) — single credential pair gating the console.
+      ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-admin}"
+      AUTH_SESSION_SECRET: "${AUTH_SESSION_SECRET:-}"
+      AUTH_COOKIE_SECURE: "${AUTH_COOKIE_SECURE:-}"
     depends_on:
       conduwuit:
         condition: service_started

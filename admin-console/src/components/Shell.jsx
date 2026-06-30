@@ -4,9 +4,10 @@ import {
   LayoutDashboard, Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight, Bot,
   Boxes, Key, MessageCircle, Github, Layers, GitBranch,
-  Sun, Moon, Rocket, Users2, Wand2, BookOpen, Workflow,
+  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
+import { useAuth } from '../auth/AuthContext';
 
 const STATUS_POLL_MS = 5_000;
 const LAST_VIEWED_KEY = 'agentChat.lastViewed';
@@ -42,11 +43,10 @@ function NavBadge({ count, color }) {
 const NAV = [
   { section: 'OVERVIEW', items: [
     { path: '/',             label: 'Dashboard',           Icon: LayoutDashboard },
-    { path: '/quickstart',   label: 'Single Agent',        Icon: Rocket,   subtitle: 'One agent, one repo' },
-    { path: '/team-setup',   label: 'Team Wizard',         Icon: Users2,   subtitle: 'Multi-role GitHub team' },
+    { path: '/quickstart',   label: 'Single Agent',        Icon: Rocket },
+    { path: '/team-setup',   label: 'Team Wizard',         Icon: Users2 },
     { path: '/agents',       label: 'Agents',              Icon: Layers },
     { path: '/flows',         label: 'Flows',               Icon: GitBranch },
-    { path: '/process',      label: 'Process Canvas',      Icon: Workflow, subtitle: 'Model agent orchestration' },
     { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
     // { path: '/orchestrator-wizard', label: 'Orchestrator Wizard', Icon: Wand2 },
   ]},
@@ -56,6 +56,7 @@ const NAV = [
     { path: '/environments',  label: 'Working Environments', Icon: Boxes },
   ]},
   { section: 'CONFIGURATION', items: [
+    { path: '/teams',        label: 'Teams',               Icon: Building2 },
     { path: '/skills',       label: 'Skills Registry',     Icon: Zap },
     { path: '/jobs',         label: 'Triggers',            Icon: Clock },
     { path: '/models',       label: 'Model Providers',     Icon: Sparkles },
@@ -70,7 +71,6 @@ const BREADCRUMBS = {
   '/team-setup':   'Team Wizard',
   '/agents':       'Agents',
   '/flows':        'Flows',
-  '/process':      'Process Canvas',
   '/chats':        'Agent Chat',
   '/environments': 'Working Environments',
   '/ssh-keys':     'SSH Keys',
@@ -79,6 +79,7 @@ const BREADCRUMBS = {
   '/jobs':         'Triggers',
   '/models':       'Model Providers',
   '/mcp':          'MCP Servers',
+  '/teams':        'Teams',
   '/patterns':               'Patterns Catalog',
   '/patterns/sdlc':          'Patterns Catalog / SDLC',
   '/patterns/mainframe':     'Patterns Catalog / Mainframe Modernization',
@@ -99,6 +100,7 @@ export default function Shell({ children }) {
   const navigate = useNavigate();
   const location = useLocation();
   const { theme, toggleLightDark } = useTheme();
+  const { user, logout } = useAuth();
   const [chatCounts, setChatCounts] = useState({ busy: 0, unread: 0 });
 
   useEffect(() => {
@@ -336,32 +338,68 @@ export default function Shell({ children }) {
           <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
             {breadcrumbFor(location.pathname)}
           </div>
-          <button
-            onClick={toggleLightDark}
-            title={theme === 'admin-light' ? 'Switch to Dark Mode' : 'Switch to Light Mode'}
-            aria-label={theme === 'admin-light' ? 'Switch to Dark Mode' : 'Switch to Light Mode'}
-            style={{
-              background: 'none',
-              border: '1px solid var(--eb-border-default)',
-              borderRadius: 'var(--eb-radius-md)',
-              color: 'var(--eb-text-secondary)',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              padding: 'var(--eb-space-1) var(--eb-space-2)',
-              transition: 'background var(--eb-transition-fast), color var(--eb-transition-fast)',
-            }}
-            onMouseEnter={e => {
-              e.currentTarget.style.background = 'var(--eb-bg-hover)';
-              e.currentTarget.style.color = 'var(--eb-text-primary)';
-            }}
-            onMouseLeave={e => {
-              e.currentTarget.style.background = 'none';
-              e.currentTarget.style.color = 'var(--eb-text-secondary)';
-            }}
-          >
-            {theme === 'admin-light' ? <Moon size={16} /> : <Sun size={16} />}
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
+            <button
+              onClick={toggleLightDark}
+              title={theme === 'admin-light' ? 'Switch to Dark Mode' : 'Switch to Light Mode'}
+              aria-label={theme === 'admin-light' ? 'Switch to Dark Mode' : 'Switch to Light Mode'}
+              style={{
+                background: 'none',
+                border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-md)',
+                color: 'var(--eb-text-secondary)',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                padding: 'var(--eb-space-1) var(--eb-space-2)',
+                transition: 'background var(--eb-transition-fast), color var(--eb-transition-fast)',
+              }}
+              onMouseEnter={e => {
+                e.currentTarget.style.background = 'var(--eb-bg-hover)';
+                e.currentTarget.style.color = 'var(--eb-text-primary)';
+              }}
+              onMouseLeave={e => {
+                e.currentTarget.style.background = 'none';
+                e.currentTarget.style.color = 'var(--eb-text-secondary)';
+              }}
+            >
+              {theme === 'admin-light' ? <Moon size={16} /> : <Sun size={16} />}
+            </button>
+            <button
+              onClick={logout}
+              title={user?.username ? `Sign out (${user.username})` : 'Sign out'}
+              aria-label="Sign out"
+              style={{
+                background: 'none',
+                border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-md)',
+                color: 'var(--eb-text-secondary)',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--eb-space-2)',
+                padding: 'var(--eb-space-1) var(--eb-space-2)',
+                fontFamily: 'inherit',
+                fontSize: 'var(--eb-text-sm)',
+                transition: 'background var(--eb-transition-fast), color var(--eb-transition-fast)',
+              }}
+              onMouseEnter={e => {
+                e.currentTarget.style.background = 'var(--eb-bg-hover)';
+                e.currentTarget.style.color = 'var(--eb-text-primary)';
+              }}
+              onMouseLeave={e => {
+                e.currentTarget.style.background = 'none';
+                e.currentTarget.style.color = 'var(--eb-text-secondary)';
+              }}
+            >
+              <LogOut size={16} />
+              {user?.username && (
+                <span style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {user.username}
+                </span>
+              )}
+            </button>
+          </div>
         </header>
 
         {/* Page content */}

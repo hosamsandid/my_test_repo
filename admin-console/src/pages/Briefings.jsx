@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, lazy, Suspense } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
-import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, Boxes, FileText, Plus } from 'lucide-react';
+import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, Boxes, FileText, Plus, Trash2 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { BPGraph } from './briefings/BPGraph';
 
@@ -292,38 +292,63 @@ function SectionHeader({ children, action }) {
   );
 }
 
-// Generic selectable row (teams, drafts, role-templates). Mirrors FlowRow's look.
-function ListRow({ icon: Icon, label, sub, selected, onSelect }) {
+// Generic selectable row (teams, drafts, role-templates). Mirrors FlowRow's
+// look. An optional `onDelete` renders a trash button that fades in on hover.
+function ListRow({ icon: Icon, label, sub, selected, onSelect, onDelete, deleteTitle }) {
+  const [hover, setHover] = useState(false);
   return (
-    <button
-      onClick={onSelect}
-      style={{
-        display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', width: '100%',
-        padding: 'var(--eb-space-2) var(--eb-space-3)',
-        background: selected ? 'var(--eb-bg-selected)' : 'transparent',
-        borderLeft: selected ? '3px solid var(--eb-accent-primary)' : '3px solid transparent',
-        borderTop: 'none', borderRight: 'none', borderBottom: '1px solid transparent',
-        color: selected ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
-        cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
-        transition: 'background var(--eb-transition-fast)',
-      }}
-      onMouseEnter={e => { if (!selected) e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
-      onMouseLeave={e => { if (!selected) e.currentTarget.style.background = 'transparent'; }}
+    <div
+      style={{ position: 'relative' }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
     >
-      <Icon size={18} style={{ flexShrink: 0, color: selected ? 'var(--eb-accent-primary)' : 'var(--eb-text-muted)' }} />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{
-          fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)',
-          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        }}>{label}</div>
-        {sub && (
+      <button
+        onClick={onSelect}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', width: '100%',
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          paddingRight: onDelete ? 'var(--eb-space-6)' : 'var(--eb-space-3)',
+          background: selected ? 'var(--eb-bg-selected)' : 'transparent',
+          borderLeft: selected ? '3px solid var(--eb-accent-primary)' : '3px solid transparent',
+          borderTop: 'none', borderRight: 'none', borderBottom: '1px solid transparent',
+          color: selected ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
+          cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
+          transition: 'background var(--eb-transition-fast)',
+        }}
+        onMouseEnter={e => { if (!selected) e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
+        onMouseLeave={e => { if (!selected) e.currentTarget.style.background = 'transparent'; }}
+      >
+        <Icon size={18} style={{ flexShrink: 0, color: selected ? 'var(--eb-accent-primary)' : 'var(--eb-text-muted)' }} />
+        <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{
-            marginTop: 2, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
+            fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)',
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-          }}>{sub}</div>
-        )}
-      </div>
-    </button>
+          }}>{label}</div>
+          {sub && (
+            <div style={{
+              marginTop: 2, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>{sub}</div>
+          )}
+        </div>
+      </button>
+      {onDelete && (hover || selected) && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onDelete(); }}
+          title={deleteTitle || 'Delete'}
+          aria-label={deleteTitle || 'Delete'}
+          style={{
+            position: 'absolute', top: '50%', right: 'var(--eb-space-2)', transform: 'translateY(-50%)',
+            background: 'none', border: 'none', cursor: 'pointer', padding: 4,
+            color: 'var(--eb-text-muted)', display: 'flex', alignItems: 'center',
+          }}
+          onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-status-error)'; }}
+          onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
+        >
+          <Trash2 size={15} />
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -360,6 +385,16 @@ export default function Briefings() {
       refetchDrafts();
       setSearchParams({ proc: `draft:${d.id}` });
     } catch { /* surfaced elsewhere; keep the list usable */ }
+  }
+
+  async function deleteDraft(d) {
+    if (!window.confirm(`Delete draft “${d.name}”? This cannot be undone.`)) return;
+    try {
+      await apiCall('DELETE', `/api/process/drafts/${d.id}`);
+      // If the deleted draft was open, drop the selection.
+      if (proc === `draft:${d.id}`) setSearchParams({});
+      refetchDrafts();
+    } catch { /* leave the list as-is; the draft may already be gone */ }
   }
 
   const dismissBanner = useCallback(() => {
@@ -529,6 +564,8 @@ export default function Briefings() {
                     sub={`${d.roleCount} role${d.roleCount === 1 ? '' : 's'}`}
                     selected={proc === `draft:${d.id}`}
                     onSelect={() => selectProc(`draft:${d.id}`)}
+                    onDelete={() => deleteDraft(d)}
+                    deleteTitle="Delete draft"
                   />
                 ))
               )}

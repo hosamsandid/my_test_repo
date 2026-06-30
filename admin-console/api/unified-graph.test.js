@@ -155,14 +155,13 @@ test('processTemplateToUnified maps roles → nodes and preserves wiring', () =>
   assert.ok(findEdge(g, e => e.on === 'label' && e.from === 'dev' && e.to === 'rev'));
 });
 
-test('briefingsToUnified drops status, skips parents, builds dependency + artifact edges', () => {
+test('briefingsToUnified drops status, builds dependency + artifact edges', () => {
   const bps = [
     { id: 'parent01', title: 'Parent', status: 'ready', children: ['aa01', 'bb02'] },
-    { id: 'aa01', title: 'Upstream', status: 'completed', artifacts: [{ path: 'spec.md', direction: 'output' }] },
-    { id: 'bb02', title: 'Downstream', status: 'dispatched', depends_on: ['aa01'], artifacts: [{ path: 'spec.md', direction: 'input' }] },
+    { id: 'aa01', title: 'Upstream', status: 'completed', parent: 'parent01', artifacts: [{ path: 'spec.md', direction: 'output' }] },
+    { id: 'bb02', title: 'Downstream', status: 'dispatched', parent: 'parent01', depends_on: ['aa01'], artifacts: [{ path: 'spec.md', direction: 'input' }] },
   ];
   const flow = briefingsToUnified(bps);
-  assert.equal(flow.nodes.length, 2, 'parent BP excluded');
   assert.ok(flow.nodes.every(n => !('status' in n)), 'status not carried onto nodes');
 
   const g = buildUnifiedGraph(flow.nodes, flow.edges);
@@ -223,6 +222,49 @@ test('round-trip preserves inputs/outputs/dependsOn through unified ↔ bundle (
   assert.deepEqual(b.dependsOn, ['a']);
   // Roles without ports stay clean (no empty arrays injected).
   assert.ok(!('inputs' in a));
+});
+
+test('briefingsToUnified keeps parents, carries body as content, builds hierarchy edges (#362 UI)', () => {
+  const bps = [
+    { id: 'parent01', title: 'Parent', status: 'ready', children: ['aa01', 'bb02'], body: '# Parent brief' },
+    { id: 'aa01', title: 'Upstream', parent: 'parent01', body: '# Do the upstream work', artifacts: [{ path: 'spec.md', direction: 'output' }] },
+    { id: 'bb02', title: 'Downstream', parent: 'parent01', depends_on: ['aa01'], artifacts: [{ path: 'spec.md', direction: 'input' }] },
+  ];
+  const flow = briefingsToUnified(bps);
+  assert.equal(flow.nodes.length, 3, 'parent BP is kept as a grouping node');
+  const parent = flow.nodes.find(n => n.id === 'parent01');
+  assert.equal(parent.isParent, true);
+  assert.equal(parent.content, '# Parent brief');
+  assert.equal(flow.nodes.find(n => n.id === 'aa01').content, '# Do the upstream work');
+
+  const g = buildUnifiedGraph(flow.nodes, flow.edges);
+  assert.ok(findEdge(g, e => e.on === 'parent' && e.from === 'parent01' && e.to === 'aa01'));
+  assert.ok(findEdge(g, e => e.on === 'parent' && e.from === 'parent01' && e.to === 'bb02'));
+  assert.ok(findEdge(g, e => e.on === 'dependency' && e.from === 'aa01' && e.to === 'bb02'));
+  assert.ok(findEdge(g, e => e.on === 'artifact' && e.from === 'aa01' && e.to === 'bb02'));
+  // content survives onto the built nodes
+  assert.equal(g.nodes.find(n => n.id === 'aa01').content, '# Do the upstream work');
+});
+
+test('process node content mirrors systemPrompt', () => {
+  const flow = processTemplateToUnified({
+    processTemplateVersion: 1, name: 'd', level: 'template',
+    roles: [{ id: 'dev', systemPrompt: 'build the thing', triggers: [] }], gates: [], labels: [],
+  });
+  assert.equal(flow.nodes[0].content, 'build the thing');
+});
+
+test('hierarchy (on:parent) edges are view-only — resolveHandoffs ignores them', () => {
+  // resolve-handoffs lives in its own module/test; here we just assert the edge
+  // exists and carries no routing semantics beyond grouping.
+  const flow = briefingsToUnified([
+    { id: 'p', children: ['c'] },
+    { id: 'c', parent: 'p' },
+  ]);
+  const g = buildUnifiedGraph(flow.nodes, flow.edges);
+  const parentEdges = g.edges.filter(e => e.on === 'parent');
+  assert.equal(parentEdges.length, 1);
+  assert.equal(parentEdges[0].from, 'p');
 });
 
 test('explicit manual hand-off edge passes through', () => {

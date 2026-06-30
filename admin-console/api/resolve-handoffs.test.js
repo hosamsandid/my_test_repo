@@ -60,6 +60,16 @@ test('Layer 0: a node never hands off to itself', () => {
   assert.deepEqual(resolveHandoffs(g, 'a').targets, []);
 });
 
+test('hierarchy (on:parent) edges never route — parents are view-only', () => {
+  const g = buildUnifiedGraph([
+    { id: 'p', triggers: [], children: ['c'] },
+    { id: 'c', triggers: [], parent: 'p' },
+  ]);
+  // p → c exists as a parent edge, but resolving from the parent yields nothing.
+  assert.ok(g.edges.find(e => e.on === 'parent' && e.from === 'p' && e.to === 'c'));
+  assert.deepEqual(resolveHandoffs(g, 'p').targets, []);
+});
+
 test('unknown / empty source yields no targets', () => {
   assert.deepEqual(resolveHandoffs(mixedGraph(), 'zzz').targets, []);
   assert.deepEqual(resolveHandoffs(mixedGraph(), {}).targets, []);

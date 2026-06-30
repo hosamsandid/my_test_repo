@@ -28,6 +28,10 @@ function mapEdge(e) {
       return { ...e, kind: 'artifact', label: Array.isArray(e.paths) ? e.paths.join(', ') : (e.label || '') };
     case 'manual':
       return { ...e, kind: 'manual', label: e.label || 'hand-off' };
+    case 'parent':
+      // Parent-child hierarchy is drawn by the rich renderer (#362 UI rework);
+      // the process renderer has no hierarchy concept, so drop it here.
+      return null;
     case 'label':
     default:
       return { ...e, kind: e.gate === 'human' ? 'gate' : 'agent' };
@@ -42,7 +46,7 @@ export function unifiedToRenderGraph(graph) {
   const g = graph || {};
   return {
     nodes: Array.isArray(g.nodes) ? g.nodes : [],
-    edges: (Array.isArray(g.edges) ? g.edges : []).map(mapEdge),
+    edges: (Array.isArray(g.edges) ? g.edges : []).map(mapEdge).filter(Boolean),
     gates: Array.isArray(g.gates) ? g.gates : [],
     labels: Array.isArray(g.labels) ? g.labels : [],
     lints: Array.isArray(g.lints) ? g.lints : [],

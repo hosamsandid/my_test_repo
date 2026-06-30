@@ -2125,6 +2125,7 @@ app.get('/api/flows/graph', async (req, res) => {
       sessionPolicy: cfg.sessionPolicy || 'persistent',
       environmentId: cfg.environmentId || null, triggers,
       inputs: [], outputs: [], dependsOn: [],
+      content: readAgentSystemPrompt(id), // expandable prompt in the unified viewer
     });
   }
   res.json({ unifiedFlowVersion: 1, source: 'live', team, ...buildUnifiedGraph(nodes) });

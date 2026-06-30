@@ -120,7 +120,8 @@ function buildUnifiedGraph(nodes, edges) {
   const pg = buildProcessGraph(list);
   const pgNodeById = new Map(pg.nodes.map(n => [n.id, n]));
 
-  // Output nodes = Process node view enriched with the BP data-flow ports.
+  // Output nodes = Process node view enriched with the BP data-flow ports,
+  // the expandable content/prompt, and the parent-child hierarchy (#362 UI).
   const outNodes = list.map(n => {
     const base = pgNodeById.get(n.id) || { id: n.id };
     return {
@@ -128,6 +129,10 @@ function buildUnifiedGraph(nodes, edges) {
       inputs: asArray(n.inputs),
       outputs: asArray(n.outputs),
       dependsOn: asArray(n.dependsOn),
+      content: typeof n.content === 'string' ? n.content : (n.systemPrompt || ''),
+      parent: n.parent || null,
+      children: asArray(n.children),
+      isParent: n.isParent === true || asArray(n.children).length > 0,
     };
   });
 
@@ -143,6 +148,15 @@ function buildUnifiedGraph(nodes, edges) {
   for (const e of pg.edges) {
     const u = processEdgeToUnified(e);
     if (u) push(u);
+  }
+
+  // 1b) Hierarchy edges from node.parent (BP parent-child). View-only: the
+  //     routing layer (resolve-handoffs) ignores `on:'parent'`, so parents are
+  //     still not units of work — they only group their children visually.
+  for (const n of list) {
+    if (n.parent && nodeIds.has(n.parent) && n.parent !== n.id) {
+      push({ from: n.parent, to: n.id, on: 'parent' });
+    }
   }
 
   // 2) Dependency edges from node.dependsOn[] (BP `depends_on`).
@@ -296,11 +310,13 @@ function processTemplateToUnified(bundle) {
       sessionPolicy: r.sessionPolicy || 'persistent',
       environmentId: null,
       systemPrompt: r.systemPrompt || '',
-      triggers: asArray(r.triggers),
+      // Content = the expandable prompt; for process roles it mirrors systemPrompt.
+      content: r.systemPrompt || '',
       // Unified editing (#367): roles may carry data-flow ports + dependencies.
       inputs: asArray(r.inputs),
       outputs: asArray(r.outputs),
       dependsOn: asArray(r.dependsOn),
+      triggers: asArray(r.triggers),
     })),
     edges: [],
     gates: asArray(b.gates),
@@ -308,16 +324,19 @@ function processTemplateToUnified(bundle) {
   };
 }
 
-// bp-explorer /api/briefings (list of parsed brief.md) → UnifiedFlow. Leaf BPs
-// become nodes; `depends_on` and `artifacts` drive dependency/artifact edges at
-// build time. `status` is dropped (decision 2); parent BPs are not work-units.
+// bp-explorer /api/briefings (list of parsed brief.md) → UnifiedFlow. ALL BPs
+// become nodes — parents are kept as grouping nodes so the viewer can show the
+// parent-child hierarchy (the BP-Explorer look). `depends_on` + `artifacts`
+// drive dependency/artifact edges, `parent` drives a hierarchy edge, and the
+// `brief.md` body becomes the node's expandable `content`. `status` is dropped
+// (decision 2). Hierarchy is view-only — resolve-handoffs ignores parents, so
+// they remain non-work-units for routing.
 function briefingsToUnified(bps, { name = 'briefings' } = {}) {
   const nodes = [];
   for (const bp of asArray(bps)) {
     if (!bp || typeof bp.id !== 'string' || !bp.id) continue;
-    const isParent = bp.is_parent === true
-      || (Array.isArray(bp.children) && bp.children.length > 0);
-    if (isParent) continue; // only leaf BPs are units of work that can react
+    const children = asArray(bp.children);
+    const isParent = bp.is_parent === true || children.length > 0;
     const artifacts = asArray(bp.artifacts);
     nodes.push({
       id: bp.id,
@@ -327,10 +346,15 @@ function briefingsToUnified(bps, { name = 'briefings' } = {}) {
       sessionPolicy: 'persistent',
       environmentId: null,
       systemPrompt: '',
+      // The brief.md body is the node's expandable content/prompt.
+      content: typeof bp.body === 'string' ? bp.body : '',
       triggers: [],
       inputs: artifacts.filter(a => a && a.direction === 'input'),
       outputs: artifacts.filter(a => a && a.direction === 'output'),
       dependsOn: asArray(bp.depends_on),
+      parent: typeof bp.parent === 'string' && bp.parent ? bp.parent : null,
+      children,
+      isParent,
       // NOTE: bp.status intentionally not carried.
     });
   }

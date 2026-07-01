@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
-import { AlertTriangle, Download, Upload, Boxes, X, Plus, ShieldCheck, Layers } from 'lucide-react';
+import { AlertTriangle, Download, Upload, Boxes, X, Plus, ShieldCheck, Layers, Pencil } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { initFlowGraph } from './process/flow-graph-render';
 import ProcessNodeInspector from './process/ProcessNodeInspector';
@@ -10,6 +10,66 @@ import MaterializeDialog from './process/MaterializeDialog';
 import AddApprovalDialog from './process/AddApprovalDialog';
 import SidePanel from '../components/SidePanel';
 import { liveOps, makeDraftOps } from './process/edit-adapters';
+
+// Inline-editable process name for the draft toolbar. Click to edit; Enter or
+// blur commits, Escape reverts. Renaming only touches the bundle's display
+// `name` — the storage id is fixed at creation.
+function EditableDraftTitle({ name, onRename }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(name || '');
+  const inputRef = useRef(null);
+  useEffect(() => { setValue(name || ''); }, [name]);
+  useEffect(() => {
+    if (editing && inputRef.current) { inputRef.current.focus(); inputRef.current.select(); }
+  }, [editing]);
+
+  const commit = () => {
+    setEditing(false);
+    const trimmed = value.trim();
+    if (trimmed && trimmed !== name) onRename(trimmed);
+    else setValue(name || '');
+  };
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        value={value}
+        onChange={e => setValue(e.target.value)}
+        onBlur={commit}
+        onKeyDown={e => {
+          if (e.key === 'Enter') { e.preventDefault(); commit(); }
+          else if (e.key === 'Escape') { e.preventDefault(); setValue(name || ''); setEditing(false); }
+        }}
+        maxLength={80}
+        style={{
+          fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)',
+          color: 'var(--eb-text-primary)', background: 'var(--eb-bg-surface)',
+          border: '1px solid var(--eb-accent-primary)', borderRadius: 'var(--eb-radius-sm)',
+          padding: '2px 6px', fontFamily: 'inherit', maxWidth: 320, width: '100%',
+        }}
+      />
+    );
+  }
+
+  return (
+    <button
+      onClick={() => setEditing(true)}
+      title="Rename draft"
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 6, maxWidth: 360,
+        background: 'none', border: 'none', padding: '2px 0', cursor: 'pointer',
+        fontFamily: 'inherit', color: 'var(--eb-text-primary)',
+        fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)',
+      }}
+    >
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {name || 'Untitled process'}
+      </span>
+      <Pencil size={13} style={{ flexShrink: 0, color: 'var(--eb-text-muted)' }} />
+    </button>
+  );
+}
 
 // Process graph panel (#330) — data-driven view of the agent orchestration:
 // which agent reacts to which label, in what order. Embedded into the Flows
@@ -213,12 +273,17 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       {/* Toolbar — the scope picker lives in the Flows left list, not here. */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-3) var(--eb-space-4)', borderBottom: '1px solid var(--eb-border-default)', flexShrink: 0, flexWrap: 'wrap' }}>
-        <div style={{ flex: 1, minWidth: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-          {scope === 'templates'
-            ? 'Blueprint view (read-only). Select a team or draft on the left to model.'
-            : isDraft
-              ? 'Draft — design from scratch: + Add role, drag the ● port to wire, click nodes/edges to edit. Nothing is created until you materialize.'
-              : 'Click a node to edit · drag the ● port to wire a hand-off · click an edge to edit it.'}
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {isDraft && draftBundle && (
+            <EditableDraftTitle name={draftBundle.name} onRename={(n) => draftOps.renameDraft(n)} />
+          )}
+          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+            {scope === 'templates'
+              ? 'Blueprint view (read-only). Select a team or draft on the left to model.'
+              : isDraft
+                ? 'Draft — design from scratch: + Add role, drag the ● port to wire, click nodes/edges to edit. Nothing is created until you materialize.'
+                : 'Click a node to edit · drag the ● port to wire a hand-off · click an edge to edit it.'}
+          </div>
         </div>
         {isDraft && (
           <>

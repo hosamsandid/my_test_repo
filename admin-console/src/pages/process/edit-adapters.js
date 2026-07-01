@@ -196,6 +196,18 @@ export function makeDraftOps(getBundle, persist) {
   return {
     mode: 'draft',
 
+    // ── the draft itself ──
+    // Rename the whole process (the bundle's top-level `name`). The backend
+    // slug/id is fixed at creation, so this only changes the display name.
+    renameDraft: async (name) => {
+      const trimmed = String(name || '').trim();
+      if (!trimmed) return;
+      const b = clone(getBundle());
+      if (b.name === trimmed) return;
+      b.name = trimmed;
+      await persist(b);
+    },
+
     // ── triggers (shape-compatible with the live API) ──
     listTriggers: async (roleId) => {
       const r = role(getBundle(), roleId);

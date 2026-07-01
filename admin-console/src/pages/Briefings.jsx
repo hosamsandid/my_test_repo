@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useCallback, lazy, Suspense } from 'react';
+import React, { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
-import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, Boxes, FileText, Plus, Trash2 } from 'lucide-react';
+import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, Boxes, FileText, Plus, Trash2, Pencil, Check } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { FlowGraph } from './process/FlowGraph';
 
@@ -295,9 +295,61 @@ function SectionHeader({ children, action }) {
 }
 
 // Generic selectable row (teams, drafts, role-templates). Mirrors FlowRow's
-// look. An optional `onDelete` renders a trash button that fades in on hover.
-function ListRow({ icon: Icon, label, sub, selected, onSelect, onDelete, deleteTitle }) {
+// look. An optional `onDelete` renders a trash button that fades in on hover;
+// an optional `onRename` renders a pencil button and turns the label into an
+// inline text field (Enter/blur commits, Escape reverts).
+function ListRow({ icon: Icon, label, sub, selected, onSelect, onDelete, deleteTitle, onRename, renameTitle }) {
   const [hover, setHover] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(label);
+  const inputRef = useRef(null);
+  useEffect(() => { if (!editing) setValue(label); }, [label, editing]);
+  useEffect(() => {
+    if (editing && inputRef.current) { inputRef.current.focus(); inputRef.current.select(); }
+  }, [editing]);
+
+  function commit() {
+    setEditing(false);
+    const trimmed = value.trim();
+    if (trimmed && trimmed !== label) onRename(trimmed);
+    else setValue(label);
+  }
+
+  const actionCount = (onRename ? 1 : 0) + (onDelete ? 1 : 0);
+
+  if (editing) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) var(--eb-space-3)' }}>
+        <Icon size={18} style={{ flexShrink: 0, color: 'var(--eb-text-muted)' }} />
+        <input
+          ref={inputRef}
+          value={value}
+          onChange={e => setValue(e.target.value)}
+          onBlur={commit}
+          onKeyDown={e => {
+            if (e.key === 'Enter') { e.preventDefault(); commit(); }
+            else if (e.key === 'Escape') { e.preventDefault(); setValue(label); setEditing(false); }
+          }}
+          maxLength={80}
+          style={{
+            flex: 1, minWidth: 0, fontSize: 'var(--eb-text-md)', fontFamily: 'inherit',
+            color: 'var(--eb-text-primary)', background: 'var(--eb-bg-surface)',
+            border: '1px solid var(--eb-accent-primary)', borderRadius: 'var(--eb-radius-sm)',
+            padding: '2px 6px',
+          }}
+        />
+        <button
+          onMouseDown={e => e.preventDefault()}
+          onClick={commit}
+          title="Save name" aria-label="Save name"
+          style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: 'var(--eb-accent-primary)', display: 'flex' }}
+        >
+          <Check size={15} />
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div
       style={{ position: 'relative' }}
@@ -309,7 +361,7 @@ function ListRow({ icon: Icon, label, sub, selected, onSelect, onDelete, deleteT
         style={{
           display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', width: '100%',
           padding: 'var(--eb-space-2) var(--eb-space-3)',
-          paddingRight: onDelete ? 'var(--eb-space-6)' : 'var(--eb-space-3)',
+          paddingRight: actionCount ? `calc(var(--eb-space-3) + ${actionCount * 24}px)` : 'var(--eb-space-3)',
           background: selected ? 'var(--eb-bg-selected)' : 'transparent',
           borderLeft: selected ? '3px solid var(--eb-accent-primary)' : '3px solid transparent',
           borderTop: 'none', borderRight: 'none', borderBottom: '1px solid transparent',
@@ -334,21 +386,42 @@ function ListRow({ icon: Icon, label, sub, selected, onSelect, onDelete, deleteT
           )}
         </div>
       </button>
-      {onDelete && (hover || selected) && (
-        <button
-          onClick={(e) => { e.stopPropagation(); onDelete(); }}
-          title={deleteTitle || 'Delete'}
-          aria-label={deleteTitle || 'Delete'}
-          style={{
-            position: 'absolute', top: '50%', right: 'var(--eb-space-2)', transform: 'translateY(-50%)',
-            background: 'none', border: 'none', cursor: 'pointer', padding: 4,
-            color: 'var(--eb-text-muted)', display: 'flex', alignItems: 'center',
-          }}
-          onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-status-error)'; }}
-          onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
-        >
-          <Trash2 size={15} />
-        </button>
+      {(hover || selected) && (onRename || onDelete) && (
+        <div style={{
+          position: 'absolute', top: '50%', right: 'var(--eb-space-2)', transform: 'translateY(-50%)',
+          display: 'flex', alignItems: 'center', gap: 2,
+        }}>
+          {onRename && (
+            <button
+              onClick={(e) => { e.stopPropagation(); setValue(label); setEditing(true); }}
+              title={renameTitle || 'Rename'}
+              aria-label={renameTitle || 'Rename'}
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer', padding: 4,
+                color: 'var(--eb-text-muted)', display: 'flex', alignItems: 'center',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-accent-primary)'; }}
+              onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
+            >
+              <Pencil size={14} />
+            </button>
+          )}
+          {onDelete && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onDelete(); }}
+              title={deleteTitle || 'Delete'}
+              aria-label={deleteTitle || 'Delete'}
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer', padding: 4,
+                color: 'var(--eb-text-muted)', display: 'flex', alignItems: 'center',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-status-error)'; }}
+              onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
+            >
+              <Trash2 size={15} />
+            </button>
+          )}
+        </div>
       )}
     </div>
   );
@@ -397,6 +470,18 @@ export default function Briefings() {
       if (proc === `draft:${d.id}`) setSearchParams({});
       refetchDrafts();
     } catch { /* leave the list as-is; the draft may already be gone */ }
+  }
+
+  async function renameDraft(d, name) {
+    const trimmed = (name || '').trim();
+    if (!trimmed || trimmed === d.name) return;
+    try {
+      // PUT validates the whole bundle, so round-trip the current document and
+      // only swap the display name.
+      const bundle = await apiCall('GET', `/api/process/drafts/${d.id}`);
+      await apiCall('PUT', `/api/process/drafts/${d.id}`, { ...bundle, name: trimmed });
+      refetchDrafts();
+    } catch { /* leave the list as-is */ }
   }
 
   // Import the selected BriefingPack flow as an editable process draft (#377) —
@@ -589,6 +674,8 @@ export default function Briefings() {
                     sub={`${d.roleCount} role${d.roleCount === 1 ? '' : 's'}`}
                     selected={proc === `draft:${d.id}`}
                     onSelect={() => selectProc(`draft:${d.id}`)}
+                    onRename={(name) => renameDraft(d, name)}
+                    renameTitle="Rename draft"
                     onDelete={() => deleteDraft(d)}
                     deleteTitle="Delete draft"
                   />

@@ -6,11 +6,14 @@ import { apiCall } from '../../hooks/useApi';
 
 // Materialise an imported process-template bundle into a real team (#334).
 // Reuses the Team-Setup pipeline (POST /api/teams) via its `processTemplate`
-// path — env + team + members + rollback are all handled there.
+// path — team + members + rollback are all handled there. Instead of typing a
+// repo URL + credentials, the operator picks an existing Working Environment,
+// which already carries the repository and the SSH-key / GitHub-token split.
 export default function MaterializeDialog({ bundle, onClose, onDone }) {
   const navigate = useNavigate();
-  const [sshKeys, setSshKeys] = useState([]);
-  const [tokens, setTokens] = useState([]);
+  const [environments, setEnvironments] = useState([]);
+  const [envsLoaded, setEnvsLoaded] = useState(false);
+  const [environmentId, setEnvironmentId] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
@@ -20,10 +23,6 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
   const sourceTeamId = bundle?.sourceTeamId || null;
   const [teamId, setTeamId] = useState(sourceTeamId || slug);
   const [teamName, setTeamName] = useState(bundle?.name || 'Team');
-  const [repoUrl, setRepoUrl] = useState('');
-  const [branch, setBranch] = useState('main');
-  const [sshKeyId, setSshKeyId] = useState('');
-  const [githubTokenId, setGithubTokenId] = useState('');
   const [extend, setExtend] = useState(!!sourceTeamId);
   // Default to deferred materialization: a process can have dozens of members,
   // and materializing each one clones the repo. Create them as stubs (shown in
@@ -34,34 +33,42 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
     let alive = true;
     (async () => {
       try {
-        const [keys, toks] = await Promise.all([
-          apiCall('GET', '/api/ssh-keys').catch(() => []),
-          apiCall('GET', '/api/github-tokens').catch(() => []),
-        ]);
+        const envs = await apiCall('GET', '/api/environments').catch(() => []);
         if (!alive) return;
-        const kl = Array.isArray(keys) ? keys : (keys?.keys || []);
-        const tl = Array.isArray(toks) ? toks : (toks?.tokens || []);
-        setSshKeys(kl); setTokens(tl);
-        if (kl[0]) setSshKeyId(kl[0].id);
-        if (tl[0]) setGithubTokenId(tl[0].id);
-      } catch (e) { if (alive) setError(e.message); }
+        const list = Array.isArray(envs) ? envs : (envs?.environments || []);
+        setEnvironments(list);
+        setEnvsLoaded(true);
+        // Prefer the env named after the source team, else the first one.
+        const preferred = (sourceTeamId && list.find(e => e.id === sourceTeamId)) || list[0];
+        if (preferred) setEnvironmentId(preferred.id);
+      } catch (e) {
+        if (alive) { setError(e.message); setEnvsLoaded(true); }
+      }
     })();
     return () => { alive = false; };
-  }, []);
+  }, [sourceTeamId]);
+
+  const selectedEnv = environments.find(e => e.id === environmentId) || null;
+  const selectedRepo = selectedEnv
+    ? ((Array.isArray(selectedEnv.repositories) ? selectedEnv.repositories[0] : selectedEnv.repository) || null)
+    : null;
+  const noEnvs = envsLoaded && environments.length === 0;
+
+  function goCreateEnv() {
+    onClose?.();
+    navigate('/environments');
+  }
 
   async function submit() {
     if (!/^[a-z0-9-]{1,40}$/.test(teamId)) { setError('teamId must be a lowercase slug [a-z0-9-], 1–40 chars.'); return; }
     if (!teamName.trim()) { setError('Team name required.'); return; }
-    if (!repoUrl.trim()) { setError('Repository URL required.'); return; }
-    if (!sshKeyId) { setError('Pick an SSH key.'); return; }
-    if (!githubTokenId) { setError('Pick a GitHub token.'); return; }
+    if (!environmentId) { setError('Pick a working environment.'); return; }
     setSaving(true); setError(null);
     try {
       await apiCall('POST', '/api/teams', {
         teamId, teamName,
         mode: extend ? 'extend' : 'create',
-        repository: { url: repoUrl.trim(), branch: branch.trim() || 'main', sshKeyId },
-        githubTokenId,
+        environmentId,
         processTemplate: bundle,
         materializeMembers: materializeNow,
       });
@@ -76,27 +83,53 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
   return (
     <SidePanel open onClose={onClose} title="Materialize as team" width="520px">
       <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 0 }}>
-        Creates a working environment, a team, and one member per role in
-        <strong> {bundle?.name}</strong> ({bundle?.roles?.length || 0} roles). Each role keeps its
-        prompt and triggers; <code>{'{{vars}}'}</code> and the repo are applied per member.
+        Creates a team and one member per role in
+        <strong> {bundle?.name}</strong> ({bundle?.roles?.length || 0} roles) on the selected
+        working environment. Each role keeps its prompt and triggers;
+        <code>{'{{vars}}'}</code> and the environment's repository are applied per member.
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
         <Field label="Team id (slug)"><input value={teamId} onChange={e => setTeamId(e.target.value)} style={input} /></Field>
         <Field label="Team name"><input value={teamName} onChange={e => setTeamName(e.target.value)} style={input} /></Field>
-        <Field label="Repository URL"><input value={repoUrl} onChange={e => setRepoUrl(e.target.value)} placeholder="git@github.com:org/repo.git" style={input} /></Field>
-        <Field label="Branch"><input value={branch} onChange={e => setBranch(e.target.value)} style={input} /></Field>
-        <Field label="SSH key">
-          <select value={sshKeyId} onChange={e => setSshKeyId(e.target.value)} style={input}>
-            <option value="">— select —</option>
-            {sshKeys.map(k => <option key={k.id} value={k.id}>{k.name || k.id}</option>)}
-          </select>
-        </Field>
-        <Field label="GitHub token">
-          <select value={githubTokenId} onChange={e => setGithubTokenId(e.target.value)} style={input}>
-            <option value="">— select —</option>
-            {tokens.map(t => <option key={t.id} value={t.id}>{t.name || t.id}</option>)}
-          </select>
-        </Field>
+
+        {noEnvs ? (
+          <div style={emptyBox}>
+            <span>
+              No working environment exists yet. A team materialises onto an existing
+              environment — it supplies the repository and the credentials (SSH key +
+              GitHub token).
+            </span>
+            <button type="button" onClick={goCreateEnv} style={linkBtn}>
+              Create a working environment →
+            </button>
+          </div>
+        ) : (
+          <Field label="Working environment">
+            <select value={environmentId} onChange={e => setEnvironmentId(e.target.value)} style={input} disabled={!envsLoaded}>
+              <option value="">— select —</option>
+              {environments.map(env => (
+                <option key={env.id} value={env.id}>{env.name || env.id}</option>
+              ))}
+            </select>
+          </Field>
+        )}
+
+        {selectedRepo && (
+          <div style={infoBox}>
+            <div style={{ wordBreak: 'break-all' }}><strong>Repository:</strong> {selectedRepo.url}</div>
+            <div><strong>Branch:</strong> {selectedRepo.branch || 'main'}</div>
+          </div>
+        )}
+        {selectedEnv && !selectedRepo && (
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-warning, var(--eb-status-error))' }}>
+            This environment has no repository configured — members will have nothing to clone.
+          </span>
+        )}
+        {!noEnvs && (
+          <button type="button" onClick={goCreateEnv} style={{ ...linkBtn, alignSelf: 'flex-start' }}>
+            Need a different setup? Create a working environment →
+          </button>
+        )}
 
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
           <input type="checkbox" checked={extend} onChange={e => setExtend(e.target.checked)} />
@@ -116,7 +149,7 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
 
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)' }}>
           <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
-          <button onClick={submit} disabled={saving} style={primary}>
+          <button onClick={submit} disabled={saving || !environmentId} style={primary}>
             {saving ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : null}
             {saving ? (extend ? ' Extending…' : ' Creating…') : (extend ? 'Extend team' : (materializeNow ? 'Create team' : 'Create team (stubs)'))}
           </button>
@@ -139,6 +172,23 @@ const input = {
   background: 'var(--eb-bg-app)', color: 'var(--eb-text-primary)',
   border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
   padding: 'var(--eb-space-2)', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', boxSizing: 'border-box', width: '100%', outline: 'none',
+};
+const emptyBox = {
+  display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+  background: 'var(--eb-bg-app)', border: '1px dashed var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-3)',
+  fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
+};
+const infoBox = {
+  display: 'flex', flexDirection: 'column', gap: 2,
+  background: 'var(--eb-bg-app)', border: '1px solid var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)',
+  fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
+};
+const linkBtn = {
+  background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+  color: 'var(--eb-accent-primary)', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
+  textAlign: 'left', textDecoration: 'underline',
 };
 const ghost = {
   background: 'none', color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',

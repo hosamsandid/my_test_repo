@@ -224,6 +224,24 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
     } catch (e) { setImportError(e.message); }
   }
 
+  // Continue an imported blueprint as an editable draft instead of materializing
+  // straight away — turns the read-only preview into a real draft you can keep
+  // building on before creating a team.
+  async function continueImportAsDraft() {
+    if (!imported?.bundle) return;
+    try {
+      const tpl = imported.bundle;
+      const d = await apiCall('POST', '/api/process/drafts', {
+        name: tpl.name || 'Imported process',
+        processTemplate: tpl,
+      });
+      if (onDraftsChanged) onDraftsChanged();
+      setImported(null);
+      setSelectedId(null);
+      navigate(`draft:${d.id}`);
+    } catch (e) { setImportError(e.message); }
+  }
+
   // Source bundle for the Materialize dialog: an imported file or the open draft.
   const materializeBundle = imported ? imported.bundle : isDraft ? draftBundle : null;
 
@@ -314,6 +332,11 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
           <span style={{ flex: 1, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
             Imported blueprint <strong>{imported.bundle?.name}</strong> ({imported.graph?.nodes?.length || 0} roles) — read-only preview.
           </span>
+          <button onClick={continueImportAsDraft} style={{
+            background: 'none', color: 'var(--eb-accent-primary)', border: '1px solid var(--eb-accent-primary)',
+            borderRadius: 'var(--eb-radius-md)', padding: '4px 12px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
+          }}>Continue as draft</button>
           <button onClick={() => setMaterializeOpen(true)} style={{
             background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
             borderRadius: 'var(--eb-radius-md)', padding: '4px 12px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',

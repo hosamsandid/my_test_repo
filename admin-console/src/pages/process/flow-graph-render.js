@@ -137,7 +137,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
     briefings:          [],
     byId:               {},
     roots:              [],
-    expanded:           new Set(),
     contentVisible:     new Set(),
     childrenVisible:    new Set(),
     outputsVisible:     new Set(),
@@ -382,7 +381,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
     const el = canvas.querySelector(`.bp-node[data-id="${id}"]`);
     if (el) return el.offsetHeight;
     let h = 90;
-    if (state.expanded.has(id))      h += 150;
     if (state.contentVisible.has(id)) h += 300;
     return h;
   }
@@ -943,7 +941,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
       header.style.cssText = 'font-weight:600;font-size:13px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:flex-start;gap:8px;';
       header.innerHTML = `
         <span style="flex:1;line-height:1.4;">${esc(bp.title)}</span>
-        ${bpIdLabel(bp.id, bp.id.slice(0, 6), 'bp-id-copy')}
       `;
       node.appendChild(header);
 
@@ -962,10 +959,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
       // Action buttons
       const actions = document.createElement('div');
       actions.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;';
-
-      const detailBtn = makeBtn('Details', state.expanded.has(n.id));
-      detailBtn.addEventListener('click', () => toggleDetails(n.id));
-      actions.appendChild(detailBtn);
 
       if (bp.children && bp.children.length > 0) {
         const childBtn = makeBtn(`Children (${bp.children.length})`, state.childrenVisible.has(n.id));
@@ -989,11 +982,17 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
         }
       }
 
-      const contentBtn = makeBtn('Content', state.contentVisible.has(n.id));
-      contentBtn.addEventListener('click', () => toggleContent(n.id));
-      actions.appendChild(contentBtn);
+      // Only append the actions row when it carries something (children /
+      // artifact toggles). The Agent Prompt is a separate disclosure below.
+      if (actions.childElementCount > 0) node.appendChild(actions);
 
-      node.appendChild(actions);
+      // Agent Prompt — a collapsible disclosure (not a named button). Expanding
+      // reveals the read-only prompt/content; editing happens in the inspector.
+      if (bp.body) {
+        const promptToggle = makeDisclosure('Agent Prompt', state.contentVisible.has(n.id));
+        promptToggle.addEventListener('click', () => toggleContent(n.id));
+        node.appendChild(promptToggle);
+      }
 
       // Connect-to-wire port (#362 Phase C2): drag to another node to wire a
       // hand-off / link. Only when editable and a handler is wired.
@@ -1009,47 +1008,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
         node.appendChild(port);
       }
 
-      // Details panel
-      if (state.expanded.has(n.id)) {
-        const details = document.createElement('div');
-        details.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid var(--eb-border-default);font-size:11px;';
-
-        const rows = [];
-        rows.push(detailRow('Created', bp.created));
-        rows.push(detailRow('Slug', bp.slug));
-        if (bp.loopscript) rows.push(detailRow('Loopscript', bp.loopscript));
-        if (bp.parent) {
-          const parentBp = state.byId[bp.parent];
-          rows.push(detailRow('Parent', parentBp ? parentBp.slug : bp.parent));
-        }
-        if (bp.depends_on && bp.depends_on.length > 0) {
-          rows.push(detailRow('Depends on', bp.depends_on.map(did => {
-            const dep = state.byId[did];
-            return dep ? dep.slug : did;
-          }).join(', ')));
-        }
-        if (bp.execution_order && bp.execution_order.length > 0) {
-          const list = bp.execution_order.map(item => {
-            if (typeof item === 'string') {
-              return `<li>${esc(item)}</li>`;
-            } else {
-              const note = item.note ? `<span style="color:var(--eb-text-muted);margin-left:4px">${esc(item.note)}</span>` : '';
-              return `<li>${esc(item.slug || item.id || JSON.stringify(item))}${note}</li>`;
-            }
-          }).join('');
-          rows.push(`<div style="margin:4px 0 2px;color:var(--eb-text-muted)">Execution Order</div>
-            <ol style="text-align:left;padding-left:16px;margin:0 0 4px;">${list}</ol>`);
-        }
-        if (bp.mentorscripts && bp.mentorscripts.length > 0) {
-          rows.push(detailRow('Mentorscripts', bp.mentorscripts.join(', ')));
-        }
-
-        details.innerHTML = rows.join('');
-        node.appendChild(details);
-      }
-
-      // Content panel — the node's prompt/brief, read-only markdown. Editing
-      // (prompt, stage, links) is in the right-side inspector (#362 unification).
+      // Agent Prompt panel — the node's prompt/content, read-only markdown.
+      // Editing (prompt, stage, links) is in the right-side inspector.
       if (state.contentVisible.has(n.id) && bp.body) {
         const body = document.createElement('div');
         body.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid var(--eb-border-default);font-size:11px;max-height:300px;overflow-y:auto;line-height:1.5;';
@@ -1244,11 +1204,25 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
     return btn;
   }
 
-  function detailRow(label, value) {
-    return `<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:3px;">
-      <span style="color:var(--eb-text-muted);flex-shrink:0;">${esc(label)}</span>
-      <span style="word-break:break-all;text-align:right;">${esc(String(value || '—'))}</span>
-    </div>`;
+  // A collapsible disclosure row (caret + label). Used for the read-only
+  // Agent Prompt panel — reads as a dropdown, not a named action button.
+  function makeDisclosure(label, active) {
+    const btn = document.createElement('button');
+    btn.style.cssText = `
+      display:flex;align-items:center;gap:6px;width:100%;margin-top:6px;
+      padding:2px 0;font-size:11px;font-family:inherit;
+      background:transparent;border:none;
+      color:${active ? '#3b82f6' : 'var(--eb-text-secondary)'};
+      cursor:pointer;text-align:left;
+    `;
+    const caret = document.createElement('span');
+    caret.textContent = active ? '▾' : '▸';
+    caret.style.cssText = 'font-size:9px;line-height:1;';
+    const text = document.createElement('span');
+    text.textContent = label;
+    btn.appendChild(caret);
+    btn.appendChild(text);
+    return btn;
   }
 
   // ─── Edge Drawing ────────────────────────────────────────────────────
@@ -1521,12 +1495,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
 
   // ─── Interactions ────────────────────────────────────────────────────
 
-  function toggleDetails(id) {
-    if (state.expanded.has(id)) state.expanded.delete(id);
-    else state.expanded.add(id);
-    render();
-  }
-
   function toggleContent(id) {
     if (state.contentVisible.has(id)) state.contentVisible.delete(id);
     else state.contentVisible.add(id);
@@ -1573,7 +1541,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
 
   function collapseAll() {
     state.childrenVisible.clear();
-    state.expanded.clear();
     state.contentVisible.clear();
     state.outputsVisible.clear();
     state.inputsVisible.clear();
@@ -1833,12 +1800,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
     return el.innerHTML;
   }
 
-  function bpIdLabel(fullId, displayText, extraClass) {
-    if (!fullId) return esc(displayText || '');
-    const text = (displayText !== undefined && displayText !== null) ? displayText : fullId;
-    const cls  = extraClass ? extraClass : '';
-    return `<span class="${cls}" data-bp-id="${esc(fullId)}" title="Click to copy ${esc(fullId)}" style="font-size:10px;color:var(--eb-text-muted);cursor:pointer;font-family:monospace;flex-shrink:0;" onclick="(function(e){e.stopPropagation();var el=e.currentTarget;var id=el.dataset.bpId||el.textContent.trim();if(navigator.clipboard)navigator.clipboard.writeText(id).catch(()=>{});el.style.color='#3b82f6';setTimeout(()=>el.style.color='var(--eb-text-muted)',1000);})(event)">${esc(text)}</span>`;
-  }
 
   // ─── Resize observer ─────────────────────────────────────────────────
 

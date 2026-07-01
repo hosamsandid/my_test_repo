@@ -119,7 +119,7 @@ function PromptTab({ agentId, onChanged }) {
       {mode === 'member' && (
         <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
           <input type="checkbox" checked={inherit} onChange={e => { setInherit(e.target.checked); setSaved(false); }} />
-          Inherit system prompt from team
+          Inherit agent prompt from team
         </label>
       )}
 
@@ -127,7 +127,7 @@ function PromptTab({ agentId, onChanged }) {
         value={editingDisabled ? inheritedPreview : text}
         onChange={e => { setText(e.target.value); setSaved(false); }}
         readOnly={editingDisabled}
-        placeholder={mode === 'member' ? 'Custom system prompt for this member…' : 'AGENT-PROMPT.md…'}
+        placeholder={mode === 'member' ? 'Custom agent prompt for this member…' : 'AGENT-PROMPT.md…'}
         style={{
           width: '100%', minHeight: 320, resize: 'vertical', boxSizing: 'border-box',
           fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-sm)', lineHeight: 1.5,

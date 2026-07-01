@@ -8,13 +8,15 @@ import ConnectionsSection from './ConnectionsSection';
 // displayName, system prompt, and triggers' emits directly on the draft bundle
 // via the draft adapter (`ops`). Lighter than the live inspector — no Matrix,
 // no inherit/override, no live status.
-export default function DraftNodeInspector({ role, roles = [], stages = [], ops, onClose, onDeleted, onChanged }) {
+export default function DraftNodeInspector({ role, roles = [], stages = [], ops, onClose, onDeleted, onChanged, onRenamedId }) {
   const [name, setName] = useState(role.displayName || role.id);
+  const [id, setId] = useState(role.id);
   const [prompt, setPrompt] = useState(role.systemPrompt || '');
   const [stage, setStage] = useState(role.stage || '');
   const [newStage, setNewStage] = useState('');   // inline "create a new stage"
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
 
   const triggers = role.triggers || [];
   const isReview = role.kind === 'pr-review';
@@ -22,7 +24,7 @@ export default function DraftNodeInspector({ role, roles = [], stages = [], ops,
   const inheritedStage = resolveInheritedStage(roles, role);
 
   async function saveMeta() {
-    setBusy(true); setSaved(false);
+    setBusy(true); setSaved(false); setError(null);
     try {
       if (name !== role.displayName) await ops.renameRole(role.id, name);
       if (prompt !== (role.systemPrompt || '')) await ops.setPrompt(role.id, prompt);
@@ -32,7 +34,19 @@ export default function DraftNodeInspector({ role, roles = [], stages = [], ops,
       const fresh = newStage.trim();
       if (fresh) { if (ops.addStage) await ops.addStage(fresh); target = fresh; setStage(fresh); setNewStage(''); }
       if (target !== (role.stage || '') && ops.setStage) await ops.setStage(role.id, target);
+      // Rename the id last (it rewires references + changes the selected key), so
+      // the ops above still resolve the role by its old id.
+      if (id !== role.id && ops.renameRoleId) {
+        const newId = await ops.renameRoleId(role.id, id);
+        setId(newId);
+        onChanged?.();
+        onRenamedId?.(newId);
+        setSaved(true);
+        return;
+      }
       setSaved(true); onChanged?.();
+    } catch (e) {
+      setError(e.message || String(e));
     } finally { setBusy(false); }
   }
 
@@ -49,14 +63,21 @@ export default function DraftNodeInspector({ role, roles = [], stages = [], ops,
         <span style={{ ...badge, ...(isReview ? { color: 'var(--eb-status-warning)', borderColor: 'var(--eb-status-warning)' } : {}) }}>
           {isReview ? 'PR-review step' : 'draft role'}
         </span>
-        <code style={{ color: 'var(--eb-text-muted)' }}>{role.id}</code>
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
         <Field label="Display name">
           <input value={name} onChange={e => { setName(e.target.value); setSaved(false); }} style={input} />
         </Field>
-        <Field label="System prompt">
+        <Field label="Agent ID">
+          <input value={id}
+            onChange={e => { setId(e.target.value); setSaved(false); setError(null); }}
+            style={{ ...input, fontFamily: 'var(--eb-font-mono)' }} />
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            Lowercase letters, digits and hyphens. Renaming rewires all connections to this agent.
+          </span>
+        </Field>
+        <Field label="Agent prompt">
           <textarea value={prompt} onChange={e => { setPrompt(e.target.value); setSaved(false); }}
             placeholder="What this role does, its responsibilities and tone…"
             style={{ ...input, minHeight: 220, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', lineHeight: 1.5 }} />
@@ -78,6 +99,7 @@ export default function DraftNodeInspector({ role, roles = [], stages = [], ops,
             <Save size={14} /> Save
           </button>
           {saved && <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-success)' }}>Saved.</span>}
+          {error && <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</span>}
         </div>
 
         {/* PR-review routing (#347) */}

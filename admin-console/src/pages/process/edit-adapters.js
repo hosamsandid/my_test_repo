@@ -214,6 +214,32 @@ export function makeDraftOps(getBundle, persist) {
       if (r) r.displayName = displayName;
       await persist(b);
     },
+    // Change a role's *id* (draft-only). The id is a plain bundle key here, so a
+    // rename is safe as long as every reference to it is rewired: dependency
+    // edges (dependsOn), parent links, and PR-review routing (reviewsPrFrom /
+    // onApprove / onChangesRequested). Enforces the slug charset + uniqueness.
+    renameRoleId: async (roleId, rawId) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (!r) throw new Error(`role ${roleId} not found`);
+      const newId = String(rawId || '').trim().toLowerCase()
+        .replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+      if (!newId) throw new Error('id must contain a letter or digit');
+      if (newId === roleId) return newId;
+      if ((b.roles || []).some(x => x.id === newId)) throw new Error(`id "${newId}" is already taken`);
+      r.id = newId;
+      for (const x of b.roles || []) {
+        if (Array.isArray(x.dependsOn)) x.dependsOn = x.dependsOn.map(d => (d === roleId ? newId : d));
+        if (x.parent === roleId) x.parent = newId;
+        if (x.review) {
+          for (const k of ['reviewsPrFrom', 'onApprove', 'onChangesRequested']) {
+            if (x.review[k] === roleId) x.review[k] = newId;
+          }
+        }
+      }
+      await persist(b);
+      return newId;
+    },
     setPrompt: async (roleId, systemPrompt) => {
       const b = clone(getBundle());
       const r = role(b, roleId);

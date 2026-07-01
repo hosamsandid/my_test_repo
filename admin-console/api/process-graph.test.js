@@ -228,27 +228,32 @@ test('lint: a clean wired pair produces no lints', () => {
   assert.deepEqual(g.lints, []);
 });
 
-test('pr-review node yields outcome edges (in / approve / changes)', () => {
+test('github channel: derived channel triggers do not produce label/event edges', () => {
+  // A consumer's derived channel trigger (channel:true) is represented by the
+  // on:'github' edge built from the port (unified-graph) — never as an external
+  // event edge or orphan listener here.
   const g = buildProcessGraph([
-    { id: 'dev', triggers: [] },
-    { id: 'rel', triggers: [] },
-    { id: 'rev', kind: 'pr-review', triggers: [],
-      review: { reviewsPrFrom: 'dev', onApprove: 'rel', onChangesRequested: 'dev' } },
+    { id: 'dev', triggers: [], github: { producesPr: true } },
+    { id: 'rev', channels: [{ artifact: 'pr', from: 'dev' }], triggers: [
+      { id: 'rev-on-pr-dev', type: 'github-event', channel: true,
+        events: ['pull_request.opened', 'pull_request.reopened'], from: ['dev'] },
+    ] },
   ]);
-  const inEdge = g.edges.find(e => e.kind === 'review' && e.reviewFlow === 'in');
-  assert.equal(inEdge.from, 'dev'); assert.equal(inEdge.to, 'rev');
-  const approve = g.edges.find(e => e.outcome === 'approve');
-  assert.equal(approve.from, 'rev'); assert.equal(approve.to, 'rel');
-  const changes = g.edges.find(e => e.outcome === 'changes');
-  assert.equal(changes.from, 'rev'); assert.equal(changes.to, 'dev'); // rework back-edge
-  assert.equal(g.nodes.find(n => n.id === 'rev').kind, 'pr-review');
+  assert.equal(g.edges.filter(e => e.external).length, 0);
+  assert.ok(!g.lints.some(l => l.code === 'orphan-listener'));
 });
 
-test('pr-review review edges skip targets that are not in the graph', () => {
+test('lint: a producer whose artifact nobody consumes is flagged (info)', () => {
+  const g = buildProcessGraph([{ id: 'dev', triggers: [], github: { producesPr: true } }]);
+  assert.ok(g.lints.some(l => l.code === 'producer-unconsumed' && l.nodeId === 'dev'));
+});
+
+test('lint: a channel from a non-producer is flagged (warning)', () => {
   const g = buildProcessGraph([
-    { id: 'rev', kind: 'pr-review', triggers: [], review: { reviewsPrFrom: 'ghost', onApprove: 'nope' } },
+    { id: 'dev', triggers: [] }, // does NOT declare producesPr
+    { id: 'rev', triggers: [], channels: [{ artifact: 'pr', from: 'dev' }] },
   ]);
-  assert.equal(g.edges.filter(e => e.kind === 'review').length, 0);
+  assert.ok(g.lints.some(l => l.code === 'channel-from-non-producer' && l.nodeId === 'rev'));
 });
 
 test('a human-approval gate (downstream waits on human:*) renders as a gate and never trips gate-violation', () => {
@@ -267,10 +272,6 @@ test('a human-approval gate (downstream waits on human:*) renders as a gate and 
   assert.ok(!g.lints.some(l => l.code === 'orphan-listener'));
 });
 
-test('lint: an unwired pr-review step is flagged', () => {
-  const g = buildProcessGraph([{ id: 'rev', kind: 'pr-review', triggers: [], review: {} }]);
-  assert.ok(g.lints.some(l => l.code === 'review-unwired' && l.nodeId === 'rev'));
-});
 
 test('node view exposes the expected fields', () => {
   const g = buildProcessGraph([{

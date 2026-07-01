@@ -6,6 +6,7 @@
   "icon": "compass",
   "category": "chat",
   "envSuffix": "ba",
+  "github": { "producesIssue": true },
   "sessionPolicy": "persistent",
   "skills": [],
   "additionalContextSnippet": "You are the stakeholder's voice toward the team. When the user talks to you, they're talking to the product — present options, surface assumptions, translate domain language.",

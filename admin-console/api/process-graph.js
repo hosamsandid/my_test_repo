@@ -66,6 +66,8 @@ function triggerView(t) {
   }
   v.emits = Array.isArray(t.emits) ? t.emits.slice() : [];
   if (t.emitsDerived) v.emitsDerived = true; // heuristic, not operator-confirmed
+  if (t.channel) v.channel = true; // derived GitHub-channel trigger (#380)
+  if (t.dataFlow) v.dataFlow = true; // derived data-flow push trigger (#379)
   return v;
 }
 
@@ -96,6 +98,13 @@ function buildProcessGraph(agents) {
       // label hand-off be wired from the edge alone, without attaching the emit
       // to a pre-existing trigger.
       emits: Array.isArray(a.emits) ? a.emits.filter(e => typeof e === 'string' && e) : [],
+      // GitHub artifact ports (#380): produce flags drive the node badge/ports;
+      // the consumed channels drive the on:'github' edges (built in unified-graph
+      // from these ports, not from the derived triggers).
+      github: (a.github && (a.github.producesPr || a.github.producesIssue))
+        ? { ...(a.github.producesPr ? { producesPr: true } : {}), ...(a.github.producesIssue ? { producesIssue: true } : {}) }
+        : null,
+      channels: Array.isArray(a.channels) ? a.channels : [],
       // DM-only front door: nothing wakes it from git, it talks to a human.
       isEntryPoint: !hasGithubEvent,
     };
@@ -123,6 +132,10 @@ function buildProcessGraph(agents) {
     // Agent-level emits (operator-declared on the agent, no trigger needed).
     for (const e of n.emits) addEmit(e, n.id);
     for (const t of n.triggers) {
+      // Derived GitHub-channel triggers (#380) are represented by the on:'github'
+      // edges built from the channel ports (unified-graph) — never as label/event
+      // edges here, so their labelFilter must not register as a listen key.
+      if (t.channel) continue;
       for (const e of t.emits) addEmit(e, n.id);
       const lk = labelListenKey(t);
       if (lk) { allListenKeys.add(lk); noteLabel(lk); }
@@ -134,6 +147,7 @@ function buildProcessGraph(agents) {
 
   for (const n of nodes) {
     for (const t of n.triggers) {
+      if (t.channel) continue; // GitHub-channel edges come from the ports (#380)
       if (t.type === 'cron' || t.type === 'once') {
         edges.push({
           from: n.id, to: n.id,
@@ -182,23 +196,6 @@ function buildProcessGraph(agents) {
     }
   }
 
-  // PR-review steps (#347): structured outcome edges, not label-derived. A
-  // reviewer reviews a producer's PRs (in), then Approve → proceed / Request
-  // changes → back to the producer (the rework loop).
-  for (const a of list) {
-    if (a.kind !== 'pr-review' || !a.review) continue;
-    const rv = a.review;
-    if (rv.reviewsPrFrom && nodeIds.has(rv.reviewsPrFrom)) {
-      edges.push({ from: rv.reviewsPrFrom, to: a.id, label: 'PR', kind: 'review', reviewFlow: 'in' });
-    }
-    if (rv.onApprove && nodeIds.has(rv.onApprove)) {
-      edges.push({ from: a.id, to: rv.onApprove, label: '✓ approve', kind: 'review', outcome: 'approve' });
-    }
-    if (rv.onChangesRequested && nodeIds.has(rv.onChangesRequested)) {
-      edges.push({ from: a.id, to: rv.onChangesRequested, label: '✗ changes', kind: 'review', outcome: 'changes' });
-    }
-  }
-
   const gates = [...gateSet].sort().map(label => ({ label, humanOnly: true }));
   const labels = [...labelMeta.keys()].sort().map(name => ({ name, ...labelMeta.get(name) }));
 
@@ -219,12 +216,39 @@ function computeLints(nodes, edges) {
         message: `\`${e.from}\` emits \`${e.label}\` but nothing listens on it.` });
     }
   }
-  const reviewedTargets = new Set(edges.filter(e => e.kind === 'review' && e.reviewFlow === 'in').map(e => e.to));
+  // GitHub-channel wiring checks (#380). A producer whose PR/issue nobody
+  // consumes, and a channel that points at a role which doesn't produce that
+  // artifact, are both advisory smells.
+  const consumedArtifactsByProducer = new Map(); // producerId -> Set(artifact)
+  for (const n of nodes) {
+    for (const ch of (n.channels || [])) {
+      if (!ch || !ch.from) continue;
+      if (!consumedArtifactsByProducer.has(ch.from)) consumedArtifactsByProducer.set(ch.from, new Set());
+      consumedArtifactsByProducer.get(ch.from).add(ch.artifact === 'issue' ? 'issue' : 'pr');
+    }
+  }
+  const nodeById = new Map(nodes.map(n => [n.id, n]));
   for (const n of nodes) {
     if (n.synthetic) continue;
-    if (n.kind === 'pr-review' && !reviewedTargets.has(n.id)) {
-      lints.push({ code: 'review-unwired', severity: 'warning', nodeId: n.id,
-        message: `PR-review step \`${n.id}\` isn't pointed at a producer (set "reviews PRs from").` });
+    const gh = n.github || {};
+    const consumed = consumedArtifactsByProducer.get(n.id) || new Set();
+    if (gh.producesPr && !consumed.has('pr')) {
+      lints.push({ code: 'producer-unconsumed', severity: 'info', nodeId: n.id,
+        message: `\`${n.id}\` opens pull requests but no agent consumes them.` });
+    }
+    if (gh.producesIssue && !consumed.has('issue')) {
+      lints.push({ code: 'producer-unconsumed', severity: 'info', nodeId: n.id,
+        message: `\`${n.id}\` opens issues but no agent consumes them.` });
+    }
+    for (const ch of (n.channels || [])) {
+      if (!ch || !ch.from) continue;
+      const prod = nodeById.get(ch.from);
+      const artifact = ch.artifact === 'issue' ? 'issue' : 'pr';
+      const producesIt = prod && prod.github && (artifact === 'pr' ? prod.github.producesPr : prod.github.producesIssue);
+      if (prod && !producesIt) {
+        lints.push({ code: 'channel-from-non-producer', severity: 'warning', nodeId: n.id, label: ch.from,
+          message: `\`${n.id}\` consumes a ${artifact === 'pr' ? 'PR' : 'issue'} from \`${ch.from}\`, which isn't marked as opening ${artifact === 'pr' ? 'PRs' : 'issues'}.` });
+      }
     }
     const stageEmits = new Set();
     for (const t of n.triggers || []) {

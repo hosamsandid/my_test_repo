@@ -6,6 +6,7 @@
   "icon": "network",
   "category": "chat",
   "envSuffix": "arch",
+  "github": { "producesPr": true },
   "sessionPolicy": "persistent",
   "skills": [],
   "additionalContextSnippet": "Architecture decisions are durable. Capture trade-offs, alternatives considered, and why you picked this one — the next person reading the doc may not know the constraints you weighed.",

@@ -226,8 +226,15 @@ export function CreateEdgeDialog({ from, to, fromName, toName, labels, ops = liv
         ops={ops} onBack={() => setType(null)} onClose={onClose} onDone={onDone} />
     );
   }
+  if (type === 'github') {
+    return (
+      <CreateChannelDialog from={from} to={to} fromName={fromName} toName={toName}
+        ops={ops} onBack={() => setType(null)} onClose={onClose} onDone={onDone} />
+    );
+  }
 
   const choices = [
+    { id: 'github', title: 'GitHub PR / Issue', desc: `${fromName || from} opens a PR/issue that wakes ${toName || to} (optionally via a human-approved label).` },
     { id: 'label', title: 'Label hand-off', desc: `${fromName || from} emits a label that wakes ${toName || to}.` },
     { id: 'dependency', title: 'Dependency', desc: `${toName || to} depends on ${fromName || from} — it can't start until that is done.` },
     { id: 'artifact', title: 'Data flow', desc: `${fromName || from} produces a file that ${toName || to} consumes.` },
@@ -250,6 +257,76 @@ export function CreateEdgeDialog({ from, to, fromName, toName, labels, ops = liv
             <div style={{ ...small, marginTop: 2 }}>{c.desc}</div>
           </button>
         ))}
+      </div>
+    </SidePanel>
+  );
+}
+
+/* ── Create a GitHub channel: A opens a PR/Issue that wakes B (#380) ─────────
+ * Stored as a declarative `channels` port on the *consumer* (B); the backend
+ * derives the github-event trigger. An optional label + human-approval gate model
+ * "A opens a PR → a human labels it → B is woken". Also ensures A is marked as
+ * producing that artifact so the producer badge/prompt-block appear. */
+export function CreateChannelDialog({ from, to, artifact: artifact0, fromName, toName, ops = liveOps, onBack, onClose, onDone }) {
+  const [artifact, setArtifact] = useState(artifact0 === 'issue' ? 'issue' : 'pr');
+  const [label, setLabel] = useState('');
+  const [human, setHuman] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const noun = artifact === 'pr' ? 'pull request' : 'issue';
+
+  async function submit() {
+    if (human && !label.trim()) { setError('A human-approval gate needs the label a human applies.'); return; }
+    setSaving(true); setError(null);
+    try {
+      // Ensure the producer is flagged so its badge + prompt block appear.
+      if (ops.getRoleGithub && ops.setGithubProduces) {
+        const g = (await ops.getRoleGithub(from)) || {};
+        const next = { pr: !!g.producesPr, issue: !!g.producesIssue };
+        if (artifact === 'pr') next.pr = true; else next.issue = true;
+        if (next.pr !== !!g.producesPr || next.issue !== !!g.producesIssue) {
+          await ops.setGithubProduces(from, next);
+        }
+      }
+      await ops.addChannel(to, {
+        artifact, from,
+        ...(label.trim() ? { label: label.trim() } : {}),
+        ...(human ? { gate: 'human' } : {}),
+      });
+      onDone?.();
+    } catch (e) { setError(e.message); setSaving(false); }
+  }
+
+  return (
+    <SidePanel open onClose={onClose} title="Wire a GitHub channel" width="520px">
+      <p style={hint}>
+        <strong>{fromName || from}</strong> opens a {noun} that wakes <strong>{toName || to}</strong>.
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <Field label="Artifact">
+          <select value={artifact} onChange={e => setArtifact(e.target.value)} style={input}>
+            <option value="pr">Pull request</option>
+            <option value="issue">Issue</option>
+          </select>
+        </Field>
+        <Field label="Routing label (optional)">
+          <input value={label} onChange={e => setLabel(e.target.value)}
+            placeholder="e.g. approved — only wake on this label" style={input} />
+          <small style={small}>
+            Leave empty to wake on every {noun} {fromName || from} opens. With a label, {toName || to}
+            {' '}wakes only when that label is present on the {noun}.
+          </small>
+        </Field>
+        <label style={check}>
+          <input type="checkbox" checked={human} onChange={e => setHuman(e.target.checked)} />
+          Human approval gate — a person applies the label (renders as a gate on the edge)
+        </label>
+        {error && <span style={errStyle}>{error}</span>}
+        <div style={actions}>
+          {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
+          <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+          <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Wiring…' : 'Create channel'}</button>
+        </div>
       </div>
     </SidePanel>
   );
@@ -352,8 +429,67 @@ export function EditHandoffDialog(props) {
   const on = props.edge?.on;
   if (on === 'dependency' || on === 'parent') return <RemoveEdgeDialog kind={on} {...props} />;
   if (on === 'artifact') return <RemoveArtifactEdgeDialog {...props} />;
+  if (on === 'github') return <EditChannelDialog {...props} />;
   if (on === 'review' || on === 'manual') return <ReadonlyEdgeDialog {...props} />;
   return <EditLabelHandoff {...props} />;
+}
+
+/* ── Edit / remove a GitHub channel edge (#380) ─────────────────────────────
+ * The channel is a port on the consumer; editing changes the routing label +
+ * human-gate, removing drops the port (the backend re-derives the trigger). */
+function EditChannelDialog({ edge, fromName, toName, ops = liveOps, onClose, onDone }) {
+  const { from, to, artifact: art } = edge;
+  const artifact = art === 'issue' ? 'issue' : 'pr';
+  const [label, setLabel] = useState(edge.label || '');
+  const [human, setHuman] = useState(edge.gate === 'human');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const noun = artifact === 'pr' ? 'pull request' : 'issue';
+
+  async function save() {
+    if (human && !label.trim()) { setError('A human-approval gate needs the label a human applies.'); return; }
+    setSaving(true); setError(null);
+    try {
+      await (ops.updateChannel || ops.addChannel)(to, {
+        artifact, from,
+        ...(label.trim() ? { label: label.trim() } : {}),
+        ...(human ? { gate: 'human' } : {}),
+      });
+      onDone?.();
+    } catch (e) { setError(e.message); setSaving(false); }
+  }
+  async function remove() {
+    setSaving(true); setError(null);
+    try { await ops.removeChannel(to, { artifact, from }); onDone?.(); }
+    catch (e) { setError(e.message); setSaving(false); }
+  }
+
+  return (
+    <SidePanel open onClose={onClose} title="GitHub channel" width="520px">
+      <p style={hint}>
+        <strong>{fromName || from}</strong>'s {noun} → <strong>{toName || to}</strong>
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <Field label="Routing label (optional)">
+          <input value={label} onChange={e => setLabel(e.target.value)}
+            placeholder="e.g. approved" style={input} />
+        </Field>
+        <label style={check}>
+          <input type="checkbox" checked={human} onChange={e => setHuman(e.target.checked)} />
+          Human approval gate — a person applies the label
+        </label>
+        {error && <span style={errStyle}>{error}</span>}
+        <div style={actions}>
+          <button onClick={remove} disabled={saving}
+            style={{ ...ghost, color: 'var(--eb-status-error)', borderColor: 'var(--eb-status-error)', marginRight: 'auto' }}>
+            Remove
+          </button>
+          <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+          <button onClick={save} disabled={saving} style={primary}>{saving ? 'Saving…' : 'Save'}</button>
+        </div>
+      </div>
+    </SidePanel>
+  );
 }
 
 function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDone }) {

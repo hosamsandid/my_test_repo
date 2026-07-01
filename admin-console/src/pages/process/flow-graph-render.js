@@ -58,6 +58,18 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
   svgEdges.style.pointerEvents = 'none';
   canvas.appendChild(svgEdges);
 
+  // Edge-label overlay — the chips/labels for hand-off & channel edges. Kept in a
+  // separate SVG stacked ABOVE the node cards (z-index) so a chip is never hidden
+  // behind an adjacent node. Edge *lines* stay in svgEdges (behind the cards).
+  const svgLabels = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svgLabels.style.position     = 'absolute';
+  svgLabels.style.top          = '0';
+  svgLabels.style.left         = '0';
+  svgLabels.style.overflow     = 'visible';
+  svgLabels.style.pointerEvents = 'none';
+  svgLabels.style.zIndex       = '4';
+  canvas.appendChild(svgLabels);
+
   // Inject shared styles once (animations + badge colours)
   if (!document.getElementById('bp-graph-styles')) {
     const style = document.createElement('style');
@@ -480,8 +492,26 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     const pos = {};
     const colMain = [];
     if (vertical) {
+      // Widen a column boundary when a hand-off/channel chip drawn across it is
+      // wider than the default gap, so a long label (e.g. "Issue 👤✓ ready") never
+      // overlaps the neighbouring cards. Only edges spanning exactly one column
+      // sit in that gap; wider spans keep the default.
+      const boundaryNeed = new Array(Math.max(0, columns.length - 1)).fill(0);
+      (state.extraEdges || []).forEach(e => {
+        if (!colOf.has(e.from) || !colOf.has(e.to)) return;
+        const a = colOf.get(e.from), b = colOf.get(e.to);
+        if (Math.abs(a - b) !== 1) return;
+        const lo = Math.min(a, b);
+        const text = e.on === 'github' ? channelChipText(e) : (e.label || '');
+        if (text) boundaryNeed[lo] = Math.max(boundaryNeed[lo], estChipWidth(text));
+      });
       let x = 0;
-      for (let c = 0; c < columns.length; c++) { colMain[c] = x; x += NODE_W + H_GAP * 2; }
+      for (let c = 0; c < columns.length; c++) {
+        colMain[c] = x;
+        // gap = space between this card's right edge and the next card's left edge.
+        const gap = Math.max(H_GAP * 2, (boundaryNeed[c] || 0) + 40);
+        x += NODE_W + gap;
+      }
       ids.forEach(id => {
         const c = colOf.get(id) || 0;
         pos[id] = { x: colMain[c], y: (center.get(id) || 0) - getNodeHeight(id) / 2 };
@@ -1336,6 +1366,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
 
   function drawEdges() {
     svgEdges.innerHTML = '';
+    svgLabels.innerHTML = '';
 
     // Resize SVG to cover all content so paths at large coordinates are rendered
     let svgMaxX = 100, svgMaxY = 100;
@@ -1349,6 +1380,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     });
     svgEdges.setAttribute('width',  svgMaxX);
     svgEdges.setAttribute('height', svgMaxY);
+    svgLabels.setAttribute('width',  svgMaxX);
+    svgLabels.setAttribute('height', svgMaxY);
 
     const visible    = getVisibleNodes();
     const visibleIds = new Set(visible.map(n => n.id));
@@ -1478,47 +1511,66 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
       if (isGithub) {
         // A pill chip at the midpoint: artifact + optional routing label, with a
-        // clear human-approval gate glyph when a human must apply the label.
-        const parts = [artifact === 'pr' ? 'PR' : 'Issue'];
-        if (e.gate === 'human') parts.push('👤✓');
-        if (e.label) parts.push(e.label);
-        drawEdgeChip(mx, my, parts.join(' '), color, e.gate === 'human');
+        // clear human-approval gate glyph when a human must apply the label. Drawn
+        // on the overlay layer (above the cards) so it is never hidden.
+        drawEdgeChip(mx, my, channelChipText(e), color, e.gate === 'human');
       } else if (e.label) {
         const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         t.textContent = e.label;
         t.setAttribute('x', mx);
-        t.setAttribute('y', my);
+        t.setAttribute('y', my - 5);
         t.setAttribute('fill', color);
         t.setAttribute('font-size', '10');
+        t.setAttribute('font-weight', '600');
         t.setAttribute('text-anchor', 'middle');
-        svgEdges.appendChild(t);
+        t.setAttribute('paint-order', 'stroke');
+        t.style.stroke = 'var(--eb-bg-app)';        // halo so text reads over lines
+        t.setAttribute('stroke-width', '3');
+        svgLabels.appendChild(t);
       }
     });
   }
 
-  // A filled rounded-rect chip centred at (cx,cy) with a text label — used for
-  // GitHub-channel edges (#380). A human-approval gate gets a heavier outline so
-  // it reads as a distinct symbol on the edge.
+  // The chip text for a GitHub-channel edge (#380): artifact + optional human-gate
+  // glyph + optional routing label. Shared with the layout so widths line up.
+  function channelChipText(e) {
+    const parts = [e.artifact === 'issue' ? 'Issue' : 'PR'];
+    if (e.gate === 'human') parts.push('👤✓');
+    if (e.label) parts.push(e.label);
+    return parts.join(' ');
+  }
+  // Rough rendered-width estimate matching drawEdgeChip. Emoji/wide glyphs count
+  // ~1.7×. Used both to size the chip and to widen the column gap so it fits.
+  function estChipWidth(text) {
+    let n = 0;
+    for (const ch of String(text || '')) n += /[ -ÿ]/.test(ch) ? 1 : 1.7;
+    return Math.max(24, n * 6.4 + 16);
+  }
+
+  // A filled rounded-rect chip centred at (cx,cy) — used for GitHub-channel edges
+  // (#380). Drawn on the overlay layer (svgLabels) so it floats above the cards; a
+  // human-approval gate gets a red fill + white outline so it reads as a gate.
   function drawEdgeChip(cx, cy, text, color, human) {
-    const w = Math.max(24, text.length * 6.2 + 10);
-    const h = 15;
+    const w = estChipWidth(text);
+    const h = 17;
     const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
     rect.setAttribute('x', cx - w / 2); rect.setAttribute('y', cy - h / 2);
     rect.setAttribute('width', w); rect.setAttribute('height', h);
-    rect.setAttribute('rx', '7');
+    rect.setAttribute('rx', '8');
     rect.setAttribute('fill', human ? '#dc2626' : color);
-    rect.setAttribute('opacity', human ? '0.95' : '0.9');
-    if (human) { rect.setAttribute('stroke', '#fff'); rect.setAttribute('stroke-width', '1'); }
-    svgEdges.appendChild(rect);
+    if (human) rect.setAttribute('stroke', '#fff');
+    else rect.style.stroke = 'var(--eb-bg-app)';  // blends the pill into the canvas
+    rect.setAttribute('stroke-width', human ? '1.5' : '2');
+    svgLabels.appendChild(rect);
     const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
     t.textContent = text;
     t.setAttribute('x', cx); t.setAttribute('y', cy + 3.5);
     t.setAttribute('fill', '#fff');
-    t.setAttribute('font-size', '9');
+    t.setAttribute('font-size', '10');
     t.setAttribute('font-weight', '600');
     t.setAttribute('text-anchor', 'middle');
     t.style.pointerEvents = 'none';
-    svgEdges.appendChild(t);
+    svgLabels.appendChild(t);
   }
 
   function drawArtifactEdges(visibleBpIds) {

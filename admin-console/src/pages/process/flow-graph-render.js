@@ -941,9 +941,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
       // Header
       const header = document.createElement('div');
       header.style.cssText = 'font-weight:600;font-size:13px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:flex-start;gap:8px;';
-      const numLabel = state.numberLabels[n.id] || '';
       header.innerHTML = `
-        <span style="flex:1;line-height:1.4;">${esc(numLabel ? numLabel + ' ' : '')}${esc(bp.title)}</span>
+        <span style="flex:1;line-height:1.4;">${esc(bp.title)}</span>
         ${bpIdLabel(bp.id, bp.id.slice(0, 6), 'bp-id-copy')}
       `;
       node.appendChild(header);

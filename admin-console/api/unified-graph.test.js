@@ -60,17 +60,37 @@ test('gate flag: human:* listener edge is marked gate, not a separate type', () 
   assert.equal(e.from, null);
 });
 
-test('review edges: pr-review role yields in / approve / changes', () => {
+test('github channel edges: producesPr + consumer channel yields an on:github edge', () => {
   const g = buildUnifiedGraph([
-    { id: 'dev', triggers: [] },
-    { id: 'merger', triggers: [] },
-    { id: 'reviewer', kind: 'pr-review', triggers: [], review: { reviewsPrFrom: 'dev', onApprove: 'merger', onChangesRequested: 'dev' } },
+    { id: 'dev', triggers: [], github: { producesPr: true } },
+    { id: 'reviewer', triggers: [], channels: [{ artifact: 'pr', from: 'dev' }] },
   ]);
-  const reviewEdges = g.edges.filter(e => e.on === 'review');
-  assert.equal(reviewEdges.length, 3);
-  assert.ok(reviewEdges.find(e => e.reviewFlow === 'in' && e.from === 'dev' && e.to === 'reviewer'));
-  assert.ok(reviewEdges.find(e => e.outcome === 'approve' && e.to === 'merger'));
-  assert.ok(reviewEdges.find(e => e.outcome === 'changes' && e.to === 'dev'));
+  const e = findEdge(g, x => x.on === 'github');
+  assert.ok(e);
+  assert.equal(e.from, 'dev');
+  assert.equal(e.to, 'reviewer');
+  assert.equal(e.artifact, 'pr');
+  // producer node carries the produce flag for the badge/port renderer
+  assert.equal(g.nodes.find(n => n.id === 'dev').github.producesPr, true);
+});
+
+test('github channel edges: a labelled human-gated channel carries label + gate', () => {
+  const g = buildUnifiedGraph([
+    { id: 'dev', triggers: [], github: { producesPr: true } },
+    { id: 'deployer', triggers: [], channels: [{ artifact: 'pr', from: 'dev', label: 'approved', gate: 'human' }] },
+  ]);
+  const e = findEdge(g, x => x.on === 'github' && x.to === 'deployer');
+  assert.ok(e);
+  assert.equal(e.label, 'approved');
+  assert.equal(e.gate, 'human');
+});
+
+test('github channel edges: PR and issue channels between the same pair are distinct', () => {
+  const g = buildUnifiedGraph([
+    { id: 'ba', triggers: [], github: { producesPr: true, producesIssue: true } },
+    { id: 'dev', triggers: [], channels: [{ artifact: 'pr', from: 'ba' }, { artifact: 'issue', from: 'ba' }] },
+  ]);
+  assert.equal(g.edges.filter(e => e.on === 'github' && e.to === 'dev').length, 2);
 });
 
 // ── dependency / artifact edges (BP mechanism) ───────────────────────────────

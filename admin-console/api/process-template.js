@@ -28,16 +28,15 @@ function roleKeyOf(id, teamId) {
   return id;
 }
 
-// Remap a PR-review step's role references through roleKeyOf so an exported
-// team's review wiring uses portable role keys (#347).
-function remapReview(review, teamId) {
-  const r = review || {};
-  const out = {};
-  if (r.reviewsPrFrom) out.reviewsPrFrom = roleKeyOf(r.reviewsPrFrom, teamId);
-  if (r.onApprove) out.onApprove = roleKeyOf(r.onApprove, teamId);
-  if (r.onChangesRequested) out.onChangesRequested = roleKeyOf(r.onChangesRequested, teamId);
-  if (Array.isArray(r.paths) && r.paths.length) out.paths = r.paths.slice();
-  return out;
+// Remap a channel's `from` role reference through roleKeyOf so an exported team's
+// GitHub-channel wiring uses portable role keys (#380).
+function remapChannel(ch, teamId) {
+  return {
+    artifact: ch.artifact === 'issue' ? 'issue' : 'pr',
+    from: roleKeyOf(ch.from, teamId),
+    ...(ch.label ? { label: ch.label } : {}),
+    ...(ch.gate ? { gate: ch.gate } : {}),
+  };
 }
 
 // Slim a trigger for the bundle: keep what defines the wiring + behaviour, drop
@@ -87,13 +86,22 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
       id: roleKeyOf(r.id, teamId),
       displayName: r.displayName || r.id,
       role: r.role || 'team-member',
-      // PR-review steps carry their structured routing (#347); plain agents omit it.
-      ...(r.kind === 'pr-review' ? { kind: 'pr-review', review: remapReview(r.review, teamId) } : {}),
       sessionPolicy: r.sessionPolicy || 'persistent',
-      systemPrompt: r.systemPrompt || '',
+      // Drop the derived producer block (#380) so the portable bundle stays clean;
+      // it is regenerated from the `github` flag by expandGithubChannels.
+      systemPrompt: stripProduceBlock(r.systemPrompt),
       // Agent-level emitted labels (label hand-offs) — keep in the portable bundle.
       ...(Array.isArray(r.emits) && r.emits.length ? { emits: r.emits.slice() } : {}),
-      triggers: (r.triggers || []).map(bundleTrigger),
+      // GitHub artifact ports (#380): what this role produces (PR/issue) and the
+      // PR/issue channels it consumes. Declarative source of truth — the runtime
+      // github-event triggers are re-derived from these (expandGithubChannels),
+      // so the derived `channel:true` triggers are dropped from the portable bundle.
+      ...(r.github && (r.github.producesPr || r.github.producesIssue)
+        ? { github: { ...(r.github.producesPr ? { producesPr: true } : {}), ...(r.github.producesIssue ? { producesIssue: true } : {}) } }
+        : {}),
+      ...(Array.isArray(r.channels) && r.channels.length
+        ? { channels: r.channels.map(c => remapChannel(c, teamId)) } : {}),
+      triggers: (r.triggers || []).filter(t => !t.channel).map(bundleTrigger),
     })),
     gates: (gates || []).map(g => ({ label: g.label })),
     labels: (labels || []).map(l => ({ name: l.name, humanGate: !!l.humanGate, brake: !!l.brake })),
@@ -113,6 +121,15 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
   for (const r of b.roles) {
     if (!r || typeof r.id !== 'string' || !r.id) return { ok: false, error: 'each role needs a string id' };
     if (r.triggers && !Array.isArray(r.triggers)) return { ok: false, error: `role ${r.id}: triggers must be an array` };
+    if (r.channels !== undefined) {
+      if (!Array.isArray(r.channels)) return { ok: false, error: `role ${r.id}: channels must be an array` };
+      for (const c of r.channels) {
+        if (!c || (c.artifact !== 'pr' && c.artifact !== 'issue')) {
+          return { ok: false, error: `role ${r.id}: each channel needs artifact 'pr' or 'issue'` };
+        }
+        if (typeof c.from !== 'string' || !c.from) return { ok: false, error: `role ${r.id}: each channel needs a string 'from'` };
+      }
+    }
   }
   if (b.gates && !Array.isArray(b.gates)) return { ok: false, error: 'gates must be an array' };
   if (b.labels && !Array.isArray(b.labels)) return { ok: false, error: 'labels must be an array' };
@@ -157,6 +174,12 @@ function templateToCustomRoles(bundle) {
     ...(typeof r.parent === 'string' && r.parent ? { parent: r.parent } : {}),
     // Agent-level emitted labels (label hand-offs) — recorded on member config.
     ...(Array.isArray(r.emits) && r.emits.length ? { emits: r.emits } : {}),
+    // GitHub artifact ports (#380) — carried to member config so the live graph
+    // renders channel edges + the orchestrator instructs the agent to open
+    // PRs/issues. The functional consumer triggers are already expanded by
+    // expandGithubChannels before this runs.
+    ...(r.github && (r.github.producesPr || r.github.producesIssue) ? { github: r.github } : {}),
+    ...(Array.isArray(r.channels) && r.channels.length ? { channels: r.channels } : {}),
     triggers: (r.triggers || []).map(t => ({
       id: t.id,
       type: t.type,
@@ -168,6 +191,7 @@ function templateToCustomRoles(bundle) {
       at: t.at,
       emits: t.emits,
       dataFlow: t.dataFlow,
+      channel: t.channel,
       description: t.description,
       promptTemplate: t.prompt || '',
       preCheckScript: t.preCheckScript,
@@ -176,80 +200,189 @@ function templateToCustomRoles(bundle) {
   }));
 }
 
-// ─── PR-review steps (#347) ──────────────────────────────────────────────
-// Native GitHub PR reviews (Approve / Request changes), CODEOWNERS-style — not
-// a custom label. A `pr-review` role is a real reviewer agent; this expansion
-// (run only at materialise time) turns its structured routing into concrete
-// triggers and injects the producer's rework trigger, then drops the meta so
-// the role materialises like any other agent.
+// ─── GitHub PR/Issue channels (#380) ─────────────────────────────────────
+// The declarative way agents hand work off over GitHub. A role's `github` flags
+// say what it *produces* (opens PRs / opens issues); a consumer role's
+// `channels: [{ artifact, from, label?, gate? }]` say which producer's PR/issue
+// it *reacts to* (optionally only when a label is present, optionally only when a
+// human applied that label — the inline approval gate). This mirrors the
+// data-flow port model: the ports are the single source of truth, and this
+// expansion (materialise time + live reconcile) derives the concrete
+// github-event trigger on the consumer, marked `channel: true` so it can be
+// regenerated idempotently. The producer-side instruction ("open a PR/issue") is
+// appended to the producer's systemPrompt as an idempotent, marker-delimited
+// block (stripped on export, regenerated on expand) so a re-import never
+// duplicates it.
 
-function reviewerPrompt(paths) {
-  const scope = Array.isArray(paths) && paths.length
-    ? `\n\nReview only changes touching: ${paths.map(p => `\`${p}\``).join(', ')}.`
-    : '';
+// Marker-delimited producer instruction block (#380) — kept idempotent so
+// export→import→materialise round-trips cleanly.
+const PRODUCE_MARK_START = '<!-- github-io:start -->';
+const PRODUCE_MARK_END = '<!-- github-io:end -->';
+
+function producePrText() {
   return [
-    'A pull request was opened or reopened in this repo (see the event payload above).',
-    'Review it and submit a **native GitHub PR review**:',
-    '- if it meets the bar, **Approve** it;',
-    '- otherwise **Request changes** with specific, actionable line comments.',
-    'Use `gh-as-agent` so your review is attributed to you. Do not merge — approval is the human/branch-protection step.' + scope,
-    '',
-    'Reply `[PASS]` if there is nothing to review (e.g. the PR is a draft or already reviewed).',
+    '**Opening pull requests.** When a unit of your work is ready for the team, open a',
+    'Pull Request: write the PR body to a file, run `gh-as-agent stamp <file>`, then',
+    '`gh pr create --title "<title>" --body-file <file>`. Downstream agents are woken by',
+    'your PR, so always open one when you finish a piece of work.',
   ].join('\n');
 }
 
-function reworkPrompt(reviewerName) {
+function produceIssueText() {
   return [
-    `A PR review was submitted (see the event payload above). If the verdict from **${reviewerName}** is *Request changes*:`,
-    '- address every comment, push new commits (this dismisses the stale review), and re-request review;',
-    '- if you disagree, reply on the PR explaining why rather than silently ignoring it.',
-    'If the verdict is *Approve* or *Comment*, reply `[PASS]`.',
+    '**Opening issues.** When you identify work another agent should pick up, open a',
+    'GitHub Issue: write the issue body to a file, run `gh-as-agent stamp <file>`, then',
+    '`gh issue create --title "<title>" --body-file <file>`.',
+  ].join('\n');
+}
+
+function stripProduceBlock(text) {
+  if (typeof text !== 'string' || !text.includes(PRODUCE_MARK_START)) return typeof text === 'string' ? text : '';
+  return text.replace(
+    new RegExp(`\\n*${PRODUCE_MARK_START}[\\s\\S]*?${PRODUCE_MARK_END}\\n*`, 'g'), '',
+  ).trimEnd();
+}
+
+function produceBlock(github) {
+  const parts = [];
+  if (github && github.producesPr) parts.push(producePrText());
+  if (github && github.producesIssue) parts.push(produceIssueText());
+  if (!parts.length) return '';
+  return `${PRODUCE_MARK_START}\n\n## GitHub outputs\n\n${parts.join('\n\n')}\n\n${PRODUCE_MARK_END}`;
+}
+
+const CHANNEL_EVENTS = {
+  pr: { open: ['pull_request.opened', 'pull_request.reopened'], labeled: ['pull_request.labeled'] },
+  issue: { open: ['issues.opened'], labeled: ['issues.labeled'] },
+};
+
+// Canonical id for a derived channel trigger, so reconciliation can find and
+// regenerate it (kept in sync with reconcileTeamGithubChannels in api.js).
+function channelTriggerId(consumerId, artifact, producerId) {
+  return `${consumerId}-on-${artifact}-${producerId}`;
+}
+
+function isChannelTrigger(t) {
+  return !!(t && t.channel === true);
+}
+
+function consumePrPrompt(producerName, { label, human } = {}) {
+  const lead = human && label
+    ? `A human applied the \`${label}\` label to a pull request from **${producerName}** — that is your go-ahead.`
+    : label
+      ? `A pull request from **${producerName}** was labelled \`${label}\`.`
+      : `**${producerName}** opened a pull request (see the event payload above).`;
+  return [
+    lead,
+    '',
+    'Act on it:',
+    '1. `gh pr checkout <number>` (the PR number is in the payload) and read the diff.',
+    '2. Do your part of the work on that PR / branch.',
+    '3. Use `gh-as-agent` for any PR comments or reviews so your identity is stamped.',
+    '',
+    'Reply `[PASS]` if there is nothing for you to do here.',
+  ].join('\n');
+}
+
+function consumeIssuePrompt(producerName, { label, human } = {}) {
+  const lead = human && label
+    ? `A human applied the \`${label}\` label to an issue from **${producerName}** — that is your go-ahead.`
+    : label
+      ? `An issue from **${producerName}** was labelled \`${label}\`.`
+      : `**${producerName}** opened a GitHub issue (see the event payload above).`;
+  return [
+    lead,
+    '',
+    'Pick it up: read the issue, do the work it describes, then report back on the issue',
+    '(write any comment to a file, run `gh-as-agent stamp <file>`, then `gh issue comment <n> --body-file <file>`).',
+    '',
+    'Reply `[PASS]` if this issue is not for you.',
   ].join('\n');
 }
 
 /**
- * Expand `pr-review` roles in a bundle into concrete agent wiring (materialise
- * time). Returns a NEW bundle: reviewer gets a PR-opened trigger + review
- * protocol; the reviewed producer gets a `pull_request_review.submitted` rework
- * trigger; the `kind`/`review` meta is removed. Non-review roles pass through.
+ * Expand a role's `channels` ports into concrete consumer github-event triggers.
+ * Returns a NEW bundle. Previously-derived `channel:true` triggers are stripped
+ * first so an edited port (e.g. a newly-added label) regenerates cleanly rather
+ * than leaving a stale trigger behind. Idempotent. Roles without channels are
+ * untouched (no-op for catalog teams).
+ * @param {object} bundle
+ * @param {{ teamId?: string }} [opts] - teamId maps a producer role id → member
+ *   id (`<teamId>-<roleId>`) for the scoped `from` allowlist.
  */
-function expandReviewSteps(bundle) {
-  const roles = (bundle.roles || []).map(r => ({ ...r, triggers: (r.triggers || []).slice() }));
+function expandGithubChannels(bundle, { teamId } = {}) {
+  const roles = (bundle.roles || []).map(r => ({
+    ...r,
+    triggers: (r.triggers || []).filter(t => !isChannelTrigger(t)),
+  }));
   const byId = new Map(roles.map(r => [r.id, r]));
+  const memberId = (roleId) => (teamId ? `${teamId}-${roleId}` : roleId);
 
-  for (const r of roles) {
-    if (r.kind !== 'pr-review') continue;
-    const rv = r.review || {};
-    // Reviewer reacts to opened/reopened PRs and submits a native review.
-    r.triggers.push({
-      id: `${r.id}-review`,
-      type: 'github-event',
-      events: ['pull_request.opened', 'pull_request.reopened'],
-      from: 'any-except-self',
-      enabled: true,
-      description: `Review PRs${rv.reviewsPrFrom ? ` from ${rv.reviewsPrFrom}` : ''}`,
-      prompt: reviewerPrompt(rv.paths),
-    });
-    r.sessionPolicy = 'per-invocation';
-
-    // Producer reacts to review submissions to rework on "Request changes".
-    const producer = rv.reviewsPrFrom && byId.get(rv.reviewsPrFrom);
-    if (producer && !producer.triggers.some(t => t.id === `${producer.id}-rework-${r.id}`)) {
-      producer.triggers.push({
-        id: `${producer.id}-rework-${r.id}`,
+  for (const b of roles) {
+    for (const ch of (b.channels || [])) {
+      const artifact = ch.artifact === 'issue' ? 'issue' : 'pr';
+      const from = typeof ch.from === 'string' ? ch.from : '';
+      if (!from || from === b.id) continue;
+      const label = typeof ch.label === 'string' && ch.label.trim() ? ch.label.trim() : '';
+      const human = ch.gate === 'human';
+      const id = channelTriggerId(b.id, artifact, from);
+      if (b.triggers.some(t => t.id === id)) continue;
+      const events = (label ? CHANNEL_EVENTS[artifact].labeled : CHANNEL_EVENTS[artifact].open).slice();
+      const producerName = byId.get(from)?.displayName || from;
+      b.triggers.push({
+        id,
         type: 'github-event',
-        events: ['pull_request_review.submitted'],
-        from: 'any-except-self',
+        events,
+        ...(label ? { labelFilter: label } : {}),
+        // A human gate means the *human* applies the label; anyone-but-self would
+        // let an agent trip it. Scope non-gated channels to the producer so only
+        // that upstream's PR/issue wakes the consumer.
+        from: human ? 'humans' : [memberId(from)],
+        channel: true,
         enabled: true,
-        description: `Rework on review from ${r.displayName || r.id}`,
-        prompt: reworkPrompt(r.displayName || r.id),
+        description: `${artifact === 'pr' ? 'PR' : 'Issue'} from ${producerName}`
+          + `${label ? ` labelled ${label}` : ''}${human ? ' (human-approved)' : ''}`,
+        prompt: artifact === 'pr'
+          ? consumePrPrompt(producerName, { label, human })
+          : consumeIssuePrompt(producerName, { label, human }),
       });
     }
-    // The role is now a plain reviewer agent — drop the modeling meta.
+    // Producer instruction block — idempotent (strip any prior block, re-append).
+    const stripped = stripProduceBlock(b.systemPrompt || '');
+    const block = produceBlock(b.github);
+    b.systemPrompt = block ? `${stripped ? stripped + '\n\n' : ''}${block}` : stripped;
+  }
+  return { ...bundle, roles };
+}
+
+/**
+ * Back-compat: map a legacy `kind:'pr-review'` role (#347) onto the #380 channel
+ * ports so old drafts/teams keep rendering. The reviewer becomes a plain agent
+ * consuming a PR channel from its reviewed producer; the producer gets
+ * `producesPr`. The approve/changes outcome routing is dropped (superseded by the
+ * channel model). Idempotent; roles without the legacy meta pass through.
+ */
+function normalizeLegacyReview(bundle) {
+  if (!bundle || !Array.isArray(bundle.roles)) return bundle;
+  const roles = bundle.roles.map(r => ({ ...r }));
+  const byId = new Map(roles.map(r => [r.id, r]));
+  let changed = false;
+  for (const r of roles) {
+    if (r.kind !== 'pr-review') continue;
+    changed = true;
+    const rv = r.review || {};
+    if (rv.reviewsPrFrom && byId.has(rv.reviewsPrFrom)) {
+      r.channels = Array.isArray(r.channels) ? r.channels.slice() : [];
+      if (!r.channels.some(c => c.artifact === 'pr' && c.from === rv.reviewsPrFrom)) {
+        r.channels.push({ artifact: 'pr', from: rv.reviewsPrFrom });
+      }
+      const producer = byId.get(rv.reviewsPrFrom);
+      producer.github = { ...(producer.github || {}), producesPr: true };
+    }
     delete r.kind;
     delete r.review;
   }
-  return { ...bundle, roles };
+  return changed ? { ...bundle, roles } : bundle;
 }
 
 // ─── Data-flow steps (#379) ───────────────────────────────────────────────
@@ -395,6 +528,7 @@ function expandDataFlowSteps(bundle, { teamId } = {}) {
 
 module.exports = {
   buildProcessTemplate, validateProcessTemplate, templateToCustomRoles,
-  expandReviewSteps, expandDataFlowSteps, emptyDraftBundle, roleKeyOf, VERSION,
+  expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview,
+  channelTriggerId, isChannelTrigger, emptyDraftBundle, roleKeyOf, VERSION,
   artifactKey, artifactHint, artifactIsNamed,
 };

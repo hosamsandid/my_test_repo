@@ -13,7 +13,7 @@
 
 import { computeFlowLayout, assignCrossCoords } from './flow-layout';
 
-export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge } = {}) {
+export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChannel, onSelectEdge } = {}) {
 
   // ─── Constants ──────────────────────────────────────────────────────
   const NODE_W      = 320;
@@ -72,6 +72,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
       .bp-badge-rigor-high     { background:rgba(249,115,22,0.15); color:#f97316; border:1px solid rgba(249,115,22,0.4); }
       .bp-badge-rigor-standard { background:rgba(107,114,128,0.15); color:#9ca3af; border:1px solid rgba(107,114,128,0.4); }
       .bp-badge-revision       { background:rgba(99,102,241,0.15);  color:#818cf8; border:1px solid rgba(99,102,241,0.4); }
+      .bp-badge-gh-pr          { background:rgba(139,92,246,0.15);  color:#a78bfa; border:1px solid rgba(139,92,246,0.4); }
+      .bp-badge-gh-issue       { background:rgba(20,184,166,0.15);  color:#2dd4bf; border:1px solid rgba(20,184,166,0.4); }
 
       /* ── Status backgrounds (dark, default) ─────────────────────────── */
       .bp-node-status-draft      { background: #1e1318; }
@@ -213,13 +215,16 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
       // Bands group by the effective (inherited) stage; fall back to own.
       stage: (typeof n.effectiveStage === 'string' && n.effectiveStage)
         || (typeof n.stage === 'string' ? n.stage : ''),
+      // GitHub artifact ports (#380): produce flags → badge + output ports.
+      github: (n.github && (n.github.producesPr || n.github.producesIssue)) ? n.github : null,
+      channels: Array.isArray(n.channels) ? n.channels : [],
       _role: n.role,
       _isParent: n.isParent === true,
     }));
     state.byId = {};
     state.briefings.forEach(bp => { state.byId[bp.id] = bp; });
 
-    const EXTRA = new Set(['label', 'review', 'manual']);
+    const EXTRA = new Set(['label', 'review', 'manual', 'github']);
     state.extraEdges = (Array.isArray(g.edges) ? g.edges : [])
       .filter(e => EXTRA.has(e.on) && e.from && e.to && e.from !== e.to);
 
@@ -655,15 +660,23 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
     layoutArtifacts(visible);
   }
 
-  // Artifacts (inputs/outputs) always live in a dedicated horizontal lane BELOW
-  // the whole node graph, regardless of flow orientation. Each artifact is
-  // placed at the mean x of its producer(s) + consumer(s), so the producer→
-  // artifact→consumer edges form a short "triangle" (down into the lane, back
-  // up to the consumer). The pooling pass below spreads overlapping artifacts
-  // apart while keeping them close to that ideal x. See drawArtifactEdges for
-  // the matching (always-vertical) edge routing.
+  // Artifacts (inputs/outputs) live in a dedicated lane, oriented perpendicular
+  // to the flow so producer→artifact→consumer reads as a short "triangle":
+  //  - horizontal flow (state.orientation === 'horizontal'): a horizontal lane
+  //    BELOW the graph; artifacts placed at the mean x of their producer(s)+
+  //    consumer(s); edges route down into / up out of it.
+  //  - vertical flow (state.orientation === 'vertical'): a vertical lane as a
+  //    new column on the RIGHT; artifacts stacked top→bottom at the mean y of
+  //    their producer(s)+consumer(s); edges route right into / left out of it.
+  // Either way the pooling pass spreads overlapping artifacts apart while
+  // keeping them close to that ideal position. drawArtifactEdges mirrors the
+  // orientation split for the edge routing.
   function layoutArtifacts(visibleBpNodes) {
-    layoutArtifactLane(visibleBpNodes);
+    if (state.orientation === 'horizontal') {
+      layoutArtifactLane(visibleBpNodes);
+    } else {
+      layoutArtifactColumn(visibleBpNodes);
+    }
   }
 
   function layoutArtifactLane(visibleBpNodes) {
@@ -789,6 +802,133 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
     state.artifactPositions = artPos;
   }
 
+  // Right-side artifact column, used for vertical flow (columns top→bottom).
+  // Mirror of layoutArtifactLane along the other axis: the column sits to the
+  // right of every node column and artifacts are stacked top→bottom at the mean
+  // y of their producer(s)+consumer(s), with the same pooling pass.
+  function layoutArtifactColumn(visibleBpNodes) {
+    const visiblePaths = getVisibleArtifactPaths();
+    if (visiblePaths.size === 0) { state.artifactPositions = {}; return; }
+
+    let maxX = 0;
+    visibleBpNodes.forEach(n => {
+      const pos = state.positions[n.id];
+      if (!pos) return;
+      maxX = Math.max(maxX, pos.x + NODE_W);
+    });
+    const artifactColX = maxX + H_GAP * 2;
+
+    const visibleBpIds = new Set(visibleBpNodes.map(n => n.id));
+
+    const items = [];
+    visiblePaths.forEach(path => {
+      const reg = state.artifactRegistry[path];
+      if (!reg) return;
+
+      let sum  = 0;
+      let count = 0;
+      let bpMin = Infinity;
+      let bpMax = -Infinity;
+      const consider = (id, toggleSet) => {
+        if (!visibleBpIds.has(id) || !toggleSet.has(id)) return;
+        const pos = state.positions[id];
+        if (!pos) return;
+        const h = getNodeHeight(id);
+        const center = pos.y + h / 2;
+        sum += center;
+        count++;
+        if (center < bpMin) bpMin = center;
+        if (center > bpMax) bpMax = center;
+      };
+      reg.producers.forEach(id => consider(id, state.outputsVisible));
+      reg.consumers.forEach(id => consider(id, state.inputsVisible));
+      if (count === 0) return;
+
+      items.push({
+        path,
+        idealY: sum / count - ARTIFACT_H / 2,
+        bpMin:  bpMin - ARTIFACT_H / 2,
+        bpMax:  bpMax - ARTIFACT_H / 2,
+      });
+    });
+
+    items.sort((a, b) => a.idealY - b.idealY);
+    const SPACING = ARTIFACT_H + 16;
+    const blocks  = [];
+    for (let i = 0; i < items.length; i++) {
+      let start = i;
+      let count = 1;
+      let sum   = items[i].idealY - i * SPACING;
+      let value = sum;
+      while (blocks.length > 0 && blocks[blocks.length - 1].value > value) {
+        const prev = blocks.pop();
+        start  = prev.start;
+        count += prev.count;
+        sum   += prev.sum;
+        value  = sum / count;
+      }
+      blocks.push({ start, end: i, count, sum, value });
+    }
+
+    blocks.forEach(b => {
+      for (let i = b.start; i <= b.end; i++) {
+        items[i].y = b.value + i * SPACING;
+      }
+    });
+
+    let prevBottom = -Infinity;
+    blocks.forEach((b, bIdx) => {
+      const minSpan = (b.count - 1) * SPACING;
+
+      if (b.count < 2) {
+        prevBottom = items[b.start].y;
+        return;
+      }
+
+      let unionMin = Infinity;
+      let unionMax = -Infinity;
+      for (let i = b.start; i <= b.end; i++) {
+        if (items[i].bpMin < unionMin) unionMin = items[i].bpMin;
+        if (items[i].bpMax > unionMax) unionMax = items[i].bpMax;
+      }
+      const desiredSpan = unionMax - unionMin;
+      if (desiredSpan <= minSpan) {
+        prevBottom = items[b.end].y;
+        return;
+      }
+
+      const topLimit    = bIdx > 0 ? prevBottom + SPACING : -Infinity;
+      const bottomLimit = bIdx < blocks.length - 1
+        ? blocks[bIdx + 1].value + blocks[bIdx + 1].start * SPACING - SPACING
+        : Infinity;
+
+      const centroid = b.value + ((b.start + b.end) / 2) * SPACING;
+      let blockStart = centroid - desiredSpan / 2;
+      let blockEnd   = centroid + desiredSpan / 2;
+      if (blockStart < topLimit) {
+        blockEnd  += topLimit - blockStart;
+        blockStart = topLimit;
+      }
+      if (blockEnd > bottomLimit) {
+        blockStart -= blockEnd - bottomLimit;
+        blockEnd    = bottomLimit;
+        if (blockStart < topLimit) blockStart = topLimit;
+      }
+      let span = blockEnd - blockStart;
+      if (span < minSpan) span = minSpan;
+
+      const step = span / (b.count - 1);
+      for (let i = b.start; i <= b.end; i++) {
+        items[i].y = blockStart + step * (i - b.start);
+      }
+      prevBottom = items[b.end].y;
+    });
+
+    const artPos = {};
+    items.forEach(it => { artPos[it.path] = { x: artifactColX, y: it.y }; });
+    state.artifactPositions = artPos;
+  }
+
   // ─── Rendering ───────────────────────────────────────────────────────
 
   function render() {
@@ -847,6 +987,11 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
       if (bp.rigor)    badgeParts.push(`<span class="bp-badge bp-badge-rigor-${esc(bp.rigor)}">${esc(bp.rigor)}</span>`);
       if (bp.revision && parseInt(bp.revision) > 1)
         badgeParts.push(`<span class="bp-badge bp-badge-revision" title="Revised">Rev ${esc(String(bp.revision))}</span>`);
+      // GitHub produce badges (#380) — visible before any wiring.
+      if (bp.github && bp.github.producesPr)
+        badgeParts.push(`<span class="bp-badge bp-badge-gh-pr" title="Opens pull requests">⇅ PR</span>`);
+      if (bp.github && bp.github.producesIssue)
+        badgeParts.push(`<span class="bp-badge bp-badge-gh-issue" title="Opens issues">◉ Issue</span>`);
       if (badgeParts.length > 0) {
         const badges = document.createElement('div');
         badges.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px;';
@@ -904,6 +1049,29 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
           startConnect(n.id);
         });
         node.appendChild(port);
+      }
+
+      // GitHub PR/Issue output ports (#380): labelled pills on the right edge,
+      // shown only when the node produces that artifact. Grab one and drag it to
+      // another node to declare that agent reacts to the PR/issue.
+      if (state.editable && onConnectChannel && bp.github) {
+        const outs = [];
+        if (bp.github.producesPr) outs.push({ artifact: 'pr', label: 'PR', color: '#8b5cf6' });
+        if (bp.github.producesIssue) outs.push({ artifact: 'issue', label: 'Issue', color: '#14b8a6' });
+        outs.forEach((o, i) => {
+          const pill = document.createElement('div');
+          pill.title = `Drag to another node: it reacts to this agent's ${o.label}`;
+          pill.textContent = o.label;
+          pill.style.cssText = `position:absolute;right:-10px;top:calc(50% + ${18 + i * 20}px);`
+            + `padding:1px 6px;border-radius:9px;background:${o.color};color:#fff;font-size:9px;`
+            + `font-weight:600;line-height:1.4;cursor:crosshair;z-index:3;box-shadow:var(--eb-shadow-sm);`;
+          pill.addEventListener('mousedown', (ev) => {
+            ev.stopPropagation();
+            ev.preventDefault();
+            startConnect(n.id, o.artifact);
+          });
+          node.appendChild(pill);
+        });
       }
 
       // Agent Prompt panel — the node's prompt/content, read-only markdown.
@@ -988,40 +1156,49 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
     }
   }
 
-  // Artifact lane band: a single faint, labelled rectangle behind the artifact
-  // row that spans the full width of the graph — so the generated files read as
-  // a dedicated lane below the agent arrangement (matches drawArtifactEdges).
+  // Artifact lane band: a single faint, labelled rectangle behind the artifacts
+  // so the generated files read as a dedicated lane. It hugs the artifact
+  // bounding box and is extended along the flow axis to span the node columns:
+  // a horizontal band below the graph for horizontal flow, a vertical band to
+  // the right for vertical flow (matches drawArtifactEdges).
   function drawArtifactLane() {
     laneLayer.innerHTML = '';
     const paths = Object.keys(state.artifactPositions);
     if (paths.length === 0) return;
+    const laneBelow = state.orientation === 'horizontal';
 
-    let laneTop = Infinity, laneBottom = -Infinity;
     let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
     paths.forEach(path => {
       const pos = state.artifactPositions[path];
       if (!pos) return;
       const el = canvas.querySelector(`.artifact-node[data-path="${CSS.escape(path)}"]`);
       const h  = el ? el.offsetHeight : ARTIFACT_H;
-      laneTop    = Math.min(laneTop, pos.y);
-      laneBottom = Math.max(laneBottom, pos.y + h);
       minX = Math.min(minX, pos.x);
       maxX = Math.max(maxX, pos.x + ARTIFACT_W);
+      minY = Math.min(minY, pos.y);
+      maxY = Math.max(maxY, pos.y + h);
     });
-    if (laneTop === Infinity) return;
+    if (minX === Infinity) return;
 
-    // Widen the band to also span the node columns, so it reads as a full lane.
+    // Extend the band along the flow axis so it spans the node arrangement: the
+    // width (x) for a below-lane, the height (y) for a right-column.
     getVisibleNodes().forEach(n => {
       const pos = state.positions[n.id];
       if (!pos) return;
-      minX = Math.min(minX, pos.x);
-      maxX = Math.max(maxX, pos.x + NODE_W);
+      if (laneBelow) {
+        minX = Math.min(minX, pos.x);
+        maxX = Math.max(maxX, pos.x + NODE_W);
+      } else {
+        minY = Math.min(minY, pos.y);
+        maxY = Math.max(maxY, pos.y + getNodeHeight(n.id));
+      }
     });
 
     const PAD = 20;
     const band = document.createElement('div');
-    band.style.cssText = `position:absolute;left:${minX - PAD}px;top:${laneTop - PAD - 18}px;`
-      + `width:${maxX - minX + PAD * 2}px;height:${laneBottom - laneTop + PAD * 2 + 18}px;`
+    band.style.cssText = `position:absolute;left:${minX - PAD}px;top:${minY - PAD - 18}px;`
+      + `width:${maxX - minX + PAD * 2}px;height:${maxY - minY + PAD * 2 + 18}px;`
       + `background:rgba(148,163,184,0.06);`
       + `border:1px dashed var(--eb-border-default);border-radius:10px;`;
     const label = document.createElement('div');
@@ -1296,6 +1473,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
     // 4. Process-linking edges (label / review / manual) — the extra wiring
     //    from the process view, drawn on top of the BP structure.
     const EXTRA_COLOR = { label: '#3b82f6', review: '#f59e0b', manual: '#3b82f6' };
+    const GH_COLOR = { pr: '#8b5cf6', issue: '#14b8a6' };
     (state.extraEdges || []).forEach(e => {
       if (!visibleIds.has(e.from) || !visibleIds.has(e.to)) return;
       const fromPos = state.positions[e.from];
@@ -1303,7 +1481,9 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
       const fromEl  = canvas.querySelector(`.bp-node[data-id="${e.from}"]`);
       if (!fromPos || !toPos || !fromEl) return;
       const fromH = fromEl.offsetHeight;
-      const color = EXTRA_COLOR[e.on] || '#3b82f6';
+      const isGithub = e.on === 'github';
+      const artifact = e.artifact === 'issue' ? 'issue' : 'pr';
+      const color = isGithub ? GH_COLOR[artifact] : (EXTRA_COLOR[e.on] || '#3b82f6');
 
       let x1, y1, x2, y2, flow;
       if (vertical) {
@@ -1313,14 +1493,23 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
         x1 = fromPos.x + NODE_W / 2; y1 = fromPos.y + fromH;
         x2 = toPos.x + NODE_W / 2;   y2 = toPos.y;  flow = 'vertical';
       }
-      const d = drawBezierEdge(x1, y1, x2, y2, color, 1.5, '', true, flow);
-      // Clickable hit-area so the edge can be edited/removed (#362 Phase C2).
-      addEdgeHit(d, { from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on, triggerId: e.triggerId });
-      if (e.label) {
+      const d = drawBezierEdge(x1, y1, x2, y2, color, isGithub ? 2 : 1.5, '', true, flow);
+      // Clickable hit-area so the edge can be edited/removed (#362 Phase C2 / #380).
+      addEdgeHit(d, { from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on,
+        artifact: isGithub ? artifact : undefined, gate: e.gate, triggerId: e.triggerId });
+      const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+      if (isGithub) {
+        // A pill chip at the midpoint: artifact + optional routing label, with a
+        // clear human-approval gate glyph when a human must apply the label.
+        const parts = [artifact === 'pr' ? 'PR' : 'Issue'];
+        if (e.gate === 'human') parts.push('👤✓');
+        if (e.label) parts.push(e.label);
+        drawEdgeChip(mx, my, parts.join(' '), color, e.gate === 'human');
+      } else if (e.label) {
         const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         t.textContent = e.label;
-        t.setAttribute('x', (x1 + x2) / 2);
-        t.setAttribute('y', (y1 + y2) / 2);
+        t.setAttribute('x', mx);
+        t.setAttribute('y', my);
         t.setAttribute('fill', color);
         t.setAttribute('font-size', '10');
         t.setAttribute('text-anchor', 'middle');
@@ -1329,24 +1518,57 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
     });
   }
 
+  // A filled rounded-rect chip centred at (cx,cy) with a text label — used for
+  // GitHub-channel edges (#380). A human-approval gate gets a heavier outline so
+  // it reads as a distinct symbol on the edge.
+  function drawEdgeChip(cx, cy, text, color, human) {
+    const w = Math.max(24, text.length * 6.2 + 10);
+    const h = 15;
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('x', cx - w / 2); rect.setAttribute('y', cy - h / 2);
+    rect.setAttribute('width', w); rect.setAttribute('height', h);
+    rect.setAttribute('rx', '7');
+    rect.setAttribute('fill', human ? '#dc2626' : color);
+    rect.setAttribute('opacity', human ? '0.95' : '0.9');
+    if (human) { rect.setAttribute('stroke', '#fff'); rect.setAttribute('stroke-width', '1'); }
+    svgEdges.appendChild(rect);
+    const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    t.textContent = text;
+    t.setAttribute('x', cx); t.setAttribute('y', cy + 3.5);
+    t.setAttribute('fill', '#fff');
+    t.setAttribute('font-size', '9');
+    t.setAttribute('font-weight', '600');
+    t.setAttribute('text-anchor', 'middle');
+    t.style.pointerEvents = 'none';
+    svgEdges.appendChild(t);
+  }
+
   function drawArtifactEdges(visibleBpIds) {
     const visiblePaths = getVisibleArtifactPaths();
+    const laneBelow    = state.orientation === 'horizontal';
 
-    // Artifacts sit in the lane below the graph, so every producer/consumer is
-    // above them: producer → artifact goes DOWN into the lane, artifact →
-    // consumer goes back UP. Both attach to the artifact's TOP edge, fanned out
-    // toward the connected node's x so the two arms read as a clean triangle.
+    // The lane is perpendicular to the flow, so producer→artifact→consumer
+    // reads as a triangle. Both arms attach to the artifact edge facing the
+    // graph — its TOP for the below-lane (horizontal flow), its LEFT for the
+    // right-column (vertical flow) — fanned toward each node so the two arms
+    // stay distinct.
     const ANCHOR_MARGIN = 16;
+    const artEl = path => canvas.querySelector(`.artifact-node[data-path="${CSS.escape(path)}"]`);
     const topAnchorX = (artPos, nodeCx) =>
       Math.max(artPos.x + ANCHOR_MARGIN,
         Math.min(artPos.x + ARTIFACT_W - ANCHOR_MARGIN, nodeCx));
+    const leftAnchorY = (artPos, artH, nodeCy) =>
+      Math.max(artPos.y + ANCHOR_MARGIN,
+        Math.min(artPos.y + artH - ANCHOR_MARGIN, nodeCy));
 
     visiblePaths.forEach(path => {
       const reg    = state.artifactRegistry[path];
       const artPos = state.artifactPositions[path];
       if (!reg || !artPos) return;
+      const el   = artEl(path);
+      const artH = el ? el.offsetHeight : ARTIFACT_H;
 
-      // Output edges: BP → artifact (green), down into the lane.
+      // Output edges: BP → artifact (green), into the lane.
       reg.producers.forEach(bpId => {
         if (!visibleBpIds.has(bpId)) return;
         const bpPos = state.positions[bpId];
@@ -1355,14 +1577,22 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
 
         const bpH  = bpEl.offsetHeight;
         const bpCx = bpPos.x + NODE_W / 2;
-        const d = drawBezierEdge(
-          bpCx, bpPos.y + bpH,
-          topAnchorX(artPos, bpCx), artPos.y,
-          '#34d399', 1.5, '', true, 'vertical');
+        const bpCy = bpPos.y + bpH / 2;
+        const d = laneBelow
+          // below-lane: producer bottom → artifact top (down)
+          ? drawBezierEdge(
+              bpCx, bpPos.y + bpH,
+              topAnchorX(artPos, bpCx), artPos.y,
+              '#34d399', 1.5, '', true, 'vertical')
+          // right-column: producer right → artifact left (rightward)
+          : drawBezierEdge(
+              bpPos.x + NODE_W, bpCy,
+              artPos.x, leftAnchorY(artPos, artH, bpCy),
+              '#34d399', 1.5, '', true, 'horizontal');
         addEdgeHit(d, { on: 'artifact', from: bpId, direction: 'output', path });
       });
 
-      // Input edges: artifact → BP (blue dashed), back up out of the lane.
+      // Input edges: artifact → BP (blue dashed), back out of the lane.
       reg.consumers.forEach(bpId => {
         if (!visibleBpIds.has(bpId)) return;
         const bpPos = state.positions[bpId];
@@ -1371,10 +1601,18 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
 
         const bpH  = bpEl.offsetHeight;
         const bpCx = bpPos.x + NODE_W / 2;
-        const d = drawBezierEdge(
-          topAnchorX(artPos, bpCx), artPos.y,
-          bpCx, bpPos.y + bpH,
-          '#60a5fa', 1.5, '4 3', true, 'vertical');
+        const bpCy = bpPos.y + bpH / 2;
+        const d = laneBelow
+          // below-lane: artifact top → consumer bottom (up)
+          ? drawBezierEdge(
+              topAnchorX(artPos, bpCx), artPos.y,
+              bpCx, bpPos.y + bpH,
+              '#60a5fa', 1.5, '4 3', true, 'vertical')
+          // right-column: artifact left → consumer right (leftward)
+          : drawBezierEdge(
+              artPos.x, leftAnchorY(artPos, artH, bpCy),
+              bpPos.x + NODE_W, bpCy,
+              '#60a5fa', 1.5, '4 3', true, 'horizontal');
         addEdgeHit(d, { on: 'artifact', from: bpId, direction: 'input', path });
       });
     });
@@ -1579,8 +1817,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
       y: (clientY - r.top - state.pan.y) / state.zoom,
     };
   }
-  function startConnect(fromId) {
-    state.connecting = { fromId };
+  function startConnect(fromId, artifact) {
+    state.connecting = { fromId, artifact: artifact || null };
     viewport.style.cursor = 'crosshair';
     tempEdge = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     tempEdge.setAttribute('stroke', 'var(--eb-accent-primary)');
@@ -1603,13 +1841,18 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
   }
   function finishConnect(e) {
     const fromId = state.connecting.fromId;
+    const artifact = state.connecting.artifact;
     state.connecting = null;
     viewport.style.cursor = 'grab';
     if (tempEdge) { tempEdge.remove(); tempEdge = null; }
     const el = document.elementFromPoint(e.clientX, e.clientY);
     const nodeEl = el && el.closest ? el.closest('.bp-node') : null;
     const toId = nodeEl && nodeEl.dataset ? nodeEl.dataset.id : null;
-    if (toId && toId !== fromId && onConnect) onConnect(fromId, toId);
+    if (!toId || toId === fromId) return;
+    // A drag from a PR/Issue output port declares a GitHub channel (#380);
+    // the plain ● port declares a generic hand-off.
+    if (artifact && onConnectChannel) onConnectChannel(fromId, toId, artifact);
+    else if (onConnect) onConnect(fromId, toId);
   }
 
   function onWheel(e) {

@@ -17,6 +17,9 @@ import { X } from 'lucide-react';
 //   onChanged   — called after any successful mutation
 export default function ConnectionsSection({ node, siblings = [], inheritedStage = '', showStage = true, ops, onChanged }) {
   const [stage, setStage] = useState(node.stage || '');
+  const gh = node.github || {};
+  const [producesPr, setPr] = useState(!!gh.producesPr);
+  const [producesIssue, setIssue] = useState(!!gh.producesIssue);
   const nameOf = (id) => siblings.find(s => s.id === id)?.displayName || id;
   // An artifact is keyed by its logical name when set, else its path (#382).
   const keyOf = (a) => (typeof a === 'string' ? a : (a && (a.name || a.path))) || '';
@@ -30,12 +33,15 @@ export default function ConnectionsSection({ node, siblings = [], inheritedStage
   const deps = Array.isArray(node.dependsOn) ? node.dependsOn : [];
   const inputs = Array.isArray(node.inputs) ? node.inputs : [];
   const outputs = Array.isArray(node.outputs) ? node.outputs : [];
+  const channels = Array.isArray(node.channels) ? node.channels : [];
 
   const run = async (fn) => {
     try { await fn(); onChanged?.(); }
     catch (e) { window.alert(e?.message || String(e)); }
   };
   const setParent = (v) => run(() => ops.setParent(node.id, v || null));
+  const saveProduces = (pr, issue) => { setPr(pr); setIssue(issue); run(() => ops.setGithubProduces(node.id, { pr, issue })); };
+  const chLabel = (c) => `${c.artifact === 'pr' ? 'PR' : 'Issue'} ${c.gate === 'human' ? '👤 ' : ''}${nameOf(c.from)}${c.label ? ` [${c.label}]` : ''}`;
   const saveStage = () => {
     if ((stage || '') === (node.stage || '') || !ops.setStage) return;
     run(() => ops.setStage(node.id, stage));
@@ -64,6 +70,30 @@ export default function ConnectionsSection({ node, siblings = [], inheritedStage
             </span>
           )}
         </Field>
+      )}
+
+      {ops.setGithubProduces && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>GitHub outputs</div>
+          <label style={check}>
+            <input type="checkbox" checked={producesPr}
+              onChange={e => saveProduces(e.target.checked, producesIssue)} />
+            Opens pull requests
+          </label>
+          <label style={check}>
+            <input type="checkbox" checked={producesIssue}
+              onChange={e => saveProduces(producesPr, e.target.checked)} />
+            Opens issues
+          </label>
+        </div>
+      )}
+
+      {channels.length > 0 && (
+        <ChipRow label="reacts to" color="#8b5cf6"
+          items={channels.map(c => ({
+            key: `${c.artifact}:${c.from}`, text: chLabel(c),
+            onRemove: () => run(() => ops.removeChannel(node.id, { artifact: c.artifact, from: c.from })),
+          }))} />
       )}
 
       {(deps.length || inputs.length || outputs.length) ? (
@@ -120,3 +150,4 @@ const input = {
   background: 'var(--eb-bg-app)', color: 'var(--eb-text-primary)', border: '1px solid var(--eb-border-default)',
   borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', boxSizing: 'border-box', width: '100%', outline: 'none',
 };
+const check = { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' };

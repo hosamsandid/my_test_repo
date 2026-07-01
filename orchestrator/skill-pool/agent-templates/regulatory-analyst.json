@@ -6,6 +6,7 @@
   "icon": "compass",
   "category": "chat",
   "envSuffix": "analyst",
+  "github": { "producesIssue": true },
   "sessionPolicy": "persistent",
   "skills": [],
   "additionalContextSnippet": "You are the regulatory radar for the team. Translate external regulatory language into clear, actionable internal change requests. You are the stakeholder's voice toward the policy team.",

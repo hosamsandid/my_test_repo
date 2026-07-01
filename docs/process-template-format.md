@@ -37,6 +37,10 @@ role's `{{vars}}` and the target repo are applied per member.
       "role": "team-member",
       "sessionPolicy": "persistent" | "per-invocation",
       "systemPrompt": "You implement issues…",
+      "github": { "producesPr": true, "producesIssue": false },  // GitHub outputs (#380)
+      "channels": [                          // PR/issue channels this role consumes (#380)
+        { "artifact": "pr", "from": "developer", "label": "approved", "gate": "human" }
+      ],
       "triggers": [
         {
           "id": "developer-assigned",
@@ -99,6 +103,18 @@ way two agents are wired in the Flow editor. These are optional arrays on a role
   trigger of role `A` lists `L` in `emits` and a trigger of role `B` filters on
   `L` (`labelFilter`). Raw events (no `labelFilter`) are external triggers, not
   hand-offs.
+- **GitHub channels (#380) are declarative ports.** `github.{producesPr,producesIssue}`
+  marks what a role opens (drives the node badge/ports and appends the producer
+  instruction block to its prompt at materialise). A consumer's `channels` entry
+  `{artifact, from, label?, gate?}` declares *A opens a PR/issue that wakes B* —
+  optionally only when `label` is present, and `gate: "human"` means a **human**
+  applies that label (the inline approval gate on the edge). At materialise (and
+  on live edits, via `reconcileTeamGithubChannels`) `expandGithubChannels` derives
+  the consumer's github-event trigger (`<consumer>-on-<artifact>-<producer>`,
+  marked `channel: true`) from the port — the derived triggers are **not** stored
+  in the portable bundle, only the ports. This supersedes the old
+  `kind: "pr-review"` construct; legacy `pr-review` roles are normalised onto
+  channels on import (`normalizeLegacyReview`).
 - **Gates & brakes are never emitted by agents.** `human:*` gate labels and the
   brakes (`hold`, `needs:human`) only ever appear as a *listener* `labelFilter`;
   an agent that declares them in `emits` is flagged `gate-violation` by the lint

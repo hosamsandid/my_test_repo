@@ -2156,6 +2156,8 @@ class Orchestrator {
         ...(opts.dataFlow && typeof opts.dataFlow === 'object' ? { dataFlow: opts.dataFlow } : {}),
         ...(typeof opts.parentMemberId === 'string' && opts.parentMemberId ? { parentMemberId: opts.parentMemberId } : {}),
         ...(Array.isArray(opts.emits) && opts.emits.length ? { emits: opts.emits } : {}),
+        ...(opts.github && typeof opts.github === 'object' ? { github: opts.github } : {}),
+        ...(Array.isArray(opts.channels) && opts.channels.length ? { channels: opts.channels } : {}),
         enabled: false, // no token → isStub; UI shows it, enableAgent materializes it
       };
       saveAgentConfig(memberId, stubConfig);
@@ -2222,6 +2224,11 @@ class Orchestrator {
       ...(typeof opts.parentMemberId === 'string' && opts.parentMemberId ? { parentMemberId: opts.parentMemberId } : {}),
       // Agent-level emitted labels (label hand-offs) for the process graph.
       ...(Array.isArray(opts.emits) && opts.emits.length ? { emits: opts.emits } : {}),
+      // GitHub artifact ports (#380) — produce flags + consumed channels, recorded
+      // for the process graph. Runtime consumer hand-offs are driven by the derived
+      // github-event triggers, not this block.
+      ...(opts.github && typeof opts.github === 'object' ? { github: opts.github } : {}),
+      ...(Array.isArray(opts.channels) && opts.channels.length ? { channels: opts.channels } : {}),
       enabled: true,
     };
     saveAgentConfig(memberId, memberConfig);

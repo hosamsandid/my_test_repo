@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandReviewSteps, expandDataFlowSteps, emptyDraftBundle, roleKeyOf } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, emptyDraftBundle, roleKeyOf } = require('./process-template');
 
 const sampleRoles = [
   {
@@ -93,64 +93,109 @@ test('validateProcessTemplate checks gates/labels are arrays', () => {
   assert.equal(validateProcessTemplate({ ...base, roles: [{ id: 'a', triggers: 'no' }] }, { allowEmptyRoles: true }).ok, false);
 });
 
-test('expandReviewSteps: reviewer gets a PR-opened trigger; producer gets a rework trigger', () => {
+test('expandGithubChannels: a consumer channel yields a scoped PR-opened trigger', () => {
   const bundle = {
     processTemplateVersion: 1, name: 'rev', level: 'template',
     roles: [
-      { id: 'developer', displayName: 'Developer', systemPrompt: 'build', triggers: [] },
-      { id: 'reviewer', displayName: 'Reviewer', kind: 'pr-review',
-        review: { reviewsPrFrom: 'developer', onApprove: 'release', onChangesRequested: 'developer', paths: ['src/**'] },
-        triggers: [] },
+      { id: 'developer', displayName: 'Developer', systemPrompt: 'build', github: { producesPr: true }, triggers: [] },
+      { id: 'reviewer', displayName: 'Reviewer', channels: [{ artifact: 'pr', from: 'developer' }], triggers: [] },
       { id: 'release', displayName: 'Release', systemPrompt: 'ship', triggers: [] },
     ],
     gates: [], labels: [],
   };
-  const out = expandReviewSteps(bundle);
+  const out = expandGithubChannels(bundle, { teamId: 'acme' });
   const reviewer = out.roles.find(r => r.id === 'reviewer');
-  const developer = out.roles.find(r => r.id === 'developer');
-
-  // reviewer: native PR-review trigger on opened/reopened, per-invocation, meta dropped
-  const rt = reviewer.triggers.find(t => t.id === 'reviewer-review');
-  assert.ok(rt);
-  assert.deepEqual(rt.events, ['pull_request.opened', 'pull_request.reopened']);
-  assert.equal(reviewer.sessionPolicy, 'per-invocation');
-  assert.equal(reviewer.kind, undefined);
-  assert.equal(reviewer.review, undefined);
-  assert.match(rt.prompt, /src\/\*\*/); // path scope folded into the prompt
-
-  // producer: rework trigger on review submissions
-  const rework = developer.triggers.find(t => t.id === 'developer-rework-reviewer');
-  assert.ok(rework);
-  assert.deepEqual(rework.events, ['pull_request_review.submitted']);
-
-  // non-review roles untouched
+  const t = reviewer.triggers.find(t => t.id === 'reviewer-on-pr-developer');
+  assert.ok(t);
+  assert.equal(t.channel, true);
+  assert.deepEqual(t.events, ['pull_request.opened', 'pull_request.reopened']);
+  assert.deepEqual(t.from, ['acme-developer']); // scoped to the producer member id
+  assert.equal(t.labelFilter, undefined);
+  // non-consumer roles untouched
   assert.equal(out.roles.find(r => r.id === 'release').triggers.length, 0);
 });
 
-test('expandReviewSteps is idempotent for the producer rework trigger', () => {
+test('expandGithubChannels: a labelled human gate reacts to *.labeled from humans', () => {
   const bundle = {
     processTemplateVersion: 1, name: 'x', level: 'template',
     roles: [
-      { id: 'dev', triggers: [] },
-      { id: 'rev', kind: 'pr-review', review: { reviewsPrFrom: 'dev' }, triggers: [] },
+      { id: 'dev', github: { producesPr: true }, triggers: [] },
+      { id: 'deployer', channels: [{ artifact: 'pr', from: 'dev', label: 'approved', gate: 'human' }], triggers: [] },
     ],
   };
-  const once = expandReviewSteps(bundle);
-  const twice = expandReviewSteps(once); // meta already stripped → no-op for rev
-  const dev = twice.roles.find(r => r.id === 'dev');
-  assert.equal(dev.triggers.filter(t => t.id === 'dev-rework-rev').length, 1);
+  const out = expandGithubChannels(bundle);
+  const t = out.roles.find(r => r.id === 'deployer').triggers[0];
+  assert.deepEqual(t.events, ['pull_request.labeled']);
+  assert.equal(t.labelFilter, 'approved');
+  assert.equal(t.from, 'humans');
 });
 
-test('buildProcessTemplate preserves pr-review kind + review (remapped keys)', () => {
+test('expandGithubChannels: regenerates (strips stale) derived channel triggers, idempotent', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'x', level: 'template',
+    roles: [
+      { id: 'dev', github: { producesIssue: true }, triggers: [] },
+      { id: 'triage', channels: [{ artifact: 'issue', from: 'dev' }], triggers: [] },
+    ],
+  };
+  const once = expandGithubChannels(bundle);
+  const twice = expandGithubChannels(once);
+  const triage = twice.roles.find(r => r.id === 'triage');
+  assert.equal(triage.triggers.filter(t => t.id === 'triage-on-issue-dev').length, 1);
+  assert.deepEqual(triage.triggers[0].events, ['issues.opened']);
+});
+
+test('expandGithubChannels: appends an idempotent producer block; buildProcessTemplate strips it', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'x', level: 'template',
+    roles: [{ id: 'dev', displayName: 'Dev', systemPrompt: 'Base prompt.', github: { producesPr: true }, triggers: [] }],
+  };
+  const once = expandGithubChannels(bundle);
+  const p1 = once.roles[0].systemPrompt;
+  assert.match(p1, /Base prompt\./);
+  assert.match(p1, /github-io:start/);
+  assert.match(p1, /gh pr create/);
+  // Re-expanding does not duplicate the block.
+  const twice = expandGithubChannels(once);
+  assert.equal((twice.roles[0].systemPrompt.match(/github-io:start/g) || []).length, 1);
+  // Export strips the block back out so the portable bundle stays clean.
+  const b = buildProcessTemplate({ name: 'x', level: 'live', roles: twice.roles });
+  assert.equal(b.roles[0].systemPrompt, 'Base prompt.');
+  assert.ok(!b.roles[0].systemPrompt.includes('github-io'));
+});
+
+test('normalizeLegacyReview: a legacy pr-review role maps to github channel ports', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'x', level: 'template',
+    roles: [
+      { id: 'developer', triggers: [] },
+      { id: 'reviewer', kind: 'pr-review', review: { reviewsPrFrom: 'developer', onApprove: 'release' }, triggers: [] },
+    ],
+  };
+  const out = normalizeLegacyReview(bundle);
+  const reviewer = out.roles.find(r => r.id === 'reviewer');
+  const developer = out.roles.find(r => r.id === 'developer');
+  assert.equal(reviewer.kind, undefined);
+  assert.equal(reviewer.review, undefined);
+  assert.deepEqual(reviewer.channels, [{ artifact: 'pr', from: 'developer' }]);
+  assert.equal(developer.github.producesPr, true);
+});
+
+test('buildProcessTemplate carries github + channels; drops derived channel triggers', () => {
   const b = buildProcessTemplate({
     name: 'x', level: 'live', teamId: 'acme',
-    roles: [{ id: 'acme-reviewer', displayName: 'Reviewer', kind: 'pr-review',
-      review: { reviewsPrFrom: 'acme-developer', onApprove: 'acme-release' }, triggers: [] }],
+    roles: [
+      { id: 'acme-developer', displayName: 'Developer', github: { producesPr: true }, triggers: [] },
+      { id: 'acme-reviewer', displayName: 'Reviewer',
+        channels: [{ artifact: 'pr', from: 'acme-developer' }],
+        triggers: [{ id: 'acme-reviewer-on-pr-acme-developer', type: 'github-event', channel: true, events: ['pull_request.opened'] }] },
+    ],
   });
-  const r = b.roles[0];
-  assert.equal(r.kind, 'pr-review');
-  assert.equal(r.review.reviewsPrFrom, 'developer'); // team prefix stripped
-  assert.equal(r.review.onApprove, 'release');
+  const dev = b.roles.find(r => r.id === 'developer');
+  const rev = b.roles.find(r => r.id === 'reviewer');
+  assert.deepEqual(dev.github, { producesPr: true });
+  assert.deepEqual(rev.channels, [{ artifact: 'pr', from: 'developer' }]); // team prefix stripped on `from`
+  assert.equal(rev.triggers.length, 0); // derived channel trigger dropped from the portable bundle
 });
 
 test('an agent-studio-shaped bundle (custom role ids, gates) validates', () => {

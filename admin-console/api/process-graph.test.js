@@ -256,6 +256,37 @@ test('lint: a channel from a non-producer is flagged (warning)', () => {
   assert.ok(g.lints.some(l => l.code === 'channel-from-non-producer' && l.nodeId === 'rev'));
 });
 
+test('channel-label listener: extra emitters wire feedback edges, pinned producer stays the github edge, no dead-end lint (#401)', () => {
+  // author listens on `go` via a channel pinned to `intake`; router + broker also
+  // emit `go` (rework loops). The pinned producer edge is drawn as on:'github'
+  // (from the port, in unified-graph), so buildProcessGraph must NOT redraw it as
+  // a label edge — but it MUST wire the two non-pinned emitters, and must not
+  // report `go` as a dead-end.
+  const g = buildProcessGraph([
+    { id: 'intake', triggers: [], github: { producesIssue: true }, emits: ['go'] },
+    { id: 'author', triggers: [], channels: [{ artifact: 'issue', from: 'intake', label: 'go' }] },
+    { id: 'router', triggers: [], emits: ['go'] },
+    { id: 'broker', triggers: [], emits: ['go'] },
+  ]);
+  const labelEdges = g.edges.filter(e => e.label === 'go' && e.kind === 'agent');
+  const pairs = labelEdges.map(e => `${e.from}->${e.to}`).sort();
+  assert.deepEqual(pairs, ['broker->author', 'router->author']);
+  // The pinned producer is not redrawn as a label edge here (it is the github edge).
+  assert.ok(!pairs.includes('intake->author'));
+  // `go` is listened on (via the channel) so it is not a dead-end.
+  assert.ok(!g.lints.some(l => l.code === 'dead-end-emitter' && l.label === 'go'));
+});
+
+test('channel without a routing label contributes no label-listen key', () => {
+  // A bare PR channel (open, not labelled) must not turn arbitrary emits into edges.
+  const g = buildProcessGraph([
+    { id: 'author', triggers: [], github: { producesPr: true }, emits: ['whatever'] },
+    { id: 'router', triggers: [], channels: [{ artifact: 'pr', from: 'author' }] },
+  ]);
+  assert.ok(!g.edges.some(e => e.label === 'whatever' && e.kind === 'agent' && e.to));
+  assert.ok(g.lints.some(l => l.code === 'dead-end-emitter' && l.label === 'whatever'));
+});
+
 test('a human-approval gate (downstream waits on human:*) renders as a gate and never trips gate-violation', () => {
   // The #346 shape: downstream listens on the gate label; nobody emits it.
   const g = buildProcessGraph([

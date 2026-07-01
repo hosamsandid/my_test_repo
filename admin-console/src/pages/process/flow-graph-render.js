@@ -1410,6 +1410,48 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     const visibleIds = new Set(visible.map(n => n.id));
     const vertical   = state.orientation === 'vertical';
 
+    // Edge-label declutter (#401). Chips/labels are drawn at an edge's midpoint,
+    // which for a cross-column hand-off often lands on top of a card or another
+    // chip. Collect the visible cards as obstacles and nudge each label off them
+    // (and off already-placed labels) before drawing, so complex graphs stay
+    // readable. Coordinates share the node/edge space, so a plain rect test works.
+    const labelObstacles = [];
+    visible.forEach(n => {
+      const p = state.positions[n.id];
+      if (!p) return;
+      const el = canvas.querySelector(`.bp-node[data-id="${n.id}"]`);
+      labelObstacles.push({ x: p.x, y: p.y, w: NODE_W, h: el ? el.offsetHeight : 90 });
+    });
+    const placedLabels = [];
+    const rectsOverlap = (a, b) =>
+      a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+    // Return a {cx,cy} near (cx,cy) whose w×h box clears cards + prior labels.
+    // Searches increasing perpendicular/parallel offsets; falls back to the
+    // midpoint if nothing clears (never worse than today).
+    function placeClearLabel(cx, cy, w, h) {
+      const pad = 2;
+      const box = (x, y) => ({ x: x - w / 2 - pad, y: y - h / 2 - pad, w: w + 2 * pad, h: h + 2 * pad });
+      const collides = (r) =>
+        labelObstacles.some(o => rectsOverlap(r, o)) || placedLabels.some(o => rectsOverlap(r, o));
+      if (!collides(box(cx, cy))) { placedLabels.push(box(cx, cy)); return { cx, cy }; }
+      // Nudge primarily along the cross axis of the flow (where the gaps are):
+      // vertical flow → move horizontally; horizontal flow → move vertically.
+      const stepY = h + 5, stepX = w * 0.6 + 8;
+      for (let s = 1; s <= 16; s++) {
+        const offs = vertical
+          ? [[0, -s * stepY], [0, s * stepY], [-s * stepX, 0], [s * stepX, 0]]
+          : [[-s * stepX, 0], [s * stepX, 0], [0, -s * stepY], [0, s * stepY]];
+        for (const [dx, dy] of offs) {
+          if (!collides(box(cx + dx, cy + dy))) {
+            placedLabels.push(box(cx + dx, cy + dy));
+            return { cx: cx + dx, cy: cy + dy };
+          }
+        }
+      }
+      placedLabels.push(box(cx, cy));
+      return { cx, cy };
+    }
+
     // 1. Hierarchy edges (gray solid)
     visible.forEach(n => {
       const bp = state.byId[n.id];
@@ -1519,29 +1561,51 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       const artifact = e.artifact === 'issue' ? 'issue' : 'pr';
       const color = isGithub ? GH_COLOR[artifact] : (EXTRA_COLOR[e.on] || '#3b82f6');
 
+      const toEl = canvas.querySelector(`.bp-node[data-id="${e.to}"]`);
+      const toH  = toEl ? toEl.offsetHeight : 90;
       let x1, y1, x2, y2, flow;
       if (vertical) {
-        x1 = fromPos.x + NODE_W; y1 = fromPos.y + fromH / 2;
-        x2 = toPos.x;            y2 = toPos.y + 20; flow = 'horizontal';
+        // Same-column hand-off (feedback/rework loop): route it out to the right
+        // instead of cutting across the stacked cards (#401).
+        if (Math.abs(fromPos.x - toPos.x) < 1) {
+          x1 = fromPos.x + NODE_W; y1 = fromPos.y + fromH / 2;
+          x2 = toPos.x + NODE_W;   y2 = toPos.y + toH / 2; flow = 'loop-right';
+        } else {
+          x1 = fromPos.x + NODE_W; y1 = fromPos.y + fromH / 2;
+          x2 = toPos.x;            y2 = toPos.y + 20; flow = 'horizontal';
+        }
       } else {
-        x1 = fromPos.x + NODE_W / 2; y1 = fromPos.y + fromH;
-        x2 = toPos.x + NODE_W / 2;   y2 = toPos.y;  flow = 'vertical';
+        if (Math.abs(fromPos.y - toPos.y) < 1) {
+          x1 = fromPos.x + NODE_W / 2; y1 = fromPos.y + fromH;
+          x2 = toPos.x + NODE_W / 2;   y2 = toPos.y + toH; flow = 'loop-down';
+        } else {
+          x1 = fromPos.x + NODE_W / 2; y1 = fromPos.y + fromH;
+          x2 = toPos.x + NODE_W / 2;   y2 = toPos.y;  flow = 'vertical';
+        }
       }
       const d = drawBezierEdge(x1, y1, x2, y2, color, isGithub ? 2 : 1.5, '', true, flow);
       // Clickable hit-area so the edge can be edited/removed (#362 Phase C2 / #380).
       addEdgeHit(d, { from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on,
         artifact: isGithub ? artifact : undefined, gate: e.gate, triggerId: e.triggerId });
-      const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+      // Seed the label near the edge's apex — for a side-loop that is out on the
+      // bulge, otherwise the geometric midpoint. placeClearLabel refines from there.
+      let mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+      if (flow === 'loop-right') mx = Math.max(x1, x2) + 24;
+      else if (flow === 'loop-down') my = Math.max(y1, y2) + 20;
       if (isGithub) {
-        // A pill chip at the midpoint: artifact + optional routing label, with a
+        // A pill chip near the midpoint: artifact + optional routing label, with a
         // clear human-approval gate glyph when a human must apply the label. Drawn
-        // on the overlay layer (above the cards) so it is never hidden.
-        drawEdgeChip(mx, my, channelChipText(e), color, e.gate === 'human');
+        // on the overlay layer (above the cards) so it is never hidden, and nudged
+        // off any card/chip it would otherwise cover (#401).
+        const txt = channelChipText(e);
+        const p = placeClearLabel(mx, my, estChipWidth(txt), 17);
+        drawEdgeChip(p.cx, p.cy, txt, color, e.gate === 'human');
       } else if (e.label) {
+        const p = placeClearLabel(mx, my, estChipWidth(e.label), 15);
         const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         t.textContent = e.label;
-        t.setAttribute('x', mx);
-        t.setAttribute('y', my - 5);
+        t.setAttribute('x', p.cx);
+        t.setAttribute('y', p.cy - 5);
         t.setAttribute('fill', color);
         t.setAttribute('font-size', '10');
         t.setAttribute('font-weight', '600');
@@ -1673,7 +1737,20 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
 
   function drawBezierEdge(x1, y1, x2, y2, stroke, width, dash, arrow, flow = 'vertical') {
     let d, dx, dy;
-    if (flow === 'horizontal') {
+    if (flow === 'loop-right') {
+      // Same-column feedback loop: both anchors on the right, bulge out rightward
+      // so the edge never crosses the stacked cards. Arrow enters the right side.
+      const cx = Math.max(x1, x2) + 46 + Math.abs(y2 - y1) * 0.12;
+      d  = `M ${x1} ${y1} C ${cx} ${y1}, ${cx} ${y2}, ${x2} ${y2}`;
+      dx = x2 - cx;
+      dy = 0;
+    } else if (flow === 'loop-down') {
+      // Same-row feedback loop: both anchors on the bottom, bulge downward.
+      const cy = Math.max(y1, y2) + 46 + Math.abs(x2 - x1) * 0.12;
+      d  = `M ${x1} ${y1} C ${x1} ${cy}, ${x2} ${cy}, ${x2} ${y2}`;
+      dx = 0;
+      dy = y2 - cy;
+    } else if (flow === 'horizontal') {
       const cx1 = x1 + (x2 - x1) * 0.4;
       const cx2 = x2 - (x2 - x1) * 0.4;
       d  = `M ${x1} ${y1} C ${cx1} ${y1}, ${cx2} ${y2}, ${x2} ${y2}`;

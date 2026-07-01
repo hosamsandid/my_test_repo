@@ -45,6 +45,17 @@ function labelListenKey(trigger) {
     ? trigger.labelFilter.trim() : null;
 }
 
+// The routing labels a node listens on through its GitHub channels (#380). A
+// channel without a label reacts to the raw PR/issue open (no label routing),
+// so it contributes no label-listen key.
+function channelLabels(node) {
+  const out = [];
+  for (const ch of (node && Array.isArray(node.channels) ? node.channels : [])) {
+    if (ch && typeof ch.label === 'string' && ch.label.trim()) out.push(ch.label.trim());
+  }
+  return out;
+}
+
 function classifyKind(key) {
   if (isHumanGate(key)) return 'gate';
   if (isBrake(key)) return 'brake';
@@ -140,6 +151,13 @@ function buildProcessGraph(agents) {
       const lk = labelListenKey(t);
       if (lk) { allListenKeys.add(lk); noteLabel(lk); }
     }
+    // A GitHub channel with a routing label makes the consumer a *label listener*
+    // for that label (#380 + #401): the channel's pinned `from` is drawn as the
+    // on:'github' edge, but the label is also set by any other emitter (e.g. a
+    // companion/escalation router routing rework back), so it must register as a
+    // listen key here — otherwise every such emit is a false dead-end and the
+    // feedback edges never appear.
+    for (const ch of channelLabels(n)) { allListenKeys.add(ch); noteLabel(ch); }
   }
 
   const edges = [];
@@ -182,6 +200,26 @@ function buildProcessGraph(agents) {
         for (const ev of (Array.isArray(t.events) ? t.events : [])) {
           edges.push({ from: null, to: n.id, label: ev, kind: classifyKind(ev), triggerId: t.id, external: true });
         }
+      }
+    }
+  }
+
+  // Channel-label hand-offs (#401). A GitHub channel with a routing label makes
+  // its consumer a label listener. The pinned `from` producer is already drawn
+  // as the on:'github' edge (built in unified-graph from the port), so here we
+  // only wire the *other* emitters of that label — the rework/feedback loops
+  // (e.g. a companion/escalation router re-applying the label to send work back)
+  // that a single-producer channel cannot express. Without this they collapse to
+  // dead-ends and the renderer drops them.
+  for (const n of nodes) {
+    for (const ch of (n.channels || [])) {
+      const label = (ch && typeof ch.label === 'string') ? ch.label.trim() : '';
+      if (!label) continue;
+      const kind = classifyKind(label);
+      if (kind === 'gate' || kind === 'brake') continue; // human-set, edge comes from null
+      for (const s of (emitIndex.get(label) || [])) {
+        if (s === n.id || s === ch.from) continue; // self / already the github edge
+        edges.push({ from: s, to: n.id, label, kind });
       }
     }
   }

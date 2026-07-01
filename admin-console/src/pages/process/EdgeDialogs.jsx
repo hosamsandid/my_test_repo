@@ -343,8 +343,20 @@ function HierarchyEdgeForm({ from, to, fromName, toName, ops, onBack, onClose, o
   );
 }
 
-/* ── Edit / delete an existing hand-off ────────────────────────────────── */
-export function EditHandoffDialog({ edge, fromName, toName, ops = liveOps, onClose, onDone }) {
+/* ── Edit / delete an existing edge ─────────────────────────────────────────
+ * Type-aware dispatcher: label hand-offs keep the full editor; dependency /
+ * data-flow / parent edges get a focused remove dialog; derived edges (a
+ * PR-review outcome, a manual pass-through) are read-only here. Same surface in
+ * draft and live — the ops adapter differs underneath. */
+export function EditHandoffDialog(props) {
+  const on = props.edge?.on;
+  if (on === 'dependency' || on === 'parent') return <RemoveEdgeDialog kind={on} {...props} />;
+  if (on === 'artifact') return <RemoveArtifactEdgeDialog {...props} />;
+  if (on === 'review' || on === 'manual') return <ReadonlyEdgeDialog {...props} />;
+  return <EditLabelHandoff {...props} />;
+}
+
+function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDone }) {
   const { from, to, label, triggerId } = edge;
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -474,6 +486,97 @@ export function EditHandoffDialog({ edge, fromName, toName, ops = liveOps, onClo
         </div>
       )}
       <style>{`@keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}`}</style>
+    </SidePanel>
+  );
+}
+
+/* ── Remove a dependency or parent edge ─────────────────────────────────── */
+function RemoveEdgeDialog({ kind, edge, fromName, toName, ops = liveOps, onClose, onDone }) {
+  const { from, to } = edge;
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const isDep = kind === 'dependency';
+
+  async function remove() {
+    setSaving(true); setError(null);
+    try {
+      if (isDep) await ops.removeDependency(to, from); // "to depends on from"
+      else await ops.setParent(to, null);              // "from is parent of to"
+      onDone?.();
+    } catch (e) { setError(e.message); setSaving(false); }
+  }
+
+  return (
+    <SidePanel open onClose={onClose} title={isDep ? 'Dependency' : 'Parent / child'} width="520px">
+      <p style={hint}>
+        {isDep ? (
+          <><strong>{toName || to}</strong> depends on <strong>{fromName || from}</strong>.</>
+        ) : (
+          <><strong>{fromName || from}</strong> is the parent of <strong>{toName || to}</strong>.</>
+        )}
+      </p>
+      {error && <span style={errStyle}>{error}</span>}
+      <div style={actions}>
+        <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+        <button onClick={remove} disabled={saving} style={{ ...primary, background: 'var(--eb-status-error)' }}>
+          {saving ? 'Removing…' : (isDep ? 'Remove dependency' : 'Remove parent link')}
+        </button>
+      </div>
+    </SidePanel>
+  );
+}
+
+/* ── Remove one side of a data-flow (artifact) edge ─────────────────────────
+ * The graph routes data flow through a shared artifact node, so a click targets
+ * exactly one port — a producer's output or a consumer's input of that path. */
+function RemoveArtifactEdgeDialog({ edge, fromName, ops = liveOps, onClose, onDone }) {
+  const { from, direction, path } = edge;
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const isOutput = direction === 'output';
+
+  async function remove() {
+    setSaving(true); setError(null);
+    try { await ops.removeArtifact(from, { direction, path }); onDone?.(); }
+    catch (e) { setError(e.message); setSaving(false); }
+  }
+
+  return (
+    <SidePanel open onClose={onClose} title="Data flow" width="520px">
+      <p style={hint}>
+        <strong>{fromName || from}</strong> {isOutput ? 'produces' : 'consumes'} <code>{path}</code>.
+      </p>
+      <div style={{ ...small, marginBottom: 'var(--eb-space-3)' }}>
+        Removes this {isOutput ? 'output' : 'input'} port only. The other side of the flow (if any) stays —
+        remove it from its own node to clear the whole hand-off.
+      </div>
+      {error && <span style={errStyle}>{error}</span>}
+      <div style={actions}>
+        <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+        <button onClick={remove} disabled={saving} style={{ ...primary, background: 'var(--eb-status-error)' }}>
+          {saving ? 'Removing…' : `Remove ${isOutput ? 'output' : 'input'}`}
+        </button>
+      </div>
+    </SidePanel>
+  );
+}
+
+/* ── Derived edges (PR-review outcome, manual pass-through) — read-only here ── */
+function ReadonlyEdgeDialog({ edge, fromName, toName, onClose }) {
+  const { from, to, on } = edge;
+  return (
+    <SidePanel open onClose={onClose} title={on === 'review' ? 'PR review' : 'Connection'} width="520px">
+      <p style={hint}>
+        <strong>{fromName || from}</strong> → <strong>{toName || to}</strong>
+      </p>
+      <div style={small}>
+        {on === 'review'
+          ? 'This edge is derived from a PR-review step. Edit it in the reviewer’s inspector (reviews-from / on-approve / on-changes), not here.'
+          : 'This connection is derived and can’t be edited here.'}
+      </div>
+      <div style={actions}>
+        <button onClick={onClose} style={ghost}>Close</button>
+      </div>
     </SidePanel>
   );
 }

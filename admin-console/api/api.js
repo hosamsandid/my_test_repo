@@ -832,6 +832,82 @@ function notifyAgentReload(agentId) {
     .catch(() => {});
 }
 
+// A derived data-flow trigger is one the `expandDataFlowSteps` derivation owns:
+// it carries the `dataFlow` marker and the canonical `<consumer>-on-push-<up>`
+// id. Manually-authored data-flow triggers (arbitrary ids) don't match and are
+// preserved untouched by reconciliation. Kept in sync with process-template.js.
+function isDerivedDataFlowTrigger(t, memberId) {
+  return t && t.dataFlow === true && typeof t.id === 'string'
+    && t.id.startsWith(`${memberId}-on-push-`);
+}
+
+// Re-derive the functional data-flow push triggers for a whole team from its
+// members' declarative ports (`dataFlow.{dependsOn,inputs,outputs}`), mirroring
+// what `expandDataFlowSteps` does at materialise time. This is what makes a live
+// team behave like a draft: the ports are the single source of truth for the
+// edges, and the runtime wiring is derived on write — no separate trigger
+// bookkeeping in the editor. Best-effort and idempotent; only members whose
+// trigger set actually changes are written back. Regenerating from ports-stripped
+// triggers handles both adds (new port) and removals (dropped port). Members'
+// own ids are already full member ids, so no teamId mapping is applied.
+async function reconcileTeamDataFlow(teamId) {
+  if (!teamId) return;
+  const members = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg || cfg.parentTeamId !== teamId) continue;
+    const df = cfg.dataFlow && typeof cfg.dataFlow === 'object' ? cfg.dataFlow : {};
+    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+    members.push({ id, displayName: cfg.displayName || id, triggers: Array.isArray(triggers) ? triggers : [], df });
+  }
+  if (members.length === 0) return;
+
+  // Strip the previously-derived triggers so expandDataFlowSteps regenerates the
+  // full current set from the ports (a plain no-op leaves stale ones behind).
+  const roles = members.map(m => ({
+    id: m.id,
+    displayName: m.displayName,
+    inputs: Array.isArray(m.df.inputs) ? m.df.inputs : [],
+    outputs: Array.isArray(m.df.outputs) ? m.df.outputs : [],
+    dependsOn: Array.isArray(m.df.dependsOn) ? m.df.dependsOn : [],
+    triggers: m.triggers.filter(t => !isDerivedDataFlowTrigger(t, m.id)),
+  }));
+  const expanded = expandDataFlowSteps({ roles }).roles;
+  const byId = new Map(expanded.map(r => [r.id, r]));
+
+  for (const m of members) {
+    const next = byId.get(m.id)?.triggers || [];
+    // Compare against the current on-disk set (order-insensitive on id) so we
+    // only write when the derived wiring genuinely changed.
+    const curIds = m.triggers.map(t => t.id).sort().join('\n');
+    const nextIds = next.map(t => t.id).sort().join('\n');
+    if (curIds === nextIds) continue;
+    try { await putTriggers(m.id, next); notifyAgentReload(m.id); }
+    catch { /* best-effort — never break the originating request */ }
+  }
+}
+
+// Guard against a parent-child cycle among a team's members (#377). Walks the
+// existing parentMemberId chain: setting `child`'s parent to `parent` is a cycle
+// if `child` is already an ancestor of `parent` (or they're equal).
+function parentWouldCycle(teamId, childId, parentId) {
+  if (!parentId || parentId === childId) return parentId === childId;
+  const parentOf = new Map();
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (cfg && cfg.parentTeamId === teamId && typeof cfg.parentMemberId === 'string') {
+      parentOf.set(id, cfg.parentMemberId);
+    }
+  }
+  let cur = parentId, seen = new Set();
+  while (cur && !seen.has(cur)) {
+    if (cur === childId) return true;
+    seen.add(cur);
+    cur = parentOf.get(cur);
+  }
+  return false;
+}
+
 // Best-effort: after the admin writes a control-plane file (prompt, skill) to the
 // pool subpath, ask the orchestrator to mirror those named paths into a running
 // isolated agent's dedicated volume (#185 item 5). The orchestrator is the only
@@ -853,7 +929,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skillsOverride, mcpServersOverride, disableMode, teamId, emits } = req.body;
+  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skillsOverride, mcpServersOverride, disableMode, teamId, emits, dataFlow, parentMemberId, stage } = req.body;
 
   // Enable/disable goes through the orchestrator so stubs (no token yet)
   // get fully materialized — Matrix user, workspace seeding, agent-runner
@@ -919,6 +995,50 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
     else delete fresh.emits;
   }
 
+  // ── Unified orchestration edges (Process Canvas) ──────────────────────────
+  // The declarative data-flow ports are the single source of truth for the
+  // dependency + data-flow edges in the Flows graph — the same shape a draft
+  // bundle carries on its roles. Writing them here lets the process editor wire
+  // a live team exactly like a draft; the functional push triggers are re-derived
+  // from these ports below (reconcileTeamDataFlow), mirroring materialise time.
+  let dataFlowChanged = false;
+  if (dataFlow !== undefined) {
+    const normPaths = (arr) => (Array.isArray(arr) ? arr : [])
+      .map(a => (typeof a === 'string' ? { path: a } : a))
+      .filter(a => a && typeof a.path === 'string' && a.path.trim())
+      .map(a => ({ path: a.path.trim(), ...(a.description ? { description: a.description } : {}) }));
+    const normDeps = (arr) => [...new Set((Array.isArray(arr) ? arr : [])
+      .filter(d => typeof d === 'string' && d && d !== id))];
+    const next = {};
+    const inputs = normPaths(dataFlow && dataFlow.inputs);
+    const outputs = normPaths(dataFlow && dataFlow.outputs);
+    const dependsOn = normDeps(dataFlow && dataFlow.dependsOn);
+    if (inputs.length) next.inputs = inputs;
+    if (outputs.length) next.outputs = outputs;
+    if (dependsOn.length) next.dependsOn = dependsOn;
+    if (Object.keys(next).length) fresh.dataFlow = next; else delete fresh.dataFlow;
+    dataFlowChanged = true;
+  }
+
+  // Parent-child hierarchy (#377). `null`/'' clears; a member id sets it, guarded
+  // against self- and ancestor-cycles among the team's members.
+  if (parentMemberId !== undefined) {
+    if (typeof parentMemberId === 'string' && parentMemberId) {
+      if (parentWouldCycle(fresh.parentTeamId, id, parentMemberId)) {
+        return res.status(400).json({ error: 'that would create a parent cycle' });
+      }
+      fresh.parentMemberId = parentMemberId;
+    } else {
+      delete fresh.parentMemberId;
+    }
+  }
+
+  // Process stage band (#362 E). Empty clears (inherits from parent).
+  if (stage !== undefined) {
+    if (typeof stage === 'string' && stage.trim()) fresh.stage = stage.trim();
+    else delete fresh.stage;
+  }
+
   // Reassign the agent to a human Team (#308). Validates against existing
   // teams; metadata-only, so no respawn is needed.
   if (teamId !== undefined) {
@@ -951,6 +1071,11 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   }
 
   writeJsonAtomic(cfgPath, fresh);
+  // A data-flow port change re-derives the team's functional push triggers so a
+  // live edit takes effect at runtime without a re-materialise (best-effort).
+  if (dataFlowChanged && fresh.parentTeamId) {
+    await reconcileTeamDataFlow(fresh.parentTeamId);
+  }
   // Wake a running agent so it re-pulls config promptly under volume isolation
   // (#185 Phase 2). On the shared volume the agent re-reads config.json on its
   // next action anyway, so this is just a harmless idempotent re-sync there.

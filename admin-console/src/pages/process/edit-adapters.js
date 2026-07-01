@@ -9,7 +9,24 @@
 import { apiCall } from '../../hooks/useApi';
 import { wouldCreateCycle } from './hierarchy-utils';
 
-// Live mode — every op is an HTTP call against the running agent.
+// Read the current data-flow port block off a live agent's config as a plain
+// {inputs, outputs, dependsOn} shape (read-modify-write helper). The PUT replaces
+// the whole `dataFlow` block, matching how a draft persists the whole bundle.
+const pathStr = (a) => (typeof a === 'string' ? a : (a && a.path)) || '';
+async function liveDataFlow(roleId) {
+  const a = await apiCall('GET', `/api/agents/${roleId}`);
+  const df = (a && typeof a.dataFlow === 'object' && a.dataFlow) || {};
+  return {
+    inputs: Array.isArray(df.inputs) ? df.inputs.slice() : [],
+    outputs: Array.isArray(df.outputs) ? df.outputs.slice() : [],
+    dependsOn: Array.isArray(df.dependsOn) ? df.dependsOn.slice() : [],
+  };
+}
+
+// Live mode — every op is an HTTP call against the running agent. Its surface is
+// shape-compatible with makeDraftOps: the editing UI never branches on mode.
+// Edge ops write only the declarative ports (dataFlow / parentMemberId / stage);
+// the backend re-derives the functional push triggers from those ports.
 export const liveOps = {
   mode: 'live',
   listTriggers: (roleId) => apiCall('GET', `/api/agents/${roleId}/triggers`),
@@ -23,6 +40,40 @@ export const liveOps = {
     return Array.isArray(a?.emits) ? a.emits : [];
   },
   setRoleEmits: (roleId, emits) => apiCall('PUT', `/api/agents/${roleId}`, { emits }),
+
+  // ── unified edges (#367): dependency + data-flow + hierarchy + stage ──
+  // Dependency A→B means "B depends on A" (A upstream), stored on B.dataFlow.dependsOn.
+  addDependency: async (roleId, dependsOnId) => {
+    if (!dependsOnId || dependsOnId === roleId) return;
+    const df = await liveDataFlow(roleId);
+    if (!df.dependsOn.includes(dependsOnId)) df.dependsOn.push(dependsOnId);
+    await apiCall('PUT', `/api/agents/${roleId}`, { dataFlow: df });
+  },
+  removeDependency: async (roleId, dependsOnId) => {
+    const df = await liveDataFlow(roleId);
+    df.dependsOn = df.dependsOn.filter(d => d !== dependsOnId);
+    await apiCall('PUT', `/api/agents/${roleId}`, { dataFlow: df });
+  },
+  // Data flow: a producer's `outputs` path becomes a consumer's `inputs` path.
+  addArtifact: async (roleId, { direction, path, description }) => {
+    const p = String(path || '').trim();
+    if (!p) return;
+    const df = await liveDataFlow(roleId);
+    const key = direction === 'output' ? 'outputs' : 'inputs';
+    if (!df[key].some(a => pathStr(a) === p)) df[key].push({ path: p, ...(description ? { description } : {}) });
+    await apiCall('PUT', `/api/agents/${roleId}`, { dataFlow: df });
+  },
+  removeArtifact: async (roleId, { direction, path }) => {
+    const df = await liveDataFlow(roleId);
+    const key = direction === 'output' ? 'outputs' : 'inputs';
+    df[key] = df[key].filter(a => pathStr(a) !== path);
+    await apiCall('PUT', `/api/agents/${roleId}`, { dataFlow: df });
+  },
+  // Parent-child hierarchy (#377) — child gets parentMemberId; cleared with falsy.
+  setParent: (roleId, parentId) =>
+    apiCall('PUT', `/api/agents/${roleId}`, { parentMemberId: parentId || null }),
+  // Process stage band — empty clears (inherits from parent).
+  setStage: (roleId, stage) => apiCall('PUT', `/api/agents/${roleId}`, { stage: stage || '' }),
 };
 
 const clone = (x) => JSON.parse(JSON.stringify(x));

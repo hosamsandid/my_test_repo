@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Save, Trash2, X, Plus } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
 import { resolveInheritedStage } from './hierarchy-utils';
+import ConnectionsSection from './ConnectionsSection';
 
 // Node inspector for a DRAFT role (Process Canvas v2, #345). Edits the role's
 // displayName, system prompt, and triggers' emits directly on the draft bundle
@@ -19,11 +20,6 @@ export default function DraftNodeInspector({ role, roles = [], stages = [], ops,
   const isReview = role.kind === 'pr-review';
   const others = roles.filter(r => r.id !== role.id);
   const inheritedStage = resolveInheritedStage(roles, role);
-
-  async function setParent(v) {
-    try { await ops.setParent(role.id, v || null); onChanged?.(); }
-    catch (e) { window.alert(e?.message || String(e)); }
-  }
 
   async function saveMeta() {
     setBusy(true); setSaved(false);
@@ -77,8 +73,6 @@ export default function DraftNodeInspector({ role, roles = [], stages = [], ops,
             Stages are the ordered columns of the flow — manage the order under <strong>Stages</strong> in the toolbar.
           </span>
         </Field>
-        <RoleSelect label="Parent (optional)" value={role.parent} options={others}
-          onChange={setParent} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
           <button onClick={saveMeta} disabled={busy} style={primary}>
             <Save size={14} /> Save
@@ -129,7 +123,13 @@ export default function DraftNodeInspector({ role, roles = [], stages = [], ops,
           </div>
         )}
 
-        <DataFlowSection role={role} roles={roles} ops={ops} onChanged={onChanged} />
+        <ConnectionsSection
+          node={role}
+          siblings={others.map(r => ({ id: r.id, displayName: r.displayName || r.id }))}
+          showStage={false}
+          ops={ops}
+          onChanged={onChanged}
+        />
 
         <div style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)' }}>
           <button onClick={async () => { await ops.deleteRole(role.id); onDeleted?.(); }}
@@ -139,60 +139,6 @@ export default function DraftNodeInspector({ role, roles = [], stages = [], ops,
         </div>
       </div>
     </SidePanel>
-  );
-}
-
-// BP data-flow ports + dependencies (#367). Created by drawing edges on the
-// canvas (on-type picker); listed + removable here.
-function DataFlowSection({ role, roles = [], ops, onChanged }) {
-  const nameOf = (id) => (roles.find(r => r.id === id)?.displayName) || id;
-  const deps = Array.isArray(role.dependsOn) ? role.dependsOn : [];
-  const inputs = Array.isArray(role.inputs) ? role.inputs : [];
-  const outputs = Array.isArray(role.outputs) ? role.outputs : [];
-  if (!deps.length && !inputs.length && !outputs.length) {
-    return (
-      <div style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)' }}>
-        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-          Dependencies & data flow
-          <span style={{ color: 'var(--eb-text-muted)' }}> — draw a dependency or data-flow edge on the canvas to add one.</span>
-        </div>
-      </div>
-    );
-  }
-  const pathOf = (a) => (a && a.path) || a;
-  const remove = async (fn) => { await fn(); onChanged?.(); };
-  return (
-    <div style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
-      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Dependencies & data flow</div>
-      {deps.length > 0 && (
-        <ChipRow label="depends on" color="#ef4444"
-          items={deps.map(d => ({ key: d, text: nameOf(d), onRemove: () => remove(() => ops.removeDependency(role.id, d)) }))} />
-      )}
-      {inputs.length > 0 && (
-        <ChipRow label="inputs" color="#10b981"
-          items={inputs.map(a => ({ key: pathOf(a), text: pathOf(a), onRemove: () => remove(() => ops.removeArtifact(role.id, { direction: 'input', path: pathOf(a) })) }))} />
-      )}
-      {outputs.length > 0 && (
-        <ChipRow label="outputs" color="#10b981"
-          items={outputs.map(a => ({ key: pathOf(a), text: pathOf(a), onRemove: () => remove(() => ops.removeArtifact(role.id, { direction: 'output', path: pathOf(a) })) }))} />
-      )}
-    </div>
-  );
-}
-
-function ChipRow({ label, color, items }) {
-  return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
-      <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', minWidth: 64 }}>{label}</span>
-      {items.map(it => (
-        <button key={it.key} onClick={it.onRemove} title="Remove" style={{
-          fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)',
-          background: `${color}1a`, color, border: `1px solid ${color}`,
-          borderRadius: 'var(--eb-radius-sm)', padding: '0 5px', cursor: 'pointer',
-          display: 'inline-flex', alignItems: 'center', gap: 3,
-        }}>{it.text} <X size={10} /></button>
-      ))}
-    </div>
   );
 }
 

@@ -1306,7 +1306,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
           flow = 'vertical';
         }
 
-        drawBezierEdge(x1, y1, x2, y2, 'var(--eb-border-hover)', 2, '', false, flow);
+        const d = drawBezierEdge(x1, y1, x2, y2, 'var(--eb-border-hover)', 2, '', false, flow);
+        addEdgeHit(d, { from: n.id, to: childId, on: 'parent' });
       });
     });
 
@@ -1358,6 +1359,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
         arrow.setAttribute('fill', '#ef4444');
         arrow.setAttribute('opacity', '0.5');
         svgEdges.appendChild(arrow);
+
+        addEdgeHit(pathD, { from: depId, to: n.id, on: 'dependency' });
       });
     });
 
@@ -1386,21 +1389,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
       }
       const d = drawBezierEdge(x1, y1, x2, y2, color, 1.5, '', true, flow);
       // Clickable hit-area so the edge can be edited/removed (#362 Phase C2).
-      if (onSelectEdge && d) {
-        const hit = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-        hit.setAttribute('d', d);
-        hit.setAttribute('stroke', 'transparent');
-        hit.setAttribute('stroke-width', '14');
-        hit.setAttribute('fill', 'none');
-        hit.style.pointerEvents = 'stroke';
-        hit.style.cursor = 'pointer';
-        hit.addEventListener('mousedown', (ev) => ev.stopPropagation());
-        hit.addEventListener('click', (ev) => {
-          ev.stopPropagation();
-          onSelectEdge({ from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on, triggerId: e.triggerId });
-        });
-        svgEdges.appendChild(hit);
-      }
+      addEdgeHit(d, { from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on, triggerId: e.triggerId });
       if (e.label) {
         const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         t.textContent = e.label;
@@ -1434,20 +1423,16 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
         if (!bpPos || !bpEl) return;
 
         const bpH = bpEl.offsetHeight;
-        if (vertical) {
-          // BP right → artifact left
-          drawBezierEdge(
-            bpPos.x + NODE_W, bpPos.y + bpH / 2,
-            artPos.x,         artPos.y + artH / 2,
-            '#34d399', 1.5, '', true, 'horizontal'
-          );
-        } else {
-          drawBezierEdge(
-            bpPos.x + NODE_W / 2, bpPos.y + bpH,
-            artPos.x + ARTIFACT_W / 2, artPos.y,
-            '#34d399', 1.5, '', true, 'vertical'
-          );
-        }
+        const d = vertical
+          ? drawBezierEdge(
+              bpPos.x + NODE_W, bpPos.y + bpH / 2,
+              artPos.x,         artPos.y + artH / 2,
+              '#34d399', 1.5, '', true, 'horizontal')
+          : drawBezierEdge(
+              bpPos.x + NODE_W / 2, bpPos.y + bpH,
+              artPos.x + ARTIFACT_W / 2, artPos.y,
+              '#34d399', 1.5, '', true, 'vertical');
+        addEdgeHit(d, { on: 'artifact', from: bpId, direction: 'output', path });
       });
 
       // Input edges: artifact → BP (blue dashed)
@@ -1458,22 +1443,17 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
         if (!bpPos || !bpEl) return;
 
         const bpH = bpEl.offsetHeight;
-        if (vertical) {
-          // artifact left → BP right? No — input means artifact feeds INTO bp
-          // In horizontal mode it goes artifact-top → bp-bottom (i.e. the arrow points down to BP)
-          // The artifact column sits to the right of BPs, so we route from artifact's LEFT into BP's RIGHT
-          drawBezierEdge(
-            artPos.x,         artPos.y + artH / 2,
-            bpPos.x + NODE_W, bpPos.y + bpH / 2,
-            '#60a5fa', 1.5, '4 3', true, 'horizontal'
-          );
-        } else {
-          drawBezierEdge(
-            artPos.x + ARTIFACT_W / 2, artPos.y,
-            bpPos.x + NODE_W / 2, bpPos.y + bpH,
-            '#60a5fa', 1.5, '4 3', true, 'vertical'
-          );
-        }
+        const d = vertical
+          // artifact feeds INTO bp — route from the artifact's edge into the BP.
+          ? drawBezierEdge(
+              artPos.x,         artPos.y + artH / 2,
+              bpPos.x + NODE_W, bpPos.y + bpH / 2,
+              '#60a5fa', 1.5, '4 3', true, 'horizontal')
+          : drawBezierEdge(
+              artPos.x + ARTIFACT_W / 2, artPos.y,
+              bpPos.x + NODE_W / 2, bpPos.y + bpH,
+              '#60a5fa', 1.5, '4 3', true, 'vertical');
+        addEdgeHit(d, { on: 'artifact', from: bpId, direction: 'input', path });
       });
     });
   }
@@ -1520,6 +1500,23 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
     p.setAttribute('d', d);
     svgEdges.appendChild(p);
     return p;
+  }
+
+  // Transparent thick overlay that makes an already-drawn edge clickable so it
+  // can be edited / removed. No-op unless the host wired onSelectEdge (the BP
+  // viewer doesn't — it removes links from the node inspector instead).
+  function addEdgeHit(pathD, payload) {
+    if (!onSelectEdge || !pathD) return;
+    const hit = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    hit.setAttribute('d', pathD);
+    hit.setAttribute('stroke', 'transparent');
+    hit.setAttribute('stroke-width', '14');
+    hit.setAttribute('fill', 'none');
+    hit.style.pointerEvents = 'stroke';
+    hit.style.cursor = 'pointer';
+    hit.addEventListener('mousedown', (ev) => ev.stopPropagation());
+    hit.addEventListener('click', (ev) => { ev.stopPropagation(); onSelectEdge(payload); });
+    svgEdges.appendChild(hit);
   }
 
   // ─── Interactions ────────────────────────────────────────────────────

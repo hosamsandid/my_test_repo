@@ -5,7 +5,7 @@ import { initFlowGraph } from './process/flow-graph-render';
 import ProcessNodeInspector from './process/ProcessNodeInspector';
 import DraftNodeInspector from './process/DraftNodeInspector';
 import StageManager from './process/StageManager';
-import { CreateHandoffDialog, EditHandoffDialog, CreateEdgeDialog } from './process/EdgeDialogs';
+import { EditHandoffDialog, CreateEdgeDialog } from './process/EdgeDialogs';
 import MaterializeDialog from './process/MaterializeDialog';
 import AddApprovalDialog from './process/AddApprovalDialog';
 import SidePanel from '../components/SidePanel';
@@ -294,13 +294,16 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
         <ProcessNodeInspector
           key={selectedNode.id}
           node={selectedNode}
+          nodes={displayGraph?.nodes || []}
           level={imported ? 'template' : displayGraph?.level}
           onClose={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
           onChanged={() => refetch()}
         />
       )}
 
-      {connectPair && (isDraft ? (
+      {/* One connect dialog for both draft and live teams (#unified): the four
+          edge types are identical — only the ops adapter differs underneath. */}
+      {connectPair && (
         <CreateEdgeDialog
           from={connectPair.from}
           to={connectPair.to}
@@ -312,18 +315,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
           onClose={() => setConnectPair(null)}
           onDone={() => { setConnectPair(null); afterEdit(); }}
         />
-      ) : (
-        <CreateHandoffDialog
-          from={connectPair.from}
-          to={connectPair.to}
-          fromName={nodeName(connectPair.from)}
-          toName={nodeName(connectPair.to)}
-          labels={displayGraph?.labels || []}
-          ops={ops}
-          onClose={() => setConnectPair(null)}
-          onDone={() => { setConnectPair(null); afterEdit(); }}
-        />
-      ))}
+      )}
 
       {selectedEdge && (
         <EditHandoffDialog

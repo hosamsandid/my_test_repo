@@ -2210,6 +2210,8 @@ app.post('/api/flows/graph', (req, res) => {
   const flow = processTemplateToUnified(bundle);
   res.json({
     unifiedFlowVersion: flow.unifiedFlowVersion, source: 'draft', imported: true, name: bundle.name,
+    // Ordered stage names drive the layered layout on the client (#stage-order).
+    stages: Array.isArray(bundle.stages) ? bundle.stages.filter(s => typeof s === 'string') : [],
     ...buildUnifiedGraph(flow.nodes, flow.edges),
   });
 });

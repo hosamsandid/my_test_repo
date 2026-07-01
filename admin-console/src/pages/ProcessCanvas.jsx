@@ -1,9 +1,10 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
-import { AlertTriangle, Download, Upload, Boxes, X, Plus, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, Download, Upload, Boxes, X, Plus, ShieldCheck, Layers } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { initFlowGraph } from './process/flow-graph-render';
 import ProcessNodeInspector from './process/ProcessNodeInspector';
 import DraftNodeInspector from './process/DraftNodeInspector';
+import StageManager from './process/StageManager';
 import { CreateHandoffDialog, EditHandoffDialog, CreateEdgeDialog } from './process/EdgeDialogs';
 import MaterializeDialog from './process/MaterializeDialog';
 import AddApprovalDialog from './process/AddApprovalDialog';
@@ -54,6 +55,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
   const [materializeOpen, setMaterializeOpen] = useState(false);
   const [addRoleOpen, setAddRoleOpen] = useState(false);
   const [approvalOpen, setApprovalOpen] = useState(false);
+  const [stagesOpen, setStagesOpen] = useState(false);
   const fileInputRef = useRef(null);
 
   // Draft bundle + its derived graph. The bundle is the source of truth; the
@@ -221,6 +223,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
             <ToolbarButton onClick={() => setAddRoleOpen('agent')} icon={Plus}>Add role</ToolbarButton>
             <ToolbarButton onClick={() => setAddRoleOpen('pr-review')} icon={Plus}>PR review</ToolbarButton>
             <ToolbarButton onClick={() => setApprovalOpen(true)} icon={ShieldCheck}>Human approval</ToolbarButton>
+            <ToolbarButton onClick={() => setStagesOpen(true)} icon={Layers}>Stages</ToolbarButton>
             <ToolbarButton onClick={() => setMaterializeOpen(true)} icon={Boxes}
               disabled={!draftBundle?.roles?.length}>Materialize…</ToolbarButton>
           </>
@@ -280,6 +283,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
           key={selectedRole.id}
           role={selectedRole}
           roles={draftBundle?.roles || []}
+          stages={draftBundle?.stages || []}
           ops={draftOps}
           onClose={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
           onDeleted={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
@@ -341,6 +345,19 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
             setAddRoleOpen(false);
             setSelectedId(id);
           }}
+        />
+      )}
+
+      {stagesOpen && isDraft && (
+        <StageManager
+          stages={draftBundle?.stages || []}
+          counts={(draftBundle?.roles || []).reduce((m, r) => {
+            if (r.stage) m[r.stage] = (m[r.stage] || 0) + 1;
+            return m;
+          }, {})}
+          ops={draftOps}
+          onClose={() => setStagesOpen(false)}
+          onChanged={() => {}}
         />
       )}
 

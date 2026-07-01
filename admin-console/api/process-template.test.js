@@ -269,3 +269,26 @@ test('expandDataFlowSteps idempotent through the full materialise chain (push tr
   const t = b.triggers.find(x => x.id === 'b-on-push-a');
   assert.ok(t && t.promptTemplate && t.from.includes('acme-a'));
 });
+
+// ─── ordered stages (layout backbone) ────────────────────────────────────────
+
+test('buildProcessTemplate carries an ordered stages list', () => {
+  const b = buildProcessTemplate({ name: 'p', roles: [], stages: ['Intake', 'Build', 'Release'] });
+  assert.deepEqual(b.stages, ['Intake', 'Build', 'Release']);
+});
+
+test('buildProcessTemplate omits stages when none given', () => {
+  const b = buildProcessTemplate({ name: 'p', roles: [] });
+  assert.equal('stages' in b, false);
+});
+
+test('validateProcessTemplate accepts a string stages array, rejects non-strings', () => {
+  const base = { processTemplateVersion: 1, roles: [], gates: [], labels: [] };
+  assert.equal(validateProcessTemplate({ ...base, stages: ['A', 'B'] }, { allowEmptyRoles: true }).ok, true);
+  assert.equal(validateProcessTemplate({ ...base, stages: 'nope' }, { allowEmptyRoles: true }).ok, false);
+  assert.equal(validateProcessTemplate({ ...base, stages: [1, 2] }, { allowEmptyRoles: true }).ok, false);
+});
+
+test('emptyDraftBundle seeds an empty stages array', () => {
+  assert.deepEqual(emptyDraftBundle('x').stages, []);
+});

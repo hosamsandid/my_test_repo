@@ -7,10 +7,11 @@ import { resolveInheritedStage } from './hierarchy-utils';
 // displayName, system prompt, and triggers' emits directly on the draft bundle
 // via the draft adapter (`ops`). Lighter than the live inspector — no Matrix,
 // no inherit/override, no live status.
-export default function DraftNodeInspector({ role, roles = [], ops, onClose, onDeleted, onChanged }) {
+export default function DraftNodeInspector({ role, roles = [], stages = [], ops, onClose, onDeleted, onChanged }) {
   const [name, setName] = useState(role.displayName || role.id);
   const [prompt, setPrompt] = useState(role.systemPrompt || '');
   const [stage, setStage] = useState(role.stage || '');
+  const [newStage, setNewStage] = useState('');   // inline "create a new stage"
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -29,7 +30,12 @@ export default function DraftNodeInspector({ role, roles = [], ops, onClose, onD
     try {
       if (name !== role.displayName) await ops.renameRole(role.id, name);
       if (prompt !== (role.systemPrompt || '')) await ops.setPrompt(role.id, prompt);
-      if (stage !== (role.stage || '') && ops.setStage) await ops.setStage(role.id, stage);
+      // A brand-new stage typed in the "＋ new" box is registered on the ordered
+      // stage list first, then assigned — so it appears in the layout order.
+      let target = stage;
+      const fresh = newStage.trim();
+      if (fresh) { if (ops.addStage) await ops.addStage(fresh); target = fresh; setStage(fresh); setNewStage(''); }
+      if (target !== (role.stage || '') && ops.setStage) await ops.setStage(role.id, target);
       setSaved(true); onChanged?.();
     } finally { setBusy(false); }
   }
@@ -59,14 +65,17 @@ export default function DraftNodeInspector({ role, roles = [], ops, onClose, onD
             placeholder="What this role does, its responsibilities and tone…"
             style={{ ...input, minHeight: 220, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', lineHeight: 1.5 }} />
         </Field>
-        <Field label="Stage (optional)">
-          <input value={stage} onChange={e => { setStage(e.target.value); setSaved(false); }}
-            placeholder={!stage && inheritedStage ? `inherits: ${inheritedStage}` : 'e.g. Build'} style={input} />
-          {!stage && inheritedStage && (
-            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-              Inherited from parent — leave empty to keep, or type to override.
-            </span>
-          )}
+        <Field label="Stage (layout column)">
+          <select value={stages.includes(stage) ? stage : ''}
+            onChange={e => { setStage(e.target.value); setNewStage(''); setSaved(false); }} style={input}>
+            <option value="">{inheritedStage ? `— inherit (${inheritedStage}) —` : '— none —'}</option>
+            {stages.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+          <input value={newStage} onChange={e => { setNewStage(e.target.value); setSaved(false); }}
+            placeholder="＋ or type a new stage name…" style={{ ...input, marginTop: 4 }} />
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            Stages are the ordered columns of the flow — manage the order under <strong>Stages</strong> in the toolbar.
+          </span>
         </Field>
         <RoleSelect label="Parent (optional)" value={role.parent} options={others}
           onChange={setParent} />

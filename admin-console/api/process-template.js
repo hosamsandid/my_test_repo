@@ -73,11 +73,16 @@ function bundleTrigger(t) {
  * @param {Array} [opts.gates]
  * @param {Array} [opts.labels]
  */
-function buildProcessTemplate({ name, level, teamId, roles, gates, labels }) {
+function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stages }) {
   return {
     processTemplateVersion: VERSION,
     name: name || 'process-template',
     level: level || 'template',
+    // Ordered stage names — the layout backbone (agents snap to their stage's
+    // column in this order). Portable + git-committable like gates/labels.
+    ...(Array.isArray(stages) && stages.length
+      ? { stages: stages.map(s => (typeof s === 'string' ? s : s && s.name)).filter(Boolean) }
+      : {}),
     roles: (roles || []).map(r => ({
       id: roleKeyOf(r.id, teamId),
       displayName: r.displayName || r.id,
@@ -111,6 +116,10 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
   }
   if (b.gates && !Array.isArray(b.gates)) return { ok: false, error: 'gates must be an array' };
   if (b.labels && !Array.isArray(b.labels)) return { ok: false, error: 'labels must be an array' };
+  if (b.stages) {
+    if (!Array.isArray(b.stages)) return { ok: false, error: 'stages must be an array' };
+    if (!b.stages.every(s => typeof s === 'string')) return { ok: false, error: 'stages must be an array of strings' };
+  }
   return { ok: true };
 }
 
@@ -123,6 +132,7 @@ function emptyDraftBundle(name) {
     roles: [],
     gates: [],
     labels: [],
+    stages: [],
   };
 }
 

@@ -11,6 +11,8 @@
 //   g.setData(unifiedGraph);   // { nodes, edges, lints } from /api/flows/graph
 //   g.fit(); g.cleanup();
 
+import { computeFlowLayout, assignCrossCoords } from './flow-layout';
+
 export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge } = {}) {
 
   // ─── Constants ──────────────────────────────────────────────────────
@@ -156,6 +158,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
     editable:           false,  // structural editing (connect-to-wire, edges)
     connecting:         null,   // { fromId } while dragging a new edge
     showStages:         localStorage.getItem('flow-graph-show-stages') === 'true', // #362 E stage bands
+    stageOrder:         [],     // ordered stage names — drives layered layout order
   };
 
   // ─── Data Loading ────────────────────────────────────────────────────
@@ -204,6 +207,12 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
     const EXTRA = new Set(['label', 'review', 'manual']);
     state.extraEdges = (Array.isArray(g.edges) ? g.edges : [])
       .filter(e => EXTRA.has(e.on) && e.from && e.to && e.from !== e.to);
+
+    // Operator-defined stage order (drives the layered layout when set). Accept
+    // either bare strings or { name } objects; ignore anything else.
+    state.stageOrder = (Array.isArray(g.stages) ? g.stages : [])
+      .map(s => (typeof s === 'string' ? s : (s && typeof s.name === 'string' ? s.name : null)))
+      .filter(Boolean);
 
     recomputeRoots();
     buildArtifactRegistry();
@@ -403,11 +412,85 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
   function layout() {
     const visible = getVisibleNodes();
     if (visible.length === 0) return;
-    if (state.orientation === 'vertical') {
+    if (useLayeredLayout(visible)) {
+      layoutLayered(visible);
+    } else if (state.orientation === 'vertical') {
       layoutVertical(visible);
     } else {
       layoutHorizontal(visible);
     }
+  }
+
+  // Flat process/draft flows have no parent-child hierarchy — their whole
+  // structure is the directed hand-off / dependency edges. The tree layout piles
+  // those into a single column, so we lay them out as an ordered layered DAG
+  // instead (sources → sinks, crossings reduced). Hierarchical graphs (BP packs,
+  // team-member trees) keep the tree layout.
+  function useLayeredLayout(visible) {
+    const anyHierarchy = state.briefings.some(bp => bp.parent || (bp.children && bp.children.length));
+    if (anyHierarchy) return false;
+    const hasExtra = (state.extraEdges || []).length > 0;
+    const hasStageOrder = (state.stageOrder || []).length > 0;
+    const hasDeps = visible.some(n => ((state.byId[n.id] || {}).depends_on || []).length > 0);
+    return hasExtra || hasStageOrder || hasDeps;
+  }
+
+  // Layered layout for a flat flow. Columns follow the flow direction (the
+  // stage order overrides them when stages are assigned); within-column order
+  // and cross-axis alignment come from the pure flow-layout module. Vertical
+  // orientation reads columns left→right; horizontal reads them top→bottom.
+  function layoutLayered(visible) {
+    const vertical = state.orientation === 'vertical';
+    const ids = visible.map(n => n.id);
+    const idSet = new Set(ids);
+
+    const edges = [];
+    (state.extraEdges || []).forEach(e => {
+      if (idSet.has(e.from) && idSet.has(e.to) && e.from !== e.to) edges.push({ from: e.from, to: e.to });
+    });
+    visible.forEach(n => {
+      const bp = state.byId[n.id];
+      (bp.depends_on || []).forEach(dep => {
+        if (idSet.has(dep) && dep !== n.id) edges.push({ from: dep, to: n.id });
+      });
+    });
+
+    const order = state.stageOrder || [];
+    const rankMap = new Map(order.map((s, i) => [s, i]));
+    const useStages = order.length > 0 && visible.some(n => rankMap.has((state.byId[n.id] || {}).stage));
+    const stageRankOf = useStages
+      ? (id => { const s = (state.byId[id] || {}).stage; return rankMap.has(s) ? rankMap.get(s) : null; })
+      : null;
+
+    const { colOf, columns } = computeFlowLayout(ids, edges, { stageRankOf, stageCount: order.length });
+
+    const sizeOf = vertical ? (id => getNodeHeight(id)) : (() => NODE_W);
+    const crossGap = vertical ? 34 : H_GAP;
+    const center = assignCrossCoords(columns, edges, sizeOf, { gap: crossGap });
+
+    const pos = {};
+    const colMain = [];
+    if (vertical) {
+      let x = 0;
+      for (let c = 0; c < columns.length; c++) { colMain[c] = x; x += NODE_W + H_GAP * 2; }
+      ids.forEach(id => {
+        const c = colOf.get(id) || 0;
+        pos[id] = { x: colMain[c], y: (center.get(id) || 0) - getNodeHeight(id) / 2 };
+      });
+    } else {
+      let y = 0;
+      for (let c = 0; c < columns.length; c++) {
+        const maxH = Math.max(90, ...columns[c].map(getNodeHeight));
+        colMain[c] = y; y += maxH + V_GAP;
+      }
+      ids.forEach(id => {
+        const c = colOf.get(id) || 0;
+        pos[id] = { x: (center.get(id) || 0) - NODE_W / 2, y: colMain[c] };
+      });
+    }
+
+    state.positions = pos;
+    layoutArtifacts(visible);
   }
 
   function layoutHorizontal(visible) {

@@ -175,6 +175,40 @@ export function makeDraftOps(getBundle, persist) {
       if (r) { if (stage) r.stage = stage; else delete r.stage; }
       await persist(b);
     },
+
+    // ── stages (draft-only): the ordered list that drives the layout ──
+    listStages: () => (getBundle().stages || []).slice(),
+    addStage: async (name) => {
+      const b = clone(getBundle());
+      const s = String(name || '').trim();
+      if (!s) return;
+      b.stages = Array.isArray(b.stages) ? b.stages : [];
+      if (!b.stages.includes(s)) b.stages.push(s);
+      await persist(b);
+    },
+    renameStage: async (oldName, newName) => {
+      const b = clone(getBundle());
+      const s = String(newName || '').trim();
+      if (!s) return;
+      b.stages = (b.stages || []).map(x => (x === oldName ? s : x));
+      // keep the list unique after a rename that collides
+      b.stages = b.stages.filter((x, i) => b.stages.indexOf(x) === i);
+      for (const r of b.roles || []) if (r.stage === oldName) r.stage = s;
+      await persist(b);
+    },
+    removeStage: async (name) => {
+      const b = clone(getBundle());
+      b.stages = (b.stages || []).filter(x => x !== name);
+      for (const r of b.roles || []) if (r.stage === name) delete r.stage;
+      await persist(b);
+    },
+    reorderStages: async (names) => {
+      const b = clone(getBundle());
+      // Trust the caller's order but keep only stages that still exist.
+      const existing = new Set(b.stages || []);
+      b.stages = (names || []).filter(n => existing.has(n));
+      await persist(b);
+    },
     // Parent-child hierarchy (#378). setParent(child, parent) makes `parent` the
     // grouping node of `child`; clear with a falsy parentId. Self-parenting and
     // direct cycles (parent already a descendant) are rejected.

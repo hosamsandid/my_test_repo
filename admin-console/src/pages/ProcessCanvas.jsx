@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
-import { AlertTriangle, Download, Upload, Boxes, X, Plus, ShieldCheck, Layers, Pencil } from 'lucide-react';
+import { AlertTriangle, Download, Upload, Boxes, X, Plus, ShieldCheck, Layers, Sparkles, Pencil } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { initFlowGraph } from './process/flow-graph-render';
 import ProcessNodeInspector from './process/ProcessNodeInspector';
@@ -475,12 +475,31 @@ function AddRoleDialog({ kind, onClose, onCreate }) {
   const isReview = kind === 'pr-review';
   const [displayName, setDisplayName] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('');
+  const [notes, setNotes] = useState('');
   const [busy, setBusy] = useState(false);
+  // LLM-assisted prompt authoring (see POST /api/agent-prompt/generate).
+  const [generating, setGenerating] = useState(false);
+  const [genError, setGenError] = useState(null);
   const submit = async () => {
     if (!displayName.trim()) return;
     setBusy(true);
     try { await onCreate({ displayName: displayName.trim(), systemPrompt }); }
     finally { setBusy(false); }
+  };
+  const generate = async () => {
+    if (!displayName.trim() || generating) return;
+    setGenerating(true);
+    setGenError(null);
+    try {
+      const { prompt } = await apiCall('POST', '/api/agent-prompt/generate', {
+        roleName: displayName.trim(), notes: notes.trim(),
+      });
+      if (prompt) setSystemPrompt(prompt);
+    } catch (e) {
+      setGenError(e.message || 'Generation failed');
+    } finally {
+      setGenerating(false);
+    }
   };
   const field = {
     background: 'var(--eb-bg-app)', color: 'var(--eb-text-primary)', border: '1px solid var(--eb-border-default)',
@@ -502,11 +521,44 @@ function AddRoleDialog({ kind, onClose, onCreate }) {
             <strong> PR</strong> output port onto it to wire the review channel.
           </div>
         ) : (
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Agent prompt (optional now)</span>
-            <textarea value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)}
-              placeholder="What this role does…" style={{ ...field, minHeight: 160, resize: 'vertical', fontFamily: 'var(--eb-font-mono)' }} />
-          </label>
+          <>
+            {/* Notes → LLM → agent prompt. The operator jots a few keywords and
+                lets the model draft a full prompt; the role name alone is often
+                enough context (e.g. "Business Analyst"). The draft lands in the
+                editable Agent-prompt field below, so it can be tweaked or replaced. */}
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Notes for prompt generation (optional)</span>
+              <textarea value={notes} onChange={e => setNotes(e.target.value)}
+                placeholder="A few keywords — e.g. reviews COBOL, flags risky changes, hands off to the migration lead"
+                style={{ ...field, minHeight: 64, resize: 'vertical' }} />
+              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
+                Generate uses the role name and these notes to draft an agent prompt via the configured LLM.
+                You can edit the result below.
+              </span>
+            </label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+              <button type="button" onClick={generate} disabled={!displayName.trim() || generating} style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                background: 'var(--eb-bg-surface)', color: 'var(--eb-accent-primary)',
+                border: '1px solid var(--eb-accent-primary)', borderRadius: 'var(--eb-radius-md)',
+                padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+                cursor: (!displayName.trim() || generating) ? 'not-allowed' : 'pointer',
+                opacity: (!displayName.trim() || generating) ? 0.5 : 1,
+              }}>
+                <Sparkles size={14} />
+                {generating ? 'Generating…' : 'Generate agent prompt'}
+              </button>
+              {genError && (
+                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error, #d33)' }}>{genError}</span>
+              )}
+            </div>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Agent prompt (optional now)</span>
+              <textarea value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)}
+                placeholder="What this role does… — or use Generate above to draft it"
+                style={{ ...field, minHeight: 160, resize: 'vertical', fontFamily: 'var(--eb-font-mono)' }} />
+            </label>
+          </>
         )}
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)' }}>
           <button onClick={onClose} disabled={busy} style={{

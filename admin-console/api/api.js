@@ -690,6 +690,56 @@ function buildModelsUrl(baseUrl) {
   return `${trimmed}/v1/models`;
 }
 
+// Companion to buildModelsUrl for the Anthropic-compatible chat endpoint.
+// Appends `/v1/messages` unless the base URL already targets a versioned or
+// messages path.
+function buildMessagesUrl(baseUrl) {
+  const trimmed = baseUrl.replace(/\/+$/, '');
+  if (/\/messages$/.test(trimmed)) return trimmed;
+  if (/\/v\d+$/.test(trimmed)) return `${trimmed}/messages`;
+  return `${trimmed}/v1/messages`;
+}
+
+// Plain HTTP/HTTPS POST of a JSON body. Mirrors httpGetJson: returns
+// { status, body, error } and never throws. Used for one-shot LLM calls.
+function httpPostJson(targetUrl, headers = {}, bodyObj = {}, timeoutMs = 30000) {
+  return new Promise((resolve) => {
+    let parsed;
+    try {
+      parsed = new URL(targetUrl);
+    } catch (err) {
+      return resolve({ status: 0, body: null, error: `Invalid URL: ${err.message}` });
+    }
+    const payload = Buffer.from(JSON.stringify(bodyObj));
+    const lib = parsed.protocol === 'https:' ? require('https') : require('http');
+    const req = lib.request({
+      method: 'POST',
+      hostname: parsed.hostname,
+      port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+      path: parsed.pathname + parsed.search,
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'Content-Length': payload.length,
+        ...headers,
+      },
+      timeout: timeoutMs,
+    }, (res) => {
+      let data = '';
+      res.on('data', (c) => data += c);
+      res.on('end', () => {
+        let body = data;
+        try { body = data ? JSON.parse(data) : null; } catch { /* keep as string */ }
+        resolve({ status: res.statusCode, body, error: null });
+      });
+    });
+    req.on('error', (err) => resolve({ status: 0, body: null, error: err.message }));
+    req.on('timeout', () => { req.destroy(); resolve({ status: 0, body: null, error: 'timeout' }); });
+    req.write(payload);
+    req.end();
+  });
+}
+
 /* ─── Health ────────────────────────────────────────────────────────── */
 
 app.get('/api/health', (req, res) => {
@@ -3555,6 +3605,105 @@ app.post('/api/llm-endpoints/probe-discover-models', heavyLimiter, async (req, r
   const result = await probeLlmEndpointDiscover(parsed.baseUrl, parsed.token);
   if (result.error) return res.status(502).json(result);
   res.json(result);
+});
+
+/* ─── Agent-prompt generation (LLM-assisted authoring) ──────────────────
+ * The Flow editor's "Add role" dialog lets the operator turn a role name plus
+ * a few keyword notes into a polished system/agent prompt instead of writing
+ * one by hand. We reuse the same LLM the stack already talks to: a registered
+ * Model Provider endpoint when present, otherwise the ANTHROPIC_* fallback
+ * from .env. This is a stateless, one-shot completion — nothing is persisted.
+ */
+
+// Resolve which endpoint + model + token to use for a one-shot generation call.
+// Prefers a caller-named endpoint, else the first registered one, else the
+// .env fallback. Within an endpoint, prefer a Sonnet-class model (good quality
+// at low latency for this short task), then its configured default, then the
+// first model. Returns { baseUrl, token, model } or { error }.
+function resolveGenerationTarget(preferredEndpointId) {
+  const endpoints = listLlmEndpoints();
+  const ep = (preferredEndpointId && endpoints.find(e => e.id === preferredEndpointId))
+    || endpoints[0]
+    || null;
+  if (ep) {
+    const models = Array.isArray(ep.models) ? ep.models : [];
+    const sonnet = models.find(m => m.kind === 'sonnet');
+    const model = sonnet?.id || pickEndpointDefaultModel(ep);
+    if (!ep.baseUrl) return { error: `LLM endpoint '${ep.id}' has no base URL` };
+    if (!model) return { error: `LLM endpoint '${ep.id}' has no models configured` };
+    return { baseUrl: ep.baseUrl, token: readLlmEndpointToken(ep.authTokenId), model };
+  }
+  // No registered endpoint — fall back to the raw ANTHROPIC_* env vars.
+  const baseUrl = (process.env.ANTHROPIC_BASE_URL || '').trim();
+  if (!baseUrl) {
+    return { error: 'No LLM endpoint configured. Add one on the Model Providers page or set ANTHROPIC_BASE_URL.' };
+  }
+  const model = (process.env.ANTHROPIC_DEFAULT_SONNET_MODEL || 'claude-sonnet-4-6').trim();
+  return { baseUrl, token: (process.env.ANTHROPIC_AUTH_TOKEN || '').trim(), model };
+}
+
+// Meta-prompt: instruct the LLM to author a reusable agent/system prompt for a
+// role in an autonomous software-delivery flow, from the role name + notes.
+function buildAgentPromptGenerationRequest(roleName, notes) {
+  const noteBlock = notes
+    ? `Additional notes / keywords from the operator:\n${notes}`
+    : 'The operator gave no extra notes — infer sensible responsibilities from the role name alone.';
+  const instruction = [
+    `You write system prompts for AI agents that participate in an autonomous software-delivery team.`,
+    `Each agent works from its own workspace, talks to a human over chat, and may react to GitHub events.`,
+    ``,
+    `Write the system prompt for a role called "${roleName}".`,
+    noteBlock,
+    ``,
+    `Requirements for the prompt you produce:`,
+    `- Speak directly to the agent in the second person ("You are …").`,
+    `- Open with a one-line identity, then cover the agent's responsibilities, how it should collaborate/hand off, and its quality bar.`,
+    `- Keep it practical and concise (roughly 120–250 words). Use short paragraphs or bullet points.`,
+    `- Do NOT invent specific tool names, repo names, file paths, or credentials.`,
+    `- Output ONLY the prompt text itself — no preamble, no headings like "System prompt:", no surrounding quotes or code fences.`,
+  ].join('\n');
+  return {
+    max_tokens: 1024,
+    messages: [{ role: 'user', content: instruction }],
+  };
+}
+
+// Pull the assistant text out of an Anthropic Messages API response.
+function extractMessageText(body) {
+  const blocks = body?.content;
+  if (!Array.isArray(blocks)) return '';
+  return blocks
+    .filter(b => b?.type === 'text' && typeof b.text === 'string')
+    .map(b => b.text)
+    .join('')
+    .trim();
+}
+
+app.post('/api/agent-prompt/generate', heavyLimiter, async (req, res) => {
+  const roleName = typeof req.body?.roleName === 'string' ? req.body.roleName.trim() : '';
+  const notes    = typeof req.body?.notes === 'string' ? req.body.notes.trim() : '';
+  if (!roleName) return res.status(400).json({ error: 'roleName is required' });
+
+  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  if (target.error) return res.status(400).json({ error: target.error });
+
+  const url = buildMessagesUrl(target.baseUrl);
+  const headers = {
+    'anthropic-version': '2023-06-01',
+    ...(target.token ? { Authorization: `Bearer ${target.token}`, 'x-api-key': target.token } : {}),
+  };
+  const payload = { model: target.model, ...buildAgentPromptGenerationRequest(roleName, notes) };
+
+  const result = await httpPostJson(url, headers, payload);
+  if (result.error || result.status < 200 || result.status >= 300) {
+    const detail = result.error
+      || (result.body && (result.body.error?.message || result.body.error || result.body.message))
+      || `HTTP ${result.status}`;
+    return res.status(502).json({ error: `LLM request failed: ${detail}` });
+  }
+  const prompt = extractMessageText(result.body);
+  if (!prompt) return res.status(502).json({ error: 'LLM returned an empty prompt' });
+  res.json({ prompt, model: target.model });
 });
 
 /* ─── MCP server registry ───────────────────────────────────────────── */

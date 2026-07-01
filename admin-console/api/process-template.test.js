@@ -212,6 +212,40 @@ test('expandDataFlowSteps: artifact output→input match creates a push trigger 
   assert.match(t.prompt, /spec\.md/, 'declared input path appears in the hand-off prompt');
 });
 
+test('expandDataFlowSteps: artifacts match by logical name, not path (#382)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'd', level: 'template',
+    roles: [
+      // Producer and consumer agree on the NAME; their path hints differ (paths
+      // vary per run) — a path-equality match would miss this, a name match hits.
+      { id: 'ba', displayName: 'BA', triggers: [], outputs: [{ name: 'Functional Design', hint: 'designs/a.md' }] },
+      { id: 'dev', displayName: 'Dev', triggers: [], inputs: [{ name: 'Functional Design', hint: 'designs/**' }] },
+    ],
+    gates: [], labels: [],
+  };
+  const out = expandDataFlowSteps(bundle, { teamId: 'acme' });
+  const t = out.roles.find(r => r.id === 'dev').triggers.find(x => x.id === 'dev-on-push-ba');
+  assert.ok(t, 'named artifact links producer → consumer');
+  assert.deepEqual(t.from, ['acme-ba']);
+  assert.match(t.prompt, /Functional Design/, 'the artifact name appears in the prompt');
+  assert.match(t.prompt, /aee-artifact/, 'the prompt tells the consumer to resolve the path from the manifest');
+  assert.match(t.prompt, /designs\/\*\*/, 'the path hint is surfaced');
+});
+
+test('expandDataFlowSteps: a differing name does NOT match even with the same path', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'd', level: 'template',
+    roles: [
+      { id: 'a', displayName: 'A', triggers: [], outputs: [{ name: 'Spec', path: 'shared.md' }] },
+      { id: 'b', displayName: 'B', triggers: [], inputs: [{ name: 'Design', path: 'shared.md' }] },
+    ],
+    gates: [], labels: [],
+  };
+  const out = expandDataFlowSteps(bundle, { teamId: 'acme' });
+  assert.equal(out.roles.find(r => r.id === 'b').triggers.length, 0,
+    'name is the match key — same path but different names do not connect');
+});
+
 test('expandDataFlowSteps: dependency + shared artifact collapse into one trigger per upstream', () => {
   const bundle = {
     processTemplateVersion: 1, name: 'd', level: 'template',

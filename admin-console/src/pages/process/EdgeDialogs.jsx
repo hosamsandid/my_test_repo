@@ -229,8 +229,8 @@ export function CreateEdgeDialog({ from, to, fromName, toName, labels, ops = liv
 
   const choices = [
     { id: 'label', title: 'Label hand-off', desc: `${fromName || from} emits a label that wakes ${toName || to}.` },
-    { id: 'dependency', title: 'Dependency', desc: `${toName || to} depends on ${fromName || from} — it can't start until that is done.` },
-    { id: 'artifact', title: 'Data flow', desc: `${fromName || from} produces a file that ${toName || to} consumes.` },
+    { id: 'dependency', title: 'Dependency', desc: `${toName || to} is woken when ${fromName || from} pushes to the repo.` },
+    { id: 'artifact', title: 'Data flow / hand-off', desc: `${fromName || from} produces an artifact that ${toName || to} consumes.` },
     { id: 'hierarchy', title: 'Parent / child', desc: `${fromName || from} groups ${toName || to} as a child — it inherits its parent's stage.` },
   ].filter(c => allowed.includes(c.id));
 
@@ -267,7 +267,8 @@ function DependencyEdgeForm({ from, to, fromName, toName, ops, onBack, onClose, 
     <SidePanel open onClose={onClose} title="Add dependency" width="520px">
       <p style={hint}>
         <strong>{toName || to}</strong> depends on <strong>{fromName || from}</strong>.
-        It becomes ready only once <strong>{fromName || from}</strong> is complete.
+        {' '}It is woken when <strong>{fromName || from}</strong> pushes to the repo — this
+        records the ordering; it does not block <strong>{toName || to}</strong> from running.
       </p>
       {error && <span style={errStyle}>{error}</span>}
       <div style={actions}>
@@ -280,39 +281,71 @@ function DependencyEdgeForm({ from, to, fromName, toName, ops, onBack, onClose, 
 }
 
 function ArtifactEdgeForm({ from, to, fromName, toName, ops, onBack, onClose, onDone }) {
-  const [path, setPath] = useState('');
+  const [name, setName] = useState('');
+  const [pathHint, setPathHint] = useState('');
   const [description, setDescription] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+
+  const nm = name.trim();
+  const h = pathHint.trim();
+
   async function submit() {
-    const p = path.trim();
-    if (!p) { setError('Enter the artifact path.'); return; }
     setSaving(true); setError(null);
     try {
-      await ops.addArtifact(from, { direction: 'output', path: p, description });
-      await ops.addArtifact(to, { direction: 'input', path: p, description });
+      if (!nm && !h) {
+        // No artifact at all — a plain ordering dependency (still wakes the
+        // consumer on the producer's push).
+        await ops.addDependency(to, from);
+      } else if (nm) {
+        // Named artifact: matched by name, path is just a hint (resolved from the
+        // manifest at runtime).
+        await ops.addArtifact(from, { direction: 'output', name: nm, hint: h, description });
+        await ops.addArtifact(to, { direction: 'input', name: nm, hint: h, description });
+      } else {
+        // Only a concrete path given → a path-keyed artifact (BriefingPack-style).
+        await ops.addArtifact(from, { direction: 'output', path: h, description });
+        await ops.addArtifact(to, { direction: 'input', path: h, description });
+      }
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
   }
+
   return (
     <SidePanel open onClose={onClose} title="Add data flow" width="520px">
       <p style={hint}>
-        <strong>{fromName || from}</strong> produces a file that <strong>{toName || to}</strong> consumes.
+        <strong>{fromName || from}</strong> produces an artifact that <strong>{toName || to}</strong> consumes.
+        {' '}<strong>{toName || to}</strong> is woken when <strong>{fromName || from}</strong> pushes.
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-        <Field label="Artifact path">
-          <input value={path} onChange={e => setPath(e.target.value)}
-            placeholder="e.g. artifacts/spec.md" style={input} />
+        <Field label="Artifact name (optional)">
+          <input value={name} onChange={e => setName(e.target.value)}
+            placeholder="e.g. Functional Design" style={input} />
+          <small style={small}>
+            The logical name of the hand-off. Matched by name, so the exact path can
+            vary per run — the consumer resolves it from the artifact manifest
+            (<code>aee-artifact</code>). Leave empty for a plain dependency.
+          </small>
+        </Field>
+        <Field label="Path / path hint (optional)">
+          <input value={pathHint} onChange={e => setPathHint(e.target.value)}
+            placeholder="e.g. designs/**  — where it usually lands" style={input} />
+          <small style={small}>
+            With a name: an informational hint. Without a name: a fixed path the
+            artifact is matched on exactly.
+          </small>
         </Field>
         <Field label="Description (optional)">
           <input value={description} onChange={e => setDescription(e.target.value)}
-            placeholder="What this file carries" style={input} />
+            placeholder="What this artifact carries" style={input} />
         </Field>
         {error && <span style={errStyle}>{error}</span>}
         <div style={actions}>
           <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>
           <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
-          <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Adding…' : 'Add data flow'}</button>
+          <button onClick={submit} disabled={saving} style={primary}>
+            {saving ? 'Adding…' : (!nm && !h ? 'Add dependency' : 'Add data flow')}
+          </button>
         </div>
       </div>
     </SidePanel>

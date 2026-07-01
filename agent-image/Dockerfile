@@ -56,6 +56,13 @@ RUN pip install --no-cache-dir -r /opt/ace/requirements.txt
 COPY scripts/ /opt/ace/scripts/
 COPY CLAUDE.md /opt/ace/CLAUDE.md
 
+# `aee-artifact` — register/resolve mission artifacts by logical name via the
+# git-committed manifest (.aee/artifacts.jsonl). On PATH so agents call it
+# directly to record what they produced and to resolve an upstream's outputs
+# whose physical path varies per run.
+RUN chmod +x /opt/ace/scripts/aee-artifact \
+    && ln -sf /opt/ace/scripts/aee-artifact /usr/local/bin/aee-artifact
+
 ENV NODE_ENV=production
 
 ENTRYPOINT ["python3", "/opt/ace/scripts/agent-entrypoint.py"]

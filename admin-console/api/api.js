@@ -1003,15 +1003,29 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // from these ports below (reconcileTeamDataFlow), mirroring materialise time.
   let dataFlowChanged = false;
   if (dataFlow !== undefined) {
-    const normPaths = (arr) => (Array.isArray(arr) ? arr : [])
+    // An artifact port is matched by its logical `name` when set, else by `path`
+    // (#382). Keep whichever of name/path/hint the caller supplied, requiring at
+    // least one of name or path so the port has a match key.
+    const normArtifacts = (arr) => (Array.isArray(arr) ? arr : [])
       .map(a => (typeof a === 'string' ? { path: a } : a))
-      .filter(a => a && typeof a.path === 'string' && a.path.trim())
-      .map(a => ({ path: a.path.trim(), ...(a.description ? { description: a.description } : {}) }));
+      .filter(a => a && typeof a === 'object')
+      .map(a => {
+        const name = typeof a.name === 'string' ? a.name.trim() : '';
+        const hint = typeof a.hint === 'string' ? a.hint.trim() : '';
+        const p = typeof a.path === 'string' ? a.path.trim() : '';
+        return {
+          ...(name ? { name } : {}),
+          ...(hint ? { hint } : {}),
+          ...(p ? { path: p } : {}),
+          ...(a.description ? { description: a.description } : {}),
+        };
+      })
+      .filter(a => a.name || a.path);
     const normDeps = (arr) => [...new Set((Array.isArray(arr) ? arr : [])
       .filter(d => typeof d === 'string' && d && d !== id))];
     const next = {};
-    const inputs = normPaths(dataFlow && dataFlow.inputs);
-    const outputs = normPaths(dataFlow && dataFlow.outputs);
+    const inputs = normArtifacts(dataFlow && dataFlow.inputs);
+    const outputs = normArtifacts(dataFlow && dataFlow.outputs);
     const dependsOn = normDeps(dataFlow && dataFlow.dependsOn);
     if (inputs.length) next.inputs = inputs;
     if (outputs.length) next.outputs = outputs;

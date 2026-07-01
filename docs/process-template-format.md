@@ -59,6 +59,40 @@ role's `{{vars}}` and the target repo are applied per member.
 }
 ```
 
+### Data-flow hand-offs (artifacts & dependencies)
+
+Besides label choreography, a role may declare **data-flow ports** — the second
+way two agents are wired in the Flow editor. These are optional arrays on a role:
+
+```jsonc
+{
+  "id": "developer",
+  "outputs": [ { "name": "Java sources", "hint": "src/**", "description": "…" } ],
+  "inputs":  [ { "name": "Functional Design", "hint": "designs/**" } ],
+  "dependsOn": [ "business-analyst" ]   // ordering only, no artifact
+}
+```
+
+- **Artifacts are matched by logical `name`, not by path (#382).** A producer's
+  `outputs` entry connects to a consumer's `inputs` entry when their **names**
+  match. The `hint` is an informational path only — agent instances write to
+  paths that vary per run, so the physical location is resolved at runtime from
+  the git-committed **artifact manifest** (`.aee/artifacts.jsonl`, written by the
+  producer via `aee-artifact add "<name>" <path>` and read by the consumer via
+  `aee-artifact path "<name>"`). A port with only a `path` (BriefingPack
+  artifacts, legacy ports) still matches by path exactly.
+- **`dependsOn`** is the degenerate case — an ordering edge with no artifact.
+- **These ports are the single source of truth.** At materialise time
+  (`expandDataFlowSteps`) and on every live edit (`reconcileTeamDataFlow`) each
+  matched producer→consumer pair derives one `github-event`/`push` trigger
+  `<consumer>-on-push-<upstream>` (`dataFlow: true`) that **wakes** the consumer
+  when the upstream pushes. It is a notification, **not** a start-gate: nothing
+  blocks the consumer from running before that. The derived trigger's prompt
+  tells the consumer to `git pull` and resolve its inputs from the manifest.
+- In the Flow editor the *Dependency* and *Data flow* connect actions are unified
+  into one "Data flow / hand-off" dialog: give it an artifact **name** for a data
+  hand-off, or leave name+path empty for a plain dependency.
+
 ### Notes & invariants
 
 - **Wiring is `emits` ↔ `labelFilter`.** An edge *A → label L → B* exists when a

@@ -268,22 +268,62 @@ function expandReviewSteps(bundle) {
 // push by the upstream and the woken agent decides whether the change is
 // relevant (it can `[PASS]`). This also covers the case where an agent chose to
 // produce something other than its declared artifact.
+//
+// Artifacts are matched by their *logical name* (#382), not their physical path:
+// an agent instance may write "the Functional Design" to a different path each
+// run (or a whole directory, or something it couldn't predict). The path becomes
+// an optional `hint`; the real location is resolved at runtime from the git-
+// committed artifact manifest (`.aee/artifacts.jsonl`, written via `aee-artifact
+// add`). A port with only a `path` (BriefingPack artifacts + legacy team ports)
+// still matches by path — unchanged.
 
-function dataFlowPrompt(upstreamName, paths) {
-  const inputs = paths.length
-    ? `Your declared inputs from it: ${paths.map(p => `\`${p}\``).join(', ')}.`
-    : 'It is an upstream dependency of yours.';
-  return [
+// The match key of an artifact port: its logical name if present, else its path.
+function artifactKey(a) {
+  if (typeof a === 'string') return a;
+  return (a && (a.name || a.path)) || '';
+}
+// The physical hint for a named artifact (informative; path IS the key when
+// there is no name).
+function artifactHint(a) {
+  if (!a || typeof a !== 'object') return '';
+  return a.hint || (a.name ? a.path : '') || '';
+}
+function artifactIsNamed(a) { return !!(a && typeof a === 'object' && a.name); }
+
+// Build the consumer's wake prompt. `artifacts` = [{ key, hint, named }] for the
+// one upstream. Named artifacts are resolved from the manifest; path-only
+// (legacy/BP) artifacts are named inline; a bare dependency has neither.
+function dataFlowPrompt(upstreamName, artifacts) {
+  const list = Array.isArray(artifacts) ? artifacts : [];
+  const named = list.filter(a => a.named && a.key);
+  const legacy = list.filter(a => !a.named && a.key);
+  const lines = [
     `Your upstream **${upstreamName}** just pushed to the team repo (the event payload above has the branch and commits).`,
-    inputs,
-    '',
-    'Before you act:',
-    '1. `git fetch`, then check out the pushed branch and `git pull --ff-only` (the ref is in the payload).',
-    '2. Inspect what changed and confirm the inputs you need are present and complete.',
-    '3. If this push does not actually affect your work, reply `[PASS]` — skipping is fine.',
-    '',
-    'Then do your part and commit + push your own outputs so your downstream agents are notified the same way.',
-  ].join('\n');
+  ];
+  if (named.length) {
+    const desc = named.map(a => `**${a.key}**${a.hint ? ` (usually under \`${a.hint}\`)` : ''}`).join(', ');
+    lines.push(`It may have produced the artifact(s) you consume: ${desc}.`);
+    lines.push('The exact path can vary per run, so resolve it from the artifact manifest instead of guessing — run `aee-artifact list "<artifact name>"` (or read `.aee/artifacts.jsonl`) to get the path the upstream registered.');
+  } else if (legacy.length) {
+    lines.push(`Your declared inputs from it: ${legacy.map(a => `\`${a.key}\``).join(', ')}.`);
+  } else {
+    lines.push('It is an upstream dependency of yours.');
+  }
+  lines.push('');
+  lines.push('Before you act:');
+  lines.push('1. `git fetch`, then check out the pushed branch and `git pull --ff-only` (the ref is in the payload).');
+  if (named.length) {
+    lines.push('2. Resolve each artifact you need from the manifest and confirm the file/directory is present and complete.');
+    lines.push('3. If the upstream pushed but never registered an artifact you expect, don\'t guess a path — tell the user it is missing and stop.');
+  } else {
+    lines.push('2. Inspect what changed and confirm the inputs you need are present and complete.');
+    lines.push('3. If this push does not actually affect your work, reply `[PASS]` — skipping is fine.');
+  }
+  lines.push('');
+  lines.push(named.length
+    ? 'Then do your part. When you produce an artifact others depend on, register it so downstream agents can find it: `aee-artifact add "<name>" <path>`. Commit + push so they are notified the same way.'
+    : 'Then do your part and commit + push your own outputs so your downstream agents are notified the same way.');
+  return lines.join('\n');
 }
 
 /**
@@ -299,38 +339,41 @@ function expandDataFlowSteps(bundle, { teamId } = {}) {
   const roles = (bundle.roles || []).map(r => ({ ...r, triggers: (r.triggers || []).slice() }));
   const byId = new Map(roles.map(r => [r.id, r]));
   const memberId = (roleId) => (teamId ? `${teamId}-${roleId}` : roleId);
-  const pathOf = (a) => (typeof a === 'string' ? a : (a && a.path)) || '';
 
-  // Producers by artifact output path.
-  const producersByPath = new Map();
+  // Producers by artifact match key (logical name, else path).
+  const producersByKey = new Map();
   for (const r of roles) {
     for (const a of (r.outputs || [])) {
-      const p = pathOf(a);
-      if (!p) continue;
-      if (!producersByPath.has(p)) producersByPath.set(p, []);
-      producersByPath.get(p).push(r.id);
+      const k = artifactKey(a);
+      if (!k) continue;
+      if (!producersByKey.has(k)) producersByKey.set(k, []);
+      producersByKey.get(k).push(r.id);
     }
   }
 
   for (const b of roles) {
-    // upstream role id -> Set(path); empty set = pure dependency edge.
+    // upstream role id -> Map(key -> {key, hint, named}); empty map = pure
+    // dependency edge (ordering only, no artifact).
     const upstream = new Map();
-    const ensure = (id) => { if (!upstream.has(id)) upstream.set(id, new Set()); return upstream.get(id); };
+    const ensure = (id) => { if (!upstream.has(id)) upstream.set(id, new Map()); return upstream.get(id); };
 
     for (const dep of (b.dependsOn || [])) {
       if (typeof dep === 'string' && dep && dep !== b.id && byId.has(dep)) ensure(dep);
     }
     for (const a of (b.inputs || [])) {
-      const p = pathOf(a);
-      if (!p) continue;
-      for (const producer of (producersByPath.get(p) || [])) {
-        if (producer !== b.id) ensure(producer).add(p);
+      const k = artifactKey(a);
+      if (!k) continue;
+      for (const producer of (producersByKey.get(k) || [])) {
+        if (producer !== b.id) {
+          ensure(producer).set(k, { key: k, hint: artifactHint(a), named: artifactIsNamed(a) });
+        }
       }
     }
 
-    for (const [upId, paths] of upstream) {
+    for (const [upId, artifacts] of upstream) {
       const triggerId = `${b.id}-on-push-${upId}`;
       if (b.triggers.some(t => t.id === triggerId)) continue; // idempotent
+      const list = [...artifacts.values()].sort((x, y) => x.key.localeCompare(y.key));
       b.triggers.push({
         id: triggerId,
         type: 'github-event',
@@ -342,7 +385,7 @@ function expandDataFlowSteps(bundle, { teamId } = {}) {
         dataFlow: true,
         enabled: true,
         description: `Data flow: wake on push from ${byId.get(upId)?.displayName || upId}`,
-        prompt: dataFlowPrompt(byId.get(upId)?.displayName || upId, [...paths].sort()),
+        prompt: dataFlowPrompt(byId.get(upId)?.displayName || upId, list),
       });
     }
   }
@@ -353,4 +396,5 @@ function expandDataFlowSteps(bundle, { teamId } = {}) {
 module.exports = {
   buildProcessTemplate, validateProcessTemplate, templateToCustomRoles,
   expandReviewSteps, expandDataFlowSteps, emptyDraftBundle, roleKeyOf, VERSION,
+  artifactKey, artifactHint, artifactIsNamed,
 };

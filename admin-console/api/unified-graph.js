@@ -34,6 +34,7 @@ const {
 } = require('./process-graph');
 const {
   buildProcessTemplate,
+  artifactKey,
 } = require('./process-template');
 
 const UNIFIED_FLOW_VERSION = 1;
@@ -49,22 +50,23 @@ function edgeId(e) {
   return `${e.on}|${e.from == null ? '∅' : e.from}→${e.to == null ? '∅' : e.to}|${tail}`;
 }
 
-// Output / input artifact paths declared on a UnifiedNode. Ported (pure) from
-// orchestrator/bp-event-router.js outputsOf/inputsOf — kept local so this
-// module has no cross-service dependency.
+// Output / input artifact match keys declared on a UnifiedNode. An artifact is
+// matched by its logical name when it has one, else by its path (#382) — so
+// agent artifacts with variable paths connect by name while BriefingPack
+// artifacts (path only) connect by path exactly as before.
 function outputPaths(node) {
   const out = new Set();
   for (const a of asArray(node.outputs)) {
-    const p = typeof a === 'string' ? a : (a && a.path);
-    if (typeof p === 'string' && p) out.add(p);
+    const k = artifactKey(a);
+    if (k) out.add(k);
   }
   return out;
 }
 function inputPaths(node) {
   const out = new Set();
   for (const a of asArray(node.inputs)) {
-    const p = typeof a === 'string' ? a : (a && a.path);
-    if (typeof p === 'string' && p) out.add(p);
+    const k = artifactKey(a);
+    if (k) out.add(k);
   }
   return out;
 }

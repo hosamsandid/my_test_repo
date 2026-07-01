@@ -183,8 +183,18 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
   function setData(graph) {
     const g = graph || {};
     const nodes = Array.isArray(g.nodes) ? g.nodes : [];
-    const mkArt = (a, direction) =>
-      (typeof a === 'string' ? { path: a, direction } : { ...a, direction });
+    // An artifact is keyed by its logical name when it has one, else its path
+    // (#382) — matching the backend. The physical path becomes a display `hint`.
+    const mkArt = (a, direction) => {
+      if (typeof a === 'string') return { path: a, direction };
+      const key = a.name || a.path;
+      return {
+        ...a,
+        path: key,
+        ...(a.name ? { hint: a.hint || a.path || '' } : {}),
+        direction,
+      };
+    };
     state.briefings = nodes.map(n => ({
       id: n.id,
       title: n.displayName || n.id,
@@ -242,12 +252,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
             path,
             filename,
             dir: dir || '',
+            hint:         '',
             producers:    [],
             consumers:    [],
             acs:          [],
             descriptions: [],
           };
         }
+        // The physical-path hint for a named artifact (its path varies per run).
+        if (art.hint && !reg[path].hint) reg[path].hint = art.hint;
 
         if (art.direction === 'output') {
           if (!reg[path].producers.includes(bp.id)) reg[path].producers.push(bp.id);
@@ -1060,6 +1073,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
         dirEl.style.cssText = 'font-size:10px;color:var(--eb-text-muted);margin-bottom:4px;word-break:break-all;';
         dirEl.textContent = reg.dir + '/';
         node.appendChild(dirEl);
+      }
+
+      // Named artifact: show the physical-path hint (resolved from the manifest
+      // at runtime) so the logical name isn't the only locator.
+      if (reg.hint) {
+        const hintEl = document.createElement('div');
+        hintEl.style.cssText = 'font-size:10px;color:var(--eb-text-muted);margin-bottom:4px;word-break:break-all;font-style:italic;';
+        hintEl.textContent = `~ ${reg.hint}`;
+        node.appendChild(hintEl);
       }
 
       const meta = document.createElement('div');

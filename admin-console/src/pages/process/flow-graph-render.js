@@ -44,6 +44,12 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
   stageLayer.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;';
   canvas.appendChild(stageLayer);
 
+  // The artifact lane band (a single labelled rectangle behind the artifact row)
+  // sits above the stage bands but still behind edges and nodes.
+  const laneLayer = document.createElement('div');
+  laneLayer.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;';
+  canvas.appendChild(laneLayer);
+
   const svgEdges = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svgEdges.style.position     = 'absolute';
   svgEdges.style.top          = '0';
@@ -638,15 +644,18 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
     layoutArtifacts(visible);
   }
 
+  // Artifacts (inputs/outputs) always live in a dedicated horizontal lane BELOW
+  // the whole node graph, regardless of flow orientation. Each artifact is
+  // placed at the mean x of its producer(s) + consumer(s), so the producer→
+  // artifact→consumer edges form a short "triangle" (down into the lane, back
+  // up to the consumer). The pooling pass below spreads overlapping artifacts
+  // apart while keeping them close to that ideal x. See drawArtifactEdges for
+  // the matching (always-vertical) edge routing.
   function layoutArtifacts(visibleBpNodes) {
-    if (state.orientation === 'vertical') {
-      layoutArtifactsVertical(visibleBpNodes);
-    } else {
-      layoutArtifactsHorizontal(visibleBpNodes);
-    }
+    layoutArtifactLane(visibleBpNodes);
   }
 
-  function layoutArtifactsHorizontal(visibleBpNodes) {
+  function layoutArtifactLane(visibleBpNodes) {
     const visiblePaths = getVisibleArtifactPaths();
     if (visiblePaths.size === 0) { state.artifactPositions = {}; return; }
 
@@ -766,130 +775,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
 
     const artPos = {};
     items.forEach(it => { artPos[it.path] = { x: it.x, y: artifactRowY }; });
-    state.artifactPositions = artPos;
-  }
-
-  function layoutArtifactsVertical(visibleBpNodes) {
-    const visiblePaths = getVisibleArtifactPaths();
-    if (visiblePaths.size === 0) { state.artifactPositions = {}; return; }
-
-    // Artifact column lives to the right of all BP columns
-    let maxX = 0;
-    visibleBpNodes.forEach(n => {
-      const pos = state.positions[n.id];
-      if (!pos) return;
-      maxX = Math.max(maxX, pos.x + NODE_W);
-    });
-    const artifactColX = maxX + H_GAP * 2;
-
-    const visibleBpIds = new Set(visibleBpNodes.map(n => n.id));
-
-    const items = [];
-    visiblePaths.forEach(path => {
-      const reg = state.artifactRegistry[path];
-      if (!reg) return;
-
-      let sum  = 0;
-      let count = 0;
-      let bpMin = Infinity;
-      let bpMax = -Infinity;
-      const consider = (id, toggleSet) => {
-        if (!visibleBpIds.has(id) || !toggleSet.has(id)) return;
-        const pos = state.positions[id];
-        if (!pos) return;
-        const h = getNodeHeight(id);
-        const center = pos.y + h / 2;
-        sum += center;
-        count++;
-        if (center < bpMin) bpMin = center;
-        if (center > bpMax) bpMax = center;
-      };
-      reg.producers.forEach(id => consider(id, state.outputsVisible));
-      reg.consumers.forEach(id => consider(id, state.inputsVisible));
-      if (count === 0) return;
-
-      items.push({
-        path,
-        idealY: sum / count - ARTIFACT_H / 2,
-        bpMin:  bpMin - ARTIFACT_H / 2,
-        bpMax:  bpMax - ARTIFACT_H / 2,
-      });
-    });
-
-    items.sort((a, b) => a.idealY - b.idealY);
-    const SPACING = ARTIFACT_H + 16;
-    const blocks  = [];
-    for (let i = 0; i < items.length; i++) {
-      let start = i;
-      let count = 1;
-      let sum   = items[i].idealY - i * SPACING;
-      let value = sum;
-      while (blocks.length > 0 && blocks[blocks.length - 1].value > value) {
-        const prev = blocks.pop();
-        start  = prev.start;
-        count += prev.count;
-        sum   += prev.sum;
-        value  = sum / count;
-      }
-      blocks.push({ start, end: i, count, sum, value });
-    }
-
-    blocks.forEach(b => {
-      for (let i = b.start; i <= b.end; i++) {
-        items[i].y = b.value + i * SPACING;
-      }
-    });
-
-    let prevBottom = -Infinity;
-    blocks.forEach((b, bIdx) => {
-      const minSpan = (b.count - 1) * SPACING;
-
-      if (b.count < 2) {
-        prevBottom = items[b.start].y;
-        return;
-      }
-
-      let unionMin = Infinity;
-      let unionMax = -Infinity;
-      for (let i = b.start; i <= b.end; i++) {
-        if (items[i].bpMin < unionMin) unionMin = items[i].bpMin;
-        if (items[i].bpMax > unionMax) unionMax = items[i].bpMax;
-      }
-      const desiredSpan = unionMax - unionMin;
-      if (desiredSpan <= minSpan) {
-        prevBottom = items[b.end].y;
-        return;
-      }
-
-      const topLimit    = bIdx > 0 ? prevBottom + SPACING : -Infinity;
-      const bottomLimit = bIdx < blocks.length - 1
-        ? blocks[bIdx + 1].value + blocks[bIdx + 1].start * SPACING - SPACING
-        : Infinity;
-
-      const centroid = b.value + ((b.start + b.end) / 2) * SPACING;
-      let blockStart = centroid - desiredSpan / 2;
-      let blockEnd   = centroid + desiredSpan / 2;
-      if (blockStart < topLimit) {
-        blockEnd  += topLimit - blockStart;
-        blockStart = topLimit;
-      }
-      if (blockEnd > bottomLimit) {
-        blockStart -= blockEnd - bottomLimit;
-        blockEnd    = bottomLimit;
-        if (blockStart < topLimit) blockStart = topLimit;
-      }
-      let span = blockEnd - blockStart;
-      if (span < minSpan) span = minSpan;
-
-      const step = span / (b.count - 1);
-      for (let i = b.start; i <= b.end; i++) {
-        items[i].y = blockStart + step * (i - b.start);
-      }
-      prevBottom = items[b.end].y;
-    });
-
-    const artPos = {};
-    items.forEach(it => { artPos[it.path] = { x: artifactColX, y: it.y }; });
     state.artifactPositions = artPos;
   }
 
@@ -1085,6 +970,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
       });
       drawEdges();
       drawStages();
+      drawArtifactLane();
     });
   }
 
@@ -1127,6 +1013,50 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
       band.appendChild(label);
       stageLayer.appendChild(band);
     }
+  }
+
+  // Artifact lane band: a single faint, labelled rectangle behind the artifact
+  // row that spans the full width of the graph — so the generated files read as
+  // a dedicated lane below the agent arrangement (matches drawArtifactEdges).
+  function drawArtifactLane() {
+    laneLayer.innerHTML = '';
+    const paths = Object.keys(state.artifactPositions);
+    if (paths.length === 0) return;
+
+    let laneTop = Infinity, laneBottom = -Infinity;
+    let minX = Infinity, maxX = -Infinity;
+    paths.forEach(path => {
+      const pos = state.artifactPositions[path];
+      if (!pos) return;
+      const el = canvas.querySelector(`.artifact-node[data-path="${CSS.escape(path)}"]`);
+      const h  = el ? el.offsetHeight : ARTIFACT_H;
+      laneTop    = Math.min(laneTop, pos.y);
+      laneBottom = Math.max(laneBottom, pos.y + h);
+      minX = Math.min(minX, pos.x);
+      maxX = Math.max(maxX, pos.x + ARTIFACT_W);
+    });
+    if (laneTop === Infinity) return;
+
+    // Widen the band to also span the node columns, so it reads as a full lane.
+    getVisibleNodes().forEach(n => {
+      const pos = state.positions[n.id];
+      if (!pos) return;
+      minX = Math.min(minX, pos.x);
+      maxX = Math.max(maxX, pos.x + NODE_W);
+    });
+
+    const PAD = 20;
+    const band = document.createElement('div');
+    band.style.cssText = `position:absolute;left:${minX - PAD}px;top:${laneTop - PAD - 18}px;`
+      + `width:${maxX - minX + PAD * 2}px;height:${laneBottom - laneTop + PAD * 2 + 18}px;`
+      + `background:rgba(148,163,184,0.06);`
+      + `border:1px dashed var(--eb-border-default);border-radius:10px;`;
+    const label = document.createElement('div');
+    label.textContent = 'Artifacts';
+    label.style.cssText = `position:absolute;left:8px;top:2px;font-size:10px;font-weight:700;`
+      + `letter-spacing:0.04em;text-transform:uppercase;color:var(--eb-text-muted);`;
+    band.appendChild(label);
+    laneLayer.appendChild(band);
   }
 
   function renderArtifactNodes() {
@@ -1405,54 +1335,50 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
 
   function drawArtifactEdges(visibleBpIds) {
     const visiblePaths = getVisibleArtifactPaths();
-    const vertical     = state.orientation === 'vertical';
+
+    // Artifacts sit in the lane below the graph, so every producer/consumer is
+    // above them: producer → artifact goes DOWN into the lane, artifact →
+    // consumer goes back UP. Both attach to the artifact's TOP edge, fanned out
+    // toward the connected node's x so the two arms read as a clean triangle.
+    const ANCHOR_MARGIN = 16;
+    const topAnchorX = (artPos, nodeCx) =>
+      Math.max(artPos.x + ANCHOR_MARGIN,
+        Math.min(artPos.x + ARTIFACT_W - ANCHOR_MARGIN, nodeCx));
 
     visiblePaths.forEach(path => {
       const reg    = state.artifactRegistry[path];
       const artPos = state.artifactPositions[path];
       if (!reg || !artPos) return;
 
-      const artEl = canvas.querySelector(`.artifact-node[data-path="${CSS.escape(path)}"]`);
-      const artH  = artEl ? artEl.offsetHeight : ARTIFACT_H;
-
-      // Output edges: BP → artifact (green)
+      // Output edges: BP → artifact (green), down into the lane.
       reg.producers.forEach(bpId => {
         if (!visibleBpIds.has(bpId)) return;
         const bpPos = state.positions[bpId];
         const bpEl  = canvas.querySelector(`.bp-node[data-id="${bpId}"]`);
         if (!bpPos || !bpEl) return;
 
-        const bpH = bpEl.offsetHeight;
-        const d = vertical
-          ? drawBezierEdge(
-              bpPos.x + NODE_W, bpPos.y + bpH / 2,
-              artPos.x,         artPos.y + artH / 2,
-              '#34d399', 1.5, '', true, 'horizontal')
-          : drawBezierEdge(
-              bpPos.x + NODE_W / 2, bpPos.y + bpH,
-              artPos.x + ARTIFACT_W / 2, artPos.y,
-              '#34d399', 1.5, '', true, 'vertical');
+        const bpH  = bpEl.offsetHeight;
+        const bpCx = bpPos.x + NODE_W / 2;
+        const d = drawBezierEdge(
+          bpCx, bpPos.y + bpH,
+          topAnchorX(artPos, bpCx), artPos.y,
+          '#34d399', 1.5, '', true, 'vertical');
         addEdgeHit(d, { on: 'artifact', from: bpId, direction: 'output', path });
       });
 
-      // Input edges: artifact → BP (blue dashed)
+      // Input edges: artifact → BP (blue dashed), back up out of the lane.
       reg.consumers.forEach(bpId => {
         if (!visibleBpIds.has(bpId)) return;
         const bpPos = state.positions[bpId];
         const bpEl  = canvas.querySelector(`.bp-node[data-id="${bpId}"]`);
         if (!bpPos || !bpEl) return;
 
-        const bpH = bpEl.offsetHeight;
-        const d = vertical
-          // artifact feeds INTO bp — route from the artifact's edge into the BP.
-          ? drawBezierEdge(
-              artPos.x,         artPos.y + artH / 2,
-              bpPos.x + NODE_W, bpPos.y + bpH / 2,
-              '#60a5fa', 1.5, '4 3', true, 'horizontal')
-          : drawBezierEdge(
-              artPos.x + ARTIFACT_W / 2, artPos.y,
-              bpPos.x + NODE_W / 2, bpPos.y + bpH,
-              '#60a5fa', 1.5, '4 3', true, 'vertical');
+        const bpH  = bpEl.offsetHeight;
+        const bpCx = bpPos.x + NODE_W / 2;
+        const d = drawBezierEdge(
+          topAnchorX(artPos, bpCx), artPos.y,
+          bpCx, bpPos.y + bpH,
+          '#60a5fa', 1.5, '4 3', true, 'vertical');
         addEdgeHit(d, { on: 'artifact', from: bpId, direction: 'input', path });
       });
     });

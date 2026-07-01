@@ -15,7 +15,8 @@ const audit = require('./audit');
 const { computeScope, visibleTeam, visibleAgent } = require('./scope');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandReviewSteps, emptyDraftBundle } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandReviewSteps, expandDataFlowSteps, emptyDraftBundle } = require('./process-template');
+const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -67,7 +68,11 @@ fs.mkdirSync(MCP_CREDENTIALS_KEYS_DIR, { recursive: true });
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+// Document-bundle endpoints (process drafts, the unified flow graph, imported
+// BriefingPack flows) carry the full brief.md / prompt bodies inline, which
+// easily exceeds body-parser's 100kb default. Raise the limit so importing /
+// rendering / saving a multi-BP flow doesn't 413 (#377). Behind the auth gate.
+app.use(express.json({ limit: '10mb' }));
 app.use(express.static(STATIC_DIR));
 
 // Allowlist for ids that turn into filesystem path segments. The dotted-
@@ -827,6 +832,82 @@ function notifyAgentReload(agentId) {
     .catch(() => {});
 }
 
+// A derived data-flow trigger is one the `expandDataFlowSteps` derivation owns:
+// it carries the `dataFlow` marker and the canonical `<consumer>-on-push-<up>`
+// id. Manually-authored data-flow triggers (arbitrary ids) don't match and are
+// preserved untouched by reconciliation. Kept in sync with process-template.js.
+function isDerivedDataFlowTrigger(t, memberId) {
+  return t && t.dataFlow === true && typeof t.id === 'string'
+    && t.id.startsWith(`${memberId}-on-push-`);
+}
+
+// Re-derive the functional data-flow push triggers for a whole team from its
+// members' declarative ports (`dataFlow.{dependsOn,inputs,outputs}`), mirroring
+// what `expandDataFlowSteps` does at materialise time. This is what makes a live
+// team behave like a draft: the ports are the single source of truth for the
+// edges, and the runtime wiring is derived on write — no separate trigger
+// bookkeeping in the editor. Best-effort and idempotent; only members whose
+// trigger set actually changes are written back. Regenerating from ports-stripped
+// triggers handles both adds (new port) and removals (dropped port). Members'
+// own ids are already full member ids, so no teamId mapping is applied.
+async function reconcileTeamDataFlow(teamId) {
+  if (!teamId) return;
+  const members = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg || cfg.parentTeamId !== teamId) continue;
+    const df = cfg.dataFlow && typeof cfg.dataFlow === 'object' ? cfg.dataFlow : {};
+    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+    members.push({ id, displayName: cfg.displayName || id, triggers: Array.isArray(triggers) ? triggers : [], df });
+  }
+  if (members.length === 0) return;
+
+  // Strip the previously-derived triggers so expandDataFlowSteps regenerates the
+  // full current set from the ports (a plain no-op leaves stale ones behind).
+  const roles = members.map(m => ({
+    id: m.id,
+    displayName: m.displayName,
+    inputs: Array.isArray(m.df.inputs) ? m.df.inputs : [],
+    outputs: Array.isArray(m.df.outputs) ? m.df.outputs : [],
+    dependsOn: Array.isArray(m.df.dependsOn) ? m.df.dependsOn : [],
+    triggers: m.triggers.filter(t => !isDerivedDataFlowTrigger(t, m.id)),
+  }));
+  const expanded = expandDataFlowSteps({ roles }).roles;
+  const byId = new Map(expanded.map(r => [r.id, r]));
+
+  for (const m of members) {
+    const next = byId.get(m.id)?.triggers || [];
+    // Compare against the current on-disk set (order-insensitive on id) so we
+    // only write when the derived wiring genuinely changed.
+    const curIds = m.triggers.map(t => t.id).sort().join('\n');
+    const nextIds = next.map(t => t.id).sort().join('\n');
+    if (curIds === nextIds) continue;
+    try { await putTriggers(m.id, next); notifyAgentReload(m.id); }
+    catch { /* best-effort — never break the originating request */ }
+  }
+}
+
+// Guard against a parent-child cycle among a team's members (#377). Walks the
+// existing parentMemberId chain: setting `child`'s parent to `parent` is a cycle
+// if `child` is already an ancestor of `parent` (or they're equal).
+function parentWouldCycle(teamId, childId, parentId) {
+  if (!parentId || parentId === childId) return parentId === childId;
+  const parentOf = new Map();
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (cfg && cfg.parentTeamId === teamId && typeof cfg.parentMemberId === 'string') {
+      parentOf.set(id, cfg.parentMemberId);
+    }
+  }
+  let cur = parentId, seen = new Set();
+  while (cur && !seen.has(cur)) {
+    if (cur === childId) return true;
+    seen.add(cur);
+    cur = parentOf.get(cur);
+  }
+  return false;
+}
+
 // Best-effort: after the admin writes a control-plane file (prompt, skill) to the
 // pool subpath, ask the orchestrator to mirror those named paths into a running
 // isolated agent's dedicated volume (#185 item 5). The orchestrator is the only
@@ -848,7 +929,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skillsOverride, mcpServersOverride, disableMode, teamId } = req.body;
+  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skillsOverride, mcpServersOverride, disableMode, teamId, emits, dataFlow, parentMemberId, stage } = req.body;
 
   // Enable/disable goes through the orchestrator so stubs (no token yet)
   // get fully materialized — Matrix user, workspace seeding, agent-runner
@@ -907,6 +988,56 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   if (displayName !== undefined) fresh.displayName = displayName;
   if (role !== undefined) fresh.role = role;
   if (briefingsPath !== undefined) fresh.briefingsPath = briefingsPath;
+  // Agent-level emitted labels (label hand-offs wired from the process editor).
+  // `null` / [] clears the set.
+  if (emits !== undefined) {
+    if (Array.isArray(emits) && emits.length) fresh.emits = emits.filter(e => typeof e === 'string' && e);
+    else delete fresh.emits;
+  }
+
+  // ── Unified orchestration edges (Process Canvas) ──────────────────────────
+  // The declarative data-flow ports are the single source of truth for the
+  // dependency + data-flow edges in the Flows graph — the same shape a draft
+  // bundle carries on its roles. Writing them here lets the process editor wire
+  // a live team exactly like a draft; the functional push triggers are re-derived
+  // from these ports below (reconcileTeamDataFlow), mirroring materialise time.
+  let dataFlowChanged = false;
+  if (dataFlow !== undefined) {
+    const normPaths = (arr) => (Array.isArray(arr) ? arr : [])
+      .map(a => (typeof a === 'string' ? { path: a } : a))
+      .filter(a => a && typeof a.path === 'string' && a.path.trim())
+      .map(a => ({ path: a.path.trim(), ...(a.description ? { description: a.description } : {}) }));
+    const normDeps = (arr) => [...new Set((Array.isArray(arr) ? arr : [])
+      .filter(d => typeof d === 'string' && d && d !== id))];
+    const next = {};
+    const inputs = normPaths(dataFlow && dataFlow.inputs);
+    const outputs = normPaths(dataFlow && dataFlow.outputs);
+    const dependsOn = normDeps(dataFlow && dataFlow.dependsOn);
+    if (inputs.length) next.inputs = inputs;
+    if (outputs.length) next.outputs = outputs;
+    if (dependsOn.length) next.dependsOn = dependsOn;
+    if (Object.keys(next).length) fresh.dataFlow = next; else delete fresh.dataFlow;
+    dataFlowChanged = true;
+  }
+
+  // Parent-child hierarchy (#377). `null`/'' clears; a member id sets it, guarded
+  // against self- and ancestor-cycles among the team's members.
+  if (parentMemberId !== undefined) {
+    if (typeof parentMemberId === 'string' && parentMemberId) {
+      if (parentWouldCycle(fresh.parentTeamId, id, parentMemberId)) {
+        return res.status(400).json({ error: 'that would create a parent cycle' });
+      }
+      fresh.parentMemberId = parentMemberId;
+    } else {
+      delete fresh.parentMemberId;
+    }
+  }
+
+  // Process stage band (#362 E). Empty clears (inherits from parent).
+  if (stage !== undefined) {
+    if (typeof stage === 'string' && stage.trim()) fresh.stage = stage.trim();
+    else delete fresh.stage;
+  }
 
   // Reassign the agent to a human Team (#308). Validates against existing
   // teams; metadata-only, so no respawn is needed.
@@ -940,6 +1071,11 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   }
 
   writeJsonAtomic(cfgPath, fresh);
+  // A data-flow port change re-derives the team's functional push triggers so a
+  // live edit takes effect at runtime without a re-materialise (best-effort).
+  if (dataFlowChanged && fresh.parentTeamId) {
+    await reconcileTeamDataFlow(fresh.parentTeamId);
+  }
   // Wake a running agent so it re-pulls config promptly under volume isolation
   // (#185 Phase 2). On the shared volume the agent re-reads config.json on its
   // next action anyway, so this is just a harmless idempotent re-sync there.
@@ -2094,6 +2230,117 @@ app.post('/api/process/graph', (req, res) => {
   res.json({ level: 'template', team: null, imported: true, name: bundle.name, ...buildProcessGraph(agents) });
 });
 
+/* ─── Unified orchestration graph (Unified Orchestration #362 / #365) ───────
+ * One graph over BOTH orchestration concepts, via the pure builder in
+ * unified-graph.js. The `/flows` source switcher picks the source:
+ *   - default (live):  live agents → process-style nodes (label/timer/review/
+ *                      event edges). Optional ?team=<id> scope. Persisted emits
+ *                      only (no silent derivation, unless ?derive=1).
+ *   - ?workspace=<path>: BP source — fetch briefings from bp-explorer and map
+ *                      via briefingsToUnified (dependency + artifact edges; BP
+ *                      status dropped). Read-only projection over brief.md.
+ * Both shapes are { unifiedFlowVersion, source, nodes, edges, gates, labels, lints }. */
+app.get('/api/flows/graph', async (req, res) => {
+  // Template-level blueprint (read-only) — the role-template catalog as a
+  // unified graph, so the rich viewer can render it like any other flow.
+  if (req.query.templates !== undefined) {
+    const derive = req.query.derive !== undefined ? truthyParam(String(req.query.derive)) : true;
+    const ids = truthyParam(String(req.query.templates))
+      ? listAgentTemplateIds()
+      : String(req.query.templates).split(',').map(s => s.trim()).filter(Boolean);
+    const tnodes = [];
+    for (const id of ids) {
+      const t = loadAgentTemplate(id);
+      if (!t) continue;
+      const triggers = effectiveTriggers(
+        (t.triggers || []).map(tr => ({
+          id: tr.id, type: tr.type, events: tr.events, labelFilter: tr.labelFilter,
+          from: tr.from, cron: tr.cron, at: tr.at, enabled: tr.enabled,
+          emits: tr.emits, prompt: tr.promptTemplate,
+        })),
+        { derive, systemPrompt: t.promptTemplate || '' },
+      );
+      tnodes.push({
+        id: t.id, role: 'template', displayName: t.displayName || t.id,
+        sessionPolicy: t.sessionPolicy || 'persistent', environmentId: null, triggers,
+        inputs: [], outputs: [], dependsOn: [], content: t.promptTemplate || '',
+      });
+    }
+    return res.json({ unifiedFlowVersion: 1, source: 'templates', level: 'template', ...buildUnifiedGraph(tnodes) });
+  }
+
+  // BP source — read-only projection of a briefings directory.
+  if (typeof req.query.workspace === 'string' && req.query.workspace.trim()) {
+    const workspace = req.query.workspace.trim();
+    try {
+      const url = `${BP_EXPLORER_URL}/api/briefings?workspace=${encodeURIComponent(workspace)}`;
+      const upstream = await fetch(url);
+      if (!upstream.ok) {
+        return res.status(502).json({ error: `BP-Explorer returned ${upstream.status}` });
+      }
+      const bps = await upstream.json();
+      const flow = briefingsToUnified(bps, { name: workspace });
+      return res.json({
+        unifiedFlowVersion: flow.unifiedFlowVersion, source: 'briefings', workspace,
+        ...buildUnifiedGraph(flow.nodes, flow.edges),
+      });
+    } catch (err) {
+      return res.status(502).json({ error: `BP-Explorer unreachable: ${err.message}` });
+    }
+  }
+
+  // Live source — agents as unified nodes (data-flow ports empty for now).
+  const team = typeof req.query.team === 'string' && req.query.team.trim()
+    ? req.query.team.trim() : null;
+  if (team && !AGENT_ID_RE.test(team)) return res.status(400).json({ error: 'Invalid team id' });
+  const derive = req.query.derive !== undefined && truthyParam(String(req.query.derive));
+
+  const nodes = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    const role = cfg.role || 'agent';
+    if (role === 'team') continue; // template holder — no triggers of its own
+    if (team && cfg.parentTeamId !== team) continue;
+    const raw = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+    const triggers = effectiveTriggers(raw, {
+      derive, systemPrompt: derive ? readAgentSystemPrompt(id) : '',
+    });
+    // Data-flow ports persisted at materialise time (#379) so the live graph
+    // of an imported team still renders its dependency/artifact edges.
+    const df = cfg.dataFlow && typeof cfg.dataFlow === 'object' ? cfg.dataFlow : {};
+    nodes.push({
+      id, role, displayName: cfg.displayName || id,
+      sessionPolicy: cfg.sessionPolicy || 'persistent',
+      environmentId: cfg.environmentId || null, triggers,
+      emits: Array.isArray(cfg.emits) ? cfg.emits : [], // agent-level label hand-offs
+      inputs: Array.isArray(df.inputs) ? df.inputs : [],
+      outputs: Array.isArray(df.outputs) ? df.outputs : [],
+      dependsOn: Array.isArray(df.dependsOn) ? df.dependsOn : [],
+      parent: typeof cfg.parentMemberId === 'string' ? cfg.parentMemberId : null,
+      content: readAgentSystemPrompt(id), // expandable prompt in the unified viewer
+      stage: typeof cfg.stage === 'string' ? cfg.stage : '',
+    });
+  }
+  res.json({ unifiedFlowVersion: 1, source: 'live', team, ...buildUnifiedGraph(nodes) });
+});
+
+/* Derive a unified graph from a draft/imported bundle (#367) — the editable
+ * counterpart of POST /api/process/graph. Maps the process-template bundle
+ * (roles may carry inputs/outputs/dependsOn) through the unified model so the
+ * draft editor renders label + dependency + artifact edges and unified lints. */
+app.post('/api/flows/graph', (req, res) => {
+  const bundle = req.body && req.body.processTemplate;
+  const v = validateProcessTemplate(bundle, { allowEmptyRoles: true });
+  if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
+  const flow = processTemplateToUnified(bundle);
+  res.json({
+    unifiedFlowVersion: flow.unifiedFlowVersion, source: 'draft', imported: true, name: bundle.name,
+    // Ordered stage names drive the layered layout on the client (#stage-order).
+    stages: Array.isArray(bundle.stages) ? bundle.stages.filter(s => typeof s === 'string') : [],
+    ...buildUnifiedGraph(flow.nodes, flow.edges),
+  });
+});
+
 /* ─── Process template bundle (export, #334) ────────────────────────────
  * GET /api/process/template?team=<id> | ?templates=1
  * Returns a portable bundle (roles + prompts + triggers incl emits, gates,
@@ -2148,8 +2395,9 @@ app.get('/api/process/template', (req, res) => {
     roleEntries.push({
       id, displayName: cfg.displayName || id, role,
       sessionPolicy: cfg.sessionPolicy || 'persistent', systemPrompt, triggers: tlist,
+      ...(Array.isArray(cfg.emits) && cfg.emits.length ? { emits: cfg.emits } : {}),
     });
-    graphAgents.push({ id, role, triggers: tlist });
+    graphAgents.push({ id, role, triggers: tlist, emits: cfg.emits });
   }
   const g = buildProcessGraph(graphAgents);
   res.json(buildProcessTemplate({
@@ -2254,6 +2502,47 @@ app.delete('/api/process/drafts/:id', apiLimiter, (req, res) => {
   if (!p || !fs.existsSync(p)) return res.status(404).json({ error: 'Draft not found' });
   fs.rmSync(p);
   res.status(204).end();
+});
+
+/* Import a BriefingPack hierarchy as a process draft (#377). Reads a briefings
+ * directory from bp-explorer and maps it through briefingsToUnified →
+ * unifiedToProcessTemplate, so the brief.md body becomes each role's prompt and
+ * the parent-child hierarchy, depends_on, artifacts and stage are preserved.
+ * The result is persisted as a new editable draft — BP-Flows and Process-Flows
+ * now share one storage format. Read-only against the BP source (no brief.md
+ * write-back). */
+app.post('/api/process/drafts/import-briefings', apiLimiter, async (req, res) => {
+  const workspace = typeof req.body?.workspace === 'string' && req.body.workspace.trim()
+    ? req.body.workspace.trim() : null;
+  if (!workspace) return res.status(400).json({ error: 'workspace (briefings path) is required' });
+
+  let bps;
+  try {
+    const url = `${BP_EXPLORER_URL}/api/briefings?workspace=${encodeURIComponent(workspace)}`;
+    const upstream = await fetch(url);
+    if (!upstream.ok) return res.status(502).json({ error: `BP-Explorer returned ${upstream.status}` });
+    bps = await upstream.json();
+  } catch (err) {
+    return res.status(502).json({ error: `BP-Explorer unreachable: ${err.message}` });
+  }
+  if (!Array.isArray(bps) || bps.length === 0) {
+    return res.status(422).json({ error: 'No briefing packs found at that workspace' });
+  }
+
+  const name = typeof req.body?.name === 'string' && req.body.name.trim()
+    ? req.body.name.trim() : `Imported: ${workspace}`;
+  const bundle = { ...unifiedToProcessTemplate(briefingsToUnified(bps, { name })), name };
+
+  // Persist as a new draft (same id derivation as POST /api/process/drafts).
+  let base = slugifyDraft(name);
+  if (!DRAFT_ID_RE.test(base)) base = 'process';
+  let id = base, n = 2;
+  while (fs.existsSync(draftPath(id))) { id = `${base}-${n++}`; }
+  const now = new Date().toISOString();
+  const draft = { ...bundle, id, sourceBriefings: workspace, createdAt: now, updatedAt: now };
+  fs.mkdirSync(PROCESS_DRAFTS_DIR, { recursive: true });
+  writeJsonAtomic(draftPath(id), draft);
+  res.status(201).json(draft);
 });
 
 /* ─── Skills ────────────────────────────────────────────────────────── */
@@ -4176,10 +4465,34 @@ function planMembers(teamId, normalizedRoles, loadTemplate) {
   return planned;
 }
 
+// Build the `dataFlow` config block for a materialised member from its custom
+// role's ports (#379). dependsOn role ids → member ids so the live graph
+// connects members; artifact paths are global and pass through unchanged.
+// Returns null when the role carries no ports (keeps ordinary teams clean).
+function dataFlowForMember(template, teamId) {
+  const inputs = Array.isArray(template?.inputs) ? template.inputs : [];
+  const outputs = Array.isArray(template?.outputs) ? template.outputs : [];
+  const dependsOn = Array.isArray(template?.dependsOn) ? template.dependsOn : [];
+  if (!inputs.length && !outputs.length && !dependsOn.length) return null;
+  return {
+    dataFlow: {
+      ...(inputs.length ? { inputs } : {}),
+      ...(outputs.length ? { outputs } : {}),
+      ...(dependsOn.length ? { dependsOn: dependsOn.map(d => `${teamId}-${d}`) } : {}),
+    },
+  };
+}
+
 app.post('/api/teams', heavyLimiter, async (req, res) => {
   const body = req.body || {};
   const { teamId, teamName, repository, githubTokenId, mcpServers } = body;
   const mode = body.mode === 'extend' ? 'extend' : 'create';
+  // Deferred materialization: when false, members are created as stubs (config
+  // + triggers only, no Matrix user / clone / process), shown in the UI and
+  // materialized on demand via enable — same model as an orchestrator's
+  // bp-instance stubs. Avoids dozens of clones up front for a large process.
+  // Default true preserves the existing immediate-materialization behaviour.
+  const materializeMembers = body.materializeMembers !== false;
   const readyLabel = (typeof body.readyLabel === 'string' && body.readyLabel.trim())
     ? body.readyLabel.trim()
     : 'ready';
@@ -4264,9 +4577,12 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   if (body.processTemplate) {
     const v = validateProcessTemplate(body.processTemplate);
     if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
-    // Expand PR-review steps (#347) into concrete reviewer + producer-rework
-    // triggers before flattening to custom roles.
-    customRolesRaw = templateToCustomRoles(expandReviewSteps(body.processTemplate));
+    // Expand PR-review steps (#347) into reviewer + producer-rework triggers,
+    // then data-flow edges (#379) into `push` triggers scoped to each upstream
+    // agent, before flattening to custom roles.
+    customRolesRaw = templateToCustomRoles(
+      expandDataFlowSteps(expandReviewSteps(body.processTemplate), { teamId })
+    );
   }
   const customMap = new Map(customRolesRaw.map(r => [r.id, r]));
   const resolveTemplate = (id) => customMap.get(id) || loadAgentTemplate(id);
@@ -4496,6 +4812,9 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           if (typeof tr.labelFilter === 'string' && tr.labelFilter.trim()) {
             out.labelFilter = applyTemplateVars(tr.labelFilter, memberVars);
           }
+          // Data-flow (agent dependency) marker so the trigger UI renders it as
+          // an editable "push from <upstream>" hand-off rather than a raw push.
+          if (tr.dataFlow) out.dataFlow = true;
         } else if (tr.type === 'cron') {
           out.cron = tr.cron;
         }
@@ -4536,6 +4855,20 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           // packs they'll plug in here.
           sessionPolicy: p.template.sessionPolicy === 'per-invocation' ? 'per-invocation' : undefined,
           triggers: triggersOut,
+          // BP data-flow ports (#379), recorded on the member config so the live
+          // graph renders dependency/artifact edges. dependsOn role ids are
+          // mapped to member ids (`<teamId>-<roleId>`) so the graph connects
+          // members; artifact paths match across nodes unchanged.
+          ...(dataFlowForMember(p.template, teamId) || {}),
+          // Parent-child hierarchy: map the role's parent id → member id so the
+          // agent overview + live graph render the tree like an orchestrator.
+          ...(typeof p.template.parent === 'string' && p.template.parent
+            ? { parentMemberId: `${teamId}-${p.template.parent}` } : {}),
+          // Agent-level emitted labels (label hand-offs) — recorded on config.
+          ...(Array.isArray(p.template.emits) && p.template.emits.length
+            ? { emits: p.template.emits } : {}),
+          // Deferred materialization — create as a stub when requested.
+          materialize: materializeMembers,
         }),
       });
       const data = await resp.json().catch(() => ({}));
@@ -4554,13 +4887,17 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     }
 
     // Phase D — DM rooms (best-effort). Members without DMs miss trigger
-    // output until a chat is opened; we keep going on failure.
-    for (const p of toCreate) {
-      try {
-        const r = await ensureAgentDmRoom(p.memberId);
-        created.dms.push({ agentId: p.memberId, roomId: r.roomId });
-      } catch (err) {
-        console.warn(`[Team] DM pre-create skipped for ${p.memberId}: ${err.message}`);
+    // output until a chat is opened; we keep going on failure. Skipped for
+    // deferred (stub) members — they have no Matrix user yet; the DM room is
+    // created when the stub is materialized + a chat is opened.
+    if (materializeMembers) {
+      for (const p of toCreate) {
+        try {
+          const r = await ensureAgentDmRoom(p.memberId);
+          created.dms.push({ agentId: p.memberId, roomId: r.roomId });
+        } catch (err) {
+          console.warn(`[Team] DM pre-create skipped for ${p.memberId}: ${err.message}`);
+        }
       }
     }
 
@@ -4570,6 +4907,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
       env: envId,
       team: teamAgentId,
       created: created.members,
+      materialized: materializeMembers,
       skipped: planned
         .filter(p => !toCreate.some(c => c.memberId === p.memberId))
         .map(p => p.memberId),
@@ -4927,6 +5265,9 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           if (typeof tr.labelFilter === 'string' && tr.labelFilter.trim()) {
             out.labelFilter = applyTemplateVars(tr.labelFilter, memberVars);
           }
+          // Data-flow (agent dependency) marker so the trigger UI renders it as
+          // an editable "push from <upstream>" hand-off rather than a raw push.
+          if (tr.dataFlow) out.dataFlow = true;
         } else if (tr.type === 'cron') {
           out.cron = tr.cron;
         }

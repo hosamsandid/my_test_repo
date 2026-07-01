@@ -7,8 +7,26 @@
 // same surface so the UI doesn't branch on mode.
 
 import { apiCall } from '../../hooks/useApi';
+import { wouldCreateCycle } from './hierarchy-utils';
 
-// Live mode — every op is an HTTP call against the running agent.
+// Read the current data-flow port block off a live agent's config as a plain
+// {inputs, outputs, dependsOn} shape (read-modify-write helper). The PUT replaces
+// the whole `dataFlow` block, matching how a draft persists the whole bundle.
+const pathStr = (a) => (typeof a === 'string' ? a : (a && a.path)) || '';
+async function liveDataFlow(roleId) {
+  const a = await apiCall('GET', `/api/agents/${roleId}`);
+  const df = (a && typeof a.dataFlow === 'object' && a.dataFlow) || {};
+  return {
+    inputs: Array.isArray(df.inputs) ? df.inputs.slice() : [],
+    outputs: Array.isArray(df.outputs) ? df.outputs.slice() : [],
+    dependsOn: Array.isArray(df.dependsOn) ? df.dependsOn.slice() : [],
+  };
+}
+
+// Live mode — every op is an HTTP call against the running agent. Its surface is
+// shape-compatible with makeDraftOps: the editing UI never branches on mode.
+// Edge ops write only the declarative ports (dataFlow / parentMemberId / stage);
+// the backend re-derives the functional push triggers from those ports.
 export const liveOps = {
   mode: 'live',
   listTriggers: (roleId) => apiCall('GET', `/api/agents/${roleId}/triggers`),
@@ -16,10 +34,98 @@ export const liveOps = {
   updateTrigger: (roleId, tid, body) => apiCall('PUT', `/api/agents/${roleId}/triggers/${tid}`, body),
   deleteTrigger: (roleId, tid) => apiCall('DELETE', `/api/agents/${roleId}/triggers/${tid}`),
   setEmits: (roleId, tid, emits) => apiCall('PUT', `/api/agents/${roleId}/triggers/${tid}/emits`, { emits }),
+  // Agent-level emitted labels (label hand-offs) — independent of any trigger.
+  getRoleEmits: async (roleId) => {
+    const a = await apiCall('GET', `/api/agents/${roleId}`);
+    return Array.isArray(a?.emits) ? a.emits : [];
+  },
+  setRoleEmits: (roleId, emits) => apiCall('PUT', `/api/agents/${roleId}`, { emits }),
+
+  // ── unified edges (#367): dependency + data-flow + hierarchy + stage ──
+  // Dependency A→B means "B depends on A" (A upstream), stored on B.dataFlow.dependsOn.
+  addDependency: async (roleId, dependsOnId) => {
+    if (!dependsOnId || dependsOnId === roleId) return;
+    const df = await liveDataFlow(roleId);
+    if (!df.dependsOn.includes(dependsOnId)) df.dependsOn.push(dependsOnId);
+    await apiCall('PUT', `/api/agents/${roleId}`, { dataFlow: df });
+  },
+  removeDependency: async (roleId, dependsOnId) => {
+    const df = await liveDataFlow(roleId);
+    df.dependsOn = df.dependsOn.filter(d => d !== dependsOnId);
+    await apiCall('PUT', `/api/agents/${roleId}`, { dataFlow: df });
+  },
+  // Data flow: a producer's `outputs` path becomes a consumer's `inputs` path.
+  addArtifact: async (roleId, { direction, path, description }) => {
+    const p = String(path || '').trim();
+    if (!p) return;
+    const df = await liveDataFlow(roleId);
+    const key = direction === 'output' ? 'outputs' : 'inputs';
+    if (!df[key].some(a => pathStr(a) === p)) df[key].push({ path: p, ...(description ? { description } : {}) });
+    await apiCall('PUT', `/api/agents/${roleId}`, { dataFlow: df });
+  },
+  removeArtifact: async (roleId, { direction, path }) => {
+    const df = await liveDataFlow(roleId);
+    const key = direction === 'output' ? 'outputs' : 'inputs';
+    df[key] = df[key].filter(a => pathStr(a) !== path);
+    await apiCall('PUT', `/api/agents/${roleId}`, { dataFlow: df });
+  },
+  // Parent-child hierarchy (#377) — child gets parentMemberId; cleared with falsy.
+  setParent: (roleId, parentId) =>
+    apiCall('PUT', `/api/agents/${roleId}`, { parentMemberId: parentId || null }),
+  // Process stage band — empty clears (inherits from parent).
+  setStage: (roleId, stage) => apiCall('PUT', `/api/agents/${roleId}`, { stage: stage || '' }),
 };
 
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const uid = () => `t${Date.now()}${Math.floor(Math.random() * 1000)}`;
+
+// BP mode (#362 UI rework Phase D) — edits a BriefingPack's brief.md in the
+// orchestrator's workspace via bp-explorer's raw endpoints (GET → modify → PUT,
+// which writes + git-commits). v1 supports the body (the node's prompt/content);
+// frontmatter editing (depends_on / artifacts) lands in D2.
+export function makeBpOps(workspace) {
+  const base = '/api/bp-explorer';
+  const q = `?workspace=${encodeURIComponent(workspace)}`;
+
+  async function getRaw(bpId) {
+    const r = await apiCall('GET', `${base}/bp/${bpId}/raw${q}`);
+    return r && typeof r.content === 'string' ? r.content : '';
+  }
+  async function putRaw(bpId, content, message) {
+    return apiCall('PUT', `${base}/bp/${bpId}/raw${q}`, {
+      content,
+      commit_message: message || `refine(bp:${bpId.slice(0, 6)}): edit brief via Flows`,
+    });
+  }
+  // Split a brief.md into its leading YAML frontmatter block and the body that
+  // follows. The body is exactly what bp-explorer returns as `body` (= the
+  // node's content), so replacing it round-trips cleanly without touching YAML.
+  function splitFrontmatter(content) {
+    const m = content.match(/^(---\n[\s\S]*?\n---\n?)([\s\S]*)$/);
+    return m ? { fm: m[1], body: m[2] } : { fm: '', body: content };
+  }
+
+  const fmEdit = (bpId, op, value) =>
+    apiCall('POST', `${base}/bp/${bpId}/frontmatter-edit${q}`, { op, value });
+
+  return {
+    mode: 'bp',
+    setPrompt: async (bpId, text) => {
+      const { fm } = splitFrontmatter(await getRaw(bpId));
+      await putRaw(bpId, fm + (text || ''));
+    },
+    // Frontmatter edits (#362 D2) — structured ops applied server-side + commit.
+    // Same signatures as makeDraftOps so the on-type picker (CreateEdgeDialog)
+    // works unchanged. Dependency A→B = "B depends on A".
+    addDependency: (bpId, dependsOnId) => fmEdit(bpId, 'add-dependency', dependsOnId),
+    removeDependency: (bpId, dependsOnId) => fmEdit(bpId, 'remove-dependency', dependsOnId),
+    addArtifact: (bpId, { direction, path, description }) =>
+      fmEdit(bpId, 'add-artifact', { direction, path, description }),
+    removeArtifact: (bpId, { direction, path }) =>
+      fmEdit(bpId, 'remove-artifact', { direction, path }),
+    setStage: (bpId, stage) => fmEdit(bpId, 'set-stage', stage || ''),
+  };
+}
 
 function slugRole(name, taken) {
   let base = String(name || 'role').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'role';
@@ -70,6 +176,17 @@ export function makeDraftOps(getBundle, persist) {
       if (t) t.emits = emits;
       await persist(b);
     },
+    // Agent-level emitted labels (label hand-offs) — on the role, no trigger.
+    getRoleEmits: async (roleId) => {
+      const r = role(getBundle(), roleId);
+      return Array.isArray(r?.emits) ? r.emits.slice() : [];
+    },
+    setRoleEmits: async (roleId, emits) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (r) { if (Array.isArray(emits) && emits.length) r.emits = emits; else delete r.emits; }
+      await persist(b);
+    },
 
     // ── roles (draft-only; no live equivalent) ──
     addRole: async ({ displayName, systemPrompt, sessionPolicy, kind }) => {
@@ -103,9 +220,112 @@ export function makeDraftOps(getBundle, persist) {
       if (r) r.systemPrompt = systemPrompt;
       await persist(b);
     },
+    setStage: async (roleId, stage) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (r) { if (stage) r.stage = stage; else delete r.stage; }
+      await persist(b);
+    },
+
+    // ── stages (draft-only): the ordered list that drives the layout ──
+    listStages: () => (getBundle().stages || []).slice(),
+    addStage: async (name) => {
+      const b = clone(getBundle());
+      const s = String(name || '').trim();
+      if (!s) return;
+      b.stages = Array.isArray(b.stages) ? b.stages : [];
+      if (!b.stages.includes(s)) b.stages.push(s);
+      await persist(b);
+    },
+    renameStage: async (oldName, newName) => {
+      const b = clone(getBundle());
+      const s = String(newName || '').trim();
+      if (!s) return;
+      b.stages = (b.stages || []).map(x => (x === oldName ? s : x));
+      // keep the list unique after a rename that collides
+      b.stages = b.stages.filter((x, i) => b.stages.indexOf(x) === i);
+      for (const r of b.roles || []) if (r.stage === oldName) r.stage = s;
+      await persist(b);
+    },
+    removeStage: async (name) => {
+      const b = clone(getBundle());
+      b.stages = (b.stages || []).filter(x => x !== name);
+      for (const r of b.roles || []) if (r.stage === name) delete r.stage;
+      await persist(b);
+    },
+    reorderStages: async (names) => {
+      const b = clone(getBundle());
+      // Trust the caller's order but keep only stages that still exist.
+      const existing = new Set(b.stages || []);
+      b.stages = (names || []).filter(n => existing.has(n));
+      await persist(b);
+    },
+    // Parent-child hierarchy (#378). setParent(child, parent) makes `parent` the
+    // grouping node of `child`; clear with a falsy parentId. Self-parenting and
+    // direct cycles (parent already a descendant) are rejected.
+    setParent: async (roleId, parentId) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (!r) throw new Error(`role ${roleId} not found`);
+      if (parentId && parentId !== roleId) {
+        if (wouldCreateCycle(b.roles, roleId, parentId)) {
+          throw new Error('that would create a parent cycle');
+        }
+        r.parent = parentId;
+      } else {
+        delete r.parent;
+      }
+      await persist(b);
+    },
     deleteRole: async (roleId) => {
       const b = clone(getBundle());
       b.roles = (b.roles || []).filter(r => r.id !== roleId);
+      // Drop references to the removed role so no edge/parent dangles.
+      for (const r of b.roles) {
+        if (Array.isArray(r.dependsOn)) r.dependsOn = r.dependsOn.filter(d => d !== roleId);
+        if (r.parent === roleId) delete r.parent; // orphaned children become roots
+      }
+      await persist(b);
+    },
+
+    // ── unified edges (#367): BP dependency + data-flow, draft-only ──
+    // Dependency A→B means "B depends on A" (A upstream), stored on B.dependsOn.
+    addDependency: async (roleId, dependsOnId) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (!r) throw new Error(`role ${roleId} not found`);
+      r.dependsOn = Array.isArray(r.dependsOn) ? r.dependsOn : [];
+      if (dependsOnId && dependsOnId !== roleId && !r.dependsOn.includes(dependsOnId)) {
+        r.dependsOn.push(dependsOnId);
+      }
+      await persist(b);
+    },
+    removeDependency: async (roleId, dependsOnId) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (r) r.dependsOn = (r.dependsOn || []).filter(d => d !== dependsOnId);
+      await persist(b);
+    },
+    // Data flow: a producer's `outputs` path becomes a consumer's `inputs` path.
+    addArtifact: async (roleId, { direction, path, description }) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (!r) throw new Error(`role ${roleId} not found`);
+      const key = direction === 'output' ? 'outputs' : 'inputs';
+      r[key] = Array.isArray(r[key]) ? r[key] : [];
+      const p = String(path || '').trim();
+      if (p && !r[key].some(a => (a.path || a) === p)) {
+        r[key].push({ path: p, ...(description ? { description } : {}) });
+      }
+      await persist(b);
+    },
+    removeArtifact: async (roleId, { direction, path }) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (r) {
+        const key = direction === 'output' ? 'outputs' : 'inputs';
+        r[key] = (r[key] || []).filter(a => (a.path || a) !== path);
+      }
       await persist(b);
     },
   };

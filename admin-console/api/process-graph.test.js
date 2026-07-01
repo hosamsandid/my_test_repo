@@ -291,3 +291,15 @@ test('node view exposes the expected fields', () => {
   assert.deepEqual(t.emits, ['started:dev']);
   assert.equal(t.emitsDerived, true);
 });
+
+test('agent-level emits wire a label hand-off without a pre-existing trigger', () => {
+  // A declares an agent-level emit (no trigger needed); B listens via labelFilter.
+  const g = buildProcessGraph([
+    { id: 'a', emits: ['dispatch'], triggers: [] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'dispatch', from: 'any-except-self' }] },
+  ]);
+  const e = g.edges.find(x => x.from === 'a' && x.to === 'b' && x.label === 'dispatch');
+  assert.ok(e, 'A→B label edge exists from the agent-level emit');
+  // Not flagged as an orphan listener.
+  assert.ok(!g.lints.some(l => l.code === 'orphan-listener'));
+});

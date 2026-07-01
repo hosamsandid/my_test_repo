@@ -23,19 +23,31 @@ function firstRepo(...triggerLists) {
   return '';
 }
 
-/* ── Create a hand-off: emitter A → label → listener B ─────────────────── */
+/* ── Create a label hand-off: A → label → B ─────────────────────────────────
+ * Mirrors the data-flow dialog: draw A→B, choose the label kind (issue / PR),
+ * whether it's added or removed, and the name. Both sides are wired
+ * automatically — B gets a listener (the derived event + labelFilter) and A is
+ * recorded as emitting the label (an agent-level emit, no pre-existing trigger
+ * required). Human gates/brakes are listener-only (no agent emits them). */
+const LABEL_TARGETS = [
+  { value: 'issues', label: 'Issue label' },
+  { value: 'pull_request', label: 'Pull-request label' },
+];
+const LABEL_ACTIONS = [
+  { value: 'labeled', label: 'added' },
+  { value: 'unlabeled', label: 'removed' },
+];
+
 export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = liveOps, onClose, onDone }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
-  const [fromTriggers, setFromTriggers] = useState([]);
   const [toTriggers, setToTriggers] = useState([]);
-
   const [label, setLabel] = useState('');
-  const [events, setEvents] = useState(['issues.labeled']);
+  const [target, setTarget] = useState('issues');       // issues | pull_request
+  const [action, setAction] = useState('labeled');       // labeled | unlabeled
   const [fromFilter, setFromFilter] = useState('any-except-self');
-  const [emitterId, setEmitterId] = useState('');
   const [repo, setRepo] = useState('');
   const [prompt, setPrompt] = useState('');
 
@@ -43,16 +55,11 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
     let alive = true;
     (async () => {
       try {
-        const [ft, tt] = await Promise.all([
-          ops.listTriggers(from),
-          ops.listTriggers(to),
-        ]);
+        const [ft, tt] = await Promise.all([ops.listTriggers(from), ops.listTriggers(to)]);
         if (!alive) return;
         const fl = Array.isArray(ft) ? ft : [];
         const tl = Array.isArray(tt) ? tt : [];
-        setFromTriggers(fl);
         setToTriggers(tl);
-        setEmitterId(fl[0]?.id || '');
         setRepo(firstRepo(fl, tl));
       } catch (e) {
         if (alive) setError(e.message);
@@ -63,51 +70,48 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
     return () => { alive = false; };
   }, [from, to]);
 
-  // Keep a sensible default listener prompt in sync with label/repo.
-  useEffect(() => {
-    setPrompt(p => p || '');
-  }, []);
-  const effectivePrompt = prompt
-    || `An issue in \`${repo || '<repo>'}\` was labeled \`${label || '<label>'}\`. The event payload above has the issue number, title and body.\n\n<Describe what this agent should do.> Reply \`[PASS]\` if there's nothing to do.`;
-
-  const toggleEvent = (v) => setEvents(prev =>
-    prev.includes(v) ? prev.filter(x => x !== v) : [...prev, v]);
+  const event = `${target}.${action}`; // e.g. issues.labeled, pull_request.unlabeled
+  const verb = action === 'labeled' ? 'added to' : 'removed from';
+  const targetNoun = target === 'issues' ? 'an issue' : 'a pull request';
 
   // Human gates (human:*) and the universal brakes are set by humans, never by
-  // an agent — so we wire only the listener, never an agent emit (#333).
+  // an agent — wire only the listener, never an agent emit (#333).
   const isGate = label.trim().startsWith('human:');
   const isBrake = label.trim() === 'hold' || label.trim() === 'needs:human';
   const humanLabel = isGate || isBrake;
 
+  const effectivePrompt = prompt
+    || `\`${label || '<label>'}\` was ${verb} ${targetNoun} in \`${repo || '<repo>'}\` by ${fromName || from}. The event payload above has the details.\n\n<Describe what ${toName || to} should do.> Reply \`[PASS]\` if there's nothing to do.`;
+
   async function submit() {
     const trimmed = label.trim();
-    if (!trimmed) { setError('Pick or type a hand-off label.'); return; }
-    if (events.length === 0) { setError('Select at least one event.'); return; }
-    if (!humanLabel && !emitterId) { setError('Pick which trigger on the source emits this label.'); return; }
+    if (!trimmed) { setError('Enter the label name.'); return; }
     setSaving(true); setError(null);
     try {
-      // 1. Listener on B — skip if one already filters on this label.
-      const existing = toTriggers.find(t => t.type === 'github-event' && t.labelFilter === trimmed);
+      // 1. Listener on B — skip if one already filters on this label + event.
+      const existing = toTriggers.find(t =>
+        t.type === 'github-event' && t.labelFilter === trimmed &&
+        Array.isArray(t.events) && t.events.includes(event));
       if (!existing) {
         await ops.createTrigger(to, {
           type: 'github-event',
-          events,
+          events: [event],
           from: fromFilter,
           repo: repo || undefined,
           labelFilter: trimmed,
           enabled: true,
           description: humanLabel
             ? `Wait for human gate \`${trimmed}\``
-            : `Wake on \`${trimmed}\` (wired from ${fromName || from})`,
+            : `Wake when \`${trimmed}\` is ${verb} ${targetNoun} (from ${fromName || from})`,
           prompt: effectivePrompt,
         });
       }
-      // 2. Record the emission on A's chosen trigger — but never for a human
-      // gate/brake (the lint would flag an agent that claims to set it).
+      // 2. Record A as emitting the label — an agent-level emit, so the edge is
+      // wired without depending on a pre-existing trigger on A. Skipped for
+      // human gates/brakes (no agent may claim to set those).
       if (!humanLabel) {
-        const emitter = fromTriggers.find(t => t.id === emitterId);
-        const nextEmits = uniq([...(emitter?.emits || []), trimmed]);
-        await ops.setEmits(from, emitterId, nextEmits);
+        const current = await ops.getRoleEmits(from);
+        await ops.setRoleEmits(from, uniq([...(Array.isArray(current) ? current : []), trimmed]));
       }
       onDone?.();
     } catch (e) {
@@ -117,17 +121,31 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
   }
 
   return (
-    <SidePanel open onClose={onClose} title="Wire a hand-off" width="520px">
+    <SidePanel open onClose={onClose} title="Wire a label hand-off" width="520px">
       <p style={hint}>
-        <strong>{fromName || from}</strong> emits a label that wakes <strong>{toName || to}</strong>.
+        <strong>{fromName || from}</strong> sets a label that wakes <strong>{toName || to}</strong>.
       </p>
       {loading ? (
-        <Center><Loader2 size={14} style={spin} /> Loading triggers…</Center>
+        <Center><Loader2 size={14} style={spin} /> Loading…</Center>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-          <Field label="Hand-off label">
+          <Field label="Label kind">
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+              <select value={target} onChange={e => setTarget(e.target.value)} style={{ ...input, flex: 1 }}>
+                {LABEL_TARGETS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+              <select value={action} onChange={e => setAction(e.target.value)} style={{ ...input, flex: 1 }}>
+                {LABEL_ACTIONS.map(o => <option key={o.value} value={o.value}>label {o.label}</option>)}
+              </select>
+            </div>
+            <small style={small}>
+              Listens on <code>{event}</code> — wakes when the label is {verb} {targetNoun}.
+            </small>
+          </Field>
+
+          <Field label="Label name">
             <input list="pc-label-list" value={label} onChange={e => setLabel(e.target.value)}
-              placeholder="e.g. dispatch, stage:td, assigned:dev-1" style={input} />
+              placeholder="e.g. dispatch, stage:td, ready-for-review" style={input} />
             <datalist id="pc-label-list">
               {(labels || []).map(l => <option key={l.name} value={l.name} />)}
             </datalist>
@@ -136,30 +154,14 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
           {humanLabel ? (
             <div style={{ ...small, padding: 'var(--eb-space-2)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-status-warning)' }}>
               <code>{label.trim()}</code> is a {isGate ? 'human gate' : 'brake'} — only a human sets it.
-              This wires <strong>{toName || to}</strong> to wait on it; no agent is recorded as emitting it.
+              This wires <strong>{toName || to}</strong> to wait on it; <strong>{fromName || from}</strong> is not recorded as emitting it.
             </div>
           ) : (
-            <Field label={`Emitting trigger on ${fromName || from}`}>
-              <select value={emitterId} onChange={e => setEmitterId(e.target.value)} style={input}>
-                {fromTriggers.length === 0 && <option value="">(no triggers — add one first)</option>}
-                {fromTriggers.map(t => (
-                  <option key={t.id} value={t.id}>{t.id} · {t.type}</option>
-                ))}
-              </select>
-              <small style={small}>The label is added to this trigger's <code>emits</code>.</small>
-            </Field>
-          )}
-
-          <Field label="Listener events (on target)">
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-2)' }}>
-              {LABEL_EVENTS.map(ev => (
-                <label key={ev.value} style={check}>
-                  <input type="checkbox" checked={events.includes(ev.value)} onChange={() => toggleEvent(ev.value)} />
-                  {ev.label}
-                </label>
-              ))}
+            <div style={{ ...small, padding: 'var(--eb-space-2)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)' }}>
+              <strong>{fromName || from}</strong> will be recorded as emitting <code>{label.trim() || '<label>'}</code>,
+              and <strong>{toName || to}</strong> gets a listener — no need to pre-configure a trigger on {fromName || from}.
             </div>
-          </Field>
+          )}
 
           <Field label="Origin filter (from)">
             <select value={fromFilter} onChange={e => setFromFilter(e.target.value)} style={input}>
@@ -191,8 +193,170 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
   );
 }
 
-/* ── Edit / delete an existing hand-off ────────────────────────────────── */
-export function EditHandoffDialog({ edge, fromName, toName, ops = liveOps, onClose, onDone }) {
+/* ── on-type picker: choose how A hands off to B (#367) ─────────────────────
+ * Label hand-off delegates to CreateHandoffDialog (unchanged). Dependency and
+ * data-flow are BP mechanisms, written via the draft ops onto node ports. */
+export function CreateEdgeDialog({ from, to, fromName, toName, labels, ops = liveOps, types, onClose, onDone }) {
+  const allowed = Array.isArray(types) && types.length ? types : ['label', 'dependency', 'artifact'];
+  const [type, setType] = useState(allowed.length === 1 ? allowed[0] : null);
+
+  if (type === 'label') {
+    return (
+      <CreateHandoffDialog
+        from={from} to={to} fromName={fromName} toName={toName}
+        labels={labels} ops={ops} onClose={onClose} onDone={onDone}
+      />
+    );
+  }
+  if (type === 'dependency') {
+    return (
+      <DependencyEdgeForm from={from} to={to} fromName={fromName} toName={toName}
+        ops={ops} onBack={() => setType(null)} onClose={onClose} onDone={onDone} />
+    );
+  }
+  if (type === 'artifact') {
+    return (
+      <ArtifactEdgeForm from={from} to={to} fromName={fromName} toName={toName}
+        ops={ops} onBack={() => setType(null)} onClose={onClose} onDone={onDone} />
+    );
+  }
+  if (type === 'hierarchy') {
+    return (
+      <HierarchyEdgeForm from={from} to={to} fromName={fromName} toName={toName}
+        ops={ops} onBack={() => setType(null)} onClose={onClose} onDone={onDone} />
+    );
+  }
+
+  const choices = [
+    { id: 'label', title: 'Label hand-off', desc: `${fromName || from} emits a label that wakes ${toName || to}.` },
+    { id: 'dependency', title: 'Dependency', desc: `${toName || to} depends on ${fromName || from} — it can't start until that is done.` },
+    { id: 'artifact', title: 'Data flow', desc: `${fromName || from} produces a file that ${toName || to} consumes.` },
+    { id: 'hierarchy', title: 'Parent / child', desc: `${fromName || from} groups ${toName || to} as a child — it inherits its parent's stage.` },
+  ].filter(c => allowed.includes(c.id));
+
+  return (
+    <SidePanel open onClose={onClose} title="Connect roles" width="520px">
+      <p style={hint}>
+        How does <strong>{fromName || from}</strong> hand off to <strong>{toName || to}</strong>?
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+        {choices.map(c => (
+          <button key={c.id} onClick={() => setType(c.id)} style={{
+            textAlign: 'left', background: 'var(--eb-bg-app)', cursor: 'pointer',
+            border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+            padding: 'var(--eb-space-3)', fontFamily: 'inherit',
+          }}>
+            <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>{c.title}</div>
+            <div style={{ ...small, marginTop: 2 }}>{c.desc}</div>
+          </button>
+        ))}
+      </div>
+    </SidePanel>
+  );
+}
+
+function DependencyEdgeForm({ from, to, fromName, toName, ops, onBack, onClose, onDone }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  async function submit() {
+    setSaving(true); setError(null);
+    try { await ops.addDependency(to, from); onDone?.(); }
+    catch (e) { setError(e.message); setSaving(false); }
+  }
+  return (
+    <SidePanel open onClose={onClose} title="Add dependency" width="520px">
+      <p style={hint}>
+        <strong>{toName || to}</strong> depends on <strong>{fromName || from}</strong>.
+        It becomes ready only once <strong>{fromName || from}</strong> is complete.
+      </p>
+      {error && <span style={errStyle}>{error}</span>}
+      <div style={actions}>
+        <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>
+        <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+        <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Adding…' : 'Add dependency'}</button>
+      </div>
+    </SidePanel>
+  );
+}
+
+function ArtifactEdgeForm({ from, to, fromName, toName, ops, onBack, onClose, onDone }) {
+  const [path, setPath] = useState('');
+  const [description, setDescription] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  async function submit() {
+    const p = path.trim();
+    if (!p) { setError('Enter the artifact path.'); return; }
+    setSaving(true); setError(null);
+    try {
+      await ops.addArtifact(from, { direction: 'output', path: p, description });
+      await ops.addArtifact(to, { direction: 'input', path: p, description });
+      onDone?.();
+    } catch (e) { setError(e.message); setSaving(false); }
+  }
+  return (
+    <SidePanel open onClose={onClose} title="Add data flow" width="520px">
+      <p style={hint}>
+        <strong>{fromName || from}</strong> produces a file that <strong>{toName || to}</strong> consumes.
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <Field label="Artifact path">
+          <input value={path} onChange={e => setPath(e.target.value)}
+            placeholder="e.g. artifacts/spec.md" style={input} />
+        </Field>
+        <Field label="Description (optional)">
+          <input value={description} onChange={e => setDescription(e.target.value)}
+            placeholder="What this file carries" style={input} />
+        </Field>
+        {error && <span style={errStyle}>{error}</span>}
+        <div style={actions}>
+          <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>
+          <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+          <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Adding…' : 'Add data flow'}</button>
+        </div>
+      </div>
+    </SidePanel>
+  );
+}
+
+function HierarchyEdgeForm({ from, to, fromName, toName, ops, onBack, onClose, onDone }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  async function submit() {
+    setSaving(true); setError(null);
+    try { await ops.setParent(to, from); onDone?.(); }
+    catch (e) { setError(e.message); setSaving(false); }
+  }
+  return (
+    <SidePanel open onClose={onClose} title="Set parent" width="520px">
+      <p style={hint}>
+        <strong>{fromName || from}</strong> becomes the parent of <strong>{toName || to}</strong>.
+        Children inherit their parent's stage by default and can override it.
+      </p>
+      {error && <span style={errStyle}>{error}</span>}
+      <div style={actions}>
+        <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>
+        <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+        <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Setting…' : 'Set parent'}</button>
+      </div>
+    </SidePanel>
+  );
+}
+
+/* ── Edit / delete an existing edge ─────────────────────────────────────────
+ * Type-aware dispatcher: label hand-offs keep the full editor; dependency /
+ * data-flow / parent edges get a focused remove dialog; derived edges (a
+ * PR-review outcome, a manual pass-through) are read-only here. Same surface in
+ * draft and live — the ops adapter differs underneath. */
+export function EditHandoffDialog(props) {
+  const on = props.edge?.on;
+  if (on === 'dependency' || on === 'parent') return <RemoveEdgeDialog kind={on} {...props} />;
+  if (on === 'artifact') return <RemoveArtifactEdgeDialog {...props} />;
+  if (on === 'review' || on === 'manual') return <ReadonlyEdgeDialog {...props} />;
+  return <EditLabelHandoff {...props} />;
+}
+
+function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDone }) {
   const { from, to, label, triggerId } = edge;
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -241,7 +405,15 @@ export function EditHandoffDialog({ edge, fromName, toName, ops = liveOps, onClo
         await ops.deleteTrigger(to, triggerId);
       }
       if (delEmit) {
-        // Strip the label from any emitter trigger on the source that declares it.
+        // Strip the label from the source's agent-level emits (the new default
+        // wiring) …
+        if (ops.getRoleEmits && ops.setRoleEmits) {
+          const cur = await ops.getRoleEmits(from);
+          if (Array.isArray(cur) && cur.includes(label)) {
+            await ops.setRoleEmits(from, cur.filter(l => l !== label));
+          }
+        }
+        // … and from any legacy per-trigger emits that still declare it.
         const ft = await ops.listTriggers(from);
         for (const t of (Array.isArray(ft) ? ft : [])) {
           if (Array.isArray(t.emits) && t.emits.includes(label)) {
@@ -314,6 +486,97 @@ export function EditHandoffDialog({ edge, fromName, toName, ops = liveOps, onClo
         </div>
       )}
       <style>{`@keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}`}</style>
+    </SidePanel>
+  );
+}
+
+/* ── Remove a dependency or parent edge ─────────────────────────────────── */
+function RemoveEdgeDialog({ kind, edge, fromName, toName, ops = liveOps, onClose, onDone }) {
+  const { from, to } = edge;
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const isDep = kind === 'dependency';
+
+  async function remove() {
+    setSaving(true); setError(null);
+    try {
+      if (isDep) await ops.removeDependency(to, from); // "to depends on from"
+      else await ops.setParent(to, null);              // "from is parent of to"
+      onDone?.();
+    } catch (e) { setError(e.message); setSaving(false); }
+  }
+
+  return (
+    <SidePanel open onClose={onClose} title={isDep ? 'Dependency' : 'Parent / child'} width="520px">
+      <p style={hint}>
+        {isDep ? (
+          <><strong>{toName || to}</strong> depends on <strong>{fromName || from}</strong>.</>
+        ) : (
+          <><strong>{fromName || from}</strong> is the parent of <strong>{toName || to}</strong>.</>
+        )}
+      </p>
+      {error && <span style={errStyle}>{error}</span>}
+      <div style={actions}>
+        <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+        <button onClick={remove} disabled={saving} style={{ ...primary, background: 'var(--eb-status-error)' }}>
+          {saving ? 'Removing…' : (isDep ? 'Remove dependency' : 'Remove parent link')}
+        </button>
+      </div>
+    </SidePanel>
+  );
+}
+
+/* ── Remove one side of a data-flow (artifact) edge ─────────────────────────
+ * The graph routes data flow through a shared artifact node, so a click targets
+ * exactly one port — a producer's output or a consumer's input of that path. */
+function RemoveArtifactEdgeDialog({ edge, fromName, ops = liveOps, onClose, onDone }) {
+  const { from, direction, path } = edge;
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const isOutput = direction === 'output';
+
+  async function remove() {
+    setSaving(true); setError(null);
+    try { await ops.removeArtifact(from, { direction, path }); onDone?.(); }
+    catch (e) { setError(e.message); setSaving(false); }
+  }
+
+  return (
+    <SidePanel open onClose={onClose} title="Data flow" width="520px">
+      <p style={hint}>
+        <strong>{fromName || from}</strong> {isOutput ? 'produces' : 'consumes'} <code>{path}</code>.
+      </p>
+      <div style={{ ...small, marginBottom: 'var(--eb-space-3)' }}>
+        Removes this {isOutput ? 'output' : 'input'} port only. The other side of the flow (if any) stays —
+        remove it from its own node to clear the whole hand-off.
+      </div>
+      {error && <span style={errStyle}>{error}</span>}
+      <div style={actions}>
+        <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+        <button onClick={remove} disabled={saving} style={{ ...primary, background: 'var(--eb-status-error)' }}>
+          {saving ? 'Removing…' : `Remove ${isOutput ? 'output' : 'input'}`}
+        </button>
+      </div>
+    </SidePanel>
+  );
+}
+
+/* ── Derived edges (PR-review outcome, manual pass-through) — read-only here ── */
+function ReadonlyEdgeDialog({ edge, fromName, toName, onClose }) {
+  const { from, to, on } = edge;
+  return (
+    <SidePanel open onClose={onClose} title={on === 'review' ? 'PR review' : 'Connection'} width="520px">
+      <p style={hint}>
+        <strong>{fromName || from}</strong> → <strong>{toName || to}</strong>
+      </p>
+      <div style={small}>
+        {on === 'review'
+          ? 'This edge is derived from a PR-review step. Edit it in the reviewer’s inspector (reviews-from / on-approve / on-changes), not here.'
+          : 'This connection is derived and can’t be edited here.'}
+      </div>
+      <div style={actions}>
+        <button onClick={onClose} style={ghost}>Close</button>
+      </div>
     </SidePanel>
   );
 }

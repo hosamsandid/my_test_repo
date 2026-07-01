@@ -1,16 +1,15 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
-import { AlertTriangle, Download, Upload, Boxes, X, Plus, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, Download, Upload, Boxes, X, Plus, ShieldCheck, Layers } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
-import { initProcessGraph } from './process/process-graph-render';
+import { initFlowGraph } from './process/flow-graph-render';
 import ProcessNodeInspector from './process/ProcessNodeInspector';
 import DraftNodeInspector from './process/DraftNodeInspector';
-import { CreateHandoffDialog, EditHandoffDialog } from './process/EdgeDialogs';
+import StageManager from './process/StageManager';
+import { EditHandoffDialog, CreateEdgeDialog } from './process/EdgeDialogs';
 import MaterializeDialog from './process/MaterializeDialog';
 import AddApprovalDialog from './process/AddApprovalDialog';
-import StageView from './process/StageView';
 import SidePanel from '../components/SidePanel';
 import { liveOps, makeDraftOps } from './process/edit-adapters';
-import { buildStageBundle } from './process/stage-model';
 
 // Process graph panel (#330) — data-driven view of the agent orchestration:
 // which agent reacts to which label, in what order. Embedded into the Flows
@@ -41,12 +40,13 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
 
   // Scope is always one of: a team id (live graph), 'templates' (blueprint),
   // or 'draft:<id>' (derived client-side from the bundle, so no fetch).
+  // All scopes feed the unified rich renderer (#362 UI rework C3).
   const graphUrl = scope === 'templates'
-    ? '/api/process/graph?templates=1'
+    ? '/api/flows/graph?templates=1'
     : isDraft
       ? null
-      : `/api/process/graph?team=${encodeURIComponent(scope)}`;
-  const { data: graph, loading, error, refetch } = useApi(graphUrl || '/api/process/graph?templates=__none__');
+      : `/api/flows/graph?team=${encodeURIComponent(scope)}`;
+  const { data: graph, loading, error, refetch } = useApi(graphUrl || '/api/flows/graph?templates=__none__');
 
   // An imported bundle (#334) overrides the fetched graph until closed — shown
   // as a read-only blueprint that can be materialised into a real team.
@@ -55,7 +55,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
   const [materializeOpen, setMaterializeOpen] = useState(false);
   const [addRoleOpen, setAddRoleOpen] = useState(false);
   const [approvalOpen, setApprovalOpen] = useState(false);
-  const [viewMode, setViewMode] = useState('graph'); // 'graph' | 'stages' (draft only)
+  const [stagesOpen, setStagesOpen] = useState(false);
   const fileInputRef = useRef(null);
 
   // Draft bundle + its derived graph. The bundle is the source of truth; the
@@ -76,7 +76,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
   useEffect(() => {
     if (!draftBundle) return;
     let alive = true;
-    apiCall('POST', '/api/process/graph', { processTemplate: draftBundle })
+    // Derive the unified graph from the bundle — the rich renderer consumes it
+    // directly (label + dependency + artifact edges + the content/prompt).
+    apiCall('POST', '/api/flows/graph', { processTemplate: draftBundle })
       .then(g => { if (alive) setDraftGraph(g); }).catch(() => {});
     return () => { alive = false; };
   }, [draftBundle]);
@@ -102,10 +104,12 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
   const viewportRef = useRef(null);
   const graphRef = useRef(null);
   const editableRef = useRef(true);
+  // Current inline-prompt save handler (draft only) — kept in a ref so the
+  // renderer, created once, always calls the live one.
 
   useEffect(() => {
     if (!viewportRef.current) return;
-    const g = initProcessGraph(viewportRef.current, {
+    const g = initFlowGraph(viewportRef.current, {
       onSelectNode: (id) => setSelectedId(id),
       onConnect: (from, to) => { if (editableRef.current) setConnectPair({ from, to }); },
       onSelectEdge: (edge) => { if (editableRef.current) setSelectedEdge(edge); },
@@ -122,6 +126,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
     const ed = isDraft ? true : (!imported && displayGraph.level !== 'template');
     editableRef.current = ed;
     graphRef.current.setEditable(ed);
+    // Prompt/stage editing happens in the right inspector (DraftNodeInspector),
+    // consistent with BP flows — there is no inline editing.
     graphRef.current.setData(displayGraph);
   }, [displayGraph, imported, isDraft]);
 
@@ -129,8 +135,6 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
   // scope change from the parent also drops any imported blueprint preview.
   useEffect(() => { setSelectedId(null); setConnectPair(null); setSelectedEdge(null); }, [scope, imported]);
   useEffect(() => { setImported(null); setImportError(null); }, [scope]);
-  // The stage view only applies to drafts.
-  useEffect(() => { if (!isDraft) setViewMode('graph'); }, [isDraft]);
 
   const nodeName = (id) => (displayGraph?.nodes || []).find(n => n.id === id)?.displayName || id;
   const selectedNode = useMemo(
@@ -156,12 +160,6 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
       if (onDraftsChanged) onDraftsChanged();
       navigate(`draft:${d.id}`);
     } catch (e) { setImportError(e.message); }
-  }
-
-  // Stage view (#349): regenerate the draft's wiring from the stage list.
-  async function applyStages(stages) {
-    if (!draftBundleRef.current) return;
-    await persistDraft(buildStageBundle(stages, draftBundleRef.current));
   }
 
   // Source bundle for the Materialize dialog: an imported file or the open draft.
@@ -196,7 +194,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
     try { bundle = JSON.parse(await file.text()); }
     catch { setImportError('Not valid JSON.'); return; }
     try {
-      const res = await fetch('/api/process/graph', {
+      const res = await fetch('/api/flows/graph', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ processTemplate: bundle }),
       });
@@ -221,22 +219,11 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
               : 'Click a node to edit · drag the ● port to wire a hand-off · click an edge to edit it.'}
         </div>
         {isDraft && (
-          <div style={{ display: 'inline-flex', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', overflow: 'hidden', marginRight: 'var(--eb-space-1)' }}>
-            {['graph', 'stages'].map(m => (
-              <button key={m} onClick={() => setViewMode(m)} style={{
-                background: viewMode === m ? 'var(--eb-bg-selected)' : 'var(--eb-bg-surface)',
-                color: viewMode === m ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
-                border: 'none', padding: 'var(--eb-space-1) var(--eb-space-3)', cursor: 'pointer',
-                fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', textTransform: 'capitalize',
-              }}>{m}</button>
-            ))}
-          </div>
-        )}
-        {isDraft && (
           <>
             <ToolbarButton onClick={() => setAddRoleOpen('agent')} icon={Plus}>Add role</ToolbarButton>
             <ToolbarButton onClick={() => setAddRoleOpen('pr-review')} icon={Plus}>PR review</ToolbarButton>
             <ToolbarButton onClick={() => setApprovalOpen(true)} icon={ShieldCheck}>Human approval</ToolbarButton>
+            <ToolbarButton onClick={() => setStagesOpen(true)} icon={Layers}>Stages</ToolbarButton>
             <ToolbarButton onClick={() => setMaterializeOpen(true)} icon={Boxes}
               disabled={!draftBundle?.roles?.length}>Materialize…</ToolbarButton>
           </>
@@ -288,13 +275,6 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
           lints={displayGraph?.lints || []}
           onFocus={(nodeId) => { if (nodeId) { setSelectedId(nodeId); graphRef.current?.setSelected(nodeId); } }}
         />
-
-        {/* Stage view overlays the graph (which stays mounted underneath). */}
-        {isDraft && viewMode === 'stages' && (
-          <div style={{ position: 'absolute', inset: 0, background: 'var(--eb-bg-app)', overflowY: 'auto', zIndex: 15 }}>
-            <StageView bundle={draftBundle} onApply={applyStages} />
-          </div>
-        )}
       </div>
 
       {/* Inspector — draft roles use the lightweight draft inspector. */}
@@ -303,6 +283,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
           key={selectedRole.id}
           role={selectedRole}
           roles={draftBundle?.roles || []}
+          stages={draftBundle?.stages || []}
           ops={draftOps}
           onClose={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
           onDeleted={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
@@ -313,20 +294,24 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
         <ProcessNodeInspector
           key={selectedNode.id}
           node={selectedNode}
+          nodes={displayGraph?.nodes || []}
           level={imported ? 'template' : displayGraph?.level}
           onClose={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
           onChanged={() => refetch()}
         />
       )}
 
+      {/* One connect dialog for both draft and live teams (#unified): the four
+          edge types are identical — only the ops adapter differs underneath. */}
       {connectPair && (
-        <CreateHandoffDialog
+        <CreateEdgeDialog
           from={connectPair.from}
           to={connectPair.to}
           fromName={nodeName(connectPair.from)}
           toName={nodeName(connectPair.to)}
           labels={displayGraph?.labels || []}
           ops={ops}
+          types={['label', 'dependency', 'artifact', 'hierarchy']}
           onClose={() => setConnectPair(null)}
           onDone={() => { setConnectPair(null); afterEdit(); }}
         />
@@ -352,6 +337,19 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
             setAddRoleOpen(false);
             setSelectedId(id);
           }}
+        />
+      )}
+
+      {stagesOpen && isDraft && (
+        <StageManager
+          stages={draftBundle?.stages || []}
+          counts={(draftBundle?.roles || []).reduce((m, r) => {
+            if (r.stage) m[r.stage] = (m[r.stage] || 0) + 1;
+            return m;
+          }, {})}
+          ops={draftOps}
+          onClose={() => setStagesOpen(false)}
+          onChanged={() => {}}
         />
       )}
 

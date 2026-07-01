@@ -2135,6 +2135,40 @@ class Orchestrator {
     // A team-member inherits its parent team agent's owning (human) Team.
     const ownerTeamId = teamCfg.teamId || DEFAULT_TEAM_ID;
 
+    // Deferred materialization: create the member as a STUB — config + triggers
+    // only, no Matrix user, no workspace seed/clone, no process. Mirrors how an
+    // orchestrator writes bp-instance stubs; enableAgent() does the full
+    // provisioning (Matrix + clone + spawn) on first activation. Lets a large
+    // process (dozens of members) be laid out without dozens of clones up front.
+    if (opts.materialize === false) {
+      const stubConfig = {
+        id: memberId,
+        displayName: memberDisplayName,
+        role: "team-member",
+        parentTeamId: teamId,
+        environmentId: teamCfg.environmentId,
+        teamId: ownerTeamId,
+        ...(typeof opts.systemPromptOverride === 'string' && opts.systemPromptOverride.length > 0
+          ? { systemPrompt: opts.systemPromptOverride } : {}),
+        ...(Array.isArray(opts.skillsOverride) ? { skillsOverride: opts.skillsOverride } : {}),
+        ...(Array.isArray(opts.mcpServersOverride) ? { mcpServersOverride: opts.mcpServersOverride } : {}),
+        ...(opts.sessionPolicy === 'per-invocation' ? { sessionPolicy: 'per-invocation' } : {}),
+        ...(opts.dataFlow && typeof opts.dataFlow === 'object' ? { dataFlow: opts.dataFlow } : {}),
+        ...(typeof opts.parentMemberId === 'string' && opts.parentMemberId ? { parentMemberId: opts.parentMemberId } : {}),
+        ...(Array.isArray(opts.emits) && opts.emits.length ? { emits: opts.emits } : {}),
+        enabled: false, // no token → isStub; UI shows it, enableAgent materializes it
+      };
+      saveAgentConfig(memberId, stubConfig);
+      // Pre-write triggers so the materialized agent has them immediately;
+      // seedAgentWorkspace never touches triggers.json, so they survive.
+      if (Array.isArray(opts.triggers) && opts.triggers.length > 0) {
+        saveTriggers(memberId, opts.triggers);
+      }
+      this.agentConfigs.set(memberId, { config: stubConfig });
+      console.log(`[Orchestrator] Created team-member STUB ${memberId} (team=${teamId}, deferred — not materialized)`);
+      return { id: memberId, userId: null, stub: true, materialized: false, seeded: false, warnings: [] };
+    }
+
     saveAgentConfig(memberId, {
       id: memberId,
       displayName: memberDisplayName,
@@ -2180,6 +2214,14 @@ class Orchestrator {
       ...(Array.isArray(opts.skillsOverride) ? { skillsOverride: opts.skillsOverride } : {}),
       ...(Array.isArray(opts.mcpServersOverride) ? { mcpServersOverride: opts.mcpServersOverride } : {}),
       ...(opts.sessionPolicy === 'per-invocation' ? { sessionPolicy: 'per-invocation' } : {}),
+      // BP data-flow ports (#379) — recorded verbatim so the live process graph
+      // renders this member's dependency/artifact edges. Runtime hand-offs are
+      // driven by the push triggers, not this block.
+      ...(opts.dataFlow && typeof opts.dataFlow === 'object' ? { dataFlow: opts.dataFlow } : {}),
+      // Parent member id for the agent-overview / live-graph hierarchy.
+      ...(typeof opts.parentMemberId === 'string' && opts.parentMemberId ? { parentMemberId: opts.parentMemberId } : {}),
+      // Agent-level emitted labels (label hand-offs) for the process graph.
+      ...(Array.isArray(opts.emits) && opts.emits.length ? { emits: opts.emits } : {}),
       enabled: true,
     };
     saveAgentConfig(memberId, memberConfig);
@@ -2887,14 +2929,20 @@ class Orchestrator {
       saveAgentPrompt(id, bpInstanceSystemPrompt(updated), "bp-instance", env);
       console.log(`[Orchestrator] Materialized bp-instance ${id} (parent=${cfg.parentOrchestratorId}, bp=${cfg.bpId})`);
     } else {
-      // team-member: restore the system prompt from the parent team template.
-      const teamCfg = cfg.parentTeamId ? loadAgentConfig(cfg.parentTeamId) : null;
-      if (!teamCfg) {
-        console.warn(`[Orchestrator] team-member ${id}: parent team '${cfg.parentTeamId}' not found — reactivating with empty system prompt`);
+      // team-member: prefer the member's own systemPrompt override (recorded on
+      // a deferred-materialization stub, or any inherit/override member). Only
+      // fall back to the parent team template when the member has no override —
+      // this is the inherit signal.
+      let prompt = (typeof cfg.systemPrompt === 'string' && cfg.systemPrompt.length > 0) ? cfg.systemPrompt : '';
+      if (!prompt) {
+        const teamCfg = cfg.parentTeamId ? loadAgentConfig(cfg.parentTeamId) : null;
+        if (!teamCfg) {
+          console.warn(`[Orchestrator] team-member ${id}: parent team '${cfg.parentTeamId}' not found — reactivating with empty system prompt`);
+        }
+        prompt = teamCfg?.systemPromptTemplate || "";
       }
-      const template = teamCfg?.systemPromptTemplate || "";
-      saveAgentPrompt(id, template, "team-member", env);
-      console.log(`[Orchestrator] Materialized team-member ${id} (team=${cfg.parentTeamId})`);
+      saveAgentPrompt(id, prompt, "team-member", env);
+      console.log(`[Orchestrator] Materialized team-member ${id} (team=${cfg.parentTeamId}, prompt=${cfg.systemPrompt ? 'override' : 'inherit'})`);
     }
 
     this.agentConfigs.set(id, { config: updated });

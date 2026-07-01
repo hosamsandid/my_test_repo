@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, lazy, Suspense } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, Boxes, FileText, Plus, Trash2 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
-import { BPGraph } from './briefings/BPGraph';
+import { FlowGraph } from './process/FlowGraph';
 
 // The process graph/editor is a heavy module (custom SVG renderer + dialogs) —
 // load it only when a process scope is actually selected.
@@ -118,9 +118,11 @@ function HelpPanel({ onClose }) {
               What does the dependency graph show?
             </h3>
             <p style={{ margin: 0 }}>
-              Each node is a BriefingPack. Edges indicate dependencies — a BP can only move to <em>ready</em> once
-              all its declared dependencies are <em>completed</em> or <em>reviewed</em>. Node colour reflects the
-              current lifecycle state, giving you an at-a-glance view of team progress.
+              Each node is a BriefingPack work-unit. Edges show how work hands off:
+              red dashed edges are <em>dependencies</em> (a BP can only start once its
+              upstream BPs are done) and green edges are <em>data flow</em> (one BP's
+              output artifact is another's input). It is the same unified viewer used
+              for process graphs.
             </p>
           </section>
 
@@ -397,6 +399,29 @@ export default function Briefings() {
     } catch { /* leave the list as-is; the draft may already be gone */ }
   }
 
+  // Import the selected BriefingPack flow as an editable process draft (#377) —
+  // one storage format for both concepts. Opens the new draft on success.
+  const [importing, setImporting] = useState(false);
+  async function importBriefings() {
+    if (!selectedAgent || importing) return;
+    const workspace = selectedAgent.briefingsPath
+      ? `/workspace/agents/${selectedAgent.id}/${selectedAgent.briefingsPath}`
+      : `/workspace/agents/${selectedAgent.id}`;
+    setImporting(true);
+    try {
+      const d = await apiCall('POST', '/api/process/drafts/import-briefings', {
+        workspace,
+        name: `${selectedAgent.displayName || selectedAgent.id} (imported)`,
+      });
+      refetchDrafts();
+      setSearchParams({ proc: `draft:${d.id}` });
+    } catch (e) {
+      window.alert(`Import failed: ${e?.message || e}`);
+    } finally {
+      setImporting(false);
+    }
+  }
+
   const dismissBanner = useCallback(() => {
     localStorage.setItem(BANNER_KEY, 'true');
     setBannerDismissed(true);
@@ -633,12 +658,32 @@ export default function Briefings() {
               Select a team, draft or flow on the left
             </div>
           ) : (
-            <BPGraph
-              orchestratorId={selectedAgent.id}
-              workspacePath={selectedAgent.briefingsPath
-                  ? `/workspace/agents/${selectedAgent.id}/${selectedAgent.briefingsPath}`
-                  : `/workspace/agents/${selectedAgent.id}`}
-            />
+            // BriefingPack flows render through the unified viewer (#362) — same
+            // renderer + model as process graphs, replacing the legacy bp-graph.js.
+            <div style={{ height: '100%', position: 'relative' }}>
+              <button
+                onClick={importBriefings}
+                disabled={importing}
+                title="Import this BriefingPack hierarchy as an editable process draft"
+                style={{
+                  position: 'absolute', top: 'var(--eb-space-3)', right: 'var(--eb-space-3)', zIndex: 5,
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                  background: 'var(--eb-bg-surface)', color: 'var(--eb-text-primary)',
+                  border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+                  padding: '6px 12px', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+                  cursor: importing ? 'default' : 'pointer', opacity: importing ? 0.6 : 1,
+                  boxShadow: 'var(--eb-shadow-sm)',
+                }}
+              >
+                <Plus size={14} /> {importing ? 'Importing…' : 'Import as draft'}
+              </button>
+              <FlowGraph
+                key={selectedAgent.id}
+                workspace={selectedAgent.briefingsPath
+                    ? `/workspace/agents/${selectedAgent.id}/${selectedAgent.briefingsPath}`
+                    : `/workspace/agents/${selectedAgent.id}`}
+              />
+            </div>
           )}
         </div>
 

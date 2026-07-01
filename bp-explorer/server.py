@@ -549,6 +549,7 @@ def load_all_briefings(project_root: Path) -> list[dict]:
             "title": meta.get("mission", meta.get("title", "")),
             "status": meta.get("status", ""),
             "rigor": meta.get("rigor", ""),
+            "stage": meta.get("stage", ""),
             "created": meta.get("created", ""),
             "parent": parent,
             "children": meta.get("children", []),
@@ -2235,6 +2236,137 @@ async def update_bp_raw(bp_id: str, body: BpRawUpdateRequest, workspace: str):
 
         await loop.run_in_executor(None, _write_and_commit)
         return _json_response({"ok": True, "path": rel_path, "commit_message": commit_msg})
+    except HTTPException:
+        raise
+    except subprocess.CalledProcessError as exc:
+        err = exc.stderr.decode() if exc.stderr else str(exc)
+        raise HTTPException(status_code=500, detail=f"Git error: {err}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Structured frontmatter editing (Unified Orchestration #362, UI rework D2) ──
+# Add/remove a dependency or a data-flow artifact on a BP, editing only that
+# key's block in the YAML frontmatter (other lines are preserved verbatim), then
+# git-commit — the same write+commit path as the raw editor.
+
+def _yaml_scalar(v) -> str:
+    import json
+    # JSON strings are valid YAML double-quoted scalars — robust quoting.
+    return json.dumps(v if v is not None else "", ensure_ascii=False)
+
+
+def _serialize_depends_on(items: list) -> list[str]:
+    if not items:
+        return ["depends_on: []"]
+    out = ["depends_on:"]
+    for it in items:
+        out.append(f"  - {_yaml_scalar(it)}")
+    return out
+
+
+def _serialize_artifacts(items: list) -> list[str]:
+    if not items:
+        return ["artifacts: []"]
+    out = ["artifacts:"]
+    for a in items:
+        out.append(f"  - path: {_yaml_scalar(a.get('path', ''))}")
+        out.append(f"    direction: {_yaml_scalar(a.get('direction', ''))}")
+        if a.get("description"):
+            out.append(f"    description: {_yaml_scalar(a['description'])}")
+    return out
+
+
+def _replace_fm_block(content: str, aliases: set[str], new_block_lines: list[str]) -> str:
+    """Replace (or insert) a single top-level frontmatter key's block, leaving
+    every other line untouched. `aliases` matches the key name variants."""
+    lines = content.split("\n")
+    delims = [i for i, l in enumerate(lines) if l.strip() == "---"]
+    if len(delims) < 2:
+        raise ValueError("brief.md has no YAML frontmatter")
+    start, end = delims[0], delims[1]
+    key_idx = None
+    for i in range(start + 1, end):
+        l = lines[i]
+        if l and not l[0].isspace():
+            k = l.split(":", 1)[0].strip()
+            if k in aliases:
+                key_idx = i
+                break
+    if key_idx is None:
+        return "\n".join(lines[:end] + new_block_lines + lines[end:])
+    block_end = end
+    for j in range(key_idx + 1, end):
+        l = lines[j]
+        if l and not l[0].isspace():
+            block_end = j
+            break
+    return "\n".join(lines[:key_idx] + new_block_lines + lines[block_end:])
+
+
+class BpFrontmatterEditRequest(BaseModel):
+    op: str  # add-dependency | remove-dependency | add-artifact | remove-artifact
+    value: dict | str | None = None
+
+
+@app.post("/api/bp/{bp_id}/frontmatter-edit")
+async def edit_bp_frontmatter(bp_id: str, body: BpFrontmatterEditRequest, workspace: str):
+    """Add/remove a dependency or artifact on a BP's brief.md frontmatter + commit."""
+    loop = asyncio.get_running_loop()
+    try:
+        project_root = resolve_workspace(workspace)
+        bp_path = await loop.run_in_executor(None, partial(find_bp_file, project_root, bp_id))
+        if bp_path is None:
+            raise HTTPException(status_code=404, detail=f"BP not found: {bp_id}")
+        content = bp_path.read_text(encoding="utf-8")
+        meta, _ = parse_frontmatter(content)
+        op = body.op
+
+        if op in ("add-dependency", "remove-dependency"):
+            deps = meta.get("depends_on") or meta.get("depends-on") or []
+            if not isinstance(deps, list):
+                deps = []
+            dep = body.value if isinstance(body.value, str) else (body.value or {}).get("id")
+            deps = [d for d in deps if d != dep]
+            if op == "add-dependency" and dep:
+                deps.append(dep)
+            new_block, aliases = _serialize_depends_on(deps), {"depends_on", "depends-on"}
+        elif op in ("add-artifact", "remove-artifact"):
+            arts = meta.get("artifacts") or []
+            if not isinstance(arts, list):
+                arts = []
+            v = body.value if isinstance(body.value, dict) else {}
+            path, direction = v.get("path"), v.get("direction")
+            arts = [a for a in arts if not (a.get("path") == path and a.get("direction") == direction)]
+            if op == "add-artifact" and path and direction:
+                entry = {"path": path, "direction": direction}
+                if v.get("description"):
+                    entry["description"] = v["description"]
+                arts.append(entry)
+            new_block, aliases = _serialize_artifacts(arts), {"artifacts"}
+        elif op == "set-stage":
+            stage = body.value if isinstance(body.value, str) else (body.value or {}).get("stage", "")
+            stage = (stage or "").strip()
+            new_block = [f"stage: {_yaml_scalar(stage)}"] if stage else []
+            aliases = {"stage"}
+        else:
+            raise HTTPException(status_code=400, detail=f"unknown op: {op}")
+
+        new_content = _replace_fm_block(content, aliases, new_block)
+        rel_path = str(bp_path.relative_to(project_root))
+
+        def _write_and_commit():
+            _ensure_git_identity(project_root)
+            env = _git_env()
+            bp_path.write_text(new_content, encoding="utf-8")
+            subprocess.run(["git", "add", rel_path], cwd=project_root, check=True, capture_output=True, env=env)
+            subprocess.run(["git", "commit", "-m", f"refine(bp:{bp_id[:6]}): {op} via Flows"], cwd=project_root, check=True, capture_output=True, env=env)
+            build_index = project_root / "scripts" / "build-index.py"
+            if build_index.exists():
+                subprocess.run(["python3", str(build_index)], cwd=project_root, capture_output=True)
+
+        await loop.run_in_executor(None, _write_and_commit)
+        return _json_response({"ok": True, "op": op, "path": rel_path})
     except HTTPException:
         raise
     except subprocess.CalledProcessError as exc:

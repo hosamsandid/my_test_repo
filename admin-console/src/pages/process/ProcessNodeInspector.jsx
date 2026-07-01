@@ -3,14 +3,20 @@ import { Save, Loader2 } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
 import { apiCall } from '../../hooks/useApi';
 import TriggersPanel from '../agent-chat/TriggersPanel';
+import ConnectionsSection from './ConnectionsSection';
+import { liveOps } from './edit-adapters';
 
 // Node inspector for the Process Canvas (#331). Opened when an agent node is
-// clicked. Two tabs — Prompt and Triggers — that write back through existing
-// endpoints; on any write it calls onChanged so the canvas re-fetches the graph.
-export default function ProcessNodeInspector({ node, level, onClose, onChanged }) {
+// clicked. Tabs — Prompt, Triggers, Connections — that write back through
+// existing endpoints; on any write it calls onChanged so the canvas re-fetches
+// the graph. The Connections tab (#unified) edits the same declarative edges
+// (parent / stage / dependency / data-flow) a draft does, via liveOps.
+export default function ProcessNodeInspector({ node, level, nodes = [], onClose, onChanged }) {
   const [tab, setTab] = useState('prompt');
   if (!node) return null;
   const isTemplate = level === 'template' || node.role === 'template';
+  const siblings = nodes.filter(n => n.id !== node.id).map(n => ({ id: n.id, displayName: n.displayName || n.id }));
+  const inheritedStage = !node.stage && node.effectiveStage ? node.effectiveStage : '';
 
   return (
     <SidePanel open onClose={onClose} title={node.displayName || node.id} width="560px">
@@ -27,14 +33,18 @@ export default function ProcessNodeInspector({ node, level, onClose, onChanged }
           <div style={{ display: 'flex', borderBottom: '1px solid var(--eb-border-default)', marginBottom: 'var(--eb-space-4)' }}>
             <TabButton active={tab === 'prompt'} onClick={() => setTab('prompt')}>Prompt</TabButton>
             <TabButton active={tab === 'triggers'} onClick={() => setTab('triggers')}>Triggers</TabButton>
+            <TabButton active={tab === 'connections'} onClick={() => setTab('connections')}>Connections</TabButton>
           </div>
-          {tab === 'prompt'
-            ? <PromptTab agentId={node.id} onChanged={onChanged} />
-            : (
-              <div style={{ height: 'min(60vh, 540px)', display: 'flex', flexDirection: 'column', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', overflow: 'hidden' }}>
-                <TriggersPanel agentId={node.id} active onChanged={onChanged} />
-              </div>
-            )}
+          {tab === 'prompt' && <PromptTab agentId={node.id} onChanged={onChanged} />}
+          {tab === 'triggers' && (
+            <div style={{ height: 'min(60vh, 540px)', display: 'flex', flexDirection: 'column', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', overflow: 'hidden' }}>
+              <TriggersPanel agentId={node.id} active onChanged={onChanged} />
+            </div>
+          )}
+          {tab === 'connections' && (
+            <ConnectionsSection node={node} siblings={siblings} inheritedStage={inheritedStage}
+              ops={liveOps} onChanged={onChanged} />
+          )}
         </>
       )}
     </SidePanel>

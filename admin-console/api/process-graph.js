@@ -91,6 +91,11 @@ function buildProcessGraph(agents) {
       sessionPolicy: a.sessionPolicy || 'persistent',
       environmentId: a.environmentId || null,
       triggers,
+      // Agent-level emitted labels (operator-declared): the labels this agent
+      // sets during its work, independent of which trigger run does it. Lets a
+      // label hand-off be wired from the edge alone, without attaching the emit
+      // to a pre-existing trigger.
+      emits: Array.isArray(a.emits) ? a.emits.filter(e => typeof e === 'string' && e) : [],
       // DM-only front door: nothing wakes it from git, it talks to a human.
       isEntryPoint: !hasGithubEvent,
     };
@@ -109,13 +114,16 @@ function buildProcessGraph(agents) {
     }
   };
 
+  const addEmit = (label, agentId) => {
+    if (!emitIndex.has(label)) emitIndex.set(label, new Set());
+    emitIndex.get(label).add(agentId);
+    noteLabel(label);
+  };
   for (const n of nodes) {
+    // Agent-level emits (operator-declared on the agent, no trigger needed).
+    for (const e of n.emits) addEmit(e, n.id);
     for (const t of n.triggers) {
-      for (const e of t.emits) {
-        if (!emitIndex.has(e)) emitIndex.set(e, new Set());
-        emitIndex.get(e).add(n.id);
-        noteLabel(e);
-      }
+      for (const e of t.emits) addEmit(e, n.id);
       const lk = labelListenKey(t);
       if (lk) { allListenKeys.add(lk); noteLabel(lk); }
     }

@@ -1,8 +1,19 @@
-// bp-graph.js — ES Module
-// Extracted canvas/graph rendering logic from ACE bp-explorer/app.js
-// Wraps all state locally; call initBPGraph(viewportEl, { apiBase, workspace })
+// flow-graph-render.js — ES Module (Unified Orchestration #362, UI rework Phase B)
+//
+// The rich, BP-Explorer-style graph renderer (originally bp-graph.js), now
+// generalized to consume the unified graph from /api/flows/graph instead of raw
+// BriefingPack objects. It keeps the look the operators preferred — expandable
+// node cards, parent-child hierarchy, the Content/prompt panel, and the data-flow
+// (input/output artifact) view — and additionally draws the process-linking edges
+// (label / review / manual) on top.
+//
+//   const g = initFlowGraph(viewportEl, { onSelectNode });
+//   g.setData(unifiedGraph);   // { nodes, edges, lints } from /api/flows/graph
+//   g.fit(); g.cleanup();
 
-export function initBPGraph(viewport, { apiBase, workspace }) {
+import { computeFlowLayout, assignCrossCoords } from './flow-layout';
+
+export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge } = {}) {
 
   // ─── Constants ──────────────────────────────────────────────────────
   const NODE_W      = 320;
@@ -27,6 +38,11 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
   canvas.style.transformOrigin = '0 0';
   canvas.style.userSelect     = 'none';
   viewport.appendChild(canvas);
+
+  // Stage bands sit behind everything (#362 E). One <div> per stage group.
+  const stageLayer = document.createElement('div');
+  stageLayer.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;';
+  canvas.appendChild(stageLayer);
 
   const svgEdges = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svgEdges.style.position     = 'absolute';
@@ -108,14 +124,12 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
     (dashed ? `border:1px dashed ${bg};background-image:repeating-linear-gradient(-45deg,transparent,transparent 2px,rgba(168,85,247,0.2) 2px,rgba(168,85,247,0.2) 4px);` : '') +
     `"></span><span style="color:var(--eb-text-secondary)">${label}</span></span>`;
   legendEl.innerHTML =
-    `<span style="color:var(--eb-text-muted);font-size:10px;margin-right:2px">Status:</span>` +
-    _mkSwatch('#e05d6f', 'Draft') +
-    _mkSwatch('#f59e0b', 'Ready') +
-    _mkSwatch('#3b82f6', 'Dispatched') +
-    _mkSwatch('#3b82f6', 'Claimed') +
-    _mkSwatch('#22c55e', 'Completed') +
-    _mkSwatch('#34d399', 'Reviewed') +
-    _mkSwatch('#a855f7', 'Stale', true);
+    `<span style="color:var(--eb-text-muted);font-size:10px;margin-right:2px">Edges:</span>` +
+    _mkSwatch('var(--eb-border-hover)', 'hierarchy') +
+    _mkSwatch('#ef4444', 'depends-on', true) +
+    _mkSwatch('#22c55e', 'data flow') +
+    _mkSwatch('#3b82f6', 'link') +
+    _mkSwatch('#f59e0b', 'review');
   viewport.appendChild(legendEl);
 
   // ─── State ──────────────────────────────────────────────────────────
@@ -140,6 +154,11 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
     panStart:           { x: 0, y: 0 },
     showArchived:       localStorage.getItem('ace-graph-show-archived') === 'true',
     orientation:        localStorage.getItem('ace-graph-orientation') === 'vertical' ? 'vertical' : 'horizontal',
+    selectedId:         null,   // #362 UI rework Phase C: node selection
+    editable:           false,  // structural editing (connect-to-wire, edges)
+    connecting:         null,   // { fromId } while dragging a new edge
+    showStages:         localStorage.getItem('flow-graph-show-stages') === 'true', // #362 E stage bands
+    stageOrder:         [],     // ordered stage names — drives layered layout order
   };
 
   // ─── Data Loading ────────────────────────────────────────────────────
@@ -150,25 +169,57 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
       .map(bp => bp.id);
   }
 
-  async function fetchBriefings() {
-    try {
-      const resp = await fetch(`${apiBase}/briefings?workspace=${encodeURIComponent(workspace)}`);
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      state.briefings = await resp.json();
+  // Feed the renderer a unified graph ({ nodes, edges, lints }) from
+  // /api/flows/graph. Unified nodes are converted to the BP record shape this
+  // renderer already understands (hierarchy via parent/children, data flow via
+  // artifacts, the expandable Content panel via `body` = node.content). The
+  // process-linking edges (label / review / manual) are kept aside as
+  // `state.extraEdges` and drawn on top of the BP structure.
+  function setData(graph) {
+    const g = graph || {};
+    const nodes = Array.isArray(g.nodes) ? g.nodes : [];
+    const mkArt = (a, direction) =>
+      (typeof a === 'string' ? { path: a, direction } : { ...a, direction });
+    state.briefings = nodes.map(n => ({
+      id: n.id,
+      title: n.displayName || n.id,
+      slug: '',
+      status: '',                       // status dropped (decision 2)
+      body: typeof n.content === 'string' ? n.content : '',
+      parent: n.parent || null,
+      children: Array.isArray(n.children) ? n.children : [],
+      depends_on: Array.isArray(n.dependsOn) ? n.dependsOn : [],
+      artifacts: [
+        ...(Array.isArray(n.inputs) ? n.inputs.map(a => mkArt(a, 'input')) : []),
+        ...(Array.isArray(n.outputs) ? n.outputs.map(a => mkArt(a, 'output')) : []),
+      ],
+      archived: false,
+      rigor: n.rigor || '',
+      // Bands group by the effective (inherited) stage; fall back to own.
+      stage: (typeof n.effectiveStage === 'string' && n.effectiveStage)
+        || (typeof n.stage === 'string' ? n.stage : ''),
+      _role: n.role,
+      _isParent: n.isParent === true,
+    }));
+    state.byId = {};
+    state.briefings.forEach(bp => { state.byId[bp.id] = bp; });
 
-      state.byId = {};
-      state.briefings.forEach(bp => { state.byId[bp.id] = bp; });
+    const EXTRA = new Set(['label', 'review', 'manual']);
+    state.extraEdges = (Array.isArray(g.edges) ? g.edges : [])
+      .filter(e => EXTRA.has(e.on) && e.from && e.to && e.from !== e.to);
 
-      recomputeRoots();
-      buildArtifactRegistry();
+    // Operator-defined stage order (drives the layered layout when set). Accept
+    // either bare strings or { name } objects; ignore anything else.
+    state.stageOrder = (Array.isArray(g.stages) ? g.stages : [])
+      .map(s => (typeof s === 'string' ? s : (s && typeof s.name === 'string' ? s.name : null)))
+      .filter(Boolean);
 
-      loadingEl.style.display = 'none';
-      layout();
-      render();
-      if (!state.userTransform) fitToView();
-    } catch (err) {
-      loadingEl.textContent = `Error loading briefings: ${err.message}`;
-    }
+    recomputeRoots();
+    buildArtifactRegistry();
+    loadingEl.style.display = 'none';
+    layout();
+    render();
+    if (!state.userTransform) fitToView();
   }
 
   function buildArtifactRegistry() {
@@ -342,14 +393,104 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
     return ARTIFACT_H;
   }
 
+  // When stage bands are on, group root nodes by their (manual) stage so each
+  // stage's subtrees are contiguous along the main axis → clean, non-overlapping
+  // bands. Stable within a stage; unstaged roots come last (#362 E).
+  function orderRootsByStage(ids) {
+    if (!state.showStages) return ids;
+    const groups = new Map();
+    const order = [];
+    ids.forEach(id => {
+      const s = (state.byId[id] && state.byId[id].stage) || '';
+      if (!groups.has(s)) { groups.set(s, []); order.push(s); }
+      groups.get(s).push(id);
+    });
+    order.sort((a, b) => (a === '' ? 1 : 0) - (b === '' ? 1 : 0)); // unstaged last
+    return order.flatMap(s => groups.get(s));
+  }
+
   function layout() {
     const visible = getVisibleNodes();
     if (visible.length === 0) return;
-    if (state.orientation === 'vertical') {
+    if (useLayeredLayout(visible)) {
+      layoutLayered(visible);
+    } else if (state.orientation === 'vertical') {
       layoutVertical(visible);
     } else {
       layoutHorizontal(visible);
     }
+  }
+
+  // Flat process/draft flows have no parent-child hierarchy — their whole
+  // structure is the directed hand-off / dependency edges. The tree layout piles
+  // those into a single column, so we lay them out as an ordered layered DAG
+  // instead (sources → sinks, crossings reduced). Hierarchical graphs (BP packs,
+  // team-member trees) keep the tree layout.
+  function useLayeredLayout(visible) {
+    const anyHierarchy = state.briefings.some(bp => bp.parent || (bp.children && bp.children.length));
+    if (anyHierarchy) return false;
+    const hasExtra = (state.extraEdges || []).length > 0;
+    const hasStageOrder = (state.stageOrder || []).length > 0;
+    const hasDeps = visible.some(n => ((state.byId[n.id] || {}).depends_on || []).length > 0);
+    return hasExtra || hasStageOrder || hasDeps;
+  }
+
+  // Layered layout for a flat flow. Columns follow the flow direction (the
+  // stage order overrides them when stages are assigned); within-column order
+  // and cross-axis alignment come from the pure flow-layout module. Vertical
+  // orientation reads columns left→right; horizontal reads them top→bottom.
+  function layoutLayered(visible) {
+    const vertical = state.orientation === 'vertical';
+    const ids = visible.map(n => n.id);
+    const idSet = new Set(ids);
+
+    const edges = [];
+    (state.extraEdges || []).forEach(e => {
+      if (idSet.has(e.from) && idSet.has(e.to) && e.from !== e.to) edges.push({ from: e.from, to: e.to });
+    });
+    visible.forEach(n => {
+      const bp = state.byId[n.id];
+      (bp.depends_on || []).forEach(dep => {
+        if (idSet.has(dep) && dep !== n.id) edges.push({ from: dep, to: n.id });
+      });
+    });
+
+    const order = state.stageOrder || [];
+    const rankMap = new Map(order.map((s, i) => [s, i]));
+    const useStages = order.length > 0 && visible.some(n => rankMap.has((state.byId[n.id] || {}).stage));
+    const stageRankOf = useStages
+      ? (id => { const s = (state.byId[id] || {}).stage; return rankMap.has(s) ? rankMap.get(s) : null; })
+      : null;
+
+    const { colOf, columns } = computeFlowLayout(ids, edges, { stageRankOf, stageCount: order.length });
+
+    const sizeOf = vertical ? (id => getNodeHeight(id)) : (() => NODE_W);
+    const crossGap = vertical ? 34 : H_GAP;
+    const center = assignCrossCoords(columns, edges, sizeOf, { gap: crossGap });
+
+    const pos = {};
+    const colMain = [];
+    if (vertical) {
+      let x = 0;
+      for (let c = 0; c < columns.length; c++) { colMain[c] = x; x += NODE_W + H_GAP * 2; }
+      ids.forEach(id => {
+        const c = colOf.get(id) || 0;
+        pos[id] = { x: colMain[c], y: (center.get(id) || 0) - getNodeHeight(id) / 2 };
+      });
+    } else {
+      let y = 0;
+      for (let c = 0; c < columns.length; c++) {
+        const maxH = Math.max(90, ...columns[c].map(getNodeHeight));
+        colMain[c] = y; y += maxH + V_GAP;
+      }
+      ids.forEach(id => {
+        const c = colOf.get(id) || 0;
+        pos[id] = { x: (center.get(id) || 0) - NODE_W / 2, y: colMain[c] };
+      });
+    }
+
+    state.positions = pos;
+    layoutArtifacts(visible);
   }
 
   function layoutHorizontal(visible) {
@@ -399,7 +540,7 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
     }
 
     let xCursor = 0;
-    const sortedRoots = topoSortRoots(state.roots).filter(id => visibleIds.has(id));
+    const sortedRoots = orderRootsByStage(topoSortRoots(state.roots).filter(id => visibleIds.has(id)));
     sortedRoots.forEach(id => {
       assignX(id, xCursor);
       xCursor += subtreeW[id] + H_GAP * 2;
@@ -479,7 +620,7 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
     }
 
     let yCursor = 0;
-    const sortedRoots = topoSortRoots(state.roots).filter(id => visibleIds.has(id));
+    const sortedRoots = orderRootsByStage(topoSortRoots(state.roots).filter(id => visibleIds.has(id)));
     sortedRoots.forEach(id => {
       assignY(id, yCursor);
       yCursor += subtreeH[id] + V_GAP;
@@ -768,6 +909,7 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
       if (!bp || !pos) return;
 
       const node = document.createElement('div');
+      const selected = state.selectedId === n.id;
       node.className = 'bp-node' + (bp.status ? ` bp-node-status-${bp.status}` : '');
       node.dataset.id = n.id;
       node.style.cssText = `
@@ -776,23 +918,31 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
         top:${pos.y}px;
         width:${NODE_W}px;
         background:var(--eb-bg-surface);
-        border:1px solid var(--eb-border-default);
+        border:${selected ? '2px solid var(--eb-accent-primary)' : '1px solid var(--eb-border-default)'};
         border-radius:8px;
         padding:10px 12px;
         box-sizing:border-box;
         font-size:12px;
         color:var(--eb-text-primary);
         box-shadow:var(--eb-shadow-sm);
+        cursor:pointer;
       `;
       applyStatusBorderColor(node, bp.status);
       node.addEventListener('mousedown', e => e.stopPropagation());
+      // Select on click — but not when interacting with a button, link or the
+      // inline editor inputs inside the card.
+      node.addEventListener('click', (e) => {
+        if (e.target.closest('button, a, input, textarea')) return;
+        state.selectedId = n.id;
+        if (onSelectNode) onSelectNode(n.id);
+        render();
+      });
 
       // Header
       const header = document.createElement('div');
       header.style.cssText = 'font-weight:600;font-size:13px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:flex-start;gap:8px;';
-      const numLabel = state.numberLabels[n.id] || '';
       header.innerHTML = `
-        <span style="flex:1;line-height:1.4;">${esc(numLabel ? numLabel + ' ' : '')}${esc(bp.title)}</span>
+        <span style="flex:1;line-height:1.4;">${esc(bp.title)}</span>
         ${bpIdLabel(bp.id, bp.id.slice(0, 6), 'bp-id-copy')}
       `;
       node.appendChild(header);
@@ -845,6 +995,20 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
 
       node.appendChild(actions);
 
+      // Connect-to-wire port (#362 Phase C2): drag to another node to wire a
+      // hand-off / link. Only when editable and a handler is wired.
+      if (state.editable && onConnect) {
+        const port = document.createElement('div');
+        port.title = 'Drag to another node to connect them';
+        port.style.cssText = 'position:absolute;right:-7px;top:calc(50% - 7px);width:14px;height:14px;border-radius:50%;background:var(--eb-accent-primary);border:2px solid var(--eb-bg-surface);cursor:crosshair;z-index:3;';
+        port.addEventListener('mousedown', (ev) => {
+          ev.stopPropagation();
+          ev.preventDefault();
+          startConnect(n.id);
+        });
+        node.appendChild(port);
+      }
+
       // Details panel
       if (state.expanded.has(n.id)) {
         const details = document.createElement('div');
@@ -884,7 +1048,8 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
         node.appendChild(details);
       }
 
-      // Content panel
+      // Content panel — the node's prompt/brief, read-only markdown. Editing
+      // (prompt, stage, links) is in the right-side inspector (#362 unification).
       if (state.contentVisible.has(n.id) && bp.body) {
         const body = document.createElement('div');
         body.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid var(--eb-border-default);font-size:11px;max-height:300px;overflow-y:auto;line-height:1.5;';
@@ -919,7 +1084,49 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
         }
       });
       drawEdges();
+      drawStages();
     });
+  }
+
+  // Stage bands (#362 E): a faint labeled rectangle behind the nodes that share
+  // a (manual) stage. Computed from actual node positions, so it follows the
+  // layout; root grouping by stage keeps each band contiguous.
+  function drawStages() {
+    stageLayer.innerHTML = '';
+    if (!state.showStages) return;
+    const visible = getVisibleNodes();
+    const boxes = new Map(); // stage -> {minX,minY,maxX,maxY}
+    visible.forEach(n => {
+      const bp = state.byId[n.id];
+      const stage = bp && bp.stage;
+      const pos = state.positions[n.id];
+      if (!stage || !pos) return;
+      const h = getNodeHeight(n.id);
+      const b = boxes.get(stage) || { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+      b.minX = Math.min(b.minX, pos.x);
+      b.minY = Math.min(b.minY, pos.y);
+      b.maxX = Math.max(b.maxX, pos.x + NODE_W);
+      b.maxY = Math.max(b.maxY, pos.y + h);
+      boxes.set(stage, b);
+    });
+    const PAD = 18;
+    let i = 0;
+    const hues = [210, 280, 150, 30, 330, 90];
+    for (const [stage, b] of boxes) {
+      const hue = hues[i % hues.length];
+      i += 1;
+      const band = document.createElement('div');
+      band.style.cssText = `position:absolute;left:${b.minX - PAD}px;top:${b.minY - PAD - 18}px;`
+        + `width:${b.maxX - b.minX + PAD * 2}px;height:${b.maxY - b.minY + PAD * 2 + 18}px;`
+        + `background:hsla(${hue},70%,50%,0.06);border:1px dashed hsla(${hue},60%,55%,0.5);`
+        + `border-radius:10px;`;
+      const label = document.createElement('div');
+      label.textContent = stage;
+      label.style.cssText = `position:absolute;left:8px;top:2px;font-size:10px;font-weight:700;`
+        + `letter-spacing:0.04em;text-transform:uppercase;color:hsla(${hue},60%,55%,0.95);`;
+      band.appendChild(label);
+      stageLayer.appendChild(band);
+    }
   }
 
   function renderArtifactNodes() {
@@ -1099,7 +1306,8 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
           flow = 'vertical';
         }
 
-        drawBezierEdge(x1, y1, x2, y2, 'var(--eb-border-hover)', 2, '', false, flow);
+        const d = drawBezierEdge(x1, y1, x2, y2, 'var(--eb-border-hover)', 2, '', false, flow);
+        addEdgeHit(d, { from: n.id, to: childId, on: 'parent' });
       });
     });
 
@@ -1151,11 +1359,48 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
         arrow.setAttribute('fill', '#ef4444');
         arrow.setAttribute('opacity', '0.5');
         svgEdges.appendChild(arrow);
+
+        addEdgeHit(pathD, { from: depId, to: n.id, on: 'dependency' });
       });
     });
 
     // 3. Artifact edges
     drawArtifactEdges(visibleIds);
+
+    // 4. Process-linking edges (label / review / manual) — the extra wiring
+    //    from the process view, drawn on top of the BP structure.
+    const EXTRA_COLOR = { label: '#3b82f6', review: '#f59e0b', manual: '#3b82f6' };
+    (state.extraEdges || []).forEach(e => {
+      if (!visibleIds.has(e.from) || !visibleIds.has(e.to)) return;
+      const fromPos = state.positions[e.from];
+      const toPos   = state.positions[e.to];
+      const fromEl  = canvas.querySelector(`.bp-node[data-id="${e.from}"]`);
+      if (!fromPos || !toPos || !fromEl) return;
+      const fromH = fromEl.offsetHeight;
+      const color = EXTRA_COLOR[e.on] || '#3b82f6';
+
+      let x1, y1, x2, y2, flow;
+      if (vertical) {
+        x1 = fromPos.x + NODE_W; y1 = fromPos.y + fromH / 2;
+        x2 = toPos.x;            y2 = toPos.y + 20; flow = 'horizontal';
+      } else {
+        x1 = fromPos.x + NODE_W / 2; y1 = fromPos.y + fromH;
+        x2 = toPos.x + NODE_W / 2;   y2 = toPos.y;  flow = 'vertical';
+      }
+      const d = drawBezierEdge(x1, y1, x2, y2, color, 1.5, '', true, flow);
+      // Clickable hit-area so the edge can be edited/removed (#362 Phase C2).
+      addEdgeHit(d, { from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on, triggerId: e.triggerId });
+      if (e.label) {
+        const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        t.textContent = e.label;
+        t.setAttribute('x', (x1 + x2) / 2);
+        t.setAttribute('y', (y1 + y2) / 2);
+        t.setAttribute('fill', color);
+        t.setAttribute('font-size', '10');
+        t.setAttribute('text-anchor', 'middle');
+        svgEdges.appendChild(t);
+      }
+    });
   }
 
   function drawArtifactEdges(visibleBpIds) {
@@ -1178,20 +1423,16 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
         if (!bpPos || !bpEl) return;
 
         const bpH = bpEl.offsetHeight;
-        if (vertical) {
-          // BP right → artifact left
-          drawBezierEdge(
-            bpPos.x + NODE_W, bpPos.y + bpH / 2,
-            artPos.x,         artPos.y + artH / 2,
-            '#34d399', 1.5, '', true, 'horizontal'
-          );
-        } else {
-          drawBezierEdge(
-            bpPos.x + NODE_W / 2, bpPos.y + bpH,
-            artPos.x + ARTIFACT_W / 2, artPos.y,
-            '#34d399', 1.5, '', true, 'vertical'
-          );
-        }
+        const d = vertical
+          ? drawBezierEdge(
+              bpPos.x + NODE_W, bpPos.y + bpH / 2,
+              artPos.x,         artPos.y + artH / 2,
+              '#34d399', 1.5, '', true, 'horizontal')
+          : drawBezierEdge(
+              bpPos.x + NODE_W / 2, bpPos.y + bpH,
+              artPos.x + ARTIFACT_W / 2, artPos.y,
+              '#34d399', 1.5, '', true, 'vertical');
+        addEdgeHit(d, { on: 'artifact', from: bpId, direction: 'output', path });
       });
 
       // Input edges: artifact → BP (blue dashed)
@@ -1202,22 +1443,17 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
         if (!bpPos || !bpEl) return;
 
         const bpH = bpEl.offsetHeight;
-        if (vertical) {
-          // artifact left → BP right? No — input means artifact feeds INTO bp
-          // In horizontal mode it goes artifact-top → bp-bottom (i.e. the arrow points down to BP)
-          // The artifact column sits to the right of BPs, so we route from artifact's LEFT into BP's RIGHT
-          drawBezierEdge(
-            artPos.x,         artPos.y + artH / 2,
-            bpPos.x + NODE_W, bpPos.y + bpH / 2,
-            '#60a5fa', 1.5, '4 3', true, 'horizontal'
-          );
-        } else {
-          drawBezierEdge(
-            artPos.x + ARTIFACT_W / 2, artPos.y,
-            bpPos.x + NODE_W / 2, bpPos.y + bpH,
-            '#60a5fa', 1.5, '4 3', true, 'vertical'
-          );
-        }
+        const d = vertical
+          // artifact feeds INTO bp — route from the artifact's edge into the BP.
+          ? drawBezierEdge(
+              artPos.x,         artPos.y + artH / 2,
+              bpPos.x + NODE_W, bpPos.y + bpH / 2,
+              '#60a5fa', 1.5, '4 3', true, 'horizontal')
+          : drawBezierEdge(
+              artPos.x + ARTIFACT_W / 2, artPos.y,
+              bpPos.x + NODE_W / 2, bpPos.y + bpH,
+              '#60a5fa', 1.5, '4 3', true, 'vertical');
+        addEdgeHit(d, { on: 'artifact', from: bpId, direction: 'input', path });
       });
     });
   }
@@ -1256,6 +1492,7 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
       tri.setAttribute('opacity', '0.7');
       svgEdges.appendChild(tri);
     }
+    return d;
   }
 
   function makeSvgPath(d) {
@@ -1263,6 +1500,23 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
     p.setAttribute('d', d);
     svgEdges.appendChild(p);
     return p;
+  }
+
+  // Transparent thick overlay that makes an already-drawn edge clickable so it
+  // can be edited / removed. No-op unless the host wired onSelectEdge (the BP
+  // viewer doesn't — it removes links from the node inspector instead).
+  function addEdgeHit(pathD, payload) {
+    if (!onSelectEdge || !pathD) return;
+    const hit = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    hit.setAttribute('d', pathD);
+    hit.setAttribute('stroke', 'transparent');
+    hit.setAttribute('stroke-width', '14');
+    hit.setAttribute('fill', 'none');
+    hit.style.pointerEvents = 'stroke';
+    hit.style.cursor = 'pointer';
+    hit.addEventListener('mousedown', (ev) => ev.stopPropagation());
+    hit.addEventListener('click', (ev) => { ev.stopPropagation(); onSelectEdge(payload); });
+    svgEdges.appendChild(hit);
   }
 
   // ─── Interactions ────────────────────────────────────────────────────
@@ -1388,15 +1642,59 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
   }
 
   function onMousemove(e) {
+    if (state.connecting) { updateTempEdge(e.clientX, e.clientY); return; }
     if (!state.dragging) return;
     state.pan.x = state.panStart.x + (e.clientX - state.dragStart.x);
     state.pan.y = state.panStart.y + (e.clientY - state.dragStart.y);
     applyTransform();
   }
 
-  function onMouseup() {
+  function onMouseup(e) {
+    if (state.connecting) { finishConnect(e); return; }
     state.dragging = false;
     viewport.style.cursor = 'grab';
+  }
+
+  // ── Connect-to-wire (#362 UI rework Phase C2) ──────────────────────────────
+  let tempEdge = null;
+  function toCanvas(clientX, clientY) {
+    const r = viewport.getBoundingClientRect();
+    return {
+      x: (clientX - r.left - state.pan.x) / state.zoom,
+      y: (clientY - r.top - state.pan.y) / state.zoom,
+    };
+  }
+  function startConnect(fromId) {
+    state.connecting = { fromId };
+    viewport.style.cursor = 'crosshair';
+    tempEdge = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    tempEdge.setAttribute('stroke', 'var(--eb-accent-primary)');
+    tempEdge.setAttribute('stroke-width', '2');
+    tempEdge.setAttribute('stroke-dasharray', '5 4');
+    tempEdge.setAttribute('fill', 'none');
+    svgEdges.appendChild(tempEdge);
+  }
+  function updateTempEdge(clientX, clientY) {
+    if (!tempEdge) return;
+    const pos = state.positions[state.connecting.fromId];
+    const el = canvas.querySelector(`.bp-node[data-id="${state.connecting.fromId}"]`);
+    if (!pos || !el) return;
+    const x1 = pos.x + NODE_W;
+    const y1 = pos.y + el.offsetHeight / 2;
+    const p = toCanvas(clientX, clientY);
+    const cx = x1 + (p.x - x1) * 0.4;
+    const cx2 = p.x - (p.x - x1) * 0.4;
+    tempEdge.setAttribute('d', `M ${x1} ${y1} C ${cx} ${y1}, ${cx2} ${p.y}, ${p.x} ${p.y}`);
+  }
+  function finishConnect(e) {
+    const fromId = state.connecting.fromId;
+    state.connecting = null;
+    viewport.style.cursor = 'grab';
+    if (tempEdge) { tempEdge.remove(); tempEdge = null; }
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const nodeEl = el && el.closest ? el.closest('.bp-node') : null;
+    const toId = nodeEl && nodeEl.dataset ? nodeEl.dataset.id : null;
+    if (toId && toId !== fromId && onConnect) onConnect(fromId, toId);
   }
 
   function onWheel(e) {
@@ -1610,14 +1908,29 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
   updateArchivedBtn(archivedBtn);
   toolbarEl.appendChild(archivedBtn);
 
+  // Stages toggle (#362 E): group + band nodes by their manual stage.
+  const updateStagesBtn = (btn) => {
+    btn.textContent = state.showStages ? 'Stages: on' : 'Stages';
+    btn.style.color = state.showStages ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)';
+  };
+  const stagesBtn = makeToolBtn('Stages', () => {
+    state.showStages = !state.showStages;
+    localStorage.setItem('flow-graph-show-stages', state.showStages);
+    updateStagesBtn(stagesBtn);
+    state.userTransform = false;
+    render();
+  });
+  updateStagesBtn(stagesBtn);
+  toolbarEl.appendChild(stagesBtn);
+
   // ─── Init ─────────────────────────────────────────────────────────────
 
   setupPanZoom();
-  fetchBriefings();
+  // No auto-fetch — the React wrapper loads /api/flows/graph and calls setData.
 
-  // ─── Cleanup ──────────────────────────────────────────────────────────
+  // ─── Public API ─────────────────────────────────────────────────────────
 
-  return function cleanup() {
+  function cleanup() {
     viewport.removeEventListener('mousedown', onMousedown);
     window.removeEventListener('mousemove', onMousemove);
     window.removeEventListener('mouseup', onMouseup);
@@ -1625,5 +1938,13 @@ export function initBPGraph(viewport, { apiBase, workspace }) {
     resizeObserver.disconnect();
     // Remove injected DOM
     while (viewport.firstChild) viewport.removeChild(viewport.firstChild);
+  }
+
+  return {
+    setData,
+    fit: () => { state.userTransform = false; fitToView(); },
+    setSelected: (id) => { state.selectedId = id; render(); },
+    setEditable: (v) => { if (state.editable !== !!v) { state.editable = !!v; render(); } },
+    cleanup,
   };
 }

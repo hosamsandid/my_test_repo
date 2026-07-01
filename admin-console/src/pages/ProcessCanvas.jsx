@@ -287,6 +287,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
           ops={draftOps}
           onClose={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
           onDeleted={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
+          onRenamedId={(nid) => { setSelectedId(nid); graphRef.current?.setSelected(nid); }}
           onChanged={() => {}}
         />
       )}
@@ -416,7 +417,7 @@ function AddRoleDialog({ kind, onClose, onCreate }) {
           </div>
         ) : (
           <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>System prompt (optional now)</span>
+            <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Agent prompt (optional now)</span>
             <textarea value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)}
               placeholder="What this role does…" style={{ ...field, minHeight: 160, resize: 'vertical', fontFamily: 'var(--eb-font-mono)' }} />
           </label>

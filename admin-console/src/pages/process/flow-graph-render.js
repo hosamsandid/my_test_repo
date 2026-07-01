@@ -644,18 +644,17 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
 
   // Artifacts (inputs/outputs) live in a dedicated lane, oriented perpendicular
   // to the flow so producer→artifact→consumer reads as a short "triangle":
-  //  - horizontal flow (state.orientation === 'vertical', columns left→right):
-  //    a horizontal lane BELOW the graph; artifacts placed at the mean x of
-  //    their producer(s)+consumer(s); edges route down into / up out of it.
-  //  - vertical flow (state.orientation === 'horizontal', columns top→bottom):
-  //    a vertical lane as a new column on the RIGHT; artifacts stacked top→
-  //    bottom at the mean y of their producer(s)+consumer(s); edges route right
-  //    into / left out of it.
+  //  - horizontal flow (state.orientation === 'horizontal'): a horizontal lane
+  //    BELOW the graph; artifacts placed at the mean x of their producer(s)+
+  //    consumer(s); edges route down into / up out of it.
+  //  - vertical flow (state.orientation === 'vertical'): a vertical lane as a
+  //    new column on the RIGHT; artifacts stacked top→bottom at the mean y of
+  //    their producer(s)+consumer(s); edges route right into / left out of it.
   // Either way the pooling pass spreads overlapping artifacts apart while
   // keeping them close to that ideal position. drawArtifactEdges mirrors the
   // orientation split for the edge routing.
   function layoutArtifacts(visibleBpNodes) {
-    if (state.orientation === 'vertical') {
+    if (state.orientation === 'horizontal') {
       layoutArtifactLane(visibleBpNodes);
     } else {
       layoutArtifactColumn(visibleBpNodes);
@@ -1120,7 +1119,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
     laneLayer.innerHTML = '';
     const paths = Object.keys(state.artifactPositions);
     if (paths.length === 0) return;
-    const vertical = state.orientation === 'vertical';
+    const laneBelow = state.orientation === 'horizontal';
 
     let minX = Infinity, maxX = -Infinity;
     let minY = Infinity, maxY = -Infinity;
@@ -1141,7 +1140,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
     getVisibleNodes().forEach(n => {
       const pos = state.positions[n.id];
       if (!pos) return;
-      if (vertical) {
+      if (laneBelow) {
         minX = Math.min(minX, pos.x);
         maxX = Math.max(maxX, pos.x + NODE_W);
       } else {
@@ -1454,7 +1453,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
 
   function drawArtifactEdges(visibleBpIds) {
     const visiblePaths = getVisibleArtifactPaths();
-    const vertical     = state.orientation === 'vertical';
+    const laneBelow    = state.orientation === 'horizontal';
 
     // The lane is perpendicular to the flow, so producer→artifact→consumer
     // reads as a triangle. Both arms attach to the artifact edge facing the
@@ -1487,7 +1486,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
         const bpH  = bpEl.offsetHeight;
         const bpCx = bpPos.x + NODE_W / 2;
         const bpCy = bpPos.y + bpH / 2;
-        const d = vertical
+        const d = laneBelow
           // below-lane: producer bottom → artifact top (down)
           ? drawBezierEdge(
               bpCx, bpPos.y + bpH,
@@ -1511,7 +1510,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
         const bpH  = bpEl.offsetHeight;
         const bpCx = bpPos.x + NODE_W / 2;
         const bpCy = bpPos.y + bpH / 2;
-        const d = vertical
+        const d = laneBelow
           // below-lane: artifact top → consumer bottom (up)
           ? drawBezierEdge(
               topAnchorX(artPos, bpCx), artPos.y,

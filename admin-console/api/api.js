@@ -4485,7 +4485,18 @@ function dataFlowForMember(template, teamId) {
 
 app.post('/api/teams', heavyLimiter, async (req, res) => {
   const body = req.body || {};
-  const { teamId, teamName, repository, githubTokenId, mcpServers } = body;
+  const { teamId, teamName, mcpServers } = body;
+  // repository + githubTokenId may be supplied directly (legacy Team-Setup
+  // wizard, which auto-creates an env) OR derived from a reused Working
+  // Environment (environmentId, below) — so they are mutable here.
+  let { repository, githubTokenId } = body;
+  // A team can be materialised onto an existing Working Environment instead of
+  // having one auto-created from a repo URL + credentials. When environmentId
+  // is supplied we pull the repo/branch/credentials from that env and skip the
+  // env-creation phase entirely.
+  const environmentId = (typeof body.environmentId === 'string' && body.environmentId.trim())
+    ? normalizeEnvId(body.environmentId)
+    : null;
   const mode = body.mode === 'extend' ? 'extend' : 'create';
   // Deferred materialization: when false, members are created as stubs (config
   // + triggers only, no Matrix user / clone / process), shown in the UI and
@@ -4538,7 +4549,33 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   if (typeof teamName !== 'string' || !teamName.trim()) {
     return res.status(400).json({ error: 'teamName required' });
   }
-  if (!repository?.url || !repository?.sshKeyId) {
+
+  // Resolve a reused Working Environment (if any) into the repository +
+  // credential inputs the rest of the pipeline expects. The env was validated
+  // when it was created, so we trust its stored repo/token here.
+  if (environmentId) {
+    const reusedEnv = loadEnvironment(environmentId);
+    if (!reusedEnv) {
+      return res.status(400).json({ error: `Working environment '${environmentId}' not found` });
+    }
+    const repos = Array.isArray(reusedEnv.repositories)
+      ? reusedEnv.repositories
+      : (reusedEnv.repository ? [reusedEnv.repository] : []);
+    const primary = repos[0];
+    if (!primary?.url) {
+      return res.status(400).json({ error: `Working environment '${environmentId}' has no repository configured` });
+    }
+    repository = { url: primary.url, branch: primary.branch || 'main', sshKeyId: primary.sshKeyId || null };
+    githubTokenId = reusedEnv.githubTokenId || null;
+  }
+
+  if (!repository?.url) {
+    return res.status(400).json({ error: 'repository.url required' });
+  }
+  // The legacy path (no environmentId) auto-creates an env from an SSH deploy
+  // key, so sshKeyId stays mandatory there. A reused env may clone over HTTPS
+  // with just a PAT, so sshKeyId is optional in that path.
+  if (!environmentId && !repository.sshKeyId) {
     return res.status(400).json({ error: 'repository.url and repository.sshKeyId required' });
   }
   let parsed;
@@ -4552,10 +4589,16 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     : 'main';
 
   // ── 2. Credentials must already exist (Pre-Flight) ────────────────
-  if (!listSshKeys().some(k => k.id === repository.sshKeyId)) {
+  if (repository.sshKeyId && !listSshKeys().some(k => k.id === repository.sshKeyId)) {
     return res.status(400).json({ error: `SSH key '${repository.sshKeyId}' not found` });
   }
-  if (typeof githubTokenId !== 'string' || !listGithubTokens().some(t => t.id === githubTokenId)) {
+  // The auto-created env path requires a GitHub PAT. A reused env may legitimately
+  // carry none (e.g. SSH-only clone), so only validate a token when one is set.
+  if (!environmentId) {
+    if (typeof githubTokenId !== 'string' || !listGithubTokens().some(t => t.id === githubTokenId)) {
+      return res.status(400).json({ error: `GitHub token '${githubTokenId}' not found` });
+    }
+  } else if (githubTokenId && !listGithubTokens().some(t => t.id === githubTokenId)) {
     return res.status(400).json({ error: `GitHub token '${githubTokenId}' not found` });
   }
 
@@ -4615,7 +4658,9 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   //   env id        = teamId
   //   team agent id = teamId
   //   member id     = `<teamId>-<roleId>` (count=1) or `<teamId>-<roleId>-N` (count>1)
-  const envId = teamId;
+  // A reused Working Environment keeps its own id (env id != teamId); otherwise
+  // the env is auto-created under the teamId.
+  const envId = environmentId || teamId;
   const teamAgentId = teamId;
   const planned = planMembers(teamId, normalizedRoles, resolveTemplate);
   for (const p of planned) {
@@ -4683,7 +4728,9 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     }
     toCreate = planned;
   }
-  const adoptOrphanEnv = mode === 'create' && envExists;
+  // Never overwrite a deliberately reused environment — only adopt an orphan
+  // env that was auto-created under this teamId by a prior aborted run.
+  const adoptOrphanEnv = mode === 'create' && envExists && !environmentId;
 
   // ── 5. Substitution variables for templates ───────────────────────
   // When the team includes a Dispatcher, the Developer is wired to react
@@ -4966,7 +5013,13 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   }
 
   const body = req.body || {};
-  const { teamId, teamName, repository, githubTokenId, mcpServers } = body;
+  const { teamId, teamName, mcpServers } = body;
+  // See POST /api/teams: repository/githubTokenId are mutable so they can be
+  // derived from a reused Working Environment (environmentId).
+  let { repository, githubTokenId } = body;
+  const environmentId = (typeof body.environmentId === 'string' && body.environmentId.trim())
+    ? normalizeEnvId(body.environmentId)
+    : null;
   const mode = body.mode === 'extend' ? 'extend' : 'create';
   const readyLabel = (typeof body.readyLabel === 'string' && body.readyLabel.trim())
     ? body.readyLabel.trim()
@@ -5003,7 +5056,28 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   if (typeof teamName !== 'string' || !teamName.trim()) {
     return fail(400, 'teamName required');
   }
-  if (!repository?.url || !repository?.sshKeyId) {
+
+  // Reuse an existing Working Environment when environmentId is supplied.
+  if (environmentId) {
+    const reusedEnv = loadEnvironment(environmentId);
+    if (!reusedEnv) {
+      return fail(400, `Working environment '${environmentId}' not found`);
+    }
+    const repos = Array.isArray(reusedEnv.repositories)
+      ? reusedEnv.repositories
+      : (reusedEnv.repository ? [reusedEnv.repository] : []);
+    const primary = repos[0];
+    if (!primary?.url) {
+      return fail(400, `Working environment '${environmentId}' has no repository configured`);
+    }
+    repository = { url: primary.url, branch: primary.branch || 'main', sshKeyId: primary.sshKeyId || null };
+    githubTokenId = reusedEnv.githubTokenId || null;
+  }
+
+  if (!repository?.url) {
+    return fail(400, 'repository.url required');
+  }
+  if (!environmentId && !repository.sshKeyId) {
     return fail(400, 'repository.url and repository.sshKeyId required');
   }
   let parsed;
@@ -5016,10 +5090,14 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
     ? repository.branch
     : 'main';
 
-  if (!listSshKeys().some(k => k.id === repository.sshKeyId)) {
+  if (repository.sshKeyId && !listSshKeys().some(k => k.id === repository.sshKeyId)) {
     return fail(400, `SSH key '${repository.sshKeyId}' not found`);
   }
-  if (typeof githubTokenId !== 'string' || !listGithubTokens().some(t => t.id === githubTokenId)) {
+  if (!environmentId) {
+    if (typeof githubTokenId !== 'string' || !listGithubTokens().some(t => t.id === githubTokenId)) {
+      return fail(400, `GitHub token '${githubTokenId}' not found`);
+    }
+  } else if (githubTokenId && !listGithubTokens().some(t => t.id === githubTokenId)) {
     return fail(400, `GitHub token '${githubTokenId}' not found`);
   }
   let normalizedMcpServers;
@@ -5044,7 +5122,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   }
 
   // ── 2. Plan ───────────────────────────────────────────────────────
-  const envId = teamId;
+  // A reused Working Environment keeps its own id; otherwise auto-create under teamId.
+  const envId = environmentId || teamId;
   const teamAgentId = teamId;
   const planned = planMembers(teamId, normalizedRoles, loadAgentTemplate);
   for (const p of planned) {
@@ -5148,8 +5227,9 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
 
   // Adopt-orphan: in mode:create the env may already exist as a leftover
   // (no team, no members). Treat it as a step we own — overwrite with the
-  // user's submitted settings and include it in the rollback set.
-  const adoptOrphanEnv = mode === 'create' && envExists;
+  // user's submitted settings and include it in the rollback set. A
+  // deliberately reused env (environmentId) is never overwritten.
+  const adoptOrphanEnv = mode === 'create' && envExists && !environmentId;
 
   // ── 4. Announce the plan up front so the wizard can render every
   // step as `pending` — gives the user the full progress shape, not a

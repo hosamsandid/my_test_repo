@@ -1,0 +1,11 @@
+# Never copy host-installed dependencies or build output into the image build
+# context. The Dockerfile runs `npm install` inside the (Linux) build stage, so
+# copying the host's node_modules (macOS/arm64 binaries, possibly a different
+# esbuild version) over them causes esbuild's "Host version X does not match
+# binary version Y" failure. Let each stage install its own deps.
+node_modules
+**/node_modules
+dist
+.git
+*.log
+.DS_Store

@@ -22,6 +22,23 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
   const V_GAP       = 100;
   const ARTIFACT_H  = 70;
 
+  // Single source of truth for edge colours (#402). Every drawer and the legend
+  // read from here so the graph and its key can never drift apart. Each entry
+  // maps a semantic edge type to its stroke colour; the same hue is reused for
+  // the node's matching badge/port (Issue = teal, PR = purple) so a node's
+  // "opens issues/PRs" chip and the resulting channel edge read as one colour.
+  const EDGE_STYLES = {
+    hierarchy:  { color: 'var(--eb-border-hover)', label: 'hierarchy' },
+    dependency: { color: '#ef4444', label: 'depends-on', dashed: true },
+    artifact:   { color: '#22c55e', label: 'data flow' },
+    label:      { color: '#3b82f6', label: 'label hand-off' },
+    issue:      { color: '#14b8a6', label: 'issue' },
+    pr:         { color: '#8b5cf6', label: 'pull request' },
+    review:     { color: '#f59e0b', label: 'review' },
+    gate:       { color: '#dc2626', label: 'human approval' },
+  };
+  const ARROW_SIZE = 12; // arrowhead length in px (#402 — was 7, hard to see)
+
   // ─── DOM structure ──────────────────────────────────────────────────
   // Build canvas-viewport → canvas → svg#edges structure inside the
   // supplied viewport element.
@@ -138,18 +155,18 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
   // Status legend
   const legendEl = document.createElement('div');
   legendEl.style.cssText = 'position:absolute;bottom:16px;left:50%;transform:translateX(-50%);background:var(--eb-bg-elevated);backdrop-filter:blur(4px);border:1px solid var(--eb-border-default);border-radius:8px;padding:6px 14px;display:flex;gap:10px;align-items:center;z-index:20;pointer-events:none;font-size:11px;white-space:nowrap;';
-  const _mkSwatch = (bg, label, dashed) =>
+  // A legend swatch: a short colour line (dashed for depends-on) + its label.
+  // The 14px line reads like an edge rather than a filled square, so the key
+  // visually matches the strokes on the canvas.
+  const _mkSwatch = ({ color, label, dashed }) =>
     `<span style="display:flex;align-items:center;gap:4px">` +
-    `<span style="width:10px;height:10px;border-radius:2px;display:inline-block;background:${bg};` +
-    (dashed ? `border:1px dashed ${bg};background-image:repeating-linear-gradient(-45deg,transparent,transparent 2px,rgba(168,85,247,0.2) 2px,rgba(168,85,247,0.2) 4px);` : '') +
-    `"></span><span style="color:var(--eb-text-secondary)">${label}</span></span>`;
+    `<span style="width:14px;height:0;display:inline-block;border-top:2px ${dashed ? 'dashed' : 'solid'} ${color};"></span>` +
+    `<span style="color:var(--eb-text-secondary)">${label}</span></span>`;
+  // Derived from EDGE_STYLES so the key can never drift from the drawn colours.
   legendEl.innerHTML =
     `<span style="color:var(--eb-text-muted);font-size:10px;margin-right:2px">Edges:</span>` +
-    _mkSwatch('var(--eb-border-hover)', 'hierarchy') +
-    _mkSwatch('#ef4444', 'depends-on', true) +
-    _mkSwatch('#22c55e', 'data flow') +
-    _mkSwatch('#3b82f6', 'link') +
-    _mkSwatch('#f59e0b', 'review');
+    ['label', 'issue', 'pr', 'review', 'gate', 'artifact', 'dependency', 'hierarchy']
+      .map(k => _mkSwatch(EDGE_STYLES[k])).join('');
   viewport.appendChild(legendEl);
 
   // ─── State ──────────────────────────────────────────────────────────
@@ -1087,8 +1104,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       // another node to declare that agent reacts to the PR/issue.
       if (state.editable && onConnectChannel && bp.github) {
         const outs = [];
-        if (bp.github.producesPr) outs.push({ artifact: 'pr', label: 'PR', color: '#8b5cf6' });
-        if (bp.github.producesIssue) outs.push({ artifact: 'issue', label: 'Issue', color: '#14b8a6' });
+        if (bp.github.producesPr) outs.push({ artifact: 'pr', label: 'PR', color: EDGE_STYLES.pr.color });
+        if (bp.github.producesIssue) outs.push({ artifact: 'issue', label: 'Issue', color: EDGE_STYLES.issue.color });
         outs.forEach((o, i) => {
           const pill = document.createElement('div');
           pill.title = `Drag to another node: it reacts to this agent's ${o.label}`;
@@ -1485,7 +1502,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
           flow = 'vertical';
         }
 
-        const d = drawBezierEdge(x1, y1, x2, y2, 'var(--eb-border-hover)', 2, '', false, flow);
+        const d = drawBezierEdge(x1, y1, x2, y2, EDGE_STYLES.hierarchy.color, 2, '', false, flow);
         addEdgeHit(d, { from: n.id, to: childId, on: 'parent' });
       });
     });
@@ -1514,7 +1531,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
           const my = (y1 + y2) / 2;
           pathD = `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`;
           // arrowhead points down (toward target's top)
-          arrowPoints = `${x2},${y2} ${x2-4},${y2-8} ${x2+4},${y2-8}`;
+          arrowPoints = `${x2},${y2} ${x2-6},${y2-ARROW_SIZE} ${x2+6},${y2-ARROW_SIZE}`;
         } else {
           x1 = fromPos.x + NODE_W;
           y1 = fromPos.y + fromH / 2;
@@ -1523,20 +1540,20 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
           const mx = (x1 + x2) / 2;
           pathD = `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`;
           // arrowhead points right (toward target's left)
-          arrowPoints = `${x2},${y2} ${x2-8},${y2-4} ${x2-8},${y2+4}`;
+          arrowPoints = `${x2},${y2} ${x2-ARROW_SIZE},${y2-6} ${x2-ARROW_SIZE},${y2+6}`;
         }
 
         const path = makeSvgPath(pathD);
-        path.setAttribute('stroke', '#ef4444');
+        path.setAttribute('stroke', EDGE_STYLES.dependency.color);
         path.setAttribute('stroke-width', '1.5');
         path.setAttribute('stroke-dasharray', '6 4');
         path.setAttribute('fill', 'none');
-        path.setAttribute('opacity', '0.5');
+        path.setAttribute('opacity', '0.6');
 
         const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
         arrow.setAttribute('points', arrowPoints);
-        arrow.setAttribute('fill', '#ef4444');
-        arrow.setAttribute('opacity', '0.5');
+        arrow.setAttribute('fill', EDGE_STYLES.dependency.color);
+        arrow.setAttribute('opacity', '0.85');
         svgEdges.appendChild(arrow);
 
         addEdgeHit(pathD, { from: depId, to: n.id, on: 'dependency' });
@@ -1548,8 +1565,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
 
     // 4. Process-linking edges (label / review / manual) — the extra wiring
     //    from the process view, drawn on top of the BP structure.
-    const EXTRA_COLOR = { label: '#3b82f6', review: '#f59e0b', manual: '#3b82f6' };
-    const GH_COLOR = { pr: '#8b5cf6', issue: '#14b8a6' };
+    const EXTRA_COLOR = { label: EDGE_STYLES.label.color, review: EDGE_STYLES.review.color, manual: EDGE_STYLES.label.color };
+    const GH_COLOR = { pr: EDGE_STYLES.pr.color, issue: EDGE_STYLES.issue.color };
     (state.extraEdges || []).forEach(e => {
       if (!visibleIds.has(e.from) || !visibleIds.has(e.to)) return;
       const fromPos = state.positions[e.from];
@@ -1559,7 +1576,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       const fromH = fromEl.offsetHeight;
       const isGithub = e.on === 'github';
       const artifact = e.artifact === 'issue' ? 'issue' : 'pr';
-      const color = isGithub ? GH_COLOR[artifact] : (EXTRA_COLOR[e.on] || '#3b82f6');
+      const color = isGithub ? GH_COLOR[artifact] : (EXTRA_COLOR[e.on] || EDGE_STYLES.label.color);
 
       const toEl = canvas.querySelector(`.bp-node[data-id="${e.to}"]`);
       const toH  = toEl ? toEl.offsetHeight : 90;
@@ -1644,7 +1661,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     rect.setAttribute('x', cx - w / 2); rect.setAttribute('y', cy - h / 2);
     rect.setAttribute('width', w); rect.setAttribute('height', h);
     rect.setAttribute('rx', '8');
-    rect.setAttribute('fill', human ? '#dc2626' : color);
+    rect.setAttribute('fill', human ? EDGE_STYLES.gate.color : color);
     if (human) rect.setAttribute('stroke', '#fff');
     else rect.style.stroke = 'var(--eb-bg-app)';  // blends the pill into the canvas
     rect.setAttribute('stroke-width', human ? '1.5' : '2');
@@ -1700,16 +1717,17 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
           ? drawBezierEdge(
               bpCx, bpPos.y + bpH,
               topAnchorX(artPos, bpCx), artPos.y,
-              '#34d399', 1.5, '', true, 'vertical')
+              EDGE_STYLES.artifact.color, 1.5, '', true, 'vertical')
           // right-column: producer right → artifact left (rightward)
           : drawBezierEdge(
               bpPos.x + NODE_W, bpCy,
               artPos.x, leftAnchorY(artPos, artH, bpCy),
-              '#34d399', 1.5, '', true, 'horizontal');
+              EDGE_STYLES.artifact.color, 1.5, '', true, 'horizontal');
         addEdgeHit(d, { on: 'artifact', from: bpId, direction: 'output', path });
       });
 
-      // Input edges: artifact → BP (blue dashed), back out of the lane.
+      // Input edges: artifact → BP (data-flow green, dashed to read as the
+      // consumer arm), back out of the lane.
       reg.consumers.forEach(bpId => {
         if (!visibleBpIds.has(bpId)) return;
         const bpPos = state.positions[bpId];
@@ -1724,12 +1742,12 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
           ? drawBezierEdge(
               topAnchorX(artPos, bpCx), artPos.y,
               bpCx, bpPos.y + bpH,
-              '#60a5fa', 1.5, '4 3', true, 'vertical')
+              EDGE_STYLES.artifact.color, 1.5, '4 3', true, 'vertical')
           // right-column: artifact left → consumer right (leftward)
           : drawBezierEdge(
               artPos.x, leftAnchorY(artPos, artH, bpCy),
               bpPos.x + NODE_W, bpCy,
-              '#60a5fa', 1.5, '4 3', true, 'horizontal');
+              EDGE_STYLES.artifact.color, 1.5, '4 3', true, 'horizontal');
         addEdgeHit(d, { on: 'artifact', from: bpId, direction: 'input', path });
       });
     });
@@ -1770,16 +1788,17 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     p.setAttribute('fill', 'none');
 
     if (arrow) {
+      // Bigger, solid arrowhead (#402) so direction reads clearly even where the
+      // tip lands on a node's connection dot. Half-angle 0.5 rad → a chunkier head.
       const angle = Math.atan2(dy, dx);
-      const size  = 7;
-      const ax1   = x2 - size * Math.cos(angle - 0.4);
-      const ay1   = y2 - size * Math.sin(angle - 0.4);
-      const ax2   = x2 - size * Math.cos(angle + 0.4);
-      const ay2   = y2 - size * Math.sin(angle + 0.4);
+      const size  = ARROW_SIZE;
+      const ax1   = x2 - size * Math.cos(angle - 0.5);
+      const ay1   = y2 - size * Math.sin(angle - 0.5);
+      const ax2   = x2 - size * Math.cos(angle + 0.5);
+      const ay2   = y2 - size * Math.sin(angle + 0.5);
       const tri   = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
       tri.setAttribute('points', `${x2},${y2} ${ax1},${ay1} ${ax2},${ay2}`);
       tri.setAttribute('fill', stroke);
-      tri.setAttribute('opacity', '0.7');
       svgEdges.appendChild(tri);
     }
     return d;

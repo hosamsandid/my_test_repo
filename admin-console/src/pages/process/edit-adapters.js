@@ -13,6 +13,8 @@ import { wouldCreateCycle } from './hierarchy-utils';
 // {inputs, outputs, dependsOn} shape (read-modify-write helper). The PUT replaces
 // the whole `dataFlow` block, matching how a draft persists the whole bundle.
 const pathStr = (a) => (typeof a === 'string' ? a : (a && a.path)) || '';
+// An artifact port's match key: its logical name when set, else its path (#382).
+const artKey = (a) => (typeof a === 'string' ? a : (a && (a.name || a.path))) || '';
 async function liveDataFlow(roleId) {
   const a = await apiCall('GET', `/api/agents/${roleId}`);
   const df = (a && typeof a.dataFlow === 'object' && a.dataFlow) || {};
@@ -54,19 +56,29 @@ export const liveOps = {
     df.dependsOn = df.dependsOn.filter(d => d !== dependsOnId);
     await apiCall('PUT', `/api/agents/${roleId}`, { dataFlow: df });
   },
-  // Data flow: a producer's `outputs` path becomes a consumer's `inputs` path.
-  addArtifact: async (roleId, { direction, path, description }) => {
+  // Data flow: a producer's output artifact matches a consumer's input artifact
+  // by logical `name` (or `path` when unnamed). `hint` is the informative path.
+  addArtifact: async (roleId, { direction, name, hint, path, description }) => {
+    const nm = String(name || '').trim();
+    const h = String(hint || '').trim();
     const p = String(path || '').trim();
-    if (!p) return;
+    const key = nm || p;               // a hint alone is not a match key
+    if (!key) return;
+    const port = {
+      ...(nm ? { name: nm } : {}), ...(h ? { hint: h } : {}),
+      ...(p ? { path: p } : {}), ...(description ? { description } : {}),
+    };
     const df = await liveDataFlow(roleId);
-    const key = direction === 'output' ? 'outputs' : 'inputs';
-    if (!df[key].some(a => pathStr(a) === p)) df[key].push({ path: p, ...(description ? { description } : {}) });
+    const k = direction === 'output' ? 'outputs' : 'inputs';
+    if (!df[k].some(a => artKey(a) === key)) df[k].push(port);
     await apiCall('PUT', `/api/agents/${roleId}`, { dataFlow: df });
   },
-  removeArtifact: async (roleId, { direction, path }) => {
+  removeArtifact: async (roleId, { direction, name, path }) => {
+    const key = String(name || path || '').trim();
+    if (!key) return;
     const df = await liveDataFlow(roleId);
-    const key = direction === 'output' ? 'outputs' : 'inputs';
-    df[key] = df[key].filter(a => pathStr(a) !== path);
+    const k = direction === 'output' ? 'outputs' : 'inputs';
+    df[k] = df[k].filter(a => artKey(a) !== key);
     await apiCall('PUT', `/api/agents/${roleId}`, { dataFlow: df });
   },
   // Parent-child hierarchy (#377) — child gets parentMemberId; cleared with falsy.
@@ -377,25 +389,33 @@ export function makeDraftOps(getBundle, persist) {
       if (r) r.dependsOn = (r.dependsOn || []).filter(d => d !== dependsOnId);
       await persist(b);
     },
-    // Data flow: a producer's `outputs` path becomes a consumer's `inputs` path.
-    addArtifact: async (roleId, { direction, path, description }) => {
+    // Data flow: a producer's output artifact matches a consumer's input by
+    // logical `name` (or `path` when unnamed); `hint` is the informative path.
+    addArtifact: async (roleId, { direction, name, hint, path, description }) => {
       const b = clone(getBundle());
       const r = role(b, roleId);
       if (!r) throw new Error(`role ${roleId} not found`);
-      const key = direction === 'output' ? 'outputs' : 'inputs';
-      r[key] = Array.isArray(r[key]) ? r[key] : [];
+      const k = direction === 'output' ? 'outputs' : 'inputs';
+      r[k] = Array.isArray(r[k]) ? r[k] : [];
+      const nm = String(name || '').trim();
+      const h = String(hint || '').trim();
       const p = String(path || '').trim();
-      if (p && !r[key].some(a => (a.path || a) === p)) {
-        r[key].push({ path: p, ...(description ? { description } : {}) });
+      const key = nm || p;
+      if (key && !r[k].some(a => artKey(a) === key)) {
+        r[k].push({
+          ...(nm ? { name: nm } : {}), ...(h ? { hint: h } : {}),
+          ...(p ? { path: p } : {}), ...(description ? { description } : {}),
+        });
       }
       await persist(b);
     },
-    removeArtifact: async (roleId, { direction, path }) => {
+    removeArtifact: async (roleId, { direction, name, path }) => {
       const b = clone(getBundle());
       const r = role(b, roleId);
       if (r) {
-        const key = direction === 'output' ? 'outputs' : 'inputs';
-        r[key] = (r[key] || []).filter(a => (a.path || a) !== path);
+        const k = direction === 'output' ? 'outputs' : 'inputs';
+        const key = String(name || path || '').trim();
+        r[k] = (r[k] || []).filter(a => artKey(a) !== key);
       }
       await persist(b);
     },

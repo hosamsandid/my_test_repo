@@ -21,7 +21,14 @@ export default function ConnectionsSection({ node, siblings = [], inheritedStage
   const [producesPr, setPr] = useState(!!gh.producesPr);
   const [producesIssue, setIssue] = useState(!!gh.producesIssue);
   const nameOf = (id) => siblings.find(s => s.id === id)?.displayName || id;
-  const pathOf = (a) => (a && a.path) || a;
+  // An artifact is keyed by its logical name when set, else its path (#382).
+  const keyOf = (a) => (typeof a === 'string' ? a : (a && (a.name || a.path))) || '';
+  const labelOf = (a) => {
+    const k = keyOf(a);
+    const h = a && typeof a === 'object' && a.name && a.hint ? a.hint : '';
+    return h ? `${k} · ${h}` : k;
+  };
+  const rmArtifact = (dir, a) => ({ direction: dir, name: a && a.name, path: a && a.path });
 
   const deps = Array.isArray(node.dependsOn) ? node.dependsOn : [];
   const inputs = Array.isArray(node.inputs) ? node.inputs : [];
@@ -98,11 +105,11 @@ export default function ConnectionsSection({ node, siblings = [], inheritedStage
           )}
           {inputs.length > 0 && (
             <ChipRow label="inputs" color="#10b981"
-              items={inputs.map(a => ({ key: pathOf(a), text: pathOf(a), onRemove: () => run(() => ops.removeArtifact(node.id, { direction: 'input', path: pathOf(a) })) }))} />
+              items={inputs.map(a => ({ key: keyOf(a), text: labelOf(a), onRemove: () => run(() => ops.removeArtifact(node.id, rmArtifact('input', a))) }))} />
           )}
           {outputs.length > 0 && (
             <ChipRow label="outputs" color="#10b981"
-              items={outputs.map(a => ({ key: pathOf(a), text: pathOf(a), onRemove: () => run(() => ops.removeArtifact(node.id, { direction: 'output', path: pathOf(a) })) }))} />
+              items={outputs.map(a => ({ key: keyOf(a), text: labelOf(a), onRemove: () => run(() => ops.removeArtifact(node.id, rmArtifact('output', a))) }))} />
           )}
         </div>
       ) : (

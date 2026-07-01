@@ -314,7 +314,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
           toName={nodeName(connectPair.to)}
           labels={displayGraph?.labels || []}
           ops={ops}
-          types={['github', 'label', 'dependency', 'artifact', 'hierarchy']}
+          types={['github', 'label', 'artifact', 'hierarchy']}
           onClose={() => setConnectPair(null)}
           onDone={() => { setConnectPair(null); afterEdit(); }}
         />

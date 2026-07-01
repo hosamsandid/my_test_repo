@@ -118,6 +118,18 @@ test('artifact edge: output path of A consumed as input by B, grouped by pair', 
   assert.deepEqual(arts[0].paths, ['out/api.md', 'out/spec.md']);
 });
 
+test('artifact edge: named artifacts match by name even when path hints differ (#382)', () => {
+  const g = buildUnifiedGraph([
+    { id: 'producer', triggers: [], outputs: [{ name: 'Functional Design', hint: 'designs/a.md' }] },
+    { id: 'consumer', triggers: [], inputs: [{ name: 'Functional Design', hint: 'designs/**' }] },
+  ]);
+  const arts = g.edges.filter(e => e.on === 'artifact');
+  assert.equal(arts.length, 1);
+  assert.equal(arts[0].from, 'producer');
+  assert.equal(arts[0].to, 'consumer');
+  assert.deepEqual(arts[0].paths, ['Functional Design'], 'edge keyed by logical name');
+});
+
 test('a node consuming its own output is not a self hand-off', () => {
   const g = buildUnifiedGraph([
     { id: 'solo', triggers: [], outputs: [{ path: 'x.md', direction: 'output' }], inputs: [{ path: 'x.md', direction: 'input' }] },

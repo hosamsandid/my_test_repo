@@ -17,12 +17,15 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
-  const slug = (bundle?.name || 'team').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'team';
   // A draft opened from a live team (#348) remembers its origin so we can default
   // to extending it rather than creating a colliding new team.
   const sourceTeamId = bundle?.sourceTeamId || null;
-  const [teamId, setTeamId] = useState(sourceTeamId || slug);
   const [teamName, setTeamName] = useState(bundle?.name || 'Team');
+  const [teamId, setTeamId] = useState(sourceTeamId || slugify(bundle?.name || 'team'));
+  // The slug auto-derives from the team name (consistent with the Team-Setup
+  // wizard) until the operator edits it by hand. A slug carried over from a
+  // source team is treated as already manual so we don't clobber it.
+  const [teamIdManuallyEdited, setTeamIdManuallyEdited] = useState(!!sourceTeamId);
   const [extend, setExtend] = useState(!!sourceTeamId);
   // Default to deferred materialization: a process can have dozens of members,
   // and materializing each one clones the repo. Create them as stubs (shown in
@@ -89,8 +92,24 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
         <code>{'{{vars}}'}</code> and the environment's repository are applied per member.
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
-        <Field label="Team id (slug)"><input value={teamId} onChange={e => setTeamId(e.target.value)} style={input} /></Field>
-        <Field label="Team name"><input value={teamName} onChange={e => setTeamName(e.target.value)} style={input} /></Field>
+        <Field label="Team name">
+          <input
+            value={teamName}
+            onChange={e => {
+              const next = e.target.value;
+              setTeamName(next);
+              if (!teamIdManuallyEdited) setTeamId(slugify(next));
+            }}
+            style={input}
+          />
+        </Field>
+        <Field label="Team id (slug)" hint="Auto-generated from the name; edit to override.">
+          <input
+            value={teamId}
+            onChange={e => { setTeamId(slugify(e.target.value)); setTeamIdManuallyEdited(true); }}
+            style={input}
+          />
+        </Field>
 
         {noEnvs ? (
           <div style={emptyBox}>
@@ -160,11 +179,17 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
   );
 }
 
-function Field({ label, children }) {
+// Mirror the Team-Setup wizard's slug rules so both entry points agree.
+function slugify(s) {
+  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+}
+
+function Field({ label, hint, children }) {
   return (
     <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>{label}</span>
       {children}
+      {hint && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{hint}</span>}
     </label>
   );
 }

@@ -46,7 +46,9 @@ function asArray(x) { return Array.isArray(x) ? x : []; }
 function edgeId(e) {
   const tail = e.label != null ? e.label
     : (Array.isArray(e.paths) ? e.paths.join(',') : '');
-  return `${e.on}|${e.from == null ? '∅' : e.from}→${e.to == null ? '∅' : e.to}|${tail}`;
+  // GitHub channels between the same pair are distinct per artifact (PR vs issue).
+  const kind = e.on === 'github' ? `github:${e.artifact || 'pr'}` : e.on;
+  return `${kind}|${e.from == null ? '∅' : e.from}→${e.to == null ? '∅' : e.to}|${tail}`;
 }
 
 // Output / input artifact paths declared on a UnifiedNode. Ported (pure) from
@@ -134,6 +136,12 @@ function buildUnifiedGraph(nodes, edges) {
       children: asArray(n.children),
       isParent: n.isParent === true || asArray(n.children).length > 0,
       stage: typeof n.stage === 'string' ? n.stage : '',  // own stage (#362 E)
+      // GitHub artifact ports (#380): produce flags for the node badge/ports;
+      // channels drive the on:'github' edges below.
+      github: (n.github && (n.github.producesPr || n.github.producesIssue))
+        ? { ...(n.github.producesPr ? { producesPr: true } : {}), ...(n.github.producesIssue ? { producesIssue: true } : {}) }
+        : null,
+      channels: asArray(n.channels),
     };
   });
 
@@ -225,6 +233,23 @@ function buildUnifiedGraph(nodes, edges) {
   for (const [key, paths] of artifactPaths) {
     const [from, to] = key.split('→');
     push({ from, to, on: 'artifact', paths: [...paths].sort() });
+  }
+
+  // 3b) GitHub channel edges (#380): a consumer's `channels` port declares which
+  //     producer's PR/issue it reacts to. Producer → consumer, tagged with the
+  //     artifact, the optional routing label, and the optional human-approval
+  //     gate (the inline gate the renderer draws on the edge).
+  for (const n of list) {
+    for (const ch of asArray(n.channels)) {
+      if (!ch || !ch.from || ch.from === n.id) continue;
+      const artifact = ch.artifact === 'issue' ? 'issue' : 'pr';
+      push({
+        from: ch.from, to: n.id, on: 'github', artifact,
+        ...(ch.label ? { label: ch.label } : {}),
+        ...(ch.gate === 'human' ? { gate: 'human' } : {}),
+        ...(nodeIds.has(ch.from) ? {} : { orphan: true }),
+      });
+    }
   }
 
   // 4) Explicit input edges (manual hand-offs, operator-drawn). Never silently
@@ -337,7 +362,6 @@ function processTemplateToUnified(bundle) {
       displayName: r.displayName || r.id,
       role: r.role || 'team-member',
       kind: r.kind || 'agent',
-      ...(r.kind === 'pr-review' && r.review ? { review: r.review } : {}),
       sessionPolicy: r.sessionPolicy || 'persistent',
       environmentId: null,
       systemPrompt: r.systemPrompt || '',
@@ -352,6 +376,9 @@ function processTemplateToUnified(bundle) {
       parent: typeof r.parent === 'string' && r.parent ? r.parent : null,
       // Agent-level emitted labels (operator-declared label hand-offs).
       emits: asArray(r.emits),
+      // GitHub artifact ports (#380): produce flags + consumed channels.
+      github: (r.github && (r.github.producesPr || r.github.producesIssue)) ? r.github : null,
+      channels: asArray(r.channels),
       triggers: asArray(r.triggers),
     })),
     edges: [],

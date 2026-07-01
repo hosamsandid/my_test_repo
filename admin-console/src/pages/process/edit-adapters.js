@@ -74,7 +74,46 @@ export const liveOps = {
     apiCall('PUT', `/api/agents/${roleId}`, { parentMemberId: parentId || null }),
   // Process stage band — empty clears (inherits from parent).
   setStage: (roleId, stage) => apiCall('PUT', `/api/agents/${roleId}`, { stage: stage || '' }),
+
+  // ── GitHub artifact ports (#380): produce flags + consumed channels ──
+  // Produce flags drive the node badge/ports + the producer prompt block.
+  getRoleGithub: async (roleId) => {
+    const a = await apiCall('GET', `/api/agents/${roleId}`);
+    return (a && a.github) || {};
+  },
+  setGithubProduces: (roleId, { pr, issue }) =>
+    apiCall('PUT', `/api/agents/${roleId}`, { github: { producesPr: !!pr, producesIssue: !!issue } }),
+  // Channels live on the *consumer*; the backend re-derives the github-event
+  // triggers from them (reconcileTeamGithubChannels). Upsert keyed on (artifact, from).
+  addChannel: async (roleId, { artifact, from, label, gate }) => {
+    if (!from || from === roleId) return;
+    const a = await apiCall('GET', `/api/agents/${roleId}`);
+    const channels = upsertChannel(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label, gate });
+    await apiCall('PUT', `/api/agents/${roleId}`, { channels });
+  },
+  updateChannel: async (roleId, spec) => liveOps.addChannel(roleId, spec),
+  removeChannel: async (roleId, { artifact, from }) => {
+    const a = await apiCall('GET', `/api/agents/${roleId}`);
+    const art = artifact === 'issue' ? 'issue' : 'pr';
+    const channels = (Array.isArray(a?.channels) ? a.channels : []).filter(c => !(c.artifact === art && c.from === from));
+    await apiCall('PUT', `/api/agents/${roleId}`, { channels });
+  },
 };
+
+// Upsert a channel into a list, keyed on (artifact, from). Pure helper shared by
+// the live + draft adapters so a re-drawn edge edits in place rather than dupes.
+function upsertChannel(list, { artifact, from, label, gate }) {
+  const art = artifact === 'issue' ? 'issue' : 'pr';
+  const next = {
+    artifact: art, from,
+    ...(typeof label === 'string' && label.trim() ? { label: label.trim() } : {}),
+    ...(gate === 'human' ? { gate: 'human' } : {}),
+  };
+  const out = (Array.isArray(list) ? list : []).slice();
+  const i = out.findIndex(c => c.artifact === art && c.from === from);
+  if (i >= 0) out[i] = next; else out.push(next);
+  return out;
+}
 
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const uid = () => `t${Date.now()}${Math.floor(Math.random() * 1000)}`;
@@ -189,14 +228,16 @@ export function makeDraftOps(getBundle, persist) {
     },
 
     // ── roles (draft-only; no live equivalent) ──
-    addRole: async ({ displayName, systemPrompt, sessionPolicy, kind }) => {
+    addRole: async ({ displayName, systemPrompt, sessionPolicy, github }) => {
       const b = clone(getBundle());
       b.roles = b.roles || [];
       const id = slugRole(displayName, new Set(b.roles.map(r => r.id)));
       b.roles.push({
         id, displayName: displayName || id, role: 'team-member',
-        ...(kind === 'pr-review' ? { kind: 'pr-review', review: {} } : {}),
-        sessionPolicy: kind === 'pr-review' ? 'per-invocation' : (sessionPolicy || 'persistent'),
+        sessionPolicy: sessionPolicy || 'persistent',
+        // A PR-reviewer role (#380) is a plain per-invocation agent that consumes a
+        // PR channel — the caller wires the channel after creation.
+        ...(github && (github.producesPr || github.producesIssue) ? { github } : {}),
         systemPrompt: systemPrompt || '', triggers: [],
       });
       await persist(b);
@@ -231,10 +272,9 @@ export function makeDraftOps(getBundle, persist) {
       for (const x of b.roles || []) {
         if (Array.isArray(x.dependsOn)) x.dependsOn = x.dependsOn.map(d => (d === roleId ? newId : d));
         if (x.parent === roleId) x.parent = newId;
-        if (x.review) {
-          for (const k of ['reviewsPrFrom', 'onApprove', 'onChangesRequested']) {
-            if (x.review[k] === roleId) x.review[k] = newId;
-          }
+        // Rewire GitHub-channel producer references (#380).
+        if (Array.isArray(x.channels)) {
+          for (const c of x.channels) if (c.from === roleId) c.from = newId;
         }
       }
       await persist(b);
@@ -310,6 +350,11 @@ export function makeDraftOps(getBundle, persist) {
       for (const r of b.roles) {
         if (Array.isArray(r.dependsOn)) r.dependsOn = r.dependsOn.filter(d => d !== roleId);
         if (r.parent === roleId) delete r.parent; // orphaned children become roots
+        // Drop GitHub channels that consumed the removed producer (#380).
+        if (Array.isArray(r.channels)) {
+          r.channels = r.channels.filter(c => c.from !== roleId);
+          if (!r.channels.length) delete r.channels;
+        }
       }
       await persist(b);
     },
@@ -351,6 +396,43 @@ export function makeDraftOps(getBundle, persist) {
       if (r) {
         const key = direction === 'output' ? 'outputs' : 'inputs';
         r[key] = (r[key] || []).filter(a => (a.path || a) !== path);
+      }
+      await persist(b);
+    },
+
+    // ── GitHub artifact ports (#380): produce flags + consumed channels ──
+    getRoleGithub: async (roleId) => {
+      const r = role(getBundle(), roleId);
+      return (r && r.github) || {};
+    },
+    setGithubProduces: async (roleId, { pr, issue }) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (r) {
+        const g = {};
+        if (pr) g.producesPr = true;
+        if (issue) g.producesIssue = true;
+        if (Object.keys(g).length) r.github = g; else delete r.github;
+      }
+      await persist(b);
+    },
+    addChannel: async (roleId, spec) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (!r) throw new Error(`role ${roleId} not found`);
+      if (!spec.from || spec.from === roleId) return;
+      r.channels = upsertChannel(r.channels, spec);
+      await persist(b);
+    },
+    // Upsert keyed on (artifact, from), so editing a channel's label/gate reuses it.
+    updateChannel: async (roleId, spec) => makeDraftOps(getBundle, persist).addChannel(roleId, spec),
+    removeChannel: async (roleId, { artifact, from }) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (r) {
+        const art = artifact === 'issue' ? 'issue' : 'pr';
+        r.channels = (r.channels || []).filter(c => !(c.artifact === art && c.from === from));
+        if (!r.channels.length) delete r.channels;
       }
       await persist(b);
     },

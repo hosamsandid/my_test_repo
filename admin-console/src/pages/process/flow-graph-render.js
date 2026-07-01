@@ -13,7 +13,7 @@
 
 import { computeFlowLayout, assignCrossCoords } from './flow-layout';
 
-export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge } = {}) {
+export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChannel, onSelectEdge } = {}) {
 
   // ─── Constants ──────────────────────────────────────────────────────
   const NODE_W      = 320;
@@ -66,6 +66,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
       .bp-badge-rigor-high     { background:rgba(249,115,22,0.15); color:#f97316; border:1px solid rgba(249,115,22,0.4); }
       .bp-badge-rigor-standard { background:rgba(107,114,128,0.15); color:#9ca3af; border:1px solid rgba(107,114,128,0.4); }
       .bp-badge-revision       { background:rgba(99,102,241,0.15);  color:#818cf8; border:1px solid rgba(99,102,241,0.4); }
+      .bp-badge-gh-pr          { background:rgba(139,92,246,0.15);  color:#a78bfa; border:1px solid rgba(139,92,246,0.4); }
+      .bp-badge-gh-issue       { background:rgba(20,184,166,0.15);  color:#2dd4bf; border:1px solid rgba(20,184,166,0.4); }
 
       /* ── Status backgrounds (dark, default) ─────────────────────────── */
       .bp-node-status-draft      { background: #1e1318; }
@@ -197,13 +199,16 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
       // Bands group by the effective (inherited) stage; fall back to own.
       stage: (typeof n.effectiveStage === 'string' && n.effectiveStage)
         || (typeof n.stage === 'string' ? n.stage : ''),
+      // GitHub artifact ports (#380): produce flags → badge + output ports.
+      github: (n.github && (n.github.producesPr || n.github.producesIssue)) ? n.github : null,
+      channels: Array.isArray(n.channels) ? n.channels : [],
       _role: n.role,
       _isParent: n.isParent === true,
     }));
     state.byId = {};
     state.briefings.forEach(bp => { state.byId[bp.id] = bp; });
 
-    const EXTRA = new Set(['label', 'review', 'manual']);
+    const EXTRA = new Set(['label', 'review', 'manual', 'github']);
     state.extraEdges = (Array.isArray(g.edges) ? g.edges : [])
       .filter(e => EXTRA.has(e.on) && e.from && e.to && e.from !== e.to);
 
@@ -949,6 +954,11 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
       if (bp.rigor)    badgeParts.push(`<span class="bp-badge bp-badge-rigor-${esc(bp.rigor)}">${esc(bp.rigor)}</span>`);
       if (bp.revision && parseInt(bp.revision) > 1)
         badgeParts.push(`<span class="bp-badge bp-badge-revision" title="Revised">Rev ${esc(String(bp.revision))}</span>`);
+      // GitHub produce badges (#380) — visible before any wiring.
+      if (bp.github && bp.github.producesPr)
+        badgeParts.push(`<span class="bp-badge bp-badge-gh-pr" title="Opens pull requests">⇅ PR</span>`);
+      if (bp.github && bp.github.producesIssue)
+        badgeParts.push(`<span class="bp-badge bp-badge-gh-issue" title="Opens issues">◉ Issue</span>`);
       if (badgeParts.length > 0) {
         const badges = document.createElement('div');
         badges.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px;';
@@ -1006,6 +1016,29 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
           startConnect(n.id);
         });
         node.appendChild(port);
+      }
+
+      // GitHub PR/Issue output ports (#380): labelled pills on the right edge,
+      // shown only when the node produces that artifact. Grab one and drag it to
+      // another node to declare that agent reacts to the PR/issue.
+      if (state.editable && onConnectChannel && bp.github) {
+        const outs = [];
+        if (bp.github.producesPr) outs.push({ artifact: 'pr', label: 'PR', color: '#8b5cf6' });
+        if (bp.github.producesIssue) outs.push({ artifact: 'issue', label: 'Issue', color: '#14b8a6' });
+        outs.forEach((o, i) => {
+          const pill = document.createElement('div');
+          pill.title = `Drag to another node: it reacts to this agent's ${o.label}`;
+          pill.textContent = o.label;
+          pill.style.cssText = `position:absolute;right:-10px;top:calc(50% + ${18 + i * 20}px);`
+            + `padding:1px 6px;border-radius:9px;background:${o.color};color:#fff;font-size:9px;`
+            + `font-weight:600;line-height:1.4;cursor:crosshair;z-index:3;box-shadow:var(--eb-shadow-sm);`;
+          pill.addEventListener('mousedown', (ev) => {
+            ev.stopPropagation();
+            ev.preventDefault();
+            startConnect(n.id, o.artifact);
+          });
+          node.appendChild(pill);
+        });
       }
 
       // Agent Prompt panel — the node's prompt/content, read-only markdown.
@@ -1344,6 +1377,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
     // 4. Process-linking edges (label / review / manual) — the extra wiring
     //    from the process view, drawn on top of the BP structure.
     const EXTRA_COLOR = { label: '#3b82f6', review: '#f59e0b', manual: '#3b82f6' };
+    const GH_COLOR = { pr: '#8b5cf6', issue: '#14b8a6' };
     (state.extraEdges || []).forEach(e => {
       if (!visibleIds.has(e.from) || !visibleIds.has(e.to)) return;
       const fromPos = state.positions[e.from];
@@ -1351,7 +1385,9 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
       const fromEl  = canvas.querySelector(`.bp-node[data-id="${e.from}"]`);
       if (!fromPos || !toPos || !fromEl) return;
       const fromH = fromEl.offsetHeight;
-      const color = EXTRA_COLOR[e.on] || '#3b82f6';
+      const isGithub = e.on === 'github';
+      const artifact = e.artifact === 'issue' ? 'issue' : 'pr';
+      const color = isGithub ? GH_COLOR[artifact] : (EXTRA_COLOR[e.on] || '#3b82f6');
 
       let x1, y1, x2, y2, flow;
       if (vertical) {
@@ -1361,20 +1397,54 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
         x1 = fromPos.x + NODE_W / 2; y1 = fromPos.y + fromH;
         x2 = toPos.x + NODE_W / 2;   y2 = toPos.y;  flow = 'vertical';
       }
-      const d = drawBezierEdge(x1, y1, x2, y2, color, 1.5, '', true, flow);
-      // Clickable hit-area so the edge can be edited/removed (#362 Phase C2).
-      addEdgeHit(d, { from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on, triggerId: e.triggerId });
-      if (e.label) {
+      const d = drawBezierEdge(x1, y1, x2, y2, color, isGithub ? 2 : 1.5, '', true, flow);
+      // Clickable hit-area so the edge can be edited/removed (#362 Phase C2 / #380).
+      addEdgeHit(d, { from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on,
+        artifact: isGithub ? artifact : undefined, gate: e.gate, triggerId: e.triggerId });
+      const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+      if (isGithub) {
+        // A pill chip at the midpoint: artifact + optional routing label, with a
+        // clear human-approval gate glyph when a human must apply the label.
+        const parts = [artifact === 'pr' ? 'PR' : 'Issue'];
+        if (e.gate === 'human') parts.push('👤✓');
+        if (e.label) parts.push(e.label);
+        drawEdgeChip(mx, my, parts.join(' '), color, e.gate === 'human');
+      } else if (e.label) {
         const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         t.textContent = e.label;
-        t.setAttribute('x', (x1 + x2) / 2);
-        t.setAttribute('y', (y1 + y2) / 2);
+        t.setAttribute('x', mx);
+        t.setAttribute('y', my);
         t.setAttribute('fill', color);
         t.setAttribute('font-size', '10');
         t.setAttribute('text-anchor', 'middle');
         svgEdges.appendChild(t);
       }
     });
+  }
+
+  // A filled rounded-rect chip centred at (cx,cy) with a text label — used for
+  // GitHub-channel edges (#380). A human-approval gate gets a heavier outline so
+  // it reads as a distinct symbol on the edge.
+  function drawEdgeChip(cx, cy, text, color, human) {
+    const w = Math.max(24, text.length * 6.2 + 10);
+    const h = 15;
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('x', cx - w / 2); rect.setAttribute('y', cy - h / 2);
+    rect.setAttribute('width', w); rect.setAttribute('height', h);
+    rect.setAttribute('rx', '7');
+    rect.setAttribute('fill', human ? '#dc2626' : color);
+    rect.setAttribute('opacity', human ? '0.95' : '0.9');
+    if (human) { rect.setAttribute('stroke', '#fff'); rect.setAttribute('stroke-width', '1'); }
+    svgEdges.appendChild(rect);
+    const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    t.textContent = text;
+    t.setAttribute('x', cx); t.setAttribute('y', cy + 3.5);
+    t.setAttribute('fill', '#fff');
+    t.setAttribute('font-size', '9');
+    t.setAttribute('font-weight', '600');
+    t.setAttribute('text-anchor', 'middle');
+    t.style.pointerEvents = 'none';
+    svgEdges.appendChild(t);
   }
 
   function drawArtifactEdges(visibleBpIds) {
@@ -1631,8 +1701,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
       y: (clientY - r.top - state.pan.y) / state.zoom,
     };
   }
-  function startConnect(fromId) {
-    state.connecting = { fromId };
+  function startConnect(fromId, artifact) {
+    state.connecting = { fromId, artifact: artifact || null };
     viewport.style.cursor = 'crosshair';
     tempEdge = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     tempEdge.setAttribute('stroke', 'var(--eb-accent-primary)');
@@ -1655,13 +1725,18 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge 
   }
   function finishConnect(e) {
     const fromId = state.connecting.fromId;
+    const artifact = state.connecting.artifact;
     state.connecting = null;
     viewport.style.cursor = 'grab';
     if (tempEdge) { tempEdge.remove(); tempEdge = null; }
     const el = document.elementFromPoint(e.clientX, e.clientY);
     const nodeEl = el && el.closest ? el.closest('.bp-node') : null;
     const toId = nodeEl && nodeEl.dataset ? nodeEl.dataset.id : null;
-    if (toId && toId !== fromId && onConnect) onConnect(fromId, toId);
+    if (!toId || toId === fromId) return;
+    // A drag from a PR/Issue output port declares a GitHub channel (#380);
+    // the plain ● port declares a generic hand-off.
+    if (artifact && onConnectChannel) onConnectChannel(fromId, toId, artifact);
+    else if (onConnect) onConnect(fromId, toId);
   }
 
   function onWheel(e) {

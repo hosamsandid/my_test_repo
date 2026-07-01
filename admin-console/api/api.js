@@ -15,7 +15,7 @@ const audit = require('./audit');
 const { computeScope, visibleTeam, visibleAgent } = require('./scope');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandReviewSteps, expandDataFlowSteps, emptyDraftBundle } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, emptyDraftBundle } = require('./process-template');
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
 
 const WORKSPACE = '/workspace';
@@ -887,6 +887,44 @@ async function reconcileTeamDataFlow(teamId) {
   }
 }
 
+// Re-derive the functional GitHub-channel triggers for a whole team from its
+// members' declarative `channels` ports (#380), mirroring what
+// `expandGithubChannels` does at materialise time. Same pattern as
+// reconcileTeamDataFlow: strip the previously-derived `channel:true` triggers,
+// regenerate from the ports, and write back only members whose derived set
+// actually changed (content-compared, so editing a channel's label/gate updates
+// its trigger even though the trigger id is stable). Members already carry full
+// ids, so no teamId mapping is applied (a channel `from` is already a member id).
+async function reconcileTeamGithubChannels(teamId) {
+  if (!teamId) return;
+  const members = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg || cfg.parentTeamId !== teamId) continue;
+    const channels = Array.isArray(cfg.channels) ? cfg.channels : [];
+    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+    members.push({ id, displayName: cfg.displayName || id, channels, triggers: Array.isArray(triggers) ? triggers : [] });
+  }
+  if (members.length === 0) return;
+
+  const roles = members.map(m => ({
+    id: m.id,
+    displayName: m.displayName,
+    channels: m.channels,
+    triggers: m.triggers.filter(t => !isChannelTrigger(t)),
+  }));
+  const expanded = expandGithubChannels({ roles }).roles;
+  const byId = new Map(expanded.map(r => [r.id, r]));
+  const norm = (arr) => JSON.stringify([...arr].sort((a, b) => (a.id < b.id ? -1 : 1)));
+
+  for (const m of members) {
+    const next = byId.get(m.id)?.triggers || [];
+    if (norm(next) === norm(m.triggers)) continue;
+    try { await putTriggers(m.id, next); notifyAgentReload(m.id); }
+    catch { /* best-effort — never break the originating request */ }
+  }
+}
+
 // Guard against a parent-child cycle among a team's members (#377). Walks the
 // existing parentMemberId chain: setting `child`'s parent to `parent` is a cycle
 // if `child` is already an ancestor of `parent` (or they're equal).
@@ -929,7 +967,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skillsOverride, mcpServersOverride, disableMode, teamId, emits, dataFlow, parentMemberId, stage } = req.body;
+  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skillsOverride, mcpServersOverride, disableMode, teamId, emits, dataFlow, parentMemberId, stage, github, channels } = req.body;
 
   // Enable/disable goes through the orchestrator so stubs (no token yet)
   // get fully materialized — Matrix user, workspace seeding, agent-runner
@@ -1039,6 +1077,33 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
     else delete fresh.stage;
   }
 
+  // ── GitHub artifact ports (#380) ──────────────────────────────────────────
+  // Produce flags (opens PRs/issues) drive the node badge/ports + the producer
+  // instruction block; consumed channels drive the on:'github' edges and the
+  // derived github-event triggers (re-derived below via reconcileTeamGithubChannels).
+  let githubChanged = false;
+  if (github !== undefined) {
+    const g = github && typeof github === 'object' ? github : {};
+    const next = {};
+    if (g.producesPr) next.producesPr = true;
+    if (g.producesIssue) next.producesIssue = true;
+    if (Object.keys(next).length) fresh.github = next; else delete fresh.github;
+    githubChanged = true;
+  }
+  let channelsChanged = false;
+  if (channels !== undefined) {
+    const norm = (Array.isArray(channels) ? channels : [])
+      .filter(c => c && (c.artifact === 'pr' || c.artifact === 'issue')
+        && typeof c.from === 'string' && c.from && c.from !== id)
+      .map(c => ({
+        artifact: c.artifact, from: c.from,
+        ...(typeof c.label === 'string' && c.label.trim() ? { label: c.label.trim() } : {}),
+        ...(c.gate === 'human' ? { gate: 'human' } : {}),
+      }));
+    if (norm.length) fresh.channels = norm; else delete fresh.channels;
+    channelsChanged = true;
+  }
+
   // Reassign the agent to a human Team (#308). Validates against existing
   // teams; metadata-only, so no respawn is needed.
   if (teamId !== undefined) {
@@ -1075,6 +1140,14 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // live edit takes effect at runtime without a re-materialise (best-effort).
   if (dataFlowChanged && fresh.parentTeamId) {
     await reconcileTeamDataFlow(fresh.parentTeamId);
+  }
+  // A channel-port change re-derives the team's functional github-event triggers
+  // so a live edit takes effect at runtime without a re-materialise (#380). The
+  // produce-flag change refreshes the producer block on the next member rebuild
+  // (lazy, per the team-env convention) — the flag itself already drives the
+  // graph badge + lints immediately.
+  if (channelsChanged && fresh.parentTeamId) {
+    await reconcileTeamGithubChannels(fresh.parentTeamId);
   }
   // Wake a running agent so it re-pulls config promptly under volume isolation
   // (#185 Phase 2). On the shared volume the agent re-reads config.json on its
@@ -2182,6 +2255,7 @@ app.get('/api/process/graph', (req, res) => {
       agents.push({
         id: t.id, role: 'template', displayName: t.displayName || t.id,
         sessionPolicy: t.sessionPolicy || 'persistent', environmentId: null, triggers,
+        github: t.github || null, channels: Array.isArray(t.channels) ? t.channels : [],
       });
     }
     return res.json({ level: 'template', team: null, ...buildProcessGraph(agents) });
@@ -2208,6 +2282,7 @@ app.get('/api/process/graph', (req, res) => {
       id, role, displayName: cfg.displayName || id,
       sessionPolicy: cfg.sessionPolicy || 'persistent',
       environmentId: cfg.environmentId || null, triggers,
+      github: cfg.github || null, channels: Array.isArray(cfg.channels) ? cfg.channels : [],
     });
   }
   res.json({ level: 'live', team, ...buildProcessGraph(agents) });
@@ -2216,15 +2291,17 @@ app.get('/api/process/graph', (req, res) => {
 // Build a graph from an imported bundle (no persistence) so the canvas can
 // render it as a blueprint (#334). Reuses the same pure builder.
 app.post('/api/process/graph', (req, res) => {
-  const bundle = req.body && req.body.processTemplate;
+  const raw = req.body && req.body.processTemplate;
   // Drafts (#345) may be empty works-in-progress.
-  const v = validateProcessTemplate(bundle, { allowEmptyRoles: true });
+  const v = validateProcessTemplate(raw, { allowEmptyRoles: true });
   if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
+  // Map legacy pr-review roles (#347) onto the #380 channel ports so old drafts render.
+  const bundle = normalizeLegacyReview(raw);
   const agents = bundle.roles.map(r => ({
     id: r.id, role: 'template', displayName: r.displayName || r.id,
     sessionPolicy: r.sessionPolicy || 'persistent',
-    // Carry PR-review routing (#347) so the builder draws outcome edges.
-    ...(r.kind === 'pr-review' ? { kind: 'pr-review', review: r.review || {} } : {}),
+    // GitHub artifact ports (#380) drive the badge/ports + channel edges.
+    github: r.github || null, channels: Array.isArray(r.channels) ? r.channels : [],
     triggers: (r.triggers || []).map(t => ({ ...t, emits: Array.isArray(t.emits) ? t.emits : [] })),
   }));
   res.json({ level: 'template', team: null, imported: true, name: bundle.name, ...buildProcessGraph(agents) });
@@ -2264,6 +2341,7 @@ app.get('/api/flows/graph', async (req, res) => {
         id: t.id, role: 'template', displayName: t.displayName || t.id,
         sessionPolicy: t.sessionPolicy || 'persistent', environmentId: null, triggers,
         inputs: [], outputs: [], dependsOn: [], content: t.promptTemplate || '',
+        github: t.github || null, channels: Array.isArray(t.channels) ? t.channels : [],
       });
     }
     return res.json({ unifiedFlowVersion: 1, source: 'templates', level: 'template', ...buildUnifiedGraph(tnodes) });
@@ -2319,6 +2397,9 @@ app.get('/api/flows/graph', async (req, res) => {
       parent: typeof cfg.parentMemberId === 'string' ? cfg.parentMemberId : null,
       content: readAgentSystemPrompt(id), // expandable prompt in the unified viewer
       stage: typeof cfg.stage === 'string' ? cfg.stage : '',
+      // GitHub artifact ports (#380): produce flags + consumed channels.
+      github: cfg.github || null,
+      channels: Array.isArray(cfg.channels) ? cfg.channels : [],
     });
   }
   res.json({ unifiedFlowVersion: 1, source: 'live', team, ...buildUnifiedGraph(nodes) });
@@ -2329,9 +2410,11 @@ app.get('/api/flows/graph', async (req, res) => {
  * (roles may carry inputs/outputs/dependsOn) through the unified model so the
  * draft editor renders label + dependency + artifact edges and unified lints. */
 app.post('/api/flows/graph', (req, res) => {
-  const bundle = req.body && req.body.processTemplate;
-  const v = validateProcessTemplate(bundle, { allowEmptyRoles: true });
+  const raw = req.body && req.body.processTemplate;
+  const v = validateProcessTemplate(raw, { allowEmptyRoles: true });
   if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
+  // Map legacy pr-review roles (#347) onto the #380 channel ports so old drafts render.
+  const bundle = normalizeLegacyReview(raw);
   const flow = processTemplateToUnified(bundle);
   res.json({
     unifiedFlowVersion: flow.unifiedFlowVersion, source: 'draft', imported: true, name: bundle.name,
@@ -4577,11 +4660,15 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   if (body.processTemplate) {
     const v = validateProcessTemplate(body.processTemplate);
     if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
-    // Expand PR-review steps (#347) into reviewer + producer-rework triggers,
-    // then data-flow edges (#379) into `push` triggers scoped to each upstream
-    // agent, before flattening to custom roles.
+    // Expand GitHub channels (#380) into consumer github-event triggers + the
+    // producer instruction block, then data-flow edges (#379) into `push`
+    // triggers scoped to each upstream agent, before flattening to custom roles.
+    // normalizeLegacyReview maps any legacy pr-review roles (#347) onto channels.
     customRolesRaw = templateToCustomRoles(
-      expandDataFlowSteps(expandReviewSteps(body.processTemplate), { teamId })
+      expandDataFlowSteps(
+        expandGithubChannels(normalizeLegacyReview(body.processTemplate), { teamId }),
+        { teamId },
+      )
     );
   }
   const customMap = new Map(customRolesRaw.map(r => [r.id, r]));
@@ -4815,6 +4902,9 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           // Data-flow (agent dependency) marker so the trigger UI renders it as
           // an editable "push from <upstream>" hand-off rather than a raw push.
           if (tr.dataFlow) out.dataFlow = true;
+          // GitHub-channel marker (#380) so reconciliation can regenerate it and
+          // the graph builders skip it (the on:'github' edge comes from the port).
+          if (tr.channel) out.channel = true;
         } else if (tr.type === 'cron') {
           out.cron = tr.cron;
         }
@@ -4867,6 +4957,14 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           // Agent-level emitted labels (label hand-offs) — recorded on config.
           ...(Array.isArray(p.template.emits) && p.template.emits.length
             ? { emits: p.template.emits } : {}),
+          // GitHub artifact ports (#380): produce flags verbatim; channel `from`
+          // role ids mapped to member ids (`<teamId>-<roleId>`) so the live graph
+          // connects members. The derived consumer triggers are already in
+          // triggersOut (from expandGithubChannels).
+          ...(p.template.github && (p.template.github.producesPr || p.template.github.producesIssue)
+            ? { github: p.template.github } : {}),
+          ...(Array.isArray(p.template.channels) && p.template.channels.length
+            ? { channels: p.template.channels.map(c => ({ ...c, from: `${teamId}-${c.from}` })) } : {}),
           // Deferred materialization — create as a stub when requested.
           materialize: materializeMembers,
         }),
@@ -5268,6 +5366,9 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           // Data-flow (agent dependency) marker so the trigger UI renders it as
           // an editable "push from <upstream>" hand-off rather than a raw push.
           if (tr.dataFlow) out.dataFlow = true;
+          // GitHub-channel marker (#380) so reconciliation can regenerate it and
+          // the graph builders skip it (the on:'github' edge comes from the port).
+          if (tr.channel) out.channel = true;
         } else if (tr.type === 'cron') {
           out.cron = tr.cron;
         }

@@ -5,7 +5,7 @@ import { initFlowGraph } from './process/flow-graph-render';
 import ProcessNodeInspector from './process/ProcessNodeInspector';
 import DraftNodeInspector from './process/DraftNodeInspector';
 import StageManager from './process/StageManager';
-import { EditHandoffDialog, CreateEdgeDialog } from './process/EdgeDialogs';
+import { EditHandoffDialog, CreateEdgeDialog, CreateChannelDialog } from './process/EdgeDialogs';
 import MaterializeDialog from './process/MaterializeDialog';
 import AddApprovalDialog from './process/AddApprovalDialog';
 import SidePanel from '../components/SidePanel';
@@ -100,6 +100,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
 
   const [selectedId, setSelectedId] = useState(null);
   const [connectPair, setConnectPair] = useState(null); // { from, to }
+  const [channelPair, setChannelPair] = useState(null); // { from, to, artifact } (#380)
   const [selectedEdge, setSelectedEdge] = useState(null);
   const viewportRef = useRef(null);
   const graphRef = useRef(null);
@@ -112,6 +113,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
     const g = initFlowGraph(viewportRef.current, {
       onSelectNode: (id) => setSelectedId(id),
       onConnect: (from, to) => { if (editableRef.current) setConnectPair({ from, to }); },
+      onConnectChannel: (from, to, artifact) => { if (editableRef.current) setChannelPair({ from, to, artifact }); },
       onSelectEdge: (edge) => { if (editableRef.current) setSelectedEdge(edge); },
     });
     graphRef.current = g;
@@ -133,7 +135,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
 
   // Clear selection/dialogs when the scope (and thus the graph) changes. A
   // scope change from the parent also drops any imported blueprint preview.
-  useEffect(() => { setSelectedId(null); setConnectPair(null); setSelectedEdge(null); }, [scope, imported]);
+  useEffect(() => { setSelectedId(null); setConnectPair(null); setChannelPair(null); setSelectedEdge(null); }, [scope, imported]);
   useEffect(() => { setImported(null); setImportError(null); }, [scope]);
 
   const nodeName = (id) => (displayGraph?.nodes || []).find(n => n.id === id)?.displayName || id;
@@ -312,9 +314,23 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
           toName={nodeName(connectPair.to)}
           labels={displayGraph?.labels || []}
           ops={ops}
-          types={['label', 'dependency', 'artifact', 'hierarchy']}
+          types={['github', 'label', 'dependency', 'artifact', 'hierarchy']}
           onClose={() => setConnectPair(null)}
           onDone={() => { setConnectPair(null); afterEdit(); }}
+        />
+      )}
+
+      {/* GitHub channel (#380): dragging a PR/Issue output port onto a node. */}
+      {channelPair && (
+        <CreateChannelDialog
+          from={channelPair.from}
+          to={channelPair.to}
+          artifact={channelPair.artifact}
+          fromName={nodeName(channelPair.from)}
+          toName={nodeName(channelPair.to)}
+          ops={ops}
+          onClose={() => setChannelPair(null)}
+          onDone={() => { setChannelPair(null); afterEdit(); }}
         />
       )}
 
@@ -334,7 +350,12 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
           kind={addRoleOpen}
           onClose={() => setAddRoleOpen(false)}
           onCreate={async ({ displayName, systemPrompt }) => {
-            const id = await draftOps.addRole({ displayName, systemPrompt, kind: addRoleOpen === 'pr-review' ? 'pr-review' : undefined });
+            // A PR-reviewer (#380) is a plain per-invocation role; the operator then
+            // drags a producer's PR output port onto it to wire the review channel.
+            const id = await draftOps.addRole({
+              displayName, systemPrompt,
+              ...(addRoleOpen === 'pr-review' ? { sessionPolicy: 'per-invocation' } : {}),
+            });
             setAddRoleOpen(false);
             setSelectedId(id);
           }}
@@ -412,8 +433,8 @@ function AddRoleDialog({ kind, onClose, onCreate }) {
         </label>
         {isReview ? (
           <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
-            A PR-review step submits a native Approve / Request-changes review. After adding it,
-            point it at a producer and wire the outcomes in the inspector.
+            A PR-review step is a per-invocation reviewer. After adding it, drag a producer's
+            <strong> PR</strong> output port onto it to wire the review channel.
           </div>
         ) : (
           <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>

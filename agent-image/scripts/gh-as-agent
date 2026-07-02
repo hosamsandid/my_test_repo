@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# gh-as-agent — tag GitHub actions with the agent's identity.
+#
+# Why: all agents share one GitHub PAT, so the central poller cannot
+# tell which agent triggered a PR-event from the GitHub identity alone.
+# Agents stamp their own actions so the poller can attribute resulting
+# events back and skip the trigger fan-out for self-actions. Without
+# this, a reviewer agent reacts to its own comments and loops.
+#
+# Usage:
+#   gh-as-agent commit [git-commit-args ...]
+#       runs `git commit --author="$AGENT_ID <$AGENT_ID@agents.local>" ...`
+#       (committer stays as the system identity)
+#
+#   gh-as-agent stamp <file>
+#       appends "<!-- agent: $AGENT_ID -->" to <file>. Use before
+#       `gh pr create / comment / review --body-file <file>`.
+#
+#   gh-as-agent marker
+#       prints the HTML comment so it can be inlined.
+
+set -euo pipefail
+
+if [[ -z "${AGENT_ID:-}" ]]; then
+  echo "gh-as-agent: AGENT_ID is not set in the environment" >&2
+  exit 2
+fi
+
+# Mirror the regex the poller uses to extract agent ids from author emails
+# and HTML markers. If AGENT_ID doesn't conform, every signal we stamp
+# will silently fail to match on the read side.
+if [[ ! "${AGENT_ID}" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+  echo "gh-as-agent: AGENT_ID '${AGENT_ID}' contains unexpected characters; loop protection would not work — refusing" >&2
+  exit 2
+fi
+
+marker="<!-- agent: ${AGENT_ID} -->"
+
+case "${1:-}" in
+  commit)
+    shift
+    # Refuse a caller-supplied --author: a downstream override would
+    # silently strip the agent identity from the commit, defeating loop
+    # protection on push events. Callers who genuinely want a different
+    # author should call `git commit` directly.
+    for arg in "$@"; do
+      case "$arg" in
+        --author|--author=*)
+          echo "gh-as-agent commit: --author is set automatically and cannot be overridden (use 'git commit' directly if you must)" >&2
+          exit 2
+          ;;
+      esac
+    done
+    exec git commit --author="${AGENT_ID} <${AGENT_ID}@agents.local>" "$@"
+    ;;
+
+  stamp)
+    file="${2:-}"
+    if [[ -z "$file" ]]; then
+      echo "gh-as-agent stamp: missing <file>" >&2
+      exit 2
+    fi
+    if [[ ! -f "$file" ]]; then
+      echo "gh-as-agent stamp: file not found: $file" >&2
+      exit 2
+    fi
+    # Idempotent: only append if the marker isn't already present.
+    if ! grep -qF "$marker" "$file"; then
+      printf '\n%s\n' "$marker" >> "$file"
+    fi
+    ;;
+
+  marker)
+    printf '%s\n' "$marker"
+    ;;
+
+  ""|-h|--help|help)
+    sed -n '2,22p' "$0"
+    ;;
+
+  *)
+    # gh-as-agent is NOT a gh proxy — it only tags identity. Be prescriptive
+    # so the caller fixes it in one step instead of a multi-call discovery loop.
+    echo "gh-as-agent: unknown subcommand '$*'." >&2
+    echo "gh-as-agent only tags identity — it supports: commit, stamp <file>, marker." >&2
+    echo "For everything else use plain 'gh'. If the action carries a body (pr create/review, issue create/comment)," >&2
+    echo "write the body to a file, run 'gh-as-agent stamp <file>', then e.g. 'gh ${1:-<verb>} --body-file <file>'." >&2
+    echo "Read-only or label ops (issue/pr list/view/edit, label create) need no stamp — just call 'gh ${1:-<verb>} ...'." >&2
+    exit 2
+    ;;
+esac

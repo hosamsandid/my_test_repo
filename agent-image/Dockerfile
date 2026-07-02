@@ -63,6 +63,14 @@ COPY CLAUDE.md /opt/ace/CLAUDE.md
 RUN chmod +x /opt/ace/scripts/aee-artifact \
     && ln -sf /opt/ace/scripts/aee-artifact /usr/local/bin/aee-artifact
 
+# `gh-as-agent` — stamps the agent's identity onto commits and issue/PR/comment
+# bodies (`<!-- agent: $AGENT_ID -->`) so the central GitHub poller can attribute
+# resulting events back to this agent. Without it every agent shares one PAT, so
+# the poller reads the origin as `human` and allowlist `from` filters fail closed —
+# breaking agent→agent GitHub hand-offs. Mirrors the copy in the orchestrator image.
+RUN chmod +x /opt/ace/scripts/gh-as-agent \
+    && ln -sf /opt/ace/scripts/gh-as-agent /usr/local/bin/gh-as-agent
+
 ENV NODE_ENV=production
 
 ENTRYPOINT ["python3", "/opt/ace/scripts/agent-entrypoint.py"]

@@ -92,6 +92,9 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
       systemPrompt: stripProduceBlock(r.systemPrompt),
       // Agent-level emitted labels (label hand-offs) — keep in the portable bundle.
       ...(Array.isArray(r.emits) && r.emits.length ? { emits: r.emits.slice() } : {}),
+      // Process stage band — portable so an exported team round-trips its stage
+      // layout back into a draft (Edit as draft) and re-materialises unchanged.
+      ...(typeof r.stage === 'string' && r.stage ? { stage: r.stage } : {}),
       // GitHub artifact ports (#380): what this role produces (PR/issue) and the
       // PR/issue channels it consumes. Declarative source of truth — the runtime
       // github-event triggers are re-derived from these (expandGithubChannels),
@@ -172,6 +175,10 @@ function templateToCustomRoles(bundle) {
     // Parent role id (hierarchy) — the materialiser maps it to a member id so
     // the agent overview + live graph render the parent-child tree (#377).
     ...(typeof r.parent === 'string' && r.parent ? { parent: r.parent } : {}),
+    // Process stage band — carried onto the materialised member's config so the
+    // live graph reproduces the draft's stage layout instead of collapsing to
+    // the auto-layered columns.
+    ...(typeof r.stage === 'string' && r.stage ? { stage: r.stage } : {}),
     // Agent-level emitted labels (label hand-offs) — recorded on member config.
     ...(Array.isArray(r.emits) && r.emits.length ? { emits: r.emits } : {}),
     // GitHub artifact ports (#380) — carried to member config so the live graph

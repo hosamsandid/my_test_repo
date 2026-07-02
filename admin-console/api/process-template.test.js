@@ -68,6 +68,26 @@ test('templateToCustomRoles maps to the /api/teams pseudo-template shape', () =>
   assert.deepEqual(t.emits, ['started:dev']);
 });
 
+test('stage: per-role stage + ordered stages survive build → customRoles (#stage-order)', () => {
+  const staged = [{ ...sampleRoles[0], stage: 'build' }];
+  const b = buildProcessTemplate({
+    name: 'x', level: 'live', teamId: 'acme', roles: staged, stages: ['intake', 'build'],
+  });
+  // Ordered stage list is portable on the bundle...
+  assert.deepEqual(b.stages, ['intake', 'build']);
+  // ...and each role carries its stage band...
+  assert.equal(b.roles[0].stage, 'build');
+  // ...through to the /api/teams pseudo-template shape so the materialised
+  // member records it and the live graph reproduces the draft layout.
+  const cr = templateToCustomRoles(b);
+  assert.equal(cr[0].stage, 'build');
+  // A role with no stage carries none (inherit signal), not an empty string.
+  const noStage = templateToCustomRoles(buildProcessTemplate({
+    name: 'x', level: 'live', teamId: 'acme', roles: sampleRoles,
+  }));
+  assert.equal('stage' in noStage[0], false);
+});
+
 test('round-trip: build → validate → customRoles preserves wiring', () => {
   const b = buildProcessTemplate({ name: 'rt', level: 'live', teamId: 'acme', roles: sampleRoles });
   assert.equal(validateProcessTemplate(b).ok, true);

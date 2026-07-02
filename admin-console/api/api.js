@@ -2466,7 +2466,14 @@ app.get('/api/flows/graph', async (req, res) => {
       channels: Array.isArray(cfg.channels) ? cfg.channels : [],
     });
   }
-  res.json({ unifiedFlowVersion: 1, source: 'live', team, ...buildUnifiedGraph(nodes) });
+  // Ordered stage names persisted on the team agent (#stage-order) drive the
+  // client's layered layout, so a materialised draft keeps its stage columns.
+  let stages = [];
+  if (team) {
+    const teamCfg = readJsonFile(path.join(AGENTS_DIR, team, 'config.json'), {});
+    if (Array.isArray(teamCfg.stages)) stages = teamCfg.stages.filter(s => typeof s === 'string');
+  }
+  res.json({ unifiedFlowVersion: 1, source: 'live', team, stages, ...buildUnifiedGraph(nodes) });
 });
 
 /* Derive a unified graph from a draft/imported bundle (#367) — the editable
@@ -2525,9 +2532,11 @@ app.get('/api/process/template', (req, res) => {
   const team = typeof req.query.team === 'string' && req.query.team.trim() ? req.query.team.trim() : null;
   if (team && !AGENT_ID_RE.test(team)) return res.status(400).json({ error: 'Invalid team id' });
   let teamName = team;
+  let teamStages = [];
   if (team) {
     const teamCfg = readJsonFile(path.join(AGENTS_DIR, team, 'config.json'), null);
     if (teamCfg?.displayName) teamName = teamCfg.displayName;
+    if (Array.isArray(teamCfg?.stages)) teamStages = teamCfg.stages.filter(s => typeof s === 'string');
   }
   for (const id of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
@@ -2543,13 +2552,14 @@ app.get('/api/process/template', (req, res) => {
       id, displayName: cfg.displayName || id, role,
       sessionPolicy: cfg.sessionPolicy || 'persistent', systemPrompt, triggers: tlist,
       ...(Array.isArray(cfg.emits) && cfg.emits.length ? { emits: cfg.emits } : {}),
+      ...(typeof cfg.stage === 'string' && cfg.stage ? { stage: cfg.stage } : {}),
     });
     graphAgents.push({ id, role, triggers: tlist, emits: cfg.emits });
   }
   const g = buildProcessGraph(graphAgents);
   res.json(buildProcessTemplate({
     name: teamName || 'process', level: 'live', teamId: team || undefined,
-    roles: roleEntries, gates: g.gates, labels: g.labels,
+    roles: roleEntries, gates: g.gates, labels: g.labels, stages: teamStages,
   }));
 });
 
@@ -4877,6 +4887,12 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
       )
     );
   }
+  // Ordered stage names from the bundle — stored on the team agent so the live
+  // graph reproduces the draft's stage layout (per-node stage rides on each
+  // member's config; this is the column *order*).
+  const bundleStages = Array.isArray(body.processTemplate?.stages)
+    ? body.processTemplate.stages.filter(s => typeof s === 'string')
+    : [];
   const customMap = new Map(customRolesRaw.map(r => [r.id, r]));
   const resolveTemplate = (id) => customMap.get(id) || loadAgentTemplate(id);
 
@@ -5076,6 +5092,8 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           systemPrompt: teamPrompt,
           environmentId: envId,
           skipFirstMember: true,
+          // Ordered stage names for the process graph's layered layout (#stage-order).
+          ...(bundleStages.length ? { stages: bundleStages } : {}),
         }),
       });
       if (!resp.ok) {
@@ -5167,6 +5185,10 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           // Agent-level emitted labels (label hand-offs) — recorded on config.
           ...(Array.isArray(p.template.emits) && p.template.emits.length
             ? { emits: p.template.emits } : {}),
+          // Process stage band — recorded on config so the live graph reproduces
+          // the draft's stage layout (the top-level order lives on the team).
+          ...(typeof p.template.stage === 'string' && p.template.stage
+            ? { stage: p.template.stage } : {}),
           // GitHub artifact ports (#380): produce flags verbatim; channel `from`
           // role ids mapped to member ids (`<teamId>-<roleId>`) so the live graph
           // connects members. The derived consumer triggers are already in

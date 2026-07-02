@@ -1970,6 +1970,11 @@ class Orchestrator {
         environmentId: env.id,
         teamId: ownerTeamId,
         systemPromptTemplate: systemPrompt || "",
+        // Ordered stage names for the process graph's layered layout (#stage-order).
+        // Members carry their own `stage`; the team holds the column *order* so the
+        // live graph reproduces a materialised draft's stage layout.
+        ...(Array.isArray(extra.stages) && extra.stages.length
+          ? { stages: extra.stages.filter(s => typeof s === 'string') } : {}),
         enabled: true,
       };
       saveAgentConfig(id, teamConfig);
@@ -2158,6 +2163,9 @@ class Orchestrator {
         ...(Array.isArray(opts.emits) && opts.emits.length ? { emits: opts.emits } : {}),
         ...(opts.github && typeof opts.github === 'object' ? { github: opts.github } : {}),
         ...(Array.isArray(opts.channels) && opts.channels.length ? { channels: opts.channels } : {}),
+        // Process stage band (#362 E) — so the live graph reproduces the draft's
+        // stage layout after materialisation.
+        ...(typeof opts.stage === 'string' && opts.stage.trim() ? { stage: opts.stage.trim() } : {}),
         enabled: false, // no token → isStub; UI shows it, enableAgent materializes it
       };
       saveAgentConfig(memberId, stubConfig);
@@ -2229,6 +2237,9 @@ class Orchestrator {
       // github-event triggers, not this block.
       ...(opts.github && typeof opts.github === 'object' ? { github: opts.github } : {}),
       ...(Array.isArray(opts.channels) && opts.channels.length ? { channels: opts.channels } : {}),
+      // Process stage band (#362 E) — recorded so the live graph reproduces the
+      // draft's stage layout after materialisation.
+      ...(typeof opts.stage === 'string' && opts.stage.trim() ? { stage: opts.stage.trim() } : {}),
       enabled: true,
     };
     saveAgentConfig(memberId, memberConfig);
@@ -5162,6 +5173,8 @@ async function main() {
           // For role: 'team' — suppress the auto-numbered first member
           // (the wizard adds members itself with role overrides instead).
           skipFirstMember,
+          // For role: 'team' — ordered stage names for the process graph layout.
+          stages,
         } = JSON.parse(body);
         if (!id || !displayName || !role || !environmentId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -5195,6 +5208,7 @@ async function main() {
         if (Array.isArray(triggers)) extra.triggers = triggers;
         if (skipFirstMember) extra.skipFirstMember = true;
         if (teamId) extra.teamId = teamId;
+        if (Array.isArray(stages)) extra.stages = stages;
         const result = await orchestrator.createAgent(id, displayName, role, systemPrompt, environmentId, extra);
         res.writeHead(201, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));

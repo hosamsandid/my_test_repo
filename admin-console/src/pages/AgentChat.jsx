@@ -141,7 +141,12 @@ export default function AgentChat() {
               effective = 'busy';
             } else if (lastResponseAt && new Date(lastResponseAt).getTime() > (viewed[id] || 0)) {
               effective = 'unread';
-            } else if (hasSession) {
+            } else if (hasSession || lastResponseAt) {
+              // Blue "active" = the agent has done work: either a live DM
+              // session pointer, or it has responded at least once. The latter
+              // covers per-invocation agents (triggered runs deliberately keep
+              // no session pointer — see agent-entrypoint.py), which would
+              // otherwise stay grey forever despite having run.
               effective = 'active';
             } else {
               effective = 'idle';

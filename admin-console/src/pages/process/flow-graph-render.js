@@ -12,6 +12,7 @@
 //   g.fit(); g.cleanup();
 
 import { computeFlowLayout, assignCrossCoords } from './flow-layout';
+import { routeOrthogonalEdges, roundedPathD, laneLoadByChannel } from './edge-router';
 
 export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChannel, onSelectEdge } = {}) {
 
@@ -195,6 +196,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     connecting:         null,   // { fromId } while dragging a new edge
     showStages:         localStorage.getItem('flow-graph-show-stages') === 'true', // #362 E stage bands
     stageOrder:         [],     // ordered stage names — drives layered layout order
+    layeredInfo:        null,   // { vertical, colOf } while the layered layout is active
   };
 
   // ─── Data Loading ────────────────────────────────────────────────────
@@ -267,8 +269,9 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     buildArtifactRegistry();
     loadingEl.style.display = 'none';
     layout();
+    // Fit after the deferred edge pass so the routed-edge bounds are known.
+    state.pendingFit = !state.userTransform;
     render();
-    if (!state.userTransform) fitToView();
   }
 
   function buildArtifactRegistry() {
@@ -519,6 +522,12 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     const crossGap = vertical ? 34 : H_GAP;
     const center = assignCrossCoords(columns, edges, sizeOf, { gap: crossGap });
 
+    // The orthogonal router (drawEdges) lays the cross runs of the edges into
+    // the channel between two columns, one lane per overlapping run. Reserve
+    // enough channel space for those lanes so labels and parallel runs fit.
+    const loads = laneLoadByChannel(edges, colOf);
+    const laneNeed = c => 56 + Math.max(0, (loads.get(c) || 0) - 1) * 18;
+
     const pos = {};
     const colMain = [];
     if (vertical) {
@@ -539,7 +548,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       for (let c = 0; c < columns.length; c++) {
         colMain[c] = x;
         // gap = space between this card's right edge and the next card's left edge.
-        const gap = Math.max(H_GAP * 2, (boundaryNeed[c] || 0) + 40);
+        const gap = Math.max(H_GAP * 2, (boundaryNeed[c] || 0) + 40, laneNeed(c));
         x += NODE_W + gap;
       }
       ids.forEach(id => {
@@ -550,7 +559,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       let y = 0;
       for (let c = 0; c < columns.length; c++) {
         const maxH = Math.max(90, ...columns[c].map(getNodeHeight));
-        colMain[c] = y; y += maxH + V_GAP;
+        colMain[c] = y; y += maxH + Math.max(V_GAP, laneNeed(c));
       }
       ids.forEach(id => {
         const c = colOf.get(id) || 0;
@@ -559,10 +568,13 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     }
 
     state.positions = pos;
+    // Tell drawEdges to use the orthogonal channel router for this layout.
+    state.layeredInfo = { vertical, colOf };
     layoutArtifacts(visible);
   }
 
   function layoutHorizontal(visible) {
+    state.layeredInfo = null;
     const visibleIds = new Set(visible.map(n => n.id));
     const childrenOf = {};
     visible.forEach(n => {
@@ -634,6 +646,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
   }
 
   function layoutVertical(visible) {
+    state.layeredInfo = null;
     const visibleIds = new Set(visible.map(n => n.id));
     const childrenOf = {};
     visible.forEach(n => {
@@ -1160,6 +1173,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       drawEdges();
       drawStages();
       drawArtifactLane();
+      if (state.pendingFit) {
+        state.pendingFit = false;
+        if (!state.userTransform) fitToView();
+      }
     });
   }
 
@@ -1407,6 +1424,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
   function drawEdges() {
     svgEdges.innerHTML = '';
     svgLabels.innerHTML = '';
+    state.edgeBounds = null;
 
     // Resize SVG to cover all content so paths at large coordinates are rendered
     let svgMaxX = 100, svgMaxY = 100;
@@ -1507,7 +1525,103 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       });
     });
 
-    // 2. Dependency edges (red dashed)
+    // 2. + 4. — the inter-node process wiring (dependencies + label/review/
+    // github edges). In the layered layout these all go through the orthogonal
+    // channel router (drawRoutedProcessEdges): distributed ports, node-free
+    // channel lanes, side gutters for long/backward edges, labels on the edge.
+    // The tree layout (BP hierarchies) keeps the original bezier drawing.
+    const EXTRA_COLOR = { label: EDGE_STYLES.label.color, review: EDGE_STYLES.review.color, manual: EDGE_STYLES.label.color };
+    const GH_COLOR = { pr: EDGE_STYLES.pr.color, issue: EDGE_STYLES.issue.color };
+
+    if (state.layeredInfo) {
+      drawRoutedProcessEdges();
+      drawArtifactEdges(visibleIds);
+      return;
+    }
+
+    function drawRoutedProcessEdges() {
+      const nodes = [];
+      visible.forEach(n => {
+        const p = state.positions[n.id];
+        if (!p) return;
+        const el = canvas.querySelector(`.bp-node[data-id="${n.id}"]`);
+        nodes.push({ id: n.id, x: p.x, y: p.y, w: NODE_W, h: el ? el.offsetHeight : getNodeHeight(n.id) });
+      });
+
+      const list = [];
+      (state.extraEdges || []).forEach(e => {
+        if (!visibleIds.has(e.from) || !visibleIds.has(e.to)) return;
+        const isGithub = e.on === 'github';
+        const artifact = e.artifact === 'issue' ? 'issue' : 'pr';
+        list.push({
+          from: e.from, to: e.to,
+          color: isGithub ? GH_COLOR[artifact] : (EXTRA_COLOR[e.on] || EDGE_STYLES.label.color),
+          width: isGithub ? 2 : 1.5,
+          dash: '',
+          opacity: 1,
+          labelText: isGithub ? channelChipText(e) : (e.label || ''),
+          chip: isGithub,
+          gate: e.gate === 'human',
+          hit: { from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on,
+            artifact: isGithub ? artifact : undefined, gate: e.gate, triggerId: e.triggerId },
+        });
+      });
+      visible.forEach(n => {
+        const bp = state.byId[n.id];
+        if (!bp || !bp.depends_on) return;
+        bp.depends_on.forEach(depId => {
+          if (!visibleIds.has(depId)) return;
+          list.push({
+            from: depId, to: n.id,
+            color: EDGE_STYLES.dependency.color, width: 1.5, dash: '6 4', opacity: 0.7,
+            labelText: '', chip: false, gate: false,
+            hit: { from: depId, to: n.id, on: 'dependency' },
+          });
+        });
+      });
+      if (list.length === 0) return;
+
+      const routed = routeOrthogonalEdges({
+        nodes,
+        edges: list,
+        colOf: state.layeredInfo.colOf,
+        flow: state.layeredInfo.vertical ? 'right' : 'down',
+        labelWidths: list.map(e => e.labelText ? estChipWidth(e.labelText) : 0),
+      });
+
+      // Gutter runs live outside the node bounding box — record their extent so
+      // fitToView keeps them (and their labels) inside the frame.
+      const eb = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+      routed.forEach(r => {
+        if (!r) return;
+        r.points.forEach(p => {
+          eb.minX = Math.min(eb.minX, p.x); eb.maxX = Math.max(eb.maxX, p.x);
+          eb.minY = Math.min(eb.minY, p.y); eb.maxY = Math.max(eb.maxY, p.y);
+        });
+      });
+      state.edgeBounds = eb.minX === Infinity ? null : eb;
+
+      routed.forEach((r, i) => {
+        if (!r) return;
+        const e = list[i];
+        const d = roundedPathD(r.points);
+        if (!d) return;
+        const path = makeSvgPath(d);
+        path.setAttribute('stroke', e.color);
+        path.setAttribute('stroke-width', String(e.width));
+        if (e.dash) path.setAttribute('stroke-dasharray', e.dash);
+        if (e.opacity !== 1) path.setAttribute('opacity', String(e.opacity));
+        path.setAttribute('fill', 'none');
+        drawArrowHead(r.arrow.x, r.arrow.y, r.arrow.angle, e.color);
+        addEdgeHit(d, e.hit);
+        if (!e.labelText) return;
+        const p = placeClearLabel(r.label.x, r.label.y, estChipWidth(e.labelText), e.chip ? 17 : 15);
+        if (e.chip) drawEdgeChip(p.cx, p.cy, e.labelText, e.color, e.gate);
+        else drawEdgeLabelText(p.cx, p.cy, e.labelText, e.color);
+      });
+    }
+
+    // 2. Dependency edges (red dashed) — tree layout only
     visible.forEach(n => {
       const bp = state.byId[n.id];
       if (!bp || !bp.depends_on) return;
@@ -1565,8 +1679,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
 
     // 4. Process-linking edges (label / review / manual) — the extra wiring
     //    from the process view, drawn on top of the BP structure.
-    const EXTRA_COLOR = { label: EDGE_STYLES.label.color, review: EDGE_STYLES.review.color, manual: EDGE_STYLES.label.color };
-    const GH_COLOR = { pr: EDGE_STYLES.pr.color, issue: EDGE_STYLES.issue.color };
     (state.extraEdges || []).forEach(e => {
       if (!visibleIds.has(e.from) || !visibleIds.has(e.to)) return;
       const fromPos = state.positions[e.from];
@@ -1619,20 +1731,40 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
         drawEdgeChip(p.cx, p.cy, txt, color, e.gate === 'human');
       } else if (e.label) {
         const p = placeClearLabel(mx, my, estChipWidth(e.label), 15);
-        const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        t.textContent = e.label;
-        t.setAttribute('x', p.cx);
-        t.setAttribute('y', p.cy - 5);
-        t.setAttribute('fill', color);
-        t.setAttribute('font-size', '10');
-        t.setAttribute('font-weight', '600');
-        t.setAttribute('text-anchor', 'middle');
-        t.setAttribute('paint-order', 'stroke');
-        t.style.stroke = 'var(--eb-bg-app)';        // halo so text reads over lines
-        t.setAttribute('stroke-width', '3');
-        svgLabels.appendChild(t);
+        drawEdgeLabelText(p.cx, p.cy, e.label, color);
       }
     });
+  }
+
+  // A text edge-label with a canvas-coloured halo so it reads over crossing
+  // lines. Drawn on the overlay layer (above the cards), centred at (cx,cy).
+  function drawEdgeLabelText(cx, cy, text, color) {
+    const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    t.textContent = text;
+    t.setAttribute('x', cx);
+    t.setAttribute('y', cy + 3);
+    t.setAttribute('fill', color);
+    t.setAttribute('font-size', '10');
+    t.setAttribute('font-weight', '600');
+    t.setAttribute('text-anchor', 'middle');
+    t.setAttribute('paint-order', 'stroke');
+    t.style.stroke = 'var(--eb-bg-app)';        // halo so text reads over lines
+    t.setAttribute('stroke-width', '3');
+    svgLabels.appendChild(t);
+  }
+
+  // Solid arrowhead at (x,y) pointing along `angle` (radians). Same geometry
+  // as the bezier drawer's head so both edge styles read identically.
+  function drawArrowHead(x, y, angle, color) {
+    const size = ARROW_SIZE;
+    const ax1 = x - size * Math.cos(angle - 0.5);
+    const ay1 = y - size * Math.sin(angle - 0.5);
+    const ax2 = x - size * Math.cos(angle + 0.5);
+    const ay2 = y - size * Math.sin(angle + 0.5);
+    const tri = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+    tri.setAttribute('points', `${x},${y} ${ax1},${ay1} ${ax2},${ay2}`);
+    tri.setAttribute('fill', color);
+    svgEdges.appendChild(tri);
   }
 
   // The chip text for a GitHub-channel edge (#380): artifact + optional human-gate
@@ -1907,6 +2039,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       minY = Math.min(minY, pos.y);
       maxX = Math.max(maxX, pos.x + ARTIFACT_W);
       maxY = Math.max(maxY, pos.y + h);
+    }
+
+    // Routed edges may swing around the graph through the side gutters — keep
+    // them (and the virtual top channel) inside the fitted frame.
+    if (state.edgeBounds) {
+      minX = Math.min(minX, state.edgeBounds.minX);
+      minY = Math.min(minY, state.edgeBounds.minY);
+      maxX = Math.max(maxX, state.edgeBounds.maxX);
+      maxY = Math.max(maxY, state.edgeBounds.maxY);
     }
 
     const vw       = viewport.clientWidth;

@@ -27,29 +27,45 @@ test('label edge: emitter → listener via emits ↔ labelFilter', () => {
   assert.ok(e.id, 'edge carries a stable id');
 });
 
-test('timer edge: cron trigger is a self-loop', () => {
+test('timer edge (#410): cron trigger runs from the @timer actor', () => {
   const g = buildUnifiedGraph([
     { id: 'curator', triggers: [{ id: 'c', type: 'cron', cron: '0 9 * * 1', emits: [] }] },
   ]);
   const e = findEdge(g, x => x.on === 'timer');
   assert.ok(e);
-  assert.equal(e.from, 'curator');
+  assert.equal(e.from, '@timer');
   assert.equal(e.to, 'curator');
   assert.deepEqual(e.schedule, { cron: '0 9 * * 1' });
+  const actor = g.nodes.find(n => n.id === '@timer');
+  assert.equal(actor.kind, 'actor');
+  assert.equal(actor.actor, 'timer');
 });
 
-test('event edge: raw github-event (no labelFilter) is external', () => {
+test('event edge (#410): raw github-event runs from the @github actor', () => {
   const g = buildUnifiedGraph([
     { id: 'triage', triggers: [{ id: 't', type: 'github-event', events: ['issues.opened'], from: 'humans', emits: [] }] },
   ]);
   const e = findEdge(g, x => x.on === 'event');
   assert.ok(e);
-  assert.equal(e.from, null);
+  assert.equal(e.from, '@github');
   assert.equal(e.to, 'triage');
   assert.deepEqual(e.events, ['issues.opened']);
+  assert.ok(g.nodes.some(n => n.id === '@github' && n.kind === 'actor'));
 });
 
-test('gate flag: human:* listener edge is marked gate, not a separate type', () => {
+test('webhook edge (#410): http trigger runs from the @external actor', () => {
+  const g = buildUnifiedGraph([
+    { id: 'builder', triggers: [{ id: 'hook1', type: 'http', secret: 'x', description: 'CI done', emits: [] }] },
+  ]);
+  const e = findEdge(g, x => x.on === 'webhook');
+  assert.ok(e);
+  assert.equal(e.from, '@external');
+  assert.equal(e.to, 'builder');
+  assert.equal(e.triggerId, 'hook1');
+  assert.ok(g.nodes.some(n => n.id === '@external' && n.kind === 'actor'));
+});
+
+test('gate flag (#410): human:* listener edge is a gate from the @human actor', () => {
   const g = buildUnifiedGraph([
     { id: 'deployer', triggers: [{ id: 't', type: 'github-event', labelFilter: 'human:approved', emits: [] }] },
   ]);
@@ -57,7 +73,26 @@ test('gate flag: human:* listener edge is marked gate, not a separate type', () 
   assert.ok(e);
   assert.equal(e.on, 'label');
   assert.equal(e.gate, 'human');
-  assert.equal(e.from, null);
+  assert.equal(e.from, '@human');
+  assert.ok(g.nodes.some(n => n.id === '@human' && n.kind === 'actor'));
+});
+
+test('human-set label listener (#410): from:humans wires @human → agent', () => {
+  const g = buildUnifiedGraph([
+    { id: 'dev', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'priorisiert', from: 'humans', emits: [] }] },
+  ]);
+  const e = findEdge(g, x => x.on === 'label' && x.label === 'priorisiert');
+  assert.ok(e);
+  assert.equal(e.from, '@human');
+  assert.ok(!e.gate, 'a plain human-set label is not an approval gate');
+});
+
+test('actor nodes appear only when referenced (#410): BP graphs get none', () => {
+  const g = buildUnifiedGraph(briefingsToUnified([
+    { id: 'aaa111', title: 'A', artifacts: [], depends_on: [] },
+    { id: 'bbb222', title: 'B', artifacts: [], depends_on: ['aaa111'] },
+  ]).nodes);
+  assert.ok(!g.nodes.some(n => n.kind === 'actor'));
 });
 
 test('github channel edges: producesPr + consumer channel yields an on:github edge', () => {

@@ -22,6 +22,9 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
   const H_GAP       = 50;
   const V_GAP       = 100;
   const ARTIFACT_H  = 70;
+  const ACTOR_W     = 150;   // actor pseudo-nodes (#410) — the "outside world" column
+  const ACTOR_H     = 40;
+  const ACTOR_ICON  = { human: '👤', github: '🐙', external: '⚡', timer: '⏰' };
 
   // Single source of truth for edge colours (#402). Every drawer and the legend
   // read from here so the graph and its key can never drift apart. Each entry
@@ -37,6 +40,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     pr:         { color: '#8b5cf6', label: 'pull request' },
     review:     { color: '#f59e0b', label: 'review' },
     gate:       { color: '#dc2626', label: 'human approval' },
+    // Actor-sourced edges (#410): raw GitHub events, schedules, webhooks.
+    event:      { color: '#f97316', label: 'GitHub event', dashed: true },
+    timer:      { color: '#0ea5e9', label: 'schedule', dashed: true },
+    webhook:    { color: '#eab308', label: 'webhook', dashed: true },
   };
   const ARROW_SIZE = 12; // arrowhead length in px (#402 — was 7, hard to see)
 
@@ -153,21 +160,40 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
   toolbarEl.style.cssText = 'position:absolute;top:12px;left:12px;z-index:20;display:flex;gap:6px;align-items:center;';
   viewport.appendChild(toolbarEl);
 
-  // Status legend
+  // Status legend. The edge key is derived from EDGE_STYLES so it can never
+  // drift from the drawn colours; the "Sources" section (#410) doubles as a
+  // per-actor filter — clicking 👤/🐙/⚡/⏰ toggles that actor's edges.
   const legendEl = document.createElement('div');
-  legendEl.style.cssText = 'position:absolute;bottom:16px;left:50%;transform:translateX(-50%);background:var(--eb-bg-elevated);backdrop-filter:blur(4px);border:1px solid var(--eb-border-default);border-radius:8px;padding:6px 14px;display:flex;gap:10px;align-items:center;z-index:20;pointer-events:none;font-size:11px;white-space:nowrap;';
-  // A legend swatch: a short colour line (dashed for depends-on) + its label.
-  // The 14px line reads like an edge rather than a filled square, so the key
-  // visually matches the strokes on the canvas.
+  legendEl.style.cssText = 'position:absolute;bottom:16px;left:50%;transform:translateX(-50%);background:var(--eb-bg-elevated);backdrop-filter:blur(4px);border:1px solid var(--eb-border-default);border-radius:8px;padding:6px 14px;display:flex;gap:10px;align-items:center;z-index:20;font-size:11px;white-space:nowrap;';
   const _mkSwatch = ({ color, label, dashed }) =>
     `<span style="display:flex;align-items:center;gap:4px">` +
     `<span style="width:14px;height:0;display:inline-block;border-top:2px ${dashed ? 'dashed' : 'solid'} ${color};"></span>` +
     `<span style="color:var(--eb-text-secondary)">${label}</span></span>`;
-  // Derived from EDGE_STYLES so the key can never drift from the drawn colours.
-  legendEl.innerHTML =
-    `<span style="color:var(--eb-text-muted);font-size:10px;margin-right:2px">Edges:</span>` +
-    ['label', 'issue', 'pr', 'review', 'gate', 'artifact', 'dependency', 'hierarchy']
-      .map(k => _mkSwatch(EDGE_STYLES[k])).join('');
+  function renderLegend() {
+    const keys = ['label', 'issue', 'pr', 'review', 'gate', 'event', 'timer', 'webhook', 'artifact', 'dependency', 'hierarchy'];
+    const actorToggles = ['human', 'github', 'external', 'timer'].map(kind => {
+      const off = state.hiddenActorKinds.has(kind);
+      return `<button data-actor-toggle="${kind}" title="Show/hide edges from this source" style="`
+        + 'background:none;border:1px solid var(--eb-border-default);border-radius:10px;padding:0 6px;'
+        + `cursor:pointer;font-size:11px;line-height:16px;opacity:${off ? 0.35 : 1};`
+        + `color:var(--eb-text-secondary);">${ACTOR_ICON[kind]}</button>`;
+    }).join('');
+    legendEl.innerHTML =
+      `<span style="color:var(--eb-text-muted);font-size:10px;margin-right:2px">Edges:</span>` +
+      keys.map(k => _mkSwatch(EDGE_STYLES[k])).join('') +
+      `<span style="color:var(--eb-text-muted);font-size:10px;margin:0 2px 0 6px">Sources:</span>` +
+      actorToggles;
+  }
+  legendEl.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-actor-toggle]');
+    if (!btn) return;
+    const kind = btn.dataset.actorToggle;
+    if (state.hiddenActorKinds.has(kind)) state.hiddenActorKinds.delete(kind);
+    else state.hiddenActorKinds.add(kind);
+    localStorage.setItem('flow-graph-hidden-actor-kinds', JSON.stringify([...state.hiddenActorKinds]));
+    renderLegend();
+    render();
+  });
   viewport.appendChild(legendEl);
 
   // ─── State ──────────────────────────────────────────────────────────
@@ -194,6 +220,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     selectedId:         null,   // #362 UI rework Phase C: node selection
     editable:           false,  // structural editing (connect-to-wire, edges)
     connecting:         null,   // { fromId } while dragging a new edge
+    actors:             [],     // actor pseudo-nodes (#410): @human/@github/@external/@timer
+    actorsById:         {},
+    actorPositions:     {},
+    hiddenActorKinds:   new Set(JSON.parse(localStorage.getItem('flow-graph-hidden-actor-kinds') || '[]')),
     showStages:         localStorage.getItem('flow-graph-show-stages') === 'true', // #362 E stage bands
     stageOrder:         [],     // ordered stage names — drives layered layout order
     layeredInfo:        null,   // { vertical, colOf } while the layered layout is active
@@ -215,7 +245,13 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
   // `state.extraEdges` and drawn on top of the BP structure.
   function setData(graph) {
     const g = graph || {};
-    const nodes = Array.isArray(g.nodes) ? g.nodes : [];
+    const allNodes = Array.isArray(g.nodes) ? g.nodes : [];
+    // Actor pseudo-nodes (#410) live in their own left-hand "outside world"
+    // column — they never join the tree/layered layout of the agent cards.
+    state.actors = allNodes.filter(n => n && n.kind === 'actor');
+    state.actorsById = {};
+    state.actors.forEach(a => { state.actorsById[a.id] = a; });
+    const nodes = allNodes.filter(n => !n || n.kind !== 'actor');
     // An artifact is keyed by its logical name when it has one, else its path
     // (#382) — matching the backend. The physical path becomes a display `hint`.
     const mkArt = (a, direction) => {
@@ -255,7 +291,9 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     state.byId = {};
     state.briefings.forEach(bp => { state.byId[bp.id] = bp; });
 
-    const EXTRA = new Set(['label', 'review', 'manual', 'github']);
+    // event/timer/webhook edges (#410) run from an actor node; label edges may
+    // too (@human). True orphans (from: null) are still dropped here.
+    const EXTRA = new Set(['label', 'review', 'manual', 'github', 'event', 'timer', 'webhook']);
     state.extraEdges = (Array.isArray(g.edges) ? g.edges : [])
       .filter(e => EXTRA.has(e.on) && e.from && e.to && e.from !== e.to);
 
@@ -473,6 +511,39 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     } else {
       layoutHorizontal(visible);
     }
+    layoutActors();
+  }
+
+  // Which actor pseudo-nodes to show (#410): an actor appears when it has at
+  // least one edge to a known node and its source kind is not toggled off in
+  // the legend. (Editable placeholder actors for empty flows come with #411.)
+  function actorHasEdges(a) {
+    return (state.extraEdges || []).some(e => e.from === a.id && state.byId[e.to]);
+  }
+  function visibleActors() {
+    return (state.actors || [])
+      .filter(a => !state.hiddenActorKinds.has(a.actor))
+      .filter(a => actorHasEdges(a));
+  }
+
+  // The "outside world" column (#410): actors stack top→down, left of the
+  // whole graph, before the first stage/layer — every flow gets a visible start.
+  function layoutActors() {
+    state.actorPositions = {};
+    const shown = visibleActors();
+    if (!shown.length) return;
+    let minX = Infinity, minY = Infinity;
+    Object.values(state.positions).forEach(p => {
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+    });
+    if (minX === Infinity) { minX = 0; minY = 0; }
+    const x = minX - ACTOR_W - 160;
+    let y = minY;
+    shown.forEach(a => {
+      state.actorPositions[a.id] = { x, y };
+      y += ACTOR_H + 28;
+    });
   }
 
   // Flat process/draft flows have no parent-child hierarchy — their whole
@@ -998,7 +1069,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     const visible    = getVisibleNodes();
     const visibleIds = new Set(visible.map(n => n.id));
 
-    canvas.querySelectorAll('.bp-node, .artifact-node').forEach(el => el.remove());
+    canvas.querySelectorAll('.bp-node, .artifact-node, .actor-node-src').forEach(el => el.remove());
 
     visible.forEach(n => {
       const bp  = state.byId[n.id];
@@ -1151,12 +1222,22 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     // Artifact nodes
     renderArtifactNodes();
 
+    // Actor pseudo-nodes (#410)
+    renderActorNodes();
+
     // Re-layout with actual DOM heights, then reposition
     requestAnimationFrame(() => {
       layout();
       canvas.querySelectorAll('.bp-node').forEach(el => {
         const id  = el.dataset.id;
         const pos = state.positions[id];
+        if (pos) {
+          el.style.left = pos.x + 'px';
+          el.style.top  = pos.y + 'px';
+        }
+      });
+      canvas.querySelectorAll('.actor-node-src').forEach(el => {
+        const pos = state.actorPositions[el.dataset.actorId];
         if (pos) {
           el.style.left = pos.x + 'px';
           el.style.top  = pos.y + 'px';
@@ -1272,6 +1353,27 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       + `letter-spacing:0.04em;text-transform:uppercase;color:var(--eb-text-muted);`;
     band.appendChild(label);
     laneLayer.appendChild(band);
+  }
+
+  // The actor cards (#410): rounded, dashed, muted — visually distinct from the
+  // agent cards. They are not `.bp-node`, so a connect-drag can't drop on them.
+  function renderActorNodes() {
+    visibleActors().forEach(a => {
+      const pos = state.actorPositions[a.id];
+      if (!pos) return;
+      const el = document.createElement('div');
+      el.className = 'actor-node-src';
+      el.dataset.actorId = a.id;
+      el.style.cssText = `position:absolute;left:${pos.x}px;top:${pos.y}px;width:${ACTOR_W}px;`
+        + `height:${ACTOR_H}px;box-sizing:border-box;`
+        + 'background:var(--eb-bg-elevated);border:1px dashed var(--eb-border-hover);border-radius:20px;'
+        + 'padding:0 14px;font-size:12px;color:var(--eb-text-secondary);'
+        + 'display:flex;align-items:center;gap:8px;';
+      el.innerHTML = `<span style="font-size:15px;line-height:1">${ACTOR_ICON[a.actor] || '•'}</span>`
+        + `<span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.displayName || a.id)}</span>`;
+      el.addEventListener('mousedown', e => e.stopPropagation());
+      canvas.appendChild(el);
+    });
   }
 
   function renderArtifactNodes() {
@@ -1533,9 +1635,43 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     const EXTRA_COLOR = { label: EDGE_STYLES.label.color, review: EDGE_STYLES.review.color, manual: EDGE_STYLES.label.color };
     const GH_COLOR = { pr: EDGE_STYLES.pr.color, issue: EDGE_STYLES.issue.color };
 
+    // Actor → agent edges (#410): schedules, raw GitHub events, webhooks, and
+    // human-set labels/gates, drawn from the "outside world" column. Shared by
+    // both layouts — the actor column sits outside the routed area either way.
+    function drawActorEdges() {
+      (state.extraEdges || []).forEach(e => {
+        const actor = state.actorsById[e.from];
+        if (!actor) return;
+        if (state.hiddenActorKinds.has(actor.actor)) return;
+        if (!visibleIds.has(e.to)) return;
+        const aPos = state.actorPositions[e.from];
+        const toPos = state.positions[e.to];
+        if (!aPos || !toPos) return;
+        const color = actorEdgeColor(e);
+        const style = EDGE_STYLES[e.on] || {};
+        const x1 = aPos.x + ACTOR_W;
+        const y1 = aPos.y + ACTOR_H / 2;
+        const x2 = toPos.x;
+        const y2 = toPos.y + 18;
+        const d = drawBezierEdge(x1, y1, x2, y2, color, 1.5, style.dashed ? '6 4' : '', true, 'horizontal');
+        addEdgeHit(d, {
+          from: e.from, to: e.to, on: e.on, kind: e.on, label: e.label,
+          triggerId: e.triggerId, gate: e.gate,
+          ...(e.events ? { events: e.events } : {}),
+          ...(e.schedule ? { schedule: e.schedule } : {}),
+        });
+        const text = actorEdgeText(e);
+        if (!text) return;
+        const p = placeClearLabel((x1 + x2) / 2, (y1 + y2) / 2, estChipWidth(text), e.gate === 'human' ? 17 : 15);
+        if (e.gate === 'human') drawEdgeChip(p.cx, p.cy, `👤✓ ${e.label}`, color, true);
+        else drawEdgeLabelText(p.cx, p.cy, text, color);
+      });
+    }
+
     if (state.layeredInfo) {
       drawRoutedProcessEdges();
       drawArtifactEdges(visibleIds);
+      drawActorEdges();
       return;
     }
 
@@ -1677,6 +1813,9 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     // 3. Artifact edges
     drawArtifactEdges(visibleIds);
 
+    // 3b. Actor edges (tree layout path)
+    drawActorEdges();
+
     // 4. Process-linking edges (label / review / manual) — the extra wiring
     //    from the process view, drawn on top of the BP structure.
     (state.extraEdges || []).forEach(e => {
@@ -1765,6 +1904,19 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     tri.setAttribute('points', `${x},${y} ${ax1},${ay1} ${ax2},${ay2}`);
     tri.setAttribute('fill', color);
     svgEdges.appendChild(tri);
+  }
+
+  // Colour + label for an actor-sourced edge (#410).
+  function actorEdgeColor(e) {
+    if (e.gate === 'human') return EDGE_STYLES.gate.color;
+    if (EDGE_STYLES[e.on]) return EDGE_STYLES[e.on].color;
+    return EDGE_STYLES.label.color;
+  }
+  function actorEdgeText(e) {
+    if (e.on === 'event') return (e.events || []).join(', ');
+    if (e.on === 'timer') return e.schedule && e.schedule.cron ? `⏱ ${e.schedule.cron}` : `once ${e.label || ''}`.trim();
+    if (e.on === 'webhook') return e.label || 'webhook';
+    return e.label || '';
   }
 
   // The chip text for a GitHub-channel edge (#380): artifact + optional human-gate
@@ -2039,6 +2191,14 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       minY = Math.min(minY, pos.y);
       maxX = Math.max(maxX, pos.x + ARTIFACT_W);
       maxY = Math.max(maxY, pos.y + h);
+    }
+
+    // Actor column (#410) sits left of the graph — keep it in the frame.
+    for (const pos of Object.values(state.actorPositions)) {
+      minX = Math.min(minX, pos.x);
+      minY = Math.min(minY, pos.y);
+      maxX = Math.max(maxX, pos.x + ACTOR_W);
+      maxY = Math.max(maxY, pos.y + ACTOR_H);
     }
 
     // Routed edges may swing around the graph through the side gutters — keep
@@ -2367,6 +2527,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
 
   // ─── Init ─────────────────────────────────────────────────────────────
 
+  renderLegend();
   setupPanZoom();
   // No auto-fetch — the React wrapper loads /api/flows/graph and calls setData.
 

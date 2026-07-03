@@ -65,13 +65,48 @@ test('emitter→listener edge forms on a matching label', () => {
   assert.ok(!e[0].orphan);
 });
 
-test('orphan listener: nothing emits the label', () => {
+test('orphan listener: nothing can set the label (agents-only origin)', () => {
   const g = buildProcessGraph([
-    { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: 'dispatch' }] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: 'dispatch', from: 'agents' }] },
   ]);
   const e = g.edges.find(x => x.to === 'b' && x.label === 'dispatch');
   assert.equal(e.from, null);
   assert.equal(e.orphan, true);
+  assert.ok(g.lints.some(l => l.code === 'orphan-listener' && l.severity === 'warning'));
+});
+
+test('human-set listener (#410): explicit from:humans is a human edge, no lint', () => {
+  const g = buildProcessGraph([
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: 'priorisiert', from: 'humans' }] },
+  ]);
+  const e = g.edges.find(x => x.to === 'b' && x.label === 'priorisiert');
+  assert.equal(e.from, null);
+  assert.equal(e.humanSet, true);
+  assert.ok(!e.orphan);
+  assert.ok(!g.lints.some(l => l.code === 'orphan-listener'));
+});
+
+test('human-reachable listener (#410): default origin keeps an advisory info lint', () => {
+  const g = buildProcessGraph([
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: 'dispatch' }] },
+  ]);
+  const e = g.edges.find(x => x.to === 'b' && x.label === 'dispatch');
+  assert.equal(e.humanSet, true);
+  assert.equal(e.humanAssumed, true);
+  const lint = g.lints.find(l => l.code === 'orphan-listener');
+  assert.equal(lint.severity, 'info');
+});
+
+test('http trigger (#410): becomes a webhook edge from outside', () => {
+  const g = buildProcessGraph([
+    { id: 'b', triggers: [{ id: 'hook1', type: 'http', secret: 's3cret', description: 'CI done' }] },
+  ]);
+  const e = g.edges.find(x => x.kind === 'webhook');
+  assert.ok(e);
+  assert.equal(e.from, null);
+  assert.equal(e.to, 'b');
+  assert.equal(e.label, 'CI done');
+  assert.equal(e.triggerId, 'hook1');
 });
 
 test('dead-end emitter: nothing listens on the emitted label', () => {

@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useCallback, useMemo, useState } from 'react';
 import { initFlowGraph } from './flow-graph-render';
 import { makeBpOps } from './edit-adapters';
-import { CreateEdgeDialog } from './EdgeDialogs';
+import { CreateEdgeDialog, EditHandoffDialog } from './EdgeDialogs';
 import BpNodeInspector from './BpNodeInspector';
 import { capabilitiesFor, bpMode, createTypesFor } from './connection-capabilities';
 
@@ -24,6 +24,7 @@ export function FlowGraph({ workspace, team }) {
   const [error, setError] = useState(null);
   const [connectPair, setConnectPair] = useState(null); // { from, to } (BP only)
   const [selectedId, setSelectedId] = useState(null);    // node inspector (BP only)
+  const [selectedEdge, setSelectedEdge] = useState(null); // edge click (#412)
 
   const bpOps = useMemo(() => (workspace ? makeBpOps(workspace) : null), [workspace]);
   // BP workspaces are editable (dependency + data-flow only); everything else
@@ -51,6 +52,9 @@ export function FlowGraph({ workspace, team }) {
     const g = initFlowGraph(viewportRef.current, {
       onSelectNode: (id) => setSelectedId(id),
       onConnect: caps.connectPort ? (from, to) => setConnectPair({ from, to }) : undefined,
+      // Edge clicks open the same "Connection" shell as the process views
+      // (#412) — dependency/artifact removable, everything else read-only.
+      onSelectEdge: caps.edgeClick ? (edge) => setSelectedEdge(edge) : undefined,
     });
     apiRef.current = g;
     g.setEditable(caps.editable); // connect-to-wire port (BP); editing is in the inspector
@@ -83,6 +87,16 @@ export function FlowGraph({ workspace, team }) {
           ops={bpOps}
           onClose={() => { setSelectedId(null); apiRef.current?.setSelected(null); }}
           onChanged={load}
+        />
+      )}
+      {selectedEdge && bpOps && (
+        <EditHandoffDialog
+          edge={selectedEdge}
+          fromName={nodeName(selectedEdge.from)}
+          toName={nodeName(selectedEdge.to)}
+          ops={bpOps}
+          onClose={() => setSelectedEdge(null)}
+          onDone={() => { setSelectedEdge(null); load(); }}
         />
       )}
       {connectPair && bpOps && (

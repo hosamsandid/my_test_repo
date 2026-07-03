@@ -472,16 +472,29 @@ function HierarchyEdgeForm({ from, to, fromName, toName, ops, onBack, onClose, o
   );
 }
 
-/* ── Edit / delete an existing edge ─────────────────────────────────────────
- * Type-aware dispatcher: label hand-offs keep the full editor; dependency /
- * data-flow / parent edges get a focused remove dialog; derived edges (a
- * PR-review outcome, a manual pass-through) are read-only here. Same surface in
- * draft and live — the ops adapter differs underneath. */
+/* ── Edit / delete an existing edge — the one "Connection" shell (#412) ─────
+ * Every clickable edge opens the same shell: type + endpoints + the type's
+ * editable properties (where it has any) + delete. Actor edges (timer, event,
+ * webhook, human-set label) are fully editable; edges whose ops the adapter
+ * doesn't support (e.g. parent links in the BP view) and derived edges render
+ * read-only with a pointer to their source of truth. Same surface in draft,
+ * live and BP — the ops adapter differs underneath. */
 export function EditHandoffDialog(props) {
   const on = props.edge?.on;
-  if (on === 'dependency' || on === 'parent') return <RemoveEdgeDialog kind={on} {...props} />;
-  if (on === 'artifact') return <RemoveArtifactEdgeDialog {...props} />;
+  const ops = props.ops || liveOps;
+  if (on === 'dependency') {
+    return ops.removeDependency ? <RemoveEdgeDialog kind={on} {...props} /> : <ReadonlyEdgeDialog {...props} />;
+  }
+  if (on === 'parent') {
+    return ops.setParent ? <RemoveEdgeDialog kind={on} {...props} /> : <ReadonlyEdgeDialog {...props} />;
+  }
+  if (on === 'artifact') {
+    return ops.removeArtifact ? <RemoveArtifactEdgeDialog {...props} /> : <ReadonlyEdgeDialog {...props} />;
+  }
   if (on === 'github') return <EditChannelDialog {...props} />;
+  if (on === 'timer') return <EditTimerDialog {...props} />;
+  if (on === 'event') return <EditEventDialog {...props} />;
+  if (on === 'webhook') return <EditWebhookDialog {...props} />;
   if (on === 'review' || on === 'manual') return <ReadonlyEdgeDialog {...props} />;
   return <EditLabelHandoff {...props} />;
 }
@@ -489,7 +502,7 @@ export function EditHandoffDialog(props) {
 /* ── Edit / remove a GitHub channel edge (#380) ─────────────────────────────
  * The channel is a port on the consumer; editing changes the routing label +
  * human-gate, removing drops the port (the backend re-derives the trigger). */
-function EditChannelDialog({ edge, fromName, toName, ops = liveOps, onClose, onDone }) {
+function EditChannelDialog({ edge, fromName, toName, ops = liveOps, producerChannelCount, onClose, onDone }) {
   const { from, to, artifact: art } = edge;
   const artifact = art === 'issue' ? 'issue' : 'pr';
   const [label, setLabel] = useState(edge.label || '');
@@ -497,6 +510,10 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, onClose, onD
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const noun = artifact === 'pr' ? 'pull request' : 'issue';
+  // Produce-flag cleanup (#412): when this is the last channel consuming the
+  // producer's PR/issue, offer to clear the orphaned produce flag with it.
+  const lastChannel = typeof producerChannelCount === 'number' && producerChannelCount <= 1;
+  const [clearProduces, setClearProduces] = useState(true);
 
   async function save() {
     if (human && !label.trim()) { setError('A human-approval gate needs the label a human applies.'); return; }
@@ -512,8 +529,16 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, onClose, onD
   }
   async function remove() {
     setSaving(true); setError(null);
-    try { await ops.removeChannel(to, { artifact, from }); onDone?.(); }
-    catch (e) { setError(e.message); setSaving(false); }
+    try {
+      await ops.removeChannel(to, { artifact, from });
+      if (lastChannel && clearProduces && ops.getRoleGithub && ops.setGithubProduces) {
+        const g = (await ops.getRoleGithub(from)) || {};
+        const next = { pr: !!g.producesPr, issue: !!g.producesIssue };
+        if (artifact === 'pr') next.pr = false; else next.issue = false;
+        await ops.setGithubProduces(from, next);
+      }
+      onDone?.();
+    } catch (e) { setError(e.message); setSaving(false); }
   }
 
   return (
@@ -530,6 +555,12 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, onClose, onD
           <input type="checkbox" checked={human} onChange={e => setHuman(e.target.checked)} />
           Human approval gate — a person applies the label
         </label>
+        {lastChannel && (
+          <label style={check}>
+            <input type="checkbox" checked={clearProduces} onChange={e => setClearProduces(e.target.checked)} />
+            On remove: also clear “opens {noun}s” on {fromName || from} (nothing consumes it any more)
+          </label>
+        )}
         {error && <span style={errStyle}>{error}</span>}
         <div style={actions}>
           <button onClick={remove} disabled={saving}
@@ -546,6 +577,9 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, onClose, onD
 
 function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDone }) {
   const { from, to, label, triggerId } = edge;
+  // Actor-sourced hand-off (#412): the label is set by a human, not an agent —
+  // there is no emit to edit or strip, only the listener trigger.
+  const humanSource = typeof from === 'string' && from.startsWith('@');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -553,7 +587,7 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
   const [fromFilter, setFromFilter] = useState('any-except-self');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [delListener, setDelListener] = useState(true);
-  const [delEmit, setDelEmit] = useState(true);
+  const [delEmit, setDelEmit] = useState(!humanSource);
 
   useEffect(() => {
     let alive = true;
@@ -592,7 +626,7 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
       if (delListener) {
         await ops.deleteTrigger(to, triggerId);
       }
-      if (delEmit) {
+      if (delEmit && !humanSource) {
         // Strip the label from the source's agent-level emits (the new default
         // wiring) …
         if (ops.getRoleEmits && ops.setRoleEmits) {
@@ -658,10 +692,12 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
                 <input type="checkbox" checked={delListener} onChange={e => setDelListener(e.target.checked)} />
                 Delete listener trigger <code>{triggerId}</code> on {toName || to}
               </label>
-              <label style={check}>
-                <input type="checkbox" checked={delEmit} onChange={e => setDelEmit(e.target.checked)} />
-                Remove <code>{label}</code> from {fromName || from}'s emits
-              </label>
+              {!humanSource && (
+                <label style={check}>
+                  <input type="checkbox" checked={delEmit} onChange={e => setDelEmit(e.target.checked)} />
+                  Remove <code>{label}</code> from {fromName || from}'s emits
+                </label>
+              )}
               <div style={actions}>
                 <button onClick={() => setConfirmDelete(false)} disabled={saving} style={ghost}>Keep</button>
                 <button onClick={doDelete} disabled={saving || (!delListener && !delEmit)}
@@ -744,6 +780,216 @@ function RemoveArtifactEdgeDialog({ edge, fromName, ops = liveOps, onClose, onDo
         <button onClick={remove} disabled={saving} style={{ ...primary, background: 'var(--eb-status-error)' }}>
           {saving ? 'Removing…' : `Remove ${isOutput ? 'output' : 'input'}`}
         </button>
+      </div>
+    </SidePanel>
+  );
+}
+
+/* ── Actor-edge editors (#412): same shell, per-type properties + delete ──── */
+
+// ⏰ → agent: edit the cron expression / one-shot timestamp, or delete.
+function EditTimerDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
+  const { to, triggerId } = edge;
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [kind, setKind] = useState('cron');
+  const [cron, setCron] = useState('');
+  const [at, setAt] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const tt = await ops.listTriggers(to);
+        if (!alive) return;
+        const t = (Array.isArray(tt) ? tt : []).find(x => x.id === triggerId);
+        if (t) {
+          setKind(t.type === 'once' ? 'once' : 'cron');
+          setCron(t.cron || '');
+          setAt(t.at || '');
+        }
+      } catch (e) { if (alive) setError(e.message); }
+      finally { if (alive) setLoading(false); }
+    })();
+    return () => { alive = false; };
+  }, [to, triggerId]);
+
+  async function save() {
+    setSaving(true); setError(null);
+    try {
+      if (kind === 'cron') await ops.updateTrigger(to, triggerId, { cron: cron.trim() });
+      else await ops.updateTrigger(to, triggerId, { at });
+      onDone?.();
+    } catch (e) { setError(e.message); setSaving(false); }
+  }
+  async function remove() {
+    setSaving(true); setError(null);
+    try { await ops.deleteTrigger(to, triggerId); onDone?.(); }
+    catch (e) { setError(e.message); setSaving(false); }
+  }
+
+  return (
+    <SidePanel open onClose={onClose} title="Schedule" width="520px">
+      <p style={hint}>⏰ Schedule → <strong>{toName || to}</strong></p>
+      {loading ? <Center><Loader2 size={14} style={spin} /> Loading…</Center> : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+          {kind === 'cron' ? (
+            <Field label="Cron expression (min hour dom mon dow)">
+              <input value={cron} onChange={e => setCron(e.target.value)} style={{ ...input, fontFamily: 'var(--eb-font-mono)' }} />
+              <small style={small}>{cronPreview(cron)}</small>
+            </Field>
+          ) : (
+            <Field label="Run at (ISO timestamp)">
+              <input value={at} onChange={e => setAt(e.target.value)} style={{ ...input, fontFamily: 'var(--eb-font-mono)' }} />
+            </Field>
+          )}
+          {error && <span style={errStyle}>{error}</span>}
+          <div style={actions}>
+            <button onClick={remove} disabled={saving}
+              style={{ ...ghost, color: 'var(--eb-status-error)', borderColor: 'var(--eb-status-error)', marginRight: 'auto' }}>Remove</button>
+            <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+            <button onClick={save} disabled={saving} style={primary}>{saving ? 'Saving…' : 'Save'}</button>
+          </div>
+        </div>
+      )}
+      <style>{`@keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}`}</style>
+    </SidePanel>
+  );
+}
+
+// 🐙 → agent: edit the raw event set + origin filter, or delete.
+function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
+  const { to, triggerId } = edge;
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [events, setEvents] = useState([]);
+  const [fromFilter, setFromFilter] = useState('any-except-self');
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const tt = await ops.listTriggers(to);
+        if (!alive) return;
+        const t = (Array.isArray(tt) ? tt : []).find(x => x.id === triggerId);
+        if (t) {
+          setEvents(Array.isArray(t.events) ? t.events : []);
+          setFromFilter(t.from || 'any-except-self');
+        }
+      } catch (e) { if (alive) setError(e.message); }
+      finally { if (alive) setLoading(false); }
+    })();
+    return () => { alive = false; };
+  }, [to, triggerId]);
+
+  // Preserve events outside the common list (the Events API knows more keys).
+  const known = new Set(RAW_EVENTS.map(e => e.value));
+  const extra = events.filter(e => !known.has(e));
+  const toggle = (v) => setEvents(prev => prev.includes(v) ? prev.filter(x => x !== v) : [...prev, v]);
+
+  async function save() {
+    setSaving(true); setError(null);
+    try { await ops.updateTrigger(to, triggerId, { events, from: fromFilter }); onDone?.(); }
+    catch (e) { setError(e.message); setSaving(false); }
+  }
+  async function remove() {
+    setSaving(true); setError(null);
+    try { await ops.deleteTrigger(to, triggerId); onDone?.(); }
+    catch (e) { setError(e.message); setSaving(false); }
+  }
+
+  return (
+    <SidePanel open onClose={onClose} title="GitHub event" width="520px">
+      <p style={hint}>🐙 GitHub → <strong>{toName || to}</strong></p>
+      {loading ? <Center><Loader2 size={14} style={spin} /> Loading…</Center> : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+          <Field label="Events">
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-2)' }}>
+              {RAW_EVENTS.map(ev => (
+                <label key={ev.value} style={check}>
+                  <input type="checkbox" checked={events.includes(ev.value)} onChange={() => toggle(ev.value)} />
+                  {ev.label}
+                </label>
+              ))}
+              {extra.map(ev => (
+                <label key={ev} style={check}>
+                  <input type="checkbox" checked onChange={() => toggle(ev)} />
+                  <code>{ev}</code>
+                </label>
+              ))}
+            </div>
+          </Field>
+          <Field label="Origin filter (from)">
+            <select value={fromFilter} onChange={e => setFromFilter(e.target.value)} style={input}>
+              {FROM_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+          </Field>
+          {error && <span style={errStyle}>{error}</span>}
+          <div style={actions}>
+            <button onClick={remove} disabled={saving}
+              style={{ ...ghost, color: 'var(--eb-status-error)', borderColor: 'var(--eb-status-error)', marginRight: 'auto' }}>Remove</button>
+            <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+            <button onClick={save} disabled={saving} style={primary}>{saving ? 'Saving…' : 'Save'}</button>
+          </div>
+        </div>
+      )}
+      <style>{`@keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}`}</style>
+    </SidePanel>
+  );
+}
+
+// ⚡ → agent: show the hook URL, rotate the secret (shown once), or delete.
+function EditWebhookDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
+  const { to, triggerId, label } = edge;
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [rotated, setRotated] = useState(null); // new secret, shown once
+  const isDraft = ops.mode === 'draft';
+
+  async function rotate() {
+    setSaving(true); setError(null);
+    try {
+      const secret = generateHookSecret();
+      await ops.updateTrigger(to, triggerId, { secret });
+      setRotated(secret);
+      setSaving(false);
+    } catch (e) { setError(e.message); setSaving(false); }
+  }
+  async function remove() {
+    setSaving(true); setError(null);
+    try { await ops.deleteTrigger(to, triggerId); onDone?.(); }
+    catch (e) { setError(e.message); setSaving(false); }
+  }
+
+  return (
+    <SidePanel open onClose={onClose} title="Webhook" width="520px">
+      <p style={hint}>⚡ {label || 'Webhook'} → <strong>{toName || to}</strong></p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        {isDraft ? (
+          <div style={small}>The URL exists once the team is materialised.</div>
+        ) : (
+          <Field label="URL (webhook server, HOOK_PORT)">
+            <code style={{ ...input, display: 'block', userSelect: 'all' }}>POST /hooks/{to}/{triggerId}</code>
+          </Field>
+        )}
+        <div style={small}>
+          The caller must send the trigger's secret in <code>X-Hook-Secret</code>. The current
+          secret is only shown at creation — rotate it to get a new one.
+        </div>
+        {rotated && (
+          <Field label="New X-Hook-Secret (shown once — copy it now)">
+            <code style={{ ...input, display: 'block', userSelect: 'all', wordBreak: 'break-all' }}>{rotated}</code>
+          </Field>
+        )}
+        {error && <span style={errStyle}>{error}</span>}
+        <div style={actions}>
+          <button onClick={remove} disabled={saving}
+            style={{ ...ghost, color: 'var(--eb-status-error)', borderColor: 'var(--eb-status-error)', marginRight: 'auto' }}>Remove</button>
+          <button onClick={rotate} disabled={saving} style={ghost}>Rotate secret</button>
+          <button onClick={() => (rotated ? onDone?.() : onClose())} style={primary}>{rotated ? 'Done' : 'Close'}</button>
+        </div>
       </div>
     </SidePanel>
   );

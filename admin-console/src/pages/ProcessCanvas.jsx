@@ -425,6 +425,10 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
           fromName={nodeName(selectedEdge.from)}
           toName={nodeName(selectedEdge.to)}
           ops={ops}
+          producerChannelCount={selectedEdge.on === 'github'
+            ? (displayGraph?.edges || []).filter(e =>
+                e.on === 'github' && e.from === selectedEdge.from && e.artifact === selectedEdge.artifact).length
+            : undefined}
           onClose={() => setSelectedEdge(null)}
           onDone={() => { setSelectedEdge(null); afterEdit(); }}
         />

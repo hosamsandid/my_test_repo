@@ -357,6 +357,13 @@ export default function Message({ message, agentUserId, thinking }) {
       </div>
 
       <style>{`
+        .agent-chat-md { min-width: 0; max-width: 100%; }
+        /* rehype-pretty-code wraps code blocks in a <figure> — kill the UA
+           default margin (1em 40px) and cap it so the pre's own horizontal
+           scrollbar kicks in instead of widening the bubble. */
+        .agent-chat-md figure { margin: 0; max-width: 100%; min-width: 0; }
+        .agent-chat-md pre { max-width: 100%; }
+        .agent-chat-md :not(pre) > code { overflow-wrap: anywhere; }
         .agent-chat-md p { margin: 0; }
         .agent-chat-md p + p { margin-top: var(--eb-space-2); }
         .agent-chat-md ul, .agent-chat-md ol { padding-left: 1.4em; margin: var(--eb-space-1) 0; }

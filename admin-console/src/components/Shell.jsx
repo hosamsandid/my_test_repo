@@ -319,6 +319,10 @@ export default function Shell({ children }) {
       <div style={{
         marginLeft: sidebarWidth,
         flex: 1,
+        // Flex items refuse to shrink below their content's min-content width
+        // by default — wide page content (code blocks, fixed-width panels)
+        // would push the whole viewport into horizontal scrolling.
+        minWidth: 0,
         display: 'flex',
         flexDirection: 'column',
         minHeight: '100vh',

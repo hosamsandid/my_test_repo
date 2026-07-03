@@ -12,7 +12,7 @@ const LEFT_MIN  = 160;
 const LEFT_MAX  = 800;
 const RIGHT_MIN = 200;
 const RIGHT_MAX = 1600;
-const CHAT_MIN  = 320;
+const CHAT_MIN  = 280;
 
 function loadPanelWidth(key, fallback) {
   try {
@@ -205,18 +205,56 @@ export default function AgentChat() {
   const containerRef = useRef(null);
   const dragRef = useRef(null);
 
+  // Live container width (ResizeObserver) so the effective panel widths can
+  // be re-clamped on window resize — not just at drag time. Without this, a
+  // stored width that no longer fits (smaller window, sidebar expanded)
+  // pushes the rails out of view.
+  const [containerW, setContainerW] = useState(null);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect?.width;
+      if (w) setContainerW(w);
+    });
+    ro.observe(el);
+    setContainerW(el.getBoundingClientRect().width || null);
+    return () => ro.disconnect();
+  }, []);
+
+  // Effective (rendered) widths: the stored preference, clamped so that
+  // left + right + dividers + CHAT_MIN never exceeds the container. The
+  // right rail gives way first, then the left one; the stored values stay
+  // untouched so the layout springs back when space returns.
+  const dividersW = logOpen ? 24 : 12;
+  let effLeftWidth  = leftWidth;
+  let effRightWidth = rightWidth;
+  if (containerW != null) {
+    const available = Math.max(0, containerW - dividersW - CHAT_MIN);
+    const rightUsed = logOpen ? effRightWidth : 0;
+    if (effLeftWidth + rightUsed > available) {
+      if (logOpen) {
+        effRightWidth = Math.max(RIGHT_MIN, available - effLeftWidth);
+      }
+      const rightNow = logOpen ? effRightWidth : 0;
+      if (effLeftWidth + rightNow > available) {
+        effLeftWidth = Math.max(LEFT_MIN, available - rightNow);
+      }
+    }
+  }
+
   const startDrag = useCallback((panel) => (e) => {
     e.preventDefault();
     const startX     = e.clientX;
-    const startWidth = panel === 'left' ? leftWidth : rightWidth;
-    const otherWidth = panel === 'left' ? rightWidth : leftWidth;
-    const containerW = containerRef.current?.getBoundingClientRect().width || window.innerWidth;
+    const startWidth = panel === 'left' ? effLeftWidth : effRightWidth;
+    const otherWidth = panel === 'left' ? effRightWidth : effLeftWidth;
+    const containerNow = containerRef.current?.getBoundingClientRect().width || window.innerWidth;
     // Both dividers (12 px each) when right rail is open; only one otherwise.
     const dividers   = logOpen ? 24 : 12;
     const railMin    = panel === 'left' ? LEFT_MIN : RIGHT_MIN;
     const railMax    = panel === 'left' ? LEFT_MAX : RIGHT_MAX;
     // Dynamic upper bound: the rail can grow until the chat panel hits CHAT_MIN.
-    const dynamicMax = Math.max(railMin, containerW - otherWidth - dividers - CHAT_MIN);
+    const dynamicMax = Math.max(railMin, containerNow - otherWidth - dividers - CHAT_MIN);
     const upperCap   = Math.min(railMax, dynamicMax);
     const lowerCap   = railMin;
     dragRef.current  = { panel, startX, startWidth, lowerCap, upperCap };
@@ -244,7 +282,7 @@ export default function AgentChat() {
     };
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup',   onUp);
-  }, [leftWidth, rightWidth, logOpen]);
+  }, [effLeftWidth, effRightWidth, logOpen]);
 
   // Cross-panel hover correlation: ChatPanel sets this when the user hovers
   // a bubble; SessionLogPanel sets it on row hover. The other side dims rows
@@ -358,8 +396,8 @@ export default function AgentChat() {
     >
       {/* Left rail */}
       <div style={{
-        width: leftWidth,
-        minWidth: leftWidth,
+        width: effLeftWidth,
+        minWidth: effLeftWidth,
         height: '100%',
         background: 'var(--eb-bg-surface)',
         display: 'flex',
@@ -497,8 +535,8 @@ export default function AgentChat() {
         <>
           <ResizeDivider onMouseDown={startDrag('right')} />
           <div style={{
-            width: rightWidth,
-            minWidth: rightWidth,
+            width: effRightWidth,
+            minWidth: effRightWidth,
             height: '100%',
             background: 'var(--eb-bg-app)',
             display: 'flex',

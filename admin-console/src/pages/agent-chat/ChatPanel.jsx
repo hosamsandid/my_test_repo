@@ -710,17 +710,21 @@ export default function ChatPanel({
         <ConnectionDot status={sseStatus} />
       </div>
 
-      {/* Session-control toolbar */}
+      {/* Session-control toolbar. flexWrap lets the controls flow onto a
+          second row at narrow widths instead of dictating the chat panel's
+          minimum width (long nowrap button row = min-content floor). */}
       <div style={{
         display: 'flex',
         alignItems: 'center',
-        gap: 'var(--eb-space-2)',
+        flexWrap: 'wrap',
+        gap: '4px var(--eb-space-2)',
         padding: '6px var(--eb-space-4)',
         borderBottom: '1px solid var(--eb-border-default)',
         background: 'var(--eb-bg-surface)',
         flexShrink: 0,
         fontSize: 'var(--eb-text-xs)',
         color: 'var(--eb-text-muted)',
+        minWidth: 0,
       }}>
         <SessionBadge active={!!sessionId} updatedAt={sessionUpdatedAt} />
         <button

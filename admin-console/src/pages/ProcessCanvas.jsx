@@ -7,7 +7,6 @@ import DraftNodeInspector from './process/DraftNodeInspector';
 import StageManager from './process/StageManager';
 import { EditHandoffDialog, CreateEdgeDialog } from './process/EdgeDialogs';
 import MaterializeDialog from './process/MaterializeDialog';
-import AddApprovalDialog from './process/AddApprovalDialog';
 import SidePanel from '../components/SidePanel';
 import { liveOps, makeDraftOps } from './process/edit-adapters';
 import { capabilitiesFor, processMode, createTypesFor, sourceKindOf } from './process/connection-capabilities';
@@ -305,11 +304,11 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
             <EditableDraftTitle name={draftBundle.name} onRename={(n) => draftOps.renameDraft(n)} />
           )}
           <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-            {scope === 'templates'
-              ? 'Blueprint view (read-only). Select a team or draft on the left to model.'
+            {caps.readOnlyHint
+              ? `${caps.readOnlyHint}${scope === 'templates' ? ' Select a team or draft on the left to model.' : ''}`
               : isDraft
-                ? 'Draft — design from scratch: + Add role, drag the ● port to wire, click nodes/edges to edit. Nothing is created until you materialize.'
-                : 'Click a node to edit · drag the ● port to wire a hand-off · click an edge to edit it.'}
+                ? 'Draft — design from scratch: + Add role, drag the ● port (roles and sources) to wire, click nodes/edges to edit. Nothing is created until you materialize.'
+                : 'Click a node to edit · drag the ● port (roles and sources) to wire a connection · click an edge to edit it.'}
           </div>
         </div>
         {isDraft && (
@@ -464,23 +463,20 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
         />
       )}
 
+      {/* The toolbar approval button is a preset of the unified create dialog
+          (#413): same ApprovalForm the @human drag offers, with the downstream
+          step picked in-form instead of by dropping on a node. */}
       {approvalOpen && isDraft && (
-        <AddApprovalDialog
-          roles={draftBundle?.roles || []}
+        <CreateEdgeDialog
+          from="@human"
+          to={null}
+          fromName="Human"
+          ops={draftOps}
+          types={['approval']}
+          preset="approval"
+          roles={(draftBundle?.roles || []).map(r => ({ id: r.id, displayName: r.displayName || r.id }))}
           onClose={() => setApprovalOpen(false)}
-          onCreate={async ({ label, description, downstream }) => {
-            // The downstream step waits on the gate label; a human sets it.
-            await draftOps.createTrigger(downstream, {
-              type: 'github-event',
-              events: ['issues.labeled', 'pull_request.labeled'],
-              from: 'humans',
-              labelFilter: label,
-              enabled: true,
-              description: description || `Human approval: ${label}`,
-              prompt: `A human granted the approval \`${label}\` (the label was added). Proceed with your part of the process. Reply \`[PASS]\` if there is nothing to do yet.`,
-            });
-            setApprovalOpen(false);
-          }}
+          onDone={() => setApprovalOpen(false)}
         />
       )}
 

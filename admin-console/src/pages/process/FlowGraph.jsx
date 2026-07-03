@@ -3,6 +3,7 @@ import { initFlowGraph } from './flow-graph-render';
 import { makeBpOps } from './edit-adapters';
 import { CreateEdgeDialog } from './EdgeDialogs';
 import BpNodeInspector from './BpNodeInspector';
+import { capabilitiesFor, bpMode, createTypesFor } from './connection-capabilities';
 
 // Unified flow viewer (#362, UI rework). Renders any source of the unified
 // orchestration graph — live agents, a draft bundle, or a BriefingPack
@@ -25,6 +26,9 @@ export function FlowGraph({ workspace, team }) {
   const [selectedId, setSelectedId] = useState(null);    // node inspector (BP only)
 
   const bpOps = useMemo(() => (workspace ? makeBpOps(workspace) : null), [workspace]);
+  // BP workspaces are editable (dependency + data-flow only); everything else
+  // renders as a read-only viewer — see the capability matrix (#409).
+  const caps = useMemo(() => capabilitiesFor(bpMode({ workspace })), [workspace]);
 
   const load = useCallback(() => {
     const g = apiRef.current;
@@ -44,15 +48,14 @@ export function FlowGraph({ workspace, team }) {
   // the process flows. The node port still wires links (connect-to-wire).
   useEffect(() => {
     if (!viewportRef.current) return undefined;
-    const editable = !!bpOps;
     const g = initFlowGraph(viewportRef.current, {
       onSelectNode: (id) => setSelectedId(id),
-      onConnect: editable ? (from, to) => setConnectPair({ from, to }) : undefined,
+      onConnect: caps.connectPort ? (from, to) => setConnectPair({ from, to }) : undefined,
     });
     apiRef.current = g;
-    g.setEditable(editable);     // connect-to-wire port (BP); editing is in the inspector
+    g.setEditable(caps.editable); // connect-to-wire port (BP); editing is in the inspector
     return () => { g.cleanup(); apiRef.current = null; };
-  }, [bpOps]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [bpOps, caps]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { load(); }, [load]);
 
@@ -89,7 +92,7 @@ export function FlowGraph({ workspace, team }) {
           fromName={nodeName(connectPair.from)}
           toName={nodeName(connectPair.to)}
           ops={bpOps}
-          types={['dependency', 'artifact']}
+          types={createTypesFor(caps, 'agent')}
           onClose={() => setConnectPair(null)}
           onDone={() => { setConnectPair(null); load(); }}
         />

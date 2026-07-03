@@ -10,6 +10,7 @@ import MaterializeDialog from './process/MaterializeDialog';
 import AddApprovalDialog from './process/AddApprovalDialog';
 import SidePanel from '../components/SidePanel';
 import { liveOps, makeDraftOps } from './process/edit-adapters';
+import { capabilitiesFor, processMode, createTypesFor } from './process/connection-capabilities';
 
 // Inline-editable process name for the draft toolbar. Click to edit; Enter or
 // blur commits, Escape reverts. Renaming only touches the bundle's display
@@ -180,18 +181,22 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
     return () => { g.cleanup(); graphRef.current = null; };
   }, []);
 
+  // What this view may do with connections — resolved once per scope from the
+  // capability matrix (#409). A draft's derived graph reports level 'template',
+  // so the mode is driven off the scope, not the level.
+  const caps = useMemo(
+    () => capabilitiesFor(processMode({ isDraft, imported, level: displayGraph?.level })),
+    [isDraft, imported, displayGraph],
+  );
+
   useEffect(() => {
     if (!graphRef.current || !displayGraph) return;
-    // Drafts and live teams are editable; the template blueprint + imported
-    // previews are read-only. (A draft's derived graph reports level 'template',
-    // so drive editability off the mode, not the level.)
-    const ed = isDraft ? true : (!imported && displayGraph.level !== 'template');
-    editableRef.current = ed;
-    graphRef.current.setEditable(ed);
+    editableRef.current = caps.editable;
+    graphRef.current.setEditable(caps.editable);
     // Prompt/stage editing happens in the right inspector (DraftNodeInspector),
     // consistent with BP flows — there is no inline editing.
     graphRef.current.setData(displayGraph);
-  }, [displayGraph, imported, isDraft]);
+  }, [displayGraph, imported, isDraft, caps]);
 
   // Clear selection/dialogs when the scope (and thus the graph) changes. A
   // scope change from the parent also drops any imported blueprint preview.
@@ -392,8 +397,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
         />
       )}
 
-      {/* One connect dialog for both draft and live teams (#unified): the four
-          edge types are identical — only the ops adapter differs underneath. */}
+      {/* One connect dialog for both draft and live teams (#unified): the type
+          set comes from the capability matrix — only the ops adapter differs. */}
       {connectPair && (
         <CreateEdgeDialog
           from={connectPair.from}
@@ -402,7 +407,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
           toName={nodeName(connectPair.to)}
           labels={displayGraph?.labels || []}
           ops={ops}
-          types={['github', 'label', 'artifact', 'hierarchy']}
+          types={createTypesFor(caps, 'agent')}
           onClose={() => setConnectPair(null)}
           onDone={() => { setConnectPair(null); afterEdit(); }}
         />

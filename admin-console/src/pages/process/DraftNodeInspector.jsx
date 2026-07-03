@@ -98,7 +98,7 @@ export default function DraftNodeInspector({ role, roles = [], stages = [], ops,
         {/* Triggers */}
         <div style={{ marginTop: 'var(--eb-space-2)' }}>
           <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginBottom: 6 }}>
-            Triggers <span style={{ color: 'var(--eb-text-muted)' }}>— wire hand-offs by dragging a ● / PR / Issue port on the canvas</span>
+            Triggers <span style={{ color: 'var(--eb-text-muted)' }}>— wire hand-offs by dragging the ● port on the canvas (from a role or a source)</span>
           </div>
           {triggers.length === 0 && (
             <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>

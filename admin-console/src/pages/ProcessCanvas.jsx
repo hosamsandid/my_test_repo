@@ -5,12 +5,16 @@ import { initFlowGraph } from './process/flow-graph-render';
 import ProcessNodeInspector from './process/ProcessNodeInspector';
 import DraftNodeInspector from './process/DraftNodeInspector';
 import StageManager from './process/StageManager';
-import { EditHandoffDialog, CreateEdgeDialog, CreateChannelDialog } from './process/EdgeDialogs';
+import { EditHandoffDialog, CreateEdgeDialog } from './process/EdgeDialogs';
 import MaterializeDialog from './process/MaterializeDialog';
 import AddApprovalDialog from './process/AddApprovalDialog';
 import SidePanel from '../components/SidePanel';
 import { liveOps, makeDraftOps } from './process/edit-adapters';
-import { capabilitiesFor, processMode, createTypesFor } from './process/connection-capabilities';
+import { capabilitiesFor, processMode, createTypesFor, sourceKindOf } from './process/connection-capabilities';
+
+// Display names for the actor pseudo-nodes (#411) — the graph carries them as
+// nodes when they have edges, but a drag can also start from a placeholder.
+const ACTOR_NAMES = { '@human': 'Human', '@github': 'GitHub', '@external': 'External system', '@timer': 'Schedule' };
 
 // Inline-editable process name for the draft toolbar. Click to edit; Enter or
 // blur commits, Escape reverts. Renaming only touches the bundle's display
@@ -160,8 +164,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
   const displayGraph = imported ? imported.graph : isDraft ? draftGraph : graph;
 
   const [selectedId, setSelectedId] = useState(null);
-  const [connectPair, setConnectPair] = useState(null); // { from, to }
-  const [channelPair, setChannelPair] = useState(null); // { from, to, artifact } (#380)
+  const [connectPair, setConnectPair] = useState(null); // { from, to } — from may be an actor id (#411)
   const [selectedEdge, setSelectedEdge] = useState(null);
   const viewportRef = useRef(null);
   const graphRef = useRef(null);
@@ -174,8 +177,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
     const g = initFlowGraph(viewportRef.current, {
       onSelectNode: (id) => setSelectedId(id),
       onConnect: (from, to) => { if (editableRef.current) setConnectPair({ from, to }); },
-      onConnectChannel: (from, to, artifact) => { if (editableRef.current) setChannelPair({ from, to, artifact }); },
       onSelectEdge: (edge) => { if (editableRef.current) setSelectedEdge(edge); },
+      actorSources: true, // offer @human/@github/@external/@timer as drag sources (#411)
     });
     graphRef.current = g;
     return () => { g.cleanup(); graphRef.current = null; };
@@ -200,10 +203,11 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
 
   // Clear selection/dialogs when the scope (and thus the graph) changes. A
   // scope change from the parent also drops any imported blueprint preview.
-  useEffect(() => { setSelectedId(null); setConnectPair(null); setChannelPair(null); setSelectedEdge(null); }, [scope, imported]);
+  useEffect(() => { setSelectedId(null); setConnectPair(null); setSelectedEdge(null); }, [scope, imported]);
   useEffect(() => { setImported(null); setImportError(null); }, [scope]);
 
-  const nodeName = (id) => (displayGraph?.nodes || []).find(n => n.id === id)?.displayName || id;
+  const nodeName = (id) =>
+    (displayGraph?.nodes || []).find(n => n.id === id)?.displayName || ACTOR_NAMES[id] || id;
   const selectedNode = useMemo(
     () => (displayGraph?.nodes || []).find(n => n.id === selectedId) || null,
     [displayGraph, selectedId],
@@ -397,8 +401,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
         />
       )}
 
-      {/* One connect dialog for both draft and live teams (#unified): the type
-          set comes from the capability matrix — only the ops adapter differs. */}
+      {/* The ONE connect dialog (#411) for both draft and live teams: the drag
+          source (agent or actor) picks the type set via the capability matrix —
+          only the ops adapter differs underneath. */}
       {connectPair && (
         <CreateEdgeDialog
           from={connectPair.from}
@@ -407,23 +412,10 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
           toName={nodeName(connectPair.to)}
           labels={displayGraph?.labels || []}
           ops={ops}
-          types={createTypesFor(caps, 'agent')}
+          types={createTypesFor(caps, sourceKindOf(connectPair.from))}
+          fromNode={(displayGraph?.nodes || []).find(n => n.id === connectPair.from) || null}
           onClose={() => setConnectPair(null)}
           onDone={() => { setConnectPair(null); afterEdit(); }}
-        />
-      )}
-
-      {/* GitHub channel (#380): dragging a PR/Issue output port onto a node. */}
-      {channelPair && (
-        <CreateChannelDialog
-          from={channelPair.from}
-          to={channelPair.to}
-          artifact={channelPair.artifact}
-          fromName={nodeName(channelPair.from)}
-          toName={nodeName(channelPair.to)}
-          ops={ops}
-          onClose={() => setChannelPair(null)}
-          onDone={() => { setChannelPair(null); afterEdit(); }}
         />
       )}
 

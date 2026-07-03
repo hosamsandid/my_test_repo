@@ -6,6 +6,7 @@ import {
   processMode,
   bpMode,
   createTypesFor,
+  sourceKindOf,
 } from './connection-capabilities.js';
 
 // The matrix reproduces today's per-view behaviour exactly (#409 is a pure
@@ -18,9 +19,22 @@ test('live and draft are fully editable with the process type set', () => {
     assert.equal(caps.editable, true);
     assert.equal(caps.connectPort, true);
     assert.equal(caps.edgeClick, true);
+    assert.equal(caps.actorSources, true);
     assert.equal(caps.readOnlyHint, null);
-    assert.deepEqual(createTypesFor(caps, 'agent'), ['github', 'label', 'artifact', 'hierarchy']);
+    assert.deepEqual(createTypesFor(caps, 'agent'), ['github-pr', 'github-issue', 'label', 'artifact', 'hierarchy']);
+    assert.deepEqual(createTypesFor(caps, 'human'), ['human-label', 'approval']);
+    assert.deepEqual(createTypesFor(caps, 'github'), ['event']);
+    assert.deepEqual(createTypesFor(caps, 'external'), ['webhook']);
+    assert.deepEqual(createTypesFor(caps, 'timer'), ['schedule']);
   }
+});
+
+test('sourceKindOf maps actor ids and falls back to agent', () => {
+  assert.equal(sourceKindOf('@human'), 'human');
+  assert.equal(sourceKindOf('@github'), 'github');
+  assert.equal(sourceKindOf('@external'), 'external');
+  assert.equal(sourceKindOf('@timer'), 'timer');
+  assert.equal(sourceKindOf('developer'), 'agent');
 });
 
 test('bp workspace edits only dependency + artifact, offers no actors', () => {

@@ -38,7 +38,7 @@ const LABEL_ACTIONS = [
   { value: 'unlabeled', label: 'removed' },
 ];
 
-export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = liveOps, onClose, onDone }) {
+export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = liveOps, onBack, onClose, onDone }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -181,6 +181,7 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
           {error && <span style={errStyle}>{error}</span>}
 
           <div style={actions}>
+            {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
             <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
             <button onClick={submit} disabled={saving} style={primary}>
               {saving ? 'Wiring…' : 'Create hand-off'}
@@ -193,67 +194,83 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
   );
 }
 
-/* ── on-type picker: choose how A hands off to B (#367) ─────────────────────
- * Label hand-off delegates to CreateHandoffDialog (unchanged). Dependency and
- * data-flow are BP mechanisms, written via the draft ops onto node ports. */
-export function CreateEdgeDialog({ from, to, fromName, toName, labels, ops = liveOps, types, onClose, onDone }) {
-  const allowed = Array.isArray(types) && types.length ? types : ['label', 'dependency', 'artifact'];
-  const [type, setType] = useState(allowed.length === 1 ? allowed[0] : null);
+/* ── on-type picker: the ONE create dialog for every connection (#411) ───────
+ * Drag the ● port from any source — an agent or an actor (@human / @github /
+ * @external / @timer) — onto an agent and this dialog opens. Step 1 picks the
+ * connection type (filtered by the capability matrix per source kind, ranked by
+ * context: a PR/Issue producer sees its channel first); step 2 is the
+ * type-specific detail form, with Back always available. */
+export function CreateEdgeDialog({
+  from, to, fromName, toName, labels, ops = liveOps, types, fromNode, roles,
+  preset, onClose, onDone,
+}) {
+  // Legacy token: 'github' expands to the two explicit channel tiles.
+  const allowed = (Array.isArray(types) && types.length ? types : ['label', 'dependency', 'artifact'])
+    .flatMap(t => (t === 'github' ? ['github-pr', 'github-issue'] : [t]));
+  const [type, setType] = useState(preset || (allowed.length === 1 ? allowed[0] : null));
+
+  const common = { from, to, fromName, toName, ops, onClose, onDone };
+  const back = allowed.length > 1 && !preset ? () => setType(null) : undefined;
 
   if (type === 'label') {
-    return (
-      <CreateHandoffDialog
-        from={from} to={to} fromName={fromName} toName={toName}
-        labels={labels} ops={ops} onClose={onClose} onDone={onDone}
-      />
-    );
+    return <CreateHandoffDialog {...common} labels={labels} onBack={back} />;
   }
-  if (type === 'dependency') {
-    return (
-      <DependencyEdgeForm from={from} to={to} fromName={fromName} toName={toName}
-        ops={ops} onBack={() => setType(null)} onClose={onClose} onDone={onDone} />
-    );
+  if (type === 'dependency') return <DependencyEdgeForm {...common} onBack={back} />;
+  if (type === 'artifact') return <ArtifactEdgeForm {...common} onBack={back} />;
+  if (type === 'hierarchy') return <HierarchyEdgeForm {...common} onBack={back} />;
+  if (type === 'github-pr' || type === 'github-issue') {
+    return <CreateChannelDialog {...common} artifact={type === 'github-pr' ? 'pr' : 'issue'} lockArtifact onBack={back} />;
   }
-  if (type === 'artifact') {
-    return (
-      <ArtifactEdgeForm from={from} to={to} fromName={fromName} toName={toName}
-        ops={ops} onBack={() => setType(null)} onClose={onClose} onDone={onDone} />
-    );
-  }
-  if (type === 'hierarchy') {
-    return (
-      <HierarchyEdgeForm from={from} to={to} fromName={fromName} toName={toName}
-        ops={ops} onBack={() => setType(null)} onClose={onClose} onDone={onDone} />
-    );
-  }
-  if (type === 'github') {
-    return (
-      <CreateChannelDialog from={from} to={to} fromName={fromName} toName={toName}
-        ops={ops} onBack={() => setType(null)} onClose={onClose} onDone={onDone} />
-    );
-  }
+  if (type === 'human-label') return <HumanLabelForm {...common} labels={labels} onBack={back} />;
+  if (type === 'approval') return <ApprovalForm {...common} roles={roles} onBack={back} />;
+  if (type === 'event') return <EventForm {...common} onBack={back} />;
+  if (type === 'webhook') return <WebhookForm {...common} onBack={back} />;
+  if (type === 'schedule') return <ScheduleForm {...common} onBack={back} />;
 
+  const gh = (fromNode && fromNode.github) || {};
+  const A = fromName || from;
+  const B = toName || to;
   const choices = [
-    { id: 'github', title: 'GitHub PR / Issue', desc: `${fromName || from} opens a PR/issue that wakes ${toName || to} (optionally via a human-approved label).` },
-    { id: 'label', title: 'Label hand-off', desc: `${fromName || from} emits a label that wakes ${toName || to}.` },
-    { id: 'dependency', title: 'Dependency', desc: `${toName || to} is woken when ${fromName || from} pushes to the repo.` },
-    { id: 'artifact', title: 'Data flow / hand-off', desc: `${fromName || from} produces an artifact that ${toName || to} consumes.` },
-    { id: 'hierarchy', title: 'Parent / child', desc: `${fromName || from} groups ${toName || to} as a child — it inherits its parent's stage.` },
+    {
+      id: 'github-pr', title: 'Pull-request channel',
+      desc: `${A} opens a pull request that wakes ${B} (optionally routed via a label / human approval).`,
+      recommended: !!gh.producesPr,
+    },
+    {
+      id: 'github-issue', title: 'Issue channel',
+      desc: `${A} opens an issue that wakes ${B} (optionally routed via a label / human approval).`,
+      recommended: !!gh.producesIssue,
+    },
+    { id: 'label', title: 'Label hand-off', desc: `${A} emits a label that wakes ${B}.` },
+    { id: 'dependency', title: 'Dependency', desc: `${B} is woken when ${A} pushes to the repo.` },
+    { id: 'artifact', title: 'Data flow / hand-off', desc: `${A} produces an artifact that ${B} consumes. Leave the name empty for a plain dependency.` },
+    { id: 'hierarchy', title: 'Parent / child', desc: `${A} groups ${B} as a child — it inherits its parent's stage.` },
+    { id: 'human-label', title: 'Label set by a human', desc: `${B} wakes when a human puts a label on an issue or PR — no agent involved.` },
+    { id: 'approval', title: 'Human approval gate', desc: `${B} waits until a human grants a human:* approval label.` },
+    { id: 'event', title: 'GitHub event', desc: `${B} wakes on a raw repo event (issue opened, PR opened, push, …).` },
+    { id: 'webhook', title: 'Webhook', desc: `An external system (CI, tooling) wakes ${B} via an HTTP call.` },
+    { id: 'schedule', title: 'Schedule', desc: `${B} runs on a cron schedule or once at a set time.` },
   ].filter(c => allowed.includes(c.id));
+  // Context ranking (#411): recommended tiles (the source's PR/Issue badges) first.
+  choices.sort((a, b) => (b.recommended ? 1 : 0) - (a.recommended ? 1 : 0));
 
   return (
-    <SidePanel open onClose={onClose} title="Connect roles" width="520px">
+    <SidePanel open onClose={onClose} title="Create connection" width="520px">
       <p style={hint}>
-        How does <strong>{fromName || from}</strong> hand off to <strong>{toName || to}</strong>?
+        How should <strong>{B}</strong> be connected to <strong>{A}</strong>?
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
         {choices.map(c => (
           <button key={c.id} onClick={() => setType(c.id)} style={{
             textAlign: 'left', background: 'var(--eb-bg-app)', cursor: 'pointer',
-            border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+            border: c.recommended ? '1px solid var(--eb-accent-primary)' : '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-md)',
             padding: 'var(--eb-space-3)', fontFamily: 'inherit',
           }}>
-            <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>{c.title}</div>
+            <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
+              {c.title}
+              {c.recommended && <span style={{ color: 'var(--eb-accent-primary)', fontWeight: 'normal' }}> — recommended</span>}
+            </div>
             <div style={{ ...small, marginTop: 2 }}>{c.desc}</div>
           </button>
         ))}
@@ -267,7 +284,7 @@ export function CreateEdgeDialog({ from, to, fromName, toName, labels, ops = liv
  * derives the github-event trigger. An optional label + human-approval gate model
  * "A opens a PR → a human labels it → B is woken". Also ensures A is marked as
  * producing that artifact so the producer badge/prompt-block appear. */
-export function CreateChannelDialog({ from, to, artifact: artifact0, fromName, toName, ops = liveOps, onBack, onClose, onDone }) {
+export function CreateChannelDialog({ from, to, artifact: artifact0, lockArtifact, fromName, toName, ops = liveOps, onBack, onClose, onDone }) {
   const [artifact, setArtifact] = useState(artifact0 === 'issue' ? 'issue' : 'pr');
   const [label, setLabel] = useState('');
   const [human, setHuman] = useState(false);
@@ -303,12 +320,14 @@ export function CreateChannelDialog({ from, to, artifact: artifact0, fromName, t
         <strong>{fromName || from}</strong> opens a {noun} that wakes <strong>{toName || to}</strong>.
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-        <Field label="Artifact">
-          <select value={artifact} onChange={e => setArtifact(e.target.value)} style={input}>
-            <option value="pr">Pull request</option>
-            <option value="issue">Issue</option>
-          </select>
-        </Field>
+        {!lockArtifact && (
+          <Field label="Artifact">
+            <select value={artifact} onChange={e => setArtifact(e.target.value)} style={input}>
+              <option value="pr">Pull request</option>
+              <option value="issue">Issue</option>
+            </select>
+          </Field>
+        )}
         <Field label="Routing label (optional)">
           <input value={label} onChange={e => setLabel(e.target.value)}
             placeholder="e.g. approved — only wake on this label" style={input} />
@@ -745,6 +764,418 @@ function ReadonlyEdgeDialog({ edge, fromName, toName, onClose }) {
       </div>
       <div style={actions}>
         <button onClick={onClose} style={ghost}>Close</button>
+      </div>
+    </SidePanel>
+  );
+}
+
+/* ── Actor-sourced connections (#411): @human / @github / @external / @timer ──
+ * Each form creates one trigger on the target agent — the same data the
+ * inspector's trigger tab writes, reachable with the same ● drag gesture. */
+
+// A human puts a label on an issue/PR (no agent involved) → wake the agent.
+// Exactly the scenario the graph could not express before #410: a human-created
+// issue gets a human-applied label and an agent reacts.
+export function HumanLabelForm({ to, toName, labels, ops = liveOps, onBack, onClose, onDone }) {
+  const [label, setLabel] = useState('');
+  const [target, setTarget] = useState('issues');
+  const [action, setAction] = useState('labeled');
+  const [prompt, setPrompt] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const event = `${target}.${action}`;
+  const verb = action === 'labeled' ? 'added to' : 'removed from';
+  const noun = target === 'issues' ? 'an issue' : 'a pull request';
+  const isGate = label.trim().startsWith('human:');
+  const effectivePrompt = prompt
+    || `A human ${verb === 'added to' ? 'added' : 'removed'} the label \`${label || '<label>'}\` on ${noun}. The event payload above has the details.\n\n<Describe what ${toName || to} should do.> Reply \`[PASS]\` if there's nothing to do.`;
+
+  async function submit() {
+    const trimmed = label.trim();
+    if (!trimmed) { setError('Enter the label name.'); return; }
+    setSaving(true); setError(null);
+    try {
+      await ops.createTrigger(to, {
+        type: 'github-event',
+        events: [event],
+        from: 'humans',
+        labelFilter: trimmed,
+        enabled: true,
+        description: isGate
+          ? `Wait for human gate \`${trimmed}\``
+          : `Wake when a human ${action === 'labeled' ? 'adds' : 'removes'} \`${trimmed}\` on ${noun}`,
+        prompt: effectivePrompt,
+      });
+      onDone?.();
+    } catch (e) { setError(e.message); setSaving(false); }
+  }
+
+  return (
+    <SidePanel open onClose={onClose} title="Label set by a human" width="520px">
+      <p style={hint}>
+        A <strong>human</strong> sets a label that wakes <strong>{toName || to}</strong> —
+        the issue/PR itself may come from anyone.
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <Field label="Label kind">
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+            <select value={target} onChange={e => setTarget(e.target.value)} style={{ ...input, flex: 1 }}>
+              {LABEL_TARGETS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            <select value={action} onChange={e => setAction(e.target.value)} style={{ ...input, flex: 1 }}>
+              {LABEL_ACTIONS.map(o => <option key={o.value} value={o.value}>label {o.label}</option>)}
+            </select>
+          </div>
+          <small style={small}>Listens on <code>{event}</code>, origin filter <code>humans</code>.</small>
+        </Field>
+        <Field label="Label name">
+          <input list="pc-human-label-list" value={label} onChange={e => setLabel(e.target.value)}
+            placeholder="e.g. priorisiert, triage-me" style={input} />
+          <datalist id="pc-human-label-list">
+            {(labels || []).map(l => <option key={l.name} value={l.name} />)}
+          </datalist>
+          {isGate && <small style={small}><code>{label.trim()}</code> is an approval-gate label — it renders as a gate on the edge.</small>}
+        </Field>
+        <Field label="Listener prompt">
+          <textarea value={effectivePrompt} onChange={e => setPrompt(e.target.value)}
+            style={{ ...input, minHeight: 100, fontFamily: 'var(--eb-font-mono)', resize: 'vertical' }} />
+        </Field>
+        {error && <span style={errStyle}>{error}</span>}
+        <div style={actions}>
+          {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
+          <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+          <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Wiring…' : 'Create trigger'}</button>
+        </div>
+      </div>
+    </SidePanel>
+  );
+}
+
+// Human approval gate — the AddApprovalDialog flow as a preset of the unified
+// dialog (#413): name → human:<slug> label, downstream step waits on it.
+export function ApprovalForm({ to, toName, roles = [], ops = liveOps, onBack, onClose, onDone }) {
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [downstream, setDownstream] = useState(to || roles[0]?.id || '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const slug = name.trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+  const label = slug ? `human:${slug}` : '';
+  const target = to || downstream;
+
+  async function submit() {
+    if (!slug) { setError('Give the approval a name.'); return; }
+    if (!target) { setError('Pick which step waits for this approval.'); return; }
+    setSaving(true); setError(null);
+    try {
+      await ops.createTrigger(target, {
+        type: 'github-event',
+        events: ['issues.labeled', 'pull_request.labeled'],
+        from: 'humans',
+        labelFilter: label,
+        enabled: true,
+        description: description.trim() || `Human approval: ${label}`,
+        prompt: `A human granted the approval \`${label}\` (the label was added). Proceed with your part of the process. Reply \`[PASS]\` if there is nothing to do yet.`,
+      });
+      onDone?.();
+    } catch (e) { setError(e.message); setSaving(false); }
+  }
+
+  return (
+    <SidePanel open onClose={onClose} title="Human approval gate" width="520px">
+      <p style={hint}>
+        A gate only a human can set. {to
+          ? <><strong>{toName || to}</strong> waits until a human adds the <code>{label || 'human:…'}</code> label.</>
+          : <>The step you pick waits until a human adds the <code>{label || 'human:…'}</code> label.</>}
+        {' '}No agent emits it.
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <Field label="Approval name">
+          <input autoFocus value={name} onChange={e => setName(e.target.value)}
+            placeholder="e.g. FDD approved, Go-live approved" style={input}
+            onKeyDown={e => { if (e.key === 'Enter') submit(); }} />
+          {label && <small style={small}>Label: <code>{label}</code></small>}
+        </Field>
+        {!to && (
+          <Field label="Waits / blocks (downstream step)">
+            <select value={downstream} onChange={e => setDownstream(e.target.value)} style={input}>
+              <option value="">— select —</option>
+              {roles.map(r => <option key={r.id} value={r.id}>{r.displayName || r.id}</option>)}
+            </select>
+          </Field>
+        )}
+        <Field label="Description (optional)">
+          <input value={description} onChange={e => setDescription(e.target.value)}
+            placeholder="e.g. Client signs off the FDD" style={input} />
+        </Field>
+        {error && <span style={errStyle}>{error}</span>}
+        <div style={actions}>
+          {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
+          <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+          <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Adding…' : 'Add approval'}</button>
+        </div>
+      </div>
+    </SidePanel>
+  );
+}
+
+// Raw GitHub events — issue opened, PR opened, push, … (@github actor).
+const RAW_EVENTS = [
+  { value: 'issues.opened', label: 'Issue opened' },
+  { value: 'issues.closed', label: 'Issue closed' },
+  { value: 'pull_request.opened', label: 'PR opened' },
+  { value: 'pull_request.reopened', label: 'PR reopened' },
+  { value: 'pull_request.closed', label: 'PR closed / merged' },
+  { value: 'pull_request_review.submitted', label: 'PR review submitted' },
+  { value: 'issue_comment.created', label: 'Comment created' },
+  { value: 'push', label: 'Push' },
+];
+
+export function EventForm({ to, toName, ops = liveOps, onBack, onClose, onDone }) {
+  const [events, setEvents] = useState([]);
+  const [fromFilter, setFromFilter] = useState('any-except-self');
+  const [repo, setRepo] = useState('');
+  const [prompt, setPrompt] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const toggle = (v) => setEvents(prev => prev.includes(v) ? prev.filter(x => x !== v) : [...prev, v]);
+  const effectivePrompt = prompt
+    || `A repo event (${events.join(', ') || '<event>'}) occurred in \`${repo || '<repo>'}\`. The event payload above has the details.\n\n<Describe what ${toName || to} should do.> Reply \`[PASS]\` if there's nothing to do.`;
+
+  async function submit() {
+    if (!events.length) { setError('Pick at least one event.'); return; }
+    setSaving(true); setError(null);
+    try {
+      await ops.createTrigger(to, {
+        type: 'github-event',
+        events,
+        from: fromFilter,
+        repo: repo || undefined,
+        enabled: true,
+        description: `Wake on ${events.join(', ')}`,
+        prompt: effectivePrompt,
+      });
+      onDone?.();
+    } catch (e) { setError(e.message); setSaving(false); }
+  }
+
+  return (
+    <SidePanel open onClose={onClose} title="GitHub event" width="520px">
+      <p style={hint}>
+        <strong>{toName || to}</strong> wakes on a raw repo event — no label routing.
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <Field label="Events">
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-2)' }}>
+            {RAW_EVENTS.map(ev => (
+              <label key={ev.value} style={check}>
+                <input type="checkbox" checked={events.includes(ev.value)} onChange={() => toggle(ev.value)} />
+                {ev.label}
+              </label>
+            ))}
+          </div>
+        </Field>
+        <Field label="Origin filter (from)">
+          <select value={fromFilter} onChange={e => setFromFilter(e.target.value)} style={input}>
+            {FROM_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+          </select>
+          <small style={small}>Use <code>humans</code> to react only to events humans caused.</small>
+        </Field>
+        <Field label="Repo">
+          <input value={repo} onChange={e => setRepo(e.target.value)} placeholder="owner/name" style={input} />
+        </Field>
+        <Field label="Listener prompt">
+          <textarea value={effectivePrompt} onChange={e => setPrompt(e.target.value)}
+            style={{ ...input, minHeight: 100, fontFamily: 'var(--eb-font-mono)', resize: 'vertical' }} />
+        </Field>
+        {error && <span style={errStyle}>{error}</span>}
+        <div style={actions}>
+          {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
+          <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+          <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Wiring…' : 'Create trigger'}</button>
+        </div>
+      </div>
+    </SidePanel>
+  );
+}
+
+// Webhook (@external actor): an http trigger the webhook server fires on
+// POST /hooks/<agentId>/<triggerId> with X-Hook-Secret. The secret is generated
+// client-side (same as the trigger inspector) and shown once after creation.
+function generateHookSecret() {
+  const arr = new Uint8Array(24);
+  (window.crypto || window.msCrypto).getRandomValues(arr);
+  return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+export function WebhookForm({ to, toName, ops = liveOps, onBack, onClose, onDone }) {
+  const [description, setDescription] = useState('');
+  const [prompt, setPrompt] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [created, setCreated] = useState(null); // { id, secret } after submit
+
+  const isDraft = ops.mode === 'draft';
+  const effectivePrompt = prompt
+    || `An external system called this agent's webhook${description ? ` (${description})` : ''}. <Describe what ${toName || to} should do.> Reply \`[PASS]\` if there's nothing to do.`;
+
+  async function submit() {
+    setSaving(true); setError(null);
+    try {
+      const secret = generateHookSecret();
+      const t = await ops.createTrigger(to, {
+        type: 'http',
+        secret,
+        enabled: true,
+        description: description.trim() || 'Webhook',
+        prompt: effectivePrompt,
+      });
+      setCreated({ id: t && t.id, secret });
+      setSaving(false);
+    } catch (e) { setError(e.message); setSaving(false); }
+  }
+
+  if (created) {
+    return (
+      <SidePanel open onClose={() => onDone?.()} title="Webhook created" width="520px">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+          {isDraft ? (
+            <p style={hint}>
+              The webhook trigger is part of the draft. The final URL exists once the
+              team is materialised; the secret below is already stored on the trigger.
+            </p>
+          ) : (
+            <Field label="URL (webhook server, HOOK_PORT)">
+              <code style={{ ...input, display: 'block', userSelect: 'all' }}>
+                POST /hooks/{to}/{created.id || '<trigger-id>'}
+              </code>
+            </Field>
+          )}
+          <Field label="X-Hook-Secret (shown once — copy it now)">
+            <code style={{ ...input, display: 'block', userSelect: 'all', wordBreak: 'break-all' }}>{created.secret}</code>
+          </Field>
+          <div style={actions}>
+            <button onClick={() => onDone?.()} style={primary}>Done</button>
+          </div>
+        </div>
+      </SidePanel>
+    );
+  }
+
+  return (
+    <SidePanel open onClose={onClose} title="Webhook" width="520px">
+      <p style={hint}>
+        An external system (CI, tooling) wakes <strong>{toName || to}</strong> via
+        {' '}<code>POST /hooks/&lt;agent&gt;/&lt;trigger&gt;</code> with an <code>X-Hook-Secret</code> header.
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <Field label="Description">
+          <input value={description} onChange={e => setDescription(e.target.value)}
+            placeholder="e.g. CI pipeline finished" style={input} />
+        </Field>
+        <Field label="Prompt">
+          <textarea value={effectivePrompt} onChange={e => setPrompt(e.target.value)}
+            style={{ ...input, minHeight: 100, fontFamily: 'var(--eb-font-mono)', resize: 'vertical' }} />
+        </Field>
+        {error && <span style={errStyle}>{error}</span>}
+        <div style={actions}>
+          {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
+          <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+          <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Creating…' : 'Create webhook'}</button>
+        </div>
+      </div>
+    </SidePanel>
+  );
+}
+
+// Schedule (@timer actor): recurring cron or one-shot timestamp.
+export function cronPreview(expr) {
+  const p = String(expr || '').trim().split(/\s+/);
+  if (p.length !== 5) return 'Expected 5 fields: minute hour day-of-month month day-of-week';
+  const [min, hr, dom, mon, dow] = p;
+  const DAYS = { 0: 'Sunday', 1: 'Monday', 2: 'Tuesday', 3: 'Wednesday', 4: 'Thursday', 5: 'Friday', 6: 'Saturday', 7: 'Sunday' };
+  const two = (s) => String(s).padStart(2, '0');
+  if (/^\d+$/.test(min) && /^\d+$/.test(hr)) {
+    const time = `${two(hr)}:${two(min)}`;
+    if (dom === '*' && mon === '*' && dow === '*') return `every day at ${time}`;
+    if (dom === '*' && mon === '*' && DAYS[dow]) return `every ${DAYS[dow]} at ${time}`;
+    if (/^\d+$/.test(dom) && mon === '*' && dow === '*') return `on day ${dom} of every month at ${time}`;
+  }
+  if (/^\*\/\d+$/.test(min) && hr === '*') return `every ${min.slice(2)} minutes`;
+  if (min === '0' && /^\*\/\d+$/.test(hr)) return `every ${hr.slice(2)} hours`;
+  return 'custom schedule';
+}
+
+export function ScheduleForm({ to, toName, ops = liveOps, onBack, onClose, onDone }) {
+  const [kind, setKind] = useState('cron'); // cron | once
+  const [cron, setCron] = useState('0 9 * * 1');
+  const [at, setAt] = useState('');
+  const [prompt, setPrompt] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const effectivePrompt = prompt
+    || `Scheduled run. <Describe what ${toName || to} should do.> Reply \`[PASS]\` if there's nothing to do.`;
+
+  async function submit() {
+    setSaving(true); setError(null);
+    try {
+      if (kind === 'cron') {
+        if (cron.trim().split(/\s+/).length !== 5) { setError('Cron needs 5 fields.'); setSaving(false); return; }
+        await ops.createTrigger(to, {
+          type: 'cron', cron: cron.trim(), enabled: true,
+          description: `Runs ${cronPreview(cron)}`, prompt: effectivePrompt,
+        });
+      } else {
+        if (!at) { setError('Pick a date and time.'); setSaving(false); return; }
+        await ops.createTrigger(to, {
+          type: 'once', at: new Date(at).toISOString(), enabled: true,
+          description: 'One-shot run', prompt: effectivePrompt,
+        });
+      }
+      onDone?.();
+    } catch (e) { setError(e.message); setSaving(false); }
+  }
+
+  return (
+    <SidePanel open onClose={onClose} title="Schedule" width="520px">
+      <p style={hint}>
+        The scheduler wakes <strong>{toName || to}</strong> — recurring or once.
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <Field label="Kind">
+          <div style={{ display: 'flex', gap: 'var(--eb-space-3)' }}>
+            <label style={check}>
+              <input type="radio" checked={kind === 'cron'} onChange={() => setKind('cron')} /> Recurring (cron)
+            </label>
+            <label style={check}>
+              <input type="radio" checked={kind === 'once'} onChange={() => setKind('once')} /> Once
+            </label>
+          </div>
+        </Field>
+        {kind === 'cron' ? (
+          <Field label="Cron expression (min hour dom mon dow)">
+            <input value={cron} onChange={e => setCron(e.target.value)} style={{ ...input, fontFamily: 'var(--eb-font-mono)' }} />
+            <small style={small}>{cronPreview(cron)}</small>
+          </Field>
+        ) : (
+          <Field label="Run at">
+            <input type="datetime-local" value={at} onChange={e => setAt(e.target.value)} style={input} />
+          </Field>
+        )}
+        <Field label="Prompt">
+          <textarea value={effectivePrompt} onChange={e => setPrompt(e.target.value)}
+            style={{ ...input, minHeight: 100, fontFamily: 'var(--eb-font-mono)', resize: 'vertical' }} />
+        </Field>
+        {error && <span style={errStyle}>{error}</span>}
+        <div style={actions}>
+          {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
+          <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+          <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Creating…' : 'Create schedule'}</button>
+        </div>
       </div>
     </SidePanel>
   );

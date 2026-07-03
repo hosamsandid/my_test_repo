@@ -16,11 +16,14 @@
 //   - createTypes   — per drag-source kind, the connection types the create
 //                     dialog offers (the source dimension, #411)
 //
-// Type tokens (per source):
-//   agent:  'github' | 'label' | 'artifact' | 'hierarchy' | 'dependency'
-//           ('artifact' with no name/path degrades to a plain dependency; the
-//           BP view keeps 'dependency' as an explicit tile). The actor sources
-//           (human/github/external/timer) gain their own token sets in #411.
+// Type tokens (per source, #411):
+//   agent:    'github-pr' | 'github-issue' | 'label' | 'artifact' | 'hierarchy'
+//             | 'dependency'  ('artifact' with no name/path degrades to a plain
+//             dependency; the BP view keeps 'dependency' as an explicit tile)
+//   human:    'human-label' | 'approval'
+//   github:   'event'
+//   external: 'webhook'
+//   timer:    'schedule'
 //
 // Modes:
 //   live      — a materialised team; ops write through to running agents
@@ -30,8 +33,25 @@
 //   viewer    — any read-only projection (BP viewer without a workspace)
 
 const PROCESS_CREATE_TYPES = {
-  agent: ['github', 'label', 'artifact', 'hierarchy'],
+  agent: ['github-pr', 'github-issue', 'label', 'artifact', 'hierarchy'],
+  human: ['human-label', 'approval'],
+  github: ['event'],
+  external: ['webhook'],
+  timer: ['schedule'],
 };
+
+// Actor pseudo-node id → source kind (#411). Everything else is an agent.
+const ACTOR_SOURCE_KINDS = {
+  '@human': 'human',
+  '@github': 'github',
+  '@external': 'external',
+  '@timer': 'timer',
+};
+
+/** The drag-source kind of a node id: an actor kind or 'agent'. */
+export function sourceKindOf(nodeId) {
+  return ACTOR_SOURCE_KINDS[nodeId] || 'agent';
+}
 
 const MODES = {
   live: {

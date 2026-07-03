@@ -14,7 +14,7 @@
 import { computeFlowLayout, assignCrossCoords } from './flow-layout';
 import { routeOrthogonalEdges, roundedPathD, laneLoadByChannel } from './edge-router';
 
-export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChannel, onSelectEdge } = {}) {
+export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge, actorSources } = {}) {
 
   // ─── Constants ──────────────────────────────────────────────────────
   const NODE_W      = 320;
@@ -25,6 +25,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
   const ACTOR_W     = 150;   // actor pseudo-nodes (#410) — the "outside world" column
   const ACTOR_H     = 40;
   const ACTOR_ICON  = { human: '👤', github: '🐙', external: '⚡', timer: '⏰' };
+  // Placeholder actors (#411): in an editable process view every source is
+  // offered as a drag source even before it has edges, so the first cron /
+  // human label / webhook can be wired on the canvas.
+  const DEFAULT_ACTORS = [
+    { id: '@human', kind: 'actor', actor: 'human', displayName: 'Human' },
+    { id: '@github', kind: 'actor', actor: 'github', displayName: 'GitHub' },
+    { id: '@external', kind: 'actor', actor: 'external', displayName: 'External system' },
+    { id: '@timer', kind: 'actor', actor: 'timer', displayName: 'Schedule' },
+  ];
 
   // Single source of truth for edge colours (#402). Every drawer and the legend
   // read from here so the graph and its key can never drift apart. Each entry
@@ -520,10 +529,18 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
   function actorHasEdges(a) {
     return (state.extraEdges || []).some(e => e.from === a.id && state.byId[e.to]);
   }
+  function actorsAsSources() {
+    return !!(actorSources && state.editable && onConnect);
+  }
   function visibleActors() {
-    return (state.actors || [])
+    // Editable process views offer every actor as a drag source (#411);
+    // read-only views show only actors that actually have edges.
+    const byId = new Map();
+    if (actorsAsSources()) DEFAULT_ACTORS.forEach(a => byId.set(a.id, a));
+    (state.actors || []).forEach(a => byId.set(a.id, a));
+    return [...byId.values()]
       .filter(a => !state.hiddenActorKinds.has(a.actor))
-      .filter(a => actorHasEdges(a));
+      .filter(a => actorsAsSources() || actorHasEdges(a));
   }
 
   // The "outside world" column (#410): actors stack top→down, left of the
@@ -1183,28 +1200,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
         node.appendChild(port);
       }
 
-      // GitHub PR/Issue output ports (#380): labelled pills on the right edge,
-      // shown only when the node produces that artifact. Grab one and drag it to
-      // another node to declare that agent reacts to the PR/issue.
-      if (state.editable && onConnectChannel && bp.github) {
-        const outs = [];
-        if (bp.github.producesPr) outs.push({ artifact: 'pr', label: 'PR', color: EDGE_STYLES.pr.color });
-        if (bp.github.producesIssue) outs.push({ artifact: 'issue', label: 'Issue', color: EDGE_STYLES.issue.color });
-        outs.forEach((o, i) => {
-          const pill = document.createElement('div');
-          pill.title = `Drag to another node: it reacts to this agent's ${o.label}`;
-          pill.textContent = o.label;
-          pill.style.cssText = `position:absolute;right:-10px;top:calc(50% + ${18 + i * 20}px);`
-            + `padding:1px 6px;border-radius:9px;background:${o.color};color:#fff;font-size:9px;`
-            + `font-weight:600;line-height:1.4;cursor:crosshair;z-index:3;box-shadow:var(--eb-shadow-sm);`;
-          pill.addEventListener('mousedown', (ev) => {
-            ev.stopPropagation();
-            ev.preventDefault();
-            startConnect(n.id, o.artifact);
-          });
-          node.appendChild(pill);
-        });
-      }
+      // NOTE (#411): the separate PR/Issue drag pills are gone — the header
+      // badges above keep the "opens PRs/issues" information visible, and the
+      // single ● port creates every connection type (the create dialog ranks
+      // the PR/Issue channel first for producers).
 
       // Agent Prompt panel — the node's prompt/content, read-only markdown.
       // Editing (prompt, stage, links) is in the right-side inspector.
@@ -1372,6 +1371,19 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       el.innerHTML = `<span style="font-size:15px;line-height:1">${ACTOR_ICON[a.actor] || '•'}</span>`
         + `<span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.displayName || a.id)}</span>`;
       el.addEventListener('mousedown', e => e.stopPropagation());
+      // The same ● connect handle agents carry (#411): drag onto an agent to
+      // create a trigger from this source (schedule, human label, event, hook).
+      if (actorsAsSources()) {
+        const port = document.createElement('div');
+        port.title = 'Drag to an agent: it gets a trigger from this source';
+        port.style.cssText = 'position:absolute;right:-7px;top:calc(50% - 7px);width:14px;height:14px;border-radius:50%;background:var(--eb-accent-primary);border:2px solid var(--eb-bg-surface);cursor:crosshair;z-index:3;';
+        port.addEventListener('mousedown', (ev) => {
+          ev.stopPropagation();
+          ev.preventDefault();
+          startConnect(a.id);
+        });
+        el.appendChild(port);
+      }
       canvas.appendChild(el);
     });
   }
@@ -2267,8 +2279,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       y: (clientY - r.top - state.pan.y) / state.zoom,
     };
   }
-  function startConnect(fromId, artifact) {
-    state.connecting = { fromId, artifact: artifact || null };
+  function startConnect(fromId) {
+    state.connecting = { fromId };
     viewport.style.cursor = 'crosshair';
     tempEdge = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     tempEdge.setAttribute('stroke', 'var(--eb-accent-primary)');
@@ -2279,11 +2291,20 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
   }
   function updateTempEdge(clientX, clientY) {
     if (!tempEdge) return;
-    const pos = state.positions[state.connecting.fromId];
-    const el = canvas.querySelector(`.bp-node[data-id="${state.connecting.fromId}"]`);
-    if (!pos || !el) return;
-    const x1 = pos.x + NODE_W;
-    const y1 = pos.y + el.offsetHeight / 2;
+    const fromId = state.connecting.fromId;
+    // The drag source is an agent card or an actor node (#411).
+    let x1, y1;
+    const actorPos = state.actorPositions[fromId];
+    if (actorPos) {
+      x1 = actorPos.x + ACTOR_W;
+      y1 = actorPos.y + ACTOR_H / 2;
+    } else {
+      const pos = state.positions[fromId];
+      const el = canvas.querySelector(`.bp-node[data-id="${fromId}"]`);
+      if (!pos || !el) return;
+      x1 = pos.x + NODE_W;
+      y1 = pos.y + el.offsetHeight / 2;
+    }
     const p = toCanvas(clientX, clientY);
     const cx = x1 + (p.x - x1) * 0.4;
     const cx2 = p.x - (p.x - x1) * 0.4;
@@ -2291,18 +2312,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
   }
   function finishConnect(e) {
     const fromId = state.connecting.fromId;
-    const artifact = state.connecting.artifact;
     state.connecting = null;
     viewport.style.cursor = 'grab';
     if (tempEdge) { tempEdge.remove(); tempEdge = null; }
+    // Only agent cards are valid drop targets — actor nodes are sources only.
     const el = document.elementFromPoint(e.clientX, e.clientY);
     const nodeEl = el && el.closest ? el.closest('.bp-node') : null;
     const toId = nodeEl && nodeEl.dataset ? nodeEl.dataset.id : null;
     if (!toId || toId === fromId) return;
-    // A drag from a PR/Issue output port declares a GitHub channel (#380);
-    // the plain ● port declares a generic hand-off.
-    if (artifact && onConnectChannel) onConnectChannel(fromId, toId, artifact);
-    else if (onConnect) onConnect(fromId, toId);
+    if (onConnect) onConnect(fromId, toId);
   }
 
   function onWheel(e) {

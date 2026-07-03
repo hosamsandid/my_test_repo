@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Save, Trash2, X, Plus } from 'lucide-react';
+import { Save, Trash2, X } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
 import { resolveInheritedStage } from './hierarchy-utils';
 import ConnectionsSection from './ConnectionsSection';
@@ -132,17 +132,13 @@ export default function DraftNodeInspector({ role, roles = [], stages = [], ops,
 }
 
 function TriggerCard({ trigger, onEmits, onDelete }) {
-  const [newLabel, setNewLabel] = useState('');
+  // Per-trigger emits are legacy (#414): still readable (the graph builder
+  // keeps evaluating them) and removable as cleanup, but never added to — new
+  // emits go on the role, in the Connections section below.
   const emits = Array.isArray(trigger.emits) ? trigger.emits : [];
   const listen = trigger.type === 'github-event'
     ? (trigger.labelFilter ? `🏷 ${trigger.labelFilter}` : (trigger.events || []).join(', '))
     : (trigger.cron || trigger.type);
-
-  const add = () => {
-    const l = newLabel.trim();
-    if (l && !emits.includes(l)) onEmits([...emits, l]);
-    setNewLabel('');
-  };
 
   return (
     <div style={{ border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)', marginBottom: 6 }}>
@@ -151,20 +147,18 @@ function TriggerCard({ trigger, onEmits, onDelete }) {
         <code style={{ flex: 1, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{listen}</code>
         <button onClick={onDelete} title="Delete trigger" style={{ ...ghost, padding: '1px 5px', borderColor: 'var(--eb-status-error)', color: 'var(--eb-status-error)' }}><Trash2 size={11} /></button>
       </div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center', marginTop: 6 }}>
-        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>emits</span>
-        {emits.length === 0 && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>none</span>}
-        {emits.map(l => (
-          <button key={l} onClick={() => onEmits(emits.filter(x => x !== l))} title="Remove"
-            style={emitChip}>{l} <X size={10} /></button>
-        ))}
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
-          <input value={newLabel} onChange={e => setNewLabel(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
-            placeholder="add label…" style={{ ...input, width: 130, padding: '1px 6px', fontSize: 'var(--eb-text-xs)' }} />
-          <button onClick={add} style={{ ...ghost, padding: '1px 5px' }}><Plus size={11} /></button>
-        </span>
-      </div>
+      {emits.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center', marginTop: 6 }}>
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}
+            title="Per-trigger emits are legacy — declare emitted labels on the role (Connections → Emits labels)">
+            emits (legacy)
+          </span>
+          {emits.map(l => (
+            <button key={l} onClick={() => onEmits(emits.filter(x => x !== l))} title="Remove (cleanup — re-add it on the role instead)"
+              style={emitChip}>{l} <X size={10} /></button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

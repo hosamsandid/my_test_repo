@@ -1,7 +1,9 @@
 # Flow-Editor: Einheitliches Verbindungsmodell (Konzept)
 
-Status: **Konzept, abgestimmt — noch nicht implementiert.**
+Status: **Implementiert** (Schritte 1–6, Issues #409–#414).
 Bezieht sich auf den Flow-Editor (`/flows`, `ProcessGraphPanel`) und den BriefingPack-Viewer (`FlowGraph.jsx`).
+Die Capability-Matrix lebt in `admin-console/src/pages/process/connection-capabilities.js`,
+die Dialoge in `EdgeDialogs.jsx`, das Aktor-Mapping in `admin-console/api/unified-graph.js` / `process-graph.js`.
 
 Dieses Dokument beschreibt, wie das Erstellen, Bearbeiten und Darstellen von
 Verbindungen zwischen Agenten (und externen Quellen) über **alle Ansichten
@@ -339,10 +341,13 @@ BP-Modus sowohl über die Kante als auch — wie bisher — über den Inspector.
 
 ### 2.9 Datenmodell-Begleitmaßnahmen
 
-1. **Emits kanonisieren:** `agent.emits[]` wird der einzige Schreibort;
-   `trigger.emits[]` bleibt lesbar (Graph-Builder wertet es weiter aus),
-   wird aber von keiner UI mehr beschrieben. Der Inline-Emits-Adder auf der
-   TriggerCard schreibt künftig auf Agent-Ebene.
+1. **Emits kanonisieren (umgesetzt, #414):** `agent.emits[]` ist der einzige
+   Schreibort — der Emits-Editor sitzt in der `ConnectionsSection`
+   („Emits labels", Draft- und Live-Inspector). `trigger.emits[]` bleibt
+   lesbar (der Graph-Builder wertet es weiter aus) und wird in der
+   TriggerCard als „emits (legacy)" angezeigt; dort ist nur noch
+   *Entfernen* (Aufräumen) möglich, kein Hinzufügen. Die Delete-Pfade des
+   Label-Hand-offs räumen weiterhin beide Orte.
 2. **Adapter-Parität dokumentiert halten:** `liveOps` / `makeDraftOps` /
    `makeBpOps` behalten ihre identische Signatur; die Feldnamen-Drift
    (`parent` vs. `parentMemberId`, `dataFlow.*`) bleibt in den Adaptern

@@ -42,8 +42,11 @@ Die 4-Aktoren-Außenwelt aus Teil 2 hat sich in der Praxis als zu laut erwiesen
    und alle Kanten wieder als Bezier zeichnete) ist entfernt. Jeder Flow —
    Prozess, Draft, Member-Baum, BriefingPack — läuft durch das Layered-
    Layout; die Hierarchie speist die Spaltenzuordnung (sichtbares Kind →
-   Spalte nach dem Parent), die graue Hierarchie-Kante wird wie jede andere
-   orthogonal geroutet. Kinder bleiben pro Karte auf-/zuklappbar
+   Spalte nach dem Parent, Geschwister gruppiert). Die graue Hierarchie-
+   Kante selbst bleibt bewusst eine label- und pfeillose **Bézier-Kurve**
+   unterhalb der Prozess-Verdrahtung: sie belegt keine Kanal-Lanes/Ports,
+   kann dank der Gruppierung nichts kreuzen und trennt Struktur visuell
+   von Arbeits-Hand-offs. Kinder bleiben pro Karte auf-/zuklappbar
    (`Children (n)`-Button); Prozess-/Team-Ansichten klappen sie per Default
    auf (`expandChildrenByDefault` an `initFlowGraph`, Nutzer-Zuklappen
    überlebt Daten-Refreshes), BP-Workspaces bleiben default-zugeklappt.

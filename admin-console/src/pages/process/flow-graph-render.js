@@ -615,9 +615,11 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
         if (idSet.has(dep) && dep !== n.id) edges.push({ from: dep, to: n.id });
       });
       // Hierarchy participates in the layering: a visible child sits after its
-      // parent along the flow axis and near it on the cross axis.
+      // parent along the flow axis and near it on the cross axis. Marked so
+      // the channel gap sizing can skip it — hierarchy is drawn as a bezier
+      // fan, not through the channel lanes.
       if (bp.parent && idSet.has(bp.parent) && bp.parent !== n.id) {
-        edges.push({ from: bp.parent, to: n.id });
+        edges.push({ from: bp.parent, to: n.id, hier: true });
         parentOf.set(n.id, bp.parent);
       }
     });
@@ -640,7 +642,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     // The orthogonal router (drawEdges) lays the cross runs of the edges into
     // the channel between two columns, one lane per overlapping run. Reserve
     // enough channel space for those lanes so labels and parallel runs fit.
-    const loads = laneLoadByChannel(edges, colOf);
+    // Hierarchy edges don't take lanes (bezier fan) — skip them here.
+    const loads = laneLoadByChannel(edges.filter(e => !e.hier), colOf);
     const laneNeed = c => 56 + Math.max(0, (loads.get(c) || 0) - 1) * 18;
 
     const pos = {};
@@ -1612,18 +1615,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
           });
         });
       });
-      // Hierarchy edges (gray solid) — routed like every other edge, so an
-      // expanded parent-child pair reads the same as a hand-off.
-      visible.forEach(n => {
-        const bp = state.byId[n.id];
-        if (!bp || !bp.parent || !visibleIds.has(bp.parent) || bp.parent === n.id) return;
-        list.push({
-          from: bp.parent, to: n.id,
-          color: EDGE_STYLES.hierarchy.color, width: 2, dash: '', opacity: 0.85,
-          labelText: '', chip: false, gate: false,
-          hit: { from: bp.parent, to: n.id, on: 'parent' },
-        });
-      });
       if (list.length === 0) return;
 
       const routed = routeOrthogonalEdges({
@@ -1665,6 +1656,32 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
         else drawEdgeLabelText(p.cx, p.cy, e.labelText, e.color);
       });
     }
+
+    // Hierarchy edges — a quiet bezier fan from the parent to its children.
+    // Deliberately NOT routed through the orthogonal channels: they carry no
+    // label, the sibling group sits in the column right next to its parent
+    // (so the curves cross nothing), and the soft, arrowless curve visually
+    // separates structure (containment) from work hand-offs. Drawn before the
+    // routed edges so they sit beneath the process wiring.
+    visible.forEach(n => {
+      const bp = state.byId[n.id];
+      if (!bp || !bp.parent || !visibleIds.has(bp.parent) || bp.parent === n.id) return;
+      const pPos = state.positions[bp.parent];
+      const cPos = state.positions[n.id];
+      if (!pPos || !cPos) return;
+      const pEl = canvas.querySelector(`.bp-node[data-id="${bp.parent}"]`);
+      const cEl = canvas.querySelector(`.bp-node[data-id="${n.id}"]`);
+      const pH = pEl ? pEl.offsetHeight : getNodeHeight(bp.parent);
+      const cH = cEl ? cEl.offsetHeight : getNodeHeight(n.id);
+      const d = vertical
+        // flow left→right: parent's right face → child's left face
+        ? drawBezierEdge(pPos.x + NODE_W, pPos.y + pH / 2, cPos.x, cPos.y + cH / 2,
+            EDGE_STYLES.hierarchy.color, 2, '', false, 'horizontal')
+        // flow top→down: parent's bottom face → child's top face
+        : drawBezierEdge(pPos.x + NODE_W / 2, pPos.y + pH, cPos.x + NODE_W / 2, cPos.y,
+            EDGE_STYLES.hierarchy.color, 2, '', false, 'vertical');
+      addEdgeHit(d, { from: bp.parent, to: n.id, on: 'parent' });
+    });
 
     drawRoutedProcessEdges();
     drawArtifactEdges(visibleIds);

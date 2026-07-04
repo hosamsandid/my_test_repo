@@ -8,7 +8,7 @@ die Dialoge in `EdgeDialogs.jsx`, das Aktor-Mapping in `admin-console/api/unifie
 ## Revision (Juli 2026): weniger Aktoren, Trigger im Knoten, orthogonale Aktor-Kanten
 
 Die 4-Aktoren-Außenwelt aus Teil 2 hat sich in der Praxis als zu laut erwiesen
-(Kreuz-und-quer-Bezierkurven von links, verwirrender ⏰/👤-Split). Vier
+(Kreuz-und-quer-Bezierkurven von links, verwirrender ⏰/👤-Split). Fünf
 Änderungen ersetzen die betroffenen Abschnitte:
 
 1. **Nur noch zwei Aktoren: 🐙 GitHub und ⚡ Drittsystem.**
@@ -37,6 +37,16 @@ Die 4-Aktoren-Außenwelt aus Teil 2 hat sich in der Praxis als zu laut erwiesen
    Agent-Chat) jetzt auch im **Draft-Inspector** als Tab eingebettet
    (ops-Adapter-fähig) — Trigger lassen sich im Flow-Editor anlegen,
    bearbeiten, schalten und löschen, im Draft wie im Live-Team.
+5. **Ein Layout für alles — Layered auch mit Hierarchie.** Das alte
+   Baum-Layout (das griff, sobald eine Parent-Child-Beziehung existierte,
+   und alle Kanten wieder als Bezier zeichnete) ist entfernt. Jeder Flow —
+   Prozess, Draft, Member-Baum, BriefingPack — läuft durch das Layered-
+   Layout; die Hierarchie speist die Spaltenzuordnung (sichtbares Kind →
+   Spalte nach dem Parent), die graue Hierarchie-Kante wird wie jede andere
+   orthogonal geroutet. Kinder bleiben pro Karte auf-/zuklappbar
+   (`Children (n)`-Button); Prozess-/Team-Ansichten klappen sie per Default
+   auf (`expandChildrenByDefault` an `initFlowGraph`, Nutzer-Zuklappen
+   überlebt Daten-Refreshes), BP-Workspaces bleiben default-zugeklappt.
 
 Dieses Dokument beschreibt, wie das Erstellen, Bearbeiten und Darstellen von
 Verbindungen zwischen Agenten (und externen Quellen) über **alle Ansichten

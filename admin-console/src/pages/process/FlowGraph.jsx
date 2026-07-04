@@ -55,6 +55,9 @@ export function FlowGraph({ workspace, team }) {
       // Edge clicks open the same "Connection" shell as the process views
       // (#412) — dependency/artifact removable, everything else read-only.
       onSelectEdge: caps.edgeClick ? (edge) => setSelectedEdge(edge) : undefined,
+      // Live/team views show the whole member tree; BP packs stay collapsed
+      // until expanded (packs can be large, the pack card is the entry point).
+      expandChildrenByDefault: !workspace,
     });
     apiRef.current = g;
     g.setEditable(caps.editable); // connect-to-wire port (BP); editing is in the inspector

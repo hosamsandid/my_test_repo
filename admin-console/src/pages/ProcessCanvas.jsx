@@ -179,7 +179,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
       onSelectNode: (id) => setSelectedId(id),
       onConnect: (from, to) => { if (editableRef.current) setConnectPair({ from, to }); },
       onSelectEdge: (edge) => { if (editableRef.current) setSelectedEdge(edge); },
-      actorSources: true, // offer @human/@github/@external/@timer as drag sources (#411)
+      actorSources: true, // offer @github/@external as drag sources (#411)
+      expandChildrenByDefault: true, // process flows show the whole team; parents collapse on demand
     });
     graphRef.current = g;
     return () => { g.cleanup(); graphRef.current = null; };

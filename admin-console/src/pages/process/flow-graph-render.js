@@ -14,7 +14,7 @@
 import { computeFlowLayout, assignCrossCoords } from './flow-layout';
 import { routeOrthogonalEdges, roundedPathD, laneLoadByChannel } from './edge-router';
 
-export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge, actorSources } = {}) {
+export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge, actorSources, expandChildrenByDefault } = {}) {
 
   // ─── Constants ──────────────────────────────────────────────────────
   const NODE_W      = 320;
@@ -212,6 +212,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     roots:              [],
     contentVisible:     new Set(),
     childrenVisible:    new Set(),
+    userCollapsed:      new Set(), // parents the user explicitly collapsed (with expandChildrenByDefault)
     outputsVisible:     new Set(),
     inputsVisible:      new Set(),
     positions:          {},
@@ -334,6 +335,16 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
       .filter(Boolean);
 
     recomputeRoots();
+    // Process views show the whole team by default — a freshly-wired child
+    // must not vanish behind its parent. Parents the user collapsed stay
+    // collapsed across data refreshes; BP viewers keep collapsed-by-default.
+    if (expandChildrenByDefault) {
+      state.briefings.forEach(bp => {
+        if (bp.children && bp.children.length > 0 && !state.userCollapsed.has(bp.id)) {
+          state.childrenVisible.add(bp.id);
+        }
+      });
+    }
     buildArtifactRegistry();
     loadingEl.style.display = 'none';
     layout();
@@ -515,32 +526,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     return ARTIFACT_H;
   }
 
-  // When stage bands are on, group root nodes by their (manual) stage so each
-  // stage's subtrees are contiguous along the main axis → clean, non-overlapping
-  // bands. Stable within a stage; unstaged roots come last (#362 E).
-  function orderRootsByStage(ids) {
-    if (!state.showStages) return ids;
-    const groups = new Map();
-    const order = [];
-    ids.forEach(id => {
-      const s = (state.byId[id] && state.byId[id].stage) || '';
-      if (!groups.has(s)) { groups.set(s, []); order.push(s); }
-      groups.get(s).push(id);
-    });
-    order.sort((a, b) => (a === '' ? 1 : 0) - (b === '' ? 1 : 0)); // unstaged last
-    return order.flatMap(s => groups.get(s));
-  }
-
   function layout() {
     const visible = getVisibleNodes();
     if (visible.length === 0) return;
-    if (useLayeredLayout(visible)) {
-      layoutLayered(visible);
-    } else if (state.orientation === 'vertical') {
-      layoutVertical(visible);
-    } else {
-      layoutHorizontal(visible);
-    }
+    layoutLayered(visible);
     layoutActors();
   }
 
@@ -587,7 +576,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
         x += ACTOR_W + 28;
       });
     } else {
-      // flow 'right' (and the tree layouts) — a column left of the graph
+      // flow 'right' — a column left of the graph
       const x = minX - ACTOR_W - 160;
       let y = minY;
       shown.forEach(a => {
@@ -597,24 +586,16 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     }
   }
 
-  // Flat process/draft flows have no parent-child hierarchy — their whole
-  // structure is the directed hand-off / dependency edges. The tree layout piles
-  // those into a single column, so we lay them out as an ordered layered DAG
-  // instead (sources → sinks, crossings reduced). Hierarchical graphs (BP packs,
-  // team-member trees) keep the tree layout.
-  function useLayeredLayout(visible) {
-    const anyHierarchy = state.briefings.some(bp => bp.parent || (bp.children && bp.children.length));
-    if (anyHierarchy) return false;
-    const hasExtra = (state.extraEdges || []).length > 0;
-    const hasStageOrder = (state.stageOrder || []).length > 0;
-    const hasDeps = visible.some(n => ((state.byId[n.id] || {}).depends_on || []).length > 0);
-    return hasExtra || hasStageOrder || hasDeps;
-  }
-
-  // Layered layout for a flat flow. Columns follow the flow direction (the
-  // stage order overrides them when stages are assigned); within-column order
-  // and cross-axis alignment come from the pure flow-layout module. Vertical
-  // orientation reads columns left→right; horizontal reads them top→bottom.
+  // The one layout for every flow (process, draft, BP pack). Nodes are laid
+  // out as an ordered layered DAG (sources → sinks, crossings reduced): the
+  // directed structure comes from the hand-off / dependency edges AND the
+  // parent-child hierarchy — an expanded child simply lands in a later column
+  // than its parent, so hierarchical graphs get the same clean orthogonal
+  // routing as flat ones (no separate tree layout any more). Columns follow
+  // the flow direction (the stage order overrides them when stages are
+  // assigned); within-column order and cross-axis alignment come from the pure
+  // flow-layout module. Vertical orientation reads columns left→right;
+  // horizontal reads them top→bottom.
   function layoutLayered(visible) {
     const vertical = state.orientation === 'vertical';
     const ids = visible.map(n => n.id);
@@ -629,6 +610,11 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
       (bp.depends_on || []).forEach(dep => {
         if (idSet.has(dep) && dep !== n.id) edges.push({ from: dep, to: n.id });
       });
+      // Hierarchy participates in the layering: a visible child sits after its
+      // parent along the flow axis and near it on the cross axis.
+      if (bp.parent && idSet.has(bp.parent) && bp.parent !== n.id) {
+        edges.push({ from: bp.parent, to: n.id });
+      }
     });
 
     const order = state.stageOrder || [];
@@ -692,153 +678,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     state.positions = pos;
     // Tell drawEdges to use the orthogonal channel router for this layout.
     state.layeredInfo = { vertical, colOf };
-    layoutArtifacts(visible);
-  }
-
-  function layoutHorizontal(visible) {
-    state.layeredInfo = null;
-    const visibleIds = new Set(visible.map(n => n.id));
-    const childrenOf = {};
-    visible.forEach(n => {
-      const bp  = state.byId[n.id];
-      const kids = (bp.children || []).filter(cid => visibleIds.has(cid));
-      childrenOf[n.id] = topoSort(kids);
-    });
-
-    const subtreeW = {};
-    const maxDepth = Math.max(...visible.map(n => n.depth));
-
-    for (let d = maxDepth; d >= 0; d--) {
-      visible.filter(n => n.depth === d).forEach(n => {
-        const kids = childrenOf[n.id] || [];
-        if (kids.length === 0) {
-          subtreeW[n.id] = NODE_W;
-        } else {
-          const childrenW = kids.reduce((sum, cid) => sum + subtreeW[cid], 0)
-            + H_GAP * (kids.length - 1);
-          subtreeW[n.id] = Math.max(NODE_W, childrenW);
-        }
-      });
-    }
-
-    const pos = {};
-
-    function assignX(id, xStart) {
-      const kids = childrenOf[id] || [];
-      if (kids.length === 0) {
-        pos[id] = { x: xStart, y: 0 };
-      } else {
-        let cx = xStart;
-        kids.forEach(cid => {
-          assignX(cid, cx);
-          cx += subtreeW[cid] + H_GAP;
-        });
-        const firstChild = pos[kids[0]];
-        const lastChild  = pos[kids[kids.length - 1]];
-        pos[id] = {
-          x: (firstChild.x + lastChild.x) / 2,
-          y: 0,
-        };
-      }
-    }
-
-    let xCursor = 0;
-    const sortedRoots = orderRootsByStage(topoSortRoots(state.roots).filter(id => visibleIds.has(id)));
-    sortedRoots.forEach(id => {
-      assignX(id, xCursor);
-      xCursor += subtreeW[id] + H_GAP * 2;
-    });
-
-    const depthNodes = {};
-    visible.forEach(n => {
-      if (!depthNodes[n.depth]) depthNodes[n.depth] = [];
-      depthNodes[n.depth].push(n.id);
-    });
-
-    let yOffset = 0;
-    for (let d = 0; d <= maxDepth; d++) {
-      const ids = depthNodes[d] || [];
-      ids.forEach(id => { pos[id].y = yOffset; });
-      const maxH = Math.max(...ids.map(id => getNodeHeight(id)), 90);
-      yOffset += maxH + V_GAP;
-    }
-
-    state.positions = pos;
-    layoutArtifacts(visible);
-  }
-
-  function layoutVertical(visible) {
-    state.layeredInfo = null;
-    const visibleIds = new Set(visible.map(n => n.id));
-    const childrenOf = {};
-    visible.forEach(n => {
-      const bp  = state.byId[n.id];
-      const kids = (bp.children || []).filter(cid => visibleIds.has(cid));
-      childrenOf[n.id] = topoSort(kids);
-    });
-
-    // Sibling gap (vertical) — give a bit of breathing room between stacked nodes
-    const SIBLING_V_GAP = 30;
-
-    const subtreeH = {};
-    const maxDepth = Math.max(...visible.map(n => n.depth));
-
-    for (let d = maxDepth; d >= 0; d--) {
-      visible.filter(n => n.depth === d).forEach(n => {
-        const kids = childrenOf[n.id] || [];
-        const selfH = getNodeHeight(n.id);
-        if (kids.length === 0) {
-          subtreeH[n.id] = selfH;
-        } else {
-          const childrenH = kids.reduce((sum, cid) => sum + subtreeH[cid], 0)
-            + SIBLING_V_GAP * (kids.length - 1);
-          subtreeH[n.id] = Math.max(selfH, childrenH);
-        }
-      });
-    }
-
-    const pos = {};
-
-    function assignY(id, yStart) {
-      const kids = childrenOf[id] || [];
-      const selfH = getNodeHeight(id);
-      if (kids.length === 0) {
-        pos[id] = { x: 0, y: yStart };
-      } else {
-        let cy = yStart;
-        kids.forEach(cid => {
-          assignY(cid, cy);
-          cy += subtreeH[cid] + SIBLING_V_GAP;
-        });
-        const firstId = kids[0];
-        const lastId  = kids[kids.length - 1];
-        const firstH  = getNodeHeight(firstId);
-        const lastH   = getNodeHeight(lastId);
-        // Center parent's vertical midpoint between first child's and last child's midpoints
-        const centerY = ((pos[firstId].y + firstH / 2) + (pos[lastId].y + lastH / 2)) / 2;
-        pos[id] = {
-          x: 0,
-          y: centerY - selfH / 2,
-        };
-      }
-    }
-
-    let yCursor = 0;
-    const sortedRoots = orderRootsByStage(topoSortRoots(state.roots).filter(id => visibleIds.has(id)));
-    sortedRoots.forEach(id => {
-      assignY(id, yCursor);
-      yCursor += subtreeH[id] + V_GAP;
-    });
-
-    // Assign X per depth column — all nodes have the same width
-    let xOffset = 0;
-    for (let d = 0; d <= maxDepth; d++) {
-      const ids = (visible.filter(n => n.depth === d) || []).map(n => n.id);
-      ids.forEach(id => { pos[id].x = xOffset; });
-      xOffset += NODE_W + H_GAP * 2;
-    }
-
-    state.positions = pos;
     layoutArtifacts(visible);
   }
 
@@ -1684,92 +1523,12 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
       return { cx, cy };
     }
 
-    // 1. Hierarchy edges (gray solid)
-    visible.forEach(n => {
-      const bp = state.byId[n.id];
-      if (!bp || !state.childrenVisible.has(n.id)) return;
-
-      const parentPos = state.positions[n.id];
-      const parentEl  = canvas.querySelector(`.bp-node[data-id="${n.id}"]`);
-      if (!parentPos || !parentEl) return;
-
-      const parentH = parentEl.offsetHeight;
-
-      (bp.children || []).forEach(childId => {
-        if (!visibleIds.has(childId)) return;
-        const childPos = state.positions[childId];
-        const childEl  = canvas.querySelector(`.bp-node[data-id="${childId}"]`);
-        if (!childPos) return;
-        const childH = childEl ? childEl.offsetHeight : getNodeHeight(childId);
-
-        let x1, y1, x2, y2, flow;
-        if (vertical) {
-          x1 = parentPos.x + NODE_W;
-          y1 = parentPos.y + parentH / 2;
-          x2 = childPos.x;
-          y2 = childPos.y + childH / 2;
-          flow = 'horizontal';
-        } else {
-          x1 = parentPos.x + NODE_W / 2;
-          y1 = parentPos.y + parentH;
-          x2 = childPos.x + NODE_W / 2;
-          y2 = childPos.y;
-          flow = 'vertical';
-        }
-
-        const d = drawBezierEdge(x1, y1, x2, y2, EDGE_STYLES.hierarchy.color, 2, '', false, flow);
-        addEdgeHit(d, { from: n.id, to: childId, on: 'parent' });
-      });
-    });
-
-    // 2. + 4. — the inter-node process wiring (dependencies + label/review/
-    // github edges). In the layered layout these all go through the orthogonal
-    // channel router (drawRoutedProcessEdges): distributed ports, node-free
-    // channel lanes, side gutters for long/backward edges, labels on the edge.
-    // The tree layout (BP hierarchies) keeps the original bezier drawing.
+    // The inter-node wiring (hierarchy + dependencies + label/review/github
+    // edges + actor-sourced triggers) all goes through the orthogonal channel
+    // router (drawRoutedProcessEdges): distributed ports, node-free channel
+    // lanes, side gutters for long/backward edges, labels on the edge.
     const EXTRA_COLOR = { label: EDGE_STYLES.label.color, review: EDGE_STYLES.review.color, manual: EDGE_STYLES.label.color };
     const GH_COLOR = { pr: EDGE_STYLES.pr.color, issue: EDGE_STYLES.issue.color };
-
-    // Actor → agent edges (#410): raw GitHub events, webhooks, and human-set
-    // labels/gates, drawn from the "outside world" sources. Bezier fallback for
-    // the tree layouts only — the layered layout routes them orthogonally
-    // through drawRoutedProcessEdges.
-    function drawActorEdges() {
-      (state.extraEdges || []).forEach(e => {
-        const actor = state.actorsById[e.from];
-        if (!actor) return;
-        if (state.hiddenActorKinds.has(actor.actor)) return;
-        if (isTriggerEdgeHidden(e)) return;
-        if (!visibleIds.has(e.to)) return;
-        const aPos = state.actorPositions[e.from];
-        const toPos = state.positions[e.to];
-        if (!aPos || !toPos) return;
-        const color = actorEdgeColor(e);
-        const style = EDGE_STYLES[e.on] || {};
-        const x1 = aPos.x + ACTOR_W;
-        const y1 = aPos.y + ACTOR_H / 2;
-        const x2 = toPos.x;
-        const y2 = toPos.y + 18;
-        const d = drawBezierEdge(x1, y1, x2, y2, color, 1.5, style.dashed ? '6 4' : '', true, 'horizontal');
-        addEdgeHit(d, {
-          from: e.from, to: e.to, on: e.on, kind: e.on, label: e.label,
-          triggerId: e.triggerId, gate: e.gate,
-          ...(e.events ? { events: e.events } : {}),
-          ...(e.schedule ? { schedule: e.schedule } : {}),
-        });
-        const text = actorEdgeText(e);
-        if (!text) return;
-        const p = placeClearLabel((x1 + x2) / 2, (y1 + y2) / 2, estChipWidth(text), e.gate === 'human' ? 17 : 15);
-        if (e.gate === 'human') drawEdgeChip(p.cx, p.cy, `👤✓ ${e.label}`, color, true);
-        else drawEdgeLabelText(p.cx, p.cy, text, color);
-      });
-    }
-
-    if (state.layeredInfo) {
-      drawRoutedProcessEdges();
-      drawArtifactEdges(visibleIds);
-      return;
-    }
 
     function drawRoutedProcessEdges() {
       const nodes = [];
@@ -1846,6 +1605,18 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
           });
         });
       });
+      // Hierarchy edges (gray solid) — routed like every other edge, so an
+      // expanded parent-child pair reads the same as a hand-off.
+      visible.forEach(n => {
+        const bp = state.byId[n.id];
+        if (!bp || !bp.parent || !visibleIds.has(bp.parent) || bp.parent === n.id) return;
+        list.push({
+          from: bp.parent, to: n.id,
+          color: EDGE_STYLES.hierarchy.color, width: 2, dash: '', opacity: 0.85,
+          labelText: '', chip: false, gate: false,
+          hit: { from: bp.parent, to: n.id, on: 'parent' },
+        });
+      });
       if (list.length === 0) return;
 
       const routed = routeOrthogonalEdges({
@@ -1888,122 +1659,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
       });
     }
 
-    // 2. Dependency edges (red dashed) — tree layout only
-    visible.forEach(n => {
-      const bp = state.byId[n.id];
-      if (!bp || !bp.depends_on) return;
-
-      bp.depends_on.forEach(depId => {
-        if (!visibleIds.has(depId)) return;
-        const fromPos = state.positions[depId];
-        const toPos   = state.positions[n.id];
-        const fromEl  = canvas.querySelector(`.bp-node[data-id="${depId}"]`);
-        if (!fromPos || !toPos || !fromEl) return;
-
-        const fromH = fromEl.offsetHeight;
-
-        let x1, y1, x2, y2, pathD, arrowPoints;
-        if (vertical) {
-          // Deps flow top → bottom (dependent BP sits below the producer in the column)
-          x1 = fromPos.x + NODE_W / 2;
-          y1 = fromPos.y + fromH;
-          x2 = toPos.x + 45;
-          y2 = toPos.y;
-          const my = (y1 + y2) / 2;
-          pathD = `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`;
-          // arrowhead points down (toward target's top)
-          arrowPoints = `${x2},${y2} ${x2-6},${y2-ARROW_SIZE} ${x2+6},${y2-ARROW_SIZE}`;
-        } else {
-          x1 = fromPos.x + NODE_W;
-          y1 = fromPos.y + fromH / 2;
-          x2 = toPos.x;
-          y2 = toPos.y + 45;
-          const mx = (x1 + x2) / 2;
-          pathD = `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`;
-          // arrowhead points right (toward target's left)
-          arrowPoints = `${x2},${y2} ${x2-ARROW_SIZE},${y2-6} ${x2-ARROW_SIZE},${y2+6}`;
-        }
-
-        const path = makeSvgPath(pathD);
-        path.setAttribute('stroke', EDGE_STYLES.dependency.color);
-        path.setAttribute('stroke-width', '1.5');
-        path.setAttribute('stroke-dasharray', '6 4');
-        path.setAttribute('fill', 'none');
-        path.setAttribute('opacity', '0.6');
-
-        const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-        arrow.setAttribute('points', arrowPoints);
-        arrow.setAttribute('fill', EDGE_STYLES.dependency.color);
-        arrow.setAttribute('opacity', '0.85');
-        svgEdges.appendChild(arrow);
-
-        addEdgeHit(pathD, { from: depId, to: n.id, on: 'dependency' });
-      });
-    });
-
-    // 3. Artifact edges
+    drawRoutedProcessEdges();
     drawArtifactEdges(visibleIds);
-
-    // 3b. Actor edges (tree layout path)
-    drawActorEdges();
-
-    // 4. Process-linking edges (label / review / manual) — the extra wiring
-    //    from the process view, drawn on top of the BP structure.
-    (state.extraEdges || []).forEach(e => {
-      if (!visibleIds.has(e.from) || !visibleIds.has(e.to)) return;
-      const fromPos = state.positions[e.from];
-      const toPos   = state.positions[e.to];
-      const fromEl  = canvas.querySelector(`.bp-node[data-id="${e.from}"]`);
-      if (!fromPos || !toPos || !fromEl) return;
-      const fromH = fromEl.offsetHeight;
-      const isGithub = e.on === 'github';
-      const artifact = e.artifact === 'issue' ? 'issue' : 'pr';
-      const color = isGithub ? GH_COLOR[artifact] : (EXTRA_COLOR[e.on] || EDGE_STYLES.label.color);
-
-      const toEl = canvas.querySelector(`.bp-node[data-id="${e.to}"]`);
-      const toH  = toEl ? toEl.offsetHeight : 90;
-      let x1, y1, x2, y2, flow;
-      if (vertical) {
-        // Same-column hand-off (feedback/rework loop): route it out to the right
-        // instead of cutting across the stacked cards (#401).
-        if (Math.abs(fromPos.x - toPos.x) < 1) {
-          x1 = fromPos.x + NODE_W; y1 = fromPos.y + fromH / 2;
-          x2 = toPos.x + NODE_W;   y2 = toPos.y + toH / 2; flow = 'loop-right';
-        } else {
-          x1 = fromPos.x + NODE_W; y1 = fromPos.y + fromH / 2;
-          x2 = toPos.x;            y2 = toPos.y + 20; flow = 'horizontal';
-        }
-      } else {
-        if (Math.abs(fromPos.y - toPos.y) < 1) {
-          x1 = fromPos.x + NODE_W / 2; y1 = fromPos.y + fromH;
-          x2 = toPos.x + NODE_W / 2;   y2 = toPos.y + toH; flow = 'loop-down';
-        } else {
-          x1 = fromPos.x + NODE_W / 2; y1 = fromPos.y + fromH;
-          x2 = toPos.x + NODE_W / 2;   y2 = toPos.y;  flow = 'vertical';
-        }
-      }
-      const d = drawBezierEdge(x1, y1, x2, y2, color, isGithub ? 2 : 1.5, '', true, flow);
-      // Clickable hit-area so the edge can be edited/removed (#362 Phase C2 / #380).
-      addEdgeHit(d, { from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on,
-        artifact: isGithub ? artifact : undefined, gate: e.gate, triggerId: e.triggerId });
-      // Seed the label near the edge's apex — for a side-loop that is out on the
-      // bulge, otherwise the geometric midpoint. placeClearLabel refines from there.
-      let mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
-      if (flow === 'loop-right') mx = Math.max(x1, x2) + 24;
-      else if (flow === 'loop-down') my = Math.max(y1, y2) + 20;
-      if (isGithub) {
-        // A pill chip near the midpoint: artifact + optional routing label, with a
-        // clear human-approval gate glyph when a human must apply the label. Drawn
-        // on the overlay layer (above the cards) so it is never hidden, and nudged
-        // off any card/chip it would otherwise cover (#401).
-        const txt = channelChipText(e);
-        const p = placeClearLabel(mx, my, estChipWidth(txt), 17);
-        drawEdgeChip(p.cx, p.cy, txt, color, e.gate === 'human');
-      } else if (e.label) {
-        const p = placeClearLabel(mx, my, estChipWidth(e.label), 15);
-        drawEdgeLabelText(p.cx, p.cy, e.label, color);
-      }
-    });
   }
 
   // A text edge-label with a canvas-coloured halo so it reads over crossing
@@ -2308,6 +1965,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
       collapseSubtree(id);
     } else {
       state.childrenVisible.add(id);
+      state.userCollapsed.delete(id);
     }
     render();
   }
@@ -2326,6 +1984,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
 
   function collapseSubtree(id) {
     state.childrenVisible.delete(id);
+    state.userCollapsed.add(id);
     const bp = state.byId[id];
     if (bp && bp.children) {
       bp.children.forEach(cid => collapseSubtree(cid));
@@ -2333,6 +1992,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
   }
 
   function expandAll() {
+    state.userCollapsed.clear();
     state.briefings.forEach(bp => {
       if (bp.children && bp.children.length > 0) {
         state.childrenVisible.add(bp.id);
@@ -2343,6 +2003,9 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
 
   function collapseAll() {
     state.childrenVisible.clear();
+    state.briefings.forEach(bp => {
+      if (bp.children && bp.children.length > 0) state.userCollapsed.add(bp.id);
+    });
     state.contentVisible.clear();
     state.outputsVisible.clear();
     state.inputsVisible.clear();
@@ -2670,9 +2333,9 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
   function updateOrientationBtn(btn) {
     const active = state.orientation === 'vertical';
     btn._active            = active;
-    btn.textContent        = active ? 'Vertical' : 'Horizontal';
-    btn.title              = 'Toggle layout orientation (roots flow ' +
-      (active ? 'top to bottom; children flow left to right' : 'left to right; children flow top to bottom') + ')';
+    btn.textContent        = active ? 'Flow →' : 'Flow ↓';
+    btn.title              = 'Toggle flow direction (' +
+      (active ? 'left to right' : 'top to bottom') + ')';
     btn.style.borderColor  = active ? '#3b82f6' : 'var(--eb-border-default)';
     btn.style.color        = active ? '#3b82f6' : 'var(--eb-text-secondary)';
     btn.style.background   = active ? 'rgba(59,130,246,0.15)' : 'var(--eb-bg-elevated)';

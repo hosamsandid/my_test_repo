@@ -53,6 +53,28 @@ test('event edge (#410): raw github-event runs from the @github actor', () => {
   assert.ok(g.nodes.some(n => n.id === '@github' && n.kind === 'actor'));
 });
 
+test('event edges merge per trigger: one trigger with several raw events is ONE edge carrying all of them', () => {
+  const g = buildUnifiedGraph([
+    { id: 'ba', triggers: [{ id: 't1', type: 'github-event', events: ['issues.closed', 'issues.labeled'], from: 'any-except-self', emits: [] }] },
+  ]);
+  const evEdges = g.edges.filter(x => x.on === 'event' && x.to === 'ba');
+  assert.equal(evEdges.length, 1);
+  assert.deepEqual(evEdges[0].events.sort(), ['issues.closed', 'issues.labeled']);
+  assert.equal(evEdges[0].triggerId, 't1');
+});
+
+test('event edges of two distinct triggers with identical events stay distinct', () => {
+  const g = buildUnifiedGraph([
+    { id: 'ba', triggers: [
+      { id: 't1', type: 'github-event', events: ['issues.opened'], from: 'any-except-self', emits: [] },
+      { id: 't2', type: 'github-event', events: ['issues.opened'], from: 'humans', emits: [] },
+    ] },
+  ]);
+  const evEdges = g.edges.filter(x => x.on === 'event' && x.to === 'ba');
+  assert.equal(evEdges.length, 2);
+  assert.deepEqual(evEdges.map(e => e.triggerId).sort(), ['t1', 't2']);
+});
+
 test('webhook edge (#410): http trigger runs from the @external actor', () => {
   const g = buildUnifiedGraph([
     { id: 'builder', triggers: [{ id: 'hook1', type: 'http', secret: 'x', description: 'CI done', emits: [] }] },

@@ -73,10 +73,16 @@ function asArray(x) { return Array.isArray(x) ? x : []; }
 // Stable, deterministic edge id so re-builds and the renderer agree.
 function edgeId(e) {
   const tail = e.label != null ? e.label
-    : (Array.isArray(e.paths) ? e.paths.join(',') : '');
+    : (Array.isArray(e.events) ? e.events.join(',')
+      : (Array.isArray(e.paths) ? e.paths.join(',') : ''));
   // GitHub channels between the same pair are distinct per artifact (PR vs issue).
   const kind = e.on === 'github' ? `github:${e.artifact || 'pr'}` : e.on;
-  return `${kind}|${e.from == null ? '∅' : e.from}→${e.to == null ? '∅' : e.to}|${tail}`;
+  // Trigger-backed actor edges are one-edge-per-trigger — key them by the
+  // trigger so two triggers with identical events/description/schedule on the
+  // same agent never collapse into one edge.
+  const trig = (e.triggerId && (e.on === 'event' || e.on === 'webhook' || e.on === 'timer'))
+    ? `#${e.triggerId}` : '';
+  return `${kind}|${e.from == null ? '∅' : e.from}→${e.to == null ? '∅' : e.to}|${tail}${trig}`;
 }
 
 // Output / input artifact match keys declared on a UnifiedNode. An artifact is
@@ -219,14 +225,33 @@ function buildUnifiedGraph(nodes, edges) {
   const seen = new Set();
   const push = (e) => {
     const id = edgeId(e);
-    if (seen.has(id)) return;
+    if (seen.has(id)) return null;
     seen.add(id);
-    unifiedEdges.push({ id, ...e });
+    const stored = { id, ...e };
+    unifiedEdges.push(stored);
+    return stored;
   };
 
+  // The process builder emits one edge per raw event; a trigger with several
+  // events is still ONE trigger (one edit dialog, one 👁 toggle), so merge its
+  // event edges into a single @github → agent edge carrying all events.
+  const eventEdgeByTrigger = new Map(); // `${from}|${to}|${triggerId}` → edge
   for (const e of pg.edges) {
     const u = processEdgeToUnified(e);
-    if (u) push(u);
+    if (!u) continue;
+    if (u.on === 'event' && u.triggerId) {
+      const k = `${u.from}|${u.to}|${u.triggerId}`;
+      const prior = eventEdgeByTrigger.get(k);
+      if (prior) {
+        prior.events = [...new Set([...(prior.events || []), ...(u.events || [])])];
+        prior.id = edgeId(prior); // keep the id in sync with the merged events
+        continue;
+      }
+      const stored = push(u);
+      if (stored) eventEdgeByTrigger.set(k, stored);
+      continue;
+    }
+    push(u);
   }
 
   // 1b) Hierarchy edges from node.parent (BP parent-child). View-only: the

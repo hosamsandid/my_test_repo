@@ -45,15 +45,16 @@ test('cycle is broken so layering terminates and stays sensible', () => {
   assert.equal(layer.get('c'), 2);
 });
 
-// Stage order overrides the automatic columns (combined mode).
+const stageBy = (map) => (id) => (id in map ? map[id] : null);
+
+// Stage order overrides the automatic columns.
 test('stage order overrides auto columns', () => {
   const ids = ['build', 'design', 'release'];
   // auto layering alone would put these all on column 0 (no edges)
   const edges = [];
-  const rank = { design: 0, build: 1, release: 2 };
   const { colOf } = computeFlowLayout(ids, edges, {
-    stageRankOf: (id) => (id in rank ? rank[id] : null),
-    stageCount: 3,
+    stageOf: stageBy({ design: 'Design', build: 'Build', release: 'Release' }),
+    stageOrder: ['Design', 'Build', 'Release'],
   });
   assert.equal(colOf.get('design'), 0);
   assert.equal(colOf.get('build'), 1);
@@ -64,12 +65,67 @@ test('stage order overrides auto columns', () => {
 test('unstaged node settles next to its staged neighbours', () => {
   const ids = ['a', 'mid', 'c'];
   const edges = [{ from: 'a', to: 'mid' }, { from: 'mid', to: 'c' }];
-  const rank = { a: 0, c: 2 }; // `mid` has no stage
   const { colOf } = computeFlowLayout(ids, edges, {
-    stageRankOf: (id) => (id in rank ? rank[id] : null),
-    stageCount: 3,
+    stageOf: stageBy({ a: 'First', c: 'Third' }), // `mid` has no stage
+    stageOrder: ['First', 'Second', 'Third'],     // empty stage keeps one column
   });
   assert.equal(colOf.get('mid'), 1); // pulled between its neighbours
+});
+
+// ── stage partitioning: stages own exclusive column blocks ──────────────────
+
+// A multi-column stage pushes the next stage past its WHOLE block — nodes of
+// two stages can never share a column, so their bands can't overlap.
+test('stages own disjoint contiguous column blocks', () => {
+  const ids = ['a1', 'a2', 'a3', 'b1', 'b2'];
+  const edges = [
+    { from: 'a1', to: 'a2' }, { from: 'a2', to: 'a3' }, // stage A is 3 columns deep
+    { from: 'a1', to: 'b1' },                            // b1 alone would land on column 1
+    { from: 'b1', to: 'b2' },
+  ];
+  const { colOf } = computeFlowLayout(ids, edges, {
+    stageOf: stageBy({ a1: 'A', a2: 'A', a3: 'A', b1: 'B', b2: 'B' }),
+    stageOrder: ['A', 'B'],
+  });
+  const aMax = Math.max(colOf.get('a1'), colOf.get('a2'), colOf.get('a3'));
+  const bMin = Math.min(colOf.get('b1'), colOf.get('b2'));
+  assert.equal(aMax, 2);
+  assert.ok(bMin > aMax); // B starts strictly after A's block
+  assert.equal(colOf.get('b2'), colOf.get('b1') + 1); // internal flow preserved
+});
+
+// Stages missing from the defined order (or with no defined order at all) are
+// still partitioned — ordered by where the plain layering puts their nodes.
+test('stages without a defined order are derived from the graph flow', () => {
+  const ids = ['r1', 'r2', 'f1', 'v1'];
+  const edges = [
+    { from: 'r1', to: 'r2' },
+    { from: 'r2', to: 'f1' },
+    { from: 'f1', to: 'v1' },
+  ];
+  const { colOf } = computeFlowLayout(ids, edges, {
+    stageOf: stageBy({ r1: 'Reverse', r2: 'Reverse', f1: 'Forward', v1: 'Verify' }),
+    stageOrder: [], // nothing authored
+  });
+  const rMax = Math.max(colOf.get('r1'), colOf.get('r2'));
+  assert.ok(colOf.get('f1') > rMax);            // Forward past all of Reverse
+  assert.ok(colOf.get('v1') > colOf.get('f1')); // Verify past Forward
+});
+
+// A back edge (rework) into an earlier stage must not drag that stage's nodes
+// into the later stage's block.
+test('rework edge across stages keeps the blocks separated', () => {
+  const ids = ['a1', 'a2', 'b1'];
+  const edges = [
+    { from: 'a1', to: 'a2' },
+    { from: 'a2', to: 'b1' },
+    { from: 'b1', to: 'a1' }, // rework back into stage A
+  ];
+  const { colOf } = computeFlowLayout(ids, edges, {
+    stageOf: stageBy({ a1: 'A', a2: 'A', b1: 'B' }),
+    stageOrder: ['A', 'B'],
+  });
+  assert.ok(Math.max(colOf.get('a1'), colOf.get('a2')) < colOf.get('b1'));
 });
 
 // Crossing reduction improves a deliberately-tangled bipartite graph.
@@ -154,15 +210,16 @@ test('nested groups: grandchildren sit one column past their parent group', () =
   assert.equal(colOf.get('g1'), colOf.get('c1') + 1);
 });
 
-// With a stage order in play, the group still ends up in one column.
-test('groups survive the stage-combined mode', () => {
+// With stages in play, the group still ends up in one column (the group's
+// stage — the first member's non-empty stage — wins for all members).
+test('groups survive the stage partitioning', () => {
   const ids = ['p', 'c1', 'c2'];
   const edges = [{ from: 'p', to: 'c1' }, { from: 'p', to: 'c2' }];
-  const rank = { p: 0, c2: 2 }; // c1 unstaged, c2 snapped to stage 2
   const { colOf } = computeFlowLayout(ids, edges, {
-    stageRankOf: (id) => (id in rank ? rank[id] : null),
-    stageCount: 3,
+    stageOf: stageBy({ p: 'Plan', c2: 'Impl' }), // c1 unstaged
+    stageOrder: ['Plan', 'Mid', 'Impl'],
     groupOf: groupBy({ c1: 'p', c2: 'p' }),
   });
   assert.equal(colOf.get('c1'), colOf.get('c2'));
+  assert.ok(colOf.get('c1') > colOf.get('p'));
 });

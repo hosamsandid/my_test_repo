@@ -623,14 +623,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     });
     const groupOf = parentOf.size > 0 ? (id => parentOf.get(id) ?? null) : null;
 
-    const order = state.stageOrder || [];
-    const rankMap = new Map(order.map((s, i) => [s, i]));
-    const useStages = order.length > 0 && visible.some(n => rankMap.has((state.byId[n.id] || {}).stage));
-    const stageRankOf = useStages
-      ? (id => { const s = (state.byId[id] || {}).stage; return rankMap.has(s) ? rankMap.get(s) : null; })
-      : null;
-
-    const { colOf, columns } = computeFlowLayout(ids, edges, { stageRankOf, stageCount: order.length, groupOf });
+    // Stages partition the flow axis (each stage gets an exclusive column
+    // block, see flow-layout.js) — applied whenever any visible node carries a
+    // stage, with or without an operator-defined order.
+    const stageOf = (id) => ((state.byId[id] || {}).stage || null);
+    const { colOf, columns } = computeFlowLayout(ids, edges, {
+      stageOf: visible.some(n => stageOf(n.id)) ? stageOf : null,
+      stageOrder: state.stageOrder || [],
+      groupOf,
+    });
 
     const sizeOf = vertical ? (id => getNodeHeight(id)) : (() => NODE_W);
     const crossGap = vertical ? 34 : H_GAP;

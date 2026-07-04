@@ -602,6 +602,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     const idSet = new Set(ids);
 
     const edges = [];
+    // Siblings (common children of one parent) form a group: they share a
+    // column and stay contiguous, so the hierarchy reads as a clearly grouped
+    // row/column next to its parent.
+    const parentOf = new Map();
     (state.extraEdges || []).forEach(e => {
       if (idSet.has(e.from) && idSet.has(e.to) && e.from !== e.to) edges.push({ from: e.from, to: e.to });
     });
@@ -614,8 +618,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
       // parent along the flow axis and near it on the cross axis.
       if (bp.parent && idSet.has(bp.parent) && bp.parent !== n.id) {
         edges.push({ from: bp.parent, to: n.id });
+        parentOf.set(n.id, bp.parent);
       }
     });
+    const groupOf = parentOf.size > 0 ? (id => parentOf.get(id) ?? null) : null;
 
     const order = state.stageOrder || [];
     const rankMap = new Map(order.map((s, i) => [s, i]));
@@ -624,7 +630,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
       ? (id => { const s = (state.byId[id] || {}).stage; return rankMap.has(s) ? rankMap.get(s) : null; })
       : null;
 
-    const { colOf, columns } = computeFlowLayout(ids, edges, { stageRankOf, stageCount: order.length });
+    const { colOf, columns } = computeFlowLayout(ids, edges, { stageRankOf, stageCount: order.length, groupOf });
 
     const sizeOf = vertical ? (id => getNodeHeight(id)) : (() => NODE_W);
     const crossGap = vertical ? 34 : H_GAP;

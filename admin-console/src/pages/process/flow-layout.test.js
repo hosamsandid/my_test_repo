@@ -80,3 +80,89 @@ test('ordering reduces crossings vs. the naive order', () => {
   const { columns, colOf } = computeFlowLayout(ids, edges);
   assert.equal(countCrossings(columns, edges, colOf), 0);
 });
+
+// ── sibling groups (parent-child hierarchy) ─────────────────────────────────
+
+const groupBy = (map) => (id) => (id in map ? map[id] : null);
+
+// All children of one parent share a column, even when a hand-off between the
+// siblings would otherwise stagger them into consecutive columns.
+test('sibling group shares one column despite intra-group hand-offs', () => {
+  const ids = ['p', 'c1', 'c2'];
+  const edges = [
+    { from: 'p', to: 'c1' }, { from: 'p', to: 'c2' }, // hierarchy
+    { from: 'c1', to: 'c2' },                          // hand-off between siblings
+  ];
+  const { colOf } = computeFlowLayout(ids, edges, { groupOf: groupBy({ c1: 'p', c2: 'p' }) });
+  assert.equal(colOf.get('p'), 0);
+  assert.equal(colOf.get('c1'), 1);
+  assert.equal(colOf.get('c2'), 1); // without the group c2 would land on column 2
+});
+
+// A consumer outside the group still sits past the whole group.
+test('downstream node comes after the whole sibling group', () => {
+  const ids = ['p', 'c1', 'c2', 'd'];
+  const edges = [
+    { from: 'p', to: 'c1' }, { from: 'p', to: 'c2' },
+    { from: 'c2', to: 'd' },
+  ];
+  const { colOf } = computeFlowLayout(ids, edges, { groupOf: groupBy({ c1: 'p', c2: 'p' }) });
+  assert.equal(colOf.get('c1'), 1);
+  assert.equal(colOf.get('c2'), 1);
+  assert.equal(colOf.get('d'), 2);
+});
+
+// A pulled-forward sibling (fed by a longer chain) drags the group with it, so
+// the group still shares one column.
+test('group snaps to its deepest member', () => {
+  const ids = ['p', 'x', 'y', 'c1', 'c2'];
+  const edges = [
+    { from: 'p', to: 'c1' }, { from: 'p', to: 'c2' },
+    { from: 'x', to: 'y' }, { from: 'y', to: 'c2' }, // c2 alone would be col 2
+  ];
+  const { colOf } = computeFlowLayout(ids, edges, { groupOf: groupBy({ c1: 'p', c2: 'p' }) });
+  assert.equal(colOf.get('c1'), colOf.get('c2'));
+  assert.ok(colOf.get('c2') >= 2);
+});
+
+// Group members stay contiguous within their column even when an unrelated
+// node lands in the same column between them (input order would interleave).
+test('sibling group is contiguous within its column', () => {
+  const ids = ['p', 'x', 'c1', 'y', 'c2'];
+  const edges = [
+    { from: 'p', to: 'c1' }, { from: 'p', to: 'c2' },
+    { from: 'x', to: 'y' }, // unrelated pipeline whose `y` shares column 1
+  ];
+  const { columns, colOf } = computeFlowLayout(ids, edges, { groupOf: groupBy({ c1: 'p', c2: 'p' }) });
+  const col = columns[colOf.get('c1')];
+  assert.equal(colOf.get('c1'), colOf.get('c2'));
+  assert.equal(Math.abs(col.indexOf('c1') - col.indexOf('c2')), 1); // adjacent
+});
+
+// Nested hierarchy: grandchildren form their own group one column further.
+test('nested groups: grandchildren sit one column past their parent group', () => {
+  const ids = ['p', 'c1', 'c2', 'g1', 'g2'];
+  const edges = [
+    { from: 'p', to: 'c1' }, { from: 'p', to: 'c2' },
+    { from: 'c1', to: 'g1' }, { from: 'c1', to: 'g2' },
+  ];
+  const { colOf } = computeFlowLayout(ids, edges, {
+    groupOf: groupBy({ c1: 'p', c2: 'p', g1: 'c1', g2: 'c1' }),
+  });
+  assert.equal(colOf.get('c1'), colOf.get('c2'));
+  assert.equal(colOf.get('g1'), colOf.get('g2'));
+  assert.equal(colOf.get('g1'), colOf.get('c1') + 1);
+});
+
+// With a stage order in play, the group still ends up in one column.
+test('groups survive the stage-combined mode', () => {
+  const ids = ['p', 'c1', 'c2'];
+  const edges = [{ from: 'p', to: 'c1' }, { from: 'p', to: 'c2' }];
+  const rank = { p: 0, c2: 2 }; // c1 unstaged, c2 snapped to stage 2
+  const { colOf } = computeFlowLayout(ids, edges, {
+    stageRankOf: (id) => (id in rank ? rank[id] : null),
+    stageCount: 3,
+    groupOf: groupBy({ c1: 'p', c2: 'p' }),
+  });
+  assert.equal(colOf.get('c1'), colOf.get('c2'));
+});

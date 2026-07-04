@@ -22,18 +22,21 @@ test('live and draft are fully editable with the process type set', () => {
     assert.equal(caps.actorSources, true);
     assert.equal(caps.readOnlyHint, null);
     assert.deepEqual(createTypesFor(caps, 'agent'), ['github-pr', 'github-issue', 'label', 'artifact', 'hierarchy']);
-    assert.deepEqual(createTypesFor(caps, 'human'), ['human-label', 'approval']);
     assert.deepEqual(createTypesFor(caps, 'github'), ['event']);
     assert.deepEqual(createTypesFor(caps, 'external'), ['webhook']);
-    assert.deepEqual(createTypesFor(caps, 'timer'), ['schedule']);
+    // @human and @timer are no longer drag sources: human actions are GitHub
+    // label events, schedules live in the card / trigger editor.
+    assert.deepEqual(createTypesFor(caps, 'human'), []);
+    assert.deepEqual(createTypesFor(caps, 'timer'), []);
   }
 });
 
 test('sourceKindOf maps actor ids and falls back to agent', () => {
-  assert.equal(sourceKindOf('@human'), 'human');
   assert.equal(sourceKindOf('@github'), 'github');
   assert.equal(sourceKindOf('@external'), 'external');
-  assert.equal(sourceKindOf('@timer'), 'timer');
+  // Former actors resolve like any unknown id — plain agents (no dialogs offered).
+  assert.equal(sourceKindOf('@human'), 'agent');
+  assert.equal(sourceKindOf('@timer'), 'agent');
   assert.equal(sourceKindOf('developer'), 'agent');
 });
 

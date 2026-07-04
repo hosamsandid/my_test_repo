@@ -25,12 +25,15 @@
 // Human-approval gates are an orthogonal `gate: 'human'` flag on the edge,
 // not a separate edge type. BP `status` is intentionally NOT modeled (decision 2).
 //
-// Actor nodes (#410). Everything that can start an agent but is not itself an
-// agent is a first-class *actor* pseudo-node (kind: 'actor'): the human
-// (@human — human-set labels, gates, brakes), GitHub (@github — raw events),
-// third-party systems (@external — webhooks) and the scheduler (@timer). Every
-// trigger edge therefore runs source → agent; nothing originates from `null`
-// except true orphan listeners (which the renderer drops and the lints flag).
+// Actor nodes (#410, reduced). Everything that can start an agent but is not
+// itself an agent is a first-class *actor* pseudo-node (kind: 'actor'): GitHub
+// (@github — raw events AND human-set labels/gates/brakes, since a human acts
+// through GitHub labels anyway) and third-party systems (@external — webhooks).
+// The scheduler keeps emitting `on:'timer'` edges from @timer for data
+// consumers, but the canvas renders schedules inside the agent card instead of
+// as an actor; the former @human actor is folded into @github. Every trigger
+// edge therefore runs source → agent; nothing originates from `null` except
+// true orphan listeners (which the renderer drops and the lints flag).
 //
 // No I/O here. The HTTP endpoint gathers live agents + BP briefings, maps them
 // through the adapters below, and hands nodes/edges to buildUnifiedGraph.
@@ -50,13 +53,11 @@ const UNIFIED_FLOW_VERSION = 1;
 // Actor pseudo-node ids (#410) — stable, and safely outside the agent-id
 // charset (agent ids never start with '@').
 const ACTORS = {
-  human: '@human',
   github: '@github',
   external: '@external',
   timer: '@timer',
 };
 const ACTOR_META = {
-  [ACTORS.human]: { actor: 'human', displayName: 'Human' },
   [ACTORS.github]: { actor: 'github', displayName: 'GitHub' },
   [ACTORS.external]: { actor: 'external', displayName: 'External system' },
   [ACTORS.timer]: { actor: 'timer', displayName: 'Schedule' },
@@ -128,9 +129,11 @@ function processEdgeToUnified(e) {
   if (e.kind === 'gate' || e.kind === 'brake' || isHumanGate(e.label) || isBrake(e.label)) {
     u.gate = 'human';
   }
-  // Edges only a human can fire originate at the human actor (#410): gates and
-  // brakes (from: null in the process graph) plus human-set label listeners.
-  if (e.humanSet || (u.from == null && u.gate === 'human')) u.from = ACTORS.human;
+  // Edges only a human can fire originate at the GitHub actor: gates, brakes
+  // (from: null in the process graph) and human-set label listeners are all
+  // GitHub label events a person applies — the former @human actor is folded
+  // into @github, the `gate`/`humanSet` flags keep the human semantics visible.
+  if (e.humanSet || (u.from == null && u.gate === 'human')) u.from = ACTORS.github;
   if (e.humanAssumed) u.humanAssumed = true;
   if (e.orphan) u.orphan = true;
   if (e.deadEnd) u.deadEnd = true;

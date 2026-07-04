@@ -5,6 +5,7 @@ import SidePanel from '../../components/SidePanel';
 import ScriptViewerPanel from '../../components/ScriptViewerPanel';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import FormInput from '../../components/FormInput';
+import { liveOps } from '../process/edit-adapters';
 
 // preCheckScript paths reference an installed binary inside the orchestrator
 // container (e.g. `/usr/local/bin/multi-agent-bid`). The allowlisted name is
@@ -352,7 +353,7 @@ function DateTimePicker({ value, onChange }) {
  * orchestration graph. Read view shows the confirmed set; the editor seeds from
  * the heuristic suggestions (GET .../emit-suggestions) and persists the
  * operator-confirmed set (PUT .../emits). */
-function EmitsSection({ trigger, agentId, onSaved }) {
+function EmitsSection({ trigger, agentId, ops = liveOps, onSaved }) {
   const [open, setOpen] = useState(false);
   const emits = Array.isArray(trigger.emits) ? trigger.emits : [];
 
@@ -390,6 +391,7 @@ function EmitsSection({ trigger, agentId, onSaved }) {
         <EmitsEditor
           trigger={trigger}
           agentId={agentId}
+          ops={ops}
           onClose={() => setOpen(false)}
           onSaved={() => { setOpen(false); onSaved?.(); }}
         />
@@ -398,15 +400,17 @@ function EmitsSection({ trigger, agentId, onSaved }) {
   );
 }
 
-function EmitsEditor({ trigger, agentId, onClose, onSaved }) {
+function EmitsEditor({ trigger, agentId, ops = liveOps, onClose, onSaved }) {
+  const isDraft = ops.mode === 'draft';
   const [selected, setSelected] = useState(() => new Set(Array.isArray(trigger.emits) ? trigger.emits : []));
   const [suggestions, setSuggestions] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!isDraft);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [newLabel, setNewLabel] = useState('');
 
   useEffect(() => {
+    if (isDraft) return undefined; // suggestion heuristics are a live-agent endpoint
     let alive = true;
     (async () => {
       try {
@@ -422,7 +426,7 @@ function EmitsEditor({ trigger, agentId, onClose, onSaved }) {
       }
     })();
     return () => { alive = false; };
-  }, [agentId, trigger.id]);
+  }, [agentId, trigger.id, isDraft]);
 
   const toggle = (label) => setSelected(prev => {
     const next = new Set(prev);
@@ -441,7 +445,7 @@ function EmitsEditor({ trigger, agentId, onClose, onSaved }) {
     setSaving(true);
     setError(null);
     try {
-      await apiCall('PUT', `/api/agents/${agentId}/triggers/${trigger.id}/emits`, { emits: [...selected] });
+      await ops.setEmits(agentId, trigger.id, [...selected]);
       onSaved?.();
     } catch (e) {
       setError(e.message);
@@ -542,7 +546,7 @@ const ghostBtnStyle = {
   padding: '2px 10px', cursor: 'pointer',
 };
 
-function TriggerRow({ trigger, agentId, onEdit, onDeleted, onToggled, nameOf = (id) => id }) {
+function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onToggled, nameOf = (id) => id }) {
   const [toggling, setToggling] = useState(false);
   const [scriptPanelName, setScriptPanelName] = useState(null);
   const preCheckScriptName = scriptNameFromPath(trigger.preCheckScript);
@@ -569,7 +573,7 @@ function TriggerRow({ trigger, agentId, onEdit, onDeleted, onToggled, nameOf = (
   async function handleToggle(val) {
     setToggling(true);
     try {
-      await apiCall('PUT', `/api/agents/${agentId}/triggers/${trigger.id}`, { enabled: val });
+      await ops.updateTrigger(agentId, trigger.id, { enabled: val });
       onToggled();
     } catch { /* surface via refresh */ }
     finally { setToggling(false); }
@@ -626,7 +630,7 @@ function TriggerRow({ trigger, agentId, onEdit, onDeleted, onToggled, nameOf = (
         </div>
       )}
 
-      <EmitsSection trigger={trigger} agentId={agentId} onSaved={onToggled} />
+      <EmitsSection trigger={trigger} agentId={agentId} ops={ops} onSaved={onToggled} />
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginTop: 2 }}>
         <ToggleSwitch checked={trigger.enabled !== false} onChange={handleToggle} />
@@ -740,8 +744,11 @@ function generateSecret() {
 }
 
 /* ── Trigger form (create & edit) ───────────────────────────────────── */
-function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, siblings = [] }) {
+function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, siblings = [], ops = liveOps }) {
   const isEdit = !!initialValues;
+  // Draft mode (process-canvas drafts): there is no live agent/environment yet,
+  // so the repo is unknown by design — it is applied at materialise time.
+  const isDraftMode = ops.mode === 'draft';
   const knownTypes = new Set(['cron', 'once', 'http', 'github-event']);
   const startedAsDataFlow = isDataFlowTrigger(initialValues);
   // 'data-flow' is a UI-only type that serializes to github-event / push / from.
@@ -786,9 +793,11 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
   }));
 
   // Repos available to this agent — sourced from the agent's working
-  // environment. Only fetched when github-event is the active type.
-  const [availableRepos, setAvailableRepos] = useState(null); // null = not loaded
+  // environment. Only fetched when github-event is the active type; a draft
+  // has no environment, so the lookup is skipped entirely.
+  const [availableRepos, setAvailableRepos] = useState(isDraftMode ? [] : null); // null = not loaded
   useEffect(() => {
+    if (isDraftMode) return undefined;
     if ((form.type !== 'github-event' && form.type !== 'data-flow') || availableRepos !== null) return;
     let cancelled = false;
     (async () => {
@@ -809,7 +818,7 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
       }
     })();
     return () => { cancelled = true; };
-  }, [form.type, agentId, availableRepos]);
+  }, [form.type, agentId, availableRepos, isDraftMode]);
 
   // Auto-pick the repo when the env has exactly one — a data-flow dependency
   // always lives on the team repo, so the user shouldn't have to choose.
@@ -843,11 +852,11 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
     if (form.type === 'cron' && !form.cron.trim()) { setFormError('Cron expression is required.'); return; }
     if (form.type === 'once' && !form.at.trim())   { setFormError('Run-at timestamp is required.'); return; }
     if (form.type === 'github-event') {
-      if (!form.repo)             { setFormError('Repository is required.'); return; }
+      if (!form.repo && !isDraftMode) { setFormError('Repository is required.'); return; }
       if (form.events.length === 0) { setFormError('Select at least one event.'); return; }
     }
     if (isDataFlow) {
-      if (!form.repo) { setFormError('A repository is required (the team repo agents push to).'); return; }
+      if (!form.repo && !isDraftMode) { setFormError('A repository is required (the team repo agents push to).'); return; }
       if (form.upstreams.length === 0) { setFormError('Pick at least one upstream agent.'); return; }
     }
     if (form.type === 'http' && !form.secret.trim()) { setFormError('Secret is required for HTTP triggers.'); return; }
@@ -861,7 +870,7 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
     if (!isEdit) body.id = form.id.trim() || undefined;
     if (isDataFlow) {
       // A data-flow dependency is a push trigger scoped to the upstream agents.
-      body.repo = form.repo;
+      if (form.repo) body.repo = form.repo; // a draft's repo lands at materialise
       body.events = ['push'];
       body.from = form.upstreams;
       body.dataFlow = true;
@@ -869,7 +878,7 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
     else if (form.type === 'once')         body.at   = form.at.trim();
     else if (form.type === 'http')         body.secret = form.secret.trim();
     else if (form.type === 'github-event') {
-      body.repo = form.repo;
+      if (form.repo) body.repo = form.repo; // a draft's repo lands at materialise
       body.events = form.events;
       // Persist the label-name filter only when it's relevant to the
       // selected events AND the user actually entered something. Sending
@@ -972,6 +981,11 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
             </div>
           </div>
 
+          {isDraftMode ? (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
+              The repository is applied when the draft is materialised into a team.
+            </div>
+          ) : (
           <div>
             <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
               Repository
@@ -988,11 +1002,17 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
               </select>
             )}
           </div>
+          )}
         </div>
       )}
 
       {form.type === 'github-event' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+          {isDraftMode ? (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
+              The repository is applied when the draft is materialised into a team.
+            </div>
+          ) : (
           <div>
             <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
               Repository
@@ -1026,6 +1046,7 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
               </select>
             )}
           </div>
+          )}
 
           <div>
             <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
@@ -1243,8 +1264,16 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
 /**
  * Read/write panel listing and managing the scheduled triggers for the
  * selected agent. Polls every 30 s for changes the agent itself makes.
+ *
+ * Write-target abstraction: pass `ops` (edit-adapters surface) to edit a
+ * process-draft role's triggers instead of a live agent — the panel then
+ * mutates the draft bundle (ops.mode === 'draft'), skips the live-only
+ * lookups (env repos, emit suggestions, sibling fetch) and stops polling.
+ * Pass `siblings` to supply the upstream candidates explicitly (draft roles).
  */
-export default function TriggersPanel({ agentId, active, onChanged }) {
+export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp = null, siblings: siblingsProp = null }) {
+  const ops = opsProp || liveOps;
+  const isDraft = ops.mode === 'draft';
   const [triggers, setTriggers]   = useState([]);
   const [loading, setLoading]     = useState(false);
   const [error, setError]         = useState(null);
@@ -1256,9 +1285,10 @@ export default function TriggersPanel({ agentId, active, onChanged }) {
 
   // Sibling agents (same parent team) — the candidate upstreams a data-flow
   // dependency can listen to, and the source for resolving member ids to names.
-  const [siblings, setSiblings] = useState([]); // [{ id, displayName }]
+  const [siblings, setSiblings] = useState(siblingsProp || []); // [{ id, displayName }]
   useEffect(() => {
-    if (!agentId || !active) return;
+    if (siblingsProp) { setSiblings(siblingsProp); return; }
+    if (!agentId || !active || isDraft) return;
     let cancelled = false;
     (async () => {
       try {
@@ -1275,7 +1305,7 @@ export default function TriggersPanel({ agentId, active, onChanged }) {
       } catch { if (!cancelled) setSiblings([]); }
     })();
     return () => { cancelled = true; };
-  }, [agentId, active]);
+  }, [agentId, active, isDraft, siblingsProp]);
   const nameOf = useCallback(
     (id) => siblings.find(s => s.id === id)?.displayName || id,
     [siblings],
@@ -1286,28 +1316,27 @@ export default function TriggersPanel({ agentId, active, onChanged }) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/agents/${id}/triggers`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      const data = await ops.listTriggers(id);
       setTriggers(Array.isArray(data) ? data : []);
     } catch (e) {
       setError(e.message);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [ops]);
 
   useEffect(() => {
     if (!active) return;
     fetchTriggers(agentId);
+    if (isDraft) return undefined; // a draft only changes through this UI
     const timer = setInterval(() => fetchTriggers(agentId), POLL_MS);
     return () => clearInterval(timer);
-  }, [agentId, active, fetchTriggers]);
+  }, [agentId, active, isDraft, fetchTriggers]);
 
   async function handleSave(body) {
     setSaving(true);
     try {
-      await apiCall('POST', `/api/agents/${agentId}/triggers`, body);
+      await ops.createTrigger(agentId, body);
       setAddOpen(false);
       fetchTriggers(agentId);
       onChanged?.();
@@ -1321,7 +1350,7 @@ export default function TriggersPanel({ agentId, active, onChanged }) {
   async function handleEditSave(body) {
     setSaving(true);
     try {
-      await apiCall('PUT', `/api/agents/${agentId}/triggers/${editTarget.id}`, body);
+      await ops.updateTrigger(agentId, editTarget.id, body);
       setEditTarget(null);
       fetchTriggers(agentId);
       onChanged?.();
@@ -1335,7 +1364,7 @@ export default function TriggersPanel({ agentId, active, onChanged }) {
   async function handleDelete() {
     if (!deleteTarget) return;
     try {
-      await apiCall('DELETE', `/api/agents/${agentId}/triggers/${deleteTarget.id}`);
+      await ops.deleteTrigger(agentId, deleteTarget.id);
       setDeleteTarget(null);
       fetchTriggers(agentId);
       onChanged?.();
@@ -1439,6 +1468,7 @@ export default function TriggersPanel({ agentId, active, onChanged }) {
             key={t.id || i}
             trigger={t}
             agentId={agentId}
+            ops={ops}
             nameOf={nameOf}
             onEdit={setEditTarget}
             onDeleted={setDeleteTarget}
@@ -1451,6 +1481,7 @@ export default function TriggersPanel({ agentId, active, onChanged }) {
         <TriggerForm
           agentId={agentId}
           siblings={siblings}
+          ops={ops}
           saving={saving}
           onSave={handleSave}
           onCancel={() => setAddOpen(false)}
@@ -1462,6 +1493,7 @@ export default function TriggersPanel({ agentId, active, onChanged }) {
           <TriggerForm
             agentId={agentId}
             siblings={siblings}
+            ops={ops}
             initialValues={editTarget}
             saving={saving}
             onSave={handleEditSave}

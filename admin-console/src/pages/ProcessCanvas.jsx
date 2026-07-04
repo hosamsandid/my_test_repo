@@ -13,7 +13,9 @@ import { capabilitiesFor, processMode, createTypesFor, sourceKindOf } from './pr
 
 // Display names for the actor pseudo-nodes (#411) — the graph carries them as
 // nodes when they have edges, but a drag can also start from a placeholder.
-const ACTOR_NAMES = { '@human': 'Human', '@github': 'GitHub', '@external': 'External system', '@timer': 'Schedule' };
+// (@human/@timer are gone: human actions are GitHub label events, schedules
+// render inside the agent card.)
+const ACTOR_NAMES = { '@github': 'GitHub', '@external': 'External system', '@timer': 'Schedule' };
 
 // Inline-editable process name for the draft toolbar. Click to edit; Enter or
 // blur commits, Escape reverts. Renaming only touches the bundle's display
@@ -464,13 +466,13 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
       )}
 
       {/* The toolbar approval button is a preset of the unified create dialog
-          (#413): same ApprovalForm the @human drag offers, with the downstream
-          step picked in-form instead of by dropping on a node. */}
+          (#413): the ApprovalForm with the downstream step picked in-form
+          instead of by dropping on a node. */}
       {approvalOpen && isDraft && (
         <CreateEdgeDialog
-          from="@human"
+          from="@github"
           to={null}
-          fromName="Human"
+          fromName="GitHub"
           ops={draftOps}
           types={['approval']}
           preset="approval"

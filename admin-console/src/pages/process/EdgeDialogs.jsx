@@ -12,6 +12,28 @@ const LABEL_EVENTS = [
 ];
 const FROM_OPTIONS = ['any-except-self', 'humans', 'agents', 'team'];
 
+// The one GitHub event catalog the unified trigger dialog offers — raw repo
+// events plus the label events. (The Events API splits closed PRs: `closed`
+// for non-merged closes, `merged` for merged ones.)
+const GH_EVENTS = [
+  { value: 'issues.opened', label: 'Issue opened' },
+  { value: 'issues.closed', label: 'Issue closed' },
+  { value: 'issues.labeled', label: 'Issue labeled' },
+  { value: 'issues.unlabeled', label: 'Issue unlabeled' },
+  { value: 'pull_request.opened', label: 'PR opened' },
+  { value: 'pull_request.reopened', label: 'PR reopened' },
+  { value: 'pull_request.closed', label: 'PR closed (without merge)' },
+  { value: 'pull_request.merged', label: 'PR merged' },
+  { value: 'pull_request.labeled', label: 'PR labeled' },
+  { value: 'pull_request.unlabeled', label: 'PR unlabeled' },
+  { value: 'pull_request_review.submitted', label: 'PR review submitted' },
+  { value: 'issue_comment.created', label: 'Comment created' },
+  { value: 'push', label: 'Push' },
+];
+// Events that carry a `payload.label.name` — the only ones where a label
+// filter makes sense (mirrors the poller / TriggersPanel semantics).
+const LABEL_FILTERABLE = new Set(LABEL_EVENTS.map(e => e.value));
+
 const uniq = (arr) => [...new Set(arr)];
 
 function firstRepo(...triggerLists) {
@@ -169,14 +191,14 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
             </select>
           </Field>
 
-          <Field label="Repo">
-            <input value={repo} onChange={e => setRepo(e.target.value)} placeholder="owner/name" style={input} />
-          </Field>
-
           <Field label="Listener prompt">
             <textarea value={effectivePrompt} onChange={e => setPrompt(e.target.value)}
               style={{ ...input, minHeight: 120, fontFamily: 'var(--eb-font-mono)', resize: 'vertical' }} />
           </Field>
+          <small style={small}>
+            The repository is resolved automatically — from the agent's working
+            environment (live team) or when the draft is materialised.
+          </small>
 
           {error && <span style={errStyle}>{error}</span>}
 
@@ -195,8 +217,8 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
 }
 
 /* ── on-type picker: the ONE create dialog for every connection (#411) ───────
- * Drag the ● port from any source — an agent or an actor (@human / @github /
- * @external / @timer) — onto an agent and this dialog opens. Step 1 picks the
+ * Drag the ● port from any source — an agent or an actor (@github /
+ * @external) — onto an agent and this dialog opens. Step 1 picks the
  * connection type (filtered by the capability matrix per source kind, ranked by
  * context: a PR/Issue producer sees its channel first); step 2 is the
  * type-specific detail form, with Back always available. */
@@ -221,11 +243,9 @@ export function CreateEdgeDialog({
   if (type === 'github-pr' || type === 'github-issue') {
     return <CreateChannelDialog {...common} artifact={type === 'github-pr' ? 'pr' : 'issue'} lockArtifact onBack={back} />;
   }
-  if (type === 'human-label') return <HumanLabelForm {...common} labels={labels} onBack={back} />;
   if (type === 'approval') return <ApprovalForm {...common} roles={roles} onBack={back} />;
-  if (type === 'event') return <EventForm {...common} onBack={back} />;
+  if (type === 'event') return <GithubTriggerForm {...common} labels={labels} onBack={back} />;
   if (type === 'webhook') return <WebhookForm {...common} onBack={back} />;
-  if (type === 'schedule') return <ScheduleForm {...common} onBack={back} />;
 
   const gh = (fromNode && fromNode.github) || {};
   const A = fromName || from;
@@ -245,11 +265,9 @@ export function CreateEdgeDialog({
     { id: 'dependency', title: 'Dependency', desc: `${B} is woken when ${A} pushes to the repo.` },
     { id: 'artifact', title: 'Data flow / hand-off', desc: `${A} produces an artifact that ${B} consumes. Leave the name empty for a plain dependency.` },
     { id: 'hierarchy', title: 'Parent / child', desc: `${A} groups ${B} as a child — it inherits its parent's stage.` },
-    { id: 'human-label', title: 'Label set by a human', desc: `${B} wakes when a human puts a label on an issue or PR — no agent involved.` },
     { id: 'approval', title: 'Human approval gate', desc: `${B} waits until a human grants a human:* approval label.` },
-    { id: 'event', title: 'GitHub event', desc: `${B} wakes on a raw repo event (issue opened, PR opened, push, …).` },
+    { id: 'event', title: 'GitHub trigger', desc: `${B} wakes on a repo event (issue opened, PR opened, push, …) or on a label — including labels a human sets.` },
     { id: 'webhook', title: 'Webhook', desc: `An external system (CI, tooling) wakes ${B} via an HTTP call.` },
-    { id: 'schedule', title: 'Schedule', desc: `${B} runs on a cron schedule or once at a set time.` },
   ].filter(c => allowed.includes(c.id));
   // Context ranking (#411): recommended tiles (the source's PR/Issue badges) first.
   choices.sort((a, b) => (b.recommended ? 1 : 0) - (a.recommended ? 1 : 0));
@@ -858,13 +876,15 @@ function EditTimerDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
   );
 }
 
-// 🐙 → agent: edit the raw event set + origin filter, or delete.
+// 🐙 → agent: edit the event set, the optional label filter + origin filter,
+// or delete. The same unified GitHub-trigger surface the create dialog offers.
 function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
   const { to, triggerId } = edge;
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [events, setEvents] = useState([]);
+  const [label, setLabel] = useState('');
   const [fromFilter, setFromFilter] = useState('any-except-self');
 
   useEffect(() => {
@@ -876,7 +896,8 @@ function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
         const t = (Array.isArray(tt) ? tt : []).find(x => x.id === triggerId);
         if (t) {
           setEvents(Array.isArray(t.events) ? t.events : []);
-          setFromFilter(t.from || 'any-except-self');
+          setLabel(typeof t.labelFilter === 'string' ? t.labelFilter : '');
+          setFromFilter(typeof t.from === 'string' ? t.from : 'any-except-self');
         }
       } catch (e) { if (alive) setError(e.message); }
       finally { if (alive) setLoading(false); }
@@ -885,13 +906,21 @@ function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
   }, [to, triggerId]);
 
   // Preserve events outside the common list (the Events API knows more keys).
-  const known = new Set(RAW_EVENTS.map(e => e.value));
+  const known = new Set(GH_EVENTS.map(e => e.value));
   const extra = events.filter(e => !known.has(e));
   const toggle = (v) => setEvents(prev => prev.includes(v) ? prev.filter(x => x !== v) : [...prev, v]);
+  const showLabelFilter = events.some(e => LABEL_FILTERABLE.has(e));
 
   async function save() {
     setSaving(true); setError(null);
-    try { await ops.updateTrigger(to, triggerId, { events, from: fromFilter }); onDone?.(); }
+    try {
+      const lf = label.trim();
+      await ops.updateTrigger(to, triggerId, {
+        events, from: fromFilter,
+        labelFilter: (showLabelFilter && lf) ? lf : null,
+      });
+      onDone?.();
+    }
     catch (e) { setError(e.message); setSaving(false); }
   }
   async function remove() {
@@ -901,13 +930,13 @@ function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
   }
 
   return (
-    <SidePanel open onClose={onClose} title="GitHub event" width="520px">
+    <SidePanel open onClose={onClose} title="GitHub trigger" width="520px">
       <p style={hint}>🐙 GitHub → <strong>{toName || to}</strong></p>
       {loading ? <Center><Loader2 size={14} style={spin} /> Loading…</Center> : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
           <Field label="Events">
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-2)' }}>
-              {RAW_EVENTS.map(ev => (
+              {GH_EVENTS.map(ev => (
                 <label key={ev.value} style={check}>
                   <input type="checkbox" checked={events.includes(ev.value)} onChange={() => toggle(ev.value)} />
                   {ev.label}
@@ -921,6 +950,12 @@ function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
               ))}
             </div>
           </Field>
+          {showLabelFilter && (
+            <Field label="Label name filter (optional)">
+              <input value={label} onChange={e => setLabel(e.target.value)}
+                placeholder="e.g. priorisiert, human:approved — empty = any label" style={input} />
+            </Field>
+          )}
           <Field label="Origin filter (from)">
             <select value={fromFilter} onChange={e => setFromFilter(e.target.value)} style={input}>
               {FROM_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
@@ -1015,42 +1050,47 @@ function ReadonlyEdgeDialog({ edge, fromName, toName, onClose }) {
   );
 }
 
-/* ── Actor-sourced connections (#411): @human / @github / @external / @timer ──
+/* ── Actor-sourced connections (#411): @github / @external ──────────────────
  * Each form creates one trigger on the target agent — the same data the
  * inspector's trigger tab writes, reachable with the same ● drag gesture. */
 
-// A human puts a label on an issue/PR (no agent involved) → wake the agent.
-// Exactly the scenario the graph could not express before #410: a human-created
-// issue gets a human-applied label and an agent reacts.
-export function HumanLabelForm({ to, toName, labels, ops = liveOps, onBack, onClose, onDone }) {
+// The ONE GitHub-trigger dialog: raw repo events AND label-based triggers
+// (including labels a human sets — the former "Label set by a human" form is
+// folded in here via the `humans` origin filter). No repo input: the repo is
+// resolved from the agent's working environment (live) or at materialise
+// time (draft), since it is unknown while modelling the flow.
+export function GithubTriggerForm({ to, toName, labels, ops = liveOps, onBack, onClose, onDone }) {
+  const [events, setEvents] = useState([]);
   const [label, setLabel] = useState('');
-  const [target, setTarget] = useState('issues');
-  const [action, setAction] = useState('labeled');
+  const [fromFilter, setFromFilter] = useState('any-except-self');
   const [prompt, setPrompt] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
-  const event = `${target}.${action}`;
-  const verb = action === 'labeled' ? 'added to' : 'removed from';
-  const noun = target === 'issues' ? 'an issue' : 'a pull request';
-  const isGate = label.trim().startsWith('human:');
+  const toggle = (v) => setEvents(prev => prev.includes(v) ? prev.filter(x => x !== v) : [...prev, v]);
+  const showLabelFilter = events.some(e => LABEL_FILTERABLE.has(e));
+  const trimmedLabel = label.trim();
+  const isGate = trimmedLabel.startsWith('human:');
+  const labelActive = showLabelFilter && !!trimmedLabel;
+
   const effectivePrompt = prompt
-    || `A human ${verb === 'added to' ? 'added' : 'removed'} the label \`${label || '<label>'}\` on ${noun}. The event payload above has the details.\n\n<Describe what ${toName || to} should do.> Reply \`[PASS]\` if there's nothing to do.`;
+    || (labelActive
+      ? `The label \`${trimmedLabel}\` changed on an issue/PR (${events.filter(e => LABEL_FILTERABLE.has(e)).join(', ')}). The event payload above has the details.\n\n<Describe what ${toName || to} should do.> Reply \`[PASS]\` if there's nothing to do.`
+      : `A repo event (${events.join(', ') || '<event>'}) occurred. The event payload above has the details.\n\n<Describe what ${toName || to} should do.> Reply \`[PASS]\` if there's nothing to do.`);
 
   async function submit() {
-    const trimmed = label.trim();
-    if (!trimmed) { setError('Enter the label name.'); return; }
+    if (!events.length) { setError('Pick at least one event.'); return; }
     setSaving(true); setError(null);
     try {
       await ops.createTrigger(to, {
         type: 'github-event',
-        events: [event],
-        from: 'humans',
-        labelFilter: trimmed,
+        events,
+        from: fromFilter,
+        ...(labelActive ? { labelFilter: trimmedLabel } : {}),
         enabled: true,
-        description: isGate
-          ? `Wait for human gate \`${trimmed}\``
-          : `Wake when a human ${action === 'labeled' ? 'adds' : 'removes'} \`${trimmed}\` on ${noun}`,
+        description: labelActive
+          ? (isGate ? `Wait for human gate \`${trimmedLabel}\`` : `Wake on label \`${trimmedLabel}\``)
+          : `Wake on ${events.join(', ')}`,
         prompt: effectivePrompt,
       });
       onDone?.();
@@ -1058,35 +1098,49 @@ export function HumanLabelForm({ to, toName, labels, ops = liveOps, onBack, onCl
   }
 
   return (
-    <SidePanel open onClose={onClose} title="Label set by a human" width="520px">
+    <SidePanel open onClose={onClose} title="GitHub trigger" width="520px">
       <p style={hint}>
-        A <strong>human</strong> sets a label that wakes <strong>{toName || to}</strong> —
-        the issue/PR itself may come from anyone.
+        <strong>{toName || to}</strong> wakes on a GitHub event — a raw repo event, or a
+        specific label (set by an agent or a human).
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-        <Field label="Label kind">
-          <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
-            <select value={target} onChange={e => setTarget(e.target.value)} style={{ ...input, flex: 1 }}>
-              {LABEL_TARGETS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-            <select value={action} onChange={e => setAction(e.target.value)} style={{ ...input, flex: 1 }}>
-              {LABEL_ACTIONS.map(o => <option key={o.value} value={o.value}>label {o.label}</option>)}
-            </select>
+        <Field label="Events">
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-2)' }}>
+            {GH_EVENTS.map(ev => (
+              <label key={ev.value} style={check}>
+                <input type="checkbox" checked={events.includes(ev.value)} onChange={() => toggle(ev.value)} />
+                {ev.label}
+              </label>
+            ))}
           </div>
-          <small style={small}>Listens on <code>{event}</code>, origin filter <code>humans</code>.</small>
         </Field>
-        <Field label="Label name">
-          <input list="pc-human-label-list" value={label} onChange={e => setLabel(e.target.value)}
-            placeholder="e.g. priorisiert, triage-me" style={input} />
-          <datalist id="pc-human-label-list">
-            {(labels || []).map(l => <option key={l.name} value={l.name} />)}
-          </datalist>
-          {isGate && <small style={small}><code>{label.trim()}</code> is an approval-gate label — it renders as a gate on the edge.</small>}
+        {showLabelFilter && (
+          <Field label="Label name filter (optional)">
+            <input list="pc-gh-label-list" value={label} onChange={e => setLabel(e.target.value)}
+              placeholder="e.g. priorisiert, stage:td, human:approved" style={input} />
+            <datalist id="pc-gh-label-list">
+              {(labels || []).map(l => <option key={l.name} value={l.name} />)}
+            </datalist>
+            <small style={small}>
+              Only fire when the changed label matches this name exactly — leave empty to fire on any label.
+            </small>
+            {isGate && <small style={small}><code>{trimmedLabel}</code> is an approval-gate label — it renders as a gate on the edge.</small>}
+          </Field>
+        )}
+        <Field label="Origin filter (from)">
+          <select value={fromFilter} onChange={e => setFromFilter(e.target.value)} style={input}>
+            {FROM_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+          </select>
+          <small style={small}>Use <code>humans</code> to react only to events humans caused (e.g. a label a person applies).</small>
         </Field>
         <Field label="Listener prompt">
           <textarea value={effectivePrompt} onChange={e => setPrompt(e.target.value)}
             style={{ ...input, minHeight: 100, fontFamily: 'var(--eb-font-mono)', resize: 'vertical' }} />
         </Field>
+        <small style={small}>
+          The repository is resolved automatically — from the agent's working environment
+          (live team) or when the draft is materialised.
+        </small>
         {error && <span style={errStyle}>{error}</span>}
         <div style={actions}>
           {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
@@ -1161,87 +1215,6 @@ export function ApprovalForm({ to, toName, roles = [], ops = liveOps, onBack, on
           {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
           <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
           <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Adding…' : 'Add approval'}</button>
-        </div>
-      </div>
-    </SidePanel>
-  );
-}
-
-// Raw GitHub events — issue opened, PR opened, push, … (@github actor).
-const RAW_EVENTS = [
-  { value: 'issues.opened', label: 'Issue opened' },
-  { value: 'issues.closed', label: 'Issue closed' },
-  { value: 'pull_request.opened', label: 'PR opened' },
-  { value: 'pull_request.reopened', label: 'PR reopened' },
-  { value: 'pull_request.closed', label: 'PR closed / merged' },
-  { value: 'pull_request_review.submitted', label: 'PR review submitted' },
-  { value: 'issue_comment.created', label: 'Comment created' },
-  { value: 'push', label: 'Push' },
-];
-
-export function EventForm({ to, toName, ops = liveOps, onBack, onClose, onDone }) {
-  const [events, setEvents] = useState([]);
-  const [fromFilter, setFromFilter] = useState('any-except-self');
-  const [repo, setRepo] = useState('');
-  const [prompt, setPrompt] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState(null);
-
-  const toggle = (v) => setEvents(prev => prev.includes(v) ? prev.filter(x => x !== v) : [...prev, v]);
-  const effectivePrompt = prompt
-    || `A repo event (${events.join(', ') || '<event>'}) occurred in \`${repo || '<repo>'}\`. The event payload above has the details.\n\n<Describe what ${toName || to} should do.> Reply \`[PASS]\` if there's nothing to do.`;
-
-  async function submit() {
-    if (!events.length) { setError('Pick at least one event.'); return; }
-    setSaving(true); setError(null);
-    try {
-      await ops.createTrigger(to, {
-        type: 'github-event',
-        events,
-        from: fromFilter,
-        repo: repo || undefined,
-        enabled: true,
-        description: `Wake on ${events.join(', ')}`,
-        prompt: effectivePrompt,
-      });
-      onDone?.();
-    } catch (e) { setError(e.message); setSaving(false); }
-  }
-
-  return (
-    <SidePanel open onClose={onClose} title="GitHub event" width="520px">
-      <p style={hint}>
-        <strong>{toName || to}</strong> wakes on a raw repo event — no label routing.
-      </p>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-        <Field label="Events">
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-2)' }}>
-            {RAW_EVENTS.map(ev => (
-              <label key={ev.value} style={check}>
-                <input type="checkbox" checked={events.includes(ev.value)} onChange={() => toggle(ev.value)} />
-                {ev.label}
-              </label>
-            ))}
-          </div>
-        </Field>
-        <Field label="Origin filter (from)">
-          <select value={fromFilter} onChange={e => setFromFilter(e.target.value)} style={input}>
-            {FROM_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
-          </select>
-          <small style={small}>Use <code>humans</code> to react only to events humans caused.</small>
-        </Field>
-        <Field label="Repo">
-          <input value={repo} onChange={e => setRepo(e.target.value)} placeholder="owner/name" style={input} />
-        </Field>
-        <Field label="Listener prompt">
-          <textarea value={effectivePrompt} onChange={e => setPrompt(e.target.value)}
-            style={{ ...input, minHeight: 100, fontFamily: 'var(--eb-font-mono)', resize: 'vertical' }} />
-        </Field>
-        {error && <span style={errStyle}>{error}</span>}
-        <div style={actions}>
-          {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
-          <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
-          <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Wiring…' : 'Create trigger'}</button>
         </div>
       </div>
     </SidePanel>
@@ -1337,7 +1310,9 @@ export function WebhookForm({ to, toName, ops = liveOps, onBack, onClose, onDone
   );
 }
 
-// Schedule (@timer actor): recurring cron or one-shot timestamp.
+// Human-readable cron summary — used by the schedule edit dialog (opened from
+// the ⏰ row inside the agent card; new schedules are added in the inspector's
+// Triggers tab).
 export function cronPreview(expr) {
   const p = String(expr || '').trim().split(/\s+/);
   if (p.length !== 5) return 'Expected 5 fields: minute hour day-of-month month day-of-week';
@@ -1353,78 +1328,6 @@ export function cronPreview(expr) {
   if (/^\*\/\d+$/.test(min) && hr === '*') return `every ${min.slice(2)} minutes`;
   if (min === '0' && /^\*\/\d+$/.test(hr)) return `every ${hr.slice(2)} hours`;
   return 'custom schedule';
-}
-
-export function ScheduleForm({ to, toName, ops = liveOps, onBack, onClose, onDone }) {
-  const [kind, setKind] = useState('cron'); // cron | once
-  const [cron, setCron] = useState('0 9 * * 1');
-  const [at, setAt] = useState('');
-  const [prompt, setPrompt] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState(null);
-
-  const effectivePrompt = prompt
-    || `Scheduled run. <Describe what ${toName || to} should do.> Reply \`[PASS]\` if there's nothing to do.`;
-
-  async function submit() {
-    setSaving(true); setError(null);
-    try {
-      if (kind === 'cron') {
-        if (cron.trim().split(/\s+/).length !== 5) { setError('Cron needs 5 fields.'); setSaving(false); return; }
-        await ops.createTrigger(to, {
-          type: 'cron', cron: cron.trim(), enabled: true,
-          description: `Runs ${cronPreview(cron)}`, prompt: effectivePrompt,
-        });
-      } else {
-        if (!at) { setError('Pick a date and time.'); setSaving(false); return; }
-        await ops.createTrigger(to, {
-          type: 'once', at: new Date(at).toISOString(), enabled: true,
-          description: 'One-shot run', prompt: effectivePrompt,
-        });
-      }
-      onDone?.();
-    } catch (e) { setError(e.message); setSaving(false); }
-  }
-
-  return (
-    <SidePanel open onClose={onClose} title="Schedule" width="520px">
-      <p style={hint}>
-        The scheduler wakes <strong>{toName || to}</strong> — recurring or once.
-      </p>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-        <Field label="Kind">
-          <div style={{ display: 'flex', gap: 'var(--eb-space-3)' }}>
-            <label style={check}>
-              <input type="radio" checked={kind === 'cron'} onChange={() => setKind('cron')} /> Recurring (cron)
-            </label>
-            <label style={check}>
-              <input type="radio" checked={kind === 'once'} onChange={() => setKind('once')} /> Once
-            </label>
-          </div>
-        </Field>
-        {kind === 'cron' ? (
-          <Field label="Cron expression (min hour dom mon dow)">
-            <input value={cron} onChange={e => setCron(e.target.value)} style={{ ...input, fontFamily: 'var(--eb-font-mono)' }} />
-            <small style={small}>{cronPreview(cron)}</small>
-          </Field>
-        ) : (
-          <Field label="Run at">
-            <input type="datetime-local" value={at} onChange={e => setAt(e.target.value)} style={input} />
-          </Field>
-        )}
-        <Field label="Prompt">
-          <textarea value={effectivePrompt} onChange={e => setPrompt(e.target.value)}
-            style={{ ...input, minHeight: 100, fontFamily: 'var(--eb-font-mono)', resize: 'vertical' }} />
-        </Field>
-        {error && <span style={errStyle}>{error}</span>}
-        <div style={actions}>
-          {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
-          <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
-          <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Creating…' : 'Create schedule'}</button>
-        </div>
-      </div>
-    </SidePanel>
-  );
 }
 
 /* ── shared bits ───────────────────────────────────────────────────────── */

@@ -24,15 +24,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
   const ARTIFACT_H  = 70;
   const ACTOR_W     = 150;   // actor pseudo-nodes (#410) — the "outside world" column
   const ACTOR_H     = 40;
-  const ACTOR_ICON  = { human: '👤', github: '🐙', external: '⚡', timer: '⏰' };
+  const ACTOR_ICON  = { github: '🐙', external: '⚡', timer: '⏰' };
   // Placeholder actors (#411): in an editable process view every source is
-  // offered as a drag source even before it has edges, so the first cron /
-  // human label / webhook can be wired on the canvas.
+  // offered as a drag source even before it has edges, so the first event /
+  // label / webhook trigger can be wired on the canvas. @human and @timer are
+  // gone: human actions are GitHub label events (folded into @github) and
+  // schedules render inside the agent card instead of as an actor.
   const DEFAULT_ACTORS = [
-    { id: '@human', kind: 'actor', actor: 'human', displayName: 'Human' },
     { id: '@github', kind: 'actor', actor: 'github', displayName: 'GitHub' },
     { id: '@external', kind: 'actor', actor: 'external', displayName: 'External system' },
-    { id: '@timer', kind: 'actor', actor: 'timer', displayName: 'Schedule' },
   ];
 
   // Single source of truth for edge colours (#402). Every drawer and the legend
@@ -179,8 +179,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     `<span style="width:14px;height:0;display:inline-block;border-top:2px ${dashed ? 'dashed' : 'solid'} ${color};"></span>` +
     `<span style="color:var(--eb-text-secondary)">${label}</span></span>`;
   function renderLegend() {
-    const keys = ['label', 'issue', 'pr', 'review', 'gate', 'event', 'timer', 'webhook', 'artifact', 'dependency', 'hierarchy'];
-    const actorToggles = ['human', 'github', 'external', 'timer'].map(kind => {
+    const keys = ['label', 'issue', 'pr', 'review', 'gate', 'event', 'webhook', 'artifact', 'dependency', 'hierarchy'];
+    const actorToggles = ['github', 'external'].map(kind => {
       const off = state.hiddenActorKinds.has(kind);
       return `<button data-actor-toggle="${kind}" title="Show/hide edges from this source" style="`
         + 'background:none;border:1px solid var(--eb-border-default);border-radius:10px;padding:0 6px;'
@@ -229,10 +229,14 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     selectedId:         null,   // #362 UI rework Phase C: node selection
     editable:           false,  // structural editing (connect-to-wire, edges)
     connecting:         null,   // { fromId } while dragging a new edge
-    actors:             [],     // actor pseudo-nodes (#410): @human/@github/@external/@timer
+    actors:             [],     // actor pseudo-nodes (#410): @github/@external
     actorsById:         {},
     actorPositions:     {},
     hiddenActorKinds:   new Set(JSON.parse(localStorage.getItem('flow-graph-hidden-actor-kinds') || '[]')),
+    // Per-trigger edge visibility (👁 toggle on the card's trigger rows) —
+    // keys are `${nodeId}|${triggerId}`, persisted across sessions.
+    hiddenTriggerEdges: new Set(JSON.parse(localStorage.getItem('flow-graph-hidden-trigger-edges') || '[]')),
+    nodeTriggerEdges:   new Map(), // nodeId → external trigger edges shown in the card
     showStages:         localStorage.getItem('flow-graph-show-stages') === 'true', // #362 E stage bands
     stageOrder:         [],     // ordered stage names — drives layered layout order
     layeredInfo:        null,   // { vertical, colOf } while the layered layout is active
@@ -255,9 +259,12 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
   function setData(graph) {
     const g = graph || {};
     const allNodes = Array.isArray(g.nodes) ? g.nodes : [];
-    // Actor pseudo-nodes (#410) live in their own left-hand "outside world"
-    // column — they never join the tree/layered layout of the agent cards.
-    state.actors = allNodes.filter(n => n && n.kind === 'actor');
+    // Actor pseudo-nodes (#410) live in their own "outside world" column —
+    // they never join the tree/layered layout of the agent cards. @timer and
+    // legacy @human actors are dropped here: schedules render inside the card,
+    // human label events come from @github.
+    state.actors = allNodes.filter(n => n && n.kind === 'actor'
+      && n.actor !== 'timer' && n.actor !== 'human');
     state.actorsById = {};
     state.actors.forEach(a => { state.actorsById[a.id] = a; });
     const nodes = allNodes.filter(n => !n || n.kind !== 'actor');
@@ -300,11 +307,25 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     state.byId = {};
     state.briefings.forEach(bp => { state.byId[bp.id] = bp; });
 
-    // event/timer/webhook edges (#410) run from an actor node; label edges may
-    // too (@human). True orphans (from: null) are still dropped here.
-    const EXTRA = new Set(['label', 'review', 'manual', 'github', 'event', 'timer', 'webhook']);
+    // event/webhook edges (#410) run from an actor node; label edges may too
+    // (human-set labels come from @github). Timer edges are NOT drawn as lines
+    // any more — schedules render inside the agent card. True orphans
+    // (from: null) are still dropped here.
+    const EXTRA = new Set(['label', 'review', 'manual', 'github', 'event', 'webhook']);
     state.extraEdges = (Array.isArray(g.edges) ? g.edges : [])
       .filter(e => EXTRA.has(e.on) && e.from && e.to && e.from !== e.to);
+
+    // The trigger rows shown inside each card: schedules (⏰, no line) plus
+    // every actor-sourced trigger edge (🐙/🏷/⚡ — each with a 👁 line toggle).
+    state.nodeTriggerEdges = new Map();
+    (Array.isArray(g.edges) ? g.edges : []).forEach(e => {
+      if (!e || !e.to) return;
+      const fromActor = typeof e.from === 'string' && e.from.startsWith('@');
+      if (e.on === 'timer' || (fromActor && ['event', 'webhook', 'label'].includes(e.on))) {
+        if (!state.nodeTriggerEdges.has(e.to)) state.nodeTriggerEdges.set(e.to, []);
+        state.nodeTriggerEdges.get(e.to).push(e);
+      }
+    });
 
     // Operator-defined stage order (drives the layered layout when set). Accept
     // either bare strings or { name } objects; ignore anything else.
@@ -543,8 +564,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
       .filter(a => actorsAsSources() || actorHasEdges(a));
   }
 
-  // The "outside world" column (#410): actors stack top→down, left of the
-  // whole graph, before the first stage/layer — every flow gets a visible start.
+  // The "outside world" sources (#410): actors sit before the first
+  // stage/layer along the flow axis, so every flow gets a visible start. For a
+  // left→right flow that is a column on the left; for a top→down flow a row on
+  // top — matching the orthogonal router, which treats them as column 0.
   function layoutActors() {
     state.actorPositions = {};
     const shown = visibleActors();
@@ -555,12 +578,23 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
       minY = Math.min(minY, p.y);
     });
     if (minX === Infinity) { minX = 0; minY = 0; }
-    const x = minX - ACTOR_W - 160;
-    let y = minY;
-    shown.forEach(a => {
-      state.actorPositions[a.id] = { x, y };
-      y += ACTOR_H + 28;
-    });
+    if (state.layeredInfo && !state.layeredInfo.vertical) {
+      // flow 'down' — a row above the graph
+      const y = minY - ACTOR_H - 160;
+      let x = minX;
+      shown.forEach(a => {
+        state.actorPositions[a.id] = { x, y };
+        x += ACTOR_W + 28;
+      });
+    } else {
+      // flow 'right' (and the tree layouts) — a column left of the graph
+      const x = minX - ACTOR_W - 160;
+      let y = minY;
+      shown.forEach(a => {
+        state.actorPositions[a.id] = { x, y };
+        y += ACTOR_H + 28;
+      });
+    }
   }
 
   // Flat process/draft flows have no parent-child hierarchy — their whole
@@ -1148,6 +1182,55 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
         node.appendChild(badges);
       }
 
+      // External triggers inside the card: schedules (⏰ — they have no line on
+      // the canvas any more) and actor-sourced wakes (🐙 events / 🏷 labels /
+      // ⚡ webhooks). Clicking a row opens the trigger's edit dialog; the 👁
+      // button shows/hides the trigger's line so dense graphs stay readable.
+      const trigEdges = state.nodeTriggerEdges.get(n.id) || [];
+      if (trigEdges.length > 0) {
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'display:flex;flex-direction:column;gap:2px;margin:2px 0 4px;';
+        trigEdges.forEach(e => {
+          const meta = triggerRowMeta(e);
+          const row = document.createElement('div');
+          row.style.cssText = 'display:flex;align-items:center;gap:5px;font-size:10px;min-width:0;';
+          const lbl = document.createElement('span');
+          lbl.style.cssText = `display:inline-flex;align-items:center;gap:4px;min-width:0;flex:1;color:${meta.color};`
+            + (onSelectEdge ? 'cursor:pointer;' : '');
+          lbl.title = onSelectEdge ? `${meta.title} — click to edit` : meta.title;
+          lbl.innerHTML = `<span style="flex-shrink:0">${meta.icon}</span>`
+            + `<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600">${esc(meta.text)}</span>`;
+          if (onSelectEdge) {
+            lbl.addEventListener('click', (ev) => {
+              ev.stopPropagation();
+              onSelectEdge({
+                from: e.from, to: e.to, on: e.on, kind: e.on, label: e.label,
+                triggerId: e.triggerId, gate: e.gate,
+                ...(e.events ? { events: e.events } : {}),
+                ...(e.schedule ? { schedule: e.schedule } : {}),
+              });
+            });
+          }
+          row.appendChild(lbl);
+          if (e.on !== 'timer' && e.triggerId) {
+            const hidden = state.hiddenTriggerEdges.has(`${n.id}|${e.triggerId}`);
+            const eye = document.createElement('button');
+            eye.textContent = '👁';
+            eye.title = hidden ? 'Show this trigger’s line' : 'Hide this trigger’s line';
+            eye.style.cssText = 'background:none;border:none;padding:0 2px;cursor:pointer;'
+              + `font-size:11px;line-height:1;flex-shrink:0;opacity:${hidden ? 0.3 : 0.85};`
+              + (hidden ? 'filter:grayscale(1);' : '');
+            eye.addEventListener('click', (ev) => {
+              ev.stopPropagation();
+              toggleTriggerEdgeHidden(n.id, e.triggerId);
+            });
+            row.appendChild(eye);
+          }
+          wrap.appendChild(row);
+        });
+        node.appendChild(wrap);
+      }
+
       // Action buttons
       const actions = document.createElement('div');
       actions.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;';
@@ -1647,14 +1730,16 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     const EXTRA_COLOR = { label: EDGE_STYLES.label.color, review: EDGE_STYLES.review.color, manual: EDGE_STYLES.label.color };
     const GH_COLOR = { pr: EDGE_STYLES.pr.color, issue: EDGE_STYLES.issue.color };
 
-    // Actor → agent edges (#410): schedules, raw GitHub events, webhooks, and
-    // human-set labels/gates, drawn from the "outside world" column. Shared by
-    // both layouts — the actor column sits outside the routed area either way.
+    // Actor → agent edges (#410): raw GitHub events, webhooks, and human-set
+    // labels/gates, drawn from the "outside world" sources. Bezier fallback for
+    // the tree layouts only — the layered layout routes them orthogonally
+    // through drawRoutedProcessEdges.
     function drawActorEdges() {
       (state.extraEdges || []).forEach(e => {
         const actor = state.actorsById[e.from];
         if (!actor) return;
         if (state.hiddenActorKinds.has(actor.actor)) return;
+        if (isTriggerEdgeHidden(e)) return;
         if (!visibleIds.has(e.to)) return;
         const aPos = state.actorPositions[e.from];
         const toPos = state.positions[e.to];
@@ -1683,7 +1768,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     if (state.layeredInfo) {
       drawRoutedProcessEdges();
       drawArtifactEdges(visibleIds);
-      drawActorEdges();
       return;
     }
 
@@ -1696,8 +1780,43 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
         nodes.push({ id: n.id, x: p.x, y: p.y, w: NODE_W, h: el ? el.offsetHeight : getNodeHeight(n.id) });
       });
 
+      // Actor pseudo-nodes join the routed graph as column 0 (their placement
+      // matches: a column left of / a row above the first layer), so their
+      // edges run through the same orthogonal channels as the agent wiring —
+      // no more bezier curves cutting across the cards. Agent columns shift +1.
+      const actorIds = [];
+      Object.entries(state.actorPositions).forEach(([id, p]) => {
+        nodes.push({ id, x: p.x, y: p.y, w: ACTOR_W, h: ACTOR_H });
+        actorIds.push(id);
+      });
+      const colOf = new Map();
+      const shift = actorIds.length ? 1 : 0;
+      state.layeredInfo.colOf.forEach((c, id) => colOf.set(id, c + shift));
+      actorIds.forEach(id => colOf.set(id, 0));
+
       const list = [];
       (state.extraEdges || []).forEach(e => {
+        // Actor-sourced trigger edges (events, webhooks, human-set labels).
+        const actor = state.actorsById[e.from];
+        if (actor) {
+          if (state.hiddenActorKinds.has(actor.actor)) return;
+          if (isTriggerEdgeHidden(e)) return;
+          if (!visibleIds.has(e.to) || !state.actorPositions[e.from]) return;
+          const style = EDGE_STYLES[e.on] || {};
+          const gate = e.gate === 'human';
+          list.push({
+            from: e.from, to: e.to,
+            color: actorEdgeColor(e), width: 1.5,
+            dash: style.dashed ? '6 4' : '', opacity: 1,
+            labelText: gate ? `👤✓ ${e.label}` : actorEdgeText(e),
+            chip: gate, gate,
+            hit: { from: e.from, to: e.to, on: e.on, kind: e.on, label: e.label,
+              triggerId: e.triggerId, gate: e.gate,
+              ...(e.events ? { events: e.events } : {}),
+              ...(e.schedule ? { schedule: e.schedule } : {}) },
+          });
+          return;
+        }
         if (!visibleIds.has(e.from) || !visibleIds.has(e.to)) return;
         const isGithub = e.on === 'github';
         const artifact = e.artifact === 'issue' ? 'issue' : 'pr';
@@ -1732,7 +1851,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
       const routed = routeOrthogonalEdges({
         nodes,
         edges: list,
-        colOf: state.layeredInfo.colOf,
+        colOf,
         flow: state.layeredInfo.vertical ? 'right' : 'down',
         labelWidths: list.map(e => e.labelText ? estChipWidth(e.labelText) : 0),
       });
@@ -1929,6 +2048,58 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     if (e.on === 'timer') return e.schedule && e.schedule.cron ? `⏱ ${e.schedule.cron}` : `once ${e.label || ''}`.trim();
     if (e.on === 'webhook') return e.label || 'webhook';
     return e.label || '';
+  }
+
+  // Human-readable cron description for the in-card schedule rows.
+  function cronText(expr) {
+    const p = String(expr || '').trim().split(/\s+/);
+    if (p.length !== 5) return expr || 'cron';
+    const [min, hr, dom, mon, dow] = p;
+    const DAYS = { 0: 'Sun', 1: 'Mon', 2: 'Tue', 3: 'Wed', 4: 'Thu', 5: 'Fri', 6: 'Sat', 7: 'Sun' };
+    const two = (s) => String(s).padStart(2, '0');
+    if (/^\d+$/.test(min) && /^\d+$/.test(hr)) {
+      const time = `${two(hr)}:${two(min)}`;
+      if (dom === '*' && mon === '*' && dow === '*') return `daily ${time}`;
+      if (dom === '*' && mon === '*' && DAYS[dow]) return `${DAYS[dow]} ${time}`;
+      if (/^\d+$/.test(dom) && mon === '*' && dow === '*') return `day ${dom}, ${time}`;
+    }
+    if (/^\*\/\d+$/.test(min) && hr === '*') return `every ${min.slice(2)} min`;
+    if (min === '0' && /^\*\/\d+$/.test(hr)) return `every ${hr.slice(2)} h`;
+    return expr;
+  }
+
+  // Icon / text / colour of a card trigger row (schedules + actor wakes).
+  function triggerRowMeta(e) {
+    if (e.on === 'timer') {
+      const text = e.schedule && e.schedule.cron ? cronText(e.schedule.cron)
+        : (e.schedule && e.schedule.at ? `once ${e.schedule.at}` : (e.label || 'schedule'));
+      return { icon: '⏰', text, color: EDGE_STYLES.timer.color, title: 'Schedule' };
+    }
+    if (e.on === 'event') {
+      return { icon: '🐙', text: (e.events || []).join(', '), color: EDGE_STYLES.event.color, title: 'GitHub trigger' };
+    }
+    if (e.on === 'webhook') {
+      return { icon: '⚡', text: e.label || 'webhook', color: EDGE_STYLES.webhook.color, title: 'Webhook' };
+    }
+    // Label listener sourced from GitHub (incl. human-set labels and gates).
+    const gate = e.gate === 'human';
+    return {
+      icon: gate ? '👤✓' : '🏷',
+      text: e.label || '',
+      color: gate ? EDGE_STYLES.gate.color : EDGE_STYLES.label.color,
+      title: gate ? 'Human approval gate (GitHub label)' : 'GitHub label trigger',
+    };
+  }
+
+  function isTriggerEdgeHidden(e) {
+    return !!(e.triggerId && state.hiddenTriggerEdges.has(`${e.to}|${e.triggerId}`));
+  }
+  function toggleTriggerEdgeHidden(nodeId, triggerId) {
+    const key = `${nodeId}|${triggerId}`;
+    if (state.hiddenTriggerEdges.has(key)) state.hiddenTriggerEdges.delete(key);
+    else state.hiddenTriggerEdges.add(key);
+    localStorage.setItem('flow-graph-hidden-trigger-edges', JSON.stringify([...state.hiddenTriggerEdges]));
+    render();
   }
 
   // The chip text for a GitHub-channel edge (#380): artifact + optional human-gate

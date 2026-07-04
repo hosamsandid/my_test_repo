@@ -10,8 +10,8 @@
 //   - editable      — structural editing at all (ports, edge clicks)
 //   - connectPort   — render the ● connect handle on nodes
 //   - edgeClick     — edges open the edit/delete dialog
-//   - actorSources  — offer the actor nodes (@human/@github/@external/@timer)
-//                     as drag sources even before they have edges (#410/#411)
+//   - actorSources  — offer the actor nodes (@github/@external) as drag
+//                     sources even before they have edges (#410/#411)
 //   - readOnlyHint  — the sentence shown instead of editing affordances (#413)
 //   - createTypes   — per drag-source kind, the connection types the create
 //                     dialog offers (the source dimension, #411)
@@ -20,10 +20,14 @@
 //   agent:    'github-pr' | 'github-issue' | 'label' | 'artifact' | 'hierarchy'
 //             | 'dependency'  ('artifact' with no name/path degrades to a plain
 //             dependency; the BP view keeps 'dependency' as an explicit tile)
-//   human:    'human-label' | 'approval'
-//   github:   'event'
+//   github:   'event'  (one unified GitHub-trigger dialog: raw events AND
+//             label-based triggers incl. human-set labels / approval gates —
+//             the former @human source is folded into GitHub)
 //   external: 'webhook'
-//   timer:    'schedule'
+//
+// Schedules are no longer wired from an actor — they live inside the agent
+// card and the inspector's Triggers tab. 'approval' remains a valid preset
+// token (the draft toolbar's Human-approval button), just not a drag source.
 //
 // Modes:
 //   live      — a materialised team; ops write through to running agents
@@ -34,18 +38,14 @@
 
 const PROCESS_CREATE_TYPES = {
   agent: ['github-pr', 'github-issue', 'label', 'artifact', 'hierarchy'],
-  human: ['human-label', 'approval'],
   github: ['event'],
   external: ['webhook'],
-  timer: ['schedule'],
 };
 
 // Actor pseudo-node id → source kind (#411). Everything else is an agent.
 const ACTOR_SOURCE_KINDS = {
-  '@human': 'human',
   '@github': 'github',
   '@external': 'external',
-  '@timer': 'timer',
 };
 
 /** The drag-source kind of a node id: an actor kind or 'agent'. */

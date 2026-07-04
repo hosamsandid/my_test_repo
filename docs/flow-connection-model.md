@@ -1,9 +1,42 @@
 # Flow-Editor: Einheitliches Verbindungsmodell (Konzept)
 
-Status: **Implementiert** (Schritte 1–6, Issues #409–#414).
+Status: **Implementiert** (Schritte 1–6, Issues #409–#414), plus Revision (s. u.).
 Bezieht sich auf den Flow-Editor (`/flows`, `ProcessGraphPanel`) und den BriefingPack-Viewer (`FlowGraph.jsx`).
 Die Capability-Matrix lebt in `admin-console/src/pages/process/connection-capabilities.js`,
 die Dialoge in `EdgeDialogs.jsx`, das Aktor-Mapping in `admin-console/api/unified-graph.js` / `process-graph.js`.
+
+## Revision (Juli 2026): weniger Aktoren, Trigger im Knoten, orthogonale Aktor-Kanten
+
+Die 4-Aktoren-Außenwelt aus Teil 2 hat sich in der Praxis als zu laut erwiesen
+(Kreuz-und-quer-Bezierkurven von links, verwirrender ⏰/👤-Split). Vier
+Änderungen ersetzen die betroffenen Abschnitte:
+
+1. **Nur noch zwei Aktoren: 🐙 GitHub und ⚡ Drittsystem.**
+   - **⏰ Zeit entfällt als Aktor.** Cron/Once-Trigger zeichnen keine Kante
+     mehr; sie erscheinen als ⏰-Zeile **in der Agenten-Karte** (Klartext-
+     Schedule, klickbar → Schedule-Edit-Dialog). Neue Schedules legt man im
+     Trigger-Tab des Inspectors an.
+   - **👤 Mensch ist in 🐙 GitHub aufgegangen** — menschengesetzte Labels,
+     Gates (`human:*`) und Bremsen sind GitHub-Label-Events; ihre Kanten
+     starten jetzt am GitHub-Aktor, behalten aber Gate-Optik (`👤✓`-Chip)
+     und `humanSet`/`gate`-Flags.
+2. **Ein GitHub-Trigger-Dialog** (`GithubTriggerForm`): Roh-Events UND
+   Label-Filter (inkl. `humans`-Origin-Filter) in einem Formular — ersetzt
+   `EventForm` + `HumanLabelForm`. **Kein Repo-Feld mehr**: das Repo ist beim
+   Modellieren unbekannt; live füllt es der Adapter aus dem Working
+   Environment (`liveOps.createTrigger`), im Draft setzt es die
+   Materialisierung (`vars.repoFullName`).
+3. **Aktor-Kanten laufen durch den orthogonalen Kanal-Router**
+   (`edge-router.js`): Aktoren bilden Spalte 0 des Layered-Layouts (Spalte
+   links bei Fluss nach rechts, Reihe oben bei Fluss nach unten) — keine
+   Bezier-Kurven mehr quer durch Knoten.
+4. **Per-Trigger-Sichtbarkeit:** Jede Trigger-Zeile in der Karte (🐙/🏷/⚡)
+   trägt ein 👁-Icon, das die zugehörige Kante ein-/ausblendet (persistiert
+   in `localStorage`), zusätzlich zum Aktor-Filter in der Legende.
+   Außerdem ist der volle Trigger-Editor (`TriggersPanel`, aus dem
+   Agent-Chat) jetzt auch im **Draft-Inspector** als Tab eingebettet
+   (ops-Adapter-fähig) — Trigger lassen sich im Flow-Editor anlegen,
+   bearbeiten, schalten und löschen, im Draft wie im Live-Team.
 
 Dieses Dokument beschreibt, wie das Erstellen, Bearbeiten und Darstellen von
 Verbindungen zwischen Agenten (und externen Quellen) über **alle Ansichten

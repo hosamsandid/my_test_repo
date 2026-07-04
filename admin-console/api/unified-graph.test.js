@@ -65,7 +65,7 @@ test('webhook edge (#410): http trigger runs from the @external actor', () => {
   assert.ok(g.nodes.some(n => n.id === '@external' && n.kind === 'actor'));
 });
 
-test('gate flag (#410): human:* listener edge is a gate from the @human actor', () => {
+test('gate flag: human:* listener edge is a gate from the @github actor (a human acts via a GitHub label)', () => {
   const g = buildUnifiedGraph([
     { id: 'deployer', triggers: [{ id: 't', type: 'github-event', labelFilter: 'human:approved', emits: [] }] },
   ]);
@@ -73,18 +73,19 @@ test('gate flag (#410): human:* listener edge is a gate from the @human actor', 
   assert.ok(e);
   assert.equal(e.on, 'label');
   assert.equal(e.gate, 'human');
-  assert.equal(e.from, '@human');
-  assert.ok(g.nodes.some(n => n.id === '@human' && n.kind === 'actor'));
+  assert.equal(e.from, '@github');
+  assert.ok(g.nodes.some(n => n.id === '@github' && n.kind === 'actor'));
 });
 
-test('human-set label listener (#410): from:humans wires @human → agent', () => {
+test('human-set label listener: from:humans wires @github → agent (no @human actor any more)', () => {
   const g = buildUnifiedGraph([
     { id: 'dev', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'priorisiert', from: 'humans', emits: [] }] },
   ]);
   const e = findEdge(g, x => x.on === 'label' && x.label === 'priorisiert');
   assert.ok(e);
-  assert.equal(e.from, '@human');
+  assert.equal(e.from, '@github');
   assert.ok(!e.gate, 'a plain human-set label is not an approval gate');
+  assert.ok(!g.nodes.some(n => n.id === '@human'), 'the @human actor is gone');
 });
 
 test('actor nodes appear only when referenced (#410): BP graphs get none', () => {

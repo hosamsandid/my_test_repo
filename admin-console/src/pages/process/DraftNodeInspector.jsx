@@ -1,14 +1,17 @@
 import React, { useState } from 'react';
-import { Save, Trash2, X, Plus } from 'lucide-react';
+import { Save, Trash2 } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
 import { resolveInheritedStage } from './hierarchy-utils';
 import ConnectionsSection from './ConnectionsSection';
+import TriggersPanel from '../agent-chat/TriggersPanel';
 
-// Node inspector for a DRAFT role (Process Canvas v2, #345). Edits the role's
-// displayName, system prompt, and triggers' emits directly on the draft bundle
-// via the draft adapter (`ops`). Lighter than the live inspector — no Matrix,
-// no inherit/override, no live status.
+// Node inspector for a DRAFT role (Process Canvas v2, #345). Tabs mirror the
+// live inspector — Details (name/id/prompt/stage), Triggers (the full
+// agent-chat trigger editor, writing to the bundle via the draft adapter) and
+// Connections. Lighter than the live inspector — no Matrix, no
+// inherit/override, no live status.
 export default function DraftNodeInspector({ role, roles = [], stages = [], ops, onClose, onDeleted, onChanged, onRenamedId }) {
+  const [tab, setTab] = useState('details');
   const [name, setName] = useState(role.displayName || role.id);
   const [id, setId] = useState(role.id);
   const [prompt, setPrompt] = useState(role.systemPrompt || '');
@@ -18,7 +21,6 @@ export default function DraftNodeInspector({ role, roles = [], stages = [], ops,
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
 
-  const triggers = role.triggers || [];
   const others = roles.filter(r => r.id !== role.id);
   const inheritedStage = resolveInheritedStage(roles, role);
 
@@ -49,15 +51,21 @@ export default function DraftNodeInspector({ role, roles = [], stages = [], ops,
     } finally { setBusy(false); }
   }
 
-  async function setEmits(tid, emits) { await ops.setEmits(role.id, tid, emits); onChanged?.(); }
-  async function deleteTrigger(tid) { await ops.deleteTrigger(role.id, tid); onChanged?.(); }
+  const siblingList = others.map(r => ({ id: r.id, displayName: r.displayName || r.id }));
 
   return (
-    <SidePanel open onClose={onClose} title={role.displayName || role.id} width="520px">
+    <SidePanel open onClose={onClose} title={role.displayName || role.id} width="560px">
       <div style={{ display: 'flex', gap: 6, marginBottom: 'var(--eb-space-4)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
         <span style={badge}>draft role</span>
       </div>
 
+      <div style={{ display: 'flex', borderBottom: '1px solid var(--eb-border-default)', marginBottom: 'var(--eb-space-4)' }}>
+        <TabButton active={tab === 'details'} onClick={() => setTab('details')}>Details</TabButton>
+        <TabButton active={tab === 'triggers'} onClick={() => setTab('triggers')}>Triggers</TabButton>
+        <TabButton active={tab === 'connections'} onClick={() => setTab('connections')}>Connections</TabButton>
+      </div>
+
+      {tab === 'details' && (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
         <Field label="Display name">
           <input value={name} onChange={e => { setName(e.target.value); setSaved(false); }} style={input} />
@@ -95,31 +103,6 @@ export default function DraftNodeInspector({ role, roles = [], stages = [], ops,
           {error && <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</span>}
         </div>
 
-        {/* Triggers */}
-        <div style={{ marginTop: 'var(--eb-space-2)' }}>
-          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginBottom: 6 }}>
-            Triggers <span style={{ color: 'var(--eb-text-muted)' }}>— wire hand-offs by dragging a ● / PR / Issue port on the canvas</span>
-          </div>
-          {triggers.length === 0 && (
-            <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
-              No triggers yet. Draw an edge into another role to create one.
-            </div>
-          )}
-          {triggers.map(t => (
-            <TriggerCard key={t.id} trigger={t}
-              onEmits={(emits) => setEmits(t.id, emits)}
-              onDelete={() => deleteTrigger(t.id)} />
-          ))}
-        </div>
-
-        <ConnectionsSection
-          node={role}
-          siblings={others.map(r => ({ id: r.id, displayName: r.displayName || r.id }))}
-          showStage={false}
-          ops={ops}
-          onChanged={onChanged}
-        />
-
         <div style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)' }}>
           <button onClick={async () => { await ops.deleteRole(role.id); onDeleted?.(); }}
             style={{ ...ghost, color: 'var(--eb-status-error)', borderColor: 'var(--eb-status-error)' }}>
@@ -127,45 +110,38 @@ export default function DraftNodeInspector({ role, roles = [], stages = [], ops,
           </button>
         </div>
       </div>
+      )}
+
+      {/* The full agent-chat trigger editor, writing to the draft bundle via
+          the ops adapter — create, edit, toggle and delete triggers here; the
+          canvas edges re-derive from the bundle on every save. */}
+      {tab === 'triggers' && (
+        <div style={{ height: 'min(60vh, 540px)', display: 'flex', flexDirection: 'column', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', overflow: 'hidden' }}>
+          <TriggersPanel agentId={role.id} active ops={ops} siblings={siblingList} onChanged={onChanged} />
+        </div>
+      )}
+
+      {tab === 'connections' && (
+        <ConnectionsSection
+          node={role}
+          siblings={siblingList}
+          showStage={false}
+          ops={ops}
+          onChanged={onChanged}
+        />
+      )}
     </SidePanel>
   );
 }
 
-function TriggerCard({ trigger, onEmits, onDelete }) {
-  const [newLabel, setNewLabel] = useState('');
-  const emits = Array.isArray(trigger.emits) ? trigger.emits : [];
-  const listen = trigger.type === 'github-event'
-    ? (trigger.labelFilter ? `🏷 ${trigger.labelFilter}` : (trigger.events || []).join(', '))
-    : (trigger.cron || trigger.type);
-
-  const add = () => {
-    const l = newLabel.trim();
-    if (l && !emits.includes(l)) onEmits([...emits, l]);
-    setNewLabel('');
-  };
-
+function TabButton({ active, onClick, children }) {
   return (
-    <div style={{ border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)', marginBottom: 6 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{trigger.type}</span>
-        <code style={{ flex: 1, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{listen}</code>
-        <button onClick={onDelete} title="Delete trigger" style={{ ...ghost, padding: '1px 5px', borderColor: 'var(--eb-status-error)', color: 'var(--eb-status-error)' }}><Trash2 size={11} /></button>
-      </div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center', marginTop: 6 }}>
-        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>emits</span>
-        {emits.length === 0 && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>none</span>}
-        {emits.map(l => (
-          <button key={l} onClick={() => onEmits(emits.filter(x => x !== l))} title="Remove"
-            style={emitChip}>{l} <X size={10} /></button>
-        ))}
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
-          <input value={newLabel} onChange={e => setNewLabel(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
-            placeholder="add label…" style={{ ...input, width: 130, padding: '1px 6px', fontSize: 'var(--eb-text-xs)' }} />
-          <button onClick={add} style={{ ...ghost, padding: '1px 5px' }}><Plus size={11} /></button>
-        </span>
-      </div>
-    </div>
+    <button onClick={onClick} style={{
+      background: 'none', border: 'none', borderBottom: active ? '2px solid var(--eb-accent-primary)' : '2px solid transparent',
+      color: active ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
+      padding: 'var(--eb-space-2) var(--eb-space-3)', cursor: 'pointer',
+      fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: active ? 'var(--eb-font-medium)' : 'normal',
+    }}>{children}</button>
   );
 }
 
@@ -181,10 +157,6 @@ const badge = { fontSize: 'var(--eb-text-xs)', padding: '1px 7px', borderRadius:
 const input = {
   background: 'var(--eb-bg-app)', color: 'var(--eb-text-primary)', border: '1px solid var(--eb-border-default)',
   borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', boxSizing: 'border-box', width: '100%', outline: 'none',
-};
-const emitChip = {
-  fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', background: 'var(--eb-status-info-bg)', color: 'var(--eb-status-info)',
-  border: '1px solid var(--eb-status-info)', borderRadius: 'var(--eb-radius-sm)', padding: '0 5px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3,
 };
 const ghost = {
   display: 'inline-flex', alignItems: 'center', gap: 6, background: 'none', color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',

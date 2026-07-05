@@ -13,6 +13,35 @@ import { wouldCreateCycle } from './hierarchy-utils';
 // {inputs, outputs, dependsOn} shape (read-modify-write helper). The PUT replaces
 // the whole `dataFlow` block, matching how a draft persists the whole bundle.
 const pathStr = (a) => (typeof a === 'string' ? a : (a && a.path)) || '';
+
+// Mirrors orchestrator/github-poller.js — owner/repo from a repository URL.
+function parseRepoFullName(url) {
+  if (!url) return null;
+  const ssh = String(url).match(/^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/);
+  if (ssh) return `${ssh[1]}/${ssh[2]}`;
+  const https = String(url).match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
+  if (https) return `${https[1]}/${https[2]}`;
+  return null;
+}
+
+// The repo a canvas-created github-event trigger should poll: the first
+// parsable repository of the agent's working environment. The connect dialogs
+// deliberately have no repo input (the repo is unknown while modelling), and
+// the poller skips triggers without one — so the live adapter fills it in.
+async function resolveAgentRepo(roleId) {
+  try {
+    const a = await apiCall('GET', `/api/agents/${roleId}`);
+    if (!a || !a.environmentId) return null;
+    const env = await apiCall('GET', `/api/environments/${a.environmentId}`);
+    const repos = Array.isArray(env?.repositories) ? env.repositories
+      : (env?.repository ? [env.repository] : []);
+    for (const r of repos) {
+      const full = parseRepoFullName(r && r.url);
+      if (full) return full;
+    }
+  } catch { /* best-effort — the trigger is still created, repo can be set later */ }
+  return null;
+}
 // An artifact port's match key: its logical name when set, else its path (#382).
 const artKey = (a) => (typeof a === 'string' ? a : (a && (a.name || a.path))) || '';
 async function liveDataFlow(roleId) {
@@ -32,7 +61,14 @@ async function liveDataFlow(roleId) {
 export const liveOps = {
   mode: 'live',
   listTriggers: (roleId) => apiCall('GET', `/api/agents/${roleId}/triggers`),
-  createTrigger: (roleId, body) => apiCall('POST', `/api/agents/${roleId}/triggers`, body),
+  createTrigger: async (roleId, body) => {
+    let b = body;
+    if (b && b.type === 'github-event' && !b.repo) {
+      const repo = await resolveAgentRepo(roleId);
+      if (repo) b = { ...b, repo };
+    }
+    return apiCall('POST', `/api/agents/${roleId}/triggers`, b);
+  },
   updateTrigger: (roleId, tid, body) => apiCall('PUT', `/api/agents/${roleId}/triggers/${tid}`, body),
   deleteTrigger: (roleId, tid) => apiCall('DELETE', `/api/agents/${roleId}/triggers/${tid}`),
   setEmits: (roleId, tid, emits) => apiCall('PUT', `/api/agents/${roleId}/triggers/${tid}/emits`, { emits }),
@@ -218,8 +254,11 @@ export function makeDraftOps(getBundle, persist) {
       const r = role(b, roleId);
       if (!r) throw new Error(`role ${roleId} not found`);
       r.triggers = r.triggers || [];
-      r.triggers.push({ id: uid(), enabled: true, ...body });
+      const t = { enabled: true, ...body };
+      if (!t.id) t.id = uid(); // callers may pass id: undefined — never persist that
+      r.triggers.push(t);
       await persist(b);
+      return t;
     },
     updateTrigger: async (roleId, tid, patch) => {
       const b = clone(getBundle());

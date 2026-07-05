@@ -1,15 +1,21 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
-import { AlertTriangle, Download, Upload, Boxes, X, Plus, ShieldCheck, Layers, Sparkles, Pencil } from 'lucide-react';
+import { AlertTriangle, Download, Upload, Boxes, X, Plus, Layers, Sparkles, Pencil } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { initFlowGraph } from './process/flow-graph-render';
 import ProcessNodeInspector from './process/ProcessNodeInspector';
 import DraftNodeInspector from './process/DraftNodeInspector';
 import StageManager from './process/StageManager';
-import { EditHandoffDialog, CreateEdgeDialog, CreateChannelDialog } from './process/EdgeDialogs';
+import { EditHandoffDialog, CreateEdgeDialog } from './process/EdgeDialogs';
 import MaterializeDialog from './process/MaterializeDialog';
-import AddApprovalDialog from './process/AddApprovalDialog';
 import SidePanel from '../components/SidePanel';
 import { liveOps, makeDraftOps } from './process/edit-adapters';
+import { capabilitiesFor, processMode, createTypesFor, sourceKindOf } from './process/connection-capabilities';
+
+// Display names for the actor pseudo-nodes (#411) — the graph carries them as
+// nodes when they have edges, but a drag can also start from a placeholder.
+// (@human/@timer are gone: human actions are GitHub label events, schedules
+// render inside the agent card.)
+const ACTOR_NAMES = { '@github': 'GitHub', '@external': 'External system', '@timer': 'Schedule' };
 
 // Inline-editable process name for the draft toolbar. Click to edit; Enter or
 // blur commits, Escape reverts. Renaming only touches the bundle's display
@@ -114,7 +120,6 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
   const [importError, setImportError] = useState(null);
   const [materializeOpen, setMaterializeOpen] = useState(false);
   const [addRoleOpen, setAddRoleOpen] = useState(false);
-  const [approvalOpen, setApprovalOpen] = useState(false);
   const [stagesOpen, setStagesOpen] = useState(false);
   const fileInputRef = useRef(null);
 
@@ -159,8 +164,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
   const displayGraph = imported ? imported.graph : isDraft ? draftGraph : graph;
 
   const [selectedId, setSelectedId] = useState(null);
-  const [connectPair, setConnectPair] = useState(null); // { from, to }
-  const [channelPair, setChannelPair] = useState(null); // { from, to, artifact } (#380)
+  const [connectPair, setConnectPair] = useState(null); // { from, to } — from may be an actor id (#411)
   const [selectedEdge, setSelectedEdge] = useState(null);
   const viewportRef = useRef(null);
   const graphRef = useRef(null);
@@ -173,32 +177,38 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
     const g = initFlowGraph(viewportRef.current, {
       onSelectNode: (id) => setSelectedId(id),
       onConnect: (from, to) => { if (editableRef.current) setConnectPair({ from, to }); },
-      onConnectChannel: (from, to, artifact) => { if (editableRef.current) setChannelPair({ from, to, artifact }); },
       onSelectEdge: (edge) => { if (editableRef.current) setSelectedEdge(edge); },
+      actorSources: true, // offer @github/@external as drag sources (#411)
+      expandChildrenByDefault: true, // process flows show the whole team; parents collapse on demand
     });
     graphRef.current = g;
     return () => { g.cleanup(); graphRef.current = null; };
   }, []);
 
+  // What this view may do with connections — resolved once per scope from the
+  // capability matrix (#409). A draft's derived graph reports level 'template',
+  // so the mode is driven off the scope, not the level.
+  const caps = useMemo(
+    () => capabilitiesFor(processMode({ isDraft, imported, level: displayGraph?.level })),
+    [isDraft, imported, displayGraph],
+  );
+
   useEffect(() => {
     if (!graphRef.current || !displayGraph) return;
-    // Drafts and live teams are editable; the template blueprint + imported
-    // previews are read-only. (A draft's derived graph reports level 'template',
-    // so drive editability off the mode, not the level.)
-    const ed = isDraft ? true : (!imported && displayGraph.level !== 'template');
-    editableRef.current = ed;
-    graphRef.current.setEditable(ed);
+    editableRef.current = caps.editable;
+    graphRef.current.setEditable(caps.editable);
     // Prompt/stage editing happens in the right inspector (DraftNodeInspector),
     // consistent with BP flows — there is no inline editing.
     graphRef.current.setData(displayGraph);
-  }, [displayGraph, imported, isDraft]);
+  }, [displayGraph, imported, isDraft, caps]);
 
   // Clear selection/dialogs when the scope (and thus the graph) changes. A
   // scope change from the parent also drops any imported blueprint preview.
-  useEffect(() => { setSelectedId(null); setConnectPair(null); setChannelPair(null); setSelectedEdge(null); }, [scope, imported]);
+  useEffect(() => { setSelectedId(null); setConnectPair(null); setSelectedEdge(null); }, [scope, imported]);
   useEffect(() => { setImported(null); setImportError(null); }, [scope]);
 
-  const nodeName = (id) => (displayGraph?.nodes || []).find(n => n.id === id)?.displayName || id;
+  const nodeName = (id) =>
+    (displayGraph?.nodes || []).find(n => n.id === id)?.displayName || ACTOR_NAMES[id] || id;
   const selectedNode = useMemo(
     () => (displayGraph?.nodes || []).find(n => n.id === selectedId) || null,
     [displayGraph, selectedId],
@@ -296,18 +306,16 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
             <EditableDraftTitle name={draftBundle.name} onRename={(n) => draftOps.renameDraft(n)} />
           )}
           <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-            {scope === 'templates'
-              ? 'Blueprint view (read-only). Select a team or draft on the left to model.'
+            {caps.readOnlyHint
+              ? `${caps.readOnlyHint}${scope === 'templates' ? ' Select a team or draft on the left to model.' : ''}`
               : isDraft
-                ? 'Draft — design from scratch: + Add role, drag the ● port to wire, click nodes/edges to edit. Nothing is created until you materialize.'
-                : 'Click a node to edit · drag the ● port to wire a hand-off · click an edge to edit it.'}
+                ? 'Draft — design from scratch: + Add role, drag the ● port (roles and sources) to wire, click nodes/edges to edit. Nothing is created until you materialize.'
+                : 'Click a node to edit · drag the ● port (roles and sources) to wire a connection · click an edge to edit it.'}
           </div>
         </div>
         {isDraft && (
           <>
-            <ToolbarButton onClick={() => setAddRoleOpen('agent')} icon={Plus}>Add role</ToolbarButton>
-            <ToolbarButton onClick={() => setAddRoleOpen('pr-review')} icon={Plus}>PR review</ToolbarButton>
-            <ToolbarButton onClick={() => setApprovalOpen(true)} icon={ShieldCheck}>Human approval</ToolbarButton>
+            <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus}>Add role</ToolbarButton>
             <ToolbarButton onClick={() => setStagesOpen(true)} icon={Layers}>Stages</ToolbarButton>
             <ToolbarButton onClick={() => setMaterializeOpen(true)} icon={Boxes}
               disabled={!draftBundle?.roles?.length}>Materialize…</ToolbarButton>
@@ -392,8 +400,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
         />
       )}
 
-      {/* One connect dialog for both draft and live teams (#unified): the four
-          edge types are identical — only the ops adapter differs underneath. */}
+      {/* The ONE connect dialog (#411) for both draft and live teams: the drag
+          source (agent or actor) picks the type set via the capability matrix —
+          only the ops adapter differs underneath. */}
       {connectPair && (
         <CreateEdgeDialog
           from={connectPair.from}
@@ -402,23 +411,10 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
           toName={nodeName(connectPair.to)}
           labels={displayGraph?.labels || []}
           ops={ops}
-          types={['github', 'label', 'artifact', 'hierarchy']}
+          types={createTypesFor(caps, sourceKindOf(connectPair.from))}
+          fromNode={(displayGraph?.nodes || []).find(n => n.id === connectPair.from) || null}
           onClose={() => setConnectPair(null)}
           onDone={() => { setConnectPair(null); afterEdit(); }}
-        />
-      )}
-
-      {/* GitHub channel (#380): dragging a PR/Issue output port onto a node. */}
-      {channelPair && (
-        <CreateChannelDialog
-          from={channelPair.from}
-          to={channelPair.to}
-          artifact={channelPair.artifact}
-          fromName={nodeName(channelPair.from)}
-          toName={nodeName(channelPair.to)}
-          ops={ops}
-          onClose={() => setChannelPair(null)}
-          onDone={() => { setChannelPair(null); afterEdit(); }}
         />
       )}
 
@@ -428,6 +424,10 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
           fromName={nodeName(selectedEdge.from)}
           toName={nodeName(selectedEdge.to)}
           ops={ops}
+          producerChannelCount={selectedEdge.on === 'github'
+            ? (displayGraph?.edges || []).filter(e =>
+                e.on === 'github' && e.from === selectedEdge.from && e.artifact === selectedEdge.artifact).length
+            : undefined}
           onClose={() => setSelectedEdge(null)}
           onDone={() => { setSelectedEdge(null); afterEdit(); }}
         />
@@ -435,15 +435,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
 
       {addRoleOpen && isDraft && (
         <AddRoleDialog
-          kind={addRoleOpen}
           onClose={() => setAddRoleOpen(false)}
           onCreate={async ({ displayName, systemPrompt }) => {
-            // A PR-reviewer (#380) is a plain per-invocation role; the operator then
-            // drags a producer's PR output port onto it to wire the review channel.
-            const id = await draftOps.addRole({
-              displayName, systemPrompt,
-              ...(addRoleOpen === 'pr-review' ? { sessionPolicy: 'per-invocation' } : {}),
-            });
+            const id = await draftOps.addRole({ displayName, systemPrompt });
             setAddRoleOpen(false);
             setSelectedId(id);
           }}
@@ -463,26 +457,6 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
         />
       )}
 
-      {approvalOpen && isDraft && (
-        <AddApprovalDialog
-          roles={draftBundle?.roles || []}
-          onClose={() => setApprovalOpen(false)}
-          onCreate={async ({ label, description, downstream }) => {
-            // The downstream step waits on the gate label; a human sets it.
-            await draftOps.createTrigger(downstream, {
-              type: 'github-event',
-              events: ['issues.labeled', 'pull_request.labeled'],
-              from: 'humans',
-              labelFilter: label,
-              enabled: true,
-              description: description || `Human approval: ${label}`,
-              prompt: `A human granted the approval \`${label}\` (the label was added). Proceed with your part of the process. Reply \`[PASS]\` if there is nothing to do yet.`,
-            });
-            setApprovalOpen(false);
-          }}
-        />
-      )}
-
       {materializeOpen && materializeBundle && (
         <MaterializeDialog
           bundle={materializeBundle}
@@ -494,8 +468,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
   );
 }
 
-function AddRoleDialog({ kind, onClose, onCreate }) {
-  const isReview = kind === 'pr-review';
+function AddRoleDialog({ onClose, onCreate }) {
   const [displayName, setDisplayName] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('');
   const [notes, setNotes] = useState('');
@@ -530,59 +503,50 @@ function AddRoleDialog({ kind, onClose, onCreate }) {
     boxSizing: 'border-box', width: '100%', outline: 'none',
   };
   return (
-    <SidePanel open onClose={onClose} title={isReview ? 'Add PR-review step' : 'Add role'} width="480px">
+    <SidePanel open onClose={onClose} title="Add role" width="480px">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
         <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>{isReview ? 'Reviewer name' : 'Role name'}</span>
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Role name</span>
           <input autoFocus value={displayName} onChange={e => setDisplayName(e.target.value)}
-            placeholder={isReview ? 'e.g. Code Reviewer' : 'e.g. Business Analyst'} style={field}
+            placeholder="e.g. Business Analyst" style={field}
             onKeyDown={e => { if (e.key === 'Enter') submit(); }} />
         </label>
-        {isReview ? (
-          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
-            A PR-review step is a per-invocation reviewer. After adding it, drag a producer's
-            <strong> PR</strong> output port onto it to wire the review channel.
-          </div>
-        ) : (
-          <>
-            {/* Notes → LLM → agent prompt. The operator jots a few keywords and
-                lets the model draft a full prompt; the role name alone is often
-                enough context (e.g. "Business Analyst"). The draft lands in the
-                editable Agent-prompt field below, so it can be tweaked or replaced. */}
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Notes for prompt generation (optional)</span>
-              <textarea value={notes} onChange={e => setNotes(e.target.value)}
-                placeholder="A few keywords — e.g. reviews COBOL, flags risky changes, hands off to the migration lead"
-                style={{ ...field, minHeight: 64, resize: 'vertical' }} />
-              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
-                Generate uses the role name and these notes to draft an agent prompt via the configured LLM.
-                You can edit the result below.
-              </span>
-            </label>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-              <button type="button" onClick={generate} disabled={!displayName.trim() || generating} style={{
-                display: 'inline-flex', alignItems: 'center', gap: 6,
-                background: 'var(--eb-bg-surface)', color: 'var(--eb-accent-primary)',
-                border: '1px solid var(--eb-accent-primary)', borderRadius: 'var(--eb-radius-md)',
-                padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
-                cursor: (!displayName.trim() || generating) ? 'not-allowed' : 'pointer',
-                opacity: (!displayName.trim() || generating) ? 0.5 : 1,
-              }}>
-                <Sparkles size={14} />
-                {generating ? 'Generating…' : 'Generate agent prompt'}
-              </button>
-              {genError && (
-                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error, #d33)' }}>{genError}</span>
-              )}
-            </div>
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Agent prompt (optional now)</span>
-              <textarea value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)}
-                placeholder="What this role does… — or use Generate above to draft it"
-                style={{ ...field, minHeight: 160, resize: 'vertical', fontFamily: 'var(--eb-font-mono)' }} />
-            </label>
-          </>
-        )}
+        {/* Notes → LLM → agent prompt. The operator jots a few keywords and
+            lets the model draft a full prompt; the role name alone is often
+            enough context (e.g. "Business Analyst"). The draft lands in the
+            editable Agent-prompt field below, so it can be tweaked or replaced. */}
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Notes for prompt generation (optional)</span>
+          <textarea value={notes} onChange={e => setNotes(e.target.value)}
+            placeholder="A few keywords — e.g. reviews COBOL, flags risky changes, hands off to the migration lead"
+            style={{ ...field, minHeight: 64, resize: 'vertical' }} />
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
+            Generate uses the role name and these notes to draft an agent prompt via the configured LLM.
+            You can edit the result below.
+          </span>
+        </label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+          <button type="button" onClick={generate} disabled={!displayName.trim() || generating} style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6,
+            background: 'var(--eb-bg-surface)', color: 'var(--eb-accent-primary)',
+            border: '1px solid var(--eb-accent-primary)', borderRadius: 'var(--eb-radius-md)',
+            padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+            cursor: (!displayName.trim() || generating) ? 'not-allowed' : 'pointer',
+            opacity: (!displayName.trim() || generating) ? 0.5 : 1,
+          }}>
+            <Sparkles size={14} />
+            {generating ? 'Generating…' : 'Generate agent prompt'}
+          </button>
+          {genError && (
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error, #d33)' }}>{genError}</span>
+          )}
+        </div>
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Agent prompt (optional now)</span>
+          <textarea value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)}
+            placeholder="What this role does… — or use Generate above to draft it"
+            style={{ ...field, minHeight: 160, resize: 'vertical', fontFamily: 'var(--eb-font-mono)' }} />
+        </label>
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)' }}>
           <button onClick={onClose} disabled={busy} style={{
             background: 'none', color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',
@@ -591,7 +555,7 @@ function AddRoleDialog({ kind, onClose, onCreate }) {
           <button onClick={submit} disabled={busy || !displayName.trim()} style={{
             background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
             borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
-          }}>{isReview ? 'Add PR review' : 'Add role'}</button>
+          }}>Add role</button>
         </div>
       </div>
     </SidePanel>

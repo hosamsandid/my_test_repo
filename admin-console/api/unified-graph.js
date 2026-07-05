@@ -14,8 +14,9 @@
 // A `UnifiedEdge` is a typed hand-off discriminated by `on`:
 //
 //   'label'      — A emits label L, B's trigger filters on L            (Process)
-//   'event'      — raw GitHub event wakes B (no labelFilter)            (Process)
-//   'timer'      — cron/once self-loop                                  (Process)
+//   'event'      — raw GitHub event wakes B (from the @github actor)    (Process)
+//   'timer'      — cron/once schedule (from the @timer actor)           (Process)
+//   'webhook'    — http trigger fired by a third party (@external)      (Process)
 //   'review'     — PR-review flow (in / approve / changes)             (Process)
 //   'dependency' — B depends_on A (readiness/ordering)                  (BP)
 //   'artifact'   — A's output path is B's input path (data flow)        (BP)
@@ -23,6 +24,16 @@
 //
 // Human-approval gates are an orthogonal `gate: 'human'` flag on the edge,
 // not a separate edge type. BP `status` is intentionally NOT modeled (decision 2).
+//
+// Actor nodes (#410, reduced). Everything that can start an agent but is not
+// itself an agent is a first-class *actor* pseudo-node (kind: 'actor'): GitHub
+// (@github — raw events AND human-set labels/gates/brakes, since a human acts
+// through GitHub labels anyway) and third-party systems (@external — webhooks).
+// The scheduler keeps emitting `on:'timer'` edges from @timer for data
+// consumers, but the canvas renders schedules inside the agent card instead of
+// as an actor; the former @human actor is folded into @github. Every trigger
+// edge therefore runs source → agent; nothing originates from `null` except
+// true orphan listeners (which the renderer drops and the lints flag).
 //
 // No I/O here. The HTTP endpoint gathers live agents + BP briefings, maps them
 // through the adapters below, and hands nodes/edges to buildUnifiedGraph.
@@ -39,6 +50,22 @@ const {
 
 const UNIFIED_FLOW_VERSION = 1;
 
+// Actor pseudo-node ids (#410) — stable, and safely outside the agent-id
+// charset (agent ids never start with '@').
+const ACTORS = {
+  github: '@github',
+  external: '@external',
+  timer: '@timer',
+};
+const ACTOR_META = {
+  [ACTORS.github]: { actor: 'github', displayName: 'GitHub' },
+  [ACTORS.external]: { actor: 'external', displayName: 'External system' },
+  [ACTORS.timer]: { actor: 'timer', displayName: 'Schedule' },
+};
+function isActorId(id) {
+  return typeof id === 'string' && Object.prototype.hasOwnProperty.call(ACTOR_META, id);
+}
+
 // ── small pure helpers ───────────────────────────────────────────────────────
 
 function asArray(x) { return Array.isArray(x) ? x : []; }
@@ -46,10 +73,17 @@ function asArray(x) { return Array.isArray(x) ? x : []; }
 // Stable, deterministic edge id so re-builds and the renderer agree.
 function edgeId(e) {
   const tail = e.label != null ? e.label
-    : (Array.isArray(e.paths) ? e.paths.join(',') : '');
+    : (Array.isArray(e.events) ? e.events.join(',')
+      : (Array.isArray(e.paths) ? e.paths.join(',') : ''));
   // GitHub channels between the same pair are distinct per artifact (PR vs issue).
   const kind = e.on === 'github' ? `github:${e.artifact || 'pr'}` : e.on;
-  return `${kind}|${e.from == null ? '∅' : e.from}→${e.to == null ? '∅' : e.to}|${tail}`;
+  // Trigger-backed edges are one-edge-per-trigger — key them by the trigger so
+  // two triggers on the same agent never collapse into one edge. For label
+  // edges this keeps e.g. "wake when L is added" and "wake when L is removed"
+  // (two triggers on the same label) as two independently editable edges.
+  const trig = (e.triggerId && (e.on === 'event' || e.on === 'webhook' || e.on === 'timer' || e.on === 'label'))
+    ? `#${e.triggerId}` : '';
+  return `${kind}|${e.from == null ? '∅' : e.from}→${e.to == null ? '∅' : e.to}|${tail}${trig}`;
 }
 
 // Output / input artifact match keys declared on a UnifiedNode. An artifact is
@@ -79,7 +113,12 @@ function processEdgeToUnified(e) {
   if (e.kind === 'timer') {
     const schedule = /^[\d*]/.test(String(e.label)) || String(e.label).includes(' ')
       ? { cron: e.label } : { at: e.label };
-    return { from: e.from, to: e.to, on: 'timer', label: e.label, schedule, triggerId: e.triggerId };
+    // The scheduler is the source (#410) — no more self-loop.
+    return { from: ACTORS.timer, to: e.to, on: 'timer', label: e.label, schedule, triggerId: e.triggerId };
+  }
+  if (e.kind === 'webhook') {
+    // http trigger — fired by an external system via the webhook server (#410).
+    return { from: ACTORS.external, to: e.to, on: 'webhook', label: e.label, triggerId: e.triggerId };
   }
   if (e.kind === 'review') {
     return {
@@ -89,14 +128,22 @@ function processEdgeToUnified(e) {
     };
   }
   if (e.external) {
-    // Raw GitHub event from an external actor (no agent emitter).
-    return { from: null, to: e.to, on: 'event', events: [e.label], triggerId: e.triggerId, external: true };
+    // Raw GitHub event — the repo itself is the source (#410).
+    return { from: ACTORS.github, to: e.to, on: 'event', events: [e.label], triggerId: e.triggerId, external: true };
   }
-  // 'agent' label wiring, plus gate/brake (human-only) edges.
+  // 'agent' label wiring, plus gate/brake/human-set (human-only) edges. The
+  // carrying label events (issue/PR × added/removed) ride along for display.
   const u = { from: e.from, to: e.to, on: 'label', label: e.label, triggerId: e.triggerId };
+  if (Array.isArray(e.events) && e.events.length) u.events = e.events;
   if (e.kind === 'gate' || e.kind === 'brake' || isHumanGate(e.label) || isBrake(e.label)) {
     u.gate = 'human';
   }
+  // Edges only a human can fire originate at the GitHub actor: gates, brakes
+  // (from: null in the process graph) and human-set label listeners are all
+  // GitHub label events a person applies — the former @human actor is folded
+  // into @github, the `gate`/`humanSet` flags keep the human semantics visible.
+  if (e.humanSet || (u.from == null && u.gate === 'human')) u.from = ACTORS.github;
+  if (e.humanAssumed) u.humanAssumed = true;
   if (e.orphan) u.orphan = true;
   if (e.deadEnd) u.deadEnd = true;
   return u;
@@ -181,14 +228,33 @@ function buildUnifiedGraph(nodes, edges) {
   const seen = new Set();
   const push = (e) => {
     const id = edgeId(e);
-    if (seen.has(id)) return;
+    if (seen.has(id)) return null;
     seen.add(id);
-    unifiedEdges.push({ id, ...e });
+    const stored = { id, ...e };
+    unifiedEdges.push(stored);
+    return stored;
   };
 
+  // The process builder emits one edge per raw event; a trigger with several
+  // events is still ONE trigger (one edit dialog, one 👁 toggle), so merge its
+  // event edges into a single @github → agent edge carrying all events.
+  const eventEdgeByTrigger = new Map(); // `${from}|${to}|${triggerId}` → edge
   for (const e of pg.edges) {
     const u = processEdgeToUnified(e);
-    if (u) push(u);
+    if (!u) continue;
+    if (u.on === 'event' && u.triggerId) {
+      const k = `${u.from}|${u.to}|${u.triggerId}`;
+      const prior = eventEdgeByTrigger.get(k);
+      if (prior) {
+        prior.events = [...new Set([...(prior.events || []), ...(u.events || [])])];
+        prior.id = edgeId(prior); // keep the id in sync with the merged events
+        continue;
+      }
+      const stored = push(u);
+      if (stored) eventEdgeByTrigger.set(k, stored);
+      continue;
+    }
+    push(u);
   }
 
   // 1b) Hierarchy edges from node.parent (BP parent-child). View-only: the
@@ -259,6 +325,21 @@ function buildUnifiedGraph(nodes, edges) {
   for (const e of asArray(edges)) {
     if (!e || !e.on) continue;
     push({ ...e });
+  }
+
+  // 5) Actor pseudo-nodes (#410): append one node per actor that some edge
+  //    references, so every trigger source is visible on the canvas. Views
+  //    without trigger edges (BriefingPacks) naturally get none.
+  const usedActors = new Set(unifiedEdges.map(e => e.from).filter(isActorId));
+  for (const [id, meta] of Object.entries(ACTOR_META)) {
+    if (!usedActors.has(id)) continue;
+    outNodes.push({
+      id, kind: 'actor', role: 'actor', actor: meta.actor, displayName: meta.displayName,
+      sessionPolicy: null, environmentId: null, triggers: [], emits: [],
+      inputs: [], outputs: [], dependsOn: [], content: '', parent: null,
+      children: [], isParent: false, stage: '', effectiveStage: '',
+      github: null, channels: [],
+    });
   }
 
   const lints = [
@@ -481,5 +562,7 @@ module.exports = {
   processTemplateToUnified,
   briefingsToUnified,
   unifiedToProcessTemplate,
+  ACTORS,
+  isActorId,
   UNIFIED_FLOW_VERSION,
 };

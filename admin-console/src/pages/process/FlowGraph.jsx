@@ -1,8 +1,9 @@
 import React, { useRef, useEffect, useCallback, useMemo, useState } from 'react';
 import { initFlowGraph } from './flow-graph-render';
 import { makeBpOps } from './edit-adapters';
-import { CreateEdgeDialog } from './EdgeDialogs';
+import { CreateEdgeDialog, EditHandoffDialog } from './EdgeDialogs';
 import BpNodeInspector from './BpNodeInspector';
+import { capabilitiesFor, bpMode, createTypesFor } from './connection-capabilities';
 
 // Unified flow viewer (#362, UI rework). Renders any source of the unified
 // orchestration graph — live agents, a draft bundle, or a BriefingPack
@@ -23,8 +24,12 @@ export function FlowGraph({ workspace, team }) {
   const [error, setError] = useState(null);
   const [connectPair, setConnectPair] = useState(null); // { from, to } (BP only)
   const [selectedId, setSelectedId] = useState(null);    // node inspector (BP only)
+  const [selectedEdge, setSelectedEdge] = useState(null); // edge click (#412)
 
   const bpOps = useMemo(() => (workspace ? makeBpOps(workspace) : null), [workspace]);
+  // BP workspaces are editable (dependency + data-flow only); everything else
+  // renders as a read-only viewer — see the capability matrix (#409).
+  const caps = useMemo(() => capabilitiesFor(bpMode({ workspace })), [workspace]);
 
   const load = useCallback(() => {
     const g = apiRef.current;
@@ -44,15 +49,20 @@ export function FlowGraph({ workspace, team }) {
   // the process flows. The node port still wires links (connect-to-wire).
   useEffect(() => {
     if (!viewportRef.current) return undefined;
-    const editable = !!bpOps;
     const g = initFlowGraph(viewportRef.current, {
       onSelectNode: (id) => setSelectedId(id),
-      onConnect: editable ? (from, to) => setConnectPair({ from, to }) : undefined,
+      onConnect: caps.connectPort ? (from, to) => setConnectPair({ from, to }) : undefined,
+      // Edge clicks open the same "Connection" shell as the process views
+      // (#412) — dependency/artifact removable, everything else read-only.
+      onSelectEdge: caps.edgeClick ? (edge) => setSelectedEdge(edge) : undefined,
+      // Live/team views show the whole member tree; BP packs stay collapsed
+      // until expanded (packs can be large, the pack card is the entry point).
+      expandChildrenByDefault: !workspace,
     });
     apiRef.current = g;
-    g.setEditable(editable);     // connect-to-wire port (BP); editing is in the inspector
+    g.setEditable(caps.editable); // connect-to-wire port (BP); editing is in the inspector
     return () => { g.cleanup(); apiRef.current = null; };
-  }, [bpOps]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [bpOps, caps]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { load(); }, [load]);
 
@@ -72,6 +82,17 @@ export function FlowGraph({ workspace, team }) {
           Could not load flow: {error}
         </div>
       )}
+      {/* Read-only views say so instead of silently swallowing edits (#413). */}
+      {caps.readOnlyHint && (
+        <div style={{
+          position: 'absolute', bottom: 12, left: 12,
+          background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+          color: 'var(--eb-text-muted)', borderRadius: 6, padding: '4px 10px',
+          fontSize: 'var(--eb-text-xs)', zIndex: 30, pointerEvents: 'none',
+        }}>
+          {caps.readOnlyHint}
+        </div>
+      )}
       {selectedNode && (
         <BpNodeInspector
           key={selectedNode.id}
@@ -82,6 +103,16 @@ export function FlowGraph({ workspace, team }) {
           onChanged={load}
         />
       )}
+      {selectedEdge && bpOps && (
+        <EditHandoffDialog
+          edge={selectedEdge}
+          fromName={nodeName(selectedEdge.from)}
+          toName={nodeName(selectedEdge.to)}
+          ops={bpOps}
+          onClose={() => setSelectedEdge(null)}
+          onDone={() => { setSelectedEdge(null); load(); }}
+        />
+      )}
       {connectPair && bpOps && (
         <CreateEdgeDialog
           from={connectPair.from}
@@ -89,7 +120,7 @@ export function FlowGraph({ workspace, team }) {
           fromName={nodeName(connectPair.from)}
           toName={nodeName(connectPair.to)}
           ops={bpOps}
-          types={['dependency', 'artifact']}
+          types={createTypesFor(caps, 'agent')}
           onClose={() => setConnectPair(null)}
           onDone={() => { setConnectPair(null); load(); }}
         />

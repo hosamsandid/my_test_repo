@@ -14,7 +14,7 @@
 import { computeFlowLayout, assignCrossCoords } from './flow-layout';
 import { routeOrthogonalEdges, roundedPathD, laneLoadByChannel } from './edge-router';
 
-export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChannel, onSelectEdge } = {}) {
+export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge, actorSources, expandChildrenByDefault } = {}) {
 
   // ─── Constants ──────────────────────────────────────────────────────
   const NODE_W      = 320;
@@ -22,6 +22,18 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
   const H_GAP       = 50;
   const V_GAP       = 100;
   const ARTIFACT_H  = 70;
+  const ACTOR_W     = 150;   // actor pseudo-nodes (#410) — the "outside world" column
+  const ACTOR_H     = 40;
+  const ACTOR_ICON  = { github: '🐙', external: '⚡', timer: '⏰' };
+  // Placeholder actors (#411): in an editable process view every source is
+  // offered as a drag source even before it has edges, so the first event /
+  // label / webhook trigger can be wired on the canvas. @human and @timer are
+  // gone: human actions are GitHub label events (folded into @github) and
+  // schedules render inside the agent card instead of as an actor.
+  const DEFAULT_ACTORS = [
+    { id: '@github', kind: 'actor', actor: 'github', displayName: 'GitHub' },
+    { id: '@external', kind: 'actor', actor: 'external', displayName: 'External system' },
+  ];
 
   // Single source of truth for edge colours (#402). Every drawer and the legend
   // read from here so the graph and its key can never drift apart. Each entry
@@ -37,6 +49,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     pr:         { color: '#8b5cf6', label: 'pull request' },
     review:     { color: '#f59e0b', label: 'review' },
     gate:       { color: '#dc2626', label: 'human approval' },
+    // Actor-sourced edges (#410): raw GitHub events, schedules, webhooks.
+    event:      { color: '#f97316', label: 'GitHub event', dashed: true },
+    timer:      { color: '#0ea5e9', label: 'schedule', dashed: true },
+    webhook:    { color: '#eab308', label: 'webhook', dashed: true },
   };
   const ARROW_SIZE = 12; // arrowhead length in px (#402 — was 7, hard to see)
 
@@ -153,21 +169,40 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
   toolbarEl.style.cssText = 'position:absolute;top:12px;left:12px;z-index:20;display:flex;gap:6px;align-items:center;';
   viewport.appendChild(toolbarEl);
 
-  // Status legend
+  // Status legend. The edge key is derived from EDGE_STYLES so it can never
+  // drift from the drawn colours; the "Sources" section (#410) doubles as a
+  // per-actor filter — clicking 👤/🐙/⚡/⏰ toggles that actor's edges.
   const legendEl = document.createElement('div');
-  legendEl.style.cssText = 'position:absolute;bottom:16px;left:50%;transform:translateX(-50%);background:var(--eb-bg-elevated);backdrop-filter:blur(4px);border:1px solid var(--eb-border-default);border-radius:8px;padding:6px 14px;display:flex;gap:10px;align-items:center;z-index:20;pointer-events:none;font-size:11px;white-space:nowrap;';
-  // A legend swatch: a short colour line (dashed for depends-on) + its label.
-  // The 14px line reads like an edge rather than a filled square, so the key
-  // visually matches the strokes on the canvas.
+  legendEl.style.cssText = 'position:absolute;bottom:16px;left:50%;transform:translateX(-50%);background:var(--eb-bg-elevated);backdrop-filter:blur(4px);border:1px solid var(--eb-border-default);border-radius:8px;padding:6px 14px;display:flex;gap:10px;align-items:center;z-index:20;font-size:11px;white-space:nowrap;';
   const _mkSwatch = ({ color, label, dashed }) =>
     `<span style="display:flex;align-items:center;gap:4px">` +
     `<span style="width:14px;height:0;display:inline-block;border-top:2px ${dashed ? 'dashed' : 'solid'} ${color};"></span>` +
     `<span style="color:var(--eb-text-secondary)">${label}</span></span>`;
-  // Derived from EDGE_STYLES so the key can never drift from the drawn colours.
-  legendEl.innerHTML =
-    `<span style="color:var(--eb-text-muted);font-size:10px;margin-right:2px">Edges:</span>` +
-    ['label', 'issue', 'pr', 'review', 'gate', 'artifact', 'dependency', 'hierarchy']
-      .map(k => _mkSwatch(EDGE_STYLES[k])).join('');
+  function renderLegend() {
+    const keys = ['label', 'issue', 'pr', 'review', 'gate', 'event', 'webhook', 'artifact', 'dependency', 'hierarchy'];
+    const actorToggles = ['github', 'external'].map(kind => {
+      const off = state.hiddenActorKinds.has(kind);
+      return `<button data-actor-toggle="${kind}" title="Show/hide edges from this source" style="`
+        + 'background:none;border:1px solid var(--eb-border-default);border-radius:10px;padding:0 6px;'
+        + `cursor:pointer;font-size:11px;line-height:16px;opacity:${off ? 0.35 : 1};`
+        + `color:var(--eb-text-secondary);">${ACTOR_ICON[kind]}</button>`;
+    }).join('');
+    legendEl.innerHTML =
+      `<span style="color:var(--eb-text-muted);font-size:10px;margin-right:2px">Edges:</span>` +
+      keys.map(k => _mkSwatch(EDGE_STYLES[k])).join('') +
+      `<span style="color:var(--eb-text-muted);font-size:10px;margin:0 2px 0 6px">Sources:</span>` +
+      actorToggles;
+  }
+  legendEl.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-actor-toggle]');
+    if (!btn) return;
+    const kind = btn.dataset.actorToggle;
+    if (state.hiddenActorKinds.has(kind)) state.hiddenActorKinds.delete(kind);
+    else state.hiddenActorKinds.add(kind);
+    localStorage.setItem('flow-graph-hidden-actor-kinds', JSON.stringify([...state.hiddenActorKinds]));
+    renderLegend();
+    render();
+  });
   viewport.appendChild(legendEl);
 
   // ─── State ──────────────────────────────────────────────────────────
@@ -177,6 +212,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     roots:              [],
     contentVisible:     new Set(),
     childrenVisible:    new Set(),
+    userCollapsed:      new Set(), // parents the user explicitly collapsed (with expandChildrenByDefault)
     outputsVisible:     new Set(),
     inputsVisible:      new Set(),
     positions:          {},
@@ -194,6 +230,14 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     selectedId:         null,   // #362 UI rework Phase C: node selection
     editable:           false,  // structural editing (connect-to-wire, edges)
     connecting:         null,   // { fromId } while dragging a new edge
+    actors:             [],     // actor pseudo-nodes (#410): @github/@external
+    actorsById:         {},
+    actorPositions:     {},
+    hiddenActorKinds:   new Set(JSON.parse(localStorage.getItem('flow-graph-hidden-actor-kinds') || '[]')),
+    // Per-trigger edge visibility (👁 toggle on the card's trigger rows) —
+    // keys are `${nodeId}|${triggerId}`, persisted across sessions.
+    hiddenTriggerEdges: new Set(JSON.parse(localStorage.getItem('flow-graph-hidden-trigger-edges') || '[]')),
+    nodeTriggerEdges:   new Map(), // nodeId → external trigger edges shown in the card
     showStages:         localStorage.getItem('flow-graph-show-stages') === 'true', // #362 E stage bands
     stageOrder:         [],     // ordered stage names — drives layered layout order
     layeredInfo:        null,   // { vertical, colOf } while the layered layout is active
@@ -215,7 +259,16 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
   // `state.extraEdges` and drawn on top of the BP structure.
   function setData(graph) {
     const g = graph || {};
-    const nodes = Array.isArray(g.nodes) ? g.nodes : [];
+    const allNodes = Array.isArray(g.nodes) ? g.nodes : [];
+    // Actor pseudo-nodes (#410) live in their own "outside world" column —
+    // they never join the tree/layered layout of the agent cards. @timer and
+    // legacy @human actors are dropped here: schedules render inside the card,
+    // human label events come from @github.
+    state.actors = allNodes.filter(n => n && n.kind === 'actor'
+      && n.actor !== 'timer' && n.actor !== 'human');
+    state.actorsById = {};
+    state.actors.forEach(a => { state.actorsById[a.id] = a; });
+    const nodes = allNodes.filter(n => !n || n.kind !== 'actor');
     // An artifact is keyed by its logical name when it has one, else its path
     // (#382) — matching the backend. The physical path becomes a display `hint`.
     const mkArt = (a, direction) => {
@@ -255,9 +308,25 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     state.byId = {};
     state.briefings.forEach(bp => { state.byId[bp.id] = bp; });
 
-    const EXTRA = new Set(['label', 'review', 'manual', 'github']);
+    // event/webhook edges (#410) run from an actor node; label edges may too
+    // (human-set labels come from @github). Timer edges are NOT drawn as lines
+    // any more — schedules render inside the agent card. True orphans
+    // (from: null) are still dropped here.
+    const EXTRA = new Set(['label', 'review', 'manual', 'github', 'event', 'webhook']);
     state.extraEdges = (Array.isArray(g.edges) ? g.edges : [])
       .filter(e => EXTRA.has(e.on) && e.from && e.to && e.from !== e.to);
+
+    // The trigger rows shown inside each card: schedules (⏰, no line) plus
+    // every actor-sourced trigger edge (🐙/🏷/⚡ — each with a 👁 line toggle).
+    state.nodeTriggerEdges = new Map();
+    (Array.isArray(g.edges) ? g.edges : []).forEach(e => {
+      if (!e || !e.to) return;
+      const fromActor = typeof e.from === 'string' && e.from.startsWith('@');
+      if (e.on === 'timer' || (fromActor && ['event', 'webhook', 'label'].includes(e.on))) {
+        if (!state.nodeTriggerEdges.has(e.to)) state.nodeTriggerEdges.set(e.to, []);
+        state.nodeTriggerEdges.get(e.to).push(e);
+      }
+    });
 
     // Operator-defined stage order (drives the layered layout when set). Accept
     // either bare strings or { name } objects; ignore anything else.
@@ -266,6 +335,16 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       .filter(Boolean);
 
     recomputeRoots();
+    // Process views show the whole team by default — a freshly-wired child
+    // must not vanish behind its parent. Parents the user collapsed stay
+    // collapsed across data refreshes; BP viewers keep collapsed-by-default.
+    if (expandChildrenByDefault) {
+      state.briefings.forEach(bp => {
+        if (bp.children && bp.children.length > 0 && !state.userCollapsed.has(bp.id)) {
+          state.childrenVisible.add(bp.id);
+        }
+      });
+    }
     buildArtifactRegistry();
     loadingEl.style.display = 'none';
     layout();
@@ -447,58 +526,86 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     return ARTIFACT_H;
   }
 
-  // When stage bands are on, group root nodes by their (manual) stage so each
-  // stage's subtrees are contiguous along the main axis → clean, non-overlapping
-  // bands. Stable within a stage; unstaged roots come last (#362 E).
-  function orderRootsByStage(ids) {
-    if (!state.showStages) return ids;
-    const groups = new Map();
-    const order = [];
-    ids.forEach(id => {
-      const s = (state.byId[id] && state.byId[id].stage) || '';
-      if (!groups.has(s)) { groups.set(s, []); order.push(s); }
-      groups.get(s).push(id);
-    });
-    order.sort((a, b) => (a === '' ? 1 : 0) - (b === '' ? 1 : 0)); // unstaged last
-    return order.flatMap(s => groups.get(s));
-  }
-
   function layout() {
     const visible = getVisibleNodes();
     if (visible.length === 0) return;
-    if (useLayeredLayout(visible)) {
-      layoutLayered(visible);
-    } else if (state.orientation === 'vertical') {
-      layoutVertical(visible);
+    layoutLayered(visible);
+    layoutActors();
+  }
+
+  // Which actor pseudo-nodes to show (#410): an actor appears when it has at
+  // least one edge to a known node and its source kind is not toggled off in
+  // the legend. (Editable placeholder actors for empty flows come with #411.)
+  function actorHasEdges(a) {
+    return (state.extraEdges || []).some(e => e.from === a.id && state.byId[e.to]);
+  }
+  function actorsAsSources() {
+    return !!(actorSources && state.editable && onConnect);
+  }
+  function visibleActors() {
+    // Editable process views offer every actor as a drag source (#411);
+    // read-only views show only actors that actually have edges.
+    const byId = new Map();
+    if (actorsAsSources()) DEFAULT_ACTORS.forEach(a => byId.set(a.id, a));
+    (state.actors || []).forEach(a => byId.set(a.id, a));
+    return [...byId.values()]
+      .filter(a => !state.hiddenActorKinds.has(a.actor))
+      .filter(a => actorsAsSources() || actorHasEdges(a));
+  }
+
+  // The "outside world" sources (#410): actors sit before the first
+  // stage/layer along the flow axis, so every flow gets a visible start. For a
+  // left→right flow that is a column on the left; for a top→down flow a row on
+  // top — matching the orthogonal router, which treats them as column 0.
+  function layoutActors() {
+    state.actorPositions = {};
+    const shown = visibleActors();
+    if (!shown.length) return;
+    let minX = Infinity, minY = Infinity;
+    Object.values(state.positions).forEach(p => {
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+    });
+    if (minX === Infinity) { minX = 0; minY = 0; }
+    if (state.layeredInfo && !state.layeredInfo.vertical) {
+      // flow 'down' — a row above the graph
+      const y = minY - ACTOR_H - 160;
+      let x = minX;
+      shown.forEach(a => {
+        state.actorPositions[a.id] = { x, y };
+        x += ACTOR_W + 28;
+      });
     } else {
-      layoutHorizontal(visible);
+      // flow 'right' — a column left of the graph
+      const x = minX - ACTOR_W - 160;
+      let y = minY;
+      shown.forEach(a => {
+        state.actorPositions[a.id] = { x, y };
+        y += ACTOR_H + 28;
+      });
     }
   }
 
-  // Flat process/draft flows have no parent-child hierarchy — their whole
-  // structure is the directed hand-off / dependency edges. The tree layout piles
-  // those into a single column, so we lay them out as an ordered layered DAG
-  // instead (sources → sinks, crossings reduced). Hierarchical graphs (BP packs,
-  // team-member trees) keep the tree layout.
-  function useLayeredLayout(visible) {
-    const anyHierarchy = state.briefings.some(bp => bp.parent || (bp.children && bp.children.length));
-    if (anyHierarchy) return false;
-    const hasExtra = (state.extraEdges || []).length > 0;
-    const hasStageOrder = (state.stageOrder || []).length > 0;
-    const hasDeps = visible.some(n => ((state.byId[n.id] || {}).depends_on || []).length > 0);
-    return hasExtra || hasStageOrder || hasDeps;
-  }
-
-  // Layered layout for a flat flow. Columns follow the flow direction (the
-  // stage order overrides them when stages are assigned); within-column order
-  // and cross-axis alignment come from the pure flow-layout module. Vertical
-  // orientation reads columns left→right; horizontal reads them top→bottom.
+  // The one layout for every flow (process, draft, BP pack). Nodes are laid
+  // out as an ordered layered DAG (sources → sinks, crossings reduced): the
+  // directed structure comes from the hand-off / dependency edges AND the
+  // parent-child hierarchy — an expanded child simply lands in a later column
+  // than its parent, so hierarchical graphs get the same clean orthogonal
+  // routing as flat ones (no separate tree layout any more). Columns follow
+  // the flow direction (the stage order overrides them when stages are
+  // assigned); within-column order and cross-axis alignment come from the pure
+  // flow-layout module. Vertical orientation reads columns left→right;
+  // horizontal reads them top→bottom.
   function layoutLayered(visible) {
     const vertical = state.orientation === 'vertical';
     const ids = visible.map(n => n.id);
     const idSet = new Set(ids);
 
     const edges = [];
+    // Siblings (common children of one parent) form a group: they share a
+    // column and stay contiguous, so the hierarchy reads as a clearly grouped
+    // row/column next to its parent.
+    const parentOf = new Map();
     (state.extraEdges || []).forEach(e => {
       if (idSet.has(e.from) && idSet.has(e.to) && e.from !== e.to) edges.push({ from: e.from, to: e.to });
     });
@@ -507,16 +614,26 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       (bp.depends_on || []).forEach(dep => {
         if (idSet.has(dep) && dep !== n.id) edges.push({ from: dep, to: n.id });
       });
+      // Hierarchy participates in the layering: a visible child sits after its
+      // parent along the flow axis and near it on the cross axis. Marked so
+      // the channel gap sizing can skip it — hierarchy is drawn as a bezier
+      // fan, not through the channel lanes.
+      if (bp.parent && idSet.has(bp.parent) && bp.parent !== n.id) {
+        edges.push({ from: bp.parent, to: n.id, hier: true });
+        parentOf.set(n.id, bp.parent);
+      }
     });
+    const groupOf = parentOf.size > 0 ? (id => parentOf.get(id) ?? null) : null;
 
-    const order = state.stageOrder || [];
-    const rankMap = new Map(order.map((s, i) => [s, i]));
-    const useStages = order.length > 0 && visible.some(n => rankMap.has((state.byId[n.id] || {}).stage));
-    const stageRankOf = useStages
-      ? (id => { const s = (state.byId[id] || {}).stage; return rankMap.has(s) ? rankMap.get(s) : null; })
-      : null;
-
-    const { colOf, columns } = computeFlowLayout(ids, edges, { stageRankOf, stageCount: order.length });
+    // Stages partition the flow axis (each stage gets an exclusive column
+    // block, see flow-layout.js) — applied whenever any visible node carries a
+    // stage, with or without an operator-defined order.
+    const stageOf = (id) => ((state.byId[id] || {}).stage || null);
+    const { colOf, columns } = computeFlowLayout(ids, edges, {
+      stageOf: visible.some(n => stageOf(n.id)) ? stageOf : null,
+      stageOrder: state.stageOrder || [],
+      groupOf,
+    });
 
     const sizeOf = vertical ? (id => getNodeHeight(id)) : (() => NODE_W);
     const crossGap = vertical ? 34 : H_GAP;
@@ -525,7 +642,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     // The orthogonal router (drawEdges) lays the cross runs of the edges into
     // the channel between two columns, one lane per overlapping run. Reserve
     // enough channel space for those lanes so labels and parallel runs fit.
-    const loads = laneLoadByChannel(edges, colOf);
+    // Hierarchy edges don't take lanes (bezier fan) — skip them here.
+    const loads = laneLoadByChannel(edges.filter(e => !e.hier), colOf);
     const laneNeed = c => 56 + Math.max(0, (loads.get(c) || 0) - 1) * 18;
 
     const pos = {};
@@ -541,7 +659,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
         const a = colOf.get(e.from), b = colOf.get(e.to);
         if (Math.abs(a - b) !== 1) return;
         const lo = Math.min(a, b);
-        const text = e.on === 'github' ? channelChipText(e) : (e.label || '');
+        const text = e.on === 'github' ? channelChipText(e)
+          : (e.on === 'label' ? labelChipText(e) : (e.label || ''));
         if (text) boundaryNeed[lo] = Math.max(boundaryNeed[lo], estChipWidth(text));
       });
       let x = 0;
@@ -570,153 +689,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     state.positions = pos;
     // Tell drawEdges to use the orthogonal channel router for this layout.
     state.layeredInfo = { vertical, colOf };
-    layoutArtifacts(visible);
-  }
-
-  function layoutHorizontal(visible) {
-    state.layeredInfo = null;
-    const visibleIds = new Set(visible.map(n => n.id));
-    const childrenOf = {};
-    visible.forEach(n => {
-      const bp  = state.byId[n.id];
-      const kids = (bp.children || []).filter(cid => visibleIds.has(cid));
-      childrenOf[n.id] = topoSort(kids);
-    });
-
-    const subtreeW = {};
-    const maxDepth = Math.max(...visible.map(n => n.depth));
-
-    for (let d = maxDepth; d >= 0; d--) {
-      visible.filter(n => n.depth === d).forEach(n => {
-        const kids = childrenOf[n.id] || [];
-        if (kids.length === 0) {
-          subtreeW[n.id] = NODE_W;
-        } else {
-          const childrenW = kids.reduce((sum, cid) => sum + subtreeW[cid], 0)
-            + H_GAP * (kids.length - 1);
-          subtreeW[n.id] = Math.max(NODE_W, childrenW);
-        }
-      });
-    }
-
-    const pos = {};
-
-    function assignX(id, xStart) {
-      const kids = childrenOf[id] || [];
-      if (kids.length === 0) {
-        pos[id] = { x: xStart, y: 0 };
-      } else {
-        let cx = xStart;
-        kids.forEach(cid => {
-          assignX(cid, cx);
-          cx += subtreeW[cid] + H_GAP;
-        });
-        const firstChild = pos[kids[0]];
-        const lastChild  = pos[kids[kids.length - 1]];
-        pos[id] = {
-          x: (firstChild.x + lastChild.x) / 2,
-          y: 0,
-        };
-      }
-    }
-
-    let xCursor = 0;
-    const sortedRoots = orderRootsByStage(topoSortRoots(state.roots).filter(id => visibleIds.has(id)));
-    sortedRoots.forEach(id => {
-      assignX(id, xCursor);
-      xCursor += subtreeW[id] + H_GAP * 2;
-    });
-
-    const depthNodes = {};
-    visible.forEach(n => {
-      if (!depthNodes[n.depth]) depthNodes[n.depth] = [];
-      depthNodes[n.depth].push(n.id);
-    });
-
-    let yOffset = 0;
-    for (let d = 0; d <= maxDepth; d++) {
-      const ids = depthNodes[d] || [];
-      ids.forEach(id => { pos[id].y = yOffset; });
-      const maxH = Math.max(...ids.map(id => getNodeHeight(id)), 90);
-      yOffset += maxH + V_GAP;
-    }
-
-    state.positions = pos;
-    layoutArtifacts(visible);
-  }
-
-  function layoutVertical(visible) {
-    state.layeredInfo = null;
-    const visibleIds = new Set(visible.map(n => n.id));
-    const childrenOf = {};
-    visible.forEach(n => {
-      const bp  = state.byId[n.id];
-      const kids = (bp.children || []).filter(cid => visibleIds.has(cid));
-      childrenOf[n.id] = topoSort(kids);
-    });
-
-    // Sibling gap (vertical) — give a bit of breathing room between stacked nodes
-    const SIBLING_V_GAP = 30;
-
-    const subtreeH = {};
-    const maxDepth = Math.max(...visible.map(n => n.depth));
-
-    for (let d = maxDepth; d >= 0; d--) {
-      visible.filter(n => n.depth === d).forEach(n => {
-        const kids = childrenOf[n.id] || [];
-        const selfH = getNodeHeight(n.id);
-        if (kids.length === 0) {
-          subtreeH[n.id] = selfH;
-        } else {
-          const childrenH = kids.reduce((sum, cid) => sum + subtreeH[cid], 0)
-            + SIBLING_V_GAP * (kids.length - 1);
-          subtreeH[n.id] = Math.max(selfH, childrenH);
-        }
-      });
-    }
-
-    const pos = {};
-
-    function assignY(id, yStart) {
-      const kids = childrenOf[id] || [];
-      const selfH = getNodeHeight(id);
-      if (kids.length === 0) {
-        pos[id] = { x: 0, y: yStart };
-      } else {
-        let cy = yStart;
-        kids.forEach(cid => {
-          assignY(cid, cy);
-          cy += subtreeH[cid] + SIBLING_V_GAP;
-        });
-        const firstId = kids[0];
-        const lastId  = kids[kids.length - 1];
-        const firstH  = getNodeHeight(firstId);
-        const lastH   = getNodeHeight(lastId);
-        // Center parent's vertical midpoint between first child's and last child's midpoints
-        const centerY = ((pos[firstId].y + firstH / 2) + (pos[lastId].y + lastH / 2)) / 2;
-        pos[id] = {
-          x: 0,
-          y: centerY - selfH / 2,
-        };
-      }
-    }
-
-    let yCursor = 0;
-    const sortedRoots = orderRootsByStage(topoSortRoots(state.roots).filter(id => visibleIds.has(id)));
-    sortedRoots.forEach(id => {
-      assignY(id, yCursor);
-      yCursor += subtreeH[id] + V_GAP;
-    });
-
-    // Assign X per depth column — all nodes have the same width
-    let xOffset = 0;
-    for (let d = 0; d <= maxDepth; d++) {
-      const ids = (visible.filter(n => n.depth === d) || []).map(n => n.id);
-      ids.forEach(id => { pos[id].x = xOffset; });
-      xOffset += NODE_W + H_GAP * 2;
-    }
-
-    state.positions = pos;
     layoutArtifacts(visible);
   }
 
@@ -998,7 +970,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     const visible    = getVisibleNodes();
     const visibleIds = new Set(visible.map(n => n.id));
 
-    canvas.querySelectorAll('.bp-node, .artifact-node').forEach(el => el.remove());
+    canvas.querySelectorAll('.bp-node, .artifact-node, .actor-node-src').forEach(el => el.remove());
 
     visible.forEach(n => {
       const bp  = state.byId[n.id];
@@ -1060,6 +1032,55 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
         node.appendChild(badges);
       }
 
+      // External triggers inside the card: schedules (⏰ — they have no line on
+      // the canvas any more) and actor-sourced wakes (🐙 events / 🏷 labels /
+      // ⚡ webhooks). Clicking a row opens the trigger's edit dialog; the 👁
+      // button shows/hides the trigger's line so dense graphs stay readable.
+      const trigEdges = state.nodeTriggerEdges.get(n.id) || [];
+      if (trigEdges.length > 0) {
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'display:flex;flex-direction:column;gap:2px;margin:2px 0 4px;';
+        trigEdges.forEach(e => {
+          const meta = triggerRowMeta(e);
+          const row = document.createElement('div');
+          row.style.cssText = 'display:flex;align-items:center;gap:5px;font-size:10px;min-width:0;';
+          const lbl = document.createElement('span');
+          lbl.style.cssText = `display:inline-flex;align-items:center;gap:4px;min-width:0;flex:1;color:${meta.color};`
+            + (onSelectEdge ? 'cursor:pointer;' : '');
+          lbl.title = onSelectEdge ? `${meta.title} — click to edit` : meta.title;
+          lbl.innerHTML = `<span style="flex-shrink:0">${meta.icon}</span>`
+            + `<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600">${esc(meta.text)}</span>`;
+          if (onSelectEdge) {
+            lbl.addEventListener('click', (ev) => {
+              ev.stopPropagation();
+              onSelectEdge({
+                from: e.from, to: e.to, on: e.on, kind: e.on, label: e.label,
+                triggerId: e.triggerId, gate: e.gate,
+                ...(e.events ? { events: e.events } : {}),
+                ...(e.schedule ? { schedule: e.schedule } : {}),
+              });
+            });
+          }
+          row.appendChild(lbl);
+          if (e.on !== 'timer' && e.triggerId) {
+            const hidden = state.hiddenTriggerEdges.has(`${n.id}|${e.triggerId}`);
+            const eye = document.createElement('button');
+            eye.textContent = '👁';
+            eye.title = hidden ? 'Show this trigger’s line' : 'Hide this trigger’s line';
+            eye.style.cssText = 'background:none;border:none;padding:0 2px;cursor:pointer;'
+              + `font-size:11px;line-height:1;flex-shrink:0;opacity:${hidden ? 0.3 : 0.85};`
+              + (hidden ? 'filter:grayscale(1);' : '');
+            eye.addEventListener('click', (ev) => {
+              ev.stopPropagation();
+              toggleTriggerEdgeHidden(n.id, e.triggerId);
+            });
+            row.appendChild(eye);
+          }
+          wrap.appendChild(row);
+        });
+        node.appendChild(wrap);
+      }
+
       // Action buttons
       const actions = document.createElement('div');
       actions.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;';
@@ -1112,28 +1133,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
         node.appendChild(port);
       }
 
-      // GitHub PR/Issue output ports (#380): labelled pills on the right edge,
-      // shown only when the node produces that artifact. Grab one and drag it to
-      // another node to declare that agent reacts to the PR/issue.
-      if (state.editable && onConnectChannel && bp.github) {
-        const outs = [];
-        if (bp.github.producesPr) outs.push({ artifact: 'pr', label: 'PR', color: EDGE_STYLES.pr.color });
-        if (bp.github.producesIssue) outs.push({ artifact: 'issue', label: 'Issue', color: EDGE_STYLES.issue.color });
-        outs.forEach((o, i) => {
-          const pill = document.createElement('div');
-          pill.title = `Drag to another node: it reacts to this agent's ${o.label}`;
-          pill.textContent = o.label;
-          pill.style.cssText = `position:absolute;right:-10px;top:calc(50% + ${18 + i * 20}px);`
-            + `padding:1px 6px;border-radius:9px;background:${o.color};color:#fff;font-size:9px;`
-            + `font-weight:600;line-height:1.4;cursor:crosshair;z-index:3;box-shadow:var(--eb-shadow-sm);`;
-          pill.addEventListener('mousedown', (ev) => {
-            ev.stopPropagation();
-            ev.preventDefault();
-            startConnect(n.id, o.artifact);
-          });
-          node.appendChild(pill);
-        });
-      }
+      // NOTE (#411): the separate PR/Issue drag pills are gone — the header
+      // badges above keep the "opens PRs/issues" information visible, and the
+      // single ● port creates every connection type (the create dialog ranks
+      // the PR/Issue channel first for producers).
 
       // Agent Prompt panel — the node's prompt/content, read-only markdown.
       // Editing (prompt, stage, links) is in the right-side inspector.
@@ -1151,12 +1154,22 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     // Artifact nodes
     renderArtifactNodes();
 
+    // Actor pseudo-nodes (#410)
+    renderActorNodes();
+
     // Re-layout with actual DOM heights, then reposition
     requestAnimationFrame(() => {
       layout();
       canvas.querySelectorAll('.bp-node').forEach(el => {
         const id  = el.dataset.id;
         const pos = state.positions[id];
+        if (pos) {
+          el.style.left = pos.x + 'px';
+          el.style.top  = pos.y + 'px';
+        }
+      });
+      canvas.querySelectorAll('.actor-node-src').forEach(el => {
+        const pos = state.actorPositions[el.dataset.actorId];
         if (pos) {
           el.style.left = pos.x + 'px';
           el.style.top  = pos.y + 'px';
@@ -1272,6 +1285,40 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       + `letter-spacing:0.04em;text-transform:uppercase;color:var(--eb-text-muted);`;
     band.appendChild(label);
     laneLayer.appendChild(band);
+  }
+
+  // The actor cards (#410): rounded, dashed, muted — visually distinct from the
+  // agent cards. They are not `.bp-node`, so a connect-drag can't drop on them.
+  function renderActorNodes() {
+    visibleActors().forEach(a => {
+      const pos = state.actorPositions[a.id];
+      if (!pos) return;
+      const el = document.createElement('div');
+      el.className = 'actor-node-src';
+      el.dataset.actorId = a.id;
+      el.style.cssText = `position:absolute;left:${pos.x}px;top:${pos.y}px;width:${ACTOR_W}px;`
+        + `height:${ACTOR_H}px;box-sizing:border-box;`
+        + 'background:var(--eb-bg-elevated);border:1px dashed var(--eb-border-hover);border-radius:20px;'
+        + 'padding:0 14px;font-size:12px;color:var(--eb-text-secondary);'
+        + 'display:flex;align-items:center;gap:8px;';
+      el.innerHTML = `<span style="font-size:15px;line-height:1">${ACTOR_ICON[a.actor] || '•'}</span>`
+        + `<span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.displayName || a.id)}</span>`;
+      el.addEventListener('mousedown', e => e.stopPropagation());
+      // The same ● connect handle agents carry (#411): drag onto an agent to
+      // create a trigger from this source (schedule, human label, event, hook).
+      if (actorsAsSources()) {
+        const port = document.createElement('div');
+        port.title = 'Drag to an agent: it gets a trigger from this source';
+        port.style.cssText = 'position:absolute;right:-7px;top:calc(50% - 7px);width:14px;height:14px;border-radius:50%;background:var(--eb-accent-primary);border:2px solid var(--eb-bg-surface);cursor:crosshair;z-index:3;';
+        port.addEventListener('mousedown', (ev) => {
+          ev.stopPropagation();
+          ev.preventDefault();
+          startConnect(a.id);
+        });
+        el.appendChild(port);
+      }
+      canvas.appendChild(el);
+    });
   }
 
   function renderArtifactNodes() {
@@ -1487,57 +1534,12 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       return { cx, cy };
     }
 
-    // 1. Hierarchy edges (gray solid)
-    visible.forEach(n => {
-      const bp = state.byId[n.id];
-      if (!bp || !state.childrenVisible.has(n.id)) return;
-
-      const parentPos = state.positions[n.id];
-      const parentEl  = canvas.querySelector(`.bp-node[data-id="${n.id}"]`);
-      if (!parentPos || !parentEl) return;
-
-      const parentH = parentEl.offsetHeight;
-
-      (bp.children || []).forEach(childId => {
-        if (!visibleIds.has(childId)) return;
-        const childPos = state.positions[childId];
-        const childEl  = canvas.querySelector(`.bp-node[data-id="${childId}"]`);
-        if (!childPos) return;
-        const childH = childEl ? childEl.offsetHeight : getNodeHeight(childId);
-
-        let x1, y1, x2, y2, flow;
-        if (vertical) {
-          x1 = parentPos.x + NODE_W;
-          y1 = parentPos.y + parentH / 2;
-          x2 = childPos.x;
-          y2 = childPos.y + childH / 2;
-          flow = 'horizontal';
-        } else {
-          x1 = parentPos.x + NODE_W / 2;
-          y1 = parentPos.y + parentH;
-          x2 = childPos.x + NODE_W / 2;
-          y2 = childPos.y;
-          flow = 'vertical';
-        }
-
-        const d = drawBezierEdge(x1, y1, x2, y2, EDGE_STYLES.hierarchy.color, 2, '', false, flow);
-        addEdgeHit(d, { from: n.id, to: childId, on: 'parent' });
-      });
-    });
-
-    // 2. + 4. — the inter-node process wiring (dependencies + label/review/
-    // github edges). In the layered layout these all go through the orthogonal
-    // channel router (drawRoutedProcessEdges): distributed ports, node-free
-    // channel lanes, side gutters for long/backward edges, labels on the edge.
-    // The tree layout (BP hierarchies) keeps the original bezier drawing.
+    // The inter-node wiring (hierarchy + dependencies + label/review/github
+    // edges + actor-sourced triggers) all goes through the orthogonal channel
+    // router (drawRoutedProcessEdges): distributed ports, node-free channel
+    // lanes, side gutters for long/backward edges, labels on the edge.
     const EXTRA_COLOR = { label: EDGE_STYLES.label.color, review: EDGE_STYLES.review.color, manual: EDGE_STYLES.label.color };
     const GH_COLOR = { pr: EDGE_STYLES.pr.color, issue: EDGE_STYLES.issue.color };
-
-    if (state.layeredInfo) {
-      drawRoutedProcessEdges();
-      drawArtifactEdges(visibleIds);
-      return;
-    }
 
     function drawRoutedProcessEdges() {
       const nodes = [];
@@ -1548,8 +1550,43 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
         nodes.push({ id: n.id, x: p.x, y: p.y, w: NODE_W, h: el ? el.offsetHeight : getNodeHeight(n.id) });
       });
 
+      // Actor pseudo-nodes join the routed graph as column 0 (their placement
+      // matches: a column left of / a row above the first layer), so their
+      // edges run through the same orthogonal channels as the agent wiring —
+      // no more bezier curves cutting across the cards. Agent columns shift +1.
+      const actorIds = [];
+      Object.entries(state.actorPositions).forEach(([id, p]) => {
+        nodes.push({ id, x: p.x, y: p.y, w: ACTOR_W, h: ACTOR_H });
+        actorIds.push(id);
+      });
+      const colOf = new Map();
+      const shift = actorIds.length ? 1 : 0;
+      state.layeredInfo.colOf.forEach((c, id) => colOf.set(id, c + shift));
+      actorIds.forEach(id => colOf.set(id, 0));
+
       const list = [];
       (state.extraEdges || []).forEach(e => {
+        // Actor-sourced trigger edges (events, webhooks, human-set labels).
+        const actor = state.actorsById[e.from];
+        if (actor) {
+          if (state.hiddenActorKinds.has(actor.actor)) return;
+          if (isTriggerEdgeHidden(e)) return;
+          if (!visibleIds.has(e.to) || !state.actorPositions[e.from]) return;
+          const style = EDGE_STYLES[e.on] || {};
+          const gate = e.gate === 'human';
+          list.push({
+            from: e.from, to: e.to,
+            color: actorEdgeColor(e), width: 1.5,
+            dash: style.dashed ? '6 4' : '', opacity: 1,
+            labelText: gate ? `👤✓ ${labelChipText(e)}` : actorEdgeText(e),
+            chip: gate, gate,
+            hit: { from: e.from, to: e.to, on: e.on, kind: e.on, label: e.label,
+              triggerId: e.triggerId, gate: e.gate,
+              ...(e.events ? { events: e.events } : {}),
+              ...(e.schedule ? { schedule: e.schedule } : {}) },
+          });
+          return;
+        }
         if (!visibleIds.has(e.from) || !visibleIds.has(e.to)) return;
         const isGithub = e.on === 'github';
         const artifact = e.artifact === 'issue' ? 'issue' : 'pr';
@@ -1559,7 +1596,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
           width: isGithub ? 2 : 1.5,
           dash: '',
           opacity: 1,
-          labelText: isGithub ? channelChipText(e) : (e.label || ''),
+          labelText: isGithub ? channelChipText(e)
+            : (e.on === 'label' ? labelChipText(e) : (e.label || '')),
           chip: isGithub,
           gate: e.gate === 'human',
           hit: { from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on,
@@ -1584,7 +1622,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       const routed = routeOrthogonalEdges({
         nodes,
         edges: list,
-        colOf: state.layeredInfo.colOf,
+        colOf,
         flow: state.layeredInfo.vertical ? 'right' : 'down',
         labelWidths: list.map(e => e.labelText ? estChipWidth(e.labelText) : 0),
       });
@@ -1621,119 +1659,34 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       });
     }
 
-    // 2. Dependency edges (red dashed) — tree layout only
+    // Hierarchy edges — a quiet bezier fan from the parent to its children.
+    // Deliberately NOT routed through the orthogonal channels: they carry no
+    // label, the sibling group sits in the column right next to its parent
+    // (so the curves cross nothing), and the soft, arrowless curve visually
+    // separates structure (containment) from work hand-offs. Drawn before the
+    // routed edges so they sit beneath the process wiring.
     visible.forEach(n => {
       const bp = state.byId[n.id];
-      if (!bp || !bp.depends_on) return;
-
-      bp.depends_on.forEach(depId => {
-        if (!visibleIds.has(depId)) return;
-        const fromPos = state.positions[depId];
-        const toPos   = state.positions[n.id];
-        const fromEl  = canvas.querySelector(`.bp-node[data-id="${depId}"]`);
-        if (!fromPos || !toPos || !fromEl) return;
-
-        const fromH = fromEl.offsetHeight;
-
-        let x1, y1, x2, y2, pathD, arrowPoints;
-        if (vertical) {
-          // Deps flow top → bottom (dependent BP sits below the producer in the column)
-          x1 = fromPos.x + NODE_W / 2;
-          y1 = fromPos.y + fromH;
-          x2 = toPos.x + 45;
-          y2 = toPos.y;
-          const my = (y1 + y2) / 2;
-          pathD = `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`;
-          // arrowhead points down (toward target's top)
-          arrowPoints = `${x2},${y2} ${x2-6},${y2-ARROW_SIZE} ${x2+6},${y2-ARROW_SIZE}`;
-        } else {
-          x1 = fromPos.x + NODE_W;
-          y1 = fromPos.y + fromH / 2;
-          x2 = toPos.x;
-          y2 = toPos.y + 45;
-          const mx = (x1 + x2) / 2;
-          pathD = `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`;
-          // arrowhead points right (toward target's left)
-          arrowPoints = `${x2},${y2} ${x2-ARROW_SIZE},${y2-6} ${x2-ARROW_SIZE},${y2+6}`;
-        }
-
-        const path = makeSvgPath(pathD);
-        path.setAttribute('stroke', EDGE_STYLES.dependency.color);
-        path.setAttribute('stroke-width', '1.5');
-        path.setAttribute('stroke-dasharray', '6 4');
-        path.setAttribute('fill', 'none');
-        path.setAttribute('opacity', '0.6');
-
-        const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-        arrow.setAttribute('points', arrowPoints);
-        arrow.setAttribute('fill', EDGE_STYLES.dependency.color);
-        arrow.setAttribute('opacity', '0.85');
-        svgEdges.appendChild(arrow);
-
-        addEdgeHit(pathD, { from: depId, to: n.id, on: 'dependency' });
-      });
+      if (!bp || !bp.parent || !visibleIds.has(bp.parent) || bp.parent === n.id) return;
+      const pPos = state.positions[bp.parent];
+      const cPos = state.positions[n.id];
+      if (!pPos || !cPos) return;
+      const pEl = canvas.querySelector(`.bp-node[data-id="${bp.parent}"]`);
+      const cEl = canvas.querySelector(`.bp-node[data-id="${n.id}"]`);
+      const pH = pEl ? pEl.offsetHeight : getNodeHeight(bp.parent);
+      const cH = cEl ? cEl.offsetHeight : getNodeHeight(n.id);
+      const d = vertical
+        // flow left→right: parent's right face → child's left face
+        ? drawBezierEdge(pPos.x + NODE_W, pPos.y + pH / 2, cPos.x, cPos.y + cH / 2,
+            EDGE_STYLES.hierarchy.color, 2, '', false, 'horizontal')
+        // flow top→down: parent's bottom face → child's top face
+        : drawBezierEdge(pPos.x + NODE_W / 2, pPos.y + pH, cPos.x + NODE_W / 2, cPos.y,
+            EDGE_STYLES.hierarchy.color, 2, '', false, 'vertical');
+      addEdgeHit(d, { from: bp.parent, to: n.id, on: 'parent' });
     });
 
-    // 3. Artifact edges
+    drawRoutedProcessEdges();
     drawArtifactEdges(visibleIds);
-
-    // 4. Process-linking edges (label / review / manual) — the extra wiring
-    //    from the process view, drawn on top of the BP structure.
-    (state.extraEdges || []).forEach(e => {
-      if (!visibleIds.has(e.from) || !visibleIds.has(e.to)) return;
-      const fromPos = state.positions[e.from];
-      const toPos   = state.positions[e.to];
-      const fromEl  = canvas.querySelector(`.bp-node[data-id="${e.from}"]`);
-      if (!fromPos || !toPos || !fromEl) return;
-      const fromH = fromEl.offsetHeight;
-      const isGithub = e.on === 'github';
-      const artifact = e.artifact === 'issue' ? 'issue' : 'pr';
-      const color = isGithub ? GH_COLOR[artifact] : (EXTRA_COLOR[e.on] || EDGE_STYLES.label.color);
-
-      const toEl = canvas.querySelector(`.bp-node[data-id="${e.to}"]`);
-      const toH  = toEl ? toEl.offsetHeight : 90;
-      let x1, y1, x2, y2, flow;
-      if (vertical) {
-        // Same-column hand-off (feedback/rework loop): route it out to the right
-        // instead of cutting across the stacked cards (#401).
-        if (Math.abs(fromPos.x - toPos.x) < 1) {
-          x1 = fromPos.x + NODE_W; y1 = fromPos.y + fromH / 2;
-          x2 = toPos.x + NODE_W;   y2 = toPos.y + toH / 2; flow = 'loop-right';
-        } else {
-          x1 = fromPos.x + NODE_W; y1 = fromPos.y + fromH / 2;
-          x2 = toPos.x;            y2 = toPos.y + 20; flow = 'horizontal';
-        }
-      } else {
-        if (Math.abs(fromPos.y - toPos.y) < 1) {
-          x1 = fromPos.x + NODE_W / 2; y1 = fromPos.y + fromH;
-          x2 = toPos.x + NODE_W / 2;   y2 = toPos.y + toH; flow = 'loop-down';
-        } else {
-          x1 = fromPos.x + NODE_W / 2; y1 = fromPos.y + fromH;
-          x2 = toPos.x + NODE_W / 2;   y2 = toPos.y;  flow = 'vertical';
-        }
-      }
-      const d = drawBezierEdge(x1, y1, x2, y2, color, isGithub ? 2 : 1.5, '', true, flow);
-      // Clickable hit-area so the edge can be edited/removed (#362 Phase C2 / #380).
-      addEdgeHit(d, { from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on,
-        artifact: isGithub ? artifact : undefined, gate: e.gate, triggerId: e.triggerId });
-      // Seed the label near the edge's apex — for a side-loop that is out on the
-      // bulge, otherwise the geometric midpoint. placeClearLabel refines from there.
-      let mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
-      if (flow === 'loop-right') mx = Math.max(x1, x2) + 24;
-      else if (flow === 'loop-down') my = Math.max(y1, y2) + 20;
-      if (isGithub) {
-        // A pill chip near the midpoint: artifact + optional routing label, with a
-        // clear human-approval gate glyph when a human must apply the label. Drawn
-        // on the overlay layer (above the cards) so it is never hidden, and nudged
-        // off any card/chip it would otherwise cover (#401).
-        const txt = channelChipText(e);
-        const p = placeClearLabel(mx, my, estChipWidth(txt), 17);
-        drawEdgeChip(p.cx, p.cy, txt, color, e.gate === 'human');
-      } else if (e.label) {
-        const p = placeClearLabel(mx, my, estChipWidth(e.label), 15);
-        drawEdgeLabelText(p.cx, p.cy, e.label, color);
-      }
-    });
   }
 
   // A text edge-label with a canvas-coloured halo so it reads over crossing
@@ -1765,6 +1718,94 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
     tri.setAttribute('points', `${x},${y} ${ax1},${ay1} ${ax2},${ay2}`);
     tri.setAttribute('fill', color);
     svgEdges.appendChild(tri);
+  }
+
+  // Colour + label for an actor-sourced edge (#410).
+  function actorEdgeColor(e) {
+    if (e.gate === 'human') return EDGE_STYLES.gate.color;
+    if (EDGE_STYLES[e.on]) return EDGE_STYLES[e.on].color;
+    return EDGE_STYLES.label.color;
+  }
+  function actorEdgeText(e) {
+    if (e.on === 'event') return (e.events || []).join(', ');
+    if (e.on === 'timer') return e.schedule && e.schedule.cron ? `⏱ ${e.schedule.cron}` : `once ${e.label || ''}`.trim();
+    if (e.on === 'webhook') return e.label || 'webhook';
+    if (e.on === 'label') return labelChipText(e);
+    return e.label || '';
+  }
+
+  // Human-readable cron description for the in-card schedule rows.
+  function cronText(expr) {
+    const p = String(expr || '').trim().split(/\s+/);
+    if (p.length !== 5) return expr || 'cron';
+    const [min, hr, dom, mon, dow] = p;
+    const DAYS = { 0: 'Sun', 1: 'Mon', 2: 'Tue', 3: 'Wed', 4: 'Thu', 5: 'Fri', 6: 'Sat', 7: 'Sun' };
+    const two = (s) => String(s).padStart(2, '0');
+    if (/^\d+$/.test(min) && /^\d+$/.test(hr)) {
+      const time = `${two(hr)}:${two(min)}`;
+      if (dom === '*' && mon === '*' && dow === '*') return `daily ${time}`;
+      if (dom === '*' && mon === '*' && DAYS[dow]) return `${DAYS[dow]} ${time}`;
+      if (/^\d+$/.test(dom) && mon === '*' && dow === '*') return `day ${dom}, ${time}`;
+    }
+    if (/^\*\/\d+$/.test(min) && hr === '*') return `every ${min.slice(2)} min`;
+    if (min === '0' && /^\*\/\d+$/.test(hr)) return `every ${hr.slice(2)} h`;
+    return expr;
+  }
+
+  // Icon / text / colour of a card trigger row (schedules + actor wakes).
+  function triggerRowMeta(e) {
+    if (e.on === 'timer') {
+      const text = e.schedule && e.schedule.cron ? cronText(e.schedule.cron)
+        : (e.schedule && e.schedule.at ? `once ${e.schedule.at}` : (e.label || 'schedule'));
+      return { icon: '⏰', text, color: EDGE_STYLES.timer.color, title: 'Schedule' };
+    }
+    if (e.on === 'event') {
+      return { icon: '🐙', text: (e.events || []).join(', '), color: EDGE_STYLES.event.color, title: 'GitHub trigger' };
+    }
+    if (e.on === 'webhook') {
+      return { icon: '⚡', text: e.label || 'webhook', color: EDGE_STYLES.webhook.color, title: 'Webhook' };
+    }
+    // Label listener sourced from GitHub (incl. human-set labels and gates).
+    const gate = e.gate === 'human';
+    const evs = Array.isArray(e.events) && e.events.length ? ` (${e.events.join(', ')})` : '';
+    return {
+      icon: gate ? '👤✓' : '🏷',
+      text: labelChipText(e),
+      color: gate ? EDGE_STYLES.gate.color : EDGE_STYLES.label.color,
+      title: (gate ? 'Human approval gate (GitHub label)' : 'GitHub label trigger') + evs,
+    };
+  }
+
+  function isTriggerEdgeHidden(e) {
+    return !!(e.triggerId && state.hiddenTriggerEdges.has(`${e.to}|${e.triggerId}`));
+  }
+  function toggleTriggerEdgeHidden(nodeId, triggerId) {
+    const key = `${nodeId}|${triggerId}`;
+    if (state.hiddenTriggerEdges.has(key)) state.hiddenTriggerEdges.delete(key);
+    else state.hiddenTriggerEdges.add(key);
+    localStorage.setItem('flow-graph-hidden-trigger-edges', JSON.stringify([...state.hiddenTriggerEdges]));
+    render();
+  }
+
+  // Compact tag for the label events a listener trigger carries: which artifact
+  // (Issue/PR) and direction (+ added / − removed) wakes it. One trigger now
+  // carries exactly one event; legacy multi-event triggers join their tags.
+  const LABEL_EVENT_TAGS = {
+    'issues.labeled': 'Issue+',
+    'issues.unlabeled': 'Issue−',
+    'pull_request.labeled': 'PR+',
+    'pull_request.unlabeled': 'PR−',
+  };
+  function labelEventTag(events) {
+    const tags = [...new Set((Array.isArray(events) ? events : [])
+      .map(ev => LABEL_EVENT_TAGS[ev]).filter(Boolean))];
+    return tags.join('/');
+  }
+  // The text for a label hand-off edge: the label plus the Issue/PR ± tag, so
+  // the canvas shows WHICH label change (issue vs PR, added vs removed) fires.
+  function labelChipText(e) {
+    const tag = labelEventTag(e.events);
+    return tag ? `${e.label || ''} · ${tag}` : (e.label || '');
   }
 
   // The chip text for a GitHub-channel edge (#380): artifact + optional human-gate
@@ -1973,6 +2014,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       collapseSubtree(id);
     } else {
       state.childrenVisible.add(id);
+      state.userCollapsed.delete(id);
     }
     render();
   }
@@ -1991,6 +2033,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
 
   function collapseSubtree(id) {
     state.childrenVisible.delete(id);
+    state.userCollapsed.add(id);
     const bp = state.byId[id];
     if (bp && bp.children) {
       bp.children.forEach(cid => collapseSubtree(cid));
@@ -1998,6 +2041,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
   }
 
   function expandAll() {
+    state.userCollapsed.clear();
     state.briefings.forEach(bp => {
       if (bp.children && bp.children.length > 0) {
         state.childrenVisible.add(bp.id);
@@ -2008,6 +2052,9 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
 
   function collapseAll() {
     state.childrenVisible.clear();
+    state.briefings.forEach(bp => {
+      if (bp.children && bp.children.length > 0) state.userCollapsed.add(bp.id);
+    });
     state.contentVisible.clear();
     state.outputsVisible.clear();
     state.inputsVisible.clear();
@@ -2039,6 +2086,14 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       minY = Math.min(minY, pos.y);
       maxX = Math.max(maxX, pos.x + ARTIFACT_W);
       maxY = Math.max(maxY, pos.y + h);
+    }
+
+    // Actor column (#410) sits left of the graph — keep it in the frame.
+    for (const pos of Object.values(state.actorPositions)) {
+      minX = Math.min(minX, pos.x);
+      minY = Math.min(minY, pos.y);
+      maxX = Math.max(maxX, pos.x + ACTOR_W);
+      maxY = Math.max(maxY, pos.y + ACTOR_H);
     }
 
     // Routed edges may swing around the graph through the side gutters — keep
@@ -2107,8 +2162,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
       y: (clientY - r.top - state.pan.y) / state.zoom,
     };
   }
-  function startConnect(fromId, artifact) {
-    state.connecting = { fromId, artifact: artifact || null };
+  function startConnect(fromId) {
+    state.connecting = { fromId };
     viewport.style.cursor = 'crosshair';
     tempEdge = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     tempEdge.setAttribute('stroke', 'var(--eb-accent-primary)');
@@ -2119,11 +2174,20 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
   }
   function updateTempEdge(clientX, clientY) {
     if (!tempEdge) return;
-    const pos = state.positions[state.connecting.fromId];
-    const el = canvas.querySelector(`.bp-node[data-id="${state.connecting.fromId}"]`);
-    if (!pos || !el) return;
-    const x1 = pos.x + NODE_W;
-    const y1 = pos.y + el.offsetHeight / 2;
+    const fromId = state.connecting.fromId;
+    // The drag source is an agent card or an actor node (#411).
+    let x1, y1;
+    const actorPos = state.actorPositions[fromId];
+    if (actorPos) {
+      x1 = actorPos.x + ACTOR_W;
+      y1 = actorPos.y + ACTOR_H / 2;
+    } else {
+      const pos = state.positions[fromId];
+      const el = canvas.querySelector(`.bp-node[data-id="${fromId}"]`);
+      if (!pos || !el) return;
+      x1 = pos.x + NODE_W;
+      y1 = pos.y + el.offsetHeight / 2;
+    }
     const p = toCanvas(clientX, clientY);
     const cx = x1 + (p.x - x1) * 0.4;
     const cx2 = p.x - (p.x - x1) * 0.4;
@@ -2131,18 +2195,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
   }
   function finishConnect(e) {
     const fromId = state.connecting.fromId;
-    const artifact = state.connecting.artifact;
     state.connecting = null;
     viewport.style.cursor = 'grab';
     if (tempEdge) { tempEdge.remove(); tempEdge = null; }
+    // Only agent cards are valid drop targets — actor nodes are sources only.
     const el = document.elementFromPoint(e.clientX, e.clientY);
     const nodeEl = el && el.closest ? el.closest('.bp-node') : null;
     const toId = nodeEl && nodeEl.dataset ? nodeEl.dataset.id : null;
     if (!toId || toId === fromId) return;
-    // A drag from a PR/Issue output port declares a GitHub channel (#380);
-    // the plain ● port declares a generic hand-off.
-    if (artifact && onConnectChannel) onConnectChannel(fromId, toId, artifact);
-    else if (onConnect) onConnect(fromId, toId);
+    if (onConnect) onConnect(fromId, toId);
   }
 
   function onWheel(e) {
@@ -2321,9 +2382,9 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
   function updateOrientationBtn(btn) {
     const active = state.orientation === 'vertical';
     btn._active            = active;
-    btn.textContent        = active ? 'Vertical' : 'Horizontal';
-    btn.title              = 'Toggle layout orientation (roots flow ' +
-      (active ? 'top to bottom; children flow left to right' : 'left to right; children flow top to bottom') + ')';
+    btn.textContent        = active ? 'Flow →' : 'Flow ↓';
+    btn.title              = 'Toggle flow direction (' +
+      (active ? 'left to right' : 'top to bottom') + ')';
     btn.style.borderColor  = active ? '#3b82f6' : 'var(--eb-border-default)';
     btn.style.color        = active ? '#3b82f6' : 'var(--eb-text-secondary)';
     btn.style.background   = active ? 'rgba(59,130,246,0.15)' : 'var(--eb-bg-elevated)';
@@ -2367,6 +2428,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectChan
 
   // ─── Init ─────────────────────────────────────────────────────────────
 
+  renderLegend();
   setupPanZoom();
   // No auto-fetch — the React wrapper loads /api/flows/graph and calls setData.
 

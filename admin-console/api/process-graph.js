@@ -24,6 +24,19 @@ function isBrake(label) {
   return BRAKES.has(label);
 }
 
+// Whether a trigger's origin filter (Layer-2 `from` spec) lets a *human* fire
+// it. Mirrors the github-poller's applyFromFilter semantics: absent /
+// any-except-self / humans include humans; agents / team exclude them; an
+// allowlist includes humans only via the "humans" token; an exclude-list
+// blocks them only when it names "humans". Unknown specs fail closed.
+function fromIncludesHumans(from) {
+  if (from == null || from === 'any-except-self' || from === 'humans') return true;
+  if (from === 'agents' || from === 'team') return false;
+  if (Array.isArray(from)) return from.includes('humans');
+  if (typeof from === 'object' && Array.isArray(from.exclude)) return !from.exclude.includes('humans');
+  return false;
+}
+
 // The keys a trigger reacts to. A github-event trigger with a labelFilter reacts
 // to that one label (the carrying event — issues.labeled — is implied, so we do
 // not also emit an edge for it). Without a labelFilter it reacts to its raw
@@ -74,6 +87,10 @@ function triggerView(t) {
     v.cron = t.cron || null;
   } else if (t.type === 'once') {
     v.at = t.at || null;
+  } else if (t.type === 'http') {
+    // Webhook trigger (#410) — fired by an external system via HOOK_PORT. The
+    // secret is intentionally not carried into the graph view.
+    if (t.description) v.description = t.description;
   }
   v.emits = Array.isArray(t.emits) ? t.emits.slice() : [];
   if (t.emitsDerived) v.emitsDerived = true; // heuristic, not operator-confirmed
@@ -174,23 +191,48 @@ function buildProcessGraph(agents) {
         });
         continue;
       }
+      if (t.type === 'http') {
+        // Webhook edge (#410): fired by an external system, so it originates
+        // outside the agent set — unified-graph attaches it to the @external actor.
+        edges.push({
+          from: null, to: n.id,
+          label: t.description || 'webhook',
+          kind: 'webhook', triggerId: t.id,
+        });
+        continue;
+      }
       const key = labelListenKey(t);
       if (key) {
-        // Label listener — participates in agent→agent wiring.
+        // Label listener — participates in agent→agent wiring. The carrying
+        // events (issues/pull_request × labeled/unlabeled) ride along so the
+        // renderer can show WHICH label change wakes the listener.
+        const evs = Array.isArray(t.events) && t.events.length ? { events: t.events.slice() } : {};
         const kind = classifyKind(key);
         if (kind === 'gate') gateSet.add(key);
         if (kind === 'gate' || kind === 'brake') {
           // No agent may emit these — the edge comes from outside (a human).
-          edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id });
+          edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, ...evs });
         } else {
           const emitters = [...(emitIndex.get(key) || [])];
           if (emitters.length === 0) {
-            // Orphan listener: nothing emits this label. Represented from null so
-            // the lint layer flags it; the renderer shows a dangling-in node.
-            edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, orphan: true });
+            if (fromIncludesHumans(t.from)) {
+              // No agent emits this label, but the origin filter lets a human
+              // set it — the edge originates at the human actor (#410), e.g. a
+              // human labelling a human-created issue. An *explicit*
+              // `from: humans` is by-design human-triggered (no lint at all);
+              // a human-including default keeps an advisory info lint so a
+              // typo'd label name still surfaces.
+              edges.push({
+                from: null, to: n.id, label: key, kind, triggerId: t.id, humanSet: true, ...evs,
+                ...(t.from === 'humans' ? {} : { humanAssumed: true }),
+              });
+            } else {
+              // Orphan listener: nothing (agent or human) can set this label.
+              edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, orphan: true, ...evs });
+            }
           } else {
             for (const s of emitters) {
-              edges.push({ from: s, to: n.id, label: key, kind, triggerId: t.id });
+              edges.push({ from: s, to: n.id, label: key, kind, triggerId: t.id, ...evs });
             }
           }
         }
@@ -248,6 +290,12 @@ function computeLints(nodes, edges) {
     if (e.orphan) {
       lints.push({ code: 'orphan-listener', severity: 'warning', label: e.label, nodeId: e.to,
         message: `\`${e.to}\` listens on \`${e.label}\` but no agent emits it.` });
+    }
+    if (e.humanAssumed) {
+      // Human-reachable listener with no agent emitter (#410): drawn from the
+      // human actor, advisory only — could be intentional, could be a typo.
+      lints.push({ code: 'orphan-listener', severity: 'info', label: e.label, nodeId: e.to,
+        message: `\`${e.to}\` listens on \`${e.label}\` — no agent emits it; only a human can set it.` });
     }
     if (e.deadEnd) {
       lints.push({ code: 'dead-end-emitter', severity: 'warning', label: e.label, nodeId: e.from,
@@ -310,4 +358,4 @@ function computeLints(nodes, edges) {
   return lints;
 }
 
-module.exports = { buildProcessGraph, computeLints, listenKeys, classifyKind, isHumanGate, isBrake };
+module.exports = { buildProcessGraph, computeLints, listenKeys, classifyKind, isHumanGate, isBrake, fromIncludesHumans };

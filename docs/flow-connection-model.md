@@ -1,7 +1,55 @@
 # Flow-Editor: Einheitliches Verbindungsmodell (Konzept)
 
-Status: **Konzept, abgestimmt — noch nicht implementiert.**
+Status: **Implementiert** (Schritte 1–6, Issues #409–#414), plus Revision (s. u.).
 Bezieht sich auf den Flow-Editor (`/flows`, `ProcessGraphPanel`) und den BriefingPack-Viewer (`FlowGraph.jsx`).
+Die Capability-Matrix lebt in `admin-console/src/pages/process/connection-capabilities.js`,
+die Dialoge in `EdgeDialogs.jsx`, das Aktor-Mapping in `admin-console/api/unified-graph.js` / `process-graph.js`.
+
+## Revision (Juli 2026): weniger Aktoren, Trigger im Knoten, orthogonale Aktor-Kanten
+
+Die 4-Aktoren-Außenwelt aus Teil 2 hat sich in der Praxis als zu laut erwiesen
+(Kreuz-und-quer-Bezierkurven von links, verwirrender ⏰/👤-Split). Fünf
+Änderungen ersetzen die betroffenen Abschnitte:
+
+1. **Nur noch zwei Aktoren: 🐙 GitHub und ⚡ Drittsystem.**
+   - **⏰ Zeit entfällt als Aktor.** Cron/Once-Trigger zeichnen keine Kante
+     mehr; sie erscheinen als ⏰-Zeile **in der Agenten-Karte** (Klartext-
+     Schedule, klickbar → Schedule-Edit-Dialog). Neue Schedules legt man im
+     Trigger-Tab des Inspectors an.
+   - **👤 Mensch ist in 🐙 GitHub aufgegangen** — menschengesetzte Labels,
+     Gates (`human:*`) und Bremsen sind GitHub-Label-Events; ihre Kanten
+     starten jetzt am GitHub-Aktor, behalten aber Gate-Optik (`👤✓`-Chip)
+     und `humanSet`/`gate`-Flags.
+2. **Ein GitHub-Trigger-Dialog** (`GithubTriggerForm`): Roh-Events UND
+   Label-Filter (inkl. `humans`-Origin-Filter) in einem Formular — ersetzt
+   `EventForm` + `HumanLabelForm`. **Kein Repo-Feld mehr**: das Repo ist beim
+   Modellieren unbekannt; live füllt es der Adapter aus dem Working
+   Environment (`liveOps.createTrigger`), im Draft setzt es die
+   Materialisierung (`vars.repoFullName`).
+3. **Aktor-Kanten laufen durch den orthogonalen Kanal-Router**
+   (`edge-router.js`): Aktoren bilden Spalte 0 des Layered-Layouts (Spalte
+   links bei Fluss nach rechts, Reihe oben bei Fluss nach unten) — keine
+   Bezier-Kurven mehr quer durch Knoten.
+4. **Per-Trigger-Sichtbarkeit:** Jede Trigger-Zeile in der Karte (🐙/🏷/⚡)
+   trägt ein 👁-Icon, das die zugehörige Kante ein-/ausblendet (persistiert
+   in `localStorage`), zusätzlich zum Aktor-Filter in der Legende.
+   Außerdem ist der volle Trigger-Editor (`TriggersPanel`, aus dem
+   Agent-Chat) jetzt auch im **Draft-Inspector** als Tab eingebettet
+   (ops-Adapter-fähig) — Trigger lassen sich im Flow-Editor anlegen,
+   bearbeiten, schalten und löschen, im Draft wie im Live-Team.
+5. **Ein Layout für alles — Layered auch mit Hierarchie.** Das alte
+   Baum-Layout (das griff, sobald eine Parent-Child-Beziehung existierte,
+   und alle Kanten wieder als Bezier zeichnete) ist entfernt. Jeder Flow —
+   Prozess, Draft, Member-Baum, BriefingPack — läuft durch das Layered-
+   Layout; die Hierarchie speist die Spaltenzuordnung (sichtbares Kind →
+   Spalte nach dem Parent, Geschwister gruppiert). Die graue Hierarchie-
+   Kante selbst bleibt bewusst eine label- und pfeillose **Bézier-Kurve**
+   unterhalb der Prozess-Verdrahtung: sie belegt keine Kanal-Lanes/Ports,
+   kann dank der Gruppierung nichts kreuzen und trennt Struktur visuell
+   von Arbeits-Hand-offs. Kinder bleiben pro Karte auf-/zuklappbar
+   (`Children (n)`-Button); Prozess-/Team-Ansichten klappen sie per Default
+   auf (`expandChildrenByDefault` an `initFlowGraph`, Nutzer-Zuklappen
+   überlebt Daten-Refreshes), BP-Workspaces bleiben default-zugeklappt.
 
 Dieses Dokument beschreibt, wie das Erstellen, Bearbeiten und Darstellen von
 Verbindungen zwischen Agenten (und externen Quellen) über **alle Ansichten
@@ -339,10 +387,13 @@ BP-Modus sowohl über die Kante als auch — wie bisher — über den Inspector.
 
 ### 2.9 Datenmodell-Begleitmaßnahmen
 
-1. **Emits kanonisieren:** `agent.emits[]` wird der einzige Schreibort;
-   `trigger.emits[]` bleibt lesbar (Graph-Builder wertet es weiter aus),
-   wird aber von keiner UI mehr beschrieben. Der Inline-Emits-Adder auf der
-   TriggerCard schreibt künftig auf Agent-Ebene.
+1. **Emits kanonisieren (umgesetzt, #414):** `agent.emits[]` ist der einzige
+   Schreibort — der Emits-Editor sitzt in der `ConnectionsSection`
+   („Emits labels", Draft- und Live-Inspector). `trigger.emits[]` bleibt
+   lesbar (der Graph-Builder wertet es weiter aus) und wird in der
+   TriggerCard als „emits (legacy)" angezeigt; dort ist nur noch
+   *Entfernen* (Aufräumen) möglich, kein Hinzufügen. Die Delete-Pfade des
+   Label-Hand-offs räumen weiterhin beide Orte.
 2. **Adapter-Parität dokumentiert halten:** `liveOps` / `makeDraftOps` /
    `makeBpOps` behalten ihre identische Signatur; die Feldnamen-Drift
    (`parent` vs. `parentMemberId`, `dataFlow.*`) bleibt in den Adaptern

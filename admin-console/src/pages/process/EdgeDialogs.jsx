@@ -223,16 +223,16 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
  * context: a PR/Issue producer sees its channel first); step 2 is the
  * type-specific detail form, with Back always available. */
 export function CreateEdgeDialog({
-  from, to, fromName, toName, labels, ops = liveOps, types, fromNode, roles,
-  preset, onClose, onDone,
+  from, to, fromName, toName, labels, ops = liveOps, types, fromNode,
+  onClose, onDone,
 }) {
   // Legacy token: 'github' expands to the two explicit channel tiles.
   const allowed = (Array.isArray(types) && types.length ? types : ['label', 'dependency', 'artifact'])
     .flatMap(t => (t === 'github' ? ['github-pr', 'github-issue'] : [t]));
-  const [type, setType] = useState(preset || (allowed.length === 1 ? allowed[0] : null));
+  const [type, setType] = useState(allowed.length === 1 ? allowed[0] : null);
 
   const common = { from, to, fromName, toName, ops, onClose, onDone };
-  const back = allowed.length > 1 && !preset ? () => setType(null) : undefined;
+  const back = allowed.length > 1 ? () => setType(null) : undefined;
 
   if (type === 'label') {
     return <CreateHandoffDialog {...common} labels={labels} onBack={back} />;
@@ -243,7 +243,6 @@ export function CreateEdgeDialog({
   if (type === 'github-pr' || type === 'github-issue') {
     return <CreateChannelDialog {...common} artifact={type === 'github-pr' ? 'pr' : 'issue'} lockArtifact onBack={back} />;
   }
-  if (type === 'approval') return <ApprovalForm {...common} roles={roles} onBack={back} />;
   if (type === 'event') return <GithubTriggerForm {...common} labels={labels} onBack={back} />;
   if (type === 'webhook') return <WebhookForm {...common} onBack={back} />;
 
@@ -265,7 +264,6 @@ export function CreateEdgeDialog({
     { id: 'dependency', title: 'Dependency', desc: `${B} is woken when ${A} pushes to the repo.` },
     { id: 'artifact', title: 'Data flow / hand-off', desc: `${A} produces an artifact that ${B} consumes. Leave the name empty for a plain dependency.` },
     { id: 'hierarchy', title: 'Parent / child', desc: `${A} groups ${B} as a child — it inherits its parent's stage.` },
-    { id: 'approval', title: 'Human approval gate', desc: `${B} waits until a human grants a human:* approval label.` },
     { id: 'event', title: 'GitHub trigger', desc: `${B} wakes on a repo event (issue opened, PR opened, push, …) or on a label — including labels a human sets.` },
     { id: 'webhook', title: 'Webhook', desc: `An external system (CI, tooling) wakes ${B} via an HTTP call.` },
   ].filter(c => allowed.includes(c.id));
@@ -1146,75 +1144,6 @@ export function GithubTriggerForm({ to, toName, labels, ops = liveOps, onBack, o
           {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
           <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
           <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Wiring…' : 'Create trigger'}</button>
-        </div>
-      </div>
-    </SidePanel>
-  );
-}
-
-// Human approval gate — the AddApprovalDialog flow as a preset of the unified
-// dialog (#413): name → human:<slug> label, downstream step waits on it.
-export function ApprovalForm({ to, toName, roles = [], ops = liveOps, onBack, onClose, onDone }) {
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
-  const [downstream, setDownstream] = useState(to || roles[0]?.id || '');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState(null);
-
-  const slug = name.trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
-  const label = slug ? `human:${slug}` : '';
-  const target = to || downstream;
-
-  async function submit() {
-    if (!slug) { setError('Give the approval a name.'); return; }
-    if (!target) { setError('Pick which step waits for this approval.'); return; }
-    setSaving(true); setError(null);
-    try {
-      await ops.createTrigger(target, {
-        type: 'github-event',
-        events: ['issues.labeled', 'pull_request.labeled'],
-        from: 'humans',
-        labelFilter: label,
-        enabled: true,
-        description: description.trim() || `Human approval: ${label}`,
-        prompt: `A human granted the approval \`${label}\` (the label was added). Proceed with your part of the process. Reply \`[PASS]\` if there is nothing to do yet.`,
-      });
-      onDone?.();
-    } catch (e) { setError(e.message); setSaving(false); }
-  }
-
-  return (
-    <SidePanel open onClose={onClose} title="Human approval gate" width="520px">
-      <p style={hint}>
-        A gate only a human can set. {to
-          ? <><strong>{toName || to}</strong> waits until a human adds the <code>{label || 'human:…'}</code> label.</>
-          : <>The step you pick waits until a human adds the <code>{label || 'human:…'}</code> label.</>}
-        {' '}No agent emits it.
-      </p>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-        <Field label="Approval name">
-          <input autoFocus value={name} onChange={e => setName(e.target.value)}
-            placeholder="e.g. FDD approved, Go-live approved" style={input}
-            onKeyDown={e => { if (e.key === 'Enter') submit(); }} />
-          {label && <small style={small}>Label: <code>{label}</code></small>}
-        </Field>
-        {!to && (
-          <Field label="Waits / blocks (downstream step)">
-            <select value={downstream} onChange={e => setDownstream(e.target.value)} style={input}>
-              <option value="">— select —</option>
-              {roles.map(r => <option key={r.id} value={r.id}>{r.displayName || r.id}</option>)}
-            </select>
-          </Field>
-        )}
-        <Field label="Description (optional)">
-          <input value={description} onChange={e => setDescription(e.target.value)}
-            placeholder="e.g. Client signs off the FDD" style={input} />
-        </Field>
-        {error && <span style={errStyle}>{error}</span>}
-        <div style={actions}>
-          {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
-          <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
-          <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Adding…' : 'Add approval'}</button>
         </div>
       </div>
     </SidePanel>

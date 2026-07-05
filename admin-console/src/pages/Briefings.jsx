@@ -85,9 +85,9 @@ function HelpPanel({ onClose }) {
               <em> listens</em> on it, and that wiring is the graph.
             </p>
             <p style={{ margin: 0 }}>
-              Click <strong>New process</strong> to author a <strong>Draft</strong> from scratch (add roles, wire
-              hand-offs, add PR-review steps and human-approval gates), then <strong>Materialize</strong> it into a
-              real team. The read-only <strong>Role templates</strong> blueprint shows the catalog wiring before any
+              Click <strong>New process</strong> to author a <strong>Draft</strong> from scratch (add roles, then
+              wire hand-offs — GitHub PR/Issue channels, labels, data flows, human-approval gates on the
+              edges), then <strong>Materialize</strong> it into a real team. The read-only <strong>Role templates</strong> blueprint shows the catalog wiring before any
               team exists.
             </p>
           </section>

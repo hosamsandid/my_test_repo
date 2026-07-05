@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
-import { AlertTriangle, Download, Upload, Boxes, X, Plus, ShieldCheck, Layers, Sparkles, Pencil } from 'lucide-react';
+import { AlertTriangle, Download, Upload, Boxes, X, Plus, Layers, Sparkles, Pencil } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { initFlowGraph } from './process/flow-graph-render';
 import ProcessNodeInspector from './process/ProcessNodeInspector';
@@ -120,7 +120,6 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
   const [importError, setImportError] = useState(null);
   const [materializeOpen, setMaterializeOpen] = useState(false);
   const [addRoleOpen, setAddRoleOpen] = useState(false);
-  const [approvalOpen, setApprovalOpen] = useState(false);
   const [stagesOpen, setStagesOpen] = useState(false);
   const fileInputRef = useRef(null);
 
@@ -316,9 +315,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
         </div>
         {isDraft && (
           <>
-            <ToolbarButton onClick={() => setAddRoleOpen('agent')} icon={Plus}>Add role</ToolbarButton>
-            <ToolbarButton onClick={() => setAddRoleOpen('pr-review')} icon={Plus}>PR review</ToolbarButton>
-            <ToolbarButton onClick={() => setApprovalOpen(true)} icon={ShieldCheck}>Human approval</ToolbarButton>
+            <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus}>Add role</ToolbarButton>
             <ToolbarButton onClick={() => setStagesOpen(true)} icon={Layers}>Stages</ToolbarButton>
             <ToolbarButton onClick={() => setMaterializeOpen(true)} icon={Boxes}
               disabled={!draftBundle?.roles?.length}>Materialize…</ToolbarButton>
@@ -438,15 +435,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
 
       {addRoleOpen && isDraft && (
         <AddRoleDialog
-          kind={addRoleOpen}
           onClose={() => setAddRoleOpen(false)}
           onCreate={async ({ displayName, systemPrompt }) => {
-            // A PR-reviewer (#380) is a plain per-invocation role; the operator then
-            // drags a producer's PR output port onto it to wire the review channel.
-            const id = await draftOps.addRole({
-              displayName, systemPrompt,
-              ...(addRoleOpen === 'pr-review' ? { sessionPolicy: 'per-invocation' } : {}),
-            });
+            const id = await draftOps.addRole({ displayName, systemPrompt });
             setAddRoleOpen(false);
             setSelectedId(id);
           }}
@@ -466,23 +457,6 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
         />
       )}
 
-      {/* The toolbar approval button is a preset of the unified create dialog
-          (#413): the ApprovalForm with the downstream step picked in-form
-          instead of by dropping on a node. */}
-      {approvalOpen && isDraft && (
-        <CreateEdgeDialog
-          from="@github"
-          to={null}
-          fromName="GitHub"
-          ops={draftOps}
-          types={['approval']}
-          preset="approval"
-          roles={(draftBundle?.roles || []).map(r => ({ id: r.id, displayName: r.displayName || r.id }))}
-          onClose={() => setApprovalOpen(false)}
-          onDone={() => setApprovalOpen(false)}
-        />
-      )}
-
       {materializeOpen && materializeBundle && (
         <MaterializeDialog
           bundle={materializeBundle}
@@ -494,8 +468,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
   );
 }
 
-function AddRoleDialog({ kind, onClose, onCreate }) {
-  const isReview = kind === 'pr-review';
+function AddRoleDialog({ onClose, onCreate }) {
   const [displayName, setDisplayName] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('');
   const [notes, setNotes] = useState('');
@@ -530,59 +503,50 @@ function AddRoleDialog({ kind, onClose, onCreate }) {
     boxSizing: 'border-box', width: '100%', outline: 'none',
   };
   return (
-    <SidePanel open onClose={onClose} title={isReview ? 'Add PR-review step' : 'Add role'} width="480px">
+    <SidePanel open onClose={onClose} title="Add role" width="480px">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
         <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>{isReview ? 'Reviewer name' : 'Role name'}</span>
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Role name</span>
           <input autoFocus value={displayName} onChange={e => setDisplayName(e.target.value)}
-            placeholder={isReview ? 'e.g. Code Reviewer' : 'e.g. Business Analyst'} style={field}
+            placeholder="e.g. Business Analyst" style={field}
             onKeyDown={e => { if (e.key === 'Enter') submit(); }} />
         </label>
-        {isReview ? (
-          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
-            A PR-review step is a per-invocation reviewer. After adding it, drag a producer's
-            <strong> PR</strong> output port onto it to wire the review channel.
-          </div>
-        ) : (
-          <>
-            {/* Notes → LLM → agent prompt. The operator jots a few keywords and
-                lets the model draft a full prompt; the role name alone is often
-                enough context (e.g. "Business Analyst"). The draft lands in the
-                editable Agent-prompt field below, so it can be tweaked or replaced. */}
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Notes for prompt generation (optional)</span>
-              <textarea value={notes} onChange={e => setNotes(e.target.value)}
-                placeholder="A few keywords — e.g. reviews COBOL, flags risky changes, hands off to the migration lead"
-                style={{ ...field, minHeight: 64, resize: 'vertical' }} />
-              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
-                Generate uses the role name and these notes to draft an agent prompt via the configured LLM.
-                You can edit the result below.
-              </span>
-            </label>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-              <button type="button" onClick={generate} disabled={!displayName.trim() || generating} style={{
-                display: 'inline-flex', alignItems: 'center', gap: 6,
-                background: 'var(--eb-bg-surface)', color: 'var(--eb-accent-primary)',
-                border: '1px solid var(--eb-accent-primary)', borderRadius: 'var(--eb-radius-md)',
-                padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
-                cursor: (!displayName.trim() || generating) ? 'not-allowed' : 'pointer',
-                opacity: (!displayName.trim() || generating) ? 0.5 : 1,
-              }}>
-                <Sparkles size={14} />
-                {generating ? 'Generating…' : 'Generate agent prompt'}
-              </button>
-              {genError && (
-                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error, #d33)' }}>{genError}</span>
-              )}
-            </div>
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Agent prompt (optional now)</span>
-              <textarea value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)}
-                placeholder="What this role does… — or use Generate above to draft it"
-                style={{ ...field, minHeight: 160, resize: 'vertical', fontFamily: 'var(--eb-font-mono)' }} />
-            </label>
-          </>
-        )}
+        {/* Notes → LLM → agent prompt. The operator jots a few keywords and
+            lets the model draft a full prompt; the role name alone is often
+            enough context (e.g. "Business Analyst"). The draft lands in the
+            editable Agent-prompt field below, so it can be tweaked or replaced. */}
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Notes for prompt generation (optional)</span>
+          <textarea value={notes} onChange={e => setNotes(e.target.value)}
+            placeholder="A few keywords — e.g. reviews COBOL, flags risky changes, hands off to the migration lead"
+            style={{ ...field, minHeight: 64, resize: 'vertical' }} />
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
+            Generate uses the role name and these notes to draft an agent prompt via the configured LLM.
+            You can edit the result below.
+          </span>
+        </label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+          <button type="button" onClick={generate} disabled={!displayName.trim() || generating} style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6,
+            background: 'var(--eb-bg-surface)', color: 'var(--eb-accent-primary)',
+            border: '1px solid var(--eb-accent-primary)', borderRadius: 'var(--eb-radius-md)',
+            padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+            cursor: (!displayName.trim() || generating) ? 'not-allowed' : 'pointer',
+            opacity: (!displayName.trim() || generating) ? 0.5 : 1,
+          }}>
+            <Sparkles size={14} />
+            {generating ? 'Generating…' : 'Generate agent prompt'}
+          </button>
+          {genError && (
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error, #d33)' }}>{genError}</span>
+          )}
+        </div>
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Agent prompt (optional now)</span>
+          <textarea value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)}
+            placeholder="What this role does… — or use Generate above to draft it"
+            style={{ ...field, minHeight: 160, resize: 'vertical', fontFamily: 'var(--eb-font-mono)' }} />
+        </label>
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)' }}>
           <button onClick={onClose} disabled={busy} style={{
             background: 'none', color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',
@@ -591,7 +555,7 @@ function AddRoleDialog({ kind, onClose, onCreate }) {
           <button onClick={submit} disabled={busy || !displayName.trim()} style={{
             background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
             borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
-          }}>{isReview ? 'Add PR review' : 'Add role'}</button>
+          }}>Add role</button>
         </div>
       </div>
     </SidePanel>

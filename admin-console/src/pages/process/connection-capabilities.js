@@ -26,8 +26,9 @@
 //   external: 'webhook'
 //
 // Schedules are no longer wired from an actor — they live inside the agent
-// card and the inspector's Triggers tab. 'approval' remains a valid preset
-// token (the draft toolbar's Human-approval button), just not a drag source.
+// card and the inspector's Triggers tab. Human approvals are authored on the
+// edges themselves: a `gate: 'human'` on a GitHub channel, or a `human:*`
+// label listener via the label / GitHub-trigger forms.
 //
 // Modes:
 //   live      — a materialised team; ops write through to running agents

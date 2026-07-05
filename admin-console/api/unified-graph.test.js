@@ -99,6 +99,32 @@ test('gate flag: human:* listener edge is a gate from the @github actor (a human
   assert.ok(g.nodes.some(n => n.id === '@github' && n.kind === 'actor'));
 });
 
+test('label edges carry the trigger events so the UI can show Issue/PR × added/removed', () => {
+  const g = buildUnifiedGraph([
+    { id: 'dev', triggers: [], emits: ['ready'] },
+    { id: 'rev', triggers: [{ id: 't1', type: 'github-event', events: ['pull_request.unlabeled'], labelFilter: 'ready', from: 'any-except-self', emits: [] }] },
+  ]);
+  const e = findEdge(g, x => x.on === 'label' && x.from === 'dev' && x.to === 'rev');
+  assert.ok(e);
+  assert.deepEqual(e.events, ['pull_request.unlabeled']);
+});
+
+test('two triggers on the SAME label (added vs removed) stay two independent edges', () => {
+  const g = buildUnifiedGraph([
+    { id: 'dev', triggers: [], emits: ['ready'] },
+    {
+      id: 'rev', triggers: [
+        { id: 'add', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready', from: 'any-except-self', emits: [] },
+        { id: 'rem', type: 'github-event', events: ['issues.unlabeled'], labelFilter: 'ready', from: 'any-except-self', emits: [] },
+      ],
+    },
+  ]);
+  const edges = g.edges.filter(x => x.on === 'label' && x.from === 'dev' && x.to === 'rev');
+  assert.equal(edges.length, 2, 'one edge per listener trigger');
+  assert.deepEqual(edges.map(e => e.triggerId).sort(), ['add', 'rem']);
+  assert.notEqual(edges[0].id, edges[1].id, 'edge ids are distinct per trigger');
+});
+
 test('human-set label listener: from:humans wires @github → agent (no @human actor any more)', () => {
   const g = buildUnifiedGraph([
     { id: 'dev', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'priorisiert', from: 'humans', emits: [] }] },

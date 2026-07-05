@@ -563,9 +563,9 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
   } else if (trigger.type === 'http') {
     schedule = `/hooks/${agentId}/${trigger.id}`;
   } else if (trigger.type === 'github-event') {
-    const evCount = Array.isArray(trigger.events) ? trigger.events.length : 0;
+    const evs = Array.isArray(trigger.events) ? trigger.events : [];
     const labelTag = trigger.labelFilter ? ` · label="${trigger.labelFilter}"` : '';
-    schedule = `${trigger.repo || '?'} · ${evCount} event${evCount === 1 ? '' : 's'}${labelTag}`;
+    schedule = `${trigger.repo || '?'} · ${evs.join(', ') || 'no event'}${labelTag}`;
   } else {
     schedule = trigger.cron || trigger.at || '—';
   }
@@ -787,10 +787,18 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
   const [secretVisible, setSecretVisible] = useState(!isEdit);
   const [formError, setFormError] = useState(null);
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
-  const toggleEvent = (val) => setForm(f => ({
-    ...f,
-    events: f.events.includes(val) ? f.events.filter(e => e !== val) : [...f.events, val],
-  }));
+  // One event per trigger: the select replaces the whole events array. Legacy
+  // triggers may still carry several — surfaced via the notice below, and the
+  // extra events are only dropped when the user saves.
+  const selectEvent = (val) => set('events', val ? [val] : []);
+  // Preserve events outside the catalog (the Events API knows more keys) so an
+  // exotic trigger stays selectable and can be re-saved untouched.
+  const knownEventValues = new Set(GITHUB_EVENT_OPTIONS.map(o => o.value));
+  const extraEventOptions = [...new Set(
+    (Array.isArray(initialValues?.events) ? initialValues.events : []).filter(e => !knownEventValues.has(e))
+  )];
+  const legacyEvents = Array.isArray(initialValues?.events) && !startedAsDataFlow
+    ? initialValues.events : [];
 
   // Repos available to this agent — sourced from the agent's working
   // environment. Only fetched when github-event is the active type; a draft
@@ -853,7 +861,7 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
     if (form.type === 'once' && !form.at.trim())   { setFormError('Run-at timestamp is required.'); return; }
     if (form.type === 'github-event') {
       if (!form.repo && !isDraftMode) { setFormError('Repository is required.'); return; }
-      if (form.events.length === 0) { setFormError('Select at least one event.'); return; }
+      if (form.events.length === 0) { setFormError('Select the event this trigger reacts to.'); return; }
     }
     if (isDataFlow) {
       if (!form.repo && !isDraftMode) { setFormError('A repository is required (the team repo agents push to).'); return; }
@@ -879,7 +887,7 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
     else if (form.type === 'http')         body.secret = form.secret.trim();
     else if (form.type === 'github-event') {
       if (form.repo) body.repo = form.repo; // a draft's repo lands at materialise
-      body.events = form.events;
+      body.events = form.events.slice(0, 1); // one event per trigger
       // Persist the label-name filter only when it's relevant to the
       // selected events AND the user actually entered something. Sending
       // an empty string would round-trip back into the form as "no
@@ -1050,37 +1058,36 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
 
           <div>
             <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
-              Events
+              Event
             </div>
-            <div style={{
-              display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)',
-              padding: 'var(--eb-space-2)',
-              background: 'var(--eb-bg-elevated)',
-              border: '1px solid var(--eb-border-default)',
-              borderRadius: 'var(--eb-radius-md)',
-              maxHeight: 200, overflowY: 'auto',
-            }}>
+            <select
+              value={form.events[0] || ''}
+              onChange={e => selectEvent(e.target.value)}
+              style={{ ...FIELD_STYLE, width: '100%' }}
+            >
+              <option value="">— Select the event —</option>
               {GITHUB_EVENT_OPTIONS.map(opt => (
-                <label key={opt.value} style={{
-                  display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
-                  padding: '2px 4px', cursor: 'pointer', fontSize: 'var(--eb-text-sm)',
-                  color: 'var(--eb-text-primary)',
-                }}>
-                  <input
-                    type="checkbox"
-                    checked={form.events.includes(opt.value)}
-                    onChange={() => toggleEvent(opt.value)}
-                  />
-                  <span style={{ flex: 1 }}>{opt.label}</span>
-                  <code style={{ fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)' }}>
-                    {opt.value}
-                  </code>
-                </label>
+                <option key={opt.value} value={opt.value}>{opt.label} ({opt.value})</option>
               ))}
-            </div>
+              {extraEventOptions.map(ev => (
+                <option key={ev} value={ev}>{ev}</option>
+              ))}
+            </select>
             <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+              One event per trigger — create another trigger to react to a second event.
               The agent receives the full event payload as JSON appended to its prompt.
             </div>
+            {legacyEvents.length > 1 && (
+              <div style={{
+                marginTop: 'var(--eb-space-2)', padding: 'var(--eb-space-2)',
+                border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)',
+                fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', lineHeight: 1.5,
+              }}>
+                This trigger still listens on several events ({legacyEvents.join(', ')}).
+                Triggers now carry exactly one event — saving keeps only the selected one.
+                Create separate triggers for the others.
+              </div>
+            )}
           </div>
 
           {showLabelFilter && (

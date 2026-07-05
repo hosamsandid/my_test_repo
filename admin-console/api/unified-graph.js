@@ -77,10 +77,11 @@ function edgeId(e) {
       : (Array.isArray(e.paths) ? e.paths.join(',') : ''));
   // GitHub channels between the same pair are distinct per artifact (PR vs issue).
   const kind = e.on === 'github' ? `github:${e.artifact || 'pr'}` : e.on;
-  // Trigger-backed actor edges are one-edge-per-trigger — key them by the
-  // trigger so two triggers with identical events/description/schedule on the
-  // same agent never collapse into one edge.
-  const trig = (e.triggerId && (e.on === 'event' || e.on === 'webhook' || e.on === 'timer'))
+  // Trigger-backed edges are one-edge-per-trigger — key them by the trigger so
+  // two triggers on the same agent never collapse into one edge. For label
+  // edges this keeps e.g. "wake when L is added" and "wake when L is removed"
+  // (two triggers on the same label) as two independently editable edges.
+  const trig = (e.triggerId && (e.on === 'event' || e.on === 'webhook' || e.on === 'timer' || e.on === 'label'))
     ? `#${e.triggerId}` : '';
   return `${kind}|${e.from == null ? '∅' : e.from}→${e.to == null ? '∅' : e.to}|${tail}${trig}`;
 }
@@ -130,8 +131,10 @@ function processEdgeToUnified(e) {
     // Raw GitHub event — the repo itself is the source (#410).
     return { from: ACTORS.github, to: e.to, on: 'event', events: [e.label], triggerId: e.triggerId, external: true };
   }
-  // 'agent' label wiring, plus gate/brake/human-set (human-only) edges.
+  // 'agent' label wiring, plus gate/brake/human-set (human-only) edges. The
+  // carrying label events (issue/PR × added/removed) ride along for display.
   const u = { from: e.from, to: e.to, on: 'label', label: e.label, triggerId: e.triggerId };
+  if (Array.isArray(e.events) && e.events.length) u.events = e.events;
   if (e.kind === 'gate' || e.kind === 'brake' || isHumanGate(e.label) || isBrake(e.label)) {
     u.gate = 'human';
   }

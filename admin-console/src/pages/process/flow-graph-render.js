@@ -659,7 +659,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
         const a = colOf.get(e.from), b = colOf.get(e.to);
         if (Math.abs(a - b) !== 1) return;
         const lo = Math.min(a, b);
-        const text = e.on === 'github' ? channelChipText(e) : (e.label || '');
+        const text = e.on === 'github' ? channelChipText(e)
+          : (e.on === 'label' ? labelChipText(e) : (e.label || ''));
         if (text) boundaryNeed[lo] = Math.max(boundaryNeed[lo], estChipWidth(text));
       });
       let x = 0;
@@ -1577,7 +1578,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
             from: e.from, to: e.to,
             color: actorEdgeColor(e), width: 1.5,
             dash: style.dashed ? '6 4' : '', opacity: 1,
-            labelText: gate ? `👤✓ ${e.label}` : actorEdgeText(e),
+            labelText: gate ? `👤✓ ${labelChipText(e)}` : actorEdgeText(e),
             chip: gate, gate,
             hit: { from: e.from, to: e.to, on: e.on, kind: e.on, label: e.label,
               triggerId: e.triggerId, gate: e.gate,
@@ -1595,7 +1596,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
           width: isGithub ? 2 : 1.5,
           dash: '',
           opacity: 1,
-          labelText: isGithub ? channelChipText(e) : (e.label || ''),
+          labelText: isGithub ? channelChipText(e)
+            : (e.on === 'label' ? labelChipText(e) : (e.label || '')),
           chip: isGithub,
           gate: e.gate === 'human',
           hit: { from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on,
@@ -1728,6 +1730,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     if (e.on === 'event') return (e.events || []).join(', ');
     if (e.on === 'timer') return e.schedule && e.schedule.cron ? `⏱ ${e.schedule.cron}` : `once ${e.label || ''}`.trim();
     if (e.on === 'webhook') return e.label || 'webhook';
+    if (e.on === 'label') return labelChipText(e);
     return e.label || '';
   }
 
@@ -1764,11 +1767,12 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     }
     // Label listener sourced from GitHub (incl. human-set labels and gates).
     const gate = e.gate === 'human';
+    const evs = Array.isArray(e.events) && e.events.length ? ` (${e.events.join(', ')})` : '';
     return {
       icon: gate ? '👤✓' : '🏷',
-      text: e.label || '',
+      text: labelChipText(e),
       color: gate ? EDGE_STYLES.gate.color : EDGE_STYLES.label.color,
-      title: gate ? 'Human approval gate (GitHub label)' : 'GitHub label trigger',
+      title: (gate ? 'Human approval gate (GitHub label)' : 'GitHub label trigger') + evs,
     };
   }
 
@@ -1781,6 +1785,27 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     else state.hiddenTriggerEdges.add(key);
     localStorage.setItem('flow-graph-hidden-trigger-edges', JSON.stringify([...state.hiddenTriggerEdges]));
     render();
+  }
+
+  // Compact tag for the label events a listener trigger carries: which artifact
+  // (Issue/PR) and direction (+ added / − removed) wakes it. One trigger now
+  // carries exactly one event; legacy multi-event triggers join their tags.
+  const LABEL_EVENT_TAGS = {
+    'issues.labeled': 'Issue+',
+    'issues.unlabeled': 'Issue−',
+    'pull_request.labeled': 'PR+',
+    'pull_request.unlabeled': 'PR−',
+  };
+  function labelEventTag(events) {
+    const tags = [...new Set((Array.isArray(events) ? events : [])
+      .map(ev => LABEL_EVENT_TAGS[ev]).filter(Boolean))];
+    return tags.join('/');
+  }
+  // The text for a label hand-off edge: the label plus the Issue/PR ± tag, so
+  // the canvas shows WHICH label change (issue vs PR, added vs removed) fires.
+  function labelChipText(e) {
+    const tag = labelEventTag(e.events);
+    return tag ? `${e.label || ''} · ${tag}` : (e.label || '');
   }
 
   // The chip text for a GitHub-channel edge (#380): artifact + optional human-gate

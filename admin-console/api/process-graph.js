@@ -203,12 +203,15 @@ function buildProcessGraph(agents) {
       }
       const key = labelListenKey(t);
       if (key) {
-        // Label listener — participates in agent→agent wiring.
+        // Label listener — participates in agent→agent wiring. The carrying
+        // events (issues/pull_request × labeled/unlabeled) ride along so the
+        // renderer can show WHICH label change wakes the listener.
+        const evs = Array.isArray(t.events) && t.events.length ? { events: t.events.slice() } : {};
         const kind = classifyKind(key);
         if (kind === 'gate') gateSet.add(key);
         if (kind === 'gate' || kind === 'brake') {
           // No agent may emit these — the edge comes from outside (a human).
-          edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id });
+          edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, ...evs });
         } else {
           const emitters = [...(emitIndex.get(key) || [])];
           if (emitters.length === 0) {
@@ -220,16 +223,16 @@ function buildProcessGraph(agents) {
               // a human-including default keeps an advisory info lint so a
               // typo'd label name still surfaces.
               edges.push({
-                from: null, to: n.id, label: key, kind, triggerId: t.id, humanSet: true,
+                from: null, to: n.id, label: key, kind, triggerId: t.id, humanSet: true, ...evs,
                 ...(t.from === 'humans' ? {} : { humanAssumed: true }),
               });
             } else {
               // Orphan listener: nothing (agent or human) can set this label.
-              edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, orphan: true });
+              edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, orphan: true, ...evs });
             }
           } else {
             for (const s of emitters) {
-              edges.push({ from: s, to: n.id, label: key, kind, triggerId: t.id });
+              edges.push({ from: s, to: n.id, label: key, kind, triggerId: t.id, ...evs });
             }
           }
         }

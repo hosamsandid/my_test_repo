@@ -34,6 +34,28 @@ const GH_EVENTS = [
 // filter makes sense (mirrors the poller / TriggersPanel semantics).
 const LABEL_FILTERABLE = new Set(LABEL_EVENTS.map(e => e.value));
 
+// Human phrase for a label event: "added to an issue" / "removed from a pull request".
+function labelEventPhrase(event) {
+  const removed = String(event || '').endsWith('.unlabeled');
+  const noun = String(event || '').startsWith('issues.') ? 'an issue' : 'a pull request';
+  return `${removed ? 'removed from' : 'added to'} ${noun}`;
+}
+
+// A trigger now carries exactly ONE event. Legacy triggers may still carry
+// several — surfaced as an explicit notice in the edit dialogs, never silently
+// dropped: saving keeps only the selected event.
+function LegacyMultiEventNote({ events, selected }) {
+  const others = (events || []).filter(e => e !== selected);
+  if (!(events || []).length || (events || []).length < 2) return null;
+  return (
+    <div style={{ ...small, padding: 'var(--eb-space-2)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-status-warning)' }}>
+      This trigger still listens on several events ({(events || []).map(e => <code key={e}>{e} </code>)}).
+      Triggers now carry exactly one event — saving keeps only the selected one.
+      Create separate triggers for {others.length === 1 ? 'the other event' : 'the other events'}.
+    </div>
+  );
+}
+
 const uniq = (arr) => [...new Set(arr)];
 
 function firstRepo(...triggerLists) {
@@ -599,7 +621,11 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
-  const [events, setEvents] = useState([]);
+  // One trigger = one label event: kind (issue/PR) + action (added/removed).
+  const [target, setTarget] = useState('issues');
+  const [action, setAction] = useState('labeled');
+  const [labelName, setLabelName] = useState(label || '');
+  const [initialEvents, setInitialEvents] = useState([]);
   const [fromFilter, setFromFilter] = useState('any-except-self');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [delListener, setDelListener] = useState(true);
@@ -613,7 +639,14 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
         if (!alive) return;
         const t = (Array.isArray(tt) ? tt : []).find(x => x.id === triggerId);
         if (t) {
-          setEvents(Array.isArray(t.events) ? t.events : []);
+          const evs = Array.isArray(t.events) ? t.events : [];
+          setInitialEvents(evs);
+          const first = evs.find(e => LABEL_FILTERABLE.has(e)) || evs[0] || '';
+          const m = String(first).match(/^(issues|pull_request)\.(labeled|unlabeled)$/);
+          if (m) { setTarget(m[1]); setAction(m[2]); }
+          if (typeof t.labelFilter === 'string' && t.labelFilter.trim()) {
+            setLabelName(t.labelFilter.trim());
+          }
           setFromFilter(t.from || 'any-except-self');
         }
       } catch (e) {
@@ -625,13 +658,26 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
     return () => { alive = false; };
   }, [to, triggerId]);
 
-  const toggleEvent = (v) => setEvents(prev =>
-    prev.includes(v) ? prev.filter(x => x !== v) : [...prev, v]);
+  const event = `${target}.${action}`;
+  const verb = action === 'labeled' ? 'added to' : 'removed from';
+  const targetNoun = target === 'issues' ? 'an issue' : 'a pull request';
 
   async function saveEdits() {
+    const newLabel = labelName.trim();
+    if (!newLabel) { setError('Enter the label name.'); return; }
     setSaving(true); setError(null);
     try {
-      await ops.updateTrigger(to, triggerId, { events, from: fromFilter });
+      await ops.updateTrigger(to, triggerId, {
+        events: [event], from: fromFilter, labelFilter: newLabel,
+      });
+      // Renaming the label keeps the source's emits in sync (agent-sourced
+      // hand-offs only — human-set labels have no emitter to rewrite).
+      if (newLabel !== label && !humanSource && ops.getRoleEmits && ops.setRoleEmits) {
+        const cur = await ops.getRoleEmits(from);
+        if (Array.isArray(cur) && cur.includes(label)) {
+          await ops.setRoleEmits(from, uniq(cur.map(l => (l === label ? newLabel : l))));
+        }
+      }
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
   }
@@ -672,15 +718,27 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
         <Center><Loader2 size={14} style={spin} /> Loading…</Center>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-          <Field label="Listener events">
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-2)' }}>
-              {LABEL_EVENTS.map(ev => (
-                <label key={ev.value} style={check}>
-                  <input type="checkbox" checked={events.includes(ev.value)} onChange={() => toggleEvent(ev.value)} />
-                  {ev.label}
-                </label>
-              ))}
+          <Field label="Label kind">
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+              <select value={target} onChange={e => setTarget(e.target.value)} style={{ ...input, flex: 1 }}>
+                {LABEL_TARGETS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+              <select value={action} onChange={e => setAction(e.target.value)} style={{ ...input, flex: 1 }}>
+                {LABEL_ACTIONS.map(o => <option key={o.value} value={o.value}>label {o.label}</option>)}
+              </select>
             </div>
+            <small style={small}>
+              Listens on <code>{event}</code> — wakes when the label is {verb} {targetNoun}.
+            </small>
+          </Field>
+          <LegacyMultiEventNote events={initialEvents} selected={event} />
+          <Field label="Label name">
+            <input value={labelName} onChange={e => setLabelName(e.target.value)} style={input} />
+            {labelName.trim() && labelName.trim() !== label && !humanSource && (
+              <small style={small}>
+                Renaming updates this listener and <strong>{fromName || from}</strong>'s emitted labels.
+              </small>
+            )}
           </Field>
           <Field label="Origin filter (from)">
             <select value={fromFilter} onChange={e => setFromFilter(e.target.value)} style={input}>
@@ -874,14 +932,16 @@ function EditTimerDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
   );
 }
 
-// 🐙 → agent: edit the event set, the optional label filter + origin filter,
-// or delete. The same unified GitHub-trigger surface the create dialog offers.
+// 🐙 → agent: edit the event, the optional label filter + origin filter,
+// or delete. The same unified GitHub-trigger surface the create dialog offers —
+// one event per trigger; legacy multi-event triggers surface a notice.
 function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
   const { to, triggerId } = edge;
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
-  const [events, setEvents] = useState([]);
+  const [event, setEvent] = useState('');
+  const [initialEvents, setInitialEvents] = useState([]);
   const [label, setLabel] = useState('');
   const [fromFilter, setFromFilter] = useState('any-except-self');
 
@@ -893,7 +953,9 @@ function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
         if (!alive) return;
         const t = (Array.isArray(tt) ? tt : []).find(x => x.id === triggerId);
         if (t) {
-          setEvents(Array.isArray(t.events) ? t.events : []);
+          const evs = Array.isArray(t.events) ? t.events : [];
+          setInitialEvents(evs);
+          setEvent(evs[0] || '');
           setLabel(typeof t.labelFilter === 'string' ? t.labelFilter : '');
           setFromFilter(typeof t.from === 'string' ? t.from : 'any-except-self');
         }
@@ -903,18 +965,19 @@ function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
     return () => { alive = false; };
   }, [to, triggerId]);
 
-  // Preserve events outside the common list (the Events API knows more keys).
+  // Preserve events outside the common list (the Events API knows more keys) —
+  // they stay selectable so an exotic trigger can be re-saved untouched.
   const known = new Set(GH_EVENTS.map(e => e.value));
-  const extra = events.filter(e => !known.has(e));
-  const toggle = (v) => setEvents(prev => prev.includes(v) ? prev.filter(x => x !== v) : [...prev, v]);
-  const showLabelFilter = events.some(e => LABEL_FILTERABLE.has(e));
+  const extra = [...new Set(initialEvents.filter(e => !known.has(e)))];
+  const showLabelFilter = LABEL_FILTERABLE.has(event);
 
   async function save() {
+    if (!event) { setError('Pick the event this trigger reacts to.'); return; }
     setSaving(true); setError(null);
     try {
       const lf = label.trim();
       await ops.updateTrigger(to, triggerId, {
-        events, from: fromFilter,
+        events: [event], from: fromFilter,
         labelFilter: (showLabelFilter && lf) ? lf : null,
       });
       onDone?.();
@@ -932,22 +995,14 @@ function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
       <p style={hint}>🐙 GitHub → <strong>{toName || to}</strong></p>
       {loading ? <Center><Loader2 size={14} style={spin} /> Loading…</Center> : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-          <Field label="Events">
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-2)' }}>
-              {GH_EVENTS.map(ev => (
-                <label key={ev.value} style={check}>
-                  <input type="checkbox" checked={events.includes(ev.value)} onChange={() => toggle(ev.value)} />
-                  {ev.label}
-                </label>
-              ))}
-              {extra.map(ev => (
-                <label key={ev} style={check}>
-                  <input type="checkbox" checked onChange={() => toggle(ev)} />
-                  <code>{ev}</code>
-                </label>
-              ))}
-            </div>
+          <Field label="Event">
+            <select value={event} onChange={e => setEvent(e.target.value)} style={input}>
+              <option value="">— select event —</option>
+              {GH_EVENTS.map(ev => <option key={ev.value} value={ev.value}>{ev.label}</option>)}
+              {extra.map(ev => <option key={ev} value={ev}>{ev}</option>)}
+            </select>
           </Field>
+          <LegacyMultiEventNote events={initialEvents} selected={event} />
           {showLabelFilter && (
             <Field label="Label name filter (optional)">
               <input value={label} onChange={e => setLabel(e.target.value)}
@@ -1054,41 +1109,42 @@ function ReadonlyEdgeDialog({ edge, fromName, toName, onClose }) {
 
 // The ONE GitHub-trigger dialog: raw repo events AND label-based triggers
 // (including labels a human sets — the former "Label set by a human" form is
-// folded in here via the `humans` origin filter). No repo input: the repo is
+// folded in here via the `humans` origin filter). One trigger reacts to exactly
+// ONE event — reacting to a second event (e.g. label removed as well as added)
+// is a second, independently configured trigger. No repo input: the repo is
 // resolved from the agent's working environment (live) or at materialise
 // time (draft), since it is unknown while modelling the flow.
 export function GithubTriggerForm({ to, toName, labels, ops = liveOps, onBack, onClose, onDone }) {
-  const [events, setEvents] = useState([]);
+  const [event, setEvent] = useState('');
   const [label, setLabel] = useState('');
   const [fromFilter, setFromFilter] = useState('any-except-self');
   const [prompt, setPrompt] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
-  const toggle = (v) => setEvents(prev => prev.includes(v) ? prev.filter(x => x !== v) : [...prev, v]);
-  const showLabelFilter = events.some(e => LABEL_FILTERABLE.has(e));
+  const showLabelFilter = LABEL_FILTERABLE.has(event);
   const trimmedLabel = label.trim();
   const isGate = trimmedLabel.startsWith('human:');
   const labelActive = showLabelFilter && !!trimmedLabel;
 
   const effectivePrompt = prompt
     || (labelActive
-      ? `The label \`${trimmedLabel}\` changed on an issue/PR (${events.filter(e => LABEL_FILTERABLE.has(e)).join(', ')}). The event payload above has the details.\n\n<Describe what ${toName || to} should do.> Reply \`[PASS]\` if there's nothing to do.`
-      : `A repo event (${events.join(', ') || '<event>'}) occurred. The event payload above has the details.\n\n<Describe what ${toName || to} should do.> Reply \`[PASS]\` if there's nothing to do.`);
+      ? `The label \`${trimmedLabel}\` was ${labelEventPhrase(event)} (${event}). The event payload above has the details.\n\n<Describe what ${toName || to} should do.> Reply \`[PASS]\` if there's nothing to do.`
+      : `A repo event (${event || '<event>'}) occurred. The event payload above has the details.\n\n<Describe what ${toName || to} should do.> Reply \`[PASS]\` if there's nothing to do.`);
 
   async function submit() {
-    if (!events.length) { setError('Pick at least one event.'); return; }
+    if (!event) { setError('Pick the event this trigger reacts to.'); return; }
     setSaving(true); setError(null);
     try {
       await ops.createTrigger(to, {
         type: 'github-event',
-        events,
+        events: [event],
         from: fromFilter,
         ...(labelActive ? { labelFilter: trimmedLabel } : {}),
         enabled: true,
         description: labelActive
-          ? (isGate ? `Wait for human gate \`${trimmedLabel}\`` : `Wake on label \`${trimmedLabel}\``)
-          : `Wake on ${events.join(', ')}`,
+          ? (isGate ? `Wait for human gate \`${trimmedLabel}\`` : `Wake when \`${trimmedLabel}\` is ${labelEventPhrase(event)}`)
+          : `Wake on ${event}`,
         prompt: effectivePrompt,
       });
       onDone?.();
@@ -1102,15 +1158,15 @@ export function GithubTriggerForm({ to, toName, labels, ops = liveOps, onBack, o
         specific label (set by an agent or a human).
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-        <Field label="Events">
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-2)' }}>
-            {GH_EVENTS.map(ev => (
-              <label key={ev.value} style={check}>
-                <input type="checkbox" checked={events.includes(ev.value)} onChange={() => toggle(ev.value)} />
-                {ev.label}
-              </label>
-            ))}
-          </div>
+        <Field label="Event">
+          <select value={event} onChange={e => setEvent(e.target.value)} style={input}>
+            <option value="">— select event —</option>
+            {GH_EVENTS.map(ev => <option key={ev.value} value={ev.value}>{ev.label}</option>)}
+          </select>
+          <small style={small}>
+            One event per trigger. To react to a second event (e.g. the label being
+            removed as well as added), create another trigger.
+          </small>
         </Field>
         {showLabelFilter && (
           <Field label="Label name filter (optional)">
@@ -1120,7 +1176,8 @@ export function GithubTriggerForm({ to, toName, labels, ops = liveOps, onBack, o
               {(labels || []).map(l => <option key={l.name} value={l.name} />)}
             </datalist>
             <small style={small}>
-              Only fire when the changed label matches this name exactly — leave empty to fire on any label.
+              Only fire when the {event.endsWith('.unlabeled') ? 'removed' : 'added'} label matches
+              this name exactly — leave empty to fire on any label.
             </small>
             {isGate && <small style={small}><code>{trimmedLabel}</code> is an approval-gate label — it renders as a gate on the edge.</small>}
           </Field>

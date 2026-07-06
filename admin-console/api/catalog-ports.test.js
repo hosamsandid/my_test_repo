@@ -89,7 +89,9 @@ test('generic pattern templates exist with the pattern-trio roles and ports', ()
   const companion = readTpl('stage-companion');
   assert.equal(normalizeTemplatePorts(companion).patternRole, 'companion');
   assert.deepEqual(normalizeTemplatePorts(companion).ports.consumes, [{ artifact: 'pr', fromSlot: 'stage-author' }]);
-  assert.deepEqual(normalizeTemplatePorts(companion).ports.produces, { pr: false, issue: true });
+  // producesIssue is deliberately NOT baked in — the weaver adds the hand-over
+  // duty only when a downstream stage actually consumes it.
+  assert.deepEqual(normalizeTemplatePorts(companion).ports.produces, { pr: false, issue: false });
   assert.equal(companion.sessionPolicy, 'persistent');
 });
 

@@ -18,6 +18,7 @@ const { buildProcessGraph } = require('./process-graph');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, emptyDraftBundle } = require('./process-template');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { normalizeTemplatePorts } = require('./catalog-ports');
+const { weaveProcess } = require('./flow-weaver');
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
 
 const WORKSPACE = '/workspace';
@@ -2366,6 +2367,9 @@ app.post('/api/process/graph', (req, res) => {
   const agents = bundle.roles.map(r => ({
     id: r.id, role: 'template', displayName: r.displayName || r.id,
     sessionPolicy: r.sessionPolicy || 'persistent',
+    // Agent-level emitted labels (#414 canonicalises emits to agent level) —
+    // without them a bundle's label hand-offs render as human-set edges.
+    emits: Array.isArray(r.emits) ? r.emits : [],
     // GitHub artifact ports (#380) drive the badge/ports + channel edges.
     github: r.github || null, channels: Array.isArray(r.channels) ? r.channels : [],
     triggers: (r.triggers || []).map(t => ({ ...t, emits: Array.isArray(t.emits) ? t.emits : [] })),
@@ -2563,6 +2567,44 @@ app.get('/api/process/template', (req, res) => {
     name: teamName || 'process', level: 'live', teamId: team || undefined,
     roles: roleEntries, gates: g.gates, labels: g.labels, stages: teamStages,
   }));
+});
+
+/* ─── Flow-Weaver (#421) ────────────────────────────────────────────────
+ * Deterministic wiring engine: ordered stages + selected roles → a complete,
+ * gap-free process-template bundle (pure builder in flow-weaver.js). Roles are
+ * referenced by catalog template id ({ templateId }) or supplied inline
+ * ({ inline: true, ... } — #423). Returns { bundle, notes } where notes lists
+ * every applied gap rule so the wizard can explain the compensation. */
+app.post('/api/process/weave', (req, res) => {
+  const body = req.body || {};
+  const stagesIn = Array.isArray(body.stages) ? body.stages : null;
+  if (!stagesIn) return res.status(400).json({ error: 'stages must be an array' });
+  const stages = [];
+  for (const s of stagesIn) {
+    const roles = [];
+    for (const r of (s && Array.isArray(s.roles) ? s.roles : [])) {
+      if (r && typeof r.templateId === 'string') {
+        const t = loadAgentTemplate(r.templateId);
+        if (!t) return res.status(400).json({ error: `Unknown role template: ${r.templateId}` });
+        roles.push(t);
+      } else if (r && r.inline === true) {
+        roles.push(r);
+      } else {
+        return res.status(400).json({ error: 'each role needs { templateId } or { inline: true, ... }' });
+      }
+    }
+    stages.push({ name: s && s.name, prefix: s && s.prefix, roles });
+  }
+  try {
+    const { bundle, notes } = weaveProcess({
+      name: typeof body.name === 'string' && body.name.trim() ? body.name : 'Woven process',
+      stages,
+      options: body.options,
+    });
+    res.json({ bundle, notes });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 /* ─── Process-template registry (#419) ──────────────────────────────────

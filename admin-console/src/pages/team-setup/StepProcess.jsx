@@ -1,0 +1,649 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
+import {
+  LayoutTemplate, Blocks, PencilRuler, AlertCircle, AlertTriangle, Info,
+  CheckCircle, Loader2, ArrowUp, ArrowDown, X, Plus, Save, Workflow,
+} from 'lucide-react';
+import { useApi, apiCall } from '../../hooks/useApi';
+
+// ─── Wizard "Process" step (#422) ────────────────────────────────────────────
+// Replaces the flat role-checkbox Members step in create mode. Three entries:
+//   • Use a template  — gallery of curated process templates (#419) + drafts
+//   • Compose         — stage columns with pattern slots, wired live by the
+//                       Flow-Weaver (#421); gap rules are explained inline
+//   • Blank canvas    — creates an empty draft and jumps to the Flows editor
+// Whatever the entry, the result is one processTemplate bundle on the form,
+// previewed as a mini flow + lint badges, and fed to POST /api/teams(/stream).
+
+const cardStyle = {
+  background: 'var(--eb-bg-surface)',
+  border: '1px solid var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-lg)',
+  padding: 'var(--eb-space-5)',
+};
+
+const labelStyle = {
+  display: 'block',
+  fontSize: 'var(--eb-text-sm)',
+  fontWeight: 'var(--eb-font-medium)',
+  color: 'var(--eb-text-primary)',
+  marginBottom: 'var(--eb-space-2)',
+};
+
+const hintStyle = {
+  fontSize: 'var(--eb-text-xs)',
+  color: 'var(--eb-text-muted)',
+  lineHeight: 1.5,
+};
+
+const selectStyle = {
+  width: '100%',
+  padding: 'var(--eb-space-2) var(--eb-space-3)',
+  background: 'var(--eb-bg-elevated)',
+  border: '1px solid var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-md)',
+  color: 'var(--eb-text-primary)',
+  fontSize: 'var(--eb-text-sm)',
+  fontFamily: 'inherit',
+  outline: 'none',
+  boxSizing: 'border-box',
+};
+
+const tinyButtonStyle = {
+  display: 'inline-flex', alignItems: 'center', gap: 4,
+  padding: '2px 6px',
+  background: 'transparent',
+  border: '1px solid var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-sm)',
+  color: 'var(--eb-text-secondary)',
+  fontSize: 'var(--eb-text-xs)',
+  cursor: 'pointer',
+  fontFamily: 'inherit',
+};
+
+// Default composer skeleton: the Simple-SDLC core loop, ready to be extended.
+export function defaultComposerStages() {
+  return [
+    { name: 'Requirements', scout: null, author: null, companion: null, extras: ['business-analyst', 'issue-triage'], gateAtExit: true },
+    { name: 'Build', scout: null, author: 'developer', companion: 'code-reviewer', extras: [], gateAtExit: true },
+  ];
+}
+
+// The role selection a composer stage sends to the weaver, in slot order.
+function stageRoleIds(stage) {
+  return [stage.scout, stage.author, stage.companion, ...(stage.extras || [])].filter(Boolean);
+}
+
+export function composerToWeaveRequest(name, composerStages) {
+  return {
+    name,
+    stages: composerStages.map(s => ({
+      name: s.name,
+      roles: stageRoleIds(s).map(id => ({ templateId: id })),
+    })),
+    options: {
+      humanGates: Object.fromEntries(composerStages.filter(s => s.gateAtExit === false).map(s => [s.name, false])),
+    },
+  };
+}
+
+// ─── Mini flow preview ──────────────────────────────────────────────────────
+// A light, read-only SVG projection of the bundle: stage columns, role boxes,
+// and the hand-off edges (GitHub channels + label hand-offs). Deliberately not
+// the full canvas renderer — this is a "does the flow hang together" glance.
+
+function bundleEdges(bundle) {
+  const roles = bundle.roles || [];
+  const edges = [];
+  // Channels: producer → consumer (with optional label + human gate).
+  for (const r of roles) {
+    for (const ch of (r.channels || [])) {
+      if (!ch || !ch.from) continue;
+      edges.push({ from: ch.from, to: r.id, label: ch.label || (ch.artifact === 'issue' ? 'issue' : 'PR'), gate: ch.gate === 'human' });
+    }
+  }
+  // Label hand-offs: emitter (role-level or trigger-level emits) → listener.
+  const emitters = new Map(); // label -> Set(roleId)
+  const addEmit = (label, id) => {
+    if (!emitters.has(label)) emitters.set(label, new Set());
+    emitters.get(label).add(id);
+  };
+  for (const r of roles) {
+    for (const e of (r.emits || [])) addEmit(e, r.id);
+    for (const t of (r.triggers || [])) for (const e of (t.emits || [])) addEmit(e, r.id);
+  }
+  for (const r of roles) {
+    for (const t of (r.triggers || [])) {
+      if (t.channel || !t.labelFilter) continue;
+      for (const from of (emitters.get(t.labelFilter) || [])) {
+        if (from === r.id) continue;
+        if (edges.some(e => e.from === from && e.to === r.id && e.label === t.labelFilter)) continue;
+        edges.push({ from, to: r.id, label: t.labelFilter, gate: false });
+      }
+    }
+  }
+  return edges;
+}
+
+export function BundleFlowPreview({ bundle }) {
+  const layout = useMemo(() => {
+    if (!bundle || !Array.isArray(bundle.roles) || bundle.roles.length === 0) return null;
+    const stages = Array.isArray(bundle.stages) && bundle.stages.length ? bundle.stages : [''];
+    const colOf = (r) => {
+      const i = stages.indexOf(r.stage);
+      return i === -1 ? stages.length : i;
+    };
+    const cols = new Map();
+    const pos = new Map();
+    for (const r of bundle.roles) {
+      const c = colOf(r);
+      if (!cols.has(c)) cols.set(c, []);
+      pos.set(r.id, { col: c, row: cols.get(c).length, role: r });
+      cols.get(c).push(r.id);
+    }
+    const NODE_W = 150, NODE_H = 40, COL_W = 210, ROW_H = 62, PAD = 16, HEADER = 26;
+    const nCols = Math.max(...[...cols.keys()]) + 1;
+    const maxRows = Math.max(...[...cols.values()].map(v => v.length));
+    const xy = (id) => {
+      const p = pos.get(id);
+      return { x: PAD + p.col * COL_W, y: PAD + HEADER + p.row * ROW_H };
+    };
+    return {
+      stages, pos, xy, edges: bundleEdges(bundle),
+      NODE_W, NODE_H, COL_W, PAD, HEADER,
+      width: PAD * 2 + (nCols - 1) * COL_W + NODE_W,
+      height: PAD * 2 + HEADER + Math.max(1, maxRows) * ROW_H,
+    };
+  }, [bundle]);
+
+  if (!layout) return null;
+  const { stages, pos, xy, edges, NODE_W, NODE_H, COL_W, PAD, HEADER, width, height } = layout;
+
+  return (
+    <div style={{ overflowX: 'auto', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-elevated)' }}>
+      <svg width={width} height={height} style={{ display: 'block', minWidth: '100%' }}>
+        <defs>
+          <marker id="proc-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+            <path d="M0,0 L7,3.5 L0,7 z" fill="var(--eb-text-muted)" />
+          </marker>
+          <marker id="proc-arrow-gate" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+            <path d="M0,0 L7,3.5 L0,7 z" fill="var(--eb-status-error)" />
+          </marker>
+        </defs>
+        {stages.map((s, i) => (
+          <text key={`st-${i}`} x={PAD + i * COL_W + NODE_W / 2} y={PAD + 12} textAnchor="middle"
+            style={{ fontSize: 11, fontWeight: 600, fill: 'var(--eb-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            {s || '—'}
+          </text>
+        ))}
+        {edges.map((e, i) => {
+          if (!pos.has(e.from) || !pos.has(e.to)) return null;
+          const a = xy(e.from); const b = xy(e.to);
+          const x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2;
+          const x2 = b.x, y2 = b.y + NODE_H / 2;
+          const back = x2 <= x1; // rework loop — bow under the boxes
+          const midX = (x1 + x2) / 2;
+          const d = back
+            ? `M ${a.x + NODE_W / 2} ${a.y + NODE_H} C ${a.x + NODE_W / 2} ${a.y + NODE_H + 26}, ${b.x + NODE_W / 2} ${b.y + NODE_H + 26}, ${b.x + NODE_W / 2} ${b.y + NODE_H + 3}`
+            : `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2 - 3} ${y2}`;
+          const color = e.gate ? 'var(--eb-status-error)' : 'var(--eb-text-muted)';
+          return (
+            <g key={`e-${i}`}>
+              <path d={d} fill="none" stroke={color} strokeWidth={1.2}
+                strokeDasharray={e.gate ? '4 3' : undefined}
+                markerEnd={`url(#${e.gate ? 'proc-arrow-gate' : 'proc-arrow'})`} opacity={0.85} />
+              <text x={back ? (a.x + b.x + NODE_W) / 2 : midX} y={back ? Math.max(a.y, b.y) + NODE_H + 22 : (y1 + y2) / 2 - 5}
+                textAnchor="middle" style={{ fontSize: 9.5, fill: color }}>
+                {e.gate ? `⛔ ${e.label}` : e.label}
+              </text>
+            </g>
+          );
+        })}
+        {[...pos.values()].map(({ role }) => {
+          const { x, y } = xy(role.id);
+          return (
+            <g key={role.id}>
+              <rect x={x} y={y} width={NODE_W} height={NODE_H} rx={7}
+                fill="var(--eb-bg-surface)" stroke="var(--eb-border-default)" strokeWidth={1} />
+              <text x={x + NODE_W / 2} y={y + 17} textAnchor="middle"
+                style={{ fontSize: 10.5, fontWeight: 600, fill: 'var(--eb-text-primary)' }}>
+                {(role.displayName || role.id).slice(0, 24)}
+              </text>
+              <text x={x + NODE_W / 2} y={y + 31} textAnchor="middle"
+                style={{ fontSize: 9, fill: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>
+                {role.id.slice(0, 26)}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+// ─── Lint + weaver-note panels ──────────────────────────────────────────────
+
+export function LintBadges({ lints, loading }) {
+  if (loading) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, ...hintStyle }}>
+        <Loader2 size={12} style={{ animation: 'team-setup-spin 0.9s linear infinite' }} /> Checking wiring…
+      </div>
+    );
+  }
+  const list = Array.isArray(lints) ? lints : [];
+  const errors = list.filter(l => l.severity === 'error');
+  const warnings = list.filter(l => l.severity === 'warning');
+  const infos = list.filter(l => l.severity === 'info');
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
+        {errors.length === 0 && warnings.length === 0 && (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-success)' }}>
+            <CheckCircle size={12} /> Wiring is clean
+          </span>
+        )}
+        {errors.length > 0 && (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>
+            <AlertCircle size={12} /> {errors.length} error{errors.length > 1 ? 's' : ''}
+          </span>
+        )}
+        {warnings.length > 0 && (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)' }}>
+            <AlertTriangle size={12} /> {warnings.length} warning{warnings.length > 1 ? 's' : ''}
+          </span>
+        )}
+        {infos.length > 0 && (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            <Info size={12} /> {infos.length} info
+          </span>
+        )}
+      </div>
+      {(errors.length > 0 || warnings.length > 0) && (
+        <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {[...errors, ...warnings].map((l, i) => (
+            <li key={i} style={{ fontSize: 'var(--eb-text-xs)', color: l.severity === 'error' ? 'var(--eb-status-error)' : 'var(--eb-status-warning)' }}>
+              {l.message}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function WeaverNotes({ notes }) {
+  if (!Array.isArray(notes) || notes.length === 0) return null;
+  return (
+    <div style={{
+      padding: 'var(--eb-space-3)', background: 'var(--eb-bg-elevated)',
+      border: '1px dashed var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+    }}>
+      <div style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 600, color: 'var(--eb-text-secondary)', marginBottom: 4 }}>
+        Auto-compensations by the Flow-Weaver
+      </div>
+      <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', display: 'flex', flexDirection: 'column', gap: 2 }}>
+        {notes.map((n, i) => (
+          <li key={i} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{n.message}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// Role list grouped by stage — reused by the Review step.
+export function BundleRolesSummary({ bundle, teamId }) {
+  if (!bundle || !Array.isArray(bundle.roles)) return null;
+  const stages = Array.isArray(bundle.stages) && bundle.stages.length ? bundle.stages : [null];
+  const groups = stages.map(s => ({ stage: s, roles: bundle.roles.filter(r => (s === null ? true : r.stage === s)) }));
+  const unstaged = bundle.roles.filter(r => !stages.includes(r.stage));
+  if (stages[0] !== null && unstaged.length) groups.push({ stage: '—', roles: unstaged });
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+      {groups.filter(g => g.roles.length).map(g => (
+        <div key={g.stage || 'all'}>
+          {g.stage !== null && (
+            <div style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--eb-text-muted)', marginBottom: 4 }}>
+              {g.stage}
+            </div>
+          )}
+          <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
+            {g.roles.map(r => (
+              <li key={r.id}>
+                <strong style={{ color: 'var(--eb-text-primary)' }}>{r.displayName || r.id}</strong>
+                {teamId && <> — <code>{teamId}-{r.id}</code></>}
+                {r.sessionPolicy === 'per-invocation' && <span style={{ color: 'var(--eb-text-muted)' }}> · per-invocation</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── Entry cards ────────────────────────────────────────────────────────────
+
+function EntryCard({ icon: Icon, title, copy, onClick }) {
+  return (
+    <button type="button" onClick={onClick} style={{
+      ...cardStyle, textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit',
+      display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+    }}>
+      <Icon size={20} style={{ color: 'var(--eb-accent-primary)' }} />
+      <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 600, color: 'var(--eb-text-primary)' }}>{title}</div>
+      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>{copy}</div>
+    </button>
+  );
+}
+
+// ─── The step ───────────────────────────────────────────────────────────────
+
+const SPIN_KEYFRAMES = <style>{'@keyframes team-setup-spin { to { transform: rotate(360deg); } }'}</style>;
+
+export default function StepProcess({ form, setForm, templates, error }) {
+  const navigate = useNavigate();
+  const { data: registry } = useApi('/api/process-templates');
+  const { data: drafts } = useApi('/api/process/drafts');
+  const [weaving, setWeaving] = useState(false);
+  const [weaveError, setWeaveError] = useState(null);
+  const [lints, setLints] = useState(null);
+  const [lintLoading, setLintLoading] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
+  const debounceRef = useRef(null);
+  const lintSeq = useRef(0);
+
+  const catalog = templates || [];
+  const byPattern = (p) => catalog.filter(t => t.patternRole === p);
+  const extraCandidates = catalog.filter(t => (t.patternRole === 'intake' || t.patternRole === 'standalone') && t.category !== 'pattern');
+
+  const setBundle = (bundle, notes, mode, templateId) => {
+    setForm(f => ({
+      ...f,
+      processMode: mode,
+      processTemplateId: templateId ?? f.processTemplateId,
+      processBundle: bundle,
+      weaveNotes: notes || [],
+      processLints: null,
+    }));
+  };
+
+  // Authoritative lint check for whatever bundle is currently selected/woven.
+  useEffect(() => {
+    const bundle = form.processBundle;
+    if (!bundle) { setLints(null); return; }
+    const seq = ++lintSeq.current;
+    setLintLoading(true);
+    apiCall('POST', '/api/flows/graph', { processTemplate: bundle })
+      .then(g => {
+        if (seq !== lintSeq.current) return;
+        setLints(g.lints || []);
+        setForm(f => ({ ...f, processLints: g.lints || [] }));
+      })
+      .catch(() => { if (seq === lintSeq.current) setLints([]); })
+      .finally(() => { if (seq === lintSeq.current) setLintLoading(false); });
+  }, [form.processBundle]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Live weave (debounced) while composing.
+  useEffect(() => {
+    if (form.processMode !== 'compose') return;
+    const stages = form.composerStages || [];
+    if (stages.every(s => stageRoleIds(s).length === 0)) {
+      setBundle(null, [], 'compose');
+      return;
+    }
+    clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(async () => {
+      setWeaving(true);
+      setWeaveError(null);
+      try {
+        const req = composerToWeaveRequest(form.teamName?.trim() || 'Team process', stages);
+        const { bundle, notes } = await apiCall('POST', '/api/process/weave', req);
+        setBundle(bundle, notes, 'compose');
+      } catch (err) {
+        setWeaveError(err.message || String(err));
+      } finally {
+        setWeaving(false);
+      }
+    }, 350);
+    return () => clearTimeout(debounceRef.current);
+  }, [form.processMode, JSON.stringify(form.composerStages), form.teamName]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function pickTemplate(entry) {
+    try {
+      const bundle = entry.kind === 'draft'
+        ? await apiCall('GET', `/api/process/drafts/${encodeURIComponent(entry.id)}`)
+        : await apiCall('GET', `/api/process-templates/${encodeURIComponent(entry.id)}`);
+      setBundle(bundle, [], 'template', `${entry.kind}:${entry.id}`);
+    } catch (err) {
+      setWeaveError(err.message || String(err));
+    }
+  }
+
+  async function saveAsDraft() {
+    if (!form.processBundle) return;
+    setSavingDraft(true);
+    try {
+      const d = await apiCall('POST', '/api/process/drafts', {
+        name: `${form.teamName?.trim() || form.processBundle.name || 'Process'}`,
+        processTemplate: form.processBundle,
+      });
+      navigate(`/flows?proc=${encodeURIComponent(`draft:${d.id}`)}`);
+    } catch (err) {
+      setWeaveError(err.message || String(err));
+      setSavingDraft(false);
+    }
+  }
+
+  async function startBlank() {
+    try {
+      const d = await apiCall('POST', '/api/process/drafts', { name: form.teamName?.trim() || 'New process' });
+      navigate(`/flows?proc=${encodeURIComponent(`draft:${d.id}`)}`);
+    } catch (err) {
+      setWeaveError(err.message || String(err));
+    }
+  }
+
+  const setStages = (fn) => setForm(f => ({
+    ...f,
+    composerStages: typeof fn === 'function' ? fn(f.composerStages || []) : fn,
+  }));
+
+  // ── entry selection ──
+  if (!form.processMode) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        {SPIN_KEYFRAMES}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 'var(--eb-space-3)' }}>
+          <EntryCard icon={LayoutTemplate} title="Use a template"
+            copy="Start from a curated process (Simple SDLC, Extended SDLC, …) or one of your saved drafts. One click, ready to review."
+            onClick={() => setForm(f => ({ ...f, processMode: 'template' }))} />
+          <EntryCard icon={Blocks} title="Compose a process"
+            copy="Define stages and pick 1–3 roles per stage from the catalog. The Flow-Weaver wires hand-offs, human gates and escalation loops for you."
+            onClick={() => setForm(f => ({ ...f, processMode: 'compose', composerStages: f.composerStages?.length ? f.composerStages : defaultComposerStages() }))} />
+          <EntryCard icon={PencilRuler} title="Start blank in the canvas"
+            copy="Open an empty draft in the Flows editor and design the process free-form. Materialise it into a team later."
+            onClick={startBlank} />
+        </div>
+        {weaveError && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{weaveError}</div>}
+        {error && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</div>}
+      </div>
+    );
+  }
+
+  const backToEntry = (
+    <button type="button" style={tinyButtonStyle}
+      onClick={() => setForm(f => ({ ...f, processMode: null, processBundle: null, processTemplateId: null, weaveNotes: [], processLints: null }))}>
+      <X size={11} /> Choose a different entry
+    </button>
+  );
+
+  // ── template gallery ──
+  if (form.processMode === 'template') {
+    const gallery = [
+      ...((registry?.templates) || []).map(t => ({ ...t, kind: 'registry' })),
+      ...((Array.isArray(drafts) ? drafts : []) || []).map(d => ({
+        id: d.id, name: d.name, description: 'Saved draft from the Flows editor.',
+        roleCount: d.roleCount, stages: [], kind: 'draft',
+      })),
+    ];
+    return (
+      <div style={{ ...cardStyle, display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        {SPIN_KEYFRAMES}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={labelStyle}>Pick a process template</div>
+          {backToEntry}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 'var(--eb-space-3)' }}>
+          {gallery.map(t => {
+            const selected = form.processTemplateId === `${t.kind === 'draft' ? 'draft' : 'registry'}:${t.id}`;
+            return (
+              <button key={`${t.kind}:${t.id}`} type="button" onClick={() => pickTemplate({ id: t.id, kind: t.kind === 'draft' ? 'draft' : 'registry' })}
+                style={{
+                  ...cardStyle, padding: 'var(--eb-space-4)', textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit',
+                  border: `1px solid ${selected ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+                }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                  <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 600, color: 'var(--eb-text-primary)' }}>{t.name}</div>
+                  <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', whiteSpace: 'nowrap' }}>
+                    {t.kind === 'draft' ? 'Draft' : `${t.roleCount} roles`}
+                  </span>
+                </div>
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginTop: 4, lineHeight: 1.5 }}>{t.description}</div>
+                {t.stages?.length > 0 && (
+                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 6, fontFamily: 'var(--eb-font-mono)' }}>
+                    {t.stages.join(' → ')}
+                  </div>
+                )}
+              </button>
+            );
+          })}
+          {gallery.length === 0 && <div style={hintStyle}>No process templates found — is the pool seeded (`make seed-process-templates`)?</div>}
+        </div>
+        {form.processBundle && (
+          <PreviewBlock form={form} lints={lints} lintLoading={lintLoading} onSaveDraft={saveAsDraft} savingDraft={savingDraft} />
+        )}
+        {weaveError && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{weaveError}</div>}
+        {error && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</div>}
+      </div>
+    );
+  }
+
+  // ── composer ──
+  const stages = form.composerStages || [];
+  return (
+    <div style={{ ...cardStyle, display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      {SPIN_KEYFRAMES}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <div style={labelStyle}>Compose your process</div>
+          <div style={hintStyle}>
+            Per stage: an <strong>Author</strong> produces the work product; a <strong>Scout</strong> prepares it; a <strong>Companion</strong> reviews,
+            routes feedback and brokers escalations. Leave a slot empty — the weaver merges its duties into the Author and tells you below.
+          </div>
+        </div>
+        {backToEntry}
+      </div>
+
+      <div style={{ display: 'flex', gap: 'var(--eb-space-3)', overflowX: 'auto', paddingBottom: 4 }}>
+        {stages.map((s, i) => (
+          <div key={i} style={{
+            flex: '0 0 240px', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+            padding: 'var(--eb-space-3)', background: 'var(--eb-bg-elevated)',
+            display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <input value={s.name}
+                onChange={e => setStages(prev => prev.map((x, j) => j === i ? { ...x, name: e.target.value } : x))}
+                style={{ ...selectStyle, fontWeight: 600, flex: 1 }} />
+              <button type="button" title="Move left" style={tinyButtonStyle} disabled={i === 0}
+                onClick={() => setStages(prev => { const c = [...prev]; [c[i - 1], c[i]] = [c[i], c[i - 1]]; return c; })}>
+                <ArrowUp size={11} style={{ transform: 'rotate(-90deg)' }} />
+              </button>
+              <button type="button" title="Move right" style={tinyButtonStyle} disabled={i === stages.length - 1}
+                onClick={() => setStages(prev => { const c = [...prev]; [c[i + 1], c[i]] = [c[i], c[i + 1]]; return c; })}>
+                <ArrowDown size={11} style={{ transform: 'rotate(-90deg)' }} />
+              </button>
+              <button type="button" title="Remove stage" style={tinyButtonStyle}
+                onClick={() => setStages(prev => prev.filter((_, j) => j !== i))}>
+                <X size={11} />
+              </button>
+            </div>
+
+            {[['scout', 'Scout'], ['author', 'Author'], ['companion', 'Companion']].map(([slot, label]) => (
+              <div key={slot}>
+                <div style={{ ...hintStyle, marginBottom: 2 }}>{label}</div>
+                <select value={s[slot] || ''} style={selectStyle}
+                  onChange={e => setStages(prev => prev.map((x, j) => j === i ? { ...x, [slot]: e.target.value || null } : x))}>
+                  <option value="">(none)</option>
+                  {byPattern(slot === 'scout' ? 'scout' : slot === 'author' ? 'author' : 'companion').map(t => (
+                    <option key={t.id} value={t.id}>{t.displayName}</option>
+                  ))}
+                </select>
+              </div>
+            ))}
+
+            <div>
+              <div style={{ ...hintStyle, marginBottom: 2 }}>Additional roles</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                {extraCandidates.map(t => {
+                  const checked = (s.extras || []).includes(t.id);
+                  return (
+                    <label key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', cursor: 'pointer' }}>
+                      <input type="checkbox" checked={checked}
+                        onChange={() => setStages(prev => prev.map((x, j) => j === i
+                          ? { ...x, extras: checked ? (x.extras || []).filter(id => id !== t.id) : [...(x.extras || []), t.id] }
+                          : x))} />
+                      {t.displayName}
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', cursor: 'pointer', marginTop: 2 }}>
+              <input type="checkbox" checked={s.gateAtExit !== false}
+                onChange={() => setStages(prev => prev.map((x, j) => j === i ? { ...x, gateAtExit: x.gateAtExit === false } : x))} />
+              Human gate at stage exit
+            </label>
+          </div>
+        ))}
+        <button type="button" style={{ ...tinyButtonStyle, flex: '0 0 auto', alignSelf: 'flex-start', padding: 'var(--eb-space-3)' }}
+          onClick={() => setStages(prev => [...prev, { name: `Stage ${prev.length + 1}`, scout: null, author: null, companion: null, extras: [], gateAtExit: true }])}>
+          <Plus size={12} /> Add stage
+        </button>
+      </div>
+
+      {weaving && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, ...hintStyle }}>
+          <Loader2 size={12} style={{ animation: 'team-setup-spin 0.9s linear infinite' }} /> Weaving the flow…
+        </div>
+      )}
+      {weaveError && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{weaveError}</div>}
+
+      {form.processBundle && !weaving && (
+        <PreviewBlock form={form} lints={lints} lintLoading={lintLoading} onSaveDraft={saveAsDraft} savingDraft={savingDraft} />
+      )}
+      {error && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</div>}
+    </div>
+  );
+}
+
+function PreviewBlock({ form, lints, lintLoading, onSaveDraft, savingDraft }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-4)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-sm)', fontWeight: 600, color: 'var(--eb-text-primary)' }}>
+          <Workflow size={14} /> Flow preview — {form.processBundle.roles.length} roles
+        </div>
+        <button type="button" onClick={onSaveDraft} disabled={savingDraft} style={tinyButtonStyle}>
+          {savingDraft ? <Loader2 size={11} style={{ animation: 'team-setup-spin 0.9s linear infinite' }} /> : <Save size={11} />}
+          Save as draft &amp; open in canvas
+        </button>
+      </div>
+      <BundleFlowPreview bundle={form.processBundle} />
+      <LintBadges lints={lints} loading={lintLoading} />
+      <WeaverNotes notes={form.weaveNotes} />
+    </div>
+  );
+}

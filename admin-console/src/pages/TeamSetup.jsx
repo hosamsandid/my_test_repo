@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import ScriptViewerPanel from '../components/ScriptViewerPanel';
+import StepProcess, { BundleRolesSummary, BundleFlowPreview, LintBadges } from './team-setup/StepProcess';
 
 function scriptNameFromPath(scriptPath) {
   if (typeof scriptPath !== 'string') return null;
@@ -118,7 +119,7 @@ function ErrorBox({ message }) {
   );
 }
 
-const STEPS = ['Team', 'Working Environment', 'Knowledge', 'Members', 'Review'];
+const STEPS = ['Team', 'Working Environment', 'Knowledge', 'Process', 'Review'];
 
 function StepIndicator({ current, onStepClick }) {
   return (
@@ -1437,6 +1438,15 @@ function StepReview({ form, templates, sshKeys, githubTokens, mcpServers, mcpCre
               </div>
             )}
           </>
+        ) : form.processBundle ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+            <div style={labelStyle}>
+              Process: {form.processBundle.name} ({(form.processBundle.roles || []).length} roles)
+            </div>
+            <BundleFlowPreview bundle={form.processBundle} />
+            <LintBadges lints={form.processLints} loading={false} />
+            <BundleRolesSummary bundle={form.processBundle} teamId={form.teamId} />
+          </div>
         ) : (
           <div>
             <div style={labelStyle}>Roles ({allSelected.length})</div>
@@ -1647,8 +1657,16 @@ export default function TeamSetup() {
     maxParallel: 1,
     sshKeyId: '',
     githubTokenId: '',
-    roleConfig: [],  // Array<{ id: string, count: number }>
+    roleConfig: [],  // Array<{ id: string, count: number }> — extend mode only
     mcpSelections: [],
+    // Process step (#422): the selected/woven process-template bundle drives
+    // team creation in create mode; roleConfig stays for extend mode.
+    processMode: null,        // null | 'template' | 'compose'
+    processTemplateId: null,  // 'registry:<id>' | 'draft:<id>'
+    processBundle: null,      // processTemplateVersion-1 bundle
+    weaveNotes: [],           // gap-rule explanations from the Flow-Weaver
+    processLints: null,       // authoritative lints for the current bundle
+    composerStages: [],       // composer state
   });
 
   const { data: templatesResp, loading: tplLoading } = useApi('/api/agent-templates');
@@ -1659,12 +1677,8 @@ export default function TeamSetup() {
 
   const templates = templatesResp?.templates || null;
 
-  // Pre-select all templates the first time the catalog loads (create mode only).
-  useEffect(() => {
-    if (!extendMode && templates && form.roleConfig.length === 0) {
-      setForm(f => ({ ...f, roleConfig: templates.map(t => ({ id: t.id, count: 1 })) }));
-    }
-  }, [templates, extendMode]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Create mode composes via the Process step (#422) — roleConfig is only
+  // populated in extend mode (from the existing team) or on a collision.
 
   // Load existing team config when URL has ?team=<id>&mode=extend.
   useEffect(() => {
@@ -1777,7 +1791,12 @@ export default function TeamSetup() {
         const hasIncrease = form.roleConfig.some(r => existingSet.has(r.id) && r.count > (existingRoleCounts[r.id] || 0));
         if (!hasNew && !hasIncrease) return 'Select at least one new role or increase an existing role count';
       } else {
-        if (form.roleConfig.length === 0) return 'Pick at least one role';
+        if (!form.processBundle || (form.processBundle.roles || []).length === 0) {
+          return 'Pick a process template or compose a process first';
+        }
+        if ((form.processLints || []).some(l => l.severity === 'error')) {
+          return 'The process has wiring errors — fix them before continuing';
+        }
       }
       return null;
     }
@@ -1833,10 +1852,16 @@ export default function TeamSetup() {
       readyLabel: (form.readyLabel || 'ready').trim() || 'ready',
       dispatchLabel: (form.dispatchLabel || 'dispatch').trim() || 'dispatch',
       maxParallel: Number.isInteger(form.maxParallel) ? form.maxParallel : 1,
-      roles: effectiveRoleConfig,
       mcpServers: (form.mcpSelections || []).filter(s => s.serverId),
       mode: effectiveMode,
     };
+    // Create mode ships the Process step's bundle (#422); extend mode keeps the
+    // catalog-role delta (instance counts are a roles-array concept).
+    if (!extendMode && form.processBundle) {
+      body.processTemplate = form.processBundle;
+    } else {
+      body.roles = effectiveRoleConfig;
+    }
 
     let res;
     try {
@@ -1870,6 +1895,14 @@ export default function TeamSetup() {
           ? prev.map(s => s.id === ev.id ? { ...s, status: ev.status, error: ev.error || s.error } : s)
           : prev);
       } else if (ev.type === 'collision') {
+        // Bundle path (#422): the process-template flow has no role-card UI to
+        // fall back to — keep the current step and offer "Add missing roles"
+        // (mode: extend re-submits the same bundle, adding only missing members).
+        if (!extendMode && form.processBundle) {
+          setCollisionInfo({ existing: ev.existing, suggestion: ev.suggestion });
+          setProgressSteps(null);
+          return;
+        }
         // Derive existing role ids + counts from the member-id list in the collision payload.
         const prefix = form.teamId + '-';
         const collisionCountMap = {};
@@ -2032,18 +2065,27 @@ export default function TeamSetup() {
           />
         )
       )}
-      {step === 3 && (
-        <StepTeam
-          form={form}
-          setForm={setForm}
-          templates={templates}
-          roleConfig={form.roleConfig}
-          setRoleConfig={fn => setForm(f => ({ ...f, roleConfig: typeof fn === 'function' ? fn(f.roleConfig) : fn }))}
-          error={stepError}
-          extendMode={extendMode}
-          existingRoles={existingRoles}
-          existingRoleCounts={existingRoleCounts}
-        />
+      {step === 3 && (extendMode
+        ? (
+          <StepTeam
+            form={form}
+            setForm={setForm}
+            templates={templates}
+            roleConfig={form.roleConfig}
+            setRoleConfig={fn => setForm(f => ({ ...f, roleConfig: typeof fn === 'function' ? fn(f.roleConfig) : fn }))}
+            error={stepError}
+            extendMode={extendMode}
+            existingRoles={existingRoles}
+            existingRoleCounts={existingRoleCounts}
+          />
+        ) : (
+          <StepProcess
+            form={form}
+            setForm={setForm}
+            templates={templates}
+            error={stepError}
+          />
+        )
       )}
       {step === 4 && (
         <StepReview

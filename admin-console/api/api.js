@@ -5453,12 +5453,35 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   } catch (err) {
     return fail(400, err.message);
   }
-  const normalizedRoles = normalizeRolesInput(body.roles);
+  // Inline roles (parity with POST /api/teams): either `customRoles` or a whole
+  // `processTemplate` bundle (Process Canvas import / wizard Process step, #422).
+  let customRolesRaw = Array.isArray(body.customRoles) ? body.customRoles : [];
+  if (body.processTemplate) {
+    const v = validateProcessTemplate(body.processTemplate);
+    if (!v.ok) return fail(400, `Invalid processTemplate: ${v.error}`);
+    customRolesRaw = templateToCustomRoles(
+      expandDataFlowSteps(
+        expandGithubChannels(normalizeLegacyReview(body.processTemplate), { teamId }),
+        { teamId },
+      )
+    );
+  }
+  const bundleStages = Array.isArray(body.processTemplate?.stages)
+    ? body.processTemplate.stages.filter(s => typeof s === 'string')
+    : [];
+  const customMap = new Map(customRolesRaw.map(r => [r.id, r]));
+  const resolveTemplate = (id) => customMap.get(id) || loadAgentTemplate(id);
+
+  let rolesInput = body.roles;
+  if ((!Array.isArray(rolesInput) || rolesInput.length === 0) && customMap.size > 0) {
+    rolesInput = [...customMap.keys()].map(id => ({ id, count: 1 }));
+  }
+  const normalizedRoles = normalizeRolesInput(rolesInput);
   if (!normalizedRoles || normalizedRoles.length === 0) {
-    return fail(400, 'roles must be a non-empty array of template ids');
+    return fail(400, 'roles must be a non-empty array of template ids (or supply customRoles / processTemplate)');
   }
   const knownIds = new Set(listAgentTemplateIds());
-  const unknown = normalizedRoles.map(r => r.id).filter(id => !knownIds.has(id));
+  const unknown = normalizedRoles.map(r => r.id).filter(id => !knownIds.has(id) && !customMap.has(id));
   if (unknown.length) {
     return fail(400, `Unknown roles: ${unknown.join(', ')}`);
   }
@@ -5472,7 +5495,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // A reused Working Environment keeps its own id; otherwise auto-create under teamId.
   const envId = environmentId || teamId;
   const teamAgentId = teamId;
-  const planned = planMembers(teamId, normalizedRoles, loadAgentTemplate);
+  const planned = planMembers(teamId, normalizedRoles, resolveTemplate);
   for (const p of planned) {
     if (!AGENT_ID_RE.test(p.memberId)) {
       return fail(400, `Computed memberId '${p.memberId}' is invalid`);
@@ -5659,6 +5682,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           systemPrompt: teamPrompt,
           environmentId: envId,
           skipFirstMember: true,
+          // Ordered stage names for the process graph's layered layout.
+          ...(bundleStages.length ? { stages: bundleStages } : {}),
         }),
       });
       if (!resp.ok) {
@@ -5735,6 +5760,19 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           systemPromptOverride: promptText,
           sessionPolicy: p.template.sessionPolicy === 'per-invocation' ? 'per-invocation' : undefined,
           triggers: triggersOut,
+          // Declarative ports (parity with POST /api/teams): data-flow (#379),
+          // hierarchy (#377), agent-level emits, stage band, GitHub ports (#380).
+          ...(dataFlowForMember(p.template, teamId) || {}),
+          ...(typeof p.template.parent === 'string' && p.template.parent
+            ? { parentMemberId: `${teamId}-${p.template.parent}` } : {}),
+          ...(Array.isArray(p.template.emits) && p.template.emits.length
+            ? { emits: p.template.emits } : {}),
+          ...(typeof p.template.stage === 'string' && p.template.stage
+            ? { stage: p.template.stage } : {}),
+          ...(p.template.github && (p.template.github.producesPr || p.template.github.producesIssue)
+            ? { github: p.template.github } : {}),
+          ...(Array.isArray(p.template.channels) && p.template.channels.length
+            ? { channels: p.template.channels.map(c => ({ ...c, from: `${teamId}-${c.from}` })) } : {}),
         }),
       });
       const data = await resp.json().catch(() => ({}));

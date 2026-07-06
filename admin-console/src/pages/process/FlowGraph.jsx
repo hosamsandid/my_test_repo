@@ -85,7 +85,7 @@ export function FlowGraph({ workspace, team }) {
       {/* Read-only views say so instead of silently swallowing edits (#413). */}
       {caps.readOnlyHint && (
         <div style={{
-          position: 'absolute', bottom: 12, left: 12,
+          position: 'absolute', bottom: 12, left: '50%', transform: 'translateX(-50%)',
           background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
           color: 'var(--eb-text-muted)', borderRadius: 6, padding: '4px 10px',
           fontSize: 'var(--eb-text-xs)', zIndex: 30, pointerEvents: 'none',

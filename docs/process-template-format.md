@@ -127,3 +127,43 @@ way two agents are wired in the Flow editor. These are optional arrays on a role
 Pure builders/validators live in `admin-console/api/process-template.js`
 (`buildProcessTemplate`, `validateProcessTemplate`, `templateToCustomRoles`),
 covered by `process-template.test.js`.
+
+## Catalog v2 — typed integration ports on *agent* templates (#420)
+
+Distinct from the process-template bundle above, the **agent-template catalog**
+(`orchestrator/skill-pool/agent-templates/*.json`) carries additive,
+backwards-compatible fields that make catalog roles composable by the
+Flow-Weaver (#421) instead of being hard-wired to the dispatcher pattern:
+
+```jsonc
+{
+  "patternRole": "author",              // scout | author | companion | intake | standalone
+  "stageAffinity": ["Build"],           // grouping hint for the wizard's stage picker
+  "ports": {
+    "consumes": [ { "artifact": "pr", "fromSlot": "stage-author" } ],
+    "produces": { "pr": true }          // defaults from the template's `github` flags
+  },
+  "triggers": [ { "id": "self-curation", "intrinsic": true, ... } ]
+}
+```
+
+- **`patternRole`** places the role in the reduced per-stage pattern
+  *Scout (gap + evidence) → Author → Companion (review, feedback, escalation)*;
+  `intake` marks pipeline entry roles (Business Analyst, Issue Triage) and
+  `standalone` (the default) everything else.
+- **`ports.consumes`** uses abstract slots — `stage-entry` (the hand-over issue
+  from the previous stage) and `stage-author` (the stage Author's PR) — never
+  concrete role ids or label names. The weaver binds slots at composition time
+  and generates the concrete labels (`<stagePrefix>:author-go`, …).
+- **`intrinsic: true`** on a trigger marks it as part of the role's essence
+  (Issue Triage's `issues.opened`, self-curation crons). The weaver keeps
+  intrinsic triggers and **drops** everything else (dispatcher wiring like
+  `assigned:{{agentId}}`); the legacy wizard path always uses all triggers.
+- The generic pattern trio ships as catalog entries `scout`, `stage-author`,
+  `stage-companion` (`category: "pattern"`, `defaultEnabled: false`) with
+  `{{stageName}}` tokens the weaver resolves at weave time.
+
+Normalisation (defaults, validation, slot filtering) lives in
+`admin-console/api/catalog-ports.js` (`normalizeTemplatePorts`,
+`intrinsicTriggers`), covered by `catalog-ports.test.js`;
+`GET /api/agent-templates` returns the normalised surface.

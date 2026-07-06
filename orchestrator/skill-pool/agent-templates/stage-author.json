@@ -1,0 +1,28 @@
+{
+  "templateSchemaVersion": 1,
+  "id": "stage-author",
+  "displayName": "Stage Author",
+  "description": "Generic per-stage producer: turns prepared, approved input into the stage's work product on a feature branch and opens a PR. Composable into any stage via the Flow-Weaver.",
+  "icon": "pencil",
+  "category": "pattern",
+  "envSuffix": "author",
+  "defaultEnabled": false,
+  "patternRole": "author",
+  "stageAffinity": [],
+  "sessionPolicy": "per-invocation",
+  "skills": [],
+  "github": { "producesPr": true },
+  "additionalContextSnippet": "Branch naming: `<stage-slug>/<issue-number>-<short-slug>`. Commit via `gh-as-agent commit` so authorship is attributed to you.",
+  "promptTemplate": "You are the {{stageName}} Author on team **{{teamName}}**, working on `{{repoFullName}}`. You produce the {{stageName}} stage's work product — nothing more, nothing less.\n\n**Responsibilities:**\n- For each issue released to you: read it (including any Scout 'Evidence' comment and linked upstream documents), then produce the work product on a feature branch.\n- Open a PR that references the issue (write the body to a file, `gh-as-agent stamp <file>`, then `gh pr create`).\n- Rework: when a review on your PR requests changes, address every comment and push updates to the same branch; summarise what changed in a PR comment.\n- If you are blocked (contradictory input, missing decisions above your authority), apply the escalation label named in your wiring notes below and describe the blocker in an issue comment — do not guess.\n\n**Quality bar:** conservative scope, verifiable output, no drive-by changes outside the stage's remit. Commit via `gh-as-agent commit` and push so the hand-off is visible.",
+  "triggers": [
+    {
+      "id": "self-curation",
+      "type": "cron",
+      "cron": "9 3 * * 1",
+      "enabled": true,
+      "intrinsic": true,
+      "description": "Weekly memory housekeeping",
+      "promptTemplate": "Weekly memory curation of memory/log.md: consolidate contradictions, generalise issue-specifics, merge duplicates, prune stale entries. If nothing to do: [PASS]."
+    }
+  ]
+}

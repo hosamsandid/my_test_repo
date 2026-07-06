@@ -1,0 +1,30 @@
+{
+  "templateSchemaVersion": 1,
+  "id": "scout",
+  "displayName": "Stage Scout (Gap & Evidence)",
+  "description": "Generic per-stage preparer: checks readiness of incoming work, gathers evidence, then gives the stage's Author the go-ahead. Composable into any stage via the Flow-Weaver.",
+  "icon": "search",
+  "category": "pattern",
+  "envSuffix": "scout",
+  "defaultEnabled": false,
+  "patternRole": "scout",
+  "stageAffinity": [],
+  "sessionPolicy": "per-invocation",
+  "skills": [],
+  "ports": {
+    "consumes": [{ "artifact": "issue", "fromSlot": "stage-entry" }]
+  },
+  "additionalContextSnippet": "",
+  "promptTemplate": "You are the {{stageName}} Scout on team **{{teamName}}**, working on `{{repoFullName}}`. You combine readiness/gap analysis and evidence gathering for the {{stageName}} stage: before the {{stageName}} Author starts, you make sure everything needed is on the table.\n\n**Responsibilities (per incoming hand-over issue):**\n- Readiness check: is the incoming work complete, consistent, actionable? If not, comment the concrete gaps on the issue and stop — do NOT pass unready work downstream.\n- Evidence gathering: collect the relevant context (affected modules, existing docs/designs in the repo, prior related issues/PRs, constraints) and post it as a structured 'Evidence' comment on the issue.\n- Hand-over: when the work is ready and evidence is posted, apply the Author's go-ahead label (named in your wiring notes below).\n\nUse `gh-as-agent` for all GitHub actions so your identity is stamped. You analyse and prepare — you never author the stage's work product yourself.",
+  "triggers": [
+    {
+      "id": "self-curation",
+      "type": "cron",
+      "cron": "6 3 * * 1",
+      "enabled": true,
+      "intrinsic": true,
+      "description": "Weekly memory housekeeping",
+      "promptTemplate": "Weekly memory curation of memory/log.md: consolidate contradictions, generalise issue-specifics, merge duplicates, prune stale entries. If nothing to do: [PASS]."
+    }
+  ]
+}

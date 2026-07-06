@@ -17,6 +17,7 @@ const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, emptyDraftBundle } = require('./process-template');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
+const { normalizeTemplatePorts } = require('./catalog-ports');
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
 
 const WORKSPACE = '/workspace';
@@ -4647,12 +4648,16 @@ app.get('/api/agent-templates', (_req, res) => {
       sessionPolicy: t.sessionPolicy,
       envSuffix: t.envSuffix,
       defaultEnabled: t.defaultEnabled !== false,
+      // Catalog v2 (#420): the normalised composition surface for the wizard's
+      // stage picker + the Flow-Weaver (patternRole / stageAffinity / ports).
+      ...normalizeTemplatePorts(t),
       triggerSummary: (t.triggers || []).map(tr => ({
         id: tr.id,
         type: tr.type,
         events: tr.events || null,
         cron: tr.cron || null,
         description: tr.description || null,
+        intrinsic: tr.intrinsic === true,
         preCheckScript: tr.preCheckScript || null,
         preCheckEnvKeys: tr.preCheckEnv && typeof tr.preCheckEnv === 'object'
           ? Object.keys(tr.preCheckEnv)

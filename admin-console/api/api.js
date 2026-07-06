@@ -19,6 +19,7 @@ const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, ex
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { normalizeTemplatePorts } = require('./catalog-ports');
 const { weaveProcess } = require('./flow-weaver');
+const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
 
 const WORKSPACE = '/workspace';
@@ -3774,6 +3775,39 @@ app.post('/api/agent-prompt/generate', heavyLimiter, async (req, res) => {
   const prompt = extractMessageText(result.body);
   if (!prompt) return res.status(502).json({ error: 'LLM returned an empty prompt' });
   res.json({ prompt, model: target.model });
+});
+
+/* ─── Port suggestion for custom composer roles (#423) ──────────────────
+ * Suggests the catalog-v2 wiring surface (patternRole / sessionPolicy /
+ * produce flags) for a user-defined role: one stateless LLM call when a
+ * generation target resolves, deterministic keyword heuristic otherwise.
+ * The response is a SUGGESTION — the dialog shows it as editable fields the
+ * user confirms; nothing is applied silently. */
+app.post('/api/agent-ports/suggest', heavyLimiter, async (req, res) => {
+  const roleName = typeof req.body?.roleName === 'string' ? req.body.roleName.trim() : '';
+  const notes = typeof req.body?.notes === 'string' ? req.body.notes.trim() : '';
+  const stageName = typeof req.body?.stageName === 'string' ? req.body.stageName.trim() : '';
+  if (!roleName) return res.status(400).json({ error: 'roleName is required' });
+
+  const fallback = () => res.json({
+    suggestion: heuristicPortSuggestion({ roleName, notes }),
+    source: 'heuristic',
+  });
+
+  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  if (target.error) return fallback();
+
+  const url = buildMessagesUrl(target.baseUrl);
+  const headers = {
+    'anthropic-version': '2023-06-01',
+    ...(target.token ? { Authorization: `Bearer ${target.token}`, 'x-api-key': target.token } : {}),
+  };
+  const payload = { model: target.model, ...buildPortSuggestionRequest(roleName, notes, stageName) };
+  const result = await httpPostJson(url, headers, payload);
+  if (result.error || result.status < 200 || result.status >= 300) return fallback();
+  const suggestion = parsePortSuggestion(extractMessageText(result.body));
+  if (!suggestion) return fallback();
+  res.json({ suggestion, source: 'llm', model: target.model });
 });
 
 /* ─── MCP server registry ───────────────────────────────────────────── */

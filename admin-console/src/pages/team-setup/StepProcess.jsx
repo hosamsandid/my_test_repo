@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   LayoutTemplate, Blocks, PencilRuler, AlertCircle, AlertTriangle, Info,
-  CheckCircle, Loader2, ArrowUp, ArrowDown, X, Plus, Save, Workflow,
+  CheckCircle, Loader2, ArrowUp, ArrowDown, X, Plus, Save, Workflow, Sparkles,
 } from 'lucide-react';
 import { useApi, apiCall } from '../../hooks/useApi';
 
@@ -79,7 +79,12 @@ export function composerToWeaveRequest(name, composerStages) {
     name,
     stages: composerStages.map(s => ({
       name: s.name,
-      roles: stageRoleIds(s).map(id => ({ templateId: id })),
+      roles: [
+        ...stageRoleIds(s).map(id => ({ templateId: id })),
+        // Custom roles (#423) travel inline — the weaver treats them exactly
+        // like catalog roles once their pattern ports are confirmed.
+        ...(s.customRoles || []).map(r => ({ ...r, inline: true })),
+      ],
     })),
     options: {
       humanGates: Object.fromEntries(composerStages.filter(s => s.gateAtExit === false).map(s => [s.name, false])),
@@ -322,6 +327,175 @@ export function BundleRolesSummary({ bundle, teamId }) {
   );
 }
 
+// ─── Custom role dialog (#423) ──────────────────────────────────────────────
+// Name + notes → LLM-drafted prompt (existing endpoint) + suggested wiring
+// (patternRole / sessionPolicy / produce flags). Suggestions land in editable
+// fields the user confirms — nothing is applied silently.
+
+function slugifyRole(name) {
+  return String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'custom-role';
+}
+
+const PATTERN_ROLE_COPY = {
+  scout: 'Scout — prepares incoming work (readiness + evidence)',
+  author: 'Author — produces the stage\'s work product, opens PRs',
+  companion: 'Companion — reviews, routes feedback, brokers escalations',
+  intake: 'Intake — turns human requests into refined issues',
+  standalone: 'Standalone — reacts to external events on its own',
+};
+
+function CustomRoleDialog({ stageName, onAdd, onClose }) {
+  const [name, setName] = useState('');
+  const [notes, setNotes] = useState('');
+  const [patternRole, setPatternRole] = useState('standalone');
+  const [sessionPolicy, setSessionPolicy] = useState('per-invocation');
+  const [producesPr, setProducesPr] = useState(false);
+  const [producesIssue, setProducesIssue] = useState(false);
+  const [prompt, setPrompt] = useState('');
+  const [suggesting, setSuggesting] = useState(false);
+  const [suggestSource, setSuggestSource] = useState(null);
+  const [generating, setGenerating] = useState(false);
+  const [err, setErr] = useState(null);
+
+  async function suggestPorts() {
+    if (!name.trim()) { setErr('Give the role a name first'); return; }
+    setSuggesting(true); setErr(null);
+    try {
+      const { suggestion, source } = await apiCall('POST', '/api/agent-ports/suggest', {
+        roleName: name.trim(), notes: notes.trim(), stageName,
+      });
+      setPatternRole(suggestion.patternRole);
+      setSessionPolicy(suggestion.sessionPolicy);
+      setProducesPr(!!suggestion.ports?.produces?.pr);
+      setProducesIssue(!!suggestion.ports?.produces?.issue);
+      setSuggestSource(source);
+    } catch (e) {
+      setErr(e.message || String(e));
+    } finally {
+      setSuggesting(false);
+    }
+  }
+
+  async function generatePrompt() {
+    if (!name.trim()) { setErr('Give the role a name first'); return; }
+    setGenerating(true); setErr(null);
+    try {
+      const { prompt: p } = await apiCall('POST', '/api/agent-prompt/generate', {
+        roleName: name.trim(), notes: notes.trim(),
+      });
+      setPrompt(p);
+    } catch (e) {
+      setErr(e.message || String(e));
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  function add() {
+    if (!name.trim()) { setErr('Role name required'); return; }
+    onAdd({
+      id: slugifyRole(name),
+      displayName: name.trim(),
+      sessionPolicy,
+      patternRole,
+      github: (producesPr || producesIssue)
+        ? { ...(producesPr ? { producesPr: true } : {}), ...(producesIssue ? { producesIssue: true } : {}) }
+        : undefined,
+      systemPrompt: prompt.trim(),
+      triggers: [],
+    });
+  }
+
+  const fieldRow = { display: 'flex', flexDirection: 'column', gap: 4 };
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 60,
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 'var(--eb-space-5)',
+    }} onClick={onClose}>
+      <div style={{ ...cardStyle, width: 560, maxWidth: '100%', maxHeight: '85vh', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}
+        onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 600, color: 'var(--eb-text-primary)' }}>
+            Custom role — {stageName}
+          </div>
+          <button type="button" style={tinyButtonStyle} onClick={onClose}><X size={12} /></button>
+        </div>
+
+        <div style={fieldRow}>
+          <label style={labelStyle}>Role name</label>
+          <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. JCL Migration Engineer" style={selectStyle} autoFocus />
+        </div>
+        <div style={fieldRow}>
+          <label style={labelStyle}>Notes (optional)</label>
+          <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} style={{ ...selectStyle, resize: 'vertical', fontFamily: 'inherit' }}
+            placeholder="Keywords for what this role should do" />
+        </div>
+
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
+          <button type="button" style={tinyButtonStyle} onClick={suggestPorts} disabled={suggesting}>
+            {suggesting ? <Loader2 size={11} style={{ animation: 'team-setup-spin 0.9s linear infinite' }} /> : <Sparkles size={11} />}
+            Suggest wiring
+          </button>
+          <button type="button" style={tinyButtonStyle} onClick={generatePrompt} disabled={generating}>
+            {generating ? <Loader2 size={11} style={{ animation: 'team-setup-spin 0.9s linear infinite' }} /> : <Sparkles size={11} />}
+            Generate agent prompt
+          </button>
+          {suggestSource && (
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+              wiring suggested by {suggestSource === 'llm' ? 'LLM' : 'heuristic'} — review below
+            </span>
+          )}
+        </div>
+
+        <div style={fieldRow}>
+          <label style={labelStyle}>Pattern role (drives the wiring)</label>
+          <select value={patternRole} onChange={e => setPatternRole(e.target.value)} style={selectStyle}>
+            {Object.entries(PATTERN_ROLE_COPY).map(([v, copy]) => <option key={v} value={v}>{copy}</option>)}
+          </select>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--eb-space-3)' }}>
+          <div style={fieldRow}>
+            <label style={labelStyle}>Session policy</label>
+            <select value={sessionPolicy} onChange={e => setSessionPolicy(e.target.value)} style={selectStyle}>
+              <option value="per-invocation">per-invocation (reactive)</option>
+              <option value="persistent">persistent (chat context)</option>
+            </select>
+          </div>
+          <div style={fieldRow}>
+            <label style={labelStyle}>Opens on GitHub</label>
+            <div style={{ display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'center', minHeight: 34 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+                <input type="checkbox" checked={producesPr} onChange={() => setProducesPr(v => !v)} /> PRs
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+                <input type="checkbox" checked={producesIssue} onChange={() => setProducesIssue(v => !v)} /> Issues
+              </label>
+            </div>
+          </div>
+        </div>
+        <div style={fieldRow}>
+          <label style={labelStyle}>Agent prompt</label>
+          <textarea value={prompt} onChange={e => setPrompt(e.target.value)} rows={7} style={{ ...selectStyle, resize: 'vertical', fontFamily: 'inherit' }}
+            placeholder="You are the … (or use Generate agent prompt above)" />
+        </div>
+
+        {err && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{err}</div>}
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)' }}>
+          <button type="button" style={tinyButtonStyle} onClick={onClose}>Cancel</button>
+          <button type="button" onClick={add} style={{
+            ...tinyButtonStyle, background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+            border: 'none', padding: 'var(--eb-space-2) var(--eb-space-3)',
+          }}>
+            <Plus size={12} /> Add role
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Entry cards ────────────────────────────────────────────────────────────
 
 function EntryCard({ icon: Icon, title, copy, onClick }) {
@@ -350,6 +524,7 @@ export default function StepProcess({ form, setForm, templates, error }) {
   const [lints, setLints] = useState(null);
   const [lintLoading, setLintLoading] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
+  const [customRoleStage, setCustomRoleStage] = useState(null); // stage index with an open dialog
   const debounceRef = useRef(null);
   const lintSeq = useRef(0);
 
@@ -388,7 +563,7 @@ export default function StepProcess({ form, setForm, templates, error }) {
   useEffect(() => {
     if (form.processMode !== 'compose') return;
     const stages = form.composerStages || [];
-    if (stages.every(s => stageRoleIds(s).length === 0)) {
+    if (stages.every(s => stageRoleIds(s).length === 0 && (s.customRoles || []).length === 0)) {
       setBundle(null, [], 'compose');
       return;
     }
@@ -601,6 +776,31 @@ export default function StepProcess({ form, setForm, templates, error }) {
               </div>
             </div>
 
+            {(s.customRoles || []).length > 0 && (
+              <div>
+                <div style={{ ...hintStyle, marginBottom: 2 }}>Custom roles</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  {(s.customRoles || []).map((r, k) => (
+                    <div key={`${r.id}-${k}`} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+                      <Sparkles size={10} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+                      <span style={{ flex: 1 }}>{r.displayName} <span style={{ color: 'var(--eb-text-muted)' }}>({r.patternRole})</span></span>
+                      <button type="button" title="Remove" style={{ ...tinyButtonStyle, padding: '0 4px' }}
+                        onClick={() => setStages(prev => prev.map((x, j) => j === i
+                          ? { ...x, customRoles: (x.customRoles || []).filter((_, m) => m !== k) }
+                          : x))}>
+                        <X size={10} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <button type="button" style={{ ...tinyButtonStyle, alignSelf: 'flex-start' }}
+              onClick={() => setCustomRoleStage(i)}>
+              <Plus size={11} /> Custom role
+            </button>
+
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', cursor: 'pointer', marginTop: 2 }}>
               <input type="checkbox" checked={s.gateAtExit !== false}
                 onChange={() => setStages(prev => prev.map((x, j) => j === i ? { ...x, gateAtExit: x.gateAtExit === false } : x))} />
@@ -625,6 +825,19 @@ export default function StepProcess({ form, setForm, templates, error }) {
         <PreviewBlock form={form} lints={lints} lintLoading={lintLoading} onSaveDraft={saveAsDraft} savingDraft={savingDraft} />
       )}
       {error && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</div>}
+
+      {customRoleStage !== null && stages[customRoleStage] && (
+        <CustomRoleDialog
+          stageName={stages[customRoleStage].name}
+          onClose={() => setCustomRoleStage(null)}
+          onAdd={(role) => {
+            setStages(prev => prev.map((x, j) => j === customRoleStage
+              ? { ...x, customRoles: [...(x.customRoles || []), role] }
+              : x));
+            setCustomRoleStage(null);
+          }}
+        />
+      )}
     </div>
   );
 }

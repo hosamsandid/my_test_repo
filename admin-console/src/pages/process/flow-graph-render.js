@@ -243,13 +243,24 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
   // Status legend. The edge key is derived from EDGE_STYLES so it can never
   // drift from the drawn colours; the "Sources" section (#410) doubles as a
   // per-actor filter — clicking 👤/🐙/⚡/⏰ toggles that actor's edges.
+  // Bottom-left (the zoom control owns bottom-right), wrapping when narrow,
+  // and collapsible to a small pill (state persisted across sessions).
   const legendEl = document.createElement('div');
-  legendEl.style.cssText = 'position:absolute;bottom:16px;left:50%;transform:translateX(-50%);background:var(--eb-bg-elevated);backdrop-filter:blur(4px);border:1px solid var(--eb-border-default);border-radius:8px;padding:6px 14px;display:flex;gap:10px;align-items:center;z-index:20;font-size:11px;white-space:nowrap;';
+  legendEl.style.cssText = 'position:absolute;bottom:12px;left:12px;max-width:calc(100% - 240px);background:var(--eb-bg-elevated);backdrop-filter:blur(4px);border:1px solid var(--eb-border-default);border-radius:8px;padding:6px 14px;display:flex;gap:6px 10px;align-items:center;flex-wrap:wrap;z-index:20;font-size:11px;';
+  legendEl.addEventListener('mousedown', (e) => e.stopPropagation());
   const _mkSwatch = ({ color, label, dashed }) =>
-    `<span style="display:flex;align-items:center;gap:4px">` +
+    `<span style="display:flex;align-items:center;gap:4px;white-space:nowrap">` +
     `<span style="width:14px;height:0;display:inline-block;border-top:2px ${dashed ? 'dashed' : 'solid'} ${color};"></span>` +
     `<span style="color:var(--eb-text-secondary)">${label}</span></span>`;
+  const _legendToggleBtn = (collapsed) =>
+    `<button data-legend-toggle title="${collapsed ? 'Show legend' : 'Hide legend'}" style="`
+    + 'background:none;border:none;padding:0;cursor:pointer;font-size:11px;white-space:nowrap;'
+    + `color:var(--eb-text-muted);">Legend ${collapsed ? '▸' : '▾'}</button>`;
   function renderLegend() {
+    if (state.legendCollapsed) {
+      legendEl.innerHTML = _legendToggleBtn(true);
+      return;
+    }
     const keys = ['label', 'issue', 'pr', 'review', 'gate', 'event', 'webhook', 'artifact', 'dependency', 'hierarchy'];
     const actorToggles = ['github', 'external'].map(kind => {
       const off = state.hiddenActorKinds.has(kind);
@@ -259,12 +270,19 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
         + `color:var(--eb-text-secondary);">${ACTOR_ICON[kind]}</button>`;
     }).join('');
     legendEl.innerHTML =
-      `<span style="color:var(--eb-text-muted);font-size:10px;margin-right:2px">Edges:</span>` +
+      _legendToggleBtn(false) +
+      `<span style="color:var(--eb-text-muted);font-size:10px;margin-left:4px">Edges:</span>` +
       keys.map(k => _mkSwatch(EDGE_STYLES[k])).join('') +
       `<span style="color:var(--eb-text-muted);font-size:10px;margin:0 2px 0 6px">Sources:</span>` +
       actorToggles;
   }
   legendEl.addEventListener('click', (e) => {
+    if (e.target.closest('[data-legend-toggle]')) {
+      state.legendCollapsed = !state.legendCollapsed;
+      localStorage.setItem('flow-graph-legend-collapsed', state.legendCollapsed);
+      renderLegend();
+      return;
+    }
     const btn = e.target.closest('[data-actor-toggle]');
     if (!btn) return;
     const kind = btn.dataset.actorToggle;
@@ -305,6 +323,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     actorsById:         {},
     actorPositions:     {},
     hiddenActorKinds:   new Set(JSON.parse(localStorage.getItem('flow-graph-hidden-actor-kinds') || '[]')),
+    legendCollapsed:    localStorage.getItem('flow-graph-legend-collapsed') === 'true',
     // Per-trigger edge visibility (👁 toggle on the card's trigger rows) —
     // keys are `${nodeId}|${triggerId}`, persisted across sessions.
     hiddenTriggerEdges: new Set(JSON.parse(localStorage.getItem('flow-graph-hidden-trigger-edges') || '[]')),

@@ -285,9 +285,17 @@ All agent lifecycle operations (create / enable / disable / edit prompt / delete
 
 ### Team-Setup wizard
 
-`POST /api/teams` (driven by the **Team Setup** wizard at `/team-setup`) materialises a team-shaped agent group in one atomic-with-rollback transaction. The wizard sits on top of the existing `team` / `team-member` machinery — the result is identical in shape to a manually-created team plus members. Inputs: a `teamId` slug, team name, repository (URL, branch, `sshKeyId`), `githubTokenId`, and a list of role templates.
+`POST /api/teams` (driven by the **Team Setup** wizard at `/team-setup`) materialises a team-shaped agent group in one atomic-with-rollback transaction. The wizard sits on top of the existing `team` / `team-member` machinery — the result is identical in shape to a manually-created team plus members. Inputs: a `teamId` slug, team name, repository (URL, branch, `sshKeyId`), `githubTokenId`, and — in create mode — a **process-template bundle** from the Process step below (extend mode still sends a list of role templates with instance counts).
 
-Role templates live as JSON files under `/template-workspace/agent-templates/` (seeded from `orchestrator/skill-pool/agent-templates/` via `make seed-templates`). The catalog ships with eight roles:
+**Process-first creation (#419–#424, `docs/wizard-flow-integration.md`).** In create mode the wizard's 4th step is the **Process** step (`admin-console/src/pages/team-setup/StepProcess.jsx`) — the flat role-checkbox list is retired there (extend mode keeps it, since role *instance counts* are a roles-array concept). It produces one `processTemplateVersion: 1` bundle via three entries:
+
+1. **Use a template** — gallery of curated process templates (registry `orchestrator/skill-pool/process-templates/` → `make seed-process-templates` → `GET /api/process-templates[/:id]`; ships `simple-sdlc` + `extended-sdlc`, CI-guarded to render lint-clean) plus saved process drafts.
+2. **Compose a process** — stage columns with Scout/Author/Companion slots (the reduced per-stage pattern *Scout (gap+evidence) → Author → Companion (review, feedback routing, escalation)*) plus intake/standalone extras and **custom roles** (LLM-drafted prompt via `POST /api/agent-prompt/generate`, suggested wiring via `POST /api/agent-ports/suggest` with a keyword-heuristic fallback in `admin-console/api/port-suggestion.js` — always user-confirmed). The selection is wired live by the **Flow-Weaver** (`admin-console/api/flow-weaver.js`, `POST /api/process/weave`): a deterministic, pure engine that chains stages via human-gated (opt-out per boundary) `<prefix>:approved` issue channels, generates the intra-stage `<prefix>:author-go` / `<prefix>:escalate` loops + rework/human-feedback triggers, auto-staggers self-curation crons, and compensates gaps (missing Companion/Scout duties merge into the Author via a marker-delimited *Wiring notes* prompt block; passive stages are skipped by the chain; every rule is surfaced in `notes[]`). Its tested contract: the woven bundle is **lint-clean** (zero error/warning lints). Catalog roles carry the composition surface for this (**catalog v2**, `admin-console/api/catalog-ports.js`): `patternRole` / `stageAffinity` / `ports` (abstract slots `stage-entry` / `stage-author`), and `intrinsic: true` on essence triggers — non-intrinsic dispatcher wiring is dropped when composing; generic pattern templates `scout` / `stage-author` / `stage-companion` ship in the catalog (`category: "pattern"`).
+3. **Start blank in the canvas** — creates an empty draft and jumps to `/flows?proc=draft:<id>`.
+
+The step shows an inline SVG flow preview + authoritative lints (`POST /api/flows/graph`); error lints block submission. Exits: **Create team** (`POST /api/teams/stream`, which now has full `processTemplate`/`customRoles`/ports parity with `POST /api/teams`) or **Save as draft** (canvas round-trip). Bundle-path collisions stay on the bundle: the collision card re-submits with `mode: "extend"`, adding only missing members.
+
+Role templates live as JSON files under `/template-workspace/agent-templates/` (seeded from `orchestrator/skill-pool/agent-templates/` via `make seed-templates`). The catalog ships with these dispatcher-pattern roles (plus the generic pattern trio above):
 
 | Role | Session | Trigger | `from` |
 |---|---|---|---|
@@ -387,7 +395,12 @@ The Admin Console embeds a Matrix client at `/chats` (and `/chats/:agentId`) so 
 | `admin-console/src/pages/WorkingEnvironments.jsx` | UI: CRUD for environments (skills picker, optional repo + ssh key) |
 | `admin-console/src/pages/SshKeys.jsx` | UI: CRUD for SSH keys (paste private key, see fingerprint only) |
 | `admin-console/src/pages/Agents.jsx` | UI: CRUD for agents (env dropdown, role-aware cards, team-member edit form with inherit/override toggles for `systemPrompt` and `skillsOverride`). |
-| `admin-console/src/pages/TeamSetup.jsx` | UI: 4-step wizard (Project → Credentials → Team → Review) that drives `POST /api/teams`. |
+| `admin-console/src/pages/TeamSetup.jsx` | UI: 5-step wizard (Team → Working Environment → Knowledge → Process → Review) that drives `POST /api/teams(/stream)`. |
+| `admin-console/src/pages/team-setup/StepProcess.jsx` | UI: the wizard's Process step (#422) — template gallery, stage composer with custom-role dialog, flow preview + lints. |
+| `admin-console/api/flow-weaver.js` | Deterministic wiring engine (#421): stages + catalog-v2 roles → lint-clean process-template bundle (`POST /api/process/weave`). |
+| `admin-console/api/catalog-ports.js` | Catalog v2 (#420): normalises `patternRole` / `stageAffinity` / `ports` + `intrinsic` trigger filtering on agent templates. |
+| `admin-console/api/process-template-registry.js` | Curated process-template registry (#419): `orchestrator/skill-pool/process-templates/` → `GET /api/process-templates`. |
+| `admin-console/api/port-suggestion.js` | Wiring suggestion for custom roles (#423): LLM parse + keyword heuristic behind `POST /api/agent-ports/suggest`. |
 
 ## Commands
 

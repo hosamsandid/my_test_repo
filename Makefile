@@ -29,7 +29,7 @@ ifeq ($(COMPOSE_PROJECT_NAME),)
 SKILL_POOL_VOLUME      = vgh-claw_claude-workspace
 endif
 
-.PHONY: up down restart build agent-image update ps logs help seed-pool seed-skills seed-memory seed-templates seed-mcp-servers
+.PHONY: up down restart build agent-image update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers
 
 # `up` depends on `agent-image` so a fresh bring-up always has the per-agent
 # runtime image built (the agent image is NOT a compose service — it's pulled
@@ -74,7 +74,7 @@ logs:
 	podman logs -f --tail=100 conduwuit &
 	wait
 
-seed-pool: seed-skills seed-memory seed-templates seed-mcp-servers
+seed-pool: seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers
 	@echo "Seeding pool CLAUDE.md from $(SKILL_POOL_DEFAULTS)/CLAUDE.md..."
 	@if [ ! -f "$(SKILL_POOL_DEFAULTS)/CLAUDE.md" ]; then \
 	  echo "ERROR: $(SKILL_POOL_DEFAULTS)/CLAUDE.md not found in repo" >&2; \
@@ -126,6 +126,19 @@ seed-templates:
 	@echo "Done. Pool agent-templates contents:"
 	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/agent-templates/
 
+seed-process-templates:
+	@if [ ! -d "$(SKILL_POOL_DEFAULTS)/process-templates" ]; then \
+	  echo "ERROR: $(SKILL_POOL_DEFAULTS)/process-templates not found in repo" >&2; \
+	  exit 1; \
+	fi
+	@echo "Seeding process-templates into volume $(SKILL_POOL_VOLUME)..."
+	podman run --rm \
+	  -v $(SKILL_POOL_VOLUME):/pool \
+	  -v $(SKILL_POOL_DEFAULTS)/process-templates:/src:ro \
+	  alpine sh -c 'rm -rf /pool/process-templates && mkdir -p /pool/process-templates && cp -r /src/. /pool/process-templates/'
+	@echo "Done. Pool process-templates contents:"
+	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/process-templates/
+
 seed-mcp-servers:
 	@if [ ! -d "$(CURDIR)/mcp-servers" ]; then \
 	  echo "ERROR: $(CURDIR)/mcp-servers not found in repo" >&2; \
@@ -140,4 +153,4 @@ seed-mcp-servers:
 	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/mcp-servers/
 
 help:
-	@echo "Targets: up, down, restart, build, agent-image, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-mcp-servers"
+	@echo "Targets: up, down, restart, build, agent-image, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers"

@@ -1,0 +1,75 @@
+{
+  "processTemplateVersion": 1,
+  "name": "Simple SDLC",
+  "description": "The minimal core loop: a Business Analyst turns requests into ready-labelled issues, a Developer implements them and opens PRs, a Code Reviewer reviews (review submissions wake the Developer for rework).",
+  "level": "template",
+  "stages": ["Requirements", "Build"],
+  "roles": [
+    {
+      "id": "business-analyst",
+      "displayName": "Business Analyst",
+      "role": "team-member",
+      "sessionPolicy": "persistent",
+      "stage": "Requirements",
+      "github": { "producesIssue": true },
+      "systemPrompt": "You are the Business Analyst on team **{{teamName}}**, working on `{{repoFullName}}`. You turn user requests from your DM conversations into well-scoped GitHub issues: a clear problem statement, scope (in/out), and numbered acceptance criteria. When an issue is complete and implementable, add the `ready` label so the Developer picks it up. Use `gh-as-agent` for all GitHub actions so your identity is stamped.",
+      "triggers": []
+    },
+    {
+      "id": "developer",
+      "displayName": "Developer",
+      "role": "team-member",
+      "sessionPolicy": "per-invocation",
+      "stage": "Build",
+      "github": { "producesPr": true },
+      "channels": [
+        { "artifact": "issue", "from": "business-analyst", "label": "ready" }
+      ],
+      "systemPrompt": "You are the Developer on team **{{teamName}}**, working on `{{repoFullName}}`. Implement `ready`-labelled issues cleanly on a feature branch, include tests covering the acceptance criteria, and open a PR that closes the issue (`gh-as-agent stamp` + `gh pr create`). When a review requests changes, address every comment and push to the same branch. Stay conservative in scope; commit via `gh-as-agent commit`.",
+      "triggers": [
+        {
+          "id": "dev-rework-on-review",
+          "type": "github-event",
+          "enabled": true,
+          "events": ["pull_request_review.submitted"],
+          "from": "any-except-self",
+          "description": "Rework the PR after a review",
+          "prompt": "A review was submitted on a PR in `{{repoFullName}}` (payload above). If it is not one of YOUR PRs, reply `[PASS]`.\n\n1. `git pull`, check out the PR branch, read every review comment.\n2. Address each point: fix the code/tests, or reply explaining why not.\n3. Run the tests, commit via `gh-as-agent commit`, push, summarise the changes in a PR comment.\n\nReply `[PASS]` if there is nothing to do."
+        },
+        {
+          "id": "self-curation",
+          "type": "cron",
+          "enabled": true,
+          "cron": "5 3 * * 1",
+          "description": "Weekly memory housekeeping",
+          "prompt": "Weekly memory curation of memory/log.md: consolidate contradictions, generalise issue-specifics, merge duplicates, prune stale entries. If nothing to do: [PASS]."
+        }
+      ]
+    },
+    {
+      "id": "code-reviewer",
+      "displayName": "Code Reviewer",
+      "role": "team-member",
+      "sessionPolicy": "per-invocation",
+      "stage": "Build",
+      "channels": [
+        { "artifact": "pr", "from": "developer" }
+      ],
+      "systemPrompt": "You are the Code Reviewer on team **{{teamName}}**, working on `{{repoFullName}}`. Review every PR the Developer opens: correctness against the linked issue's acceptance criteria, test coverage, security-sensitive spots, readability. Submit your review via `gh-as-agent` + `gh pr review` — request changes with concrete, actionable comments (the Developer is woken by your review), or approve when all blocking points are resolved. A human performs the merge.",
+      "triggers": [
+        {
+          "id": "self-curation",
+          "type": "cron",
+          "enabled": true,
+          "cron": "10 3 * * 1",
+          "description": "Weekly memory housekeeping",
+          "prompt": "Weekly memory curation of memory/log.md: consolidate, generalise, merge duplicates, prune stale entries. If nothing to do: [PASS]."
+        }
+      ]
+    }
+  ],
+  "gates": [],
+  "labels": [
+    { "name": "ready", "humanGate": false, "brake": false }
+  ]
+}

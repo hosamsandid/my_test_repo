@@ -16,6 +16,7 @@ const { computeScope, visibleTeam, visibleAgent } = require('./scope');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, emptyDraftBundle } = require('./process-template');
+const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
 
 const WORKSPACE = '/workspace';
@@ -2561,6 +2562,22 @@ app.get('/api/process/template', (req, res) => {
     name: teamName || 'process', level: 'live', teamId: team || undefined,
     roles: roleEntries, gates: g.gates, labels: g.labels, stages: teamStages,
   }));
+});
+
+/* ─── Process-template registry (#419) ──────────────────────────────────
+ * Curated whole-process templates — the process-level analogue of the
+ * agent-template catalog. Seeded from orchestrator/skill-pool/process-templates/
+ * into the pool volume via `make seed-process-templates`; read-only here. */
+const PROCESS_TEMPLATES_DIR = path.join(POOL_DIR, 'process-templates');
+
+app.get('/api/process-templates', (_req, res) => {
+  res.json({ templates: listProcessTemplates(PROCESS_TEMPLATES_DIR) });
+});
+
+app.get('/api/process-templates/:id', (req, res) => {
+  const b = loadProcessTemplate(PROCESS_TEMPLATES_DIR, req.params.id);
+  if (!b) return res.status(404).json({ error: 'Process template not found' });
+  res.json(b);
 });
 
 /* ─── Process drafts (Process Canvas v2, #344) ──────────────────────────

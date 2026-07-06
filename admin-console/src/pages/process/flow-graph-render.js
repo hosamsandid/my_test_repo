@@ -158,11 +158,82 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
   loadingEl.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--eb-text-muted);font-size:14px;pointer-events:none;';
   viewport.appendChild(loadingEl);
 
-  // Zoom display
-  const zoomEl = document.createElement('div');
-  zoomEl.textContent = '100%';
-  zoomEl.style.cssText = 'position:absolute;bottom:8px;right:12px;font-size:11px;color:var(--eb-text-muted);pointer-events:none;z-index:20;';
-  viewport.appendChild(zoomEl);
+  // Zoom control (bottom-right): − / editable % / preset menu / + — mouse-wheel
+  // zoom is imprecise on touch displays, so every step is also reachable by tap.
+  const ZOOM_MIN = 0.1;
+  const ZOOM_MAX = 3.0;
+  const ZOOM_STEP = 1.25;
+  const ZOOM_PRESETS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3];
+
+  const zoomCtrlEl = document.createElement('div');
+  zoomCtrlEl.style.cssText = 'position:absolute;bottom:12px;right:12px;z-index:20;display:flex;align-items:center;gap:2px;'
+    + 'background:var(--eb-bg-elevated);backdrop-filter:blur(4px);border:1px solid var(--eb-border-default);border-radius:8px;padding:2px;';
+  // Interacting with the control must not start a canvas pan / text-select fight.
+  zoomCtrlEl.addEventListener('mousedown', (e) => e.stopPropagation());
+
+  const mkZoomBtn = (label, title, fn) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.title = title;
+    b.style.cssText = 'width:28px;height:28px;padding:0;font-size:15px;line-height:1;border:none;border-radius:6px;'
+      + 'background:none;color:var(--eb-text-secondary);cursor:pointer;';
+    b.addEventListener('mouseover', () => { b.style.background = 'var(--eb-bg-app)'; b.style.color = 'var(--eb-text-primary)'; });
+    b.addEventListener('mouseout',  () => { b.style.background = 'none'; b.style.color = 'var(--eb-text-secondary)'; });
+    b.addEventListener('click', fn);
+    return b;
+  };
+
+  const zoomInput = document.createElement('input');
+  zoomInput.type = 'text';
+  zoomInput.value = '100%';
+  zoomInput.title = 'Zoom level — type a percentage and press Enter';
+  zoomInput.setAttribute('aria-label', 'Zoom level');
+  zoomInput.style.cssText = 'width:46px;height:28px;padding:0;font-size:11px;text-align:center;border:none;border-radius:6px;'
+    + 'background:none;color:var(--eb-text-secondary);outline:none;';
+  zoomInput.addEventListener('focus', () => { zoomInput.style.background = 'var(--eb-bg-app)'; zoomInput.select(); });
+  zoomInput.addEventListener('blur',  () => { zoomInput.style.background = 'none'; applyZoomInput(); });
+  zoomInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter')  { e.preventDefault(); zoomInput.blur(); }
+    if (e.key === 'Escape') { e.preventDefault(); zoomInput.value = Math.round(state.zoom * 100) + '%'; zoomInput.blur(); }
+  });
+  function applyZoomInput() {
+    const pct = parseFloat(zoomInput.value.replace(/[%\s]/g, '').replace(',', '.'));
+    if (Number.isFinite(pct) && pct > 0) setZoom(pct / 100);
+    else zoomInput.value = Math.round(state.zoom * 100) + '%';
+  }
+
+  // Preset menu — opens above the control, closes on outside click.
+  const zoomMenuEl = document.createElement('div');
+  zoomMenuEl.style.cssText = 'position:absolute;bottom:calc(100% + 6px);right:0;display:none;flex-direction:column;min-width:110px;'
+    + 'background:var(--eb-bg-elevated);backdrop-filter:blur(4px);border:1px solid var(--eb-border-default);border-radius:8px;padding:4px;z-index:30;';
+  const mkMenuItem = (label, fn) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = 'padding:6px 10px;font-size:11px;text-align:left;border:none;border-radius:5px;'
+      + 'background:none;color:var(--eb-text-secondary);cursor:pointer;white-space:nowrap;';
+    b.addEventListener('mouseover', () => { b.style.background = 'var(--eb-bg-app)'; b.style.color = 'var(--eb-text-primary)'; });
+    b.addEventListener('mouseout',  () => { b.style.background = 'none'; b.style.color = 'var(--eb-text-secondary)'; });
+    b.addEventListener('click', () => { closeZoomMenu(); fn(); });
+    return b;
+  };
+  zoomMenuEl.appendChild(mkMenuItem('Fit to view', () => { state.userTransform = false; fitToView(); }));
+  for (const z of ZOOM_PRESETS) zoomMenuEl.appendChild(mkMenuItem(Math.round(z * 100) + '%', () => setZoom(z)));
+  zoomCtrlEl.appendChild(zoomMenuEl);
+
+  function closeZoomMenu() { zoomMenuEl.style.display = 'none'; }
+  function onDocClickCloseZoomMenu(e) { if (!zoomCtrlEl.contains(e.target)) closeZoomMenu(); }
+  document.addEventListener('click', onDocClickCloseZoomMenu);
+
+  zoomCtrlEl.appendChild(mkZoomBtn('−', 'Zoom out', () => setZoom(state.zoom / ZOOM_STEP)));
+  zoomCtrlEl.appendChild(zoomInput);
+  const zoomCaretBtn = mkZoomBtn('▾', 'Zoom presets', () => {
+    zoomMenuEl.style.display = zoomMenuEl.style.display === 'flex' ? 'none' : 'flex';
+  });
+  zoomCaretBtn.style.width = '20px';
+  zoomCaretBtn.style.fontSize = '10px';
+  zoomCtrlEl.appendChild(zoomCaretBtn);
+  zoomCtrlEl.appendChild(mkZoomBtn('+', 'Zoom in', () => setZoom(state.zoom * ZOOM_STEP)));
+  viewport.appendChild(zoomCtrlEl);
 
   // Toolbar (buttons wired after functions are defined below)
   const toolbarEl = document.createElement('div');
@@ -2208,24 +2279,28 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
 
   function onWheel(e) {
     e.preventDefault();
-    state.userTransform = true;
-    const delta   = e.deltaY > 0 ? 0.9 : 1.1;
-    const oldZoom = state.zoom;
-    state.zoom    = Math.max(0.1, Math.min(3.0, state.zoom * delta));
-
     const rect = viewport.getBoundingClientRect();
-    const mx   = e.clientX - rect.left;
-    const my   = e.clientY - rect.top;
+    setZoom(state.zoom * (e.deltaY > 0 ? 0.9 : 1.1), e.clientX - rect.left, e.clientY - rect.top);
+  }
 
-    state.pan.x = mx - (mx - state.pan.x) * (state.zoom / oldZoom);
-    state.pan.y = my - (my - state.pan.y) * (state.zoom / oldZoom);
-
+  // Zoom to an absolute factor, keeping the viewport point (cx, cy) fixed —
+  // defaults to the viewport centre for button / preset / typed-input zooming.
+  function setZoom(newZoom, cx, cy) {
+    state.userTransform = true;
+    const oldZoom = state.zoom;
+    state.zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, newZoom));
+    if (state.zoom !== oldZoom) {
+      const mx = cx !== undefined ? cx : viewport.clientWidth / 2;
+      const my = cy !== undefined ? cy : viewport.clientHeight / 2;
+      state.pan.x = mx - (mx - state.pan.x) * (state.zoom / oldZoom);
+      state.pan.y = my - (my - state.pan.y) * (state.zoom / oldZoom);
+    }
     applyTransform();
   }
 
   function applyTransform() {
     canvas.style.transform = `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.zoom})`;
-    zoomEl.textContent     = Math.round(state.zoom * 100) + '%';
+    if (document.activeElement !== zoomInput) zoomInput.value = Math.round(state.zoom * 100) + '%';
   }
 
   // ─── Markdown Renderer ────────────────────────────────────────────────
@@ -2439,6 +2514,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     window.removeEventListener('mousemove', onMousemove);
     window.removeEventListener('mouseup', onMouseup);
     viewport.removeEventListener('wheel', onWheel);
+    document.removeEventListener('click', onDocClickCloseZoomMenu);
     resizeObserver.disconnect();
     // Remove injected DOM
     while (viewport.firstChild) viewport.removeChild(viewport.firstChild);
@@ -2449,6 +2525,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     fit: () => { state.userTransform = false; fitToView(); },
     setSelected: (id) => { state.selectedId = id; render(); },
     setEditable: (v) => { if (state.editable !== !!v) { state.editable = !!v; render(); } },
+    setZoom,
+    getZoom: () => state.zoom,
+    zoomIn:  () => setZoom(state.zoom * ZOOM_STEP),
+    zoomOut: () => setZoom(state.zoom / ZOOM_STEP),
     cleanup,
   };
 }

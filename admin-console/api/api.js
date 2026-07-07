@@ -582,10 +582,68 @@ function maskLlmEndpoint(ep) {
   const { authTokenId, ...rest } = ep;
   return {
     ...rest,
+    authType: ep.authType === 'oauth-token' ? 'oauth-token' : 'api-key',
+    complianceAck: ep.complianceAck || null,
     hasToken: Boolean(token),
     tokenPreview: token ? llmTokenPreview(token) : '',
     tokenFingerprint: token ? llmTokenFingerprint(token) : '',
   };
+}
+
+/* ─── Subscription-OAuth support (authType: 'oauth-token') ──────────────
+ * A Model Provider can authenticate the Claude CLI with a long-lived
+ * subscription OAuth token (Claude Max / Enterprise seat, minted by
+ * `claude setup-token`) instead of an API key against a proxy. The token is
+ * stored in the same _keys/ store; the orchestrator injects it as
+ * CLAUDE_CODE_OAUTH_TOKEN and strips the ANTHROPIC_* variables for agents
+ * bound to such a provider.
+ *
+ * Compliance: Anthropic's Consumer Terms only permit consumer-subscription
+ * OAuth tokens for the subscription owner's own, single-user use — not for
+ * serving third parties. Creating/re-keying an oauth-token provider therefore
+ * requires an explicit single-user acknowledgment, recorded on the entry as
+ * complianceAck { singleUser, confirmedAt, confirmedBy }.
+ */
+
+const ANTHROPIC_DIRECT_BASE = 'https://api.anthropic.com';
+
+function oauthProbeHeaders(token) {
+  return {
+    Authorization: `Bearer ${token}`,
+    'anthropic-beta': 'oauth-2025-04-20',
+    'anthropic-version': '2023-06-01',
+  };
+}
+
+function normalizeAuthType(v) {
+  return v === 'oauth-token' ? 'oauth-token' : 'api-key';
+}
+
+function buildComplianceAck(req) {
+  return {
+    singleUser: true,
+    confirmedAt: new Date().toISOString(),
+    confirmedBy: req.user?.sub || 'admin',
+  };
+}
+
+// Claim the token captured by a completed setup-token login flow from the
+// orchestrator. One-shot: the orchestrator wipes its copy on success. Only
+// ever called server-side — the raw token never travels to the browser.
+async function claimOauthFlowToken(flowId) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  if (!/^[a-f0-9]+$/.test(String(flowId))) {
+    return { error: 'invalid oauthFlowId' };
+  }
+  try {
+    const r = await fetch(`${orchestratorUrl}/internal/llm-auth/flows/${flowId}/claim`, { method: 'POST' });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) return { error: body.error || `claim failed (HTTP ${r.status})` };
+    if (!body.token) return { error: 'login flow returned no token' };
+    return { token: body.token };
+  } catch (err) {
+    return { error: `orchestrator unreachable: ${err.message}` };
+  }
 }
 
 // Synthetic read-only provider record that mirrors the ANTHROPIC_* variables
@@ -3372,14 +3430,22 @@ app.get('/api/llm-endpoints/:id', (req, res) => {
   res.json(maskLlmEndpoint(ep));
 });
 
-app.post('/api/llm-endpoints', apiLimiter, (req, res) => {
-  const { name, baseUrl, authToken, models, defaultModelId, id: rawId, teamId } = req.body || {};
+app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
+  const { name, baseUrl, authToken, models, defaultModelId, id: rawId, teamId,
+          authType: rawAuthType, complianceAck, oauthFlowId } = req.body || {};
+  const authType = normalizeAuthType(rawAuthType);
+  const isOauth = authType === 'oauth-token';
   if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
-  if (!baseUrl || typeof baseUrl !== 'string') return res.status(400).json({ error: 'baseUrl is required' });
+  if (!isOauth && (!baseUrl || typeof baseUrl !== 'string')) return res.status(400).json({ error: 'baseUrl is required' });
+  if (isOauth && complianceAck !== true) {
+    return res.status(400).json({ error: 'Subscription auth requires the explicit single-user compliance confirmation (complianceAck).' });
+  }
   let ownerTeamId;
   try { ownerTeamId = resolveOwnerTeamId(teamId); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
-  try { new URL(baseUrl); } catch { return res.status(400).json({ error: 'baseUrl must be a valid URL' }); }
+  if (!isOauth) {
+    try { new URL(baseUrl); } catch { return res.status(400).json({ error: 'baseUrl must be a valid URL' }); }
+  }
   const modelList = Array.isArray(models) ? models : [];
   const modelErr = validateModels(modelList);
   if (modelErr) return res.status(400).json({ error: modelErr });
@@ -3404,17 +3470,31 @@ app.post('/api/llm-endpoints', apiLimiter, (req, res) => {
     if (existing.some(e => e.id === id)) id = `${id}-${Date.now().toString(36)}`;
   }
 
+  // Resolve the token: manual paste (authToken) or a completed setup-token
+  // login flow (oauthFlowId — claimed server-side from the orchestrator).
+  let tokenValue = (authToken && typeof authToken === 'string') ? authToken.trim() : '';
+  if (isOauth && !tokenValue && oauthFlowId) {
+    const claim = await claimOauthFlowToken(oauthFlowId);
+    if (claim.error) return res.status(502).json({ error: `Could not obtain token from login flow: ${claim.error}` });
+    tokenValue = claim.token;
+  }
+  if (isOauth && !tokenValue) {
+    return res.status(400).json({ error: 'Subscription auth needs a token — complete the login flow or paste a setup-token value.' });
+  }
+
   let authTokenId = '';
-  if (authToken && typeof authToken === 'string' && authToken.trim()) {
+  if (tokenValue) {
     authTokenId = `${id}-${Date.now().toString(36)}`;
-    writeLlmEndpointToken(authTokenId, authToken.trim());
+    writeLlmEndpointToken(authTokenId, tokenValue);
   }
 
   const entry = {
     id,
     name,
     teamId: ownerTeamId,
-    baseUrl,
+    baseUrl: isOauth ? '' : baseUrl,
+    authType,
+    ...(isOauth ? { complianceAck: buildComplianceAck(req) } : {}),
     authTokenId,
     models: normalizedModels,
     defaultModelId: def.defaultModelId,
@@ -3424,16 +3504,30 @@ app.post('/api/llm-endpoints', apiLimiter, (req, res) => {
   res.status(201).json(maskLlmEndpoint(entry));
 });
 
-app.put('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
+app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
   const list = listLlmEndpoints();
   const idx = list.findIndex(e => e.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'LLM endpoint not found' });
   const current = list[idx];
-  const { name, baseUrl, authToken, models, defaultModelId } = req.body || {};
+  const { name, baseUrl, authToken, models, defaultModelId,
+          authType: rawAuthType, complianceAck, oauthFlowId } = req.body || {};
 
-  if (baseUrl !== undefined) {
+  // The effective auth type after this update. Switching to subscription auth
+  // demands a fresh explicit single-user confirmation.
+  const nextAuthType = rawAuthType !== undefined
+    ? normalizeAuthType(rawAuthType)
+    : normalizeAuthType(current.authType);
+  const isOauth = nextAuthType === 'oauth-token';
+  if (isOauth && normalizeAuthType(current.authType) !== 'oauth-token' && complianceAck !== true) {
+    return res.status(400).json({ error: 'Switching to subscription auth requires the explicit single-user compliance confirmation (complianceAck).' });
+  }
+
+  if (baseUrl !== undefined && !(isOauth && baseUrl === '')) {
     if (typeof baseUrl !== 'string' || !baseUrl) return res.status(400).json({ error: 'baseUrl must be a non-empty string' });
     try { new URL(baseUrl); } catch { return res.status(400).json({ error: 'baseUrl must be a valid URL' }); }
+  }
+  if (!isOauth && normalizeAuthType(current.authType) === 'oauth-token' && !(baseUrl && typeof baseUrl === 'string')) {
+    return res.status(400).json({ error: 'Switching to api-key auth requires a baseUrl.' });
   }
   if (models !== undefined) {
     const modelErr = validateModels(models);
@@ -3441,8 +3535,17 @@ app.put('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
   }
 
   const next = { ...current };
+  next.authType = nextAuthType;
+  if (isOauth) {
+    if (normalizeAuthType(current.authType) !== 'oauth-token' || complianceAck === true) {
+      next.complianceAck = buildComplianceAck(req);
+    }
+    if (baseUrl === undefined) next.baseUrl = '';
+  } else {
+    delete next.complianceAck;
+  }
   if (name !== undefined)    next.name    = String(name);
-  if (baseUrl !== undefined) next.baseUrl = baseUrl;
+  if (baseUrl !== undefined) next.baseUrl = isOauth ? '' : baseUrl;
   if (models !== undefined)  next.models  = models.map(m => ({
     id: m.id,
     displayName: m.displayName || m.id,
@@ -3465,11 +3568,21 @@ app.put('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
   }
 
   // Token rotation: if `authToken` is a non-empty string, replace; if it's an
-  // empty string, clear; if undefined, leave the existing token alone.
-  if (authToken !== undefined) {
-    if (typeof authToken === 'string' && authToken.trim()) {
+  // empty string, clear; if undefined, leave the existing token alone. For
+  // subscription auth a completed login flow (oauthFlowId) is an alternative
+  // source — claimed server-side, never round-tripped through the browser.
+  let newTokenValue;
+  if (isOauth && oauthFlowId) {
+    const claim = await claimOauthFlowToken(oauthFlowId);
+    if (claim.error) return res.status(502).json({ error: `Could not obtain token from login flow: ${claim.error}` });
+    newTokenValue = claim.token;
+  } else if (authToken !== undefined) {
+    newTokenValue = (typeof authToken === 'string' && authToken.trim()) ? authToken.trim() : '';
+  }
+  if (newTokenValue !== undefined) {
+    if (newTokenValue) {
       const newId = current.authTokenId || `${current.id}-${Date.now().toString(36)}`;
-      writeLlmEndpointToken(newId, authToken.trim());
+      writeLlmEndpointToken(newId, newTokenValue);
       if (newId !== current.authTokenId && current.authTokenId) {
         deleteLlmEndpointToken(current.authTokenId);
       }
@@ -3478,6 +3591,11 @@ app.put('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
       if (current.authTokenId) deleteLlmEndpointToken(current.authTokenId);
       next.authTokenId = '';
     }
+  }
+  // Switching to subscription auth must not leave the endpoint tokenless —
+  // the CLI has nothing to authenticate with then.
+  if (isOauth && !next.authTokenId) {
+    return res.status(400).json({ error: 'Subscription auth needs a token — complete the login flow or paste a setup-token value.' });
   }
 
   next.updatedAt = new Date().toISOString();
@@ -3528,10 +3646,24 @@ app.delete('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
 
 // Shared between the stored-endpoint routes (use the persisted token) and the
 // stateless probe routes (use the token from the request body, so the form can
-// test a draft endpoint before saving).
-async function probeLlmEndpointTest(baseUrl, token) {
-  const url = buildModelsUrl(baseUrl);
-  const headers = token ? { Authorization: `Bearer ${token}`, 'x-api-key': token } : {};
+// test a draft endpoint before saving). Subscription-OAuth endpoints always
+// probe the real Anthropic API (there is no proxy base URL) with the Bearer +
+// oauth beta header the CLI itself uses.
+function llmProbeTarget(baseUrl, token, authType) {
+  if (normalizeAuthType(authType) === 'oauth-token') {
+    return {
+      url: buildModelsUrl(ANTHROPIC_DIRECT_BASE),
+      headers: token ? oauthProbeHeaders(token) : {},
+    };
+  }
+  return {
+    url: buildModelsUrl(baseUrl),
+    headers: token ? { Authorization: `Bearer ${token}`, 'x-api-key': token } : {},
+  };
+}
+
+async function probeLlmEndpointTest(baseUrl, token, authType) {
+  const { url, headers } = llmProbeTarget(baseUrl, token, authType);
   const result = await httpGetJson(url, headers);
   const ok = result.status >= 200 && result.status < 300;
   return {
@@ -3545,9 +3677,8 @@ async function probeLlmEndpointTest(baseUrl, token) {
   };
 }
 
-async function probeLlmEndpointDiscover(baseUrl, token) {
-  const url = buildModelsUrl(baseUrl);
-  const headers = token ? { Authorization: `Bearer ${token}`, 'x-api-key': token } : {};
+async function probeLlmEndpointDiscover(baseUrl, token, authType) {
+  const { url, headers } = llmProbeTarget(baseUrl, token, authType);
   const result = await httpGetJson(url, headers);
   if (result.error || result.status < 200 || result.status >= 300) {
     return { error: result.error || `HTTP ${result.status}`, url, status: result.status };
@@ -3573,28 +3704,35 @@ async function probeLlmEndpointDiscover(baseUrl, token) {
 }
 
 function validateProbeBody(body) {
+  const authType = normalizeAuthType(body?.authType);
   const baseUrl = body?.baseUrl;
-  if (!baseUrl || typeof baseUrl !== 'string') return { error: 'baseUrl is required' };
-  try { new URL(baseUrl); } catch { return { error: 'baseUrl must be a valid URL' }; }
+  if (authType !== 'oauth-token') {
+    if (!baseUrl || typeof baseUrl !== 'string') return { error: 'baseUrl is required' };
+    try { new URL(baseUrl); } catch { return { error: 'baseUrl must be a valid URL' }; }
+  }
   const authToken = body?.authToken;
   if (authToken !== undefined && authToken !== null && typeof authToken !== 'string') {
     return { error: 'authToken must be a string' };
   }
-  return { baseUrl, token: (typeof authToken === 'string' && authToken.trim()) ? authToken.trim() : '' };
+  return {
+    authType,
+    baseUrl: authType === 'oauth-token' ? '' : baseUrl,
+    token: (typeof authToken === 'string' && authToken.trim()) ? authToken.trim() : '',
+  };
 }
 
 app.post('/api/llm-endpoints/:id/test', heavyLimiter, async (req, res) => {
   const ep = listLlmEndpoints().find(e => e.id === req.params.id);
   if (!ep) return res.status(404).json({ error: 'LLM endpoint not found' });
   const token = readLlmEndpointToken(ep.authTokenId);
-  res.json(await probeLlmEndpointTest(ep.baseUrl, token));
+  res.json(await probeLlmEndpointTest(ep.baseUrl, token, ep.authType));
 });
 
 app.post('/api/llm-endpoints/:id/discover-models', heavyLimiter, async (req, res) => {
   const ep = listLlmEndpoints().find(e => e.id === req.params.id);
   if (!ep) return res.status(404).json({ error: 'LLM endpoint not found' });
   const token = readLlmEndpointToken(ep.authTokenId);
-  const result = await probeLlmEndpointDiscover(ep.baseUrl, token);
+  const result = await probeLlmEndpointDiscover(ep.baseUrl, token, ep.authType);
   if (result.error) return res.status(502).json(result);
   res.json(result);
 });
@@ -3606,15 +3744,60 @@ app.post('/api/llm-endpoints/:id/discover-models', heavyLimiter, async (req, res
 app.post('/api/llm-endpoints/probe-test', heavyLimiter, async (req, res) => {
   const parsed = validateProbeBody(req.body);
   if (parsed.error) return res.status(400).json({ error: parsed.error });
-  res.json(await probeLlmEndpointTest(parsed.baseUrl, parsed.token));
+  res.json(await probeLlmEndpointTest(parsed.baseUrl, parsed.token, parsed.authType));
 });
 
 app.post('/api/llm-endpoints/probe-discover-models', heavyLimiter, async (req, res) => {
   const parsed = validateProbeBody(req.body);
   if (parsed.error) return res.status(400).json({ error: parsed.error });
-  const result = await probeLlmEndpointDiscover(parsed.baseUrl, parsed.token);
+  const result = await probeLlmEndpointDiscover(parsed.baseUrl, parsed.token, parsed.authType);
   if (result.error) return res.status(502).json(result);
   res.json(result);
+});
+
+/* ─── Subscription-OAuth login flows (proxy to the orchestrator) ─────────
+ * The orchestrator runs `claude setup-token` under a PTY and exposes the flow
+ * state on its internal API. These proxies surface start/status/code/cancel
+ * to the Model Providers page. The one-shot token claim is deliberately NOT
+ * proxied — it happens server-side inside POST/PUT /api/llm-endpoints, so the
+ * raw token never reaches the browser.
+ */
+
+const LLM_AUTH_FLOW_ID_RE = /^[a-f0-9]+$/;
+
+async function proxyLlmAuthFlow(res, method, subPath, body) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const r = await fetch(`${orchestratorUrl}/internal/llm-auth/flows${subPath}`, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const payload = await r.json().catch(() => ({}));
+    res.status(r.status).json(payload);
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+}
+
+app.post('/api/llm-auth/flows', heavyLimiter, (req, res) => {
+  proxyLlmAuthFlow(res, 'POST', '', null);
+});
+
+app.get('/api/llm-auth/flows/:id', (req, res) => {
+  if (!LLM_AUTH_FLOW_ID_RE.test(req.params.id)) return res.status(400).json({ error: 'invalid flow id' });
+  proxyLlmAuthFlow(res, 'GET', `/${req.params.id}`, null);
+});
+
+app.post('/api/llm-auth/flows/:id/code', apiLimiter, (req, res) => {
+  if (!LLM_AUTH_FLOW_ID_RE.test(req.params.id)) return res.status(400).json({ error: 'invalid flow id' });
+  const code = typeof req.body?.code === 'string' ? req.body.code : '';
+  proxyLlmAuthFlow(res, 'POST', `/${req.params.id}/code`, { code });
+});
+
+app.delete('/api/llm-auth/flows/:id', apiLimiter, (req, res) => {
+  if (!LLM_AUTH_FLOW_ID_RE.test(req.params.id)) return res.status(400).json({ error: 'invalid flow id' });
+  proxyLlmAuthFlow(res, 'DELETE', `/${req.params.id}`, null);
 });
 
 /* ─── Agent-prompt generation (LLM-assisted authoring) ──────────────────
@@ -3631,7 +3814,11 @@ app.post('/api/llm-endpoints/probe-discover-models', heavyLimiter, async (req, r
 // at low latency for this short task), then its configured default, then the
 // first model. Returns { baseUrl, token, model } or { error }.
 function resolveGenerationTarget(preferredEndpointId) {
-  const endpoints = listLlmEndpoints();
+  // Subscription-OAuth providers are excluded here: their token authenticates
+  // the Claude *CLI* under the subscriber's seat, not arbitrary server-side
+  // /v1/messages calls — routing one-shot generation through it would be both
+  // unreliable and outside the subscription's permitted use.
+  const endpoints = listLlmEndpoints().filter(e => normalizeAuthType(e.authType) !== 'oauth-token');
   const ep = (preferredEndpointId && endpoints.find(e => e.id === preferredEndpointId))
     || endpoints[0]
     || null;

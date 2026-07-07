@@ -12,6 +12,7 @@ const { findEnclosingGitRepo } = require("./git-workspace");
 const { bpsToBriefingsMap } = require("./briefings-graph");
 const { createTeamsStore, DEFAULT_TEAM_ID } = require("./teams-store");
 const { makeSkillSourceResolver } = require("./skill-source");
+const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 
 // ============================================================
 // Config
@@ -95,6 +96,7 @@ function loadLlmBindingForEnv(env) {
     }
   }
   return {
+    authType: ep.authType === "oauth-token" ? "oauth-token" : "api-key",
     baseUrl: ep.baseUrl || "",
     token,
     defaultModelId: env.defaultModelId || ep.defaultModelId || null,
@@ -110,6 +112,10 @@ function randomHex(bytes) {
   return crypto.randomBytes(bytes).toString("hex");
 }
 const agentProcesses = new Map(); // id → ChildProcess
+
+// Subscription-OAuth login flows (`claude setup-token` under a PTY) — driven
+// by the Model Providers page in the admin console. See llm-auth-flow.js.
+const llmAuthFlows = createLlmAuthFlowManager();
 
 // ============================================================
 // Process lifecycle (each agent runs as its own Podman container)
@@ -141,10 +147,23 @@ function startAgentProcess(config) {
   const env = environmentId ? loadEnvironment(environmentId) : null;
   const llm = loadLlmBindingForEnv(env);
   if (llm) {
-    if (llm.baseUrl) childEnv.ANTHROPIC_BASE_URL = llm.baseUrl;
-    if (llm.token)   childEnv.ANTHROPIC_AUTH_TOKEN = llm.token;
+    if (llm.authType === "oauth-token") {
+      // Subscription auth (Claude Max / Enterprise seat): the Claude CLI reads
+      // CLAUDE_CODE_OAUTH_TOKEN — but only when no API-key credential wins the
+      // precedence race. The orchestrator's own environment carries the
+      // proxy's ANTHROPIC_* values from `.env` (inherited via process.env
+      // above), so strip them explicitly; the token targets the default
+      // Anthropic endpoint, never a proxy base URL.
+      if (llm.token) childEnv.CLAUDE_CODE_OAUTH_TOKEN = llm.token;
+      delete childEnv.ANTHROPIC_BASE_URL;
+      delete childEnv.ANTHROPIC_AUTH_TOKEN;
+      delete childEnv.ANTHROPIC_API_KEY;
+    } else {
+      if (llm.baseUrl) childEnv.ANTHROPIC_BASE_URL = llm.baseUrl;
+      if (llm.token)   childEnv.ANTHROPIC_AUTH_TOKEN = llm.token;
+    }
     if (llm.defaultModelId) childEnv.AGENT_DEFAULT_MODEL = llm.defaultModelId;
-    console.log(`[Orchestrator] Agent ${id} → LLM endpoint=${env.llmEndpointId}, model=${llm.defaultModelId || '(endpoint default)'}`);
+    console.log(`[Orchestrator] Agent ${id} → LLM endpoint=${env.llmEndpointId} (${llm.authType}), model=${llm.defaultModelId || '(endpoint default)'}`);
   } else if (env?.llmEndpointId) {
     console.log(`[Orchestrator] Agent ${id} → LLM endpoint binding missing for env=${env.id}, using .env fallback`);
   }
@@ -3712,6 +3731,46 @@ async function main() {
         if (!res.headersSent) sendJson(res, 500, { error: err.message });
       });
       return;
+    }
+
+    // Subscription-OAuth login flows for Model Providers. Proxied by the
+    // admin console as /api/llm-auth/flows/*. The raw token is obtainable
+    // only via the one-shot POST …/claim, which the admin console calls
+    // server-side while persisting the endpoint — status responses never
+    // carry it.
+    if (req.method === 'POST' && req.url === '/internal/llm-auth/flows') {
+      llmAuthFlows.start()
+        .then(view => sendJson(res, 201, view))
+        .catch(err => sendJson(res, 500, { error: err.message }));
+      return;
+    }
+    const llmAuthFlowMatch = req.url.match(/^\/internal\/llm-auth\/flows\/([a-f0-9]+)(?:\/(code|claim))?$/);
+    if (llmAuthFlowMatch) {
+      const [, flowId, action] = llmAuthFlowMatch;
+      if (!action && req.method === 'GET') {
+        const view = llmAuthFlows.get(flowId);
+        if (!view) return sendJson(res, 404, { error: 'flow not found' });
+        return sendJson(res, 200, view);
+      }
+      if (!action && req.method === 'DELETE') {
+        const r = llmAuthFlows.cancel(flowId);
+        if (r.error) return sendJson(res, r.status || 400, { error: r.error });
+        return sendJson(res, 200, { ok: true });
+      }
+      if (action === 'code' && req.method === 'POST') {
+        readBody(req).then(body => {
+          const r = llmAuthFlows.submitCode(flowId, body.code);
+          if (r.error) return sendJson(res, r.status || 400, { error: r.error });
+          sendJson(res, 200, r.view);
+        }).catch(err => sendJson(res, 400, { error: err.message }));
+        return;
+      }
+      if (action === 'claim' && req.method === 'POST') {
+        const r = llmAuthFlows.claimToken(flowId);
+        if (r.error) return sendJson(res, r.status || 400, { error: r.error });
+        return sendJson(res, 200, { token: r.token });
+      }
+      return sendJson(res, 405, { error: 'method not allowed' });
     }
 
     // Read-only access to baked-in helper scripts referenced by agent

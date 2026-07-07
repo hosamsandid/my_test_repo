@@ -316,13 +316,19 @@ def run_agent(system_prompt: str, user_prompt: str) -> int:
         "Bash(*) Write(*) Edit(*) Read(*) Glob(*) Grep(*) Agent(*)",
     ]
 
-    # Pass API key check (supports both direct API key and Azure Foundry)
+    # Credential check — any of the auth mechanisms the Claude CLI understands:
+    # direct API key, proxy bearer token (ANTHROPIC_AUTH_TOKEN), subscription
+    # OAuth token (CLAUDE_CODE_OAUTH_TOKEN, injected by the orchestrator for
+    # oauth-token Model Providers), or Azure Foundry.
     has_key = (
         os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
         or os.environ.get("ANTHROPIC_FOUNDRY_API_KEY")
     )
     if not has_key:
-        print("ERROR: No API key set. Need ANTHROPIC_API_KEY or ANTHROPIC_FOUNDRY_API_KEY.",
+        print("ERROR: No credential set. Need ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, "
+              "CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_FOUNDRY_API_KEY.",
               file=sys.stderr)
         sys.exit(1)
 

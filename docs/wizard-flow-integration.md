@@ -1,4 +1,4 @@
-# Team wizard × Flow Designer — process-first team creation (#419–#424)
+# Team wizard × Flow Designer — process-first team creation (#419–#424, #428)
 
 The Team-Setup wizard and the Flow Designer used to be two separate worlds that
 both fed `POST /api/teams`: the wizard picked *flat role lists* from the
@@ -93,13 +93,22 @@ Wiring rules:
    combinations in `flow-weaver.test.js`. The lints are thereby not just
    diagnostics but the weaver's acceptance criterion.
 
-### 4. Wizard Process step (#422)
+### 4. Wizard Process step (#422, moved to the front by #428)
 
-The wizard's step 4 (create mode) is the **Process** step
-(`admin-console/src/pages/team-setup/StepProcess.jsx`):
+The wizard's **step 1** (create mode) is the **Process** step
+(`admin-console/src/pages/team-setup/StepProcess.jsx`). The process choice is
+the entry decision — *what kind of team am I building?* — and the remaining
+steps qualify it: **Process → Working Environment → Team → Knowledge
+(optional) → Review** (#428; before that, Process was step 4 and the
+blank-canvas exit threw away the configuration entered in steps 1–3):
 
 - Three entry cards: *Use a template* / *Compose a process* / *Start blank in
-  the canvas* (creates an empty draft, jumps to `/flows?proc=draft:<id>`).
+  the canvas* (creates an empty draft, jumps to `/flows?proc=draft:<id>` —
+  loss-free, since as step 1 nothing has been entered yet).
+- **Name binding:** the team name isn't known while weaving (it is entered two
+  steps later), so the woven bundle carries a placeholder name; the wizard
+  overwrites `bundle.name` with the team name at submit time, so the
+  materialised bundle name always equals the team name.
 - Composer: stage columns (add/remove/reorder), Scout/Author/Companion slot
   dropdowns filtered by `patternRole`, additional intake/standalone roles,
   per-stage human-gate toggle. Every change re-weaves (debounced) via

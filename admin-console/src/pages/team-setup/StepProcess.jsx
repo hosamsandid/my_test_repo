@@ -572,6 +572,8 @@ export default function StepProcess({ form, setForm, templates, error }) {
       setWeaving(true);
       setWeaveError(null);
       try {
+        // With Process as step 1 the team name is usually not set yet — the
+        // wizard overwrites the bundle name with the team name at submit (#428).
         const req = composerToWeaveRequest(form.teamName?.trim() || 'Team process', stages);
         const { bundle, notes } = await apiCall('POST', '/api/process/weave', req);
         setBundle(bundle, notes, 'compose');

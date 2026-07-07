@@ -441,14 +441,24 @@ function CustomRoleDialog({ stageName, onAdd, onClose }) {
 
 // ─── Entry cards ────────────────────────────────────────────────────────────
 
-function EntryCard({ icon: Icon, title, copy, onClick }) {
+function EntryCard({ icon: Icon, title, copy, onClick, disabled, badge }) {
   return (
-    <button type="button" onClick={onClick} style={{
-      ...cardStyle, textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit',
+    <button type="button" onClick={disabled ? undefined : onClick} disabled={disabled} style={{
+      ...cardStyle, textAlign: 'left', cursor: disabled ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
       display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+      opacity: disabled ? 0.55 : 1,
     }}>
-      <Icon size={20} style={{ color: 'var(--eb-accent-primary)' }} />
-      <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 600, color: 'var(--eb-text-primary)' }}>{title}</div>
+      <Icon size={20} style={{ color: disabled ? 'var(--eb-text-muted)' : 'var(--eb-accent-primary)' }} />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 'var(--eb-text-md)', fontWeight: 600, color: 'var(--eb-text-primary)' }}>{title}</span>
+        {badge && (
+          <span style={{
+            fontSize: 'var(--eb-text-xs)', fontWeight: 600, color: 'var(--eb-text-muted)',
+            background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-sm)', padding: '1px 6px', textTransform: 'uppercase', letterSpacing: '0.04em',
+          }}>{badge}</span>
+        )}
+      </div>
       <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>{copy}</div>
     </button>
   );
@@ -578,9 +588,8 @@ export default function StepProcess({ form, setForm, templates, error }) {
           <EntryCard icon={LayoutTemplate} title="Use a template"
             copy="Start from a curated process (Core SDLC, Extended SDLC, …) or one of your saved drafts. One click, ready to review."
             onClick={() => setForm(f => ({ ...f, processMode: 'template' }))} />
-          <EntryCard icon={Blocks} title="Compose a process"
-            copy="Define stages and pick 1–3 roles per stage from the catalog. The Flow-Weaver wires hand-offs, human gates and escalation loops for you."
-            onClick={() => setForm(f => ({ ...f, processMode: 'compose', composerStages: f.composerStages?.length ? f.composerStages : defaultComposerStages() }))} />
+          <EntryCard icon={Blocks} title="Compose a process" disabled badge="Coming soon"
+            copy="Define stages and pick 1–3 roles per stage from the catalog. The Flow-Weaver wires hand-offs, human gates and escalation loops for you." />
           <EntryCard icon={PencilRuler} title="Start blank in the canvas"
             copy="Open an empty draft in the Flows editor and design the process free-form. Materialise it into a team later."
             onClick={startBlank} />

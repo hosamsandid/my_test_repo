@@ -67,10 +67,15 @@ test('extractAuthUrl falls back to the longest candidate when none is complete',
   assert.equal(extractAuthUrl(out), longer);
 });
 
-test('extractToken finds a long-lived subscription token', () => {
-  const tok = 'sk-ant-oat01-' + 'A'.repeat(40) + '-XyZ_12';
-  const out = `Success!\nYour token:\n${tok}\nStore it safely.`;
+test('extractToken finds a long-lived subscription token (sk-ant-at01-)', () => {
+  const tok = 'sk-ant-at01-' + 'E-rHz0RDdXgC0h0orCgp0zwNx3xK2BRtkg7Vu' + '-XyZ_12';
+  const out = `Long-lived authentication token created successfully!\nYour OAuth token (valid for 1 year):\n${tok}\nStore this token securely.`;
   assert.equal(extractToken(out), tok);
+});
+
+test('extractToken also matches the legacy sk-ant-oat01- prefix', () => {
+  const tok = 'sk-ant-oat01-' + 'A'.repeat(40) + '-XyZ_12';
+  assert.equal(extractToken(`Your token:\n${tok}\n`), tok);
 });
 
 test('extractToken does not match ordinary api keys', () => {

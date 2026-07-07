@@ -77,10 +77,14 @@ function extractAuthUrl(cleanText) {
   return all.reduce((a, b) => (b.length > a.length ? b : a));
 }
 
-// Long-lived subscription token as printed by `claude setup-token`
-// (sk-ant-oat01-…). Kept permissive on the version segment.
+// Long-lived subscription token as printed by `claude setup-token`. The CLI
+// prints it prefixed `sk-ant-at01-` (older builds: `sk-ant-oat01-`) — both are
+// matched; `sk-ant-api…` keys are deliberately excluded so a stray API key in
+// the environment can't be mistaken for the freshly minted token.
+const OAUTH_TOKEN_RE = /sk-ant-o?at[0-9]{2}-[A-Za-z0-9_-]{20,}/;
+
 function extractToken(cleanText) {
-  const m = cleanText.match(/sk-ant-oat[0-9a-z]{0,4}-[A-Za-z0-9_-]{20,}/);
+  const m = cleanText.match(OAUTH_TOKEN_RE);
   return m ? m[0] : null;
 }
 
@@ -117,7 +121,7 @@ function createLlmAuthFlowManager({ workDirRoot = '/tmp/llm-auth-flows', log = c
   // can tell an unexpected prompt from a network problem without shell access.
   function redactedTail(flow, n = 600) {
     return stripAnsi(flow.output)
-      .replace(/sk-ant-oat[0-9a-z]{0,4}-[A-Za-z0-9_-]{10,}/g, '<TOKEN>')
+      .replace(/sk-ant-o?at[0-9]{2}-[A-Za-z0-9_-]{10,}/g, '<TOKEN>')
       .replace(/\n{3,}/g, '\n\n')
       .slice(-n);
   }
@@ -198,6 +202,22 @@ function createLlmAuthFlowManager({ workDirRoot = '/tmp/llm-auth-flows', log = c
         }
       }, CLAIM_TTL_MS);
       if (flow.claimTimer.unref) flow.claimTimer.unref();
+    }
+  }
+
+  // Submit the just-pasted code by sending lone Return keystrokes as separate
+  // writes, on a short cadence, until the CLI leaves the paste prompt (token
+  // issued, or an error flips the flow back to 'awaiting-code'). A single '\r'
+  // was observed to be enough once the paste settled; the extra nudges cover
+  // slower processing. Each is guarded on still-exchanging, so a nudge can't
+  // leak a stray newline into a later prompt.
+  function scheduleSubmitReturns(flow) {
+    for (const delay of [350, 1000, 2200]) {
+      const t = setTimeout(() => {
+        if (flow.state !== 'exchanging' || !flow.child) return;
+        try { flow.child.stdin.write('\r'); } catch { /* best effort */ }
+      }, delay);
+      if (t.unref) t.unref();
     }
   }
 
@@ -324,11 +344,12 @@ function createLlmAuthFlowManager({ workDirRoot = '/tmp/llm-auth-flows', log = c
     const trimmed = String(code || '').trim();
     if (!trimmed) return { error: 'code is required', status: 400 };
     try {
-      // The CLI's prompt runs in raw terminal mode, where the Return key is a
-      // carriage return — a plain '\n' only types the code without submitting
-      // it (verified against the real CLI). Cooked mode maps CR→NL via ICRNL,
-      // so '\r' submits correctly in both modes.
-      flow.child.stdin.write(trimmed + '\r');
+      // Deliver the code WITHOUT a trailing Return: the CLI's Ink paste prompt
+      // absorbs a carriage return that arrives in the same write as the pasted
+      // text, so it never submits. Submitting reliably needs a *separate*
+      // Return keystroke once the paste has been processed (verified against
+      // the real CLI — the token only appeared after a standalone '\r').
+      flow.child.stdin.write(trimmed);
     } catch (err) {
       return { error: `could not deliver code to the login process: ${err.message}`, status: 500 };
     }
@@ -337,6 +358,7 @@ function createLlmAuthFlowManager({ workDirRoot = '/tmp/llm-auth-flows', log = c
     // Baseline for the recoverable-failure detector: only error lines printed
     // *after* this submission count as this submission's failure.
     flow.oauthErrorCount = extractOauthErrors(stripAnsi(flow.output)).length;
+    scheduleSubmitReturns(flow);
     log.log(`[LlmAuth] flow ${flow.id}: code submitted — exchanging`);
     return { ok: true, view: publicView(flow) };
   }

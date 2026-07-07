@@ -5,9 +5,9 @@ import {
   Compass, Code, Search, Shield, FlaskConical, Book, Tag, User,
   Loader2, Circle, XCircle, Lock,
   Network, ClipboardCheck, Gauge, Rocket, MessageCircle, TrendingUp,
-  Server, KeyRound, Terminal, FileCode2, Workflow,
+  Layers, Terminal, FileCode2, Workflow,
 } from 'lucide-react';
-import { useApi, apiCall } from '../hooks/useApi';
+import { useApi } from '../hooks/useApi';
 import ScriptViewerPanel from '../components/ScriptViewerPanel';
 
 function scriptNameFromPath(scriptPath) {
@@ -118,7 +118,7 @@ function ErrorBox({ message }) {
   );
 }
 
-const STEPS = ['Team', 'Working Environment', 'Knowledge', 'Members', 'Review'];
+const STEPS = ['Working Environment', 'Team', 'Knowledge', 'Members', 'Review'];
 
 function StepIndicator({ current, onStepClick }) {
   return (
@@ -175,6 +175,29 @@ function slugify(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
 }
 
+// Suggest a team name + id derived from a Working Environment's name, made
+// unique against every existing agent id (the teamId doubles as the team
+// agent's id) and every existing team display name. "Acme" taken → "Acme 2" /
+// "acme-2", and so on. The user can still edit both fields afterwards.
+function suggestTeamNaming(envName, agents) {
+  const list = Array.isArray(agents) ? agents : [];
+  const takenIds = new Set(list.map(a => a.id));
+  const takenNames = new Set(
+    list.filter(a => a.role === 'team').map(a => String(a.displayName || '').trim().toLowerCase()),
+  );
+  const baseName = String(envName || '').trim() || 'Team';
+  const baseSlug = slugify(baseName) || 'team';
+  const free = (name, slug) => !!slug && !takenIds.has(slug) && !takenNames.has(name.toLowerCase());
+  if (free(baseName, baseSlug)) return { teamName: baseName, teamId: baseSlug };
+  for (let n = 2; n < 100; n++) {
+    const name = `${baseName} ${n}`;
+    const suffix = `-${n}`;
+    const slug = baseSlug.slice(0, 40 - suffix.length) + suffix;
+    if (free(name, slug)) return { teamName: name, teamId: slug };
+  }
+  return { teamName: baseName, teamId: baseSlug };
+}
+
 function ExtendReadOnlyBanner({ children }) {
   return (
     <div style={{
@@ -203,13 +226,15 @@ function StepProjectReadOnly({ form }) {
   );
 }
 
-function StepEnvironmentReadOnly({ form, sshKeys, githubTokens }) {
+function StepEnvironmentReadOnly({ form, environments, sshKeys, githubTokens }) {
+  const env = (environments || []).find(e => e.id === form.environmentId);
   const sshKey = (sshKeys || []).find(k => k.id === form.sshKeyId);
   const ghToken = (githubTokens || []).find(t => t.id === form.githubTokenId);
   return (
     <Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
         <ExtendReadOnlyBanner>These settings belong to the existing team and cannot be changed here.</ExtendReadOnlyBanner>
+        <ReviewRow label="Working Environment" value={env ? `${env.name} (${env.id})` : (form.environmentId || '—')} />
         <ReviewRow label="SSH Deploy Key" value={sshKey ? sshKey.name : '—'} />
         <ReviewRow label="GitHub Token" value={ghToken ? ghToken.name : '—'} />
         <ReviewRow label="Repository" value={form.repoUrl ? `${form.repoUrl} @ ${form.branch || 'main'}` : '—'} />
@@ -248,11 +273,165 @@ function StepKnowledgeReadOnly({ form, mcpServers, mcpCredentials }) {
   );
 }
 
-// ─── Step 1 — Team basics (name + id only) ────────────────────────────
-// The repo URL and branch moved to Step 2 because they can only be
-// verified once the credentials are picked — entering them up-front meant
-// the user committed to a URL the wizard couldn't validate yet.
-function StepProject({ form, setForm, error }) {
+// ─── Step 2 — Team basics (name + id only) ────────────────────────────
+// Comes after the Working-Environment pick so both fields can be pre-filled
+// from the environment's name (with a uniqueness-resolving suggestion). The
+// user may change them, but doesn't have to.
+function StepProject({ form, setForm, environments, takenAgentIds, error }) {
+  const env = (environments || []).find(e => e.id === form.environmentId);
+  return (
+    <Card>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <div>
+          <label htmlFor="ts-team-name" style={labelStyle}>Team Name</label>
+          <input
+            id="ts-team-name"
+            type="text"
+            placeholder="e.g. Acme Demo"
+            value={form.teamName}
+            onChange={e => {
+              const teamName = e.target.value;
+              setForm(f => ({
+                ...f,
+                teamName,
+                teamNameManuallyEdited: true,
+                // Auto-derive slug while user hasn't manually edited it.
+                teamId: f.teamIdManuallyEdited ? f.teamId : slugify(teamName),
+              }));
+            }}
+            style={inputStyle}
+            autoFocus
+          />
+          <div style={hintStyle}>
+            {env && !form.teamNameManuallyEdited
+              ? <>Suggested from the working environment <strong>{env.name}</strong> — change it if you like.</>
+              : <>Used as the prefix for all created resources and as the team identifier.</>}
+          </div>
+        </div>
+
+        <div>
+          <label htmlFor="ts-team-id" style={labelStyle}>Team ID (slug)</label>
+          <input
+            id="ts-team-id"
+            type="text"
+            placeholder="acme-demo"
+            value={form.teamId}
+            onChange={e => setForm(f => ({ ...f, teamId: slugify(e.target.value), teamIdManuallyEdited: true }))}
+            style={inputStyle}
+          />
+          <div style={hintStyle}>Lowercase, dashes only. 1–40 chars. Resources will be named <code>{form.teamId || '<slug>'}-developer</code>, etc.</div>
+          {takenAgentIds?.has(form.teamId) && (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', marginTop: 'var(--eb-space-2)', display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)' }}>
+              <AlertCircle size={12} /> This ID is already used by an existing agent or team — pick a different one.
+            </div>
+          )}
+        </div>
+
+        <ErrorBox message={error} />
+      </div>
+    </Card>
+  );
+}
+
+// ─── Step 1 — Working Environment (pick an existing one) ─────────────
+// The wizard no longer assembles an environment from raw credentials + repo
+// URL — a Working Environment already bundles repository, credentials,
+// skills and knowledge sources. The team is materialised onto the selected
+// environment (POST /api/teams `environmentId`), which resolves everything
+// else server-side. Environments without a repository can't host a team,
+// so their cards are shown but not selectable.
+function envRepositories(env) {
+  if (Array.isArray(env?.repositories)) return env.repositories.filter(r => r?.url);
+  if (env?.repository?.url) return [env.repository];
+  return [];
+}
+
+function EnvironmentCard({ env, selected, onSelect }) {
+  const repos = envRepositories(env);
+  const skills = Array.isArray(env.skills) ? env.skills : [];
+  const selectable = repos.length > 0;
+  return (
+    <div
+      onClick={selectable ? onSelect : undefined}
+      role="radio"
+      aria-checked={selected}
+      aria-disabled={!selectable}
+      tabIndex={selectable ? 0 : -1}
+      onKeyDown={selectable ? (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); onSelect(); } } : undefined}
+      style={{
+        textAlign: 'left',
+        background: selected ? 'var(--eb-bg-surface)' : 'var(--eb-bg-app)',
+        border: `2px solid ${selected ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+        borderRadius: 'var(--eb-radius-lg)',
+        padding: 'var(--eb-space-4)',
+        cursor: selectable ? 'pointer' : 'not-allowed',
+        opacity: selectable ? 1 : 0.55,
+        fontFamily: 'inherit',
+        color: 'var(--eb-text-primary)',
+        display: 'flex',
+        gap: 'var(--eb-space-3)',
+        alignItems: 'flex-start',
+        transition: 'border-color 0.1s',
+        userSelect: 'none',
+      }}
+    >
+      <div style={{
+        flexShrink: 0, width: 36, height: 36,
+        borderRadius: 'var(--eb-radius-md)',
+        background: selected ? 'var(--eb-accent-primary)' : 'var(--eb-bg-elevated)',
+        color: selected ? 'var(--eb-text-inverted)' : 'var(--eb-text-primary)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}>
+        <Layers size={18} />
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 'var(--eb-space-2)' }}>
+          <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)' }}>
+            {env.name}
+          </div>
+          <code style={{ fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)', flexShrink: 0 }}>
+            {env.id}
+          </code>
+        </div>
+        {env.description && (
+          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 'var(--eb-space-1)', lineHeight: 1.4 }}>
+            {env.description}
+          </div>
+        )}
+        <div style={{ marginTop: 'var(--eb-space-2)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+          {repos.length > 0 ? repos.map(r => (
+            <div key={r.url} style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', minWidth: 0 }}>
+              <Github size={12} style={{ flexShrink: 0, color: 'var(--eb-text-muted)' }} />
+              <span style={{ fontFamily: 'var(--eb-font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {repoSlug(r.url) || r.url}{r.branch ? ` @ ${r.branch}` : ''}
+              </span>
+            </div>
+          )) : (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', color: 'var(--eb-status-warning)' }}>
+              <AlertCircle size={12} style={{ flexShrink: 0 }} />
+              No repository configured — a team needs one. Add it under Working Environments.
+            </div>
+          )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+            <Tag size={12} style={{ flexShrink: 0, color: 'var(--eb-text-muted)' }} />
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {skills.length > 0 ? skills.join(', ') : 'No skills'}
+            </span>
+          </div>
+          {repos.length > 0 && !env.githubTokenId && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', color: 'var(--eb-status-warning)' }}>
+              <AlertCircle size={12} style={{ flexShrink: 0 }} />
+              No GitHub token — roles reacting to issues / PRs won&apos;t trigger.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StepEnvironmentSelect({ form, environments, envsLoading, refetchEnvs, onSelect, error }) {
+  const envs = environments || [];
   return (
     <Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -268,336 +447,65 @@ function StepProject({ form, setForm, error }) {
         }}>
           <p style={{ margin: 0 }}>
             Sets up a coordinated team of agents — Business Analyst, Developer, Code Reviewer, and more — all
-            wired to your GitHub repository and ready to react to issues and pull requests automatically.
+            wired to one GitHub repository and ready to react to issues and pull requests automatically.
           </p>
           <p style={{ margin: 0, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-            The wizard creates agents with the <strong style={{ color: 'var(--eb-text-secondary)' }}>team-member</strong> role.
-            The <strong style={{ color: 'var(--eb-text-secondary)' }}>Team</strong> role on the Agents page is a
-            configuration template that team-members inherit from — you don&apos;t need to create it manually.
+            Pick the <strong style={{ color: 'var(--eb-text-secondary)' }}>Working Environment</strong> the team
+            works in — it already bundles the repository, credentials, skills and knowledge sources.
           </p>
         </div>
-        <div>
-          <label htmlFor="ts-team-name" style={labelStyle}>Team Name</label>
-          <input
-            id="ts-team-name"
-            type="text"
-            placeholder="e.g. Acme Demo"
-            value={form.teamName}
-            onChange={e => {
-              const teamName = e.target.value;
-              setForm(f => ({
-                ...f,
-                teamName,
-                // Auto-derive slug while user hasn't manually edited it.
-                teamId: f.teamIdManuallyEdited ? f.teamId : slugify(teamName),
-              }));
-            }}
-            style={inputStyle}
-            autoFocus
-          />
-          <div style={hintStyle}>Used as the prefix for all created resources and as the team identifier.</div>
-        </div>
 
-        <div>
-          <label htmlFor="ts-team-id" style={labelStyle}>Team ID (slug)</label>
-          <input
-            id="ts-team-id"
-            type="text"
-            placeholder="acme-demo"
-            value={form.teamId}
-            onChange={e => setForm(f => ({ ...f, teamId: slugify(e.target.value), teamIdManuallyEdited: true }))}
-            style={inputStyle}
-          />
-          <div style={hintStyle}>Lowercase, dashes only. 1–40 chars. Resources will be named <code>{form.teamId || '<slug>'}-developer</code>, etc.</div>
-        </div>
-
-        <ErrorBox message={error} />
-      </div>
-    </Card>
-  );
-}
-
-// ─── Step 2 — Working Environment (credentials → URL → branch) ───────
-// Order is deliberate: credentials first means the wizard can verify the
-// repo URL against the PAT (saves the user from picking a misspelt URL),
-// and the verified probe call also returns the actual branch list — so
-// the branch field becomes a dropdown of real branches instead of a
-// free-text "main"-by-default input.
-function CredentialPicker({ label, items, value, onChange, emptyHelp, generateLabel, onGenerate, generating, generateHint }) {
-  return (
-    <div>
-      <label style={labelStyle}>{label}</label>
-      {items.length > 0 ? (
-        <select
-          value={value}
-          onChange={e => onChange(e.target.value)}
-          style={{ ...inputStyle, fontFamily: 'inherit' }}
-        >
-          <option value="">— pick —</option>
-          {items.map(it => (
-            <option key={it.id} value={it.id}>{it.name}{it.preview ? ` — ${it.preview}` : ''}{it.fingerprint ? ` (${it.fingerprint.slice(0, 16)})` : ''}</option>
-          ))}
-        </select>
-      ) : (
-        <div style={{ ...hintStyle, marginTop: 0 }}>{emptyHelp}</div>
-      )}
-      {onGenerate && (
-        <div style={{ marginTop: 'var(--eb-space-2)' }}>
-          <button
-            type="button"
-            disabled={generating}
-            onClick={onGenerate}
-            style={{
-              padding: 'var(--eb-space-2) var(--eb-space-3)',
-              background: 'transparent',
-              border: '1px solid var(--eb-border-default)',
-              borderRadius: 'var(--eb-radius-md)',
-              color: 'var(--eb-text-primary)',
-              fontSize: 'var(--eb-text-sm)',
-              cursor: generating ? 'wait' : 'pointer',
-              fontFamily: 'inherit',
-            }}
-          >
-            {generating ? 'Generating…' : generateLabel}
-          </button>
-          {generateHint && <span style={{ ...hintStyle, marginLeft: 'var(--eb-space-3)', display: 'inline' }}>{generateHint}</span>}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function StepEnvironment({
-  form, setForm, sshKeys, sshKeysLoading, githubTokens, tokensLoading, error, refetchKeys,
-}) {
-  const [generating, setGenerating] = useState(false);
-  const [genError, setGenError] = useState(null);
-  // Probe state: idle | probing | ok | error. Driven by the URL+token
-  // pair — clears whenever either changes so the user never trusts a
-  // stale "verified" badge from a previous combination.
-  const [probeState, setProbeState] = useState('idle');
-  const [probeResult, setProbeResult] = useState(null); // { repo, defaultBranch, branches, truncated }
-  const [probeError, setProbeError] = useState(null);
-
-  async function generateKey() {
-    setGenError(null);
-    setGenerating(true);
-    try {
-      const name = form.teamName ? `${form.teamName} deploy key` : `${form.teamId}-deploy`;
-      const r = await apiCall('POST', '/api/ssh-keys/generate', { name });
-      await refetchKeys();
-      setForm(f => ({ ...f, sshKeyId: r.id }));
-    } catch (err) {
-      setGenError(err.message);
-    } finally {
-      setGenerating(false);
-    }
-  }
-
-  // Reset probe state on dependency changes.
-  useEffect(() => {
-    setProbeState('idle');
-    setProbeResult(null);
-    setProbeError(null);
-  }, [form.repoUrl, form.githubTokenId]);
-
-  async function probeRepo() {
-    if (!form.repoUrl.trim() || !form.githubTokenId) return;
-    setProbeState('probing');
-    setProbeError(null);
-    try {
-      const res = await fetch('/api/github/probe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: form.repoUrl.trim(), githubTokenId: form.githubTokenId }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!data.ok) {
-        setProbeState('error');
-        setProbeError(data.error || `HTTP ${res.status}`);
-        setProbeResult(null);
-        return;
-      }
-      setProbeResult({
-        repo: data.repo,
-        defaultBranch: data.defaultBranch,
-        branches: Array.isArray(data.branches) ? data.branches : [],
-        truncated: !!data.truncated,
-      });
-      setProbeState('ok');
-      // Snap the form's branch to the default if the user hadn't picked
-      // one yet, or to the closest match if their existing pick is gone.
-      setForm(f => {
-        const has = (data.branches || []).includes(f.branch);
-        if (!f.branch || !has) {
-          return { ...f, branch: data.defaultBranch };
-        }
-        return f;
-      });
-    } catch (err) {
-      setProbeState('error');
-      setProbeError(err.message || String(err));
-      setProbeResult(null);
-    }
-  }
-
-  const canProbe = !!form.repoUrl.trim() && !!form.githubTokenId;
-
-  return (
-    <Card>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-5)' }}>
-        {/* ── Credentials first ────────────────────────────────────── */}
-        <CredentialPicker
-          label="SSH Deploy Key"
-          items={sshKeysLoading ? [] : (sshKeys || [])}
-          value={form.sshKeyId}
-          onChange={v => setForm(f => ({ ...f, sshKeyId: v }))}
-          emptyHelp={
-            <span>
-              No SSH key configured. Generate one here, or create at{' '}
-              <Link to="/ssh-keys" target="_blank" style={{ color: 'var(--eb-accent-primary)' }}>SSH Keys →</Link>
-            </span>
-          }
-          generateLabel="Generate new SSH key"
-          onGenerate={generateKey}
-          generating={generating}
-          generateHint="Creates a fresh ed25519 key pair. Add the public key as a deploy key on GitHub afterwards."
-        />
-        <ErrorBox message={genError} />
-
-        <CredentialPicker
-          label="GitHub Personal Access Token"
-          items={tokensLoading ? [] : (githubTokens || [])}
-          value={form.githubTokenId}
-          onChange={v => setForm(f => ({ ...f, githubTokenId: v }))}
-          emptyHelp={
-            <span>
-              No GitHub token configured. Add one at{' '}
-              <Link to="/github-tokens" target="_blank" style={{ color: 'var(--eb-accent-primary)' }}>
-                GitHub Tokens →
-              </Link>{' '}
-              and come back. Required scopes: <code>repo</code>, <code>issues:write</code> (for the BA + reviewers).
-            </span>
-          }
-        />
-
-        {/* ── Repository URL with verify button ────────────────────── */}
-        <div>
-          <label htmlFor="ts-repo-url" style={labelStyle}>GitHub Repository URL</label>
-          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'stretch' }}>
-            <div style={{ position: 'relative', flex: 1 }}>
-              <Github size={18} style={{
-                position: 'absolute', left: 'var(--eb-space-3)', top: '50%', transform: 'translateY(-50%)',
-                color: 'var(--eb-text-muted)', pointerEvents: 'none',
-              }} />
-              <input
-                id="ts-repo-url"
-                type="text"
-                placeholder="git@github.com:org/repo.git or https://github.com/org/repo"
-                value={form.repoUrl}
-                onChange={e => setForm(f => ({ ...f, repoUrl: e.target.value }))}
-                onBlur={() => { if (canProbe && probeState === 'idle') probeRepo(); }}
-                style={{ ...inputStyle, paddingLeft: 'var(--eb-space-10)' }}
-              />
+        {envsLoading ? (
+          <div style={{ ...hintStyle, marginTop: 0 }}>Loading working environments…</div>
+        ) : envs.length === 0 ? (
+          <div style={{
+            padding: 'var(--eb-space-5)',
+            border: '1px dashed var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-md)',
+            display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)',
+            alignItems: 'flex-start',
+            fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6,
+          }}>
+            <div>
+              No working environment exists yet. Create one first — with the repository the team should work
+              on and any skills it needs — then come back here.
             </div>
-            <button
-              type="button"
-              onClick={probeRepo}
-              disabled={!canProbe || probeState === 'probing'}
-              style={{
-                padding: 'var(--eb-space-2) var(--eb-space-4)',
-                background: probeState === 'ok' ? 'var(--eb-status-success-bg)' : 'var(--eb-bg-elevated)',
-                border: `1px solid ${probeState === 'ok' ? 'var(--eb-status-success)' : 'var(--eb-border-default)'}`,
-                borderRadius: 'var(--eb-radius-md)',
-                color: probeState === 'ok' ? 'var(--eb-status-success)' : 'var(--eb-text-primary)',
-                fontSize: 'var(--eb-text-sm)',
-                fontFamily: 'inherit',
-                cursor: !canProbe || probeState === 'probing' ? 'not-allowed' : 'pointer',
-                opacity: !canProbe ? 0.5 : 1,
-                whiteSpace: 'nowrap',
-                display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
-              }}
-            >
-              {probeState === 'probing' && <Loader2 size={13} style={{ animation: 'team-setup-spin 0.9s linear infinite' }} />}
-              {probeState === 'ok' && <CheckCircle size={13} />}
-              {probeState === 'error' && <AlertCircle size={13} style={{ color: 'var(--eb-status-error)' }} />}
-              {probeState === 'probing' ? 'Verifying…'
-                : probeState === 'ok' ? 'Verified'
-                : probeState === 'error' ? 'Retry'
-                : 'Verify'}
-            </button>
+            <div style={{ display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'center' }}>
+              <Link to="/environments" target="_blank" style={{ ...diagramLinkButtonStyle, textDecoration: 'none' }}>
+                <Layers size={14} /> Open Working Environments
+              </Link>
+              <button type="button" onClick={refetchEnvs} style={secondaryButtonStyle()}>
+                Refresh list
+              </button>
+            </div>
           </div>
-          {!canProbe && (
-            <div style={hintStyle}>Pick the credentials first — the wizard verifies the URL against the GitHub token before you commit to it.</div>
-          )}
-          {probeState === 'ok' && probeResult && (
-            <div style={{
-              marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)',
-              color: 'var(--eb-text-muted)',
-            }}>
-              <code style={{ color: 'var(--eb-status-success)' }}>{probeResult.repo}</code>
-              {' — '}
-              {probeResult.branches.length} branch{probeResult.branches.length === 1 ? '' : 'es'}
-              {probeResult.truncated && ' (showing first 200, type below for more)'}
-            </div>
-          )}
-          {probeState === 'error' && (
-            <div style={{
-              marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)',
-              color: 'var(--eb-status-error)',
-              display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-1)',
-            }}>
-              <AlertCircle size={12} style={{ flexShrink: 0, marginTop: 2 }} /> {probeError}
-            </div>
-          )}
-        </div>
-
-        {/* ── Branch picker (dropdown of probed branches, falls back to text) */}
-        <div>
-          <label htmlFor="ts-branch" style={labelStyle}>Branch</label>
-          {probeState === 'ok' && probeResult && probeResult.branches.length > 0 ? (
-            <select
-              id="ts-branch"
-              value={form.branch}
-              onChange={e => setForm(f => ({ ...f, branch: e.target.value }))}
-              style={{ ...inputStyle, fontFamily: 'inherit' }}
-            >
-              {probeResult.branches.map(b => (
-                <option key={b} value={b}>
-                  {b}{b === probeResult.defaultBranch ? '  (default)' : ''}
-                </option>
+        ) : (
+          <>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 'var(--eb-space-3)' }} role="radiogroup" aria-label="Working Environment">
+              {envs.map(env => (
+                <EnvironmentCard
+                  key={env.id}
+                  env={env}
+                  selected={form.environmentId === env.id}
+                  onSelect={() => onSelect(env)}
+                />
               ))}
-            </select>
-          ) : (
-            <input
-              id="ts-branch"
-              type="text"
-              placeholder="main"
-              value={form.branch}
-              onChange={e => setForm(f => ({ ...f, branch: e.target.value }))}
-              style={inputStyle}
-            />
-          )}
-          <div style={hintStyle}>
-            {probeState === 'ok'
-              ? 'Picked from the actual branches in the repo.'
-              : 'Verify the repository above to pick from a list of real branches.'}
-          </div>
-        </div>
-
-        <div style={{
-          padding: 'var(--eb-space-3)',
-          background: 'var(--eb-bg-elevated)',
-          border: '1px dashed var(--eb-border-default)',
-          borderRadius: 'var(--eb-radius-md)',
-          fontSize: 'var(--eb-text-xs)',
-          color: 'var(--eb-text-muted)',
-          lineHeight: 1.6,
-        }}>
-          <strong>Why two credentials?</strong> The SSH key clones the repo (per-repo, read-only deploy key works).
-          The PAT runs <code>gh-as-agent</code> for PR / issue / comment actions and is what the wizard uses
-          right above to verify the URL. Splitting them is defense-in-depth — see the credential pages for details.
-        </div>
+            </div>
+            <div style={{ ...hintStyle, marginTop: 0 }}>
+              Missing one, or need to adjust repositories / skills? Manage them at{' '}
+              <Link to="/environments" target="_blank" style={{ color: 'var(--eb-accent-primary)' }}>Working Environments →</Link>
+              {' '}<button
+                type="button"
+                onClick={refetchEnvs}
+                style={{
+                  background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+                  color: 'var(--eb-accent-primary)', fontSize: 'inherit', fontFamily: 'inherit',
+                  textDecoration: 'underline',
+                }}
+              >Refresh list</button>
+            </div>
+          </>
+        )}
 
         <ErrorBox message={error} />
       </div>
@@ -605,139 +513,43 @@ function StepEnvironment({
   );
 }
 
-// ─── Step 3 — Knowledge sources (MCP servers) ────────────────────────
-function StepKnowledge({ form, setForm, mcpServers, mcpServersLoading, mcpCredentials, mcpCredentialsLoading, error }) {
-  const selections = form.mcpSelections || [];
-  const isSelected = id => selections.some(s => s.serverId === id);
-  const credFor = id => {
-    const sel = selections.find(s => s.serverId === id);
-    return sel ? (sel.credentialId || '') : '';
-  };
-
-  function toggle(serverId) {
-    setForm(f => {
-      const cur = f.mcpSelections || [];
-      const exists = cur.some(s => s.serverId === serverId);
-      return {
-        ...f,
-        mcpSelections: exists
-          ? cur.filter(s => s.serverId !== serverId)
-          : [...cur, { serverId, credentialId: null }],
-      };
-    });
-  }
-
-  function setCred(serverId, credentialId) {
-    setForm(f => ({
-      ...f,
-      mcpSelections: (f.mcpSelections || []).map(s =>
-        s.serverId === serverId ? { ...s, credentialId: credentialId || null } : s),
-    }));
-  }
-
-  if (mcpServersLoading || mcpCredentialsLoading) {
-    return <Card>Loading MCP registry…</Card>;
-  }
-
-  const servers = mcpServers || [];
-  const creds = mcpCredentials || [];
-
+// ─── Step 3 — Knowledge sources (inherited from the environment) ─────
+// With the wizard reusing an existing Working Environment, the MCP set is
+// defined there — POST /api/teams resolves it from `environmentId`, so an
+// editable selection here would be silently ignored. Show the inherited
+// set read-only and point to the environment editor for changes.
+function StepKnowledgeSummary({ form, environments, mcpServers, mcpCredentials, error }) {
+  const env = (environments || []).find(e => e.id === form.environmentId);
+  const knowledge = (form.mcpSelections || []).filter(s => s.serverId);
   return (
     <Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
         <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
-          Pick the MCP servers your team should be able to query at runtime — wiki, vector store, graph DB, etc.
-          Each member of the team inherits the team-wide selection by default; per-member overrides come later via
-          the agent edit form. Skip if no shared knowledge sources are needed.
+          Knowledge sources are MCP servers the team can query at runtime — wiki, vector store, graph DB, etc.
+          They are inherited from the working environment{env ? <> <strong style={{ color: 'var(--eb-text-primary)' }}>{env.name}</strong></> : null}.
+          To change them, edit the environment at{' '}
+          <Link to="/environments" target="_blank" style={{ color: 'var(--eb-accent-primary)' }}>Working Environments →</Link>
+          {' '}— per-member overrides come later via the agent edit form.
         </div>
-
-        {servers.length === 0 ? (
-          <div style={{
-            padding: 'var(--eb-space-4)',
-            border: '1px dashed var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-md)',
-            color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)',
-          }}>
-            No MCP servers registered yet. You can add some at{' '}
-            <Link to="/mcp" target="_blank" style={{ color: 'var(--eb-accent-primary)' }}>MCP Servers →</Link>{' '}
-            and come back, or skip this step entirely.
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
-            {servers.map(s => {
-              const selected = isSelected(s.id);
-              const matchingCreds = creds.filter(c => !c.serverId || c.serverId === s.id);
-              return (
-                <div key={s.id} style={{
-                  display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
-                  padding: 'var(--eb-space-4)',
-                  background: selected ? 'var(--eb-bg-surface)' : 'var(--eb-bg-app)',
-                  border: `2px solid ${selected ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
-                  borderRadius: 'var(--eb-radius-lg)',
-                }}>
-                  <button
-                    type="button"
-                    onClick={() => toggle(s.id)}
-                    style={{
-                      textAlign: 'left',
-                      display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'flex-start',
-                      background: 'transparent', border: 'none', padding: 0,
-                      color: 'var(--eb-text-primary)', cursor: 'pointer', fontFamily: 'inherit',
-                    }}
-                  >
-                    <div style={{
-                      flexShrink: 0, width: 36, height: 36,
-                      borderRadius: 'var(--eb-radius-md)',
-                      background: selected ? 'var(--eb-accent-primary)' : 'var(--eb-bg-elevated)',
-                      color: selected ? 'var(--eb-text-inverted)' : 'var(--eb-text-primary)',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    }}>
-                      <Server size={18} />
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)' }}>
-                        {s.name} <span style={{ fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)' }}>({s.id})</span>
-                      </div>
-                      {s.description && (
-                        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 'var(--eb-space-1)', lineHeight: 1.4 }}>
-                          {s.description}
-                        </div>
-                      )}
-                    </div>
-                  </button>
-
-                  {selected && s.requiresCredential && (
-                    <div style={{ paddingLeft: 'calc(36px + var(--eb-space-3))' }}>
-                      <label style={{ ...labelStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-                        <KeyRound size={13} /> Credential
-                      </label>
-                      {matchingCreds.length === 0 ? (
-                        <div style={hintStyle}>
-                          No credentials for this server. Add one at{' '}
-                          <Link to="/mcp" target="_blank" style={{ color: 'var(--eb-accent-primary)' }}>MCP Servers →</Link>.
-                        </div>
-                      ) : (
-                        <select
-                          value={credFor(s.id)}
-                          onChange={e => setCred(s.id, e.target.value)}
-                          style={{ ...inputStyle, fontFamily: 'inherit' }}
-                        >
-                          <option value="">— pick a credential —</option>
-                          {matchingCreds.map(c => (
-                            <option key={c.id} value={c.id}>
-                              {c.name}{c.fingerprint ? ` (${c.fingerprint})` : ''}
-                            </option>
-                          ))}
-                        </select>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-
+        <div>
+          <div style={labelStyle}>Knowledge sources ({knowledge.length})</div>
+          {knowledge.length === 0 ? (
+            <div style={{ ...hintStyle, marginTop: 0 }}>None — the environment defines no MCP servers.</div>
+          ) : (
+            <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
+              {knowledge.map(k => {
+                const srv = (mcpServers || []).find(s => s.id === k.serverId);
+                const cred = (mcpCredentials || []).find(c => c.id === k.credentialId);
+                return (
+                  <li key={k.serverId}>
+                    <strong style={{ color: 'var(--eb-text-primary)' }}>{srv?.name || k.serverId}</strong>
+                    {' '}— credential {cred ? cred.name : '—'}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
         <ErrorBox message={error} />
       </div>
     </Card>
@@ -1286,9 +1098,10 @@ function repoSlug(url) {
   return m ? m[1] : null;
 }
 
-function StepReview({ form, templates, sshKeys, githubTokens, mcpServers, mcpCredentials, error, extendMode, existingRoles, existingRoleCounts }) {
+function StepReview({ form, templates, environments, sshKeys, githubTokens, mcpServers, mcpCredentials, error, extendMode, existingRoles, existingRoleCounts }) {
   const existingSet = new Set(extendMode ? (existingRoles || []) : []);
   const counts = existingRoleCounts || {};
+  const env = (environments || []).find(e => e.id === form.environmentId);
   const sshKey = sshKeys?.find(k => k.id === form.sshKeyId);
   const ghToken = githubTokens?.find(t => t.id === form.githubTokenId);
   const roleConfig = form.roleConfig || [];
@@ -1354,6 +1167,7 @@ function StepReview({ form, templates, sshKeys, githubTokens, mcpServers, mcpCre
         <ReviewRow label="Team" value={`${form.teamName} (${form.teamId})`} />
         {!extendMode && (
           <>
+            <ReviewRow label="Working Environment" value={env ? `${env.name} (${env.id})` : (form.environmentId || '—')} />
             <ReviewRow label="Repository" value={`${form.repoUrl} @ ${form.branch || 'main'}`} />
             {showReadyLabel && <ReviewRow label="Ready label" value={form.readyLabel || 'ready'} />}
             {showDispatchControls && (
@@ -1640,6 +1454,8 @@ export default function TeamSetup() {
     teamName: '',
     teamId: '',
     teamIdManuallyEdited: false,
+    teamNameManuallyEdited: false,
+    environmentId: '',
     repoUrl: '',
     branch: 'main',
     readyLabel: 'ready',
@@ -1652,12 +1468,47 @@ export default function TeamSetup() {
   });
 
   const { data: templatesResp, loading: tplLoading } = useApi('/api/agent-templates');
-  const { data: sshKeys, loading: keysLoading, refetch: refetchKeys } = useApi('/api/ssh-keys');
-  const { data: githubTokens, loading: tokensLoading } = useApi('/api/github-tokens');
-  const { data: mcpServers, loading: mcpServersLoading } = useApi('/api/mcp-servers');
-  const { data: mcpCredentials, loading: mcpCredentialsLoading } = useApi('/api/mcp-credentials');
+  const { data: environments, loading: envsLoading, refetch: refetchEnvs } = useApi('/api/environments');
+  const { data: agentsList } = useApi('/api/agents');
+  const { data: sshKeys } = useApi('/api/ssh-keys');
+  const { data: githubTokens } = useApi('/api/github-tokens');
+  const { data: mcpServers } = useApi('/api/mcp-servers');
+  const { data: mcpCredentials } = useApi('/api/mcp-credentials');
 
   const templates = templatesResp?.templates || null;
+  const takenAgentIds = useMemo(
+    () => new Set((Array.isArray(agentsList) ? agentsList : []).map(a => a.id)),
+    [agentsList],
+  );
+
+  // Selecting an environment pulls its repo/credentials/MCP set into the form
+  // (used for review display + the coordinator check; the backend re-resolves
+  // everything from environmentId) and suggests a unique team name + id from
+  // the environment's name — unless the user already typed their own.
+  function selectEnvironment(env) {
+    const repos = envRepositories(env);
+    const primary = repos[0] || {};
+    setForm(f => {
+      const next = {
+        ...f,
+        environmentId: env.id,
+        repoUrl: primary.url || '',
+        branch: primary.branch || 'main',
+        sshKeyId: primary.sshKeyId || '',
+        githubTokenId: env.githubTokenId || '',
+        mcpSelections: (env.mcpServers || []).map(s => ({ serverId: s.serverId, credentialId: s.credentialId || null })),
+      };
+      if (!f.teamNameManuallyEdited && !f.teamIdManuallyEdited) {
+        const suggestion = suggestTeamNaming(env.name || env.id, agentsList);
+        next.teamName = suggestion.teamName;
+        next.teamId = suggestion.teamId;
+      }
+      return next;
+    });
+    setStepError(null);
+    // Card click both selects and advances — the pick is the whole step.
+    setStep(1);
+  }
 
   // Pre-select all templates the first time the catalog loads (create mode only).
   useEffect(() => {
@@ -1727,6 +1578,8 @@ export default function TeamSetup() {
           teamName: teamCfg.displayName || teamId,
           teamId,
           teamIdManuallyEdited: true,
+          teamNameManuallyEdited: true,
+          environmentId: teamCfg.environmentId || '',
           repoUrl: repo?.url || '',
           branch: repo?.branch || 'main',
           sshKeyId: repo?.sshKeyId || '',
@@ -1749,25 +1602,18 @@ export default function TeamSetup() {
     if (extendMode && step <= 2) return null;
 
     if (step === 0) {
-      if (!form.teamName.trim()) return 'Team name required';
-      if (!/^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/.test(form.teamId)) return 'Team ID must be 1–40 chars, [a-z0-9-]';
+      if (!form.environmentId) return 'Pick a working environment';
+      if (!form.repoUrl.trim()) return 'The selected working environment has no repository — add one first';
       return null;
     }
     if (step === 1) {
-      if (!form.sshKeyId) return 'SSH key required';
-      if (!form.githubTokenId) return 'GitHub token required';
-      if (!form.repoUrl.trim()) return 'Repository URL required';
-      if (!form.branch.trim()) return 'Branch required';
+      if (!form.teamName.trim()) return 'Team name required';
+      if (!/^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/.test(form.teamId)) return 'Team ID must be 1–40 chars, [a-z0-9-]';
+      if (takenAgentIds.has(form.teamId)) return `Team ID '${form.teamId}' is already used by an existing agent or team — pick a different one (to add roles to an existing team, use "Extend" on its card on the Agents page)`;
       return null;
     }
     if (step === 2) {
-      const sel = form.mcpSelections || [];
-      for (const s of sel) {
-        const def = (mcpServers || []).find(x => x.id === s.serverId);
-        if (def?.requiresCredential && !s.credentialId) {
-          return `MCP server '${s.serverId}' requires a credential — pick one or remove it`;
-        }
-      }
+      // Knowledge sources are inherited from the environment — read-only here.
       return null;
     }
     if (step === 3) {
@@ -1828,13 +1674,21 @@ export default function TeamSetup() {
     const body = {
       teamId: form.teamId,
       teamName: form.teamName.trim(),
-      repository: { url: form.repoUrl.trim(), branch: form.branch.trim() || 'main', sshKeyId: form.sshKeyId },
-      githubTokenId: form.githubTokenId,
+      // The wizard reuses an existing Working Environment: the backend resolves
+      // repository + credentials + MCP set from environmentId. The legacy
+      // repository/githubTokenId/mcpServers fields are only sent as a fallback
+      // when no environment id is known (pre-env-reuse teams in extend mode).
+      ...(form.environmentId
+        ? { environmentId: form.environmentId }
+        : {
+            repository: { url: form.repoUrl.trim(), branch: form.branch.trim() || 'main', sshKeyId: form.sshKeyId },
+            githubTokenId: form.githubTokenId,
+            mcpServers: (form.mcpSelections || []).filter(s => s.serverId),
+          }),
       readyLabel: (form.readyLabel || 'ready').trim() || 'ready',
       dispatchLabel: (form.dispatchLabel || 'dispatch').trim() || 'dispatch',
       maxParallel: Number.isInteger(form.maxParallel) ? form.maxParallel : 1,
       roles: effectiveRoleConfig,
-      mcpServers: (form.mcpSelections || []).filter(s => s.serverId),
       mode: effectiveMode,
     };
 
@@ -2002,32 +1856,30 @@ export default function TeamSetup() {
       />
 
       {step === 0 && (extendMode
-        ? <StepProjectReadOnly form={form} />
-        : <StepProject {...stepProps} error={stepError} />
-      )}
-      {step === 1 && (extendMode
-        ? <StepEnvironmentReadOnly form={form} sshKeys={sshKeys} githubTokens={githubTokens} />
+        ? <StepEnvironmentReadOnly form={form} environments={environments} sshKeys={sshKeys} githubTokens={githubTokens} />
         : (
-          <StepEnvironment
-            {...stepProps}
-            sshKeys={sshKeys}
-            sshKeysLoading={keysLoading}
-            githubTokens={githubTokens}
-            tokensLoading={tokensLoading}
+          <StepEnvironmentSelect
+            form={form}
+            environments={environments}
+            envsLoading={envsLoading}
+            refetchEnvs={refetchEnvs}
+            onSelect={selectEnvironment}
             error={stepError}
-            refetchKeys={refetchKeys}
           />
         )
+      )}
+      {step === 1 && (extendMode
+        ? <StepProjectReadOnly form={form} />
+        : <StepProject {...stepProps} environments={environments} takenAgentIds={takenAgentIds} error={stepError} />
       )}
       {step === 2 && (extendMode
         ? <StepKnowledgeReadOnly form={form} mcpServers={mcpServers} mcpCredentials={mcpCredentials} />
         : (
-          <StepKnowledge
-            {...stepProps}
+          <StepKnowledgeSummary
+            form={form}
+            environments={environments}
             mcpServers={mcpServers}
-            mcpServersLoading={mcpServersLoading}
             mcpCredentials={mcpCredentials}
-            mcpCredentialsLoading={mcpCredentialsLoading}
             error={stepError}
           />
         )
@@ -2049,6 +1901,7 @@ export default function TeamSetup() {
         <StepReview
           form={form}
           templates={templates}
+          environments={environments}
           sshKeys={sshKeys}
           githubTokens={githubTokens}
           mcpServers={mcpServers}

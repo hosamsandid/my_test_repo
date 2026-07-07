@@ -112,7 +112,7 @@ Static skills live in the agent's workspace; **MCP servers** are how agents reac
 
 **Per-member override.** A team-member may carry an `mcpServersOverride` array (same `[{serverId, credentialId}, ...]` shape as `env.mcpServers`); when present it replaces the env's MCP set verbatim for that one member, parallel to `skillsOverride`. Absent = inherit. Edit it via the **MCP Servers** field on the agent edit form.
 
-**Team-Setup wizard.** The "Knowledge sources" step (between Credentials and Team) selects the team-wide MCP set. Servers that declare a `${credential}` placeholder require a credential to be bound at this step; servers without one accept "(none)".
+**Team-Setup wizard.** The "Knowledge sources" step shows the team-wide MCP set read-only — it is inherited from the selected Working Environment (which binds servers to credentials); the step links to the environment editor for changes.
 
 ### Agent Roles
 
@@ -285,7 +285,7 @@ All agent lifecycle operations (create / enable / disable / edit prompt / delete
 
 ### Team-Setup wizard
 
-`POST /api/teams` (driven by the **Team Setup** wizard at `/team-setup`) materialises a team-shaped agent group in one atomic-with-rollback transaction. The wizard sits on top of the existing `team` / `team-member` machinery — the result is identical in shape to a manually-created team plus members. Inputs: a `teamId` slug, team name, repository (URL, branch, `sshKeyId`), `githubTokenId`, and a list of role templates.
+`POST /api/teams` (driven by the **Team Setup** wizard at `/team-setup`) materialises a team-shaped agent group in one atomic-with-rollback transaction. The wizard sits on top of the existing `team` / `team-member` machinery — the result is identical in shape to a manually-created team plus members. The wizard's first step picks an existing **Working Environment** (card grid: name + repo/skills summary; empty state links to `/environments`) and sends its id as `environmentId` — the backend resolves repository, branch, SSH key, PAT and the MCP set from the env and skips env auto-creation. The team name + id are then pre-filled from the env's name (uniqueness-resolved against existing agent ids / team names; both editable). The API also still accepts the legacy direct inputs (`repository` (URL, branch, `sshKeyId`) + `githubTokenId` + `mcpServers`), which auto-create an env id `<teamId>`; the wizard only uses that path as an extend-mode fallback for pre-env-reuse teams. Common to both: a `teamId` slug, team name, and a list of role templates.
 
 Role templates live as JSON files under `/template-workspace/agent-templates/` (seeded from `orchestrator/skill-pool/agent-templates/` via `make seed-templates`). The catalog ships with eight roles:
 
@@ -303,7 +303,7 @@ Role templates live as JSON files under `/template-workspace/agent-templates/` (
 Each `per-invocation` role also ships a weekly self-curation cron (staggered 5min apart) that reviews and prunes the agent's `memory/`.
 
 **Materialisation flow:**
-1. One Working Environment id `<teamId>` carrying the shared repo, SSH key, PAT, and the team-default skill set (empty in v1).
+1. One shared Working Environment: the reused env when `environmentId` is supplied (kept untouched, keeps its own id), else auto-created under id `<teamId>` carrying the repo, SSH key, PAT, and an empty skill set.
 2. One `team` agent id `<teamId>` with a generic shared `systemPromptTemplate` and `skipFirstMember: true` (so the wizard adds members itself with role overrides instead of getting an auto-numbered `<teamId>-1`).
 3. One `team-member` agent per selected role, id `<teamId>-<roleId>`. Each member carries:
    - `systemPrompt` = role-specific prompt from the template (override against the team default).
@@ -387,7 +387,7 @@ The Admin Console embeds a Matrix client at `/chats` (and `/chats/:agentId`) so 
 | `admin-console/src/pages/WorkingEnvironments.jsx` | UI: CRUD for environments (skills picker, optional repo + ssh key) |
 | `admin-console/src/pages/SshKeys.jsx` | UI: CRUD for SSH keys (paste private key, see fingerprint only) |
 | `admin-console/src/pages/Agents.jsx` | UI: CRUD for agents (env dropdown, role-aware cards, team-member edit form with inherit/override toggles for `systemPrompt` and `skillsOverride`). |
-| `admin-console/src/pages/TeamSetup.jsx` | UI: 4-step wizard (Project → Credentials → Team → Review) that drives `POST /api/teams`. |
+| `admin-console/src/pages/TeamSetup.jsx` | UI: 5-step wizard (Working Environment → Team → Knowledge → Members → Review) that drives `POST /api/teams` with `environmentId`. |
 
 ## Commands
 

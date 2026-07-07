@@ -1,6 +1,6 @@
 {
   "processTemplateVersion": 1,
-  "name": "Simple SDLC",
+  "name": "Core SDLC",
   "description": "The minimal core loop: a Business Analyst turns requests into ready-labelled issues, a Developer implements them and opens PRs, a Code Reviewer reviews (review submissions wake the Developer for rework).",
   "level": "template",
   "stages": ["Requirements", "Build"],

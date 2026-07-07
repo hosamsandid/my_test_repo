@@ -4,7 +4,7 @@ export default function AccentureLogo({ size = 24, style, ...rest }) {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
+      viewBox="0 0 16.1 17"
       width={size}
       height={size}
       fill="currentColor"
@@ -13,7 +13,7 @@ export default function AccentureLogo({ size = 24, style, ...rest }) {
       style={style}
       {...rest}
     >
-      <path d="M7 4 L18 12 L7 20 L7 15.6 L11.8 12 L7 8.4 Z" />
+      <polygon points="0,4.9 0,0 16.1,6.5 16.1,10.5 0,17 0,12 9.4,8.5" />
     </svg>
   );
 }

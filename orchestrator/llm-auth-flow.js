@@ -77,19 +77,31 @@ function extractAuthUrl(cleanText) {
   return all.reduce((a, b) => (b.length > a.length ? b : a));
 }
 
-// Long-lived subscription token as printed by `claude setup-token` — always
-// prefixed `sk-ant-oat…` (the value the CLI stores as CLAUDE_CODE_OAUTH_TOKEN).
-// We must NOT match the bare `sk-ant-at…` prefix: that is the short-lived OAuth
-// *access token* which flashes in the PTY output during the code exchange, is
-// rejected by api.anthropic.com ("Invalid bearer token"), and — because it
-// appears before the final `oat` token — would otherwise be captured first.
-// `sk-ant-api…` keys are likewise excluded so a stray API key in the
+// Token as printed by `claude setup-token`. Both the long-lived subscription
+// token AND the short-lived OAuth *access token* from the code exchange carry
+// the same `sk-ant-(o)at…` prefix, so the prefix alone can't tell them apart —
+// and the ephemeral access token appears *first* in the PTY output, so a naive
+// "first match" grabs the wrong one (it's rejected later with 401 "Invalid
+// bearer token"). `sk-ant-api…` keys are excluded so a stray API key in the
 // environment can't be mistaken for the freshly minted token.
-const OAUTH_TOKEN_RE = /sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]{20,}/;
+const OAUTH_TOKEN_RE = /sk-ant-o?at[0-9]{2}-[A-Za-z0-9_-]{20,}/g;
+
+// The banner the CLI prints immediately before the real subscription token
+// ("✓ Long-lived authentication token created successfully! Your OAuth token
+// (valid for 1 year):"). The TUI positions text with cursor moves, so after
+// stripAnsi the words can run together with no spaces — `\s*` tolerates that.
+const TOKEN_BANNER_RE = /(created\s*successfully|your\s*oauth\s*token|valid\s*for\s*1\s*year)/i;
 
 function extractToken(cleanText) {
-  const m = cleanText.match(OAUTH_TOKEN_RE);
-  return m ? m[0] : null;
+  // Only trust a token that appears *after* the success banner, and take the
+  // last such match — that skips the ephemeral access token from the exchange
+  // (printed earlier) and the literal "=<token>" placeholder in the epilogue
+  // (which doesn't match the token regex). Returns null until the banner shows,
+  // so we never finalize on the wrong token mid-stream.
+  const bannerIdx = cleanText.search(TOKEN_BANNER_RE);
+  if (bannerIdx === -1) return null;
+  const matches = cleanText.slice(bannerIdx).match(OAUTH_TOKEN_RE);
+  return matches && matches.length ? matches[matches.length - 1] : null;
 }
 
 // Exchange failures the CLI reports after a code was submitted, e.g.
@@ -305,6 +317,10 @@ function createLlmAuthFlowManager({ workDirRoot = '/tmp/llm-auth-flows', log = c
     child.on('exit', (code) => {
       if (flow.state === 'done') return; // token already captured
       if (['error', 'expired', 'cancelled'].includes(flow.state)) return;
+      // The token (banner + value) can land in the very last chunk, racing the
+      // exit — give scan() one final pass over the full buffer before failing.
+      scan(flow);
+      if (flow.state === 'done') return;
       log.warn(`[LlmAuth] flow ${flow.id}: CLI exited early (code ${code}); last output (redacted):\n${redactedTail(flow)}`);
       cleanupFlow(
         flow,

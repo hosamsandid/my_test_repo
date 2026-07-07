@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Trash2, Plus, Pencil, Check, X, RefreshCw, PlugZap, Star, Lock } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Trash2, Plus, Pencil, Check, X, RefreshCw, PlugZap, Star, Lock, LogIn, Copy, ShieldAlert, ExternalLink } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
@@ -202,6 +202,184 @@ function ModelEditor({ models, defaultModelId, onChange, onDefaultChange }) {
   );
 }
 
+/* ────────────── Sub: subscription OAuth login wizard ────────────── */
+//
+// Walks the operator through `claude setup-token`, executed by the
+// orchestrator: start → open the authorize URL in the browser → paste the
+// confirmation code → the orchestrator captures the long-lived token. The
+// token itself never reaches the browser — on success we only hand the
+// flowId back to the form, and the server claims the token while saving.
+function OAuthLoginWizard({ onToken, onClose }) {
+  const [flow, setFlow] = useState(null);   // { flowId, status, authUrl, error }
+  const [code, setCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [copied, setCopied] = useState(false);
+  const doneNotified = useRef(false);
+
+  function absorb(view) {
+    setFlow(view);
+    if (view?.status === 'done' && !doneNotified.current) {
+      doneNotified.current = true;
+      onToken(view.flowId);
+    }
+    if (view?.error) setErr(view.error);
+  }
+
+  // Kick off the flow on mount.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setBusy(true);
+      try {
+        const r = await apiCall('POST', '/api/llm-auth/flows');
+        if (!cancelled) absorb(r);
+      } catch (e) {
+        if (!cancelled) setErr(e.message);
+      } finally {
+        if (!cancelled) setBusy(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Poll while the orchestrator is working (waiting for the URL, or
+  // exchanging the pasted code for the token).
+  useEffect(() => {
+    if (!flow?.flowId) return;
+    const polling = flow.status === 'starting' || flow.status === 'exchanging';
+    if (!polling) return;
+    const t = setInterval(async () => {
+      try {
+        const r = await apiCall('GET', `/api/llm-auth/flows/${flow.flowId}`);
+        absorb(r);
+      } catch (e) {
+        setErr(e.message);
+      }
+    }, 1500);
+    return () => clearInterval(t);
+  }, [flow?.flowId, flow?.status]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function sendCode() {
+    if (!code.trim()) return;
+    setBusy(true); setErr(null);
+    try {
+      const r = await apiCall('POST', `/api/llm-auth/flows/${flow.flowId}/code`, { code: code.trim() });
+      absorb(r);
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function cancel() {
+    if (flow?.flowId && flow.status !== 'done') {
+      try { await apiCall('DELETE', `/api/llm-auth/flows/${flow.flowId}`); } catch { /* best effort */ }
+    }
+    onClose();
+  }
+
+  async function copyUrl() {
+    try {
+      await navigator.clipboard.writeText(flow.authUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* clipboard unavailable — the link is still clickable */ }
+  }
+
+  const status = flow?.status;
+  const failed = ['error', 'expired', 'cancelled'].includes(status) || (!!err && status !== 'done');
+
+  return (
+    <div style={{
+      padding: 'var(--eb-space-3)',
+      background: 'var(--eb-bg-elevated)',
+      border: '1px solid var(--eb-accent-primary)',
+      borderRadius: 'var(--eb-radius-md)',
+      display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)',
+      fontSize: 'var(--eb-text-sm)',
+    }}>
+      {(!flow || status === 'starting') && !failed && (
+        <div>Starting the login flow (<code style={{ fontFamily: 'var(--eb-font-mono)' }}>claude setup-token</code>)…</div>
+      )}
+
+      {status === 'awaiting-code' && flow.authUrl && (
+        <>
+          <div style={{ fontWeight: 'var(--eb-font-medium)' }}>1. Open this link, sign in with your Claude subscription and approve:</div>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+            <a
+              href={flow.authUrl}
+              target="_blank"
+              rel="noreferrer"
+              style={{
+                fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)',
+                wordBreak: 'break-all', color: 'var(--eb-accent-primary)',
+                display: 'inline-flex', alignItems: 'flex-start', gap: 4,
+              }}
+            >
+              <ExternalLink size={12} style={{ flexShrink: 0, marginTop: 2 }} />
+              {flow.authUrl}
+            </a>
+            <button type="button" onClick={copyUrl} style={{ ...buttonGhost, flexShrink: 0 }}>
+              <Copy size={12} /> {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+          <div style={{ fontWeight: 'var(--eb-font-medium)' }}>2. Paste the confirmation code shown after approval:</div>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+            <input
+              value={code}
+              onChange={e => setCode(e.target.value)}
+              placeholder="Paste code…"
+              style={{
+                flex: 1,
+                padding: 'var(--eb-space-2) var(--eb-space-3)',
+                background: 'var(--eb-bg-surface)',
+                border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-md)',
+                color: 'var(--eb-text-primary)',
+                fontFamily: 'var(--eb-font-mono)',
+                fontSize: 'var(--eb-text-xs)',
+                outline: 'none',
+              }}
+            />
+            <button
+              type="button"
+              onClick={sendCode}
+              disabled={busy || !code.trim()}
+              style={{ ...buttonPrimary, opacity: busy || !code.trim() ? 0.6 : 1 }}
+            >
+              {busy ? 'Submitting…' : 'Submit code'}
+            </button>
+          </div>
+        </>
+      )}
+
+      {status === 'exchanging' && (
+        <div>Exchanging the code for a token…</div>
+      )}
+
+      {status === 'done' && (
+        <div style={{ color: 'var(--eb-status-success)', display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+          <Check size={14} /> Login successful — the token will be stored when you save this provider.
+        </div>
+      )}
+
+      {failed && (
+        <div role="alert" style={{ color: 'var(--eb-status-error)' }}>
+          {err || flow?.error || 'The login flow failed.'} You can retry, or paste a token generated with <code style={{ fontFamily: 'var(--eb-font-mono)' }}>claude setup-token</code> manually.
+        </div>
+      )}
+
+      {status !== 'done' && (
+        <button type="button" onClick={cancel} style={{ ...buttonSecondary, alignSelf: 'flex-start' }}>
+          Cancel login
+        </button>
+      )}
+    </div>
+  );
+}
+
 /* ─────────────────── Sub: endpoint form (create + edit) ─────────────────── */
 
 function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
@@ -220,6 +398,19 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
   const [models, setModels] = useState(endpoint?.models ?? []);
   const [defaultModelId, setDefaultModelId] = useState(endpoint?.defaultModelId ?? '');
 
+  // Auth type: classic api-key/proxy vs Claude subscription OAuth token.
+  const wasOauth = endpoint?.authType === 'oauth-token';
+  const [authType, setAuthType] = useState(endpoint?.authType ?? 'api-key');
+  const isOauth = authType === 'oauth-token';
+  // Compliance confirmation is demanded whenever subscription auth is being
+  // (re-)established for this provider — i.e. on create, or when switching an
+  // api-key provider over. Existing oauth providers carry their recorded ack.
+  const requireCompliance = isOauth && (!isEdit || !wasOauth);
+  const [complianceOk, setComplianceOk] = useState(false);
+  // Completed login flow — the server claims the actual token on save.
+  const [oauthFlowId, setOauthFlowId] = useState(null);
+  const [wizardOpen, setWizardOpen] = useState(false);
+
   // If the user removes the default model from the list (without using the
   // star toggle), drop the dangling pointer so we don't ship a server-rejected
   // value on save.
@@ -234,16 +425,29 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
   const [probeMsg, setProbeMsg] = useState(null);          // { ok, text }
   const [discovered, setDiscovered] = useState(null);      // suggestion list pending merge
 
-  const canSubmit = name.trim() && baseUrl.trim();
-  const canProbe = !!baseUrl.trim();
+  // A subscription provider must end up with a token: an already-stored one
+  // (edit), a completed login flow, or a manually pasted setup-token value.
+  const oauthTokenReady = (isEdit && wasOauth && endpoint.hasToken && !clearToken)
+    || !!oauthFlowId
+    || !!authToken.trim();
+  const canSubmit = name.trim() && (isOauth
+    ? ((!requireCompliance || complianceOk) && oauthTokenReady)
+    : !!baseUrl.trim());
+  // Probing an oauth provider needs a token the server can reach: the stored
+  // one, or a pasted value. A wizard-obtained token is only claimable on save,
+  // so it can't be probed pre-save.
+  const canProbe = isOauth
+    ? ((isEdit && wasOauth && endpoint.hasToken && !authToken.trim()) || !!authToken.trim())
+    : !!baseUrl.trim();
 
   // Pick the probe target: when the user is editing an existing endpoint and
   // hasn't typed a new token, hit the stored-id route so the server's persisted
   // token is used (we never round-trip the raw token through the UI). In every
   // other case — create mode, or edit with an unsaved token change — call the
-  // stateless probe route with the form's baseUrl + typed token.
+  // stateless probe route with the form's auth type, baseUrl + typed token.
   function probeRequest(kind) {
-    const useStored = isEdit && !authToken.trim() && !clearToken;
+    const sameAuthType = authType === (endpoint?.authType ?? 'api-key');
+    const useStored = isEdit && !authToken.trim() && !clearToken && sameAuthType;
     if (useStored) {
       const suffix = kind === 'test' ? 'test' : 'discover-models';
       return { path: `/api/llm-endpoints/${endpoint.id}/${suffix}`, body: undefined };
@@ -251,13 +455,17 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
     const suffix = kind === 'test' ? 'probe-test' : 'probe-discover-models';
     return {
       path: `/api/llm-endpoints/${suffix}`,
-      body: { baseUrl: baseUrl.trim(), authToken: clearToken ? '' : authToken.trim() },
+      body: {
+        authType,
+        baseUrl: isOauth ? '' : baseUrl.trim(),
+        authToken: clearToken ? '' : authToken.trim(),
+      },
     };
   }
 
   async function runTest() {
     if (!canProbe) {
-      setProbeMsg({ ok: false, text: 'Enter a Base URL first.' });
+      setProbeMsg({ ok: false, text: isOauth ? 'No token available to test — paste one, or save and test afterwards.' : 'Enter a Base URL first.' });
       return;
     }
     setProbing('test'); setProbeMsg(null);
@@ -279,7 +487,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
 
   async function runDiscover() {
     if (!canProbe) {
-      setProbeMsg({ ok: false, text: 'Enter a Base URL first.' });
+      setProbeMsg({ ok: false, text: isOauth ? 'No token available — paste one, or save and discover afterwards.' : 'Enter a Base URL first.' });
       return;
     }
     setProbing('discover'); setProbeMsg(null);
@@ -318,7 +526,8 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
       }));
     const payload = {
       name: name.trim(),
-      baseUrl: baseUrl.trim(),
+      authType,
+      baseUrl: isOauth ? '' : baseUrl.trim(),
       models: cleanedModels,
       // Always send defaultModelId — '' clears it on the server, a real id
       // sets/updates it. Skipping the field would leave the server's cached
@@ -328,8 +537,12 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
         : '',
     };
     if (!isEdit && id.trim()) payload.id = id.trim();
-    if (clearToken)        payload.authToken = '';
-    else if (authToken.trim()) payload.authToken = authToken.trim();
+    if (isOauth && complianceOk) payload.complianceAck = true;
+    // Token sources, in precedence order: manual paste > completed login flow
+    // (claimed server-side) > keep/clear existing.
+    if (authToken.trim())      payload.authToken = authToken.trim();
+    else if (isOauth && oauthFlowId) payload.oauthFlowId = oauthFlowId;
+    else if (clearToken)       payload.authToken = '';
     // else: undefined → server keeps existing token (only relevant on edit)
     onSave(payload);
   }
@@ -364,19 +577,154 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
           : <>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only. <strong>Cannot be changed after creation.</strong></>}
       />
 
+      {/* Auth type — classic API key / proxy vs Claude subscription OAuth */}
       <div>
-        <FormInput
-          label="Base URL"
-          required
-          type="url"
-          value={baseUrl}
-          onChange={setBaseUrl}
-          placeholder="https://litellm.example/v1"
-        />
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-          Must speak the Anthropic Messages API — e.g. the Anthropic API directly, a LiteLLM proxy, or an internal gateway that exposes it.
+        <div style={{
+          fontSize: 'var(--eb-text-sm)',
+          fontWeight: 'var(--eb-font-medium)',
+          color: 'var(--eb-text-secondary)',
+          marginBottom: 'var(--eb-space-1)',
+        }}>
+          Authentication
+        </div>
+        <div style={{ display: 'flex', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
+          {[
+            { value: 'api-key', label: 'API key / proxy', hint: 'Bearer token against a Base URL (Anthropic API, LiteLLM, gateway)' },
+            { value: 'oauth-token', label: 'Anthropic subscription (OAuth)', hint: 'Claude Max / Enterprise seat via claude setup-token' },
+          ].map(opt => (
+            <label key={opt.value} title={opt.hint} style={{
+              display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+              padding: 'var(--eb-space-2) var(--eb-space-3)',
+              background: authType === opt.value ? 'var(--eb-bg-elevated)' : 'transparent',
+              border: `1px solid ${authType === opt.value ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+              borderRadius: 'var(--eb-radius-md)',
+              fontSize: 'var(--eb-text-sm)', cursor: 'pointer',
+            }}>
+              <input
+                type="radio"
+                name="llm-auth-type"
+                value={opt.value}
+                checked={authType === opt.value}
+                onChange={() => { setAuthType(opt.value); setProbeMsg(null); }}
+              />
+              {opt.label}
+            </label>
+          ))}
         </div>
       </div>
+
+      {!isOauth && (
+        <div>
+          <FormInput
+            label="Base URL"
+            required
+            type="url"
+            value={baseUrl}
+            onChange={setBaseUrl}
+            placeholder="https://litellm.example/v1"
+          />
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+            Must speak the Anthropic Messages API — e.g. the Anthropic API directly, a LiteLLM proxy, or an internal gateway that exposes it.
+          </div>
+        </div>
+      )}
+
+      {isOauth && (
+        <>
+          <div style={{
+            padding: 'var(--eb-space-3)',
+            background: 'var(--eb-bg-elevated)',
+            border: '1px solid var(--eb-status-warning)',
+            borderRadius: 'var(--eb-radius-md)',
+            fontSize: 'var(--eb-text-sm)',
+            color: 'var(--eb-text-secondary)',
+            display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+          }}>
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start' }}>
+              <ShieldAlert size={15} style={{ flexShrink: 0, marginTop: 2, color: 'var(--eb-status-warning)' }} />
+              <span>
+                <strong>Single-user operation only.</strong> Anthropic's Consumer Terms permit OAuth tokens from
+                Free/Pro/Max subscriptions solely for the subscription owner's own use — they must not serve
+                other users or third parties. For team setups use per-seat Enterprise tokens (one provider per seat)
+                or an API key. Agents bound to this provider talk directly to <code style={{ fontFamily: 'var(--eb-font-mono)' }}>api.anthropic.com</code> and
+                share the subscription's rate limits with your interactive Claude sessions.
+              </span>
+            </div>
+            {requireCompliance ? (
+              <label style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={complianceOk}
+                  onChange={e => setComplianceOk(e.target.checked)}
+                  style={{ marginTop: 3 }}
+                />
+                <span>
+                  I confirm that every agent using this provider runs exclusively for me, the owner of this
+                  Claude subscription (single-user operation). <span style={{ color: 'var(--eb-status-error)' }}>*</span>
+                </span>
+              </label>
+            ) : (
+              endpoint?.complianceAck?.confirmedAt && (
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                  Single-user operation confirmed by <strong>{endpoint.complianceAck.confirmedBy}</strong> on {new Date(endpoint.complianceAck.confirmedAt).toLocaleString()}.
+                </div>
+              )
+            )}
+          </div>
+
+          <div>
+            <div style={{
+              fontSize: 'var(--eb-text-sm)',
+              fontWeight: 'var(--eb-font-medium)',
+              color: 'var(--eb-text-secondary)',
+              marginBottom: 'var(--eb-space-1)',
+            }}>
+              Subscription login
+            </div>
+            {isEdit && wasOauth && endpoint.hasToken && !oauthFlowId && (
+              <div style={{
+                fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
+                marginBottom: 'var(--eb-space-2)', fontFamily: 'var(--eb-font-mono)',
+              }}>
+                Current token: {endpoint.tokenPreview} · {endpoint.tokenFingerprint}
+              </div>
+            )}
+            {oauthFlowId ? (
+              <div style={{
+                fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-success)',
+                display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+                marginBottom: 'var(--eb-space-2)',
+              }}>
+                <Check size={14} /> Login completed — the token is stored when you save.
+                <button
+                  type="button"
+                  onClick={() => { setOauthFlowId(null); setWizardOpen(false); }}
+                  style={buttonGhost}
+                >
+                  Discard
+                </button>
+              </div>
+            ) : wizardOpen ? (
+              <OAuthLoginWizard
+                onToken={(flowId) => { setOauthFlowId(flowId); setWizardOpen(false); }}
+                onClose={() => setWizardOpen(false)}
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={() => setWizardOpen(true)}
+                style={{ ...buttonPrimary, display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}
+              >
+                <LogIn size={14} /> {isEdit && wasOauth && endpoint.hasToken ? 'Re-authenticate…' : 'Sign in with Anthropic…'}
+              </button>
+            )}
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-2)' }}>
+              Runs <code style={{ fontFamily: 'var(--eb-font-mono)' }}>claude setup-token</code> on the orchestrator and issues a long-lived (~1 year) token.
+              Alternatively, run it on any machine yourself and paste the resulting <code style={{ fontFamily: 'var(--eb-font-mono)' }}>sk-ant-oat…</code> token below.
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Token field — different copy for create vs edit */}
       <div>
@@ -386,9 +734,11 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
           color: 'var(--eb-text-secondary)',
           marginBottom: 'var(--eb-space-1)',
         }}>
-          Auth token {!isEdit && <span style={{ color: 'var(--eb-text-muted)', fontWeight: 'normal' }}>(optional)</span>}
+          {isOauth
+            ? <>Setup token <span style={{ color: 'var(--eb-text-muted)', fontWeight: 'normal' }}>(manual alternative to the login above)</span></>
+            : <>Auth token {!isEdit && <span style={{ color: 'var(--eb-text-muted)', fontWeight: 'normal' }}>(optional)</span>}</>}
         </div>
-        {isEdit && endpoint.hasToken && (
+        {!isOauth && isEdit && endpoint.hasToken && (
           <div style={{
             fontSize: 'var(--eb-text-xs)',
             color: 'var(--eb-text-muted)',
@@ -398,7 +748,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
             Current: {endpoint.tokenPreview} · {endpoint.tokenFingerprint}
           </div>
         )}
-        {isEdit && !endpoint.hasToken && (
+        {!isOauth && isEdit && !endpoint.hasToken && (
           <div style={{
             fontSize: 'var(--eb-text-xs)',
             color: 'var(--eb-status-warning)',
@@ -413,11 +763,13 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
           onChange={e => setAuthToken(e.target.value)}
           rows={2}
           placeholder={
-            isEdit
-              ? endpoint.hasToken
-                ? 'Leave empty to keep current token'
-                : 'Paste auth token (sent as Bearer to the proxy)'
-              : 'sk-… (sent as Bearer token to the proxy)'
+            isOauth
+              ? 'sk-ant-oat… (output of `claude setup-token`)'
+              : isEdit
+                ? endpoint.hasToken
+                  ? 'Leave empty to keep current token'
+                  : 'Paste auth token (sent as Bearer to the proxy)'
+                : 'sk-… (sent as Bearer token to the proxy)'
           }
           style={{
             width: '100%',
@@ -434,7 +786,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
             boxSizing: 'border-box',
           }}
         />
-        {isEdit && endpoint.hasToken && (
+        {!isOauth && isEdit && endpoint.hasToken && (
           <label style={{
             display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)',
             fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)',
@@ -720,7 +1072,18 @@ export default function ModelRegistry() {
           </span>
         : v,
     },
-    { key: 'baseUrl', label: 'Base URL', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{v}</span> },
+    {
+      key: 'baseUrl',
+      label: 'Base URL',
+      render: (v, row) => row.authType === 'oauth-token'
+        ? <span title="Anthropic subscription (OAuth) — talks directly to api.anthropic.com" style={{
+            display: 'inline-flex', alignItems: 'center', gap: 4,
+            padding: '0 var(--eb-space-2)', borderRadius: 'var(--eb-radius-sm)',
+            background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
+            fontSize: 'var(--eb-text-xs)',
+          }}><LogIn size={11} /> Subscription (OAuth)</span>
+        : <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{v}</span>,
+    },
     {
       key: 'tokenPreview',
       label: 'Token',

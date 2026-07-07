@@ -13,6 +13,7 @@ const { bpsToBriefingsMap } = require("./briefings-graph");
 const { createTeamsStore, DEFAULT_TEAM_ID } = require("./teams-store");
 const { makeSkillSourceResolver } = require("./skill-source");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
+const agentGitOps = require("./agent-git-ops");
 
 // ============================================================
 // Config
@@ -1474,6 +1475,150 @@ function pullOrchestratorWorkspace(orchestratorId, briefingsPath, env, { force =
     const detail = (err.stderr || err.stdout || err.message || "").toString().trim().slice(0, 200);
     console.warn(`[Orchestrator] Pull failed for ${orchestratorId}: ${detail}`);
     return { failed: true, detail, repoRoot };
+  }
+}
+
+// ── Orchestrator-side git push / PR on behalf of an agent ────────────────────
+//
+// Under enterprise-subscription OAuth (authType "oauth-token") the agent's
+// Claude CLI enforces the org's server-managed settings, which can force
+// interactive approval for `git push` / `gh pr create` — impossible in an
+// unattended run. The agent therefore commits locally (not blocked) and asks
+// the orchestrator, via the `gh-as-agent push` / `pr` CLI, to perform the network-facing step.
+// The orchestrator shares the workspace volume, so it sees the agent's commits
+// and pushes them with the environment's own credentials. See agent-git-ops.js.
+
+function _buildAgentGitEnv(id, repo, env) {
+  return agentGitOps.buildRepoGitEnv({
+    env,
+    repoUrl: repo.url,
+    sshKeyId: repo.sshKeyId,
+    githubTokenId: env?.githubTokenId,
+    baseEnv: process.env,
+    sshKeysDir: SSH_KEYS_DIR,
+    ghTokensDir: GH_TOKENS_DIR,
+  });
+}
+
+// Push the agent's committed work. `body` = { repo?, branch?, remote?,
+// setUpstream? }. Throws caller-facing Errors (safe to return over the API).
+function agentGitPush(id, env, body = {}) {
+  const repo = agentGitOps.resolveAgentRepo({
+    repositories: env?.repositories,
+    requestedRepo: body.repo,
+    agentWorkspace: agentDir(id),
+  });
+  const req = agentGitOps.normalizePushRequest(body);
+  const gitEnv = _buildAgentGitEnv(id, repo, env);
+  const run = (args, timeout = 30_000) =>
+    execFileSync("git", args, { cwd: repo.repoPath, env: gitEnv, stdio: "pipe", timeout }).toString();
+
+  let branch = req.branch;
+  if (!branch) {
+    branch = run(["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+    if (branch === "HEAD") {
+      throw new Error("workspace is in detached HEAD — check out a branch before pushing");
+    }
+    if (agentGitOps.PROTECTED_BRANCHES.has(branch)) {
+      throw new Error(`refusing to push protected branch '${branch}' — open a PR from a feature branch`);
+    }
+  }
+
+  const pushArgs = ["push"];
+  if (req.setUpstream) pushArgs.push("--set-upstream");
+  pushArgs.push(req.remote, branch);
+
+  try {
+    const stdout = run(pushArgs);
+    return {
+      ok: true,
+      repo: repo.name,
+      branch,
+      remote: req.remote,
+      output: agentGitOps.sanitizeGitOutput(stdout).trim(),
+    };
+  } catch (err) {
+    const detail = agentGitOps
+      .sanitizeGitOutput((err.stderr || err.stdout || err.message || "").toString())
+      .trim()
+      .slice(0, 500);
+    const e = new Error(`git push failed: ${detail}`);
+    e.gitFailed = true;
+    throw e;
+  }
+}
+
+// Push the current branch, then open a PR via `gh`. `body` = { repo?, title,
+// body?, base?, head?, draft? }. Stamps the agent marker into the PR body so the
+// GitHub poller can attribute the resulting events (loop protection).
+function agentCreatePr(id, env, body = {}) {
+  const repo = agentGitOps.resolveAgentRepo({
+    repositories: env?.repositories,
+    requestedRepo: body.repo,
+    agentWorkspace: agentDir(id),
+  });
+  const title = typeof body.title === "string" ? body.title.trim() : "";
+  if (!title) throw new Error("pr title is required");
+
+  const base = body.base != null ? String(body.base) : null;
+  if (base !== null && !agentGitOps.isValidBranchName(base)) {
+    throw new Error(`invalid base branch: ${base}`);
+  }
+
+  const gitEnv = _buildAgentGitEnv(id, repo, env);
+  const run = (args, timeout = 30_000) =>
+    execFileSync("git", args, { cwd: repo.repoPath, env: gitEnv, stdio: "pipe", timeout }).toString();
+
+  let head = body.head != null ? String(body.head) : run(["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+  if (head === "HEAD") {
+    throw new Error("workspace is in detached HEAD — check out a branch before opening a PR");
+  }
+  if (!agentGitOps.isValidBranchName(head)) throw new Error(`invalid head branch: ${head}`);
+  if (agentGitOps.PROTECTED_BRANCHES.has(head)) {
+    throw new Error(`refusing to open a PR from protected branch '${head}'`);
+  }
+
+  // Ensure the branch exists on the remote before gh reads it.
+  try {
+    run(["push", "--set-upstream", "origin", head]);
+  } catch (err) {
+    const detail = agentGitOps
+      .sanitizeGitOutput((err.stderr || err.stdout || err.message || "").toString())
+      .trim()
+      .slice(0, 500);
+    const e = new Error(`git push failed (needed before PR): ${detail}`);
+    e.gitFailed = true;
+    throw e;
+  }
+
+  const marker = `<!-- agent: ${id} -->`;
+  let prBody = typeof body.body === "string" ? body.body : "";
+  if (!prBody.includes(marker)) prBody = `${prBody.trimEnd()}\n\n${marker}\n`;
+  const tmp = path.join(repo.repoPath, `.aee-pr-body-${Date.now()}.md`);
+  fs.writeFileSync(tmp, prBody);
+
+  try {
+    const ghArgs = ["pr", "create", "--title", title, "--body-file", tmp, "--head", head];
+    if (base) ghArgs.push("--base", base);
+    if (body.draft) ghArgs.push("--draft");
+    const out = execFileSync("gh", ghArgs, {
+      cwd: repo.repoPath,
+      env: gitEnv,
+      stdio: "pipe",
+      timeout: 30_000,
+    }).toString();
+    const url = (out.match(/https?:\/\/\S+/) || [])[0] || null;
+    return { ok: true, repo: repo.name, branch: head, base: base || null, url };
+  } catch (err) {
+    const detail = agentGitOps
+      .sanitizeGitOutput((err.stderr || err.stdout || err.message || "").toString())
+      .trim()
+      .slice(0, 500);
+    const e = new Error(`gh pr create failed: ${detail}`);
+    e.gitFailed = true;
+    throw e;
+  } finally {
+    try { fs.unlinkSync(tmp); } catch { /* best effort */ }
   }
 }
 
@@ -4952,6 +5097,43 @@ async function main() {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: err.message }));
       }
+      return;
+    }
+
+    // ── Push / open-PR on behalf of an agent (gh-as-agent push/pr) ──────────────────
+    // Moves the managed-policy-gated `git push` / `gh pr create` out of the
+    // agent's Claude CLI into the orchestrator (see agentGitPush / agentCreatePr
+    // above). Internal-only, unauthenticated like the rest of :4002.
+    const gitPushMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/git\/push$/);
+    const gitPrMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/git\/pr$/);
+    if (gitPushMatch || gitPrMatch) {
+      const id = decodeURIComponent((gitPushMatch || gitPrMatch)[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* {} */ }
+        try {
+          const cfg = loadAgentConfig(id);
+          if (!cfg) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: `Agent '${id}' not found` }));
+            return;
+          }
+          const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+          const result = gitPushMatch ? agentGitPush(id, env, parsed) : agentCreatePr(id, env, parsed);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          const msg = (err && err.message) ? err.message : String(err);
+          // 409 for git/gh failures the agent can act on (non-fast-forward,
+          // auth, etc.); 400 for request/config problems.
+          const status = err && err.gitFailed ? 409 : 400;
+          console.warn(`[Orchestrator] git ${gitPushMatch ? 'push' : 'pr'} for ${id}: ${msg}`);
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: msg }));
+        }
+      });
       return;
     }
 

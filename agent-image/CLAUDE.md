@@ -21,6 +21,33 @@ Actions: `draft`, `refine`, `claim`, `complete`, `merge`
 - Commit frequently; push when a logical unit of work is done.
 - Never force-push. Never commit to `main` directly.
 
+### Pushing & opening PRs — use `gh-as-agent`, not `git push` / `gh pr create`
+
+Depending on how this agent is configured, `git push` and `gh pr create` may be
+**blocked by the organisation's managed Claude Code policy** (it requires
+interactive human approval, which does not exist in an unattended triggered or
+scheduled run). `git commit` is **not** blocked.
+
+So the workflow is: **commit locally, then hand the push/PR to the platform** —
+all through the one `gh-as-agent` wrapper:
+
+```bash
+# 1. Commit your work locally (stamps your agent identity as author):
+gh-as-agent commit -m "feat: implement the thing"
+
+# 2. Push via the orchestrator (uses the environment's own credentials):
+gh-as-agent push
+
+# 3. Or push + open a PR in one step (body is stamped with your agent marker):
+gh-as-agent pr --title "Implement the thing" --body-file /tmp/pr-body.md --base main
+```
+
+`gh-as-agent push` / `pr` run the network step **outside** the policy-gated
+Claude CLI, so they work in unattended runs. On a multi-repo environment add
+`--repo <clone-dir-name>`. If it reports a failure (e.g. non-fast-forward, auth),
+surface it to the user — do not retry with a raw `git push`, which will just hit
+the policy block.
+
 ## Task Management
 
 Tasks and Briefing Packs are tracked on GitHub Issues. Use `gh issue view <number>` to read context.

@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { stripAnsi, extractAuthUrl, extractToken } = require('./llm-auth-flow');
+const { stripAnsi, extractAuthUrl, extractToken, isCompleteAuthUrl } = require('./llm-auth-flow');
 
 test('stripAnsi removes CSI color/cursor sequences', () => {
   const raw = '\x1b[1m\x1b[38;5;208mBrowser didn\'t open?\x1b[0m Use the url below';
@@ -43,6 +43,28 @@ test('extractAuthUrl reassembles a URL wrapped across terminal lines', () => {
 
 test('extractAuthUrl ignores non-oauth URLs', () => {
   assert.equal(extractAuthUrl('see https://claude.ai/download and https://docs.claude.com/x'), null);
+});
+
+test('isCompleteAuthUrl requires redirect_uri and state', () => {
+  const full = 'https://claude.ai/oauth/authorize?code=true&client_id=abc&response_type=code&redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&state=xyz';
+  assert.equal(isCompleteAuthUrl(full), true);
+  // Truncated mid-query — exactly the shape claude.ai rejects with
+  // "Missing redirect_uri parameter".
+  assert.equal(isCompleteAuthUrl('https://claude.ai/oauth/authorize?code=true&client_id=abc&response_type=code'), false);
+});
+
+test('extractAuthUrl prefers a complete candidate over an earlier truncated redraw copy', () => {
+  const truncated = 'https://claude.ai/oauth/authorize?code=true&client_id=abc';
+  const full = 'https://claude.ai/oauth/authorize?code=true&client_id=abc&redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback&state=xyz';
+  const out = `visit:\n${truncated}\n…redraw…\nvisit:\n${full}\n`;
+  assert.equal(extractAuthUrl(out), full);
+});
+
+test('extractAuthUrl falls back to the longest candidate when none is complete', () => {
+  const shorter = 'https://claude.ai/oauth/authorize?code=true';
+  const longer = 'https://claude.ai/oauth/authorize?code=true&client_id=abc&response_type=code';
+  const out = `${shorter}\n\n${longer}\n`;
+  assert.equal(extractAuthUrl(out), longer);
 });
 
 test('extractToken finds a long-lived subscription token', () => {

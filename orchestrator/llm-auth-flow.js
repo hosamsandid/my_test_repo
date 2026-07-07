@@ -48,13 +48,33 @@ function stripAnsi(s) {
     .replace(/\r/g, '\n');
 }
 
-// First https URL that belongs to the Claude OAuth flow. The CLI may wrap the
-// URL across terminal lines, so we tolerate no whitespace inside the match by
-// scanning the de-ANSI'd, newline-joined text.
+// A usable authorize URL must carry the full query string — a URL cut off by
+// a terminal line-wrap or a mid-URL output chunk is rejected by claude.ai
+// with "Missing redirect_uri parameter". `redirect_uri` and `state` sit at
+// the tail end of the query, so their presence is a good completeness signal.
+function isCompleteAuthUrl(url) {
+  return /[?&]redirect_uri=/.test(url) && /[?&]state=/.test(url);
+}
+
+// First https URL that belongs to the Claude OAuth flow. The CLI may print it
+// several times while redrawing its TUI, and a narrow terminal may wrap it
+// across lines. Strategy: scan the text as-is first (the flow widens the PTY
+// so the URL normally sits on one line), then retry with wrapped lines
+// re-joined; prefer a complete candidate, else the longest one seen. The
+// character class is a strict URL alphabet so surrounding prose can never be
+// glued onto a candidate by the line-joining pass.
+const AUTH_URL_RE = /https:\/\/(?:claude\.ai|claude\.com|console\.anthropic\.com)\/[A-Za-z0-9\-._~:/?#@!$&*+,;=%]*oauth[A-Za-z0-9\-._~:/?#@!$&*+,;=%]*/g;
+
 function extractAuthUrl(cleanText) {
-  const joined = cleanText.replace(/\n(?=[^\s])/g, '');
-  const m = joined.match(/https:\/\/(?:claude\.ai|claude\.com|console\.anthropic\.com)\/[^\s"'<>)\]]*oauth[^\s"'<>)\]]*/i);
-  return m ? m[0] : null;
+  const direct = cleanText.match(AUTH_URL_RE) || [];
+  const completeDirect = direct.find(isCompleteAuthUrl);
+  if (completeDirect) return completeDirect;
+  const joined = (cleanText.replace(/\n(?=[^\s])/g, '').match(AUTH_URL_RE)) || [];
+  const completeJoined = joined.find(isCompleteAuthUrl);
+  if (completeJoined) return completeJoined;
+  const all = [...direct, ...joined];
+  if (all.length === 0) return null;
+  return all.reduce((a, b) => (b.length > a.length ? b : a));
 }
 
 // Long-lived subscription token as printed by `claude setup-token`
@@ -88,6 +108,7 @@ function createLlmAuthFlowManager({ workDirRoot = '/tmp/llm-auth-flows', log = c
   function cleanupFlow(flow, nextState, errorMsg) {
     if (!flow) return;
     if (flow.ttlTimer) clearTimeout(flow.ttlTimer);
+    if (flow.urlSettleTimer) { clearTimeout(flow.urlSettleTimer); flow.urlSettleTimer = null; }
     if (flow.child && flow.child.exitCode === null && !flow.child.killed) {
       try { flow.child.kill('SIGKILL'); } catch { /* ignore */ }
     }
@@ -101,14 +122,31 @@ function createLlmAuthFlowManager({ workDirRoot = '/tmp/llm-auth-flows', log = c
     }
   }
 
+  function acceptAuthUrl(flow, url) {
+    if (flow.authUrl) return;
+    flow.authUrl = url;
+    if (flow.urlSettleTimer) { clearTimeout(flow.urlSettleTimer); flow.urlSettleTimer = null; }
+    if (flow.state === 'starting') flow.state = 'awaiting-code';
+    log.log(`[LlmAuth] flow ${flow.id}: authorize URL captured — awaiting code`);
+  }
+
   function scan(flow) {
     const clean = stripAnsi(flow.output);
     if (!flow.authUrl) {
       const url = extractAuthUrl(clean);
-      if (url) {
-        flow.authUrl = url;
-        if (flow.state === 'starting') flow.state = 'awaiting-code';
-        log.log(`[LlmAuth] flow ${flow.id}: authorize URL captured — awaiting code`);
+      if (url && isCompleteAuthUrl(url)) {
+        acceptAuthUrl(flow, url);
+      } else if (url) {
+        // Candidate looks truncated — most likely an output chunk ended in
+        // the middle of the URL. Re-check after the output settles; by then
+        // the rest has arrived (or this really is all the CLI printed).
+        if (flow.urlSettleTimer) clearTimeout(flow.urlSettleTimer);
+        flow.urlSettleTimer = setTimeout(() => {
+          flow.urlSettleTimer = null;
+          const settled = extractAuthUrl(stripAnsi(flow.output));
+          if (settled) acceptAuthUrl(flow, settled);
+        }, 1000);
+        if (flow.urlSettleTimer.unref) flow.urlSettleTimer.unref();
       }
     }
     const token = extractToken(clean);
@@ -173,14 +211,18 @@ function createLlmAuthFlowManager({ workDirRoot = '/tmp/llm-auth-flows', log = c
       child: null,
       ttlTimer: null,
       claimTimer: null,
+      urlSettleTimer: null,
     };
     active = flow;
 
     // `claude setup-token` needs a TTY; util-linux `script` allocates one and
     // forwards our pipe-stdin to it — no native pty dependency required.
+    // The PTY is widened first (`stty cols 500`) so the CLI never line-wraps
+    // the authorize URL — a wrapped URL is easy to scrape incorrectly and a
+    // truncated one is rejected by claude.ai ("Missing redirect_uri").
     let child;
     try {
-      child = spawn('script', ['-qefc', 'claude setup-token', '/dev/null'], {
+      child = spawn('script', ['-qefc', 'stty cols 500 rows 100 2>/dev/null; claude setup-token', '/dev/null'], {
         env,
         cwd: home,
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -286,4 +328,4 @@ function createLlmAuthFlowManager({ workDirRoot = '/tmp/llm-auth-flows', log = c
   return { start, get, submitCode, claimToken, cancel };
 }
 
-module.exports = { createLlmAuthFlowManager, stripAnsi, extractAuthUrl, extractToken };
+module.exports = { createLlmAuthFlowManager, stripAnsi, extractAuthUrl, extractToken, isCompleteAuthUrl };

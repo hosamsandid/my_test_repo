@@ -16,6 +16,10 @@ const { computeScope, visibleTeam, visibleAgent } = require('./scope');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, emptyDraftBundle } = require('./process-template');
+const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
+const { normalizeTemplatePorts } = require('./catalog-ports');
+const { weaveProcess } = require('./flow-weaver');
+const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
 
 const WORKSPACE = '/workspace';
@@ -2422,6 +2426,9 @@ app.post('/api/process/graph', (req, res) => {
   const agents = bundle.roles.map(r => ({
     id: r.id, role: 'template', displayName: r.displayName || r.id,
     sessionPolicy: r.sessionPolicy || 'persistent',
+    // Agent-level emitted labels (#414 canonicalises emits to agent level) —
+    // without them a bundle's label hand-offs render as human-set edges.
+    emits: Array.isArray(r.emits) ? r.emits : [],
     // GitHub artifact ports (#380) drive the badge/ports + channel edges.
     github: r.github || null, channels: Array.isArray(r.channels) ? r.channels : [],
     triggers: (r.triggers || []).map(t => ({ ...t, emits: Array.isArray(t.emits) ? t.emits : [] })),
@@ -2619,6 +2626,60 @@ app.get('/api/process/template', (req, res) => {
     name: teamName || 'process', level: 'live', teamId: team || undefined,
     roles: roleEntries, gates: g.gates, labels: g.labels, stages: teamStages,
   }));
+});
+
+/* ─── Flow-Weaver (#421) ────────────────────────────────────────────────
+ * Deterministic wiring engine: ordered stages + selected roles → a complete,
+ * gap-free process-template bundle (pure builder in flow-weaver.js). Roles are
+ * referenced by catalog template id ({ templateId }) or supplied inline
+ * ({ inline: true, ... } — #423). Returns { bundle, notes } where notes lists
+ * every applied gap rule so the wizard can explain the compensation. */
+app.post('/api/process/weave', (req, res) => {
+  const body = req.body || {};
+  const stagesIn = Array.isArray(body.stages) ? body.stages : null;
+  if (!stagesIn) return res.status(400).json({ error: 'stages must be an array' });
+  const stages = [];
+  for (const s of stagesIn) {
+    const roles = [];
+    for (const r of (s && Array.isArray(s.roles) ? s.roles : [])) {
+      if (r && typeof r.templateId === 'string') {
+        const t = loadAgentTemplate(r.templateId);
+        if (!t) return res.status(400).json({ error: `Unknown role template: ${r.templateId}` });
+        roles.push(t);
+      } else if (r && r.inline === true) {
+        roles.push(r);
+      } else {
+        return res.status(400).json({ error: 'each role needs { templateId } or { inline: true, ... }' });
+      }
+    }
+    stages.push({ name: s && s.name, prefix: s && s.prefix, roles });
+  }
+  try {
+    const { bundle, notes } = weaveProcess({
+      name: typeof body.name === 'string' && body.name.trim() ? body.name : 'Woven process',
+      stages,
+      options: body.options,
+    });
+    res.json({ bundle, notes });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/* ─── Process-template registry (#419) ──────────────────────────────────
+ * Curated whole-process templates — the process-level analogue of the
+ * agent-template catalog. Seeded from orchestrator/skill-pool/process-templates/
+ * into the pool volume via `make seed-process-templates`; read-only here. */
+const PROCESS_TEMPLATES_DIR = path.join(POOL_DIR, 'process-templates');
+
+app.get('/api/process-templates', (_req, res) => {
+  res.json({ templates: listProcessTemplates(PROCESS_TEMPLATES_DIR) });
+});
+
+app.get('/api/process-templates/:id', (req, res) => {
+  const b = loadProcessTemplate(PROCESS_TEMPLATES_DIR, req.params.id);
+  if (!b) return res.status(404).json({ error: 'Process template not found' });
+  res.json(b);
 });
 
 /* ─── Process drafts (Process Canvas v2, #344) ──────────────────────────
@@ -3903,6 +3964,39 @@ app.post('/api/agent-prompt/generate', heavyLimiter, async (req, res) => {
   res.json({ prompt, model: target.model });
 });
 
+/* ─── Port suggestion for custom composer roles (#423) ──────────────────
+ * Suggests the catalog-v2 wiring surface (patternRole / sessionPolicy /
+ * produce flags) for a user-defined role: one stateless LLM call when a
+ * generation target resolves, deterministic keyword heuristic otherwise.
+ * The response is a SUGGESTION — the dialog shows it as editable fields the
+ * user confirms; nothing is applied silently. */
+app.post('/api/agent-ports/suggest', heavyLimiter, async (req, res) => {
+  const roleName = typeof req.body?.roleName === 'string' ? req.body.roleName.trim() : '';
+  const notes = typeof req.body?.notes === 'string' ? req.body.notes.trim() : '';
+  const stageName = typeof req.body?.stageName === 'string' ? req.body.stageName.trim() : '';
+  if (!roleName) return res.status(400).json({ error: 'roleName is required' });
+
+  const fallback = () => res.json({
+    suggestion: heuristicPortSuggestion({ roleName, notes }),
+    source: 'heuristic',
+  });
+
+  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  if (target.error) return fallback();
+
+  const url = buildMessagesUrl(target.baseUrl);
+  const headers = {
+    'anthropic-version': '2023-06-01',
+    ...(target.token ? { Authorization: `Bearer ${target.token}`, 'x-api-key': target.token } : {}),
+  };
+  const payload = { model: target.model, ...buildPortSuggestionRequest(roleName, notes, stageName) };
+  const result = await httpPostJson(url, headers, payload);
+  if (result.error || result.status < 200 || result.status >= 300) return fallback();
+  const suggestion = parsePortSuggestion(extractMessageText(result.body));
+  if (!suggestion) return fallback();
+  res.json({ suggestion, source: 'llm', model: target.model });
+});
+
 /* ─── MCP server registry ───────────────────────────────────────────── */
 
 // The legacy pool-wide /api/mcp endpoints (which wrote /pool/.claude/settings.json
@@ -4817,12 +4911,16 @@ app.get('/api/agent-templates', (_req, res) => {
       sessionPolicy: t.sessionPolicy,
       envSuffix: t.envSuffix,
       defaultEnabled: t.defaultEnabled !== false,
+      // Catalog v2 (#420): the normalised composition surface for the wizard's
+      // stage picker + the Flow-Weaver (patternRole / stageAffinity / ports).
+      ...normalizeTemplatePorts(t),
       triggerSummary: (t.triggers || []).map(tr => ({
         id: tr.id,
         type: tr.type,
         events: tr.events || null,
         cron: tr.cron || null,
         description: tr.description || null,
+        intrinsic: tr.intrinsic === true,
         preCheckScript: tr.preCheckScript || null,
         preCheckEnvKeys: tr.preCheckEnv && typeof tr.preCheckEnv === 'object'
           ? Object.keys(tr.preCheckEnv)
@@ -5576,12 +5674,35 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   } catch (err) {
     return fail(400, err.message);
   }
-  const normalizedRoles = normalizeRolesInput(body.roles);
+  // Inline roles (parity with POST /api/teams): either `customRoles` or a whole
+  // `processTemplate` bundle (Process Canvas import / wizard Process step, #422).
+  let customRolesRaw = Array.isArray(body.customRoles) ? body.customRoles : [];
+  if (body.processTemplate) {
+    const v = validateProcessTemplate(body.processTemplate);
+    if (!v.ok) return fail(400, `Invalid processTemplate: ${v.error}`);
+    customRolesRaw = templateToCustomRoles(
+      expandDataFlowSteps(
+        expandGithubChannels(normalizeLegacyReview(body.processTemplate), { teamId }),
+        { teamId },
+      )
+    );
+  }
+  const bundleStages = Array.isArray(body.processTemplate?.stages)
+    ? body.processTemplate.stages.filter(s => typeof s === 'string')
+    : [];
+  const customMap = new Map(customRolesRaw.map(r => [r.id, r]));
+  const resolveTemplate = (id) => customMap.get(id) || loadAgentTemplate(id);
+
+  let rolesInput = body.roles;
+  if ((!Array.isArray(rolesInput) || rolesInput.length === 0) && customMap.size > 0) {
+    rolesInput = [...customMap.keys()].map(id => ({ id, count: 1 }));
+  }
+  const normalizedRoles = normalizeRolesInput(rolesInput);
   if (!normalizedRoles || normalizedRoles.length === 0) {
-    return fail(400, 'roles must be a non-empty array of template ids');
+    return fail(400, 'roles must be a non-empty array of template ids (or supply customRoles / processTemplate)');
   }
   const knownIds = new Set(listAgentTemplateIds());
-  const unknown = normalizedRoles.map(r => r.id).filter(id => !knownIds.has(id));
+  const unknown = normalizedRoles.map(r => r.id).filter(id => !knownIds.has(id) && !customMap.has(id));
   if (unknown.length) {
     return fail(400, `Unknown roles: ${unknown.join(', ')}`);
   }
@@ -5595,7 +5716,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // A reused Working Environment keeps its own id; otherwise auto-create under teamId.
   const envId = environmentId || teamId;
   const teamAgentId = teamId;
-  const planned = planMembers(teamId, normalizedRoles, loadAgentTemplate);
+  const planned = planMembers(teamId, normalizedRoles, resolveTemplate);
   for (const p of planned) {
     if (!AGENT_ID_RE.test(p.memberId)) {
       return fail(400, `Computed memberId '${p.memberId}' is invalid`);
@@ -5782,6 +5903,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           systemPrompt: teamPrompt,
           environmentId: envId,
           skipFirstMember: true,
+          // Ordered stage names for the process graph's layered layout.
+          ...(bundleStages.length ? { stages: bundleStages } : {}),
         }),
       });
       if (!resp.ok) {
@@ -5858,6 +5981,19 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           systemPromptOverride: promptText,
           sessionPolicy: p.template.sessionPolicy === 'per-invocation' ? 'per-invocation' : undefined,
           triggers: triggersOut,
+          // Declarative ports (parity with POST /api/teams): data-flow (#379),
+          // hierarchy (#377), agent-level emits, stage band, GitHub ports (#380).
+          ...(dataFlowForMember(p.template, teamId) || {}),
+          ...(typeof p.template.parent === 'string' && p.template.parent
+            ? { parentMemberId: `${teamId}-${p.template.parent}` } : {}),
+          ...(Array.isArray(p.template.emits) && p.template.emits.length
+            ? { emits: p.template.emits } : {}),
+          ...(typeof p.template.stage === 'string' && p.template.stage
+            ? { stage: p.template.stage } : {}),
+          ...(p.template.github && (p.template.github.producesPr || p.template.github.producesIssue)
+            ? { github: p.template.github } : {}),
+          ...(Array.isArray(p.template.channels) && p.template.channels.length
+            ? { channels: p.template.channels.map(c => ({ ...c, from: `${teamId}-${c.from}` })) } : {}),
         }),
       });
       const data = await resp.json().catch(() => ({}));

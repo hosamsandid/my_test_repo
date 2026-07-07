@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import ScriptViewerPanel from '../components/ScriptViewerPanel';
+import StepProcess, { BundleRolesSummary, BundleFlowPreview, LintBadges } from './team-setup/StepProcess';
 
 function scriptNameFromPath(scriptPath) {
   if (typeof scriptPath !== 'string') return null;
@@ -118,7 +119,10 @@ function ErrorBox({ message }) {
   );
 }
 
-const STEPS = ['Working Environment', 'Team', 'Knowledge', 'Members', 'Review'];
+// Process first (#428): the process choice is the entry decision — everything
+// else (environment, name, knowledge) qualifies it. As step 1, "Start blank in
+// the canvas" exits without losing any entered configuration.
+const STEPS = ['Process', 'Working Environment', 'Team', 'Knowledge (optional)', 'Review'];
 
 function StepIndicator({ current, onStepClick }) {
   return (
@@ -273,7 +277,7 @@ function StepKnowledgeReadOnly({ form, mcpServers, mcpCredentials }) {
   );
 }
 
-// ─── Step 2 — Team basics (name + id only) ────────────────────────────
+// ─── Step 3 — Team basics (name + id only) ────────────────────────────
 // Comes after the Working-Environment pick so both fields can be pre-filled
 // from the environment's name (with a uniqueness-resolving suggestion). The
 // user may change them, but doesn't have to.
@@ -333,7 +337,7 @@ function StepProject({ form, setForm, environments, takenAgentIds, error }) {
   );
 }
 
-// ─── Step 1 — Working Environment (pick an existing one) ─────────────
+// ─── Step 2 — Working Environment (pick an existing one) ─────────────
 // The wizard no longer assembles an environment from raw credentials + repo
 // URL — a Working Environment already bundles repository, credentials,
 // skills and knowledge sources. The team is materialised onto the selected
@@ -513,11 +517,12 @@ function StepEnvironmentSelect({ form, environments, envsLoading, refetchEnvs, o
   );
 }
 
-// ─── Step 3 — Knowledge sources (inherited from the environment) ─────
+// ─── Step 4 — Knowledge sources (inherited from the environment) ─────
 // With the wizard reusing an existing Working Environment, the MCP set is
 // defined there — POST /api/teams resolves it from `environmentId`, so an
 // editable selection here would be silently ignored. Show the inherited
-// set read-only and point to the environment editor for changes.
+// set read-only and point to the environment editor for changes. The step
+// is optional — nothing here blocks continuing to Review.
 function StepKnowledgeSummary({ form, environments, mcpServers, mcpCredentials, error }) {
   const env = (environments || []).find(e => e.id === form.environmentId);
   const knowledge = (form.mcpSelections || []).filter(s => s.serverId);
@@ -530,6 +535,7 @@ function StepKnowledgeSummary({ form, environments, mcpServers, mcpCredentials, 
           To change them, edit the environment at{' '}
           <Link to="/environments" target="_blank" style={{ color: 'var(--eb-accent-primary)' }}>Working Environments →</Link>
           {' '}— per-member overrides come later via the agent edit form.
+          {' '}<strong style={{ color: 'var(--eb-text-primary)' }}>This step is optional</strong> — if the inherited set looks right (or the team needs none), just continue.
         </div>
         <div>
           <div style={labelStyle}>Knowledge sources ({knowledge.length})</div>
@@ -556,7 +562,7 @@ function StepKnowledgeSummary({ form, environments, mcpServers, mcpCredentials, 
   );
 }
 
-// ─── Step 4 — Team composition ────────────────────────────────────────
+// ─── Roles step (extend mode, occupies the "Process" slot = step 1) ──
 // Business Analyst is a persistent chat agent; multiple instances would
 // conflict (shared DM session). All other roles support reactive triggers
 // and can be scaled to multiple instances.
@@ -1251,6 +1257,17 @@ function StepReview({ form, templates, environments, sshKeys, githubTokens, mcpS
               </div>
             )}
           </>
+        ) : form.processBundle ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+            <div style={labelStyle}>
+              {/* Composed bundles are woven before the team name exists (#428) —
+                  show the name the materialised bundle will carry. */}
+              Process: {form.processMode === 'compose' ? (form.teamName?.trim() || form.processBundle.name) : form.processBundle.name} ({(form.processBundle.roles || []).length} roles)
+            </div>
+            <BundleFlowPreview bundle={form.processBundle} />
+            <LintBadges lints={form.processLints} loading={false} />
+            <BundleRolesSummary bundle={form.processBundle} teamId={form.teamId} />
+          </div>
         ) : (
           <div>
             <div style={labelStyle}>Roles ({allSelected.length})</div>
@@ -1463,8 +1480,16 @@ export default function TeamSetup() {
     maxParallel: 1,
     sshKeyId: '',
     githubTokenId: '',
-    roleConfig: [],  // Array<{ id: string, count: number }>
+    roleConfig: [],  // Array<{ id: string, count: number }> — extend mode only
     mcpSelections: [],
+    // Process step (#422): the selected/woven process-template bundle drives
+    // team creation in create mode; roleConfig stays for extend mode.
+    processMode: null,        // null | 'template' | 'compose'
+    processTemplateId: null,  // 'registry:<id>' | 'draft:<id>'
+    processBundle: null,      // processTemplateVersion-1 bundle
+    weaveNotes: [],           // gap-rule explanations from the Flow-Weaver
+    processLints: null,       // authoritative lints for the current bundle
+    composerStages: [],       // composer state
   });
 
   const { data: templatesResp, loading: tplLoading } = useApi('/api/agent-templates');
@@ -1507,15 +1532,11 @@ export default function TeamSetup() {
     });
     setStepError(null);
     // Card click both selects and advances — the pick is the whole step.
-    setStep(1);
+    setStep(2);
   }
 
-  // Pre-select all templates the first time the catalog loads (create mode only).
-  useEffect(() => {
-    if (!extendMode && templates && form.roleConfig.length === 0) {
-      setForm(f => ({ ...f, roleConfig: templates.map(t => ({ id: t.id, count: 1 })) }));
-    }
-  }, [templates, extendMode]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Create mode composes via the Process step (#422) — roleConfig is only
+  // populated in extend mode (from the existing team) or on a collision.
 
   // Load existing team config when URL has ?team=<id>&mode=extend.
   useEffect(() => {
@@ -1588,7 +1609,8 @@ export default function TeamSetup() {
           mcpSelections: (env?.mcpServers || []).map(s => ({ serverId: s.serverId, credentialId: s.credentialId || null })),
           roleConfig: uniqueRoles.map(id => ({ id, count: roleCountMap[id] })),
         }));
-        setStep(3);
+        // Extend mode edits roles in the wizard's first slot ("Process").
+        setStep(0);
       } catch (err) {
         setExtendError(err.message || String(err));
       } finally {
@@ -1598,35 +1620,38 @@ export default function TeamSetup() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   function validateStep() {
-    // In extend mode, steps 0–2 are read-only — no validation needed.
-    if (extendMode && step <= 2) return null;
-
+    if (extendMode) {
+      // Only the roles step (0) takes input — steps 1–3 are read-only.
+      if (step === 0) {
+        const existingSet = new Set(existingRoles);
+        const hasNew = form.roleConfig.some(r => !existingSet.has(r.id));
+        const hasIncrease = form.roleConfig.some(r => existingSet.has(r.id) && r.count > (existingRoleCounts[r.id] || 0));
+        if (!hasNew && !hasIncrease) return 'Select at least one new role or increase an existing role count';
+      }
+      return null;
+    }
     if (step === 0) {
+      if (!form.processBundle || (form.processBundle.roles || []).length === 0) {
+        return 'Pick a process template or compose a process first';
+      }
+      if ((form.processLints || []).some(l => l.severity === 'error')) {
+        return 'The process has wiring errors — fix them before continuing';
+      }
+      return null;
+    }
+    if (step === 1) {
       if (!form.environmentId) return 'Pick a working environment';
       if (!form.repoUrl.trim()) return 'The selected working environment has no repository — add one first';
       return null;
     }
-    if (step === 1) {
+    if (step === 2) {
       if (!form.teamName.trim()) return 'Team name required';
       if (!/^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/.test(form.teamId)) return 'Team ID must be 1–40 chars, [a-z0-9-]';
       if (takenAgentIds.has(form.teamId)) return `Team ID '${form.teamId}' is already used by an existing agent or team — pick a different one (to add roles to an existing team, use "Extend" on its card on the Agents page)`;
       return null;
     }
-    if (step === 2) {
-      // Knowledge sources are inherited from the environment — read-only here.
-      return null;
-    }
-    if (step === 3) {
-      if (extendMode) {
-        const existingSet = new Set(existingRoles);
-        const hasNew = form.roleConfig.some(r => !existingSet.has(r.id));
-        const hasIncrease = form.roleConfig.some(r => existingSet.has(r.id) && r.count > (existingRoleCounts[r.id] || 0));
-        if (!hasNew && !hasIncrease) return 'Select at least one new role or increase an existing role count';
-      } else {
-        if (form.roleConfig.length === 0) return 'Pick at least one role';
-      }
-      return null;
-    }
+    // Step 3 — Knowledge sources are inherited from the environment and
+    // optional — nothing to validate.
     return null;
   }
 
@@ -1634,12 +1659,14 @@ export default function TeamSetup() {
     const err = validateStep();
     if (err) { setStepError(err); return; }
     setStepError(null);
-    setStep(s => Math.min(s + 1, STEPS.length - 1));
+    // Extend mode: steps 1–3 are read-only — jump from Roles straight to Review.
+    setStep(s => extendMode ? STEPS.length - 1 : Math.min(s + 1, STEPS.length - 1));
   }
   function back() {
     setStepError(null);
     setCollisionInfo(null);
-    setStep(s => Math.max(s - 1, 0));
+    // Extend mode: mirror next() — Review returns to the roles step.
+    setStep(s => extendMode && s === STEPS.length - 1 ? 0 : Math.max(s - 1, 0));
   }
 
   // Land on the Business Analyst chat when it was created, else the first
@@ -1688,9 +1715,17 @@ export default function TeamSetup() {
       readyLabel: (form.readyLabel || 'ready').trim() || 'ready',
       dispatchLabel: (form.dispatchLabel || 'dispatch').trim() || 'dispatch',
       maxParallel: Number.isInteger(form.maxParallel) ? form.maxParallel : 1,
-      roles: effectiveRoleConfig,
       mode: effectiveMode,
     };
+    // Create mode ships the Process step's bundle (#422); extend mode keeps the
+    // catalog-role delta (instance counts are a roles-array concept).
+    if (!extendMode && form.processBundle) {
+      // With Process as step 1 the team name isn't known at weave time — bind
+      // the bundle name to the team name at submit time instead (#428).
+      body.processTemplate = { ...form.processBundle, name: form.teamName.trim() || form.processBundle.name };
+    } else {
+      body.roles = effectiveRoleConfig;
+    }
 
     let res;
     try {
@@ -1724,6 +1759,14 @@ export default function TeamSetup() {
           ? prev.map(s => s.id === ev.id ? { ...s, status: ev.status, error: ev.error || s.error } : s)
           : prev);
       } else if (ev.type === 'collision') {
+        // Bundle path (#422): the process-template flow has no role-card UI to
+        // fall back to — keep the current step and offer "Add missing roles"
+        // (mode: extend re-submits the same bundle, adding only missing members).
+        if (!extendMode && form.processBundle) {
+          setCollisionInfo({ existing: ev.existing, suggestion: ev.suggestion });
+          setProgressSteps(null);
+          return;
+        }
         // Derive existing role ids + counts from the member-id list in the collision payload.
         const prefix = form.teamId + '-';
         const collisionCountMap = {};
@@ -1746,7 +1789,7 @@ export default function TeamSetup() {
         setExtendMode(true);
         setCollisionInfo({ existing: ev.existing, suggestion: ev.suggestion });
         setProgressSteps(null);
-        setStep(3);
+        setStep(0);
       } else if (ev.type === 'complete') {
         setResult(ev.result);
         const land = landingAgent(ev.result?.created);
@@ -1856,6 +1899,28 @@ export default function TeamSetup() {
       />
 
       {step === 0 && (extendMode
+        ? (
+          <StepTeam
+            form={form}
+            setForm={setForm}
+            templates={templates}
+            roleConfig={form.roleConfig}
+            setRoleConfig={fn => setForm(f => ({ ...f, roleConfig: typeof fn === 'function' ? fn(f.roleConfig) : fn }))}
+            error={stepError}
+            extendMode={extendMode}
+            existingRoles={existingRoles}
+            existingRoleCounts={existingRoleCounts}
+          />
+        ) : (
+          <StepProcess
+            form={form}
+            setForm={setForm}
+            templates={templates}
+            error={stepError}
+          />
+        )
+      )}
+      {step === 1 && (extendMode
         ? <StepEnvironmentReadOnly form={form} environments={environments} sshKeys={sshKeys} githubTokens={githubTokens} />
         : (
           <StepEnvironmentSelect
@@ -1868,11 +1933,11 @@ export default function TeamSetup() {
           />
         )
       )}
-      {step === 1 && (extendMode
+      {step === 2 && (extendMode
         ? <StepProjectReadOnly form={form} />
         : <StepProject {...stepProps} environments={environments} takenAgentIds={takenAgentIds} error={stepError} />
       )}
-      {step === 2 && (extendMode
+      {step === 3 && (extendMode
         ? <StepKnowledgeReadOnly form={form} mcpServers={mcpServers} mcpCredentials={mcpCredentials} />
         : (
           <StepKnowledgeSummary
@@ -1883,19 +1948,6 @@ export default function TeamSetup() {
             error={stepError}
           />
         )
-      )}
-      {step === 3 && (
-        <StepTeam
-          form={form}
-          setForm={setForm}
-          templates={templates}
-          roleConfig={form.roleConfig}
-          setRoleConfig={fn => setForm(f => ({ ...f, roleConfig: typeof fn === 'function' ? fn(f.roleConfig) : fn }))}
-          error={stepError}
-          extendMode={extendMode}
-          existingRoles={existingRoles}
-          existingRoleCounts={existingRoleCounts}
-        />
       )}
       {step === 4 && (
         <StepReview
@@ -1972,9 +2024,9 @@ export default function TeamSetup() {
             <ArrowLeft size={16} /> Back
           </button>
 
-          {!isLast && (extendMode && step < 3 ? (
-            <button type="button" onClick={() => setStep(3)} style={primaryButtonStyle(false)}>
-              Back to Roles <ArrowRight size={16} />
+          {!isLast && (extendMode && step > 0 ? (
+            <button type="button" onClick={() => setStep(0)} style={primaryButtonStyle(false)}>
+              <ArrowLeft size={16} /> Back to Roles
             </button>
           ) : (
             <button type="button" onClick={next} disabled={tplLoading || submitting} style={primaryButtonStyle(submitting || tplLoading)}>

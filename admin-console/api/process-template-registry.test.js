@@ -78,7 +78,7 @@ const CURATED_DIR = path.join(__dirname, '..', '..', 'orchestrator', 'skill-pool
 test('curated repo templates are valid bundles', () => {
   const list = listProcessTemplates(CURATED_DIR);
   const ids = list.map(t => t.id);
-  assert.ok(ids.includes('simple-sdlc'), `simple-sdlc missing (got ${ids.join(', ')})`);
+  assert.ok(ids.includes('core-sdlc'), `core-sdlc missing (got ${ids.join(', ')})`);
   assert.ok(ids.includes('extended-sdlc'), `extended-sdlc missing (got ${ids.join(', ')})`);
   for (const t of list) {
     const b = loadProcessTemplate(CURATED_DIR, t.id);

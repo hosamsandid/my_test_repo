@@ -23,7 +23,7 @@ Curated, git-versioned whole-process bundles — the process-level analogue of
 `agent-templates/`:
 
 - Source of truth: `orchestrator/skill-pool/process-templates/*.json`
-  (`simple-sdlc`, `extended-sdlc`), seeded into the pool volume via
+  (`core-sdlc`, `extended-sdlc`), seeded into the pool volume via
   `make seed-process-templates` (chained from `make seed-pool`).
 - API: `GET /api/process-templates` (gallery summary: id, name, description,
   roleCount, stages) and `GET /api/process-templates/:id` (full bundle).

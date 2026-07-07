@@ -61,7 +61,7 @@ const tinyButtonStyle = {
   fontFamily: 'inherit',
 };
 
-// Default composer skeleton: the Simple-SDLC core loop, ready to be extended.
+// Default composer skeleton: the Core-SDLC loop, ready to be extended.
 export function defaultComposerStages() {
   return [
     { name: 'Requirements', scout: null, author: null, companion: null, extras: ['business-analyst', 'issue-triage'], gateAtExit: true },
@@ -631,7 +631,7 @@ export default function StepProcess({ form, setForm, templates, error }) {
         {SPIN_KEYFRAMES}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 'var(--eb-space-3)' }}>
           <EntryCard icon={LayoutTemplate} title="Use a template"
-            copy="Start from a curated process (Simple SDLC, Extended SDLC, …) or one of your saved drafts. One click, ready to review."
+            copy="Start from a curated process (Core SDLC, Extended SDLC, …) or one of your saved drafts. One click, ready to review."
             onClick={() => setForm(f => ({ ...f, processMode: 'template' }))} />
           <EntryCard icon={Blocks} title="Compose a process"
             copy="Define stages and pick 1–3 roles per stage from the catalog. The Flow-Weaver wires hand-offs, human gates and escalation loops for you."

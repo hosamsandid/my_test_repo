@@ -2,12 +2,13 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, Users, Zap, Clock, Sparkles, Server,
-  ChevronLeft, ChevronRight, Bot,
+  ChevronLeft, ChevronRight,
   Boxes, Key, MessageCircle, Github, Layers, GitBranch,
   Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
+import AccentureLogo from './AccentureLogo';
 
 const STATUS_POLL_MS = 5_000;
 const LAST_VIEWED_KEY = 'agentChat.lastViewed';
@@ -160,7 +161,7 @@ export default function Shell({ children }) {
           flexShrink: 0,
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-            <Bot size={24} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+            <AccentureLogo size={24} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
             {!collapsed && (
               <span style={{
                 fontWeight: 'var(--eb-font-semibold)',

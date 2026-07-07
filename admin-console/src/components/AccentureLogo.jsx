@@ -1,0 +1,19 @@
+import React from 'react';
+
+export default function AccentureLogo({ size = 24, style, ...rest }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      fill="currentColor"
+      role="img"
+      aria-label="Accenture"
+      style={style}
+      {...rest}
+    >
+      <path d="M7 4 L18 12 L7 20 L7 15.6 L11.8 12 L7 8.4 Z" />
+    </svg>
+  );
+}

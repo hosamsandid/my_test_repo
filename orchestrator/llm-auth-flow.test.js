@@ -75,11 +75,33 @@ test('extractToken finds a long-lived subscription token (sk-ant-at01-)', () => 
 
 test('extractToken also matches the legacy sk-ant-oat01- prefix', () => {
   const tok = 'sk-ant-oat01-' + 'A'.repeat(40) + '-XyZ_12';
-  assert.equal(extractToken(`Your token:\n${tok}\n`), tok);
+  assert.equal(extractToken(`Your OAuth token (valid for 1 year):\n${tok}\n`), tok);
+});
+
+test('extractToken skips the earlier ephemeral access token, takes the one after the banner', () => {
+  const ephemeral = 'sk-ant-at01-' + 'E'.repeat(40) + '-eph_00';
+  const real = 'sk-ant-at01-' + 'R'.repeat(40) + '-real99';
+  const out =
+    `exchanging code… access_token=${ephemeral}\n` +
+    `Long-lived authentication token created successfully!\nYour OAuth token (valid for 1 year):\n${real}\n` +
+    'Store this token securely. Use it: export CLAUDE_CODE_OAUTH_TOKEN=<token>';
+  assert.equal(extractToken(out), real);
+});
+
+test('extractToken handles space-less TUI output (cursor-positioned text)', () => {
+  const tok = 'sk-ant-at01-' + 'T'.repeat(40) + '-tui_01';
+  const out = `✓Long-livedauthenticationtokencreatedsuccessfully!\nYourOAuthtoken(validfor1year):\n${tok}\nStorethistokensecurely.`;
+  assert.equal(extractToken(out), tok);
+});
+
+test('extractToken returns null before the success banner appears (never grabs the ephemeral token early)', () => {
+  const ephemeral = 'sk-ant-at01-' + 'E'.repeat(40) + '-eph_00';
+  assert.equal(extractToken(`exchanging code… access_token=${ephemeral}`), null);
 });
 
 test('extractToken does not match ordinary api keys', () => {
-  assert.equal(extractToken('ANTHROPIC_API_KEY=sk-ant-api03-' + 'B'.repeat(40)), null);
+  const out = 'Your OAuth token (valid for 1 year):\nANTHROPIC_API_KEY=sk-ant-api03-' + 'B'.repeat(40);
+  assert.equal(extractToken(out), null);
 });
 
 test('extractOauthErrors finds exchange failures reported by the CLI', () => {

@@ -5,6 +5,7 @@ import {
   CheckCircle, Loader2, ArrowUp, ArrowDown, X, Plus, Save, Workflow, Sparkles,
 } from 'lucide-react';
 import { useApi, apiCall } from '../../hooks/useApi';
+import { computePreviewLayout, ellipsize, PREVIEW } from './flow-preview-layout';
 
 // ─── Wizard "Process" step (#422) ────────────────────────────────────────────
 // Replaces the flat role-checkbox Members step in create mode. Three entries:
@@ -96,73 +97,38 @@ export function composerToWeaveRequest(name, composerStages) {
 // A light, read-only SVG projection of the bundle: stage columns, role boxes,
 // and the hand-off edges (GitHub channels + label hand-offs). Deliberately not
 // the full canvas renderer — this is a "does the flow hang together" glance.
+// All geometry (lanes, label staggering, corridor clamping, #427) lives in
+// flow-preview-layout.js.
 
-function bundleEdges(bundle) {
-  const roles = bundle.roles || [];
-  const edges = [];
-  // Channels: producer → consumer (with optional label + human gate).
-  for (const r of roles) {
-    for (const ch of (r.channels || [])) {
-      if (!ch || !ch.from) continue;
-      edges.push({ from: ch.from, to: r.id, label: ch.label || (ch.artifact === 'issue' ? 'issue' : 'PR'), gate: ch.gate === 'human' });
-    }
-  }
-  // Label hand-offs: emitter (role-level or trigger-level emits) → listener.
-  const emitters = new Map(); // label -> Set(roleId)
-  const addEmit = (label, id) => {
-    if (!emitters.has(label)) emitters.set(label, new Set());
-    emitters.get(label).add(id);
-  };
-  for (const r of roles) {
-    for (const e of (r.emits || [])) addEmit(e, r.id);
-    for (const t of (r.triggers || [])) for (const e of (t.emits || [])) addEmit(e, r.id);
-  }
-  for (const r of roles) {
-    for (const t of (r.triggers || [])) {
-      if (t.channel || !t.labelFilter) continue;
-      for (const from of (emitters.get(t.labelFilter) || [])) {
-        if (from === r.id) continue;
-        if (edges.some(e => e.from === from && e.to === r.id && e.label === t.labelFilter)) continue;
-        edges.push({ from, to: r.id, label: t.labelFilter, gate: false });
-      }
-    }
-  }
-  return edges;
+// Halo behind edge labels so they stay readable when crossing a line.
+const labelHaloStyle = {
+  paintOrder: 'stroke',
+  stroke: 'var(--eb-bg-elevated)',
+  strokeWidth: 3,
+  strokeLinejoin: 'round',
+};
+
+function PreviewEdge({ edge }) {
+  const color = edge.gate ? 'var(--eb-status-error)' : 'var(--eb-text-muted)';
+  return (
+    <g>
+      <path d={edge.d} fill="none" stroke={color} strokeWidth={1.2}
+        strokeDasharray={edge.gate ? '4 3' : undefined}
+        markerEnd={`url(#${edge.gate ? 'proc-arrow-gate' : 'proc-arrow'})`} opacity={0.85} />
+      <text x={edge.labelX} y={edge.labelY} textAnchor="middle"
+        style={{ fontSize: 9.5, fill: color, ...labelHaloStyle }}>
+        {edge.labelText}
+      </text>
+    </g>
+  );
 }
 
 export function BundleFlowPreview({ bundle }) {
-  const layout = useMemo(() => {
-    if (!bundle || !Array.isArray(bundle.roles) || bundle.roles.length === 0) return null;
-    const stages = Array.isArray(bundle.stages) && bundle.stages.length ? bundle.stages : [''];
-    const colOf = (r) => {
-      const i = stages.indexOf(r.stage);
-      return i === -1 ? stages.length : i;
-    };
-    const cols = new Map();
-    const pos = new Map();
-    for (const r of bundle.roles) {
-      const c = colOf(r);
-      if (!cols.has(c)) cols.set(c, []);
-      pos.set(r.id, { col: c, row: cols.get(c).length, role: r });
-      cols.get(c).push(r.id);
-    }
-    const NODE_W = 150, NODE_H = 40, COL_W = 210, ROW_H = 62, PAD = 16, HEADER = 26;
-    const nCols = Math.max(...[...cols.keys()]) + 1;
-    const maxRows = Math.max(...[...cols.values()].map(v => v.length));
-    const xy = (id) => {
-      const p = pos.get(id);
-      return { x: PAD + p.col * COL_W, y: PAD + HEADER + p.row * ROW_H };
-    };
-    return {
-      stages, pos, xy, edges: bundleEdges(bundle),
-      NODE_W, NODE_H, COL_W, PAD, HEADER,
-      width: PAD * 2 + (nCols - 1) * COL_W + NODE_W,
-      height: PAD * 2 + HEADER + Math.max(1, maxRows) * ROW_H,
-    };
-  }, [bundle]);
+  const layout = useMemo(() => computePreviewLayout(bundle), [bundle]);
 
   if (!layout) return null;
-  const { stages, pos, xy, edges, NODE_W, NODE_H, COL_W, PAD, HEADER, width, height } = layout;
+  const { NODE_W, COL_W, NODE_H, PAD } = PREVIEW;
+  const { stages, nodes, forward, back, width, height } = layout;
 
   return (
     <div style={{ overflowX: 'auto', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-elevated)' }}>
@@ -181,46 +147,23 @@ export function BundleFlowPreview({ bundle }) {
             {s || '—'}
           </text>
         ))}
-        {edges.map((e, i) => {
-          if (!pos.has(e.from) || !pos.has(e.to)) return null;
-          const a = xy(e.from); const b = xy(e.to);
-          const x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2;
-          const x2 = b.x, y2 = b.y + NODE_H / 2;
-          const back = x2 <= x1; // rework loop — bow under the boxes
-          const midX = (x1 + x2) / 2;
-          const d = back
-            ? `M ${a.x + NODE_W / 2} ${a.y + NODE_H} C ${a.x + NODE_W / 2} ${a.y + NODE_H + 26}, ${b.x + NODE_W / 2} ${b.y + NODE_H + 26}, ${b.x + NODE_W / 2} ${b.y + NODE_H + 3}`
-            : `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2 - 3} ${y2}`;
-          const color = e.gate ? 'var(--eb-status-error)' : 'var(--eb-text-muted)';
-          return (
-            <g key={`e-${i}`}>
-              <path d={d} fill="none" stroke={color} strokeWidth={1.2}
-                strokeDasharray={e.gate ? '4 3' : undefined}
-                markerEnd={`url(#${e.gate ? 'proc-arrow-gate' : 'proc-arrow'})`} opacity={0.85} />
-              <text x={back ? (a.x + b.x + NODE_W) / 2 : midX} y={back ? Math.max(a.y, b.y) + NODE_H + 22 : (y1 + y2) / 2 - 5}
-                textAnchor="middle" style={{ fontSize: 9.5, fill: color }}>
-                {e.gate ? `⛔ ${e.label}` : e.label}
-              </text>
-            </g>
-          );
-        })}
-        {[...pos.values()].map(({ role }) => {
-          const { x, y } = xy(role.id);
-          return (
-            <g key={role.id}>
-              <rect x={x} y={y} width={NODE_W} height={NODE_H} rx={7}
-                fill="var(--eb-bg-surface)" stroke="var(--eb-border-default)" strokeWidth={1} />
-              <text x={x + NODE_W / 2} y={y + 17} textAnchor="middle"
-                style={{ fontSize: 10.5, fontWeight: 600, fill: 'var(--eb-text-primary)' }}>
-                {(role.displayName || role.id).slice(0, 24)}
-              </text>
-              <text x={x + NODE_W / 2} y={y + 31} textAnchor="middle"
-                style={{ fontSize: 9, fill: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>
-                {role.id.slice(0, 26)}
-              </text>
-            </g>
-          );
-        })}
+        {forward.map((e, i) => <PreviewEdge key={`f-${i}`} edge={e} />)}
+        {back.map((e, i) => <PreviewEdge key={`b-${i}`} edge={e} />)}
+        {nodes.map(({ role, x, y }) => (
+          <g key={role.id}>
+            <title>{role.displayName && role.displayName !== role.id ? `${role.displayName} (${role.id})` : role.id}</title>
+            <rect x={x} y={y} width={NODE_W} height={NODE_H} rx={7}
+              fill="var(--eb-bg-surface)" stroke="var(--eb-border-default)" strokeWidth={1} />
+            <text x={x + NODE_W / 2} y={y + 17} textAnchor="middle"
+              style={{ fontSize: 10.5, fontWeight: 600, fill: 'var(--eb-text-primary)' }}>
+              {ellipsize(role.displayName || role.id, 26)}
+            </text>
+            <text x={x + NODE_W / 2} y={y + 31} textAnchor="middle"
+              style={{ fontSize: 9, fill: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>
+              {ellipsize(role.id, 29)}
+            </text>
+          </g>
+        ))}
       </svg>
     </div>
   );

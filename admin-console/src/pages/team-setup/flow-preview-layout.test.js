@@ -1,0 +1,144 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+
+import {
+  PREVIEW,
+  ellipsize,
+  bundleEdges,
+  computePreviewLayout,
+} from './flow-preview-layout.js';
+
+const { NODE_W, NODE_H, COL_W, ROW_H, PAD, HEADER, LANE_STEP, LABEL_GAP, CHAR_W } = PREVIEW;
+
+// Minimal role factory — just enough shape for bundleEdges.
+const role = (id, stage, extra = {}) => ({ id, stage, ...extra });
+
+function labelBoxes(layout) {
+  return [...layout.forward, ...layout.back].map(e => ({
+    text: e.labelText,
+    left: e.labelX - (e.labelText.length * CHAR_W) / 2,
+    right: e.labelX + (e.labelText.length * CHAR_W) / 2,
+    top: e.labelY - 8,
+    bottom: e.labelY + 2,
+  }));
+}
+
+test('ellipsize truncates with … and keeps short strings intact', () => {
+  assert.equal(ellipsize('short', 10), 'short');
+  assert.equal(ellipsize('Design Scout (Gap & Evidence)', 26), 'Design Scout (Gap & Evide…');
+  assert.equal(ellipsize(null, 5), '');
+});
+
+test('bundleEdges: channels + label hand-offs, deduped, no self-edges', () => {
+  const bundle = {
+    roles: [
+      role('author', 'Build', { emits: ['done'], triggers: [{ emits: ['done'] }] }),
+      role('reviewer', 'Build', {
+        channels: [{ artifact: 'pr', from: 'author' }],
+        triggers: [{ labelFilter: 'done' }],
+      }),
+    ],
+  };
+  const edges = bundleEdges(bundle);
+  assert.deepEqual(edges.map(e => `${e.from}→${e.to}:${e.label}`).sort(),
+    ['author→reviewer:PR', 'author→reviewer:done']);
+});
+
+// Two rework loops within one stage column: each back edge gets its own lane
+// below the grid, so each label sits on its own line.
+test('back edges get one label line per edge', () => {
+  const bundle = {
+    stages: ['Build'],
+    roles: [
+      role('author', 'Build', { emits: ['escalate'], triggers: [{ labelFilter: 'author-go' }] }),
+      role('companion', 'Build', { emits: ['author-go'], triggers: [{ labelFilter: 'escalate' }] }),
+    ],
+  };
+  const layout = computePreviewLayout(bundle);
+  assert.equal(layout.back.length, 2);
+  assert.equal(layout.forward.length, 0);
+  const ys = layout.back.map(e => e.labelY).sort((a, b) => a - b);
+  assert.equal(ys[1] - ys[0], LANE_STEP);
+  // lanes live below the node grid
+  const gridBottom = PAD + HEADER + ROW_H + NODE_H;
+  assert.ok(ys[0] > gridBottom);
+  // svg is tall enough to hold both lanes
+  assert.ok(layout.height >= ys[1] + 4);
+});
+
+// Two hand-offs sharing the corridor between the same two columns are
+// staggered vertically instead of overprinting.
+test('forward labels sharing a corridor are staggered', () => {
+  const bundle = {
+    stages: ['S1', 'S2'],
+    roles: [
+      role('a', 'S1', { emits: ['go', 'ship'] }),
+      role('b', 'S2', { triggers: [{ labelFilter: 'go' }, { labelFilter: 'ship' }] }),
+    ],
+  };
+  const layout = computePreviewLayout(bundle);
+  assert.equal(layout.forward.length, 2);
+  const [y1, y2] = layout.forward.map(e => e.labelY).sort((a, b) => a - b);
+  assert.ok(y2 - y1 >= LABEL_GAP, `labels ${y1}/${y2} not staggered`);
+});
+
+// A label wider than the corridor would overhang the node boxes on a same-row
+// edge — it must be nudged into the row gap below the boxes.
+test('oversized label is nudged off the node row', () => {
+  const bundle = {
+    stages: ['S1', 'S2'],
+    roles: [
+      role('a', 'S1', { emits: ['requirements:approved'] }),
+      role('b', 'S2', { triggers: [{ labelFilter: 'requirements:approved' }] }),
+    ],
+  };
+  const layout = computePreviewLayout(bundle);
+  assert.equal(layout.forward.length, 1);
+  const rowBottom = PAD + HEADER + NODE_H;
+  assert.ok(layout.forward[0].labelY - 8 >= rowBottom, 'label still intersects the node row');
+});
+
+// The issue's reproduction case: the curated Extended SDLC template (10 roles,
+// several loops + PR channels) must render with no overlapping labels and no
+// label sitting inside a node box.
+test('extended-sdlc preview: labels neither overlap nor cover node boxes', () => {
+  const bundle = JSON.parse(readFileSync(
+    new URL('../../../../orchestrator/skill-pool/process-templates/extended-sdlc.json', import.meta.url), 'utf8'));
+  const layout = computePreviewLayout(bundle);
+  assert.ok(layout.back.length > 0, 'expected rework/escalation loops');
+  const boxes = labelBoxes(layout);
+  assert.ok(boxes.length >= 10, 'expected a busy preview');
+
+  for (let i = 0; i < boxes.length; i++) {
+    for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i]; const b = boxes[j];
+      const overlap = a.left < b.right - 1 && b.left < a.right - 1
+        && a.top < b.bottom - 1 && b.top < a.bottom - 1;
+      assert.ok(!overlap, `labels overlap: "${a.text}" and "${b.text}"`);
+    }
+  }
+  for (const l of boxes) {
+    for (const n of layout.nodes) {
+      const covers = l.left < n.x + NODE_W && n.x < l.right
+        && l.top < n.y + NODE_H && n.y < l.bottom;
+      assert.ok(!covers, `label "${l.text}" sits on node ${n.role.id}`);
+    }
+    assert.ok(l.bottom <= layout.height && l.top >= 0, `label "${l.text}" clipped vertically`);
+    assert.ok(l.left >= 0 && l.right <= layout.width, `label "${l.text}" clipped horizontally`);
+  }
+});
+
+// Column geometry is unchanged in spirit: one column per stage, unstaged roles
+// in a trailing column.
+test('unstaged roles land in a trailing column', () => {
+  const bundle = {
+    stages: ['S1'],
+    roles: [role('a', 'S1'), role('x', undefined)],
+  };
+  const layout = computePreviewLayout(bundle);
+  const xs = new Map(layout.nodes.map(n => [n.role.id, n.x]));
+  assert.equal(xs.get('a'), PAD);
+  assert.equal(xs.get('x'), PAD + COL_W);
+  assert.equal(layout.width, PAD * 2 + COL_W + NODE_W);
+});

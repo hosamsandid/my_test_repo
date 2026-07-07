@@ -1,7 +1,7 @@
 {
   "processTemplateVersion": 1,
   "name": "Extended SDLC",
-  "description": "Four-stage SDLC (Requirements → Design → Build → Release) with the reduced per-stage pattern: Scout (gap + evidence) → Author → Companion (review, feedback routing, escalation). Human gates on every stage boundary.",
+  "description": "A full delivery pipeline of ten agents in four phases — requirements, design, build, release. Agents prepare, produce and review the work in each phase and ask you when they are blocked; you approve every phase transition, and documentation and release notes are kept up to date.",
   "level": "template",
   "stages": [
     "Requirements",

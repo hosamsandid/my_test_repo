@@ -1,7 +1,7 @@
 {
   "processTemplateVersion": 1,
   "name": "Core SDLC",
-  "description": "The minimal core loop: a Business Analyst turns requests into ready-labelled issues, a Developer implements them and opens PRs, a Code Reviewer reviews (review submissions wake the Developer for rework).",
+  "description": "Three agents covering the essentials: a Business Analyst turns your requests into well-defined work items, a Developer implements them, and a Code Reviewer checks every change. You stay in control of what gets merged.",
   "level": "template",
   "stages": ["Requirements", "Build"],
   "roles": [

@@ -44,15 +44,25 @@ Each skill directory contains a `SKILL.md` with instructions, data point referen
 
 When you act on GitHub (commits, PRs, reviews, comments), you MUST tag every action with your agent identity. All agents in this stack share one GitHub PAT, so the central poller cannot tell who did what from the GitHub identity alone — it relies on these tags to skip events you caused yourself. Without them, you will eventually trigger yourself in a loop.
 
-**`gh-as-agent` is not a `gh` proxy.** It does identity tagging only and understands exactly three verbs:
+`gh-as-agent` is the wrapper for doing git/GitHub actions as you. It understands these verbs:
 
 | Verb | Use |
 |---|---|
 | `gh-as-agent commit [git-commit-args …]` | Commit with `--author` set to your agent id |
+| `gh-as-agent push [--repo <name>] [--branch <b>] [--no-set-upstream]` | Push the current (or `--branch`) branch via the platform |
+| `gh-as-agent pr --title <t> [--body-file <f>] [--base <branch>] [--repo <name>] [--draft]` | Push the current branch, then open a PR (body auto-stamped) |
 | `gh-as-agent stamp <file>` | Append your agent marker to a body file before you post it |
 | `gh-as-agent marker` | Print the marker (for inlining) |
 
-**Everything else → plain `gh`.** When the action carries a body (PR create/review, issue create/comment), write the body to a file, `gh-as-agent stamp <file>`, then post with `gh … --body-file <file>`. Read-only and label operations (`gh issue/pr list/view/edit`, `gh label create`) need no stamp. Do **not** call `gh-as-agent pr …` / `gh-as-agent issue …` / `gh-as-agent label …` — those subcommands do not exist.
+**You MUST push and open PRs via `gh-as-agent push` / `gh-as-agent pr` — not raw `git push` / `gh pr create`.** Depending on this agent's model provider, the org's managed Claude Code policy can force interactive human approval for `git push` / `gh pr create`, which is impossible in an unattended (triggered/scheduled) run — so a raw push just fails. `gh-as-agent push` / `pr` run the network step through the platform with the environment's credentials, and stamp your identity so loop-protection keeps working. `git commit` is not blocked, so commit locally first. On a multi-repo environment add `--repo <clone-dir-name>`. If `gh-as-agent push`/`pr` reports a failure (non-fast-forward, auth), surface it to the user — do not retry with a raw `git push`.
+
+Typical flow:
+```bash
+gh-as-agent commit -m "feat: implement the thing"
+gh-as-agent pr --title "Implement the thing" --body-file /tmp/pr-body.md --base main
+```
+
+**Everything else → plain `gh`.** When the action carries a body (PR review, issue create/comment), write the body to a file, `gh-as-agent stamp <file>`, then post with `gh … --body-file <file>`. Read-only and label operations (`gh issue/pr list/view/edit`, `gh label create`) need no stamp. There is no `gh-as-agent issue …` / `gh-as-agent label …` — those subcommands do not exist.
 
 Example for a PR review:
 ```bash

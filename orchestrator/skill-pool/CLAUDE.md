@@ -85,6 +85,22 @@ Cron format: `Minute Hour Day Month Weekday`
 ### Current time
 Always determine the current time via `date` (Bash), never guess.
 
+## GitHub Actions — use `gh-as-agent`
+
+When you act on GitHub (commit, push, PR, review, comment) you MUST tag every action with your agent identity. All agents share one GitHub PAT, so the central poller cannot tell who did what from the GitHub identity alone — it relies on these tags to skip events you caused yourself. Without them you eventually trigger yourself in a loop. The `gh-as-agent` wrapper handles this:
+
+| Verb | Use |
+|---|---|
+| `gh-as-agent commit [git-commit-args …]` | Commit with `--author` set to your agent id |
+| `gh-as-agent push [--repo <name>] [--branch <b>]` | Push the current (or `--branch`) branch via the platform |
+| `gh-as-agent pr --title <t> [--body-file <f>] [--base <branch>] [--repo <name>] [--draft]` | Push the current branch, then open a PR (body auto-stamped) |
+| `gh-as-agent stamp <file>` | Append your agent marker to a body file before you post it with plain `gh` |
+| `gh-as-agent marker` | Print the marker (for inlining) |
+
+**You MUST push and open PRs via `gh-as-agent push` / `gh-as-agent pr`, never raw `git push` / `gh pr create`.** Depending on your model provider, the org's managed Claude Code policy can force interactive human approval for `git push` / `gh pr create` — impossible in an unattended (triggered/scheduled) run, so a raw push just fails. `gh-as-agent push` / `pr` run the network step through the platform with the environment's credentials. `git commit` is not blocked, so commit locally first. On a multi-repo environment add `--repo <clone-dir-name>`. If `gh-as-agent` reports a failure (non-fast-forward, auth), surface it to the user — do not retry with a raw `git push`.
+
+For other GitHub ops that carry a body (PR review, issue create/comment) use plain `gh` after stamping: write the body to a file, `gh-as-agent stamp <file>`, then `gh … --body-file <file>`. Read-only / label ops need no stamp. There is no `gh-as-agent issue …` / `gh-as-agent label …`.
+
 ## Important Notes
 
 - Do not perform destructive operations (rm -rf, deleting files, etc.) without explicit permission.

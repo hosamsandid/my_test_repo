@@ -77,11 +77,15 @@ function extractAuthUrl(cleanText) {
   return all.reduce((a, b) => (b.length > a.length ? b : a));
 }
 
-// Long-lived subscription token as printed by `claude setup-token`. The CLI
-// prints it prefixed `sk-ant-at01-` (older builds: `sk-ant-oat01-`) — both are
-// matched; `sk-ant-api…` keys are deliberately excluded so a stray API key in
-// the environment can't be mistaken for the freshly minted token.
-const OAUTH_TOKEN_RE = /sk-ant-o?at[0-9]{2}-[A-Za-z0-9_-]{20,}/;
+// Long-lived subscription token as printed by `claude setup-token` — always
+// prefixed `sk-ant-oat…` (the value the CLI stores as CLAUDE_CODE_OAUTH_TOKEN).
+// We must NOT match the bare `sk-ant-at…` prefix: that is the short-lived OAuth
+// *access token* which flashes in the PTY output during the code exchange, is
+// rejected by api.anthropic.com ("Invalid bearer token"), and — because it
+// appears before the final `oat` token — would otherwise be captured first.
+// `sk-ant-api…` keys are likewise excluded so a stray API key in the
+// environment can't be mistaken for the freshly minted token.
+const OAUTH_TOKEN_RE = /sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]{20,}/;
 
 function extractToken(cleanText) {
   const m = cleanText.match(OAUTH_TOKEN_RE);

@@ -219,11 +219,13 @@ function OAuthLoginWizard({ onToken, onClose }) {
 
   function absorb(view) {
     setFlow(view);
+    // Mirror the server's error verbatim (and clear it once the server does —
+    // e.g. after a successful code re-submission).
+    setErr(view?.error || null);
     if (view?.status === 'done' && !doneNotified.current) {
       doneNotified.current = true;
       onToken(view.flowId);
     }
-    if (view?.error) setErr(view.error);
   }
 
   // Kick off the flow on mount.
@@ -289,7 +291,10 @@ function OAuthLoginWizard({ onToken, onClose }) {
   }
 
   const status = flow?.status;
-  const failed = ['error', 'expired', 'cancelled'].includes(status) || (!!err && status !== 'done');
+  // An error while the flow still awaits a code (e.g. "OAuth error: Invalid
+  // code") is recoverable — keep the paste form visible instead of failing.
+  const failed = ['error', 'expired', 'cancelled'].includes(status)
+    || (!!err && !['done', 'awaiting-code'].includes(status));
 
   return (
     <div style={{
@@ -306,6 +311,11 @@ function OAuthLoginWizard({ onToken, onClose }) {
 
       {status === 'awaiting-code' && flow.authUrl && (
         <>
+          {err && (
+            <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>
+              {err}
+            </div>
+          )}
           <div style={{ fontWeight: 'var(--eb-font-medium)' }}>1. Open this link, sign in with your Claude subscription and approve:</div>
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
             <a
@@ -325,7 +335,7 @@ function OAuthLoginWizard({ onToken, onClose }) {
               <Copy size={12} /> {copied ? 'Copied' : 'Copy'}
             </button>
           </div>
-          <div style={{ fontWeight: 'var(--eb-font-medium)' }}>2. Paste the confirmation code shown after approval:</div>
+          <div style={{ fontWeight: 'var(--eb-font-medium)' }}>2. Paste the confirmation code shown after approval (copy it completely, including any <code style={{ fontFamily: 'var(--eb-font-mono)' }}>#…</code> suffix):</div>
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
             <input
               value={code}

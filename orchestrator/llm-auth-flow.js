@@ -84,6 +84,13 @@ function extractToken(cleanText) {
   return m ? m[0] : null;
 }
 
+// Exchange failures the CLI reports after a code was submitted, e.g.
+// "OAuth error: Invalid code. …". The CLI keeps running ("Press Enter to
+// retry."), so these are recoverable — the flow returns to awaiting-code.
+function extractOauthErrors(cleanText) {
+  return cleanText.match(/OAuth error:?[^\n]*/gi) || [];
+}
+
 // ── Flow manager ────────────────────────────────────────────────────────────
 
 const FLOW_TTL_MS = 10 * 60 * 1000;        // whole login must finish within 10 min
@@ -103,6 +110,16 @@ function createLlmAuthFlowManager({ workDirRoot = '/tmp/llm-auth-flows', log = c
       error: flow.error || null,
       startedAt: flow.startedAt,
     };
+  }
+
+  // Failure-path diagnostics: the last chunk of what the CLI actually showed,
+  // with any token redacted. Logged only when a flow fails, so an operator
+  // can tell an unexpected prompt from a network problem without shell access.
+  function redactedTail(flow, n = 600) {
+    return stripAnsi(flow.output)
+      .replace(/sk-ant-oat[0-9a-z]{0,4}-[A-Za-z0-9_-]{10,}/g, '<TOKEN>')
+      .replace(/\n{3,}/g, '\n\n')
+      .slice(-n);
   }
 
   function cleanupFlow(flow, nextState, errorMsg) {
@@ -149,6 +166,21 @@ function createLlmAuthFlowManager({ workDirRoot = '/tmp/llm-auth-flows', log = c
         if (flow.urlSettleTimer.unref) flow.urlSettleTimer.unref();
       }
     }
+    // Recoverable exchange failure (wrong/incomplete code): surface it, nudge
+    // the CLI back to its paste prompt ("Press Enter to retry.") and let the
+    // operator paste again. Redraw frames can repeat an old error line, so
+    // only a *new* occurrence (vs the count recorded at submit time) counts.
+    if (flow.state === 'exchanging' && !flow.token) {
+      const errs = extractOauthErrors(clean);
+      if (errs.length > (flow.oauthErrorCount || 0)) {
+        flow.oauthErrorCount = errs.length;
+        flow.error = `${errs[errs.length - 1].slice(0, 160).trim()} — paste the code again.`;
+        flow.state = 'awaiting-code';
+        try { flow.child?.stdin.write('\r'); } catch { /* prompt nudge is best effort */ }
+        log.warn(`[LlmAuth] flow ${flow.id}: code exchange failed — awaiting new code`);
+      }
+    }
+
     const token = extractToken(clean);
     if (token && !flow.token) {
       flow.token = token;
@@ -212,6 +244,7 @@ function createLlmAuthFlowManager({ workDirRoot = '/tmp/llm-auth-flows', log = c
       ttlTimer: null,
       claimTimer: null,
       urlSettleTimer: null,
+      oauthErrorCount: 0,
     };
     active = flow;
 
@@ -248,19 +281,19 @@ function createLlmAuthFlowManager({ workDirRoot = '/tmp/llm-auth-flows', log = c
     child.on('exit', (code) => {
       if (flow.state === 'done') return; // token already captured
       if (['error', 'expired', 'cancelled'].includes(flow.state)) return;
+      log.warn(`[LlmAuth] flow ${flow.id}: CLI exited early (code ${code}); last output (redacted):\n${redactedTail(flow)}`);
       cleanupFlow(
         flow,
         'error',
         `claude setup-token exited (code ${code}) before a token was issued. ` +
         'Check that the code was pasted correctly, or use the manual token paste instead.',
       );
-      log.warn(`[LlmAuth] flow ${flow.id}: CLI exited early (code ${code})`);
     });
 
     flow.ttlTimer = setTimeout(() => {
       if (!['done', 'error', 'cancelled'].includes(flow.state)) {
+        log.warn(`[LlmAuth] flow ${flow.id}: timed out in state '${flow.state}'; last output (redacted):\n${redactedTail(flow)}`);
         cleanupFlow(flow, 'expired', 'Login flow timed out. Start a new login.');
-        log.warn(`[LlmAuth] flow ${flow.id}: timed out`);
       }
     }, FLOW_TTL_MS);
     if (flow.ttlTimer.unref) flow.ttlTimer.unref();
@@ -291,11 +324,19 @@ function createLlmAuthFlowManager({ workDirRoot = '/tmp/llm-auth-flows', log = c
     const trimmed = String(code || '').trim();
     if (!trimmed) return { error: 'code is required', status: 400 };
     try {
-      flow.child.stdin.write(trimmed + '\n');
+      // The CLI's prompt runs in raw terminal mode, where the Return key is a
+      // carriage return — a plain '\n' only types the code without submitting
+      // it (verified against the real CLI). Cooked mode maps CR→NL via ICRNL,
+      // so '\r' submits correctly in both modes.
+      flow.child.stdin.write(trimmed + '\r');
     } catch (err) {
       return { error: `could not deliver code to the login process: ${err.message}`, status: 500 };
     }
     flow.state = 'exchanging';
+    flow.error = null;
+    // Baseline for the recoverable-failure detector: only error lines printed
+    // *after* this submission count as this submission's failure.
+    flow.oauthErrorCount = extractOauthErrors(stripAnsi(flow.output)).length;
     log.log(`[LlmAuth] flow ${flow.id}: code submitted — exchanging`);
     return { ok: true, view: publicView(flow) };
   }
@@ -328,4 +369,4 @@ function createLlmAuthFlowManager({ workDirRoot = '/tmp/llm-auth-flows', log = c
   return { start, get, submitCode, claimToken, cancel };
 }
 
-module.exports = { createLlmAuthFlowManager, stripAnsi, extractAuthUrl, extractToken, isCompleteAuthUrl };
+module.exports = { createLlmAuthFlowManager, stripAnsi, extractAuthUrl, extractToken, isCompleteAuthUrl, extractOauthErrors };

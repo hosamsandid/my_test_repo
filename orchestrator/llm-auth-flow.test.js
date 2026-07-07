@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { stripAnsi, extractAuthUrl, extractToken, isCompleteAuthUrl } = require('./llm-auth-flow');
+const { stripAnsi, extractAuthUrl, extractToken, isCompleteAuthUrl, extractOauthErrors } = require('./llm-auth-flow');
 
 test('stripAnsi removes CSI color/cursor sequences', () => {
   const raw = '\x1b[1m\x1b[38;5;208mBrowser didn\'t open?\x1b[0m Use the url below';
@@ -75,4 +75,12 @@ test('extractToken finds a long-lived subscription token', () => {
 
 test('extractToken does not match ordinary api keys', () => {
   assert.equal(extractToken('ANTHROPIC_API_KEY=sk-ant-api03-' + 'B'.repeat(40)), null);
+});
+
+test('extractOauthErrors finds exchange failures reported by the CLI', () => {
+  const out = 'Paste code here if prompted >\n\nOAuth error: Invalid code. Please make sure the full code was copied\n\nPress Enter to retry.';
+  const errs = extractOauthErrors(out);
+  assert.equal(errs.length, 1);
+  assert.match(errs[0], /^OAuth error: Invalid code/);
+  assert.equal(extractOauthErrors('Success! Your token is below.').length, 0);
 });

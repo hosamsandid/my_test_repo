@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Bot, LogIn } from 'lucide-react';
+import { LogIn } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
+import AccentureLogo from '../components/AccentureLogo';
 
 // Full-screen login gate (#276). Rendered instead of the console whenever there
 // is no active session. On success the AuthProvider flips to authenticated and
@@ -63,7 +64,7 @@ export default function Login() {
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-2)' }}>
-          <Bot size={24} style={{ color: 'var(--eb-accent-primary)' }} />
+          <AccentureLogo size={24} style={{ color: 'var(--eb-accent-primary)' }} />
           <span style={{ fontWeight: 'var(--eb-font-semibold)', fontSize: 'var(--eb-text-lg)' }}>Agent Studio</span>
         </div>
         <p style={{ margin: `0 0 var(--eb-space-5)`, color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>

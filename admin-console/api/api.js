@@ -868,47 +868,6 @@ app.get('/api/setup/status', (req, res) => {
   res.json({ isComplete, steps, completionPercent: Math.round((doneCount / steps.length) * 100) });
 });
 
-/* ─── Dashboard ─────────────────────────────────────────────────────── */
-
-app.get('/api/dashboard', (req, res) => {
-  const agentDirs = listAgentDirs();
-  let active = 0;
-  let disabled = 0;
-  let agentSkills = 0;
-  let triggerCount = 0;
-
-  for (const id of agentDirs) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (cfg.enabled === false) disabled++;
-    else active++;
-
-    const skillsDir = path.join(AGENTS_DIR, id, 'skills');
-    try {
-      const skills = fs.readdirSync(skillsDir).filter(n => {
-        return fs.existsSync(path.join(skillsDir, n, 'SKILL.md'));
-      });
-      agentSkills += skills.length;
-    } catch { /* no skills dir */ }
-
-    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []); // canonical copy (#185)
-    if (Array.isArray(triggers)) triggerCount += triggers.length;
-  }
-
-  let poolSkills = 0;
-  const poolSkillsDir = path.join(POOL_DIR, 'skills');
-  try {
-    poolSkills = fs.readdirSync(poolSkillsDir).filter(n =>
-      fs.existsSync(path.join(poolSkillsDir, n, 'SKILL.md'))
-    ).length;
-  } catch { /* no dir */ }
-
-  res.json({
-    agents: { total: agentDirs.length, active, disabled },
-    jobs: { total: triggerCount },
-    skills: { total: poolSkills + agentSkills },
-  });
-});
-
 /* ─── Agents ────────────────────────────────────────────────────────── */
 
 app.get('/api/agents', (req, res) => {

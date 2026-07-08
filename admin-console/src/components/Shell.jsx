@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
-  LayoutDashboard, Users, Zap, Clock, Sparkles, Server,
+  Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight,
   Boxes, Key, MessageCircle, Github, Layers, GitBranch,
   Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2, History,
@@ -42,13 +42,14 @@ function NavBadge({ count, color }) {
 }
 
 const NAV = [
-  { section: 'OVERVIEW', items: [
-    { path: '/',             label: 'Dashboard',           Icon: LayoutDashboard },
+  { items: [
+    { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
+  ]},
+  { section: 'AGENT SETUP', items: [
     { path: '/quickstart',   label: 'Single Agent',        Icon: Rocket },
     { path: '/team-setup',   label: 'Team Wizard',         Icon: Users2 },
     { path: '/agents',       label: 'Agents',              Icon: Layers },
     { path: '/flows',         label: 'Flows',               Icon: GitBranch },
-    { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
     // { path: '/orchestrator-wizard', label: 'Orchestrator Wizard', Icon: Wand2 },
   ]},
   { section: 'WORKSPACES', items: [
@@ -68,7 +69,6 @@ const NAV = [
 ];
 
 const BREADCRUMBS = {
-  '/':             'Dashboard',
   '/quickstart':   'Single Agent',
   '/team-setup':   'Team Wizard',
   '/agents':       'Agents',
@@ -202,9 +202,9 @@ export default function Shell({ children }) {
 
         {/* Nav sections */}
         <nav style={{ flex: 1, overflowY: 'auto', padding: 'var(--eb-space-2) 0' }}>
-          {NAV.map(section => (
-            <div key={section.section} style={{ marginBottom: 'var(--eb-space-2)' }}>
-              {!collapsed && (
+          {NAV.map((section, sectionIndex) => (
+            <div key={section.section || sectionIndex} style={{ marginBottom: 'var(--eb-space-2)' }}>
+              {!collapsed && section.section && (
                 <div style={{
                   padding: 'var(--eb-space-1) var(--eb-space-4)',
                   fontSize: 'var(--eb-text-xs)',
@@ -217,9 +217,7 @@ export default function Shell({ children }) {
                 </div>
               )}
               {section.items.map(({ path, label, Icon, subtitle }) => {
-                const isActive = path === '/'
-                  ? location.pathname === '/'
-                  : location.pathname === path || location.pathname.startsWith(path + '/');
+                const isActive = location.pathname === path || location.pathname.startsWith(path + '/');
                 const isChat = path === '/chats';
                 const dotColor = chatCounts.unread > 0
                   ? 'var(--eb-status-success)'

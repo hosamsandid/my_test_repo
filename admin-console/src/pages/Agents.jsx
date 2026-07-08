@@ -294,9 +294,8 @@ function stripYamlFrontmatter(text) {
   return text.replace(/^\s*---\n[\s\S]*?\n---\s*\n?/, '');
 }
 
-// Compact, dashboard-aligned typography for the brief.md body. Without
-// these the browser's default heading sizes look oversized inside a
-// 640px side panel.
+// Compact typography for the brief.md body. Without these the browser's
+// default heading sizes look oversized inside a 640px side panel.
 const BRIEF_MD_COMPONENTS = {
   h1: (props) => <h2 style={{ fontSize: 'var(--eb-text-lg)', fontWeight: 'var(--eb-font-semibold)', margin: '1em 0 0.4em' }} {...props} />,
   h2: (props) => <h3 style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', margin: '1em 0 0.4em' }} {...props} />,

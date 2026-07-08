@@ -11,7 +11,6 @@ function ProcessTeamRedirect() {
   return <Navigate to={`/flows?proc=${encodeURIComponent(teamId)}`} replace />;
 }
 
-const Dashboard           = lazy(() => import('./pages/Dashboard'));
 const Agents              = lazy(() => import('./pages/Agents'));
 const AgentChat           = lazy(() => import('./pages/AgentChat'));
 const QuickStart          = lazy(() => import('./pages/QuickStart'));
@@ -83,7 +82,7 @@ export default function App() {
     <Shell>
       <Suspense fallback={<div style={{ padding: 'var(--eb-space-6)', color: 'var(--eb-text-muted)' }}>Loading...</div>}>
         <Routes>
-          <Route path="/"             element={<Dashboard />} />
+          <Route path="/"             element={<Navigate to="/chats" replace />} />
           <Route path="/agents"       element={<Agents />} />
           <Route path="/blueprints"   element={<Navigate to="/agents" replace />} />
           <Route path="/chats"           element={<AgentChat />} />

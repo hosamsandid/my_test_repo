@@ -6,6 +6,7 @@ import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 
 const inputStyle = {
@@ -408,22 +409,7 @@ export default function SshKeys() {
       sortable: false,
       render: (_, row) => (
         <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
-          <button
-            aria-label="Delete"
-            onClick={() => setDeleteTarget(row)}
-            title="Delete"
-            style={{
-              display: 'flex', alignItems: 'center',
-              padding: 'var(--eb-space-1) var(--eb-space-2)',
-              background: 'var(--eb-bg-elevated)',
-              border: '1px solid var(--eb-status-error)',
-              borderRadius: 'var(--eb-radius-md)',
-              color: 'var(--eb-status-error)',
-              cursor: 'pointer', fontSize: 'var(--eb-text-xs)',
-            }}
-          >
-            <Trash2 size={13} />
-          </button>
+          <IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteTarget(row)} />
         </div>
       ),
     },

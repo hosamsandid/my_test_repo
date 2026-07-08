@@ -6,6 +6,7 @@ import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 
 /* ── Type badge ─────────────────────────────────────────────────────── */
@@ -435,21 +436,9 @@ export default function ScheduledJobs() {
       />
     )},
     { key: '_actions', label: '', sortable: false, render: (_, row) => (
-      <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }}>
-        <button
-          onClick={e => { e.stopPropagation(); setEditTarget(row); }}
-          title="Edit trigger"
-          style={{ background: 'none', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)', cursor: 'pointer', padding: '2px 6px' }}
-        >
-          <Edit size={13} />
-        </button>
-        <button
-          onClick={e => { e.stopPropagation(); setDeleteTarget(row); }}
-          title="Delete trigger"
-          style={{ background: 'none', border: '1px solid var(--eb-status-error)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-status-error)', cursor: 'pointer', padding: '2px 6px' }}
-        >
-          <Trash2 size={13} />
-        </button>
+      <div className="eb-wrap-md" style={{ display: 'flex', gap: 'var(--eb-space-1)' }}>
+        <IconButton icon={Edit} label="Edit trigger" onClick={e => { e.stopPropagation(); setEditTarget(row); }} />
+        <IconButton icon={Trash2} label="Delete trigger" danger onClick={e => { e.stopPropagation(); setDeleteTarget(row); }} />
       </div>
     )},
   ];

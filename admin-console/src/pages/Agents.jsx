@@ -12,6 +12,7 @@ import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import IconButton from '../components/IconButton';
 import useAutoDerivedId, { sanitizeId } from '../hooks/useAutoDerivedId';
 
 // Mirrors AGENT_ID_RE in admin-console/api/api.js — used only to give inline
@@ -608,29 +609,6 @@ function SecondaryBtn({ children, onClick, style = {} }) {
         cursor: 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', ...style,
       }}
     >{children}</button>
-  );
-}
-
-function IconBtn({ icon: Icon, label, onClick, danger, title, disabled }) {
-  return (
-    <button
-      aria-label={label}
-      title={title || label}
-      onClick={onClick}
-      disabled={disabled}
-      style={{
-        background: 'none',
-        border: `1px solid ${danger ? 'var(--eb-status-error)' : 'var(--eb-border-default)'}`,
-        borderRadius: 'var(--eb-radius-md)',
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        color: danger ? 'var(--eb-status-error)' : 'var(--eb-text-secondary)',
-        padding: '4px 8px', display: 'flex', alignItems: 'center', gap: 4,
-        fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
-        opacity: disabled ? 0.5 : 1,
-      }}
-    >
-      <Icon size={13} />
-    </button>
   );
 }
 
@@ -1455,6 +1433,7 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
   };
   return (
     <div
+      className="eb-wrap-md"
       style={{
         display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
         padding: 'var(--eb-space-3) var(--eb-space-4)',
@@ -1489,7 +1468,7 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
         </span>
         <StateBadge state={state} />
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+      <div className="eb-wrap-md" style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
         {isStub ? (
           <PrimaryBtn
             onClick={() => onActivate(agent)}
@@ -1508,7 +1487,7 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
               label={state === 'active' ? 'Disable' : 'Enable'}
               disabled={busy}
             />
-            <IconBtn
+            <IconButton
               icon={PowerOff}
               label="Deactivate"
               title="Deactivate — reset to stub state"
@@ -1518,15 +1497,15 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
           </>
         )}
         {onOpenBrief && (
-          <IconBtn
+          <IconButton
             icon={FileText}
             label="View mission"
             title="View mission spec"
             onClick={() => onOpenBrief(agent)}
           />
         )}
-        <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
-        <IconBtn
+        <IconButton icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
+        <IconButton
           icon={MessageCircle}
           label="Open chat"
           title={isStub ? 'Stub — activate first' : 'Open chat'}
@@ -1534,12 +1513,12 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
           disabled={isStub}
         />
         {onExport && !isStub && (
-          <IconBtn icon={Download} label="Export" title="Export agent as ZIP" onClick={() => onExport(agent.id)} />
+          <IconButton icon={Download} label="Export" title="Export agent as ZIP" onClick={() => onExport(agent.id)} />
         )}
         {onClone && (
-          <IconBtn icon={Copy} label="Clone" title="Clone this agent" onClick={() => onClone(agent)} />
+          <IconButton icon={Copy} label="Clone" title="Clone this agent" onClick={() => onClone(agent)} />
         )}
-        <IconBtn icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
+        <IconButton icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
       </div>
     </div>
   );
@@ -1624,7 +1603,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
       overflow: 'hidden',
     }}>
       {/* Header */}
-      <div style={{
+      <div className="eb-wrap-md" style={{
         display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
         padding: 'var(--eb-space-4)',
         background: 'var(--eb-bg-elevated)',
@@ -1650,7 +1629,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
           </div>
         </div>
 
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+        <div className="eb-wrap-md" style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
           <span style={{
             fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
             background: 'var(--eb-bg-app)', padding: '2px 8px',
@@ -1690,7 +1669,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
                 label={state === 'active' ? 'Disable' : 'Enable'}
                 disabled={busyIds.has(agent.id)}
               />
-              <IconBtn
+              <IconButton
                 icon={PowerOff}
                 label="Deactivate"
                 title="Deactivate — reset to stub state"
@@ -1699,12 +1678,12 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
               />
             </>
           )}
-          <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
-          <IconBtn icon={MessageCircle} label="Open chat" onClick={() => !isStub && navigate(`/chats/${agent.id}`)} disabled={isStub} />
+          <IconButton icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
+          <IconButton icon={MessageCircle} label="Open chat" onClick={() => !isStub && navigate(`/chats/${agent.id}`)} disabled={isStub} />
           {onExport && !isStub && (
-            <IconBtn icon={Download} label="Export" title="Export agent as ZIP" onClick={() => onExport(agent.id)} />
+            <IconButton icon={Download} label="Export" title="Export agent as ZIP" onClick={() => onExport(agent.id)} />
           )}
-          <IconBtn icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
+          <IconButton icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
         </div>
       </div>
 
@@ -1778,7 +1757,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
       overflow: 'hidden',
     }}>
       {/* Header */}
-      <div style={{
+      <div className="eb-wrap-md" style={{
         display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
         padding: 'var(--eb-space-4)',
         background: 'var(--eb-bg-elevated)',
@@ -1807,7 +1786,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
           </div>
         </div>
 
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+        <div className="eb-wrap-md" style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
           <span style={{
             fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
             background: 'var(--eb-bg-app)', padding: '2px 8px',
@@ -1839,11 +1818,11 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
           >
             <Plus size={13} /> {addingMember ? 'Adding…' : 'Add Member'}
           </button>
-          <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
+          <IconButton icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
           {onExport && (
-            <IconBtn icon={Download} label="Export" title="Export team as ZIP" onClick={() => onExport(agent.id)} />
+            <IconButton icon={Download} label="Export" title="Export team as ZIP" onClick={() => onExport(agent.id)} />
           )}
-          <IconBtn icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
+          <IconButton icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
         </div>
       </div>
 
@@ -1887,7 +1866,7 @@ function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate,
       borderRadius: 'var(--eb-radius-lg)',
       overflow: 'hidden',
     }}>
-      <div style={{
+      <div className="eb-wrap-md" style={{
         display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
         padding: 'var(--eb-space-4)',
         background: 'var(--eb-bg-elevated)',
@@ -1902,27 +1881,27 @@ function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate,
             {agent.id} · {agent.role} · env: {agent.environmentId}
           </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+        <div className="eb-wrap-md" style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
           <ToggleSwitch
             checked={state === 'active'}
             onChange={() => onToggleEnabled(agent)}
             label={state === 'active' ? 'Disable' : 'Enable'}
             disabled={busy}
           />
-          <IconBtn
+          <IconButton
             icon={PowerOff}
             label="Deactivate"
             title="Deactivate — reset to stub state"
             onClick={() => onDeactivate(agent)}
             disabled={busy}
           />
-          <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
-          <IconBtn icon={MessageCircle} label="Open chat" onClick={() => navigate(`/chats/${agent.id}`)} />
-          <IconBtn icon={Download} label="Export" title="Export agent as ZIP" onClick={() => onExport(agent.id)} />
+          <IconButton icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
+          <IconButton icon={MessageCircle} label="Open chat" onClick={() => navigate(`/chats/${agent.id}`)} />
+          <IconButton icon={Download} label="Export" title="Export agent as ZIP" onClick={() => onExport(agent.id)} />
           {onClone && (
-            <IconBtn icon={Copy} label="Clone" title="Clone this agent" onClick={() => onClone(agent)} />
+            <IconButton icon={Copy} label="Clone" title="Clone this agent" onClick={() => onClone(agent)} />
           )}
-          <IconBtn icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
+          <IconButton icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
         </div>
       </div>
     </div>
@@ -1938,7 +1917,7 @@ function OrphanCard({ agent, onDelete }) {
       : 'parent agent is gone';
 
   return (
-    <div style={{
+    <div className="eb-wrap-md" style={{
       display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
       padding: 'var(--eb-space-3) var(--eb-space-4)',
       background: 'var(--eb-bg-surface)',
@@ -1953,7 +1932,7 @@ function OrphanCard({ agent, onDelete }) {
           {agent.id} · {agent.role} · {reason}
         </div>
       </div>
-      <IconBtn icon={Trash2} label="Delete orphan" danger onClick={() => onDelete(agent)} />
+      <IconButton icon={Trash2} label="Delete orphan" danger onClick={() => onDelete(agent)} />
     </div>
   );
 }

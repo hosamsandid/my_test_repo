@@ -7,6 +7,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import IdField from '../components/IdField';
+import IconButton from '../components/IconButton';
 
 const inputStyle = {
   width: '100%',
@@ -259,27 +260,6 @@ function CreateCredentialForm({ servers, onSave, onCancel, saving, error }) {
   );
 }
 
-function DeleteButton({ onClick }) {
-  return (
-    <button
-      aria-label="Delete"
-      onClick={onClick}
-      title="Delete"
-      style={{
-        display: 'flex', alignItems: 'center',
-        padding: 'var(--eb-space-1) var(--eb-space-2)',
-        background: 'var(--eb-bg-elevated)',
-        border: '1px solid var(--eb-status-error)',
-        borderRadius: 'var(--eb-radius-md)',
-        color: 'var(--eb-status-error)',
-        cursor: 'pointer', fontSize: 'var(--eb-text-xs)',
-      }}
-    >
-      <Trash2 size={13} />
-    </button>
-  );
-}
-
 export default function McpServers() {
   const { data: servers, loading: serversLoading, error: serversError, refetch: refetchServers } = useApi('/api/mcp-servers');
   const { data: credentials, loading: credsLoading, error: credsError, refetch: refetchCreds } = useApi('/api/mcp-credentials');
@@ -338,7 +318,7 @@ export default function McpServers() {
     )},
     { key: 'requiresCredential', label: 'Credential', render: v => v ? 'required' : '—' },
     { key: '_actions', label: '', sortable: false, render: (_, row) => (
-      <div onClick={e => e.stopPropagation()}><DeleteButton onClick={() => setDeleteServer(row)} /></div>
+      <div onClick={e => e.stopPropagation()}><IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteServer(row)} /></div>
     )},
   ];
 
@@ -349,7 +329,7 @@ export default function McpServers() {
     { key: 'fingerprint', label: 'Fingerprint', render: v => <span style={{ ...monoStyle, color: 'var(--eb-text-secondary)' }}>{v}</span> },
     { key: 'createdAt', label: 'Added', render: v => v ? new Date(v).toLocaleString() : '—' },
     { key: '_actions', label: '', sortable: false, render: (_, row) => (
-      <div onClick={e => e.stopPropagation()}><DeleteButton onClick={() => setDeleteCred(row)} /></div>
+      <div onClick={e => e.stopPropagation()}><IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteCred(row)} /></div>
     )},
   ];
 

@@ -8,9 +8,12 @@ const {
   passesHorizon,
   selectFreshEvents,
   planBurstHandoffs,
+  shouldFetchNextPage,
   GRACE_MS,
   SEEN_MAX,
   BURST_CAP,
+  PER_PAGE,
+  MAX_PAGES,
 } = require("./github-poller");
 
 // ── effectiveHorizon (Baustein A): activatedAt > createdAt > mtime ─────────────
@@ -204,4 +207,38 @@ test("planBurstHandoffs: deliverables without an agentId are ignored", () => {
   const plans = planBurstHandoffs(d, 3);
   assert.equal(plans.length, 1);
   assert.equal(plans[0].agentId, "a");
+});
+
+// ── shouldFetchNextPage (#449 pagination): page until known/partial/cap ────────
+
+const fullPage = (startId) =>
+  Array.from({ length: PER_PAGE }, (_, i) => ({ id: String(startId + i) }));
+
+test("shouldFetchNextPage: full page, none seen, under cap → page again", () => {
+  assert.equal(shouldFetchNextPage(fullPage(1000), [], 1), true);
+});
+
+test("shouldFetchNextPage: a partial page is the last one → stop", () => {
+  const partial = fullPage(1000).slice(0, PER_PAGE - 1);
+  assert.equal(shouldFetchNextPage(partial, [], 1), false);
+});
+
+test("shouldFetchNextPage: page containing an already-seen id → stop (reached known)", () => {
+  const page = fullPage(1000);
+  const seen = [String(1000 + PER_PAGE - 1)]; // last id on the page is already seen
+  assert.equal(shouldFetchNextPage(page, seen, 1), false);
+});
+
+test("shouldFetchNextPage: at the page cap → stop even if full and unseen", () => {
+  assert.equal(shouldFetchNextPage(fullPage(1000), [], MAX_PAGES), false);
+  assert.equal(shouldFetchNextPage(fullPage(1000), [], MAX_PAGES - 1), true);
+});
+
+test("shouldFetchNextPage: empty seen set with a full page → page again", () => {
+  assert.equal(shouldFetchNextPage(fullPage(1), [], 1), true);
+});
+
+test("shouldFetchNextPage: non-array / empty page → stop", () => {
+  assert.equal(shouldFetchNextPage(null, [], 1), false);
+  assert.equal(shouldFetchNextPage([], [], 1), false);
 });

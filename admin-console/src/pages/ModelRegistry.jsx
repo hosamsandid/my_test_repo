@@ -6,6 +6,7 @@ import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 
 /* ───────────────────────── shared styles ───────────────────────── */
@@ -1135,39 +1136,9 @@ export default function ModelRegistry() {
           <Lock size={13} />
         </div>
       ) : (
-        <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
-          <button
-            aria-label="Edit"
-            title="Edit"
-            onClick={() => { setEditing(row); setFormError(null); }}
-            style={{
-              display: 'flex', alignItems: 'center',
-              padding: 'var(--eb-space-1) var(--eb-space-2)',
-              background: 'var(--eb-bg-elevated)',
-              border: '1px solid var(--eb-border-default)',
-              borderRadius: 'var(--eb-radius-md)',
-              color: 'var(--eb-text-secondary)',
-              cursor: 'pointer', fontSize: 'var(--eb-text-xs)',
-            }}
-          >
-            <Pencil size={13} />
-          </button>
-          <button
-            aria-label="Delete"
-            title="Delete"
-            onClick={() => setDeleteTarget(row)}
-            style={{
-              display: 'flex', alignItems: 'center',
-              padding: 'var(--eb-space-1) var(--eb-space-2)',
-              background: 'var(--eb-bg-elevated)',
-              border: '1px solid var(--eb-status-error)',
-              borderRadius: 'var(--eb-radius-md)',
-              color: 'var(--eb-status-error)',
-              cursor: 'pointer', fontSize: 'var(--eb-text-xs)',
-            }}
-          >
-            <Trash2 size={13} />
-          </button>
+        <div className="eb-wrap-md" style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
+          <IconButton icon={Pencil} label="Edit" onClick={() => { setEditing(row); setFormError(null); }} />
+          <IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteTarget(row)} />
         </div>
       ),
     },

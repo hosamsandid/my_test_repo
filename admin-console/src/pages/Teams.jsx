@@ -6,6 +6,7 @@ import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 
 const DEFAULT_TEAM_ID = 'default';
@@ -175,7 +176,7 @@ function ManageTeamPanel({ team, users, memberships, onRefresh, onError }) {
         {teamMembers.map(m => {
           const u = userById[m.userId];
           return (
-            <div key={m.id || m.userId} style={{
+            <div key={m.id || m.userId} className="eb-wrap-md" style={{
               display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
               padding: 'var(--eb-space-2) var(--eb-space-3)',
               background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
@@ -194,9 +195,7 @@ function ManageTeamPanel({ team, users, memberships, onRefresh, onError }) {
               <select value={m.role} onChange={e => setRole(m.userId, e.target.value)} disabled={busy} style={{ ...inputStyle, width: 'auto' }}>
                 {ROLE_OPTIONS.map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
               </select>
-              <button onClick={() => removeMember(m.userId)} disabled={busy} title="Remove from team" style={{ ...ghostBtn, borderColor: 'var(--eb-status-error)', color: 'var(--eb-status-error)' }}>
-                <Trash2 size={13} />
-              </button>
+              <IconButton icon={Trash2} label="Remove from team" danger onClick={() => removeMember(m.userId)} disabled={busy} />
             </div>
           );
         })}
@@ -306,7 +305,7 @@ function ManageUsersPanel({ users, onRefresh, onError }) {
             padding: 'var(--eb-space-2) var(--eb-space-3)',
             background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
           }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+            <div className="eb-wrap-md" style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 'var(--eb-text-sm)' }}>{u.displayName || u.subject}</div>
                 <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{u.email || u.subject}</div>
@@ -315,12 +314,8 @@ function ManageUsersPanel({ users, onRefresh, onError }) {
               <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
                 <input type="checkbox" checked={!!u.systemAdmin} onChange={() => toggleSysadmin(u)} /> sysadmin
               </label>
-              <button onClick={() => { setPwUserId(pwUserId === u.id ? null : u.id); setPwValue(''); }} title="Set login password" style={ghostBtn}>
-                <KeyRound size={13} />
-              </button>
-              <button onClick={() => setDeleteTarget(u)} title="Delete user" style={{ ...ghostBtn, borderColor: 'var(--eb-status-error)', color: 'var(--eb-status-error)' }}>
-                <Trash2 size={13} />
-              </button>
+              <IconButton icon={KeyRound} label="Set login password" onClick={() => { setPwUserId(pwUserId === u.id ? null : u.id); setPwValue(''); }} />
+              <IconButton icon={Trash2} label="Delete user" danger onClick={() => setDeleteTarget(u)} />
             </div>
             {pwUserId === u.id && (
               <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
@@ -439,16 +434,16 @@ export default function Teams() {
     {
       key: '_actions', label: '', sortable: false,
       render: (_, row) => (
-        <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
+        <div className="eb-wrap-md" style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
           <button onClick={() => setManageTeam(row)} title="Manage" style={ghostBtn}><Settings2 size={13} /> Manage</button>
-          <button
+          <IconButton
+            icon={Trash2}
+            label="Delete"
+            danger
             onClick={() => setDeleteTarget(row)}
             disabled={row.id === DEFAULT_TEAM_ID}
             title={row.id === DEFAULT_TEAM_ID ? 'The default team cannot be deleted' : 'Delete'}
-            style={{ ...ghostBtn, borderColor: 'var(--eb-status-error)', color: 'var(--eb-status-error)', opacity: row.id === DEFAULT_TEAM_ID ? 0.4 : 1, cursor: row.id === DEFAULT_TEAM_ID ? 'not-allowed' : 'pointer' }}
-          >
-            <Trash2 size={13} />
-          </button>
+          />
         </div>
       ),
     },

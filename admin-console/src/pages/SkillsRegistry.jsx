@@ -8,6 +8,7 @@ import { useApi } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
+import IconButton from '../components/IconButton';
 
 /* ─── Skill name validation (mirrors SKILL_NAME_RE in api.js) ─────────── */
 const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
@@ -790,13 +791,7 @@ function makeColumns(onDeleteRow) {
       label: '',
       sortable: false,
       render: (_, row) => (row.source === 'pool' || row.source === 'team') ? (
-        <button
-          onClick={e => { e.stopPropagation(); onDeleteRow(row); }}
-          title="Delete skill"
-          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--eb-status-error)', padding: '2px', display: 'flex', alignItems: 'center' }}
-        >
-          <Trash2 size={14} />
-        </button>
+        <IconButton icon={Trash2} label="Delete skill" danger onClick={e => { e.stopPropagation(); onDeleteRow(row); }} size={14} />
       ) : null,
     },
   ];

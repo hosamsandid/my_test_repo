@@ -6,6 +6,7 @@ import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 
 const labelStyle = {
@@ -162,23 +163,7 @@ function RepositoryCard({ idx, repo, sshKeys, githubTokenId, onChange, onRemove 
         <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)' }}>
           Repository #{idx + 1}
         </span>
-        <button
-          type="button"
-          aria-label="Remove repository"
-          title="Remove repository"
-          onClick={onRemove}
-          style={{
-            display: 'flex', alignItems: 'center',
-            padding: 'var(--eb-space-1)',
-            background: 'transparent',
-            border: '1px solid var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-sm)',
-            color: 'var(--eb-status-error)',
-            cursor: 'pointer',
-          }}
-        >
-          <X size={12} />
-        </button>
+        <IconButton icon={X} label="Remove repository" danger onClick={onRemove} size={12} />
       </div>
 
       <div>
@@ -723,9 +708,9 @@ export default function WorkingEnvironments() {
       label: '',
       sortable: false,
       render: (_, row) => (
-        <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
-          <ActionBtn icon={Edit} label="Edit" onClick={() => { setSelected(row); setPanelMode('edit'); setFormError(null); }} />
-          <ActionBtn icon={Trash2} label="Delete" danger onClick={() => setDeleteTarget(row)} />
+        <div className="eb-wrap-md" style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
+          <IconButton icon={Edit} label="Edit" onClick={() => { setSelected(row); setPanelMode('edit'); setFormError(null); }} />
+          <IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteTarget(row)} />
         </div>
       ),
     },
@@ -852,23 +837,3 @@ export default function WorkingEnvironments() {
   );
 }
 
-function ActionBtn({ icon: Icon, label, onClick, danger }) {
-  return (
-    <button
-      aria-label={label}
-      onClick={onClick}
-      title={label}
-      style={{
-        display: 'flex', alignItems: 'center',
-        padding: 'var(--eb-space-1) var(--eb-space-2)',
-        background: 'var(--eb-bg-elevated)',
-        border: `1px solid ${danger ? 'var(--eb-status-error)' : 'var(--eb-border-default)'}`,
-        borderRadius: 'var(--eb-radius-md)',
-        color: danger ? 'var(--eb-status-error)' : 'var(--eb-text-secondary)',
-        cursor: 'pointer', fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
-      }}
-    >
-      <Icon size={13} />
-    </button>
-  );
-}

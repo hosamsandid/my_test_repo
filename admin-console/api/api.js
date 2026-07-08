@@ -2298,8 +2298,16 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   if (idx === -1) return res.status(404).json({ error: 'Trigger not found' });
   const prev = triggers[idx];
   const merged = { ...prev, ...req.body, id: triggerId };
-  if (merged.type === 'github-event' && prev.enabled === false && merged.enabled !== false) {
-    merged.activatedAt = new Date().toISOString();
+  if (merged.type === 'github-event') {
+    const now = new Date().toISOString();
+    // Refresh the activation horizon on a disable→enable flip so a
+    // re-enabled trigger drops the backlog that accrued while it was off.
+    if (prev.enabled === false && merged.enabled !== false) merged.activatedAt = now;
+    // Backfill the stamps on any edit of a legacy unstamped trigger. Its
+    // horizon was already drifting with the triggers.json mtime; stamping it
+    // now makes it stable for all subsequent edits (#320 review follow-up).
+    if (!merged.createdAt) merged.createdAt = now;
+    if (!merged.activatedAt) merged.activatedAt = now;
   }
   triggers[idx] = merged;
   try {

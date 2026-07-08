@@ -11,11 +11,16 @@
 //      type=github-event, matching repo).
 //   2. For each repo in the plan, issues a conditional GET with
 //      If-None-Match (so 304 responses don't decrement the rate limit).
-//   3. Filters fresh events by id > lastEventId, fans them out by writing
-//      to each subscriber's pending-triggers.json — same queue HTTP triggers
-//      use, so the agent-runner picks them up via its existing 5s drain.
+//   3. Selects fresh events by id membership against a per-repo sliding
+//      seen-id set (#320 — not a created_at high-water-mark, since GitHub
+//      neither orders events nor delivers them promptly), then gates each
+//      subscriber by its history horizon (activatedAt/createdAt/mtime, with
+//      a grace window) before fanning them out by writing to each
+//      subscriber's pending-triggers.json — same queue HTTP triggers use,
+//      so the agent-runner picks them up via its existing 5s drain.
 //
-// State (`state.json`) holds per-repo `etag`, `lastEventId`, `lastPolledAt`.
+// State (`state.json`) holds per-repo `etag`, `seen` (event-id set, capped
+// at SEEN_MAX), `lastPolledAt`.
 // ============================================================
 
 const fs = require('fs');

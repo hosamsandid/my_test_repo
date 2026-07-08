@@ -269,7 +269,7 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
         {uploading
           ? 'Uploading attachment…'
           : onUpload
-            ? <>Markdown supported · attach with <Paperclip size={11} style={{ verticalAlign: '-1px' }} /> or drag &amp; drop · <kbd style={kbdStyle}>⌘</kbd>+<kbd style={kbdStyle}>↩</kbd> to send</>
+            ? <>Markdown supported · attach with <Paperclip size={11} style={{ verticalAlign: '-1px' }} />, drag &amp; drop, or paste (<kbd style={kbdStyle}>⌘</kbd>/<kbd style={kbdStyle}>Ctrl</kbd>+<kbd style={kbdStyle}>V</kbd>) · <kbd style={kbdStyle}>⌘</kbd>+<kbd style={kbdStyle}>↩</kbd> to send</>
             : <>Markdown supported · <kbd style={kbdStyle}>⌘</kbd>+<kbd style={kbdStyle}>↩</kbd> to send · <kbd style={kbdStyle}>↩</kbd> for newline</>}
       </div>
     </div>

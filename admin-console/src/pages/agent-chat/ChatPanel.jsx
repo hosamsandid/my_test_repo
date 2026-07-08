@@ -1080,14 +1080,14 @@ function SessionBadge({ active }) {
       alignItems: 'center',
       gap: 'var(--eb-space-1)',
       fontSize: 'var(--eb-text-xs)',
-      color: active ? 'var(--eb-status-success)' : 'var(--eb-text-muted)',
+      color: active ? 'var(--eb-status-info)' : 'var(--eb-text-muted)',
       fontWeight: 'var(--eb-font-medium)',
     }}>
       <span style={{
         width: 7,
         height: 7,
         borderRadius: 'var(--eb-radius-full)',
-        background: active ? 'var(--eb-status-success)' : 'var(--eb-text-muted)',
+        background: active ? 'var(--eb-status-info)' : 'var(--eb-text-muted)',
         display: 'inline-block',
       }} />
       {active ? 'Session active' : 'New session'}

@@ -1642,6 +1642,18 @@ class TriggerScheduler:
                     print(f"[Runner:{self._agent_id}] handover-dm error: {exc}",
                           file=sys.stderr)
                 continue
+            if kind == "github-digest":
+                # #449-D: a burst of GitHub events for one (agent, conversation)
+                # was collapsed by the poller into a single lossless digest.
+                # Deliver it as a plain DM (no Claude call) — the burst is an
+                # exceptional/loop-ish signal, so we surface it and let the human
+                # decide rather than auto-acting on a batched backlog.
+                try:
+                    await self._execute_github_digest(entry)
+                except Exception as exc:
+                    print(f"[Runner:{self._agent_id}] github-digest error: {exc}",
+                          file=sys.stderr)
+                continue
             if kind in _PENDING_OUT_OF_SCOPE_KINDS:
                 print(
                     f"[Runner:{self._agent_id}] pending kind={kind} not yet ported "
@@ -1776,6 +1788,71 @@ class TriggerScheduler:
         except Exception:
             pass
         print(f"[Runner:{self._agent_id}] handover-dm: {len(result)} chars",
+              file=sys.stderr)
+
+    # -- github digest -------------------------------------------------------
+
+    async def _execute_github_digest(self, entry: dict) -> None:
+        """Post a `github-digest` queue entry as a plain DM — no Claude call.
+
+        The GitHub poller's burst-cap (#449-C) collapses more than its
+        BURST_CAP fresh events for one (agent, conversation) in a single poll
+        into this one lossless entry, instead of waking the agent per event.
+        A burst is an exceptional / loop-ish signal, so we surface it and let
+        the human decide rather than auto-acting on a batched backlog —
+        mirroring the throttle-warning delivery intent.
+        """
+        raw_room_id = entry.get("roomId") or _load_dm_room_id()
+        room_id = (
+            raw_room_id
+            if isinstance(raw_room_id, str) and _MATRIX_ROOM_ID_RE.match(raw_room_id)
+            else None
+        )
+        if not room_id:
+            print(f"[Runner:{self._agent_id}] github-digest: no DM room available — skipping",
+                  file=sys.stderr)
+            return
+
+        events = entry.get("events")
+        events = events if isinstance(events, list) else []
+        count = entry.get("count")
+        if not isinstance(count, int) or count <= 0:
+            count = len(events)
+        conv = entry.get("convKey") or "?"
+
+        lines = [
+            f"⚠️ **Event-Burst geklammert** — {count} GitHub-Events auf "
+            f"`{conv}` in einem Poll-Zyklus. Statt {count} Einzel-Sessions "
+            f"fasse ich sie hier zusammen und starte **keinen** automatischen Lauf.",
+            "",
+        ]
+        # Render oldest-first; cap the visible lines so a large burst doesn't
+        # produce a wall of text (the entry stays lossless regardless).
+        max_lines = 20
+        shown = [e for e in events if isinstance(e, dict)][:max_lines]
+        for ev in shown:
+            parts = [f"`{ev.get('event') or '?'}`"]
+            if ev.get("eventId"):
+                parts.append(f"({ev.get('eventId')})")
+            if ev.get("actor"):
+                parts.append(f"von {ev.get('actor')}")
+            if ev.get("createdAt"):
+                parts.append(f"um {ev.get('createdAt')}")
+            lines.append("- " + " ".join(parts))
+        hidden = len(events) - len(shown)
+        if hidden > 0:
+            lines.append(f"- … und {hidden} weitere")
+        lines.append("")
+        lines.append("Schau bei Bedarf selbst im Repo nach.")
+
+        body = "\n".join(lines)
+        try:
+            await self._send_formatted(room_id, body)
+        except Exception as exc:
+            print(f"[Runner:{self._agent_id}] Could not post github-digest DM: {exc}",
+                  file=sys.stderr)
+            return
+        print(f"[Runner:{self._agent_id}] github-digest: {count} events on {conv} → DM",
               file=sys.stderr)
 
     # -- execute -------------------------------------------------------------

@@ -200,11 +200,13 @@ X-Hook-Secret: <trigger.secret>
 
 | Layer | Where | What it blocks |
 |---|---|---|
-| 0 — Self-loop | `_fanOut` | Origin matches destination. Unconditional, no spec value disables it. |
+| 0 — Self-loop | `_fanOutBatch` | Origin matches destination. Unconditional, no spec value disables it. |
 | 2 — `from` filter | `applyFromFilter` | Per-trigger origin filter. Values: `any-except-self` (default), `humans`, `agents`, `team` (origin in same `team` as subscriber, read from `config.json`), `["agent-id", ...]` allowlist (with `"humans"` as a special token), `{ exclude: [...] }` blocklist. Unknown specs fail-closed. |
 | 3 — Conversation throttle | `_checkAndIncThrottle` | Per `(agent, conversationKey)` sliding window — default 5 events/h. `conversationKey` groups by PR/issue/branch (`pr:42`, `issue:99`, `push:refs/heads/x`, …). On the first over-threshold drop the poller writes a `kind: "throttle-warning"` entry to `pending-triggers.json`; the agent-runner posts a plain DM warning (no Claude call) and then drops further events silently until the window resets. Buckets persist in `/workspace/github-poller/throttle-state.json` and self-prune at 2× the window. |
 
 Layer 1 (template discipline — narrowly scoped events per role) lives in the role templates themselves, not in code, so it isn't a runtime layer.
+
+**Burst-cap digest (#449).** The fan-out is batched per poll (`_fanOutBatch`). After the three layers, the events that would be delivered are grouped by `(agent, conversationKey)`; when a group has **more than `BURST_CAP` (default 3)** events in one poll, they collapse into a single **lossless** `kind: "github-digest"` queue entry (carrying a summary of every bundled event) instead of that many individual agent wake-ups. The agent runtime (`_execute_github_digest`) posts it as a plain DM — no Claude call — so a reactivation backlog or a real activity spike surfaces once for the human to look at, rather than launching a flood of sessions. This is the poll-scoped, *lossless* sibling of the Layer-3 throttle (hour-scoped, *drops*); the digest deliberately bypasses the throttle since it is itself the anti-flood response. Pure splitter `planBurstHandoffs` in `github-poller.js` (unit-tested).
 
 Results are posted to `trigger.roomId` if set, otherwise to the agent's DM room with the admin (read from `/workspace/agents/<id>/dm-room.json`). If neither is available — i.e. the user has not yet opened a chat with this agent — the trigger run is skipped. `[PASS]` suppresses output.
 
@@ -388,7 +390,7 @@ The Admin Console embeds a Matrix client at `/chats` (and `/chats/:agentId`) so 
 | `orchestrator/teams-store.js` | Single source of truth for the human **Team** data model (#299): pure factory for Teams / users / memberships CRUD, referential integrity, default-team + System-Admin bootstrap. Unit-tested in `teams-store.test.js`. See `docs/teams-data-model.md`. |
 | `agent-image/` | The per-agent container image `as-agent:latest` (`python:3.12-slim`). Entrypoint `scripts/agent-entrypoint.py` (+ `sase_lib.py`) is the live agent runtime — a Python port of `agent-runner.js`. |
 | `orchestrator/agent-runner.js` | **Legacy** Node per-agent runner: Matrix client + Claude CLI invocations + trigger scheduler. Behaviour ported to `agent-image/`'s Python entrypoint (the process actually run in agent containers); kept as the reference for that behaviour. Honors `sessionPolicy: per-invocation` and posts plain-text throttle warnings on `kind: throttle-warning` queue entries. |
-| `orchestrator/github-poller.js` | Polls the GitHub Events API; applies Layer-0 self-loop, Layer-2 `from` filter, Layer-3 conversation throttle before fanning events out to per-agent `pending-triggers.json`. |
+| `orchestrator/github-poller.js` | Polls the GitHub Events API; applies Layer-0 self-loop, Layer-2 `from` filter, Layer-3 conversation throttle, then the #449 burst-cap digest (`planBurstHandoffs`) before fanning events out to per-agent `pending-triggers.json`. |
 | `orchestrator/session-log.js` | JSONL session logger: maps Claude `stream-json` NDJSON to normalized events, append-only writer |
 | `orchestrator/Dockerfile` | Node 22 + Claude Code CLI + git + openssh-client |
 | `orchestrator/CLAUDE-template.md` | Base template baked into the image as `/defaults/CLAUDE.md`, used as fallback when the skill-pool volume has no CLAUDE.md |

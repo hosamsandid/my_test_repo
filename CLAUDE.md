@@ -285,6 +285,16 @@ The whole console is gated by a login screen — every `/api/*` data endpoint re
 
 Every mutating `/api` request (`POST`/`PUT`/`PATCH`/`DELETE`) is recorded as one append-only JSONL line at `/workspace/audit/audit-<date>.jsonl` (override via `AUDIT_DIR`). `admin-console/api/audit.js` exposes `auditMutations` — a global middleware mounted **before** the auth gate (so it sees denied/unauthenticated attempts too) that logs from a `res.on('finish')` handler reading the acting human from `req.user` (#276). Each entry carries `ts, actor, action, method, resource, teamId (best-effort from body, pending #302), status, outcome, ip`. Logging is strictly best-effort — wrapped so it can never block or break a request. Read via `GET /api/audit?limit=<n>` (protected, newest-first). Matrix chat history is intentionally **not** the config-mutation audit log. See `docs/admin-console.md` → *Audit trail*.
 
+### GitHub poller event-transparency log (#469)
+
+Separate from the audit trail above (which covers human/API mutations), this log answers "what did the GitHub poller see, and what happened to it" — every event the poller confirms **fresh** (survived the #320 seen-id dedup) is recorded, whether it was delivered to an agent, dropped by a loop-protection layer, folded into a #449 burst digest, or matched no subscriber's trigger at all. It is purely observational: it never influences delivery decisions, only records them, so an admin can distinguish "a bug dropped this" from "a protection layer correctly dropped this".
+
+Writer/reader split across the shared-volume boundary, mirroring the audit trail's day-bucketed JSONL pattern but with its own directory since the two packages don't cross-require:
+
+- **Writer** (`orchestrator/github-event-log.js`) — invoked from `github-poller.js`'s `_fanOutBatch` once per fresh event, after all gates have resolved. `buildEventEntry` records `ts, eventId, repo, event, actor, createdAt`, plus one `outcomes[]` entry **per subscriber whose trigger's event-type filter matched** (`{agentId, triggerId, status: delivered|dropped|digest, reason?}`) — a subscriber that doesn't listen to this event type at all is not represented, which is what makes `outcomes.length === 0` (`noMatchingTrigger: true`) a precise "nobody's listening" signal rather than an artifact of gating. Appended as JSONL to `/workspace/github-event-log/github-events-<date>.jsonl` (override via `GITHUB_EVENT_LOG_DIR`), best-effort like the audit log. Rolling retention (`cleanupOldEntries`, default 7 days) runs once per calendar day from the poller's existing tick loop.
+- **Reader** (`admin-console/api/github-event-log.js`) — `queryEntries({since, until, limit})` merges entries across day files, newest-first, capped at `MAX_LIMIT` (5000). Exposed as `GET /api/github-events` (protected by the auth gate), which additionally enriches each outcome with the subscriber's display name from its `config.json`.
+- **UI** — the **GitHub Event Log** page (`/github-events`, `admin-console/src/pages/GithubEventLog.jsx`) lists events for a selectable time range (default last 24 hours), with an outcome chip per subscriber and a distinct "nobody's listening" badge for unmatched events.
+
 ### Agent Management
 
 All agent lifecycle operations (create / enable / disable / edit prompt / delete) happen via the **Admin Console** at `http://localhost:4000`.

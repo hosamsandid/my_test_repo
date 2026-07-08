@@ -21,6 +21,7 @@ const SshKeys             = lazy(() => import('./pages/SshKeys'));
 const GithubTokens        = lazy(() => import('./pages/GithubTokens'));
 const SkillsRegistry      = lazy(() => import('./pages/SkillsRegistry'));
 const ScheduledJobs       = lazy(() => import('./pages/ScheduledJobs'));
+const GithubEventLog      = lazy(() => import('./pages/GithubEventLog'));
 const ModelRegistry       = lazy(() => import('./pages/ModelRegistry'));
 const McpServers          = lazy(() => import('./pages/McpServers'));
 const Teams               = lazy(() => import('./pages/Teams'));
@@ -95,6 +96,7 @@ export default function App() {
           <Route path="/github-tokens" element={<GithubTokens />} />
           <Route path="/skills"       element={<SkillsRegistry />} />
           <Route path="/jobs"         element={<ScheduledJobs />} />
+          <Route path="/github-events" element={<GithubEventLog />} />
           <Route path="/models"       element={<ModelRegistry />} />
           <Route path="/mcp"          element={<McpServers />} />
           <Route path="/teams"        element={<Teams />} />

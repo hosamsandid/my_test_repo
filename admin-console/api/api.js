@@ -12,6 +12,7 @@ const { spawnSync } = require('child_process');
 const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
+const githubEventLog = require('./github-event-log');
 const { computeScope, visibleTeam, visibleAgent } = require('./scope');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
@@ -168,6 +169,29 @@ app.use('/api', auth.gate);
 // Read recent audit entries (newest first). Protected by the gate above.
 app.get('/api/audit', (req, res) => {
   res.json(audit.recentEntries(Number(req.query.limit) || 200));
+});
+
+// Read GitHub poller event-transparency entries (#469): every fresh event the
+// poller saw, whether delivered, dropped (with reason), digested, or matching
+// no subscriber at all. Protected by the gate above.
+app.get('/api/github-events', (req, res) => {
+  const entries = githubEventLog.queryEntries({
+    since: req.query.since,
+    until: req.query.until,
+    limit: Number(req.query.limit) || undefined,
+  });
+  const nameCache = new Map();
+  const agentName = (agentId) => {
+    if (!nameCache.has(agentId)) {
+      const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
+      nameCache.set(agentId, cfg?.name || agentId);
+    }
+    return nameCache.get(agentId);
+  };
+  res.json(entries.map((e) => ({
+    ...e,
+    outcomes: (e.outcomes || []).map((o) => ({ ...o, agentName: agentName(o.agentId) })),
+  })));
 });
 
 const MCP_SERVER_ID_RE = /^[a-z0-9-]+$/;

@@ -26,6 +26,7 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const githubEventLog = require('./github-event-log');
 
 const POLL_INTERVAL_MS = 30_000;
 const STATE_DIR = '/workspace/github-poller';
@@ -411,6 +412,9 @@ class GitHubPoller {
     this.throttleBuckets = this._loadThrottleState();
     this.timer = null;
     this.running = false;
+    // Rolling retention (#469) only needs to run about once a day; tracking
+    // the last day it ran avoids a readdir/stat pass every 30s tick.
+    this._lastEventLogCleanupDay = null;
   }
 
   start() {
@@ -430,6 +434,11 @@ class GitHubPoller {
     if (this.running) return;
     this.running = true;
     try {
+      const today = new Date().toISOString().slice(0, 10);
+      if (this._lastEventLogCleanupDay !== today) {
+        githubEventLog.cleanupOldEntries();
+        this._lastEventLogCleanupDay = today;
+      }
       const plan = this._buildPollPlan();
       if (plan.size === 0) return;
       for (const [repoFullName, entry] of plan) {
@@ -687,15 +696,29 @@ class GitHubPoller {
     // filter). Everything that survives becomes a "deliverable" tagged with its
     // subscriber + conversation, to be grouped in phase 2. Events arrive
     // oldest-first (caller sorted), so per-group order stays causal.
+    //
+    // `eventLogEntries` (#469) accumulates one entry per event for the
+    // event-transparency log, keyed by event id — populated here with the
+    // per-subscriber gate outcomes, then finalised with phase 2's digest/
+    // throttle/delivered outcomes below, and written out once at the end.
+    // A subscriber that doesn't listen to this event type at all (`!sub.events.has(key)`)
+    // is NOT recorded as an outcome — that's the "no one is listening" case
+    // (AC #4), distinct from "someone listened but a gate dropped it" (AC #3).
     const deliverables = [];
+    const eventLogEntries = new Map();
     for (const ghEvent of ghEvents) {
       const key = eventKey(ghEvent);
+      const logEntry = { ghEvent, key, outcomes: [] };
+      eventLogEntries.set(ghEvent.id, logEntry);
       if (!key) continue;
       const originAgentId = extractOriginAgent(ghEvent);
       const convKey = conversationKey(ghEvent);
 
       for (const sub of subscribers) {
         if (!sub.events.has(key)) continue;
+
+        const outcome = { agentId: sub.agentId, triggerId: sub.triggerId, status: 'pending', reason: null, digest: false };
+        logEntry.outcomes.push(outcome);
 
         // History horizon (#320-A/B): skip events older than the subscriber's
         // horizon, widened by GRACE_MS to absorb late/out-of-order delivery.
@@ -708,6 +731,8 @@ class GitHubPoller {
             `[GH-Poller] history-horizon: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
             `(event=${ghEvent.created_at}, sub-since=${sub.horizon}, grace=${GRACE_MS}ms)`,
           );
+          outcome.status = 'dropped';
+          outcome.reason = 'history-horizon';
           continue;
         }
 
@@ -724,6 +749,8 @@ class GitHubPoller {
               `[GH-Poller] label-filter: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
               `(label='${labelName ?? '?'}', want='${sub.labelFilter}')`,
             );
+            outcome.status = 'dropped';
+            outcome.reason = 'label-filter';
             continue;
           }
         }
@@ -741,6 +768,8 @@ class GitHubPoller {
               `[GH-Poller] from-filter: ${key} (${ghEvent.id}) origin=${originAgentId || 'human'} → ${sub.agentId} dropped (${decision.reason})`,
             );
           }
+          outcome.status = 'dropped';
+          outcome.reason = decision.reason === 'self-loop' ? 'self-loop' : `from-filter:${decision.reason}`;
           continue;
         }
 
@@ -750,6 +779,7 @@ class GitHubPoller {
           convKey,
           key,
           ghEvent,
+          outcome,
         });
       }
     }
@@ -765,6 +795,10 @@ class GitHubPoller {
     for (const plan of plans) {
       if (plan.mode === 'digest') {
         this._enqueueDigest(plan.agentId, plan.convKey, plan.items);
+        for (const it of plan.items) {
+          it.outcome.status = 'delivered';
+          it.outcome.digest = true;
+        }
         continue;
       }
 
@@ -785,14 +819,33 @@ class GitHubPoller {
               `[GH-Poller] throttle: warning queued for ${it.agentId} (conv=${it.convKey})`,
             );
           }
+          it.outcome.status = 'dropped';
+          it.outcome.reason = 'throttle';
           continue;
         }
 
         this._enqueue(it.agentId, it.triggerId, it.key, it.ghEvent);
+        it.outcome.status = 'delivered';
       }
     }
 
     if (throttleStateDirty) this._saveThrottleState();
+
+    // #469 — persist the transparency log entry for every fresh event in this
+    // batch, whether it was delivered, dropped, digested, or matched no
+    // subscriber at all. Best-effort (see github-event-log.js); never throws.
+    for (const entry of eventLogEntries.values()) {
+      githubEventLog.record(
+        githubEventLog.buildEventEntry({
+          ghEvent: entry.ghEvent,
+          repoFullName,
+          key: entry.key,
+          outcomes: entry.outcomes.map(({ agentId, triggerId, status, reason, digest }) => ({
+            agentId, triggerId, status, reason, digest,
+          })),
+        }),
+      );
+    }
   }
 
   // #449-D: append one `github-digest` entry summarising a burst of events for a

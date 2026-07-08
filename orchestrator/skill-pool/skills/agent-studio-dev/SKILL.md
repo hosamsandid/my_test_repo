@@ -15,8 +15,8 @@ description: >-
 
 This skill front-loads the practical, non-obvious knowledge a team of agents
 accumulated while developing **Agent Studio** (repo:
-`AccentureCodeFoundry/314092_agent-execution-environment`, aka *e-vgh-claw* — a
-local Matrix-to-Claude-Code stack). A fresh agent that reads this can skip the
+`AccentureCodeFoundry/314092_agent-execution-environment`) — a local
+Matrix-to-Claude-Code stack. A fresh agent that reads this can skip the
 painful rediscovery of the same environment quirks, workflow rules, and repo
 conventions.
 

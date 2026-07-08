@@ -1,0 +1,36 @@
+name: Mirror to GitLab
+
+# Keeps GitHub as source-of-truth (dev happens here) and pushes main to the
+# GitLab host so its CI/CD can build + deploy. See DEPLOY-CICD.md option (b).
+# Scope for the "host first" goal: main branch only — no feature branches, no tags yet.
+
+on:
+  push:
+    branches: [main]      # fires on every merge to main
+  workflow_dispatch: {}   # allows a manual test run from the Actions tab
+
+# Least-privilege: the job only reads the repo (checkout) and pushes to GitLab
+# with a separate secret — it never writes back to GitHub.
+permissions:
+  contents: read
+
+# Prevent overlapping mirror pushes racing each other
+concurrency:
+  group: mirror-to-gitlab
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so GitLab gets all of main's commits
+
+      - name: Push main to GitLab
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_MIRROR_TOKEN }}
+        run: |
+          git push --force \
+            "https://oauth2:${GITLAB_TOKEN}@unitedunicorns.org/gitlab/agent-studio.git" \
+            HEAD:refs/heads/main

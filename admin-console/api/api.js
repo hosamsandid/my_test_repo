@@ -1815,26 +1815,50 @@ app.delete('/api/agents/:id', heavyLimiter, async (req, res) => {
 
 /* ─── Agent Clone ───────────────────────────────────────────────────── */
 
+// Optional body field:
+//   - parentTeamId — graft the clone into an existing team as a member,
+//     mirroring /api/agents/import's team-assignment field. Absent → the
+//     clone is created as a standalone agent, even when the source itself
+//     is a team member.
+// On id conflict the response is 409 with `{ code: 'id-conflict', agentId }`,
+// same shape as /api/agents/import, so the UI can prompt for a new id inline.
 app.post('/api/agents/:id/clone', heavyLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const { newId, newDisplayName } = req.body || {};
+  const { newId, newDisplayName, parentTeamId } = req.body || {};
   if (!newId || !newDisplayName) {
     return res.status(400).json({ error: 'newId and newDisplayName required' });
   }
-  const normalizedNewId = newId.toLowerCase().replace(/[^a-z0-9-]/g, '');
-  if (!normalizedNewId) {
-    return res.status(400).json({ error: 'newId must contain at least one valid character (a-z, 0-9, -)' });
+  if (!AGENT_ID_RE.test(newId)) {
+    return res.status(400).json({ error: `Invalid agent id '${newId}' (allowed: letters, digits, _ - .)` });
   }
   if (!fs.existsSync(path.join(AGENTS_DIR, id))) {
     return res.status(404).json({ error: 'Agent not found' });
+  }
+  if (parentTeamId != null && !AGENT_ID_RE.test(parentTeamId)) {
+    return res.status(400).json({ error: 'Invalid parentTeamId' });
+  }
+  // Containment check — path.resolve + path.relative is the in-flow
+  // sanitiser pattern CodeQL recognises for js/path-injection.
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const targetDir = path.resolve(agentsBaseDir, newId);
+  const rel = path.relative(agentsBaseDir, targetDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel) || !rel) {
+    return res.status(400).json({ error: 'Invalid agent id path' });
+  }
+  if (fs.existsSync(targetDir)) {
+    return res.status(409).json({
+      error: `Agent '${newId}' already exists — choose a different id.`,
+      code: 'id-conflict',
+      agentId: newId,
+    });
   }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/clone`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ newId: normalizedNewId, newDisplayName }),
+      body: JSON.stringify({ newId, newDisplayName, parentTeamId: parentTeamId || undefined }),
     });
     const data = await resp.json();
     if (!resp.ok) return res.status(resp.status).json(data);

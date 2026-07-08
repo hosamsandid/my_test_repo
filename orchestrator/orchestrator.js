@@ -14,6 +14,7 @@ const { createTeamsStore, DEFAULT_TEAM_ID } = require("./teams-store");
 const { makeSkillSourceResolver } = require("./skill-source");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
+const { resolveCloneTarget } = require("./clone-target");
 
 // ============================================================
 // Config
@@ -3512,10 +3513,22 @@ class Orchestrator {
   // ===========================================================
   // Agent cloning
   // ===========================================================
-  async cloneAgent(sourceId, newId, newDisplayName) {
+  // opts:
+  //   - parentTeamId — when set, the clone is grafted into an existing team as
+  //                    a `team-member` and inherits the team's environment
+  //                    (same resolution importAgent() uses). Absent → cloned
+  //                    as a standalone `agent`, even if the source itself was
+  //                    a team-member of some other team.
+  async cloneAgent(sourceId, newId, newDisplayName, opts = {}) {
     const sourceCfg = loadAgentConfig(sourceId);
     if (!sourceCfg) throw new Error(`Source agent '${sourceId}' not found`);
+    if (!["agent", "team-member"].includes(sourceCfg.role)) {
+      throw new Error(`Agent '${sourceId}' has role '${sourceCfg.role}' and cannot be cloned`);
+    }
     if (loadAgentConfig(newId)) throw new Error(`Agent '${newId}' already exists`);
+
+    const teamCfg = opts.parentTeamId ? loadAgentConfig(opts.parentTeamId) : null;
+    const { role, parentTeamId, environmentId } = resolveCloneTarget(sourceCfg, opts, teamCfg);
 
     const password = `agent-${newId}-${Date.now()}`;
     const userId = `@${newId}:local`;
@@ -3541,14 +3554,21 @@ class Orchestrator {
       userId,
       token,
       enabled: true,
+      role,
+      environmentId,
     };
+    if (parentTeamId) {
+      newConfig.parentTeamId = parentTeamId;
+    } else {
+      delete newConfig.parentTeamId;
+    }
     saveAgentConfig(newId, newConfig);
 
     this.agentConfigs.set(newId, { config: newConfig });
     startAgentProcess(newConfig);
 
-    console.log(`[Orchestrator] Cloned agent ${sourceId} → ${newId}`);
-    return { id: newId, userId, clonedFrom: sourceId };
+    console.log(`[Orchestrator] Cloned agent ${sourceId} → ${newId}${parentTeamId ? ` (team=${parentTeamId})` : ''}`);
+    return { id: newId, userId, clonedFrom: sourceId, role, parentTeamId };
   }
 
   // ===========================================================
@@ -4257,18 +4277,23 @@ async function main() {
       req.on('data', d => body += d);
       req.on('end', async () => {
         try {
-          const { newId, newDisplayName } = JSON.parse(body);
+          const { newId, newDisplayName, parentTeamId } = JSON.parse(body);
           if (!newId || !newDisplayName) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'newId and newDisplayName required' }));
             return;
           }
-          const result = await orchestrator.cloneAgent(sourceId, newId, newDisplayName);
+          const result = await orchestrator.cloneAgent(sourceId, newId, newDisplayName, {
+            parentTeamId: parentTeamId || undefined,
+          });
           res.writeHead(201, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(result));
         } catch (err) {
           console.error(`[Orchestrator] Clone error: ${err.message}`);
-          const status = /not found/i.test(err.message) ? 404 : /already exists/i.test(err.message) ? 409 : 500;
+          const status = /not found/i.test(err.message) ? 404
+                       : /already exists/i.test(err.message) ? 409
+                       : /is not a team|cannot be cloned/i.test(err.message) ? 400
+                       : 500;
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));
         }

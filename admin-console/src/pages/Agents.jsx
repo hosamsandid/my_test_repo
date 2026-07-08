@@ -5,14 +5,30 @@ import remarkGfm from 'remark-gfm';
 import {
   Plus, Trash2, Layers, ChevronDown, ChevronRight,
   Edit, MessageCircle, RefreshCw, Power, PowerOff, FileText,
-  User, Users, Workflow, Info, GitMerge, Download, Upload,
+  User, Users, Workflow, Info, GitMerge, Download, Upload, Copy,
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
-import useAutoDerivedId from '../hooks/useAutoDerivedId';
+import useAutoDerivedId, { sanitizeId } from '../hooks/useAutoDerivedId';
+
+// Mirrors AGENT_ID_RE in admin-console/api/api.js — used only to give inline
+// feedback before the server round-trip; the server remains the source of
+// truth for validity.
+const AGENT_ID_RE = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/;
+
+// Suggests a unique clone id derived from the source id, avoiding any id
+// already present in the agents list (server-side uniqueness is still
+// enforced — this is just a friendlier starting point).
+function suggestCloneId(sourceId, existingIds) {
+  const base = `${sourceId}-copy`;
+  if (!existingIds.has(base)) return base;
+  let n = 2;
+  while (existingIds.has(`${base}-${n}`)) n++;
+  return `${base}-${n}`;
+}
 
 const hasRepos = (env) =>
   (Array.isArray(env?.repositories) && env.repositories.length > 0) ||
@@ -1034,6 +1050,105 @@ function ImportAgentForm({ file, teams, onSubmit, onCancel }) {
   );
 }
 
+/* ── Clone Agent Form ───────────────────────────────────────────────── */
+// Direct "duplicate this agent" dialog — a one-step alternative to the
+// Export → Import round trip. Only offered for `agent` and `team-member`
+// source cards (see LeafAgentCard / AgentRow); the backend clone endpoint
+// also rejects any other role defensively.
+function CloneAgentForm({ agent, teams, existingIds, onSubmit, onCancel }) {
+  const [newId, setNewId] = useState(() => suggestCloneId(agent.id, existingIds));
+  const [newDisplayName, setNewDisplayName] = useState(`${agent.displayName || agent.id} (Copy)`);
+  const [parentTeamId, setParentTeamId] = useState(agent.parentTeamId || '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const trimmedId = newId.trim();
+  const idError = trimmedId && !AGENT_ID_RE.test(trimmedId)
+    ? 'Only letters, digits, underscores, hyphens and dots are allowed.'
+    : null;
+  const canSubmit = trimmedId && !idError && newDisplayName.trim();
+
+  async function submit() {
+    setBusy(true);
+    setError(null);
+    try {
+      const { ok, data } = await onSubmit({
+        newId: trimmedId,
+        newDisplayName: newDisplayName.trim(),
+        parentTeamId: parentTeamId || undefined,
+      });
+      if (!ok) {
+        if (data?.code === 'id-conflict') {
+          setNewId(suggestCloneId(trimmedId, existingIds));
+        }
+        setError(data?.error || 'Clone failed.');
+      }
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      {error && (
+        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-md)' }}>
+          {error}
+        </div>
+      )}
+
+      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.55 }}>
+        Cloning <strong style={{ color: 'var(--eb-text-primary)' }}>{agent.displayName}</strong> ({agent.id}).
+        The clone gets its own workspace, prompt and chat identity — a fully independent
+        copy, not a reference. Deleting one later never affects the other.
+      </div>
+
+      <FormInput
+        label="New Agent ID"
+        required
+        value={newId}
+        onChange={v => setNewId(sanitizeId(v))}
+        error={idError}
+        placeholder="e.g. cobol-agent-copy"
+      />
+
+      <FormInput
+        label="New Display Name"
+        required
+        value={newDisplayName}
+        onChange={setNewDisplayName}
+        placeholder="COBOL Agent (Copy)"
+      />
+
+      <div>
+        <div style={labelStyle}>Target Team</div>
+        <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-1)' }}>
+          Defaults to the source's own team (if any). Choose a different team or
+          <em> Standalone</em> to place the clone elsewhere.
+        </div>
+        <select
+          value={parentTeamId}
+          onChange={e => setParentTeamId(e.target.value)}
+          style={inputStyle}
+        >
+          <option value="">Standalone agent (no team)</option>
+          {(teams || []).map(t => (
+            <option key={t.id} value={t.id}>{t.displayName || t.id}</option>
+          ))}
+        </select>
+      </div>
+
+      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+        <PrimaryBtn onClick={submit} saving={busy} disabled={busy || !canSubmit}>
+          {busy ? 'Cloning…' : 'Clone Agent'}
+        </PrimaryBtn>
+        <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
+      </div>
+    </div>
+  );
+}
+
 /* ── Agent Edit Form ────────────────────────────────────────────────── */
 function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
   // Initial values for the inheritance toggles. `agent.systemPrompt` /
@@ -1332,7 +1447,7 @@ const radioLabelStyle = {
 };
 
 /* ── Agent Row ──────────────────────────────────────────────────────── */
-function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, onOpenBrief, onExport, navigate, tree, busy }) {
+function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, onOpenBrief, onExport, onClone, navigate, tree, busy }) {
   const state = agentState(agent);
   const isStub = state === 'stub';
   const t = tree || {
@@ -1420,6 +1535,9 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
         />
         {onExport && !isStub && (
           <IconBtn icon={Download} label="Export" title="Export agent as ZIP" onClick={() => onExport(agent.id)} />
+        )}
+        {onClone && (
+          <IconBtn icon={Copy} label="Clone" title="Clone this agent" onClick={() => onClone(agent)} />
         )}
         <IconBtn icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
       </div>
@@ -1639,7 +1757,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
 }
 
 /* ── Team Card ──────────────────────────────────────────────────────── */
-function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactivate, onToggleEnabled, onEditChild, onDeleteChild, onExport, navigate, addingMember, busyIds }) {
+function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactivate, onToggleEnabled, onEditChild, onDeleteChild, onExport, onCloneChild, navigate, addingMember, busyIds }) {
   const expandedKey = `aee_team_expanded_${agent.id}`;
   const [expanded, setExpanded] = useState(() => {
     try { return localStorage.getItem(expandedKey) !== 'false'; } catch { return true; }
@@ -1749,6 +1867,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
               onEdit={onEditChild}
               onDelete={onDeleteChild}
               onExport={onExport}
+              onClone={onCloneChild}
             />
           ))
         )
@@ -1758,7 +1877,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
 }
 
 /* ── Leaf Agent Card ────────────────────────────────────────────────── */
-function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate, onExport, navigate, busy }) {
+function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate, onExport, onClone, navigate, busy }) {
   const state = agentState(agent);
 
   return (
@@ -1800,6 +1919,9 @@ function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate,
           <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
           <IconBtn icon={MessageCircle} label="Open chat" onClick={() => navigate(`/chats/${agent.id}`)} />
           <IconBtn icon={Download} label="Export" title="Export agent as ZIP" onClick={() => onExport(agent.id)} />
+          {onClone && (
+            <IconBtn icon={Copy} label="Clone" title="Clone this agent" onClick={() => onClone(agent)} />
+          )}
           <IconBtn icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
         </div>
       </div>
@@ -1859,6 +1981,7 @@ export default function Agents() {
   const importFileRef = useRef(null);
 
   const agents = rawAgents || [];
+  const existingAgentIds = useMemo(() => new Set(agents.map(a => a.id)), [agents]);
   const byName = (a, b) => (a.displayName || a.id).localeCompare(b.displayName || b.id);
   const bpInstances = agents.filter(a => a.role === 'bp-instance');
   const teamMembers = agents.filter(a => a.role === 'team-member');
@@ -1936,6 +2059,22 @@ export default function Agents() {
         `and started — open it in Agent Chat.`,
       );
       setImportFile(null);
+      closePanel();
+      refetch();
+    }
+    return { ok: resp.ok, status: resp.status, data };
+  }
+
+  // Clone dialog submitted. Returns the parsed response so the form can react
+  // to a 409 id-conflict (re-suggest an id) without closing.
+  async function handleCloneSubmit({ newId, newDisplayName, parentTeamId }) {
+    const resp = await fetch(`/api/agents/${encodeURIComponent(selectedAgent.id)}/clone`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ newId, newDisplayName, parentTeamId }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok) {
       closePanel();
       refetch();
     }
@@ -2263,6 +2402,7 @@ export default function Agents() {
               onEditChild={a => openPanel('edit', a)}
               onDeleteChild={a => setDeleteTarget(a)}
               onExport={handleExport}
+              onCloneChild={a => openPanel('clone', a)}
             />
           ))}
           {leaves.map(a => (
@@ -2276,6 +2416,7 @@ export default function Agents() {
               onDeactivate={ag => setDeactivateTarget(ag)}
               onToggleEnabled={handleToggleEnabled}
               onExport={handleExport}
+              onClone={ag => openPanel('clone', ag)}
             />
           ))}
           {orphans.length > 0 && (
@@ -2320,6 +2461,23 @@ export default function Agents() {
             teams={teams}
             onSubmit={handleImportSubmit}
             onCancel={() => { setImportFile(null); closePanel(); }}
+          />
+        )}
+      </SidePanel>
+
+      <SidePanel
+        open={panelMode === 'clone' && !!selectedAgent}
+        onClose={closePanel}
+        title={`Clone Agent — ${selectedAgent?.displayName ?? ''}`}
+        width="480px"
+      >
+        {selectedAgent && panelMode === 'clone' && (
+          <CloneAgentForm
+            agent={selectedAgent}
+            teams={teams}
+            existingIds={existingAgentIds}
+            onSubmit={handleCloneSubmit}
+            onCancel={closePanel}
           />
         )}
       </SidePanel>

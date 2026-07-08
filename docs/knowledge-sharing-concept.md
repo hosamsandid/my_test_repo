@@ -268,9 +268,15 @@ labelled.
 
 ## Open questions
 
-1. KB physical layout — one file per kind with a JSONL provenance sidecar, vs. front-matter per entry.
+1. ~~KB physical layout — one file per kind with a JSONL provenance sidecar, vs. front-matter per entry.~~
+   **Resolved (Phase 0):** one canonical JSONL file per kind (`facts/facts.jsonl`, …); each line is a
+   full entry incl. provenance/convergence. Markdown is a derived read view, not a second source of
+   truth. Rationale: line-atomic concurrent appends + mechanical `convergence[]` updates. See
+   `docs/knowledge-store.md`.
 2. Similarity backend for dedup/convergence — lexical-only (dependency-free) vs. optional embeddings via
    a model provider.
 3. Convergence threshold defaults (independent-agent count, recurrence count, time window).
-4. Whether the Agent-tier skill pool is materialised on disk from day one or introduced with Phase 3
-   promotion (Phase 0 can define the resolver tier and defer the on-disk pool).
+4. ~~Whether the Agent-tier skill pool is materialised on disk from day one or introduced with Phase 3
+   promotion.~~ **Resolved (Phase 0):** the resolver tier (agent → team → global) is defined now; the
+   on-disk agent pool is **deferred to Phase 3** promotion — no agent has the directory yet, so
+   resolution falls through to team/global exactly as today. See `docs/knowledge-store.md`.

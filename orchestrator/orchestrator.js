@@ -12,6 +12,7 @@ const { findEnclosingGitRepo } = require("./git-workspace");
 const { bpsToBriefingsMap } = require("./briefings-graph");
 const { createTeamsStore, DEFAULT_TEAM_ID } = require("./teams-store");
 const { makeSkillSourceResolver } = require("./skill-source");
+const { normalizeKnowledgeStore } = require("./knowledge-store");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const { resolveCloneTarget } = require("./clone-target");
@@ -531,11 +532,19 @@ function loadEnvironment(envId) {
   if (!fs.existsSync(p)) return null;
   try {
     const raw = JSON.parse(fs.readFileSync(p, "utf8"));
-    return normalizeEnvironmentRepositories(raw);
+    return normalizeEnvironmentConfig(raw);
   } catch (err) {
     console.error(`[Orchestrator] Cannot parse environment ${envId}: ${err.message}`);
     return null;
   }
+}
+
+// Apply every environment normalization in order. Repositories first (the
+// knowledgeStore normalization reads the repository list to pick a KB repo).
+function normalizeEnvironmentConfig(env) {
+  const withRepos = normalizeEnvironmentRepositories(env);
+  const { store } = normalizeKnowledgeStore(withRepos);
+  return { ...withRepos, knowledgeStore: store };
 }
 
 // Migrate legacy `repository` (single) into `repositories: [...]` so the rest
@@ -780,12 +789,18 @@ function seedAgentWorkspace(id, env, opts = {}) {
     const skillsDst = path.join(dest, "skills");
     fs.mkdirSync(skillsDst, { recursive: true });
     for (const skillName of selectedSkills) {
-      const src = resolveSkillSourceDir(skillName, ownerTeamId);
+      // Resolve agent-first (Phase 0): an agent's own skill pool
+      // (/workspace/agents/<id>/skills) shadows the team's and the global one.
+      const src = resolveSkillSourceDir(skillName, ownerTeamId, { agentId: id });
       const dst = path.join(skillsDst, skillName);
       if (!src) {
         warnings.push(`skill not found in pool: ${skillName}`);
         continue;
       }
+      // The agent-tier pool IS this destination dir, so an agent-private skill
+      // resolves to itself — it is already in place, and cpSync(src === dst)
+      // throws. Skip the self-copy.
+      if (path.resolve(src) === path.resolve(dst)) continue;
       try {
         fs.cpSync(src, dst, { recursive: true });
       } catch (err) {

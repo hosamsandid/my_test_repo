@@ -436,6 +436,19 @@ function environmentInUse(envId) {
   return null;
 }
 
+// All agents referencing this environment, scoped to what the caller may see
+// (same team/visibility rules as GET /api/agents — #302, #439).
+function agentsUsingEnvironment(envId, scope) {
+  const agents = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    if (cfg.environmentId === envId && visibleAgent(scope, cfg)) {
+      agents.push({ id, displayName: cfg.displayName || id });
+    }
+  }
+  return agents;
+}
+
 function sshKeyInUse(keyId) {
   for (const envId of listEnvironmentIds()) {
     const env = loadEnvironment(envId);
@@ -4396,14 +4409,20 @@ app.delete('/api/admin/memberships', apiLimiter, (req, res) => proxyAdmin(req, r
 app.get('/api/environments', (req, res) => {
   const scope = getScope(req);
   const envs = listEnvironmentIds().map(loadEnvironment).filter(Boolean)
-    .filter(e => visibleTeam(scope, e.teamId)); // (#302)
+    .filter(e => visibleTeam(scope, e.teamId)) // (#302)
+    .map(e => {
+      const agents = agentsUsingEnvironment(e.id, scope); // (#439)
+      return { ...e, agents, agentCount: agents.length };
+    });
   res.json(envs);
 });
 
 app.get('/api/environments/:id', (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
-  res.json(env);
+  const scope = getScope(req);
+  const agents = agentsUsingEnvironment(env.id, scope); // (#439)
+  res.json({ ...env, agents, agentCount: agents.length });
 });
 
 // Resolve and validate { llmEndpointId, defaultModelId } against the registry.

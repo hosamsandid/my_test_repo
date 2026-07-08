@@ -7,8 +7,10 @@ const {
   effectiveHorizon,
   passesHorizon,
   selectFreshEvents,
+  planBurstHandoffs,
   GRACE_MS,
   SEEN_MAX,
+  BURST_CAP,
 } = require("./github-poller");
 
 // ── effectiveHorizon (Baustein A): activatedAt > createdAt > mtime ─────────────
@@ -109,4 +111,97 @@ test("selectFreshEvents: events without an id are ignored", () => {
   const { fresh, nextSeen } = selectFreshEvents(events, [], SEEN_MAX);
   assert.deepEqual(fresh.map(e => e.id), ["5"]);
   assert.deepEqual(nextSeen, ["5"]);
+});
+
+// ── planBurstHandoffs (Baustein C, #449): group by (agent, conv), cap → digest ─
+
+function deliverable(agentId, convKey, id) {
+  return {
+    agentId,
+    triggerId: `${agentId}-trig`,
+    convKey,
+    key: "pull_request.opened",
+    ghEvent: { id },
+  };
+}
+
+test("planBurstHandoffs: more than cap in one (agent,conv) group → single digest", () => {
+  const d = [
+    deliverable("a", "pr:1", "1"),
+    deliverable("a", "pr:1", "2"),
+    deliverable("a", "pr:1", "3"),
+    deliverable("a", "pr:1", "4"),
+  ];
+  const plans = planBurstHandoffs(d, 3);
+  assert.equal(plans.length, 1);
+  assert.equal(plans[0].mode, "digest");
+  assert.equal(plans[0].agentId, "a");
+  assert.equal(plans[0].convKey, "pr:1");
+  assert.equal(plans[0].items.length, 4);
+});
+
+test("planBurstHandoffs: exactly cap stays individual (no premature digest)", () => {
+  const d = [
+    deliverable("a", "pr:1", "1"),
+    deliverable("a", "pr:1", "2"),
+    deliverable("a", "pr:1", "3"),
+  ];
+  const plans = planBurstHandoffs(d, 3);
+  assert.equal(plans.length, 1);
+  assert.equal(plans[0].mode, "individual");
+  assert.equal(plans[0].items.length, 3);
+});
+
+test("planBurstHandoffs: groups split by (agent, conversation)", () => {
+  const d = [
+    deliverable("a", "pr:1", "1"),
+    deliverable("a", "pr:1", "2"),
+    deliverable("a", "pr:1", "3"),
+    deliverable("a", "pr:1", "4"), // agent a / pr:1 → 4 → digest
+    deliverable("a", "pr:2", "5"), // agent a / pr:2 → 1 → individual
+    deliverable("b", "pr:1", "6"), // agent b / pr:1 → 1 → individual (same conv, other agent)
+  ];
+  const plans = planBurstHandoffs(d, 3);
+  assert.equal(plans.length, 3);
+  const byKey = Object.fromEntries(plans.map(p => [`${p.agentId} ${p.convKey}`, p]));
+  assert.equal(byKey["a pr:1"].mode, "digest");
+  assert.equal(byKey["a pr:2"].mode, "individual");
+  assert.equal(byKey["b pr:1"].mode, "individual");
+});
+
+test("planBurstHandoffs: preserves per-group event order (oldest-first)", () => {
+  const d = [
+    deliverable("a", "pr:1", "10"),
+    deliverable("a", "pr:1", "11"),
+    deliverable("a", "pr:1", "12"),
+    deliverable("a", "pr:1", "13"),
+  ];
+  const plans = planBurstHandoffs(d, 3);
+  assert.deepEqual(plans[0].items.map(i => i.ghEvent.id), ["10", "11", "12", "13"]);
+});
+
+test("planBurstHandoffs: default cap (BURST_CAP) used when cap omitted or invalid", () => {
+  const many = Array.from({ length: BURST_CAP + 1 }, (_, i) => deliverable("a", "pr:1", String(i)));
+  assert.equal(planBurstHandoffs(many)[0].mode, "digest");
+  assert.equal(planBurstHandoffs(many, -5)[0].mode, "digest"); // invalid cap → default
+  const exact = Array.from({ length: BURST_CAP }, (_, i) => deliverable("a", "pr:1", String(i)));
+  assert.equal(planBurstHandoffs(exact)[0].mode, "individual");
+});
+
+test("planBurstHandoffs: cap=0 makes any non-empty group a digest", () => {
+  const plans = planBurstHandoffs([deliverable("a", "pr:1", "1")], 0);
+  assert.equal(plans[0].mode, "digest");
+});
+
+test("planBurstHandoffs: empty / non-array input yields no plans", () => {
+  assert.deepEqual(planBurstHandoffs([], 3), []);
+  assert.deepEqual(planBurstHandoffs(null, 3), []);
+  assert.deepEqual(planBurstHandoffs(undefined), []);
+});
+
+test("planBurstHandoffs: deliverables without an agentId are ignored", () => {
+  const d = [{ convKey: "pr:1" }, deliverable("a", "pr:1", "1")];
+  const plans = planBurstHandoffs(d, 3);
+  assert.equal(plans.length, 1);
+  assert.equal(plans[0].agentId, "a");
 });

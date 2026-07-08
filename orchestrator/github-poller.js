@@ -65,6 +65,14 @@ const GRACE_MS = 5 * 60_000;
 // on disk; oldest ids beyond this bound are pruned.
 const SEEN_MAX = 500;
 
+// #449-C: burst cap for the fan-out. When MORE than BURST_CAP fresh events for
+// the same (agent, conversationKey) arrive in a SINGLE poll, they collapse into
+// one lossless `github-digest` queue entry instead of BURST_CAP+ individual
+// agent wake-ups. This is the poll-scoped sibling of the Layer-3 throttle
+// (THROTTLE_*, hour-scoped): the throttle silently *drops* beyond its threshold,
+// the digest *bundles* without losing any event.
+const BURST_CAP = 3;
+
 // tokenId is operator-supplied via the Working Environment config, but a
 // rogue or typo'd value like "../../etc/passwd" would otherwise resolve
 // outside GH_TOKENS_DIR via path.join. Restrict to the same character set
@@ -280,6 +288,42 @@ function selectFreshEvents(events, seenArr, seenMax) {
   for (const e of list) push(e && e.id);
   for (const id of (Array.isArray(seenArr) ? seenArr : [])) push(id);
   return { fresh, nextSeen: nextSeen.slice(0, seenMax || SEEN_MAX) };
+}
+
+// #449-C (pure core, unit-tested). Given the events that passed every delivery
+// gate in one poll — each tagged as { agentId, triggerId, convKey, key, ghEvent }
+// — group them by (agentId, convKey) and decide per group how to hand off:
+//   mode 'digest'     when a group has MORE than `cap` events (the burst case
+//                     AK2 collapses into one lossless notification), else
+//   mode 'individual' (normal volume — the caller enqueues each event and applies
+//                     the Layer-3 throttle unchanged).
+// Group insertion order and per-group event order (caller passes oldest-first)
+// are preserved. Pure — no I/O.
+function planBurstHandoffs(deliverables, cap) {
+  const CAP = Number.isInteger(cap) && cap >= 0 ? cap : BURST_CAP;
+  const groups = new Map();
+  const order = [];
+  for (const d of Array.isArray(deliverables) ? deliverables : []) {
+    if (!d || !d.agentId) continue;
+    const convKey = d.convKey ?? null;
+    const gkey = `${d.agentId} ${convKey ?? ''}`;
+    let g = groups.get(gkey);
+    if (!g) {
+      g = { agentId: d.agentId, convKey, items: [] };
+      groups.set(gkey, g);
+      order.push(gkey);
+    }
+    g.items.push(d);
+  }
+  return order.map((k) => {
+    const g = groups.get(k);
+    return {
+      agentId: g.agentId,
+      convKey: g.convKey,
+      mode: g.items.length > CAP ? 'digest' : 'individual',
+      items: g.items,
+    };
+  });
 }
 
 class GitHubPoller {
@@ -512,25 +556,18 @@ class GitHubPoller {
       // GitHub returns newest-first; process oldest-first so triggers fire
       // in causal order. Events without a timestamp sort last (stable).
       fresh.sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
-      for (const ev of fresh) {
-        this._fanOut(repoFullName, ev, subscribers);
-      }
+      this._fanOutBatch(repoFullName, fresh, subscribers);
     }
 
     this.state[repoFullName] = repoState;
     this._saveState();
   }
 
-  _fanOut(repoFullName, ghEvent, subscribers) {
-    const key = eventKey(ghEvent);
-    if (!key) return;
-    const originAgentId = extractOriginAgent(ghEvent);
-
-    // Cache `team` lookups for the duration of this fan-out call. A burst of
-    // events to the same subscribers would otherwise re-read the same
-    // config.json files repeatedly. The cache is intentionally per-call so
-    // late team renames don't get stuck behind stale data — the next event
-    // re-reads.
+  _fanOutBatch(repoFullName, ghEvents, subscribers) {
+    // Cache `team` lookups for the duration of this batch. A burst of events to
+    // the same subscribers would otherwise re-read the same config.json files
+    // repeatedly. Per-batch (one poll, ~30s) so a late team rename is picked up
+    // on the next poll rather than being stuck behind stale data.
     const teamCache = new Map();
     const lookupTeam = (agentId) => {
       if (teamCache.has(agentId)) return teamCache.get(agentId);
@@ -545,82 +582,144 @@ class GitHubPoller {
       return team;
     };
 
-    const convKey = conversationKey(ghEvent);
-    let throttleStateDirty = false;
+    // Phase 1 — per-event delivery gates (history horizon, label filter, from
+    // filter). Everything that survives becomes a "deliverable" tagged with its
+    // subscriber + conversation, to be grouped in phase 2. Events arrive
+    // oldest-first (caller sorted), so per-group order stays causal.
+    const deliverables = [];
+    for (const ghEvent of ghEvents) {
+      const key = eventKey(ghEvent);
+      if (!key) continue;
+      const originAgentId = extractOriginAgent(ghEvent);
+      const convKey = conversationKey(ghEvent);
 
-    for (const sub of subscribers) {
-      if (!sub.events.has(key)) continue;
+      for (const sub of subscribers) {
+        if (!sub.events.has(key)) continue;
 
-      // History horizon (#320-A/B): skip events older than the subscriber's
-      // horizon, widened by GRACE_MS to absorb late/out-of-order delivery.
-      // Cheapest check, runs before everything else — a brand-new or just-
-      // reactivated agent never reads (let alone reacts to) activity that
-      // pre-dates it, even when the per-repo cursor is stale (e.g. another
-      // agent already advanced it past those events).
-      if (!passesHorizon(ghEvent.created_at, sub.horizon, GRACE_MS)) {
-        console.log(
-          `[GH-Poller] history-horizon: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
-          `(event=${ghEvent.created_at}, sub-since=${sub.horizon}, grace=${GRACE_MS}ms)`,
-        );
-        continue;
-      }
-
-      // Label-name filter for *.labeled / *.unlabeled events. The action
-      // payload carries the affected label as `payload.label.name`. When
-      // the subscriber pinned a label name, drop everything that doesn't
-      // match before any other layer runs — this is the cheap pre-filter
-      // that saves the Claude wake-up; the from-filter and throttle still
-      // apply afterward. No-op for non-label events.
-      if (sub.labelFilter) {
-        const labelName = ghEvent.payload?.label?.name;
-        if (labelName !== sub.labelFilter) {
+        // History horizon (#320-A/B): skip events older than the subscriber's
+        // horizon, widened by GRACE_MS to absorb late/out-of-order delivery.
+        // Cheapest check, runs before everything else — a brand-new or just-
+        // reactivated agent never reads (let alone reacts to) activity that
+        // pre-dates it, even when the per-repo cursor is stale (e.g. another
+        // agent already advanced it past those events).
+        if (!passesHorizon(ghEvent.created_at, sub.horizon, GRACE_MS)) {
           console.log(
-            `[GH-Poller] label-filter: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
-            `(label='${labelName ?? '?'}', want='${sub.labelFilter}')`,
+            `[GH-Poller] history-horizon: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
+            `(event=${ghEvent.created_at}, sub-since=${sub.horizon}, grace=${GRACE_MS}ms)`,
           );
           continue;
         }
-      }
 
-      const decision = applyFromFilter(originAgentId, sub.agentId, sub.from, lookupTeam);
-      if (!decision.deliver) {
-        if (decision.reason === 'self-loop') {
-          // Preserve the existing log line shape so operators with grep
-          // habits / log dashboards keep working.
-          console.log(
-            `[GH-Poller] Loop-protect: ${key} (${ghEvent.id}) origin=${originAgentId} matches subscriber — skipping`,
-          );
-        } else {
-          console.log(
-            `[GH-Poller] from-filter: ${key} (${ghEvent.id}) origin=${originAgentId || 'human'} → ${sub.agentId} dropped (${decision.reason})`,
-          );
+        // Label-name filter for *.labeled / *.unlabeled events. The action
+        // payload carries the affected label as `payload.label.name`. When
+        // the subscriber pinned a label name, drop everything that doesn't
+        // match before any other layer runs — this is the cheap pre-filter
+        // that saves the Claude wake-up; the from-filter and throttle still
+        // apply afterward. No-op for non-label events.
+        if (sub.labelFilter) {
+          const labelName = ghEvent.payload?.label?.name;
+          if (labelName !== sub.labelFilter) {
+            console.log(
+              `[GH-Poller] label-filter: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
+              `(label='${labelName ?? '?'}', want='${sub.labelFilter}')`,
+            );
+            continue;
+          }
         }
+
+        const decision = applyFromFilter(originAgentId, sub.agentId, sub.from, lookupTeam);
+        if (!decision.deliver) {
+          if (decision.reason === 'self-loop') {
+            // Preserve the existing log line shape so operators with grep
+            // habits / log dashboards keep working.
+            console.log(
+              `[GH-Poller] Loop-protect: ${key} (${ghEvent.id}) origin=${originAgentId} matches subscriber — skipping`,
+            );
+          } else {
+            console.log(
+              `[GH-Poller] from-filter: ${key} (${ghEvent.id}) origin=${originAgentId || 'human'} → ${sub.agentId} dropped (${decision.reason})`,
+            );
+          }
+          continue;
+        }
+
+        deliverables.push({
+          agentId: sub.agentId,
+          triggerId: sub.triggerId,
+          convKey,
+          key,
+          ghEvent,
+        });
+      }
+    }
+
+    // Phase 2 — group by (agent, conversation) and hand off (#449-C). A group
+    // larger than BURST_CAP collapses into ONE lossless digest; smaller groups
+    // go out individually, each still gated by the Layer-3 throttle exactly as
+    // before (the throttle is deliberately NOT applied to a digest — see
+    // _enqueueDigest).
+    const plans = planBurstHandoffs(deliverables, BURST_CAP);
+    let throttleStateDirty = false;
+
+    for (const plan of plans) {
+      if (plan.mode === 'digest') {
+        this._enqueueDigest(plan.agentId, plan.convKey, plan.items);
         continue;
       }
 
-      // Layer-3 throttle: count per (agent, conversation). Drops further
-      // reactions once the threshold is exceeded; the very first drop also
-      // schedules a one-shot DM warning so the user sees the clamp.
-      const t = this._checkAndIncThrottle(sub.agentId, convKey);
-      throttleStateDirty = true;
-      if (t.drop) {
-        console.log(
-          `[GH-Poller] throttle: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
-          `(conv=${convKey}, count=${t.count}/${t.threshold}/h, window-ends=${t.windowEndsAt})`,
-        );
-        if (t.justWarned) {
-          this._enqueueThrottleWarning(sub.agentId, convKey, t);
+      for (const it of plan.items) {
+        // Layer-3 throttle: count per (agent, conversation). Drops further
+        // reactions once the threshold is exceeded; the very first drop also
+        // schedules a one-shot DM warning so the user sees the clamp.
+        const t = this._checkAndIncThrottle(it.agentId, it.convKey);
+        throttleStateDirty = true;
+        if (t.drop) {
           console.log(
-            `[GH-Poller] throttle: warning queued for ${sub.agentId} (conv=${convKey})`,
+            `[GH-Poller] throttle: ${it.key} (${it.ghEvent.id}) → ${it.agentId} dropped ` +
+            `(conv=${it.convKey}, count=${t.count}/${t.threshold}/h, window-ends=${t.windowEndsAt})`,
           );
+          if (t.justWarned) {
+            this._enqueueThrottleWarning(it.agentId, it.convKey, t);
+            console.log(
+              `[GH-Poller] throttle: warning queued for ${it.agentId} (conv=${it.convKey})`,
+            );
+          }
+          continue;
         }
-        continue;
-      }
 
-      this._enqueue(sub.agentId, sub.triggerId, key, ghEvent);
+        this._enqueue(it.agentId, it.triggerId, it.key, it.ghEvent);
+      }
     }
 
     if (throttleStateDirty) this._saveThrottleState();
+  }
+
+  // #449-D: append one `github-digest` entry summarising a burst of events for a
+  // single (agent, conversation). Lossless — every event is listed — but NOT run
+  // through the Layer-3 throttle: the digest IS the anti-flood response, so it
+  // must always reach the agent. The runtime posts it as a plain DM (no LLM
+  // call), mirroring the throttle-warning delivery.
+  _enqueueDigest(agentId, convKey, items) {
+    const events = items.map((it) => ({
+      event: it.key,
+      eventId: it.ghEvent.id,
+      repo: it.ghEvent.repo?.name,
+      actor: it.ghEvent.actor?.login,
+      createdAt: it.ghEvent.created_at,
+    }));
+    const triggerIds = [...new Set(items.map((it) => it.triggerId).filter(Boolean))];
+    this._enqueuePending(agentId, {
+      kind: 'github-digest',
+      convKey,
+      cap: BURST_CAP,
+      count: events.length,
+      triggerIds,
+      events,
+    });
+    console.log(
+      `[GH-Poller] burst-digest: ${events.length} events → agent=${agentId} ` +
+      `(conv=${convKey}, cap=${BURST_CAP})`,
+    );
   }
 
   // Centralised pending-queue writer. Prefers the orchestrator's queue (which
@@ -824,8 +923,10 @@ module.exports = {
   effectiveHorizon,
   passesHorizon,
   selectFreshEvents,
+  planBurstHandoffs,
   THROTTLE_THRESHOLD,
   THROTTLE_WINDOW_MS,
   GRACE_MS,
   SEEN_MAX,
+  BURST_CAP,
 };

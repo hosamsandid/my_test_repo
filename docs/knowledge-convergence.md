@@ -26,7 +26,7 @@ begin until the decisions in §0 are confirmed.
 | # | Question | Proposed choice |
 |---|---|---|
 | **a** | **Where dedup/convergence runs** — the concept offers "CLI write path *or* a small collector", and flags that per-agent shards make write-time cross-agent merge non-trivial. | **Orchestrator-side collector at the push choke-point.** Cross-agent convergence is inherently a cross-shard read, and the orchestrator is already the *only* sanctioned cross-agent reader (the canonical clone, per the concept's cross-cutting note). The CLI keeps its Phase-1 `search`-before-`add` nudge (cheap *self*-dedup); the collector does the cross-agent work. It runs inside `emitKnowledgeHarvest` (already fires after every successful push) — event-driven, no new cron. See §2. |
-| **b** | **Similarity method + threshold** | **Lexical only, dependency-free** (concept: "cheap similarity, optional embedding later"). Normalized **token-set Jaccard** with an exact-normalized fast path; default merge threshold `simThreshold = 0.6`, default promotion threshold `convergenceThreshold = 2` **distinct** agents. Both configurable per team via a new `knowledgeConvergence` env block. A `similarity(a,b)→score` seam lets embeddings slot in later without touching callers. See §3. |
+| **b** | **Similarity method + threshold** | **Lexical only, dependency-free** (concept: "cheap similarity, optional embedding later"). Normalized **token-set Jaccard** with an exact-normalized fast path; default merge threshold `simThreshold = 0.6`, default promotion threshold `convergenceThreshold = 2` **distinct** agents (**confirmed by product — concept open question #3 resolved**; stays per-team configurable). Both configurable per team via a new `knowledgeConvergence` env block. A `similarity(a,b)→score` seam lets embeddings slot in later without touching callers. See §3. |
 | **c** | **Merge representation in JSONL** (must not break append-only shards, line-atomic writes, or Phase 2 `dedupById`) | **Shards stay append-only and are never rewritten** (attribution + conflict-freedom preserved). The merge lives entirely in the **canonical `<kind>.jsonl`** — the single-writer, orchestrator-owned "curated read view" Phase 0 already reserved. The collector regenerates it as: one **canonical entry per cluster** (earliest member wins the id) with grown `convergence[]` + `updatedAt`, plus a **`status:"merged"` tombstone** `{ id:<absorbed>, mergedInto:<canonicalId> }` for every non-winner id. A new *additive* pure `foldMerges()` in the graph builder resolves tombstones before the untouched `dedupById`. No merges ⇒ `foldMerges` is identity ⇒ Phase 2 output is byte-identical. See §4. |
 | **d** | **`promote(from→to)` contract + provenance + CLI verb semantics** | `POST /api/knowledge/promote` generalises `promote-to-global` to `agent→team` and `team→global`; **`entryIds` is mandatory** and a `provenance.json` is written beside `SKILL.md` (the graph's T1→T2 edge already keys off `provenance.entryIds`). The `knowledge promote` CLI verb (exit-3 stub today) becomes **nominate**, not execute: it raises a suggestion card; the operator confirms in the UI, which alone calls `POST /api/knowledge/promote`. This keeps "no auto-promotion at level 2." See §5–§6. |
 | **e** | **Autonomy gating** | **Convergence-grow runs at level ≥ 1**, so the default dial makes Phase 2's "N× independent" real (non-destructive: shards untouched, only the derived canonical view changes). **Promotion suggestions (candidates + cards + drafts) run at level ≥ 2.** Auto-merge/auto-promote stay level 3 (Phase 4). See §7. |
@@ -273,9 +273,10 @@ updates lifecycle status). Each candidate:
 ```
 
 **Raised two ways:** the collector (§2 step 5, `source:"convergence"`) and the
-CLI `knowledge promote <id>` (§9, `source:"agent-nominated"`, works below
-threshold too — an agent flagging something skill-worthy). Both go through the
-same stable-id dedup, so nothing is raised twice.
+CLI `knowledge promote <id>` (§9, `source:"agent-nominated"`, **works below
+threshold too — confirmed by product**: an agent may flag something skill-worthy
+even when only it has recorded it). Both go through the same stable-id dedup, so
+nothing is raised twice.
 
 **Debounce/batch (#449 thinking).** The store's stable ids *are* the debounce —
 re-detection never duplicates. For the live pulse, the collector emits at most

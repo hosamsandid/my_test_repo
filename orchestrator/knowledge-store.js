@@ -40,6 +40,19 @@ const DEFAULT_AUTONOMY = 1;
 const DEFAULT_SIM_THRESHOLD = 0.6;
 const DEFAULT_CONVERGENCE_THRESHOLD = 2;
 
+// Curation / full-autonomy defaults (Phase 4). The promotion transitions the
+// gate policy covers, the two gate modes, and their conservative defaults:
+// team→team may auto-promote, but anything to the global pool (blast radius, and
+// the orchestrator mounts /template-workspace read-only so it CANNOT write it)
+// and lifting a private agent skill to the team both default to human review.
+const PROMOTION_TRANSITIONS = ['team>team', 'team>global', 'agent>team'];
+const GATE_MODES = ['auto', 'review'];
+const DEFAULT_PROMOTION_GATES = { 'team>team': 'auto', 'team>global': 'review', 'agent>team': 'review' };
+// #449 burst-cap parity: at most this many clusters auto-promote in one collector
+// pass; the overflow is deferred to review cards (lossless), so flipping the dial
+// to level 3 over a large backlog can't emit a flood of skills at once.
+const DEFAULT_MAX_AUTO_PROMOTIONS = 3;
+
 // ---------------------------------------------------------------------------
 // Ids / clock (injectable so tests are deterministic)
 // ---------------------------------------------------------------------------
@@ -365,6 +378,37 @@ function knowledgeConvergenceConfig(env) {
   return { simThreshold: sim, convergenceThreshold: conv };
 }
 
+// Resolve the per-team, per-transition promotion gate policy (Phase 4), read off
+// the environment the team shares. Absent transition ⇒ its conservative default;
+// a present-but-invalid mode ⇒ "review" (fail-safe: an unrecognised policy never
+// silently auto-promotes). team→global is ALWAYS forced to "review" regardless of
+// the stored value — there is no code path that auto-writes the read-only global
+// pool, so the highest-blast-radius transition stays human-gated by construction.
+function resolvePromotionGates(env) {
+  const raw = env && typeof env.knowledgePromotionGates === 'object' && env.knowledgePromotionGates
+    ? env.knowledgePromotionGates
+    : {};
+  const out = {};
+  for (const t of PROMOTION_TRANSITIONS) {
+    if (!(t in raw)) { out[t] = DEFAULT_PROMOTION_GATES[t]; continue; }
+    out[t] = GATE_MODES.includes(raw[t]) ? raw[t] : 'review';
+  }
+  out['team>global'] = 'review';
+  return out;
+}
+
+// Curation config (Phase 4), read off the environment the team shares. Clamped
+// with a safe default so any legacy env (no `knowledgeCuration`) behaves as
+// { maxAutoPromotionsPerPass: 3 }. The cap clamps to an integer >= 1.
+function knowledgeCurationConfig(env) {
+  const raw = env && typeof env.knowledgeCuration === 'object' && env.knowledgeCuration
+    ? env.knowledgeCuration
+    : {};
+  let cap = Number(raw.maxAutoPromotionsPerPass);
+  if (!Number.isInteger(cap) || cap < 1) cap = DEFAULT_MAX_AUTO_PROMOTIONS;
+  return { maxAutoPromotionsPerPass: cap };
+}
+
 // The per-session harvest instruction woven into the agent's memory hint
 // (Shared Agent Learning, Phase 1). Pure + gated on the autonomy dial: level 0
 // (or a non-int) returns '' so the surrounding hint is exactly today's text —
@@ -406,7 +450,13 @@ module.exports = {
   normalizeKnowledgeStore,
   knowledgeAutonomyLevel,
   knowledgeConvergenceConfig,
+  resolvePromotionGates,
+  knowledgeCurationConfig,
   buildHarvestHint,
   DEFAULT_SIM_THRESHOLD,
   DEFAULT_CONVERGENCE_THRESHOLD,
+  DEFAULT_MAX_AUTO_PROMOTIONS,
+  PROMOTION_TRANSITIONS,
+  GATE_MODES,
+  DEFAULT_PROMOTION_GATES,
 };

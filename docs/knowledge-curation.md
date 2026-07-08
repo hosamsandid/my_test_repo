@@ -18,8 +18,10 @@ promotion arrow flips between "automatic" and "needs review" on one switch, and 
 gated edge routes through an operator approval card instead of firing. Levels
 0/1/2 behave **exactly** as today; level 2 (draft + operator confirm) is untouched.
 
-Status: **design of record for #463** — awaiting §0 confirmation. To be
-implemented on `integration/knowledge-flow` (stacked on Phase 3, commit 88d78ee).
+Status: **design of record for #463** — approved (§0 decisions confirmed; the two
+optional sub-decisions deferred: no `knowledge promote --to agent` CLI verb, and
+auto-archive off in v1) and implemented on `integration/knowledge-flow` (stacked
+on Phase 3, commit 88d78ee).
 
 ---
 

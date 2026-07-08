@@ -2723,8 +2723,38 @@ app.get('/api/knowledge/graph', async (req, res) => {
   }
   const agents = gatherKnowledgeAgents(scope, teamIds);
   const skills = gatherKnowledgeSkills(scope);
-  res.json(buildKnowledgeGraph({ scope: parsed.scope, entries, skills, agents, now: Date.now(), warnings }));
+  const graph = buildKnowledgeGraph({ scope: parsed.scope, entries, skills, agents, now: Date.now(), warnings });
+  augmentPendingPromotions(graph, teamIds);
+  res.json(graph);
 });
+
+// Overlay "needs review" edges + ghost skill nodes (Phase 4) for open promotion
+// candidates whose converged fact is a node in this graph — the pending promotion
+// the operator still has to approve (a gated/deferred auto-promotion, or a
+// level-2 suggestion). Derived from the candidate store in the route so the pure
+// graph builder stays a function of entries+skills only. No-op when there are no
+// open candidates (mutates `graph` in place).
+function augmentPendingPromotions(graph, teamIds) {
+  if (!graph || !Array.isArray(graph.nodes)) return;
+  const itemIds = new Set(graph.nodes.filter(n => n.kind === 'item').map(n => n.id));
+  if (itemIds.size === 0) return;
+  const seen = new Set();
+  for (const teamId of teamIds) {
+    for (const c of readCandidateStore(teamId)) {
+      if (!c || c.status !== 'open' || !c.canonicalId) continue;
+      const itemNodeId = `item:${c.canonicalId}`;
+      if (!itemIds.has(itemNodeId) || seen.has(c.id)) continue;
+      seen.add(c.id);
+      const label = (c.draft && c.draft.name) || knowledgeSuggestions.slugifySkillName(c.text, c.kind);
+      graph.nodes.push({
+        id: `pending:${c.id}`, lane: 'global', kind: 'pending', label,
+        suggestionId: c.id, teamId, gateReason: c.gateReason || null,
+        autoDrafted: !!c.autoDrafted,
+      });
+      graph.edges.push({ from: itemNodeId, to: `pending:${c.id}`, kind: 'promoted', pending: true });
+    }
+  }
+}
 
 app.get('/api/knowledge/summary', async (req, res) => {
   const scope = getScope(req);
@@ -2964,6 +2994,28 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
   if (!visibleTeam(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
 
+  // agent→team lift (Phase 4): the source is a private AGENT skill. Resolve it and
+  // pre-fill skillMd + entryIds from its SKILL.md / provenance.json, so the caller
+  // only names the source and provenance is carried forward (still mandatory).
+  let liftProv = null;
+  if (req.body?.from === 'agent') {
+    const agentId = typeof req.body.agentId === 'string' ? req.body.agentId : '';
+    if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'agentId is required for an agent→team lift' });
+    const name = typeof req.body.name === 'string' ? req.body.name : '';
+    if (!knowledgeSuggestions.SKILL_NAME_RE.test(name)) return res.status(400).json({ error: 'invalid skill name' });
+    const agentsBaseDir = path.resolve(AGENTS_DIR);
+    const srcDir = path.resolve(agentsBaseDir, agentId, 'skills', name);
+    const srcRel = path.relative(agentsBaseDir, srcDir);
+    if (srcRel.startsWith('..') || path.isAbsolute(srcRel)) return res.status(400).json({ error: 'invalid agent id or skill name' });
+    const srcSkill = path.join(srcDir, 'SKILL.md');
+    if (!fs.existsSync(srcSkill)) return res.status(404).json({ error: `agent skill '${name}' not found for '${agentId}'` });
+    liftProv = readSkillProvenance(srcDir) || {};
+    if (!req.body.skillMd) { try { req.body.skillMd = fs.readFileSync(srcSkill, 'utf8'); } catch { /* validated below */ } }
+    if (!Array.isArray(req.body.entryIds) || req.body.entryIds.length === 0) {
+      req.body.entryIds = Array.isArray(liftProv.entryIds) ? liftProv.entryIds : [];
+    }
+  }
+
   const v = knowledgeSuggestions.validatePromotion(req.body);
   if (!v.ok) return res.status(400).json({ error: v.error });
 
@@ -2986,10 +3038,25 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     return res.status(409).json({ error: `Skill '${v.name}' already exists`, exists: true });
   }
 
-  const prov = knowledgeSuggestions.buildSkillProvenance({
-    from: v.from, to: v.to, teamId, entryIds: v.entryIds, candidate: cand,
-    promotedBy: (req.user && (req.user.sub || req.user.username)) || 'operator',
-  });
+  const promotedBy = (req.user && (req.user.sub || req.user.username)) || 'operator';
+  const prov = v.from === 'agent'
+    ? {
+        fromTier: 'agent', toTier: v.to, teamId,
+        entryIds: v.entryIds,
+        canonicalId: (liftProv && liftProv.canonicalId) || v.entryIds[0] || null,
+        originAgents: Array.isArray(liftProv && liftProv.originAgents) ? liftProv.originAgents : [],
+        convergence: Array.isArray(liftProv && liftProv.convergence)
+          ? liftProv.convergence
+          : (Array.isArray(liftProv && liftProv.originAgents) ? liftProv.originAgents : []),
+        sourceRefs: Array.isArray(liftProv && liftProv.sourceRefs) ? liftProv.sourceRefs : [],
+        sessions: Array.isArray(liftProv && liftProv.sessions) ? liftProv.sessions : [],
+        originTeamId: (liftProv && liftProv.originTeamId) || teamId,
+        liftedFrom: { tier: 'agent', agentId: req.body.agentId, name: v.name },
+        promotedAt: new Date().toISOString(), promotedBy,
+      }
+    : knowledgeSuggestions.buildSkillProvenance({
+        from: v.from, to: v.to, teamId, entryIds: v.entryIds, candidate: cand, promotedBy,
+      });
   try {
     if (req.body.overwrite) fs.rmSync(dstDir, { recursive: true, force: true });
     fs.mkdirSync(dstDir, { recursive: true });
@@ -3011,6 +3078,70 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
   } catch { /* best-effort */ }
 
   res.status(201).json({ name: v.name, tier: v.to, teamId, provenance: prov });
+});
+
+// The environment a team shares (from any of its agents' configs). Mirrors the
+// orchestrator's resolveTeamEnvId; used only to read/display config here.
+function teamEnvironment(teamId) {
+  let ids;
+  try { ids = fs.readdirSync(AGENTS_DIR); } catch { return null; }
+  for (const id of ids) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg) continue;
+    const t = cfg.teamId || cfg.parentTeamId || 'default';
+    if (t === teamId && cfg.environmentId) {
+      const env = loadEnvironment(cfg.environmentId);
+      if (env) return env;
+    }
+  }
+  return null;
+}
+
+// Team autonomy level (0..3, default 1). Local read — api.js does not import the
+// orchestrator's knowledge-store; the clamp mirrors knowledgeAutonomyLevel.
+function teamAutonomyLevel(env) {
+  const n = Number(env && env.knowledgeAutonomy);
+  if (!Number.isInteger(n)) return 1;
+  return Math.max(0, Math.min(3, n));
+}
+
+// Promotion gate policy for a team (Phase 4) + its autonomy level, for the
+// Knowledge Flow gate switches.
+app.get('/api/knowledge/gates', (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.query.team === 'string' ? req.query.team : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  const env = teamEnvironment(teamId);
+  res.json({
+    team: teamId,
+    autonomy: teamAutonomyLevel(env),
+    gates: knowledgeSuggestions.resolvePromotionGates(env),
+  });
+});
+
+// Flip one promotion transition between "auto" and "review" (the operator's one
+// switch). Proxies to the orchestrator, the env-config writer.
+app.put('/api/knowledge/gates', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
+  const transition = typeof req.body?.transition === 'string' ? req.body.transition : '';
+  const mode = typeof req.body?.mode === 'string' ? req.body.mode : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
+  if (!visibleTeam(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  if (!knowledgeSuggestions.PROMOTION_TRANSITIONS.includes(transition)) return res.status(400).json({ error: 'invalid transition' });
+  if (!knowledgeSuggestions.GATE_MODES.includes(mode)) return res.status(400).json({ error: 'invalid mode' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/gates`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, transition, mode }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) return res.status(502).json({ error: (out && out.error) || 'gate update failed' });
+    res.json({ ok: true, gates: out.gates });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
 });
 
 /* ─── Unified orchestration graph (Unified Orchestration #362 / #365) ───────

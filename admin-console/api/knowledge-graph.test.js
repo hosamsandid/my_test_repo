@@ -7,6 +7,7 @@ const {
   parseScope,
   dedupById,
   foldMerges,
+  foldArchived,
   buildKnowledgeGraph,
   summarizeKnowledge,
 } = require('./knowledge-graph');
@@ -354,4 +355,46 @@ test('buildKnowledgeGraph: promoted edge appears when skill provenance names a f
   const promoted = g.edges.filter((e) => e.kind === 'promoted');
   assert.equal(promoted.length, 1);
   assert.deepEqual(promoted[0], { from: 'item:aaaaaaaaaaaa', to: 'skill:poller-conventions', kind: 'promoted' });
+});
+
+// ── foldArchived (Phase 4) ──────────────────────────────────────────────────────
+
+test('foldArchived: identity when no archived records (Phase 2/3 goldens unchanged)', () => {
+  const entries = [entry({ id: 'aaaaaaaaaaaa' }), entry({ id: 'bbbbbbbbbbbb' })];
+  assert.deepEqual(foldArchived(entries), entries);
+});
+
+test('foldArchived: drops an archived canonical entry', () => {
+  const entries = [
+    entry({ id: 'aaaaaaaaaaaa', status: 'archived', updatedAt: '2026-07-08T11:00:00Z' }),
+    entry({ id: 'bbbbbbbbbbbb' }),
+  ];
+  const out = foldArchived(entries);
+  assert.deepEqual(out.map((e) => e.id), ['bbbbbbbbbbbb']);
+});
+
+test('foldArchived: a stale live shard copy cannot resurrect an archived entry (latest wins)', () => {
+  const entries = [
+    entry({ id: 'aaaaaaaaaaaa', status: 'active', createdAt: '2026-07-08T09:00:00Z' }),
+    entry({ id: 'aaaaaaaaaaaa', status: 'archived', updatedAt: '2026-07-08T11:00:00Z' }),
+  ];
+  assert.equal(foldArchived(entries).length, 0);
+});
+
+test('foldArchived: an archived copy older than a live update keeps the entry', () => {
+  const entries = [
+    entry({ id: 'aaaaaaaaaaaa', status: 'archived', updatedAt: '2026-07-08T09:00:00Z' }),
+    entry({ id: 'aaaaaaaaaaaa', status: 'active', updatedAt: '2026-07-08T11:00:00Z' }),
+  ];
+  assert.equal(foldArchived(entries).length, 2); // latest is active → id survives
+});
+
+test('foldArchived composes with foldMerges + dedupById in the graph (archived item hidden)', () => {
+  const entries = [
+    entry({ id: 'aaaaaaaaaaaa', text: 'live fact', originAgent: 'd1' }),
+    entry({ id: 'bbbbbbbbbbbb', text: 'archived fact', originAgent: 'd2', status: 'archived', updatedAt: '2026-07-08T11:00:00Z' }),
+  ];
+  const g = buildKnowledgeGraph({ scope: 'team:acme', entries, now: NOW });
+  const itemTexts = g.nodes.filter((n) => n.kind === 'item').map((n) => n.text);
+  assert.deepEqual(itemTexts, ['live fact']);
 });

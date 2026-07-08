@@ -20,7 +20,7 @@ const KIND_COLORS = {
 
 const CARD_W = 210;
 const COL_GAP = 90;
-const NODE_H = { agent: 58, team: 74, skill: 46, item: 74 };
+const NODE_H = { agent: 58, team: 74, skill: 46, item: 74, pending: 46 };
 const PAD = 56; // top padding below lane headers
 
 export default function KnowledgeFlow() {
@@ -85,6 +85,28 @@ export default function KnowledgeFlow() {
   }, [parsed.kind, parsed.id]);
 
   useEffect(() => { loadSuggestions(); }, [loadSuggestions]);
+
+  // Promotion gate policy + autonomy level (Phase 4) — team scope only.
+  const [gates, setGates] = useState(null);
+  const loadGates = useCallback(() => {
+    if (parsed.kind !== 'team' || !parsed.id) { setGates(null); return; }
+    fetch(`/api/knowledge/gates?team=${encodeURIComponent(parsed.id)}`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => setGates(d))
+      .catch(() => {});
+  }, [parsed.kind, parsed.id]);
+  useEffect(() => { loadGates(); }, [loadGates]);
+
+  const setGate = useCallback((transition, mode) => {
+    if (!parsed.id) return;
+    fetch('/api/knowledge/gates', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId: parsed.id, transition, mode }),
+    })
+      .then(r => (r.ok ? r.json() : null))
+      .then(() => { loadGates(); load(); })
+      .catch(() => {});
+  }, [parsed.id, loadGates, load]);
 
   const onFeedEvent = useCallback((ev) => {
     if (ev?.type === 'suggestion' || ev?.type === 'promotion') { loadSuggestions(); load(); }
@@ -215,6 +237,10 @@ export default function KnowledgeFlow() {
             <Canvas graph={filtered} layout={layout} pulseId={pulseId}
               selectedId={selected ? `item:${selected}` : null}
               onSelectItem={(node) => openItem(node.id.slice(5), node.teamId)}
+              onReviewPending={(node) => {
+                const s = suggestions.find(x => x.id === node.suggestionId);
+                if (s) setPromoting(s);
+              }}
               onSelectAgent={(node) => node.agentId && navigate(`/chats/${encodeURIComponent(node.agentId)}`)} />
           )}
         </div>
@@ -224,6 +250,9 @@ export default function KnowledgeFlow() {
             <Provenance detail={detail} onClose={() => { setSelected(null); setDetail(null); }} onOpenAgent={(id) => navigate(`/chats/${encodeURIComponent(id)}`)} />
           ) : (
             <>
+              {parsed.kind === 'team' && gates && (
+                <GatePanel data={gates} onSet={setGate} />
+              )}
               {parsed.kind === 'team' && suggestions.length > 0 && (
                 <SuggestionsPanel suggestions={suggestions} onReview={(s) => setPromoting(s)} />
               )}
@@ -393,7 +422,7 @@ const inp = {
 
 /* ── Canvas (lightweight purpose-built SVG) ─────────────────────────────────── */
 
-function Canvas({ graph, layout, pulseId, selectedId, onSelectItem, onSelectAgent }) {
+function Canvas({ graph, layout, pulseId, selectedId, onSelectItem, onSelectAgent, onReviewPending }) {
   const { positions, width, height } = layout;
   return (
     <svg width={width} height={height} style={{ display: 'block' }}>
@@ -411,9 +440,9 @@ function Canvas({ graph, layout, pulseId, selectedId, onSelectItem, onSelectAgen
         return (
           <path key={i}
             d={`M ${x1} ${a.cy} C ${mx} ${a.cy}, ${mx} ${b.cy}, ${x2} ${b.cy}`}
-            fill="none" stroke={stroke} strokeOpacity={e.origin || thick ? 0.75 : 0.4}
+            fill="none" stroke={stroke} strokeOpacity={e.pending ? 0.55 : (e.origin || thick ? 0.75 : 0.4)}
             strokeWidth={thick ? 2.5 : 1.4}
-            strokeDasharray={e.kind === 'promoted' ? '4 3' : undefined} />
+            strokeDasharray={e.pending ? '2 4' : (e.kind === 'promoted' ? '4 3' : undefined)} />
         );
       })}
       {/* nodes */}
@@ -430,6 +459,10 @@ function Canvas({ graph, layout, pulseId, selectedId, onSelectItem, onSelectAgen
         if (n.kind === 'item') {
           return <ItemCard key={n.id} node={n} x={x} y={y} w={p.w} h={p.h}
             selected={n.id === selectedId} pulsing={pulsing} onClick={() => onSelectItem(n)} />;
+        }
+        if (n.kind === 'pending') {
+          return <PendingCard key={n.id} node={n} x={x} y={y} w={p.w} h={p.h}
+            onClick={() => onReviewPending && onReviewPending(n)} />;
         }
         return <SkillCard key={n.id} node={n} x={x} y={y} w={p.w} h={p.h} />;
       })}
@@ -493,18 +526,93 @@ function ItemCard({ node, x, y, w, h, selected, pulsing, onClick }) {
 }
 
 function SkillCard({ node, x, y, w, h }) {
+  const auto = node.promotedBy === 'curator';
   return (
     <g>
       {foreign(x, y, w, h, (
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
           <GitBranch size={13} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
-          <div style={{ minWidth: 0 }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{node.label}</div>
             <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{node.tier} skill</div>
           </div>
+          {auto && (
+            <span title="Auto-promoted by the curator" style={{ flexShrink: 0, fontSize: 10, fontWeight: 600, color: 'var(--eb-status-warning)', border: '1px solid var(--eb-status-warning)', borderRadius: 4, padding: '1px 4px' }}>auto</span>
+          )}
         </div>
       ), { background: 'var(--eb-bg-elevated)' })}
     </g>
+  );
+}
+
+// A ghost "skill-to-be" node for an open promotion candidate the operator still
+// has to approve (a review-gated / deferred auto-promotion, or a level-2
+// suggestion). Clicking opens the review dialog. Dashed border + amber to read as
+// "needs review", distinct from a written skill.
+function PendingCard({ node, x, y, w, h, onClick }) {
+  return (
+    <g style={{ cursor: 'pointer' }} onClick={onClick}>
+      {foreign(x, y, w, h, (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+          <Sparkles size={13} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{node.label}</div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)' }}>needs review</div>
+          </div>
+        </div>
+      ), { background: 'var(--eb-bg-surface)', border: '1px dashed var(--eb-status-warning)' })}
+    </g>
+  );
+}
+
+// Autonomy level + per-transition promotion gates (Phase 4). The operator's one
+// switch: flip a promotion arrow between "automatic" and "needs review".
+function GatePanel({ data, onSet }) {
+  const gates = (data && data.gates) || {};
+  const autonomy = data ? data.autonomy : 1;
+  const LABELS = {
+    'team>team': 'KB → team skill',
+    'team>global': 'team → global',
+    'agent>team': 'agent → team',
+  };
+  const row = (transition) => {
+    const mode = gates[transition] || 'review';
+    const locked = transition === 'team>global'; // always review by construction
+    return (
+      <div key={transition} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
+        <span style={{ flex: 1, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{LABELS[transition]}</span>
+        {locked ? (
+          <span style={{ fontSize: 10, color: 'var(--eb-text-muted)' }}>review (locked)</span>
+        ) : (
+          <button
+            onClick={() => onSet(transition, mode === 'auto' ? 'review' : 'auto')}
+            title="Toggle automatic / needs review"
+            style={{
+              fontSize: 10, fontWeight: 600, cursor: 'pointer', borderRadius: 4, padding: '2px 6px',
+              border: `1px solid ${mode === 'auto' ? 'var(--eb-status-success)' : 'var(--eb-status-warning)'}`,
+              color: mode === 'auto' ? 'var(--eb-status-success)' : 'var(--eb-status-warning)',
+              background: 'transparent',
+            }}>
+            {mode === 'auto' ? 'automatic' : 'needs review'}
+          </button>
+        )}
+      </div>
+    );
+  };
+  return (
+    <div style={{ padding: 'var(--eb-space-3) var(--eb-space-4)', borderBottom: '1px solid var(--eb-border-default)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+        <Sparkles size={14} style={{ color: 'var(--eb-accent-primary)' }} />
+        <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>Promotion gates</span>
+        <span style={{ fontSize: 10, color: 'var(--eb-text-muted)', marginLeft: 'auto' }}>autonomy {autonomy}</span>
+      </div>
+      {autonomy < 3 && (
+        <div style={{ fontSize: 10, color: 'var(--eb-text-muted)', marginBottom: 4 }}>
+          Auto-promotion runs at autonomy 3. Gates below take effect there.
+        </div>
+      )}
+      {['team>team', 'agent>team', 'team>global'].map(row)}
+    </div>
   );
 }
 

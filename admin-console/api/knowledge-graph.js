@@ -95,6 +95,33 @@ function entryTime(e) {
   return Number.isNaN(n) ? 0 : n;
 }
 
+// ---------------------------------------------------------------------------
+// Archive folding (Phase 4)
+// ---------------------------------------------------------------------------
+
+// Drop entries the curator retired via status:"archived" (non-destructive KB
+// curation, docs/knowledge-curation.md §6): the canonical writer stamps a
+// superseded/stale canonical entry archived; the raw shard lines stay in git for
+// audit but the entry leaves the ACTIVE graph. Runs BEFORE dedupById, so it
+// decides per id by the LATEST copy (updatedAt/createdAt): if the freshest copy of
+// an id is archived, every copy of that id is dropped — a stale live shard copy
+// can't resurrect an archived entry. Additive: no archived records ⇒ identity ⇒
+// Phase 2/3 output byte-identical.
+function foldArchived(entries) {
+  const list = Array.isArray(entries) ? entries.filter((e) => e && typeof e === 'object') : [];
+  const latest = new Map();
+  for (const e of list) {
+    const id = typeof e.id === 'string' && e.id.trim() ? e.id : null;
+    if (!id) continue;
+    const prev = latest.get(id);
+    if (!prev || entryTime(e) >= entryTime(prev)) latest.set(id, e);
+  }
+  const archivedIds = new Set();
+  for (const [id, e] of latest) if (e.status === 'archived') archivedIds.add(id);
+  if (archivedIds.size === 0) return list;
+  return list.filter((e) => !(typeof e.id === 'string' && archivedIds.has(e.id)));
+}
+
 // Collapse entries that share an `id` — the same KB entry seen across multiple
 // shard roots (the canonical clone AND stale agent checkouts, §2). Last writer
 // wins on updatedAt/createdAt; ties keep the last one seen so a caller can order
@@ -194,7 +221,7 @@ function buildKnowledgeGraph({ scope, entries = [], skills = [], agents = [], no
   const parsed = parseScope(scope);
   const nowMs = typeof now === 'number' ? now : Date.parse(now) || Date.now();
 
-  const allItems = dedupById(foldMerges(entries)).map(toItem);
+  const allItems = dedupById(foldArchived(foldMerges(entries))).map(toItem);
   const agentMeta = new Map(
     (Array.isArray(agents) ? agents : [])
       .filter((a) => a && typeof a.id === 'string')
@@ -346,6 +373,7 @@ function buildKnowledgeGraph({ scope, entries = [], skills = [], agents = [], no
     };
     if (s.originTeamId) node.originTeamId = s.originTeamId;
     if (s.teamId) node.teamId = s.teamId;
+    if (s.provenance && typeof s.provenance.promotedBy === 'string') node.promotedBy = s.provenance.promotedBy;
     nodes.push(node);
     // T1→T2 promoted edge — only when the referenced entry is a node here.
     for (const entryId of skillEntryIds(s)) {
@@ -390,7 +418,7 @@ function buildKnowledgeGraph({ scope, entries = [], skills = [], agents = [], no
 function summarizeKnowledge({ scope, entries = [], now = Date.now() } = {}) {
   const parsed = parseScope(scope);
   const nowMs = typeof now === 'number' ? now : Date.parse(now) || Date.now();
-  const items = dedupById(foldMerges(entries)).map(toItem);
+  const items = dedupById(foldArchived(foldMerges(entries))).map(toItem);
   let scoped;
   if (parsed.kind === 'agent') {
     scoped = items.filter((it) => it.originAgent === parsed.id || it.convergence.includes(parsed.id));
@@ -419,6 +447,7 @@ module.exports = {
   parseScope,
   dedupById,
   foldMerges,
+  foldArchived,
   buildKnowledgeGraph,
   summarizeKnowledge,
 };

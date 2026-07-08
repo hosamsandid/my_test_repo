@@ -16,14 +16,20 @@ const {
   normalizeKnowledgeStore,
   knowledgeAutonomyLevel,
   knowledgeConvergenceConfig,
+  resolvePromotionGates,
+  knowledgeCurationConfig,
   buildDefaultManifest,
   kindFilePath,
   parseEntry: parseKnowledgeEntry,
+  serializeEntry: serializeKnowledgeEntry,
+  PROMOTION_TRANSITIONS,
+  GATE_MODES,
   KINDS: KNOWLEDGE_KINDS,
 } = require("./knowledge-store");
 const knowledgeSync = require("./knowledge-sync");
 const knowledgeFeed = require("./knowledge-feed");
 const knowledgeConvergence = require("./knowledge-convergence");
+const knowledgeCurator = require("./knowledge-curator");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const { resolveCloneTarget } = require("./clone-target");
@@ -826,10 +832,15 @@ function seedAgentWorkspace(id, env, opts = {}) {
   const selectedSkills = Array.isArray(opts.skillsOverride)
     ? opts.skillsOverride
     : ((env && Array.isArray(env.skills)) ? env.skills : []);
+  // Materialise the on-disk AGENT skill pool (Phase 4, concept open question #4):
+  // the bottom rung of the Agent → Team → Global ladder is now a real, writable
+  // tier. The dir exists even with no seeded skills, so an agent can author a
+  // private skill and `agent→team` promotion has a source. resolveSkillSourceDir
+  // already prefers it (agent-first), and the self-copy is skipped below.
+  const skillsDst = path.join(dest, "skills");
+  fs.mkdirSync(skillsDst, { recursive: true });
   if (selectedSkills.length > 0) {
     const ownerTeamId = opts.teamId || DEFAULT_TEAM_ID;
-    const skillsDst = path.join(dest, "skills");
-    fs.mkdirSync(skillsDst, { recursive: true });
     for (const skillName of selectedSkills) {
       // Resolve agent-first (Phase 0): an agent's own skill pool
       // (/workspace/agents/<id>/skills) shadows the team's and the global one.
@@ -1716,6 +1727,36 @@ function resolveTeamKbRepo(teamId) {
   return null;
 }
 
+// The environment id a team shares (from any of its agents' configs). A team is
+// materialised with one shared env, so the first match wins. Returns null when no
+// agent of the team carries an environmentId.
+function resolveTeamEnvId(teamId) {
+  for (const id of listAgentIds()) {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) continue;
+    const t = cfg.teamId || cfg.parentTeamId || DEFAULT_TEAM_ID;
+    if (t === teamId && cfg.environmentId) return cfg.environmentId;
+  }
+  return null;
+}
+
+// Persist one per-transition promotion gate onto the team's shared environment.
+// Reads the RAW environment.json (not the normalized view) so unrelated fields
+// round-trip untouched, sets knowledgePromotionGates[transition]=mode, writes back.
+function writeTeamPromotionGate(teamId, transition, mode) {
+  const envId = resolveTeamEnvId(teamId);
+  if (!envId) throw new Error(`no environment resolvable for team '${teamId}'`);
+  const p = path.join(ENVIRONMENTS_DIR, envId, "environment.json");
+  let raw;
+  try { raw = JSON.parse(fs.readFileSync(p, "utf8")); } catch { throw new Error(`cannot read environment '${envId}'`); }
+  const gates = raw.knowledgePromotionGates && typeof raw.knowledgePromotionGates === "object"
+    ? { ...raw.knowledgePromotionGates } : {};
+  gates[transition] = mode;
+  raw.knowledgePromotionGates = gates;
+  fs.writeFileSync(p, JSON.stringify(raw, null, 2));
+  return { envId, gates: resolvePromotionGates(raw) };
+}
+
 // Ensure/refresh the canonical clone for a team. Best-effort, throttled per team
 // (force bypasses the throttle). Never throws — a missing/failing clone just
 // means the admin-console reads whatever is on disk (agent-checkout fallback).
@@ -1926,13 +1967,28 @@ function runConvergenceCollector(teamId, envArg) {
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   const proj = knowledgeConvergence.buildCanonicalProjection(shardEntries, { simThreshold, now });
 
-  // Write the canonical <kind>.jsonl files (single-writer merged view).
+  // Read the candidate store once — it drives both the promoted-status overlay on
+  // the canonical files (Phase 4 git audit) and the suggestion / auto-promotion
+  // steps below.
+  const candidates = readKnowledgeCandidates(teamId);
+  // Canonical ids a promotion (operator level-2 OR curator level-3, from THIS or a
+  // prior pass) marked promoted. Overlaid onto the freshly-projected canonical
+  // entries so status:"promoted" is durable in git across re-projections
+  // (buildCanonicalProjection reads shards, which always carry status "active").
+  const promotedCanonicalIds = new Set(
+    candidates.filter((c) => c && c.status === "promoted" && c.canonicalId).map((c) => c.canonicalId),
+  );
+
+  // Write the canonical <kind>.jsonl files (single-writer merged view), applying
+  // the promoted-status overlay. Byte-identical to proj.lines when the overlay is
+  // empty, so idempotency (no spurious git churn) is preserved.
   for (const kind of KNOWLEDGE_KINDS) {
-    const lines = proj.lines[kind];
-    if (!lines) continue;
+    const bucket = proj.byKind[kind];
+    if (!bucket) continue;
     let rel;
     try { rel = kindFilePath(manifest, kind); } catch { continue; }
     const file = path.join(storeRoot, rel);
+    const lines = _serializeCanonicalKind(bucket, promotedCanonicalIds);
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, lines.length ? lines.join("\n") + "\n" : "");
@@ -1961,21 +2017,140 @@ function runConvergenceCollector(teamId, envArg) {
     console.warn(`[Orchestrator] convergence commit/push for '${teamId}' failed: ${err.message}`);
   }
 
-  // Promotion suggestions gate at autonomy >= 2 ("Suggest").
-  if (knowledgeAutonomyLevel(env) < 2) return;
-  try {
-    const existing = readKnowledgeCandidates(teamId);
-    const { raise, batch } = knowledgeConvergence.planNewSuggestions(proj.clusters, existing, {
-      threshold: convergenceThreshold,
-      teamId,
-      now,
-    });
-    if (raise.length > 0) {
-      writeKnowledgeCandidates(teamId, [...existing, ...raise]);
-      if (batch) appendKnowledgeEvents([batch]);
+  // Level 3 ("Auto-curate"): the curator auto-promotes converged clusters within
+  // the gate policy and defers the rest to review cards. Level 2 ("Suggest"):
+  // raise convergence cards only. Level 1: nothing more (merge already done).
+  const level = knowledgeAutonomyLevel(env);
+  if (level >= 3) {
+    try {
+      autoPromoteStep(teamId, env, proj.clusters, candidates, { convergenceThreshold, now });
+    } catch (err) {
+      console.warn(`[Orchestrator] auto-promotion for '${teamId}' failed: ${err.message}`);
     }
-  } catch (err) {
-    console.warn(`[Orchestrator] convergence suggestions for '${teamId}' failed: ${err.message}`);
+  } else if (level >= 2) {
+    try {
+      const { raise, batch } = knowledgeConvergence.planNewSuggestions(proj.clusters, candidates, {
+        threshold: convergenceThreshold,
+        teamId,
+        now,
+      });
+      if (raise.length > 0) {
+        writeKnowledgeCandidates(teamId, [...candidates, ...raise]);
+        if (batch) appendKnowledgeEvents([batch]);
+      }
+    } catch (err) {
+      console.warn(`[Orchestrator] convergence suggestions for '${teamId}' failed: ${err.message}`);
+    }
+  }
+}
+
+// Serialize one kind's canonical bucket (canonical entries first, then merge
+// tombstones) in the SAME deterministic order buildCanonicalProjection uses, with
+// a promoted-status overlay: any canonical entry whose id a promotion marked
+// promoted is written status:"promoted". Empty overlay ⇒ byte-identical to
+// proj.lines[kind].
+function _serializeCanonicalKind(bucket, promotedIds) {
+  const canon = bucket.canonical.slice().sort(
+    (a, b) => (a.createdAt || "").localeCompare(b.createdAt || "") || String(a.id).localeCompare(String(b.id)),
+  );
+  const tombs = bucket.tombstones.slice().sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  const out = [];
+  for (const e of canon) {
+    const entry = promotedIds && promotedIds.has(e.id) && e.status !== "promoted" ? { ...e, status: "promoted" } : e;
+    out.push(serializeKnowledgeEntry(entry));
+  }
+  for (const e of tombs) out.push(serializeKnowledgeEntry(e));
+  return out;
+}
+
+// Guarded destination dir for a curator-written TEAM skill:
+// /workspace/teams/<teamId>/skills/<name>. Returns null on an unsafe id/name.
+// The orchestrator can write here (/workspace is RW); it can NEVER write the
+// global pool (/template-workspace is mounted read-only), which is exactly why
+// team→global is never auto-promoted (see docs/knowledge-curation.md decision c).
+function _teamSkillDir(teamId, name) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  if (typeof name !== "string" || !knowledgeCurator.SKILL_NAME_RE.test(name)) return null;
+  const base = path.resolve(WORKSPACE, "teams", seg, "skills");
+  const dir = path.resolve(base, name);
+  const rel = path.relative(base, dir);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) return null;
+  return dir;
+}
+
+// Level-3 auto-promotion (Shared Agent Learning, Phase 4). Plans with the pure
+// curator core, writes each auto-promoted cluster as a TEAM skill (SKILL.md +
+// mandatory provenance.json, promotedBy:"curator"), flips its candidate to
+// promoted, and raises review cards for deferred (gated / over-cap) clusters.
+// Best-effort: a per-skill failure logs and continues. The promoted-status git
+// stamp lands on the NEXT collector pass via the candidate-store overlay above
+// (or within a day via the backstop), so this step performs no git op itself.
+function autoPromoteStep(teamId, env, clusters, candidates, { convergenceThreshold, now }) {
+  const gates = resolvePromotionGates(env);
+  const { maxAutoPromotionsPerPass } = knowledgeCurationConfig(env);
+  const plan = knowledgeCurator.planAutoPromotions(clusters, candidates, gates, {
+    threshold: convergenceThreshold,
+    cap: maxAutoPromotionsPerPass,
+    teamId,
+    now,
+  });
+  if (plan.promote.length === 0 && plan.defer.length === 0) return;
+
+  const byId = new Map((candidates || []).filter((c) => c && c.id).map((c) => [c.id, c]));
+  const promotedSkills = [];
+  for (const item of plan.promote) {
+    const dir = _teamSkillDir(teamId, item.name);
+    if (!dir) {
+      console.warn(`[Orchestrator] auto-promote: unsafe skill dir for '${item.name}'`);
+      continue;
+    }
+    const promotedCand = { ...item.candidate, status: "promoted", resolvedAt: now, promotedBy: "curator" };
+    // Idempotent: never clobber an existing skill — just settle the candidate so
+    // it is not retried every pass.
+    if (fs.existsSync(path.join(dir, "SKILL.md"))) {
+      byId.set(item.candidate.id, promotedCand);
+      continue;
+    }
+    const prov = knowledgeCurator.curatorSkillProvenance({
+      teamId, cluster: item.cluster, entryIds: item.candidate.entryIds, now,
+    });
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      const md = item.draft.skillMd.endsWith("\n") ? item.draft.skillMd : item.draft.skillMd + "\n";
+      fs.writeFileSync(path.join(dir, "SKILL.md"), md);
+      fs.writeFileSync(path.join(dir, "provenance.json"), JSON.stringify(prov, null, 2));
+    } catch (err) {
+      console.warn(`[Orchestrator] auto-promote: writing skill '${item.name}' failed: ${err.message}`);
+      continue;
+    }
+    byId.set(item.candidate.id, promotedCand);
+    promotedSkills.push({ name: item.name, entryIds: item.candidate.entryIds });
+  }
+
+  // Deferred clusters (review-gated / over the per-pass cap) become open cards.
+  const raisedCards = [];
+  for (const item of plan.defer) {
+    if (byId.has(item.candidate.id)) continue; // already tracked (open/promoted/dismissed)
+    const card = { ...item.candidate, autoDrafted: true, gateReason: item.reason };
+    byId.set(card.id, card);
+    raisedCards.push(card);
+  }
+
+  writeKnowledgeCandidates(teamId, [...byId.values()]);
+
+  if (promotedSkills.length > 0) {
+    appendKnowledgeEvents(promotedSkills.map((s) => ({
+      type: "promotion", ts: now, teamId, skill: { name: s.name, tier: "team" }, entryIds: s.entryIds, auto: true,
+    })));
+  }
+  if (raisedCards.length > 0) {
+    appendKnowledgeEvents([{
+      type: "suggestion", ts: now, teamId, count: raisedCards.length,
+      samples: raisedCards.slice(0, 5).map((c) => ({
+        id: c.id, canonicalId: c.canonicalId, text: c.text, convergenceCount: c.convergenceCount,
+      })),
+    }]);
   }
 }
 
@@ -5780,6 +5955,33 @@ async function main() {
       return;
     }
 
+    // ── Set a team's promotion gate policy (Phase 4) ────────────────────────────
+    // The admin-console PUT /api/knowledge/gates proxies here. Writes one
+    // per-transition mode onto the team's shared environment.json. team>global is
+    // never persisted as auto (resolvePromotionGates forces it to review anyway).
+    if (req.method === 'POST' && req.url === '/internal/knowledge/gates') {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const p = JSON.parse(body || '{}');
+          const teamId = String(p.teamId || '');
+          const transition = String(p.transition || '');
+          const mode = String(p.mode || '');
+          if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
+          if (!PROMOTION_TRANSITIONS.includes(transition)) throw new Error('invalid transition');
+          if (!GATE_MODES.includes(mode)) throw new Error('invalid mode');
+          const result = writeTeamPromotionGate(teamId, transition, mode);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+        }
+      });
+      return;
+    }
+
     const claimMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/claim$/);
     if (claimMatch) {
       const id = decodeURIComponent(claimMatch[1]);
@@ -6232,6 +6434,43 @@ async function main() {
     triggersPath: (agentId) => controlOrPoolPath(agentId, 'triggers.json'),
   });
   ghPoller.start();
+
+  // ============================================================
+  // Knowledge curator backstop (Shared Agent Learning, Phase 4).
+  // The convergence collector runs event-driven on every KB push; this timer is
+  // the concept's "cron only as a backstop, never the primary driver" — a ≤ daily
+  // sweep that force-refreshes + re-runs the collector for every knowledge-enabled
+  // team, so an autonomy-dial change (e.g. flipped to level 3 after facts already
+  // converged) or a push whose collector failed still converges/promotes within a
+  // day. Idempotent: a team with nothing new produces no commit and no promotion.
+  // ============================================================
+  const CURATOR_INTERVAL_MS = Math.max(
+    60_000,
+    Number(process.env.KNOWLEDGE_CURATOR_INTERVAL_MS) || 24 * 60 * 60 * 1000,
+  );
+  const runCuratorBackstop = () => {
+    let teamIds;
+    try {
+      teamIds = [...new Set(
+        listAgentIds()
+          .map((id) => { const c = loadAgentConfig(id); return c && (c.teamId || c.parentTeamId); })
+          .filter((t) => typeof t === "string" && t),
+      )];
+    } catch (err) {
+      console.warn(`[Orchestrator] curator backstop: team enumeration failed: ${err.message}`);
+      return;
+    }
+    for (const teamId of teamIds) {
+      try {
+        refreshKnowledgeClone(teamId, { force: true });
+        runConvergenceCollector(teamId);
+      } catch (err) {
+        console.warn(`[Orchestrator] curator backstop for '${teamId}' failed: ${err.message}`);
+      }
+    }
+  };
+  const curatorTimer = setInterval(runCuratorBackstop, CURATOR_INTERVAL_MS);
+  if (typeof curatorTimer.unref === "function") curatorTimer.unref();
 }
 
 main().catch((err) => { console.error("Fatal:", err); process.exit(1); });

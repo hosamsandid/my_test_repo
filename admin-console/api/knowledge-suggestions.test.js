@@ -9,6 +9,7 @@ const {
   validatePromotion,
   buildSkillProvenance,
   promotionSuggestionView,
+  resolvePromotionGates,
 } = require('./knowledge-suggestions');
 
 const NOW = '2026-07-08T12:00:00Z';
@@ -59,15 +60,16 @@ test('buildHeuristicSkillDraft: contains texts + provenance, no secrets', () => 
 
 // ── validatePromotion ───────────────────────────────────────────────────────
 
-test('validatePromotion: allowed transitions (team→team default, team→global)', () => {
+test('validatePromotion: allowed transitions (team→team, team→global, agent→team)', () => {
   const base = { name: 'my-skill', skillMd: '# x', entryIds: ['aaaaaaaaaaaa'] };
   assert.equal(validatePromotion({ ...base, from: 'team', to: 'team' }).ok, true);
   assert.equal(validatePromotion({ ...base, from: 'team', to: 'global' }).ok, true);
+  assert.equal(validatePromotion({ ...base, from: 'agent', to: 'team' }).ok, true); // Phase 4 agent rung
 });
 
 test('validatePromotion: rejects bad transitions + missing provenance + bad name', () => {
   const base = { name: 'my-skill', skillMd: '# x', entryIds: ['aaaaaaaaaaaa'] };
-  assert.equal(validatePromotion({ ...base, from: 'agent', to: 'team' }).ok, false);
+  assert.equal(validatePromotion({ ...base, from: 'agent', to: 'global' }).ok, false); // agent→global not allowed
   assert.equal(validatePromotion({ ...base, from: 'global', to: 'team' }).ok, false);
   assert.equal(validatePromotion({ ...base, from: 'team', to: 'agent' }).ok, false);
   assert.equal(validatePromotion({ from: 'team', to: 'global', name: 'my-skill', skillMd: '# x', entryIds: [] }).ok, false);
@@ -117,4 +119,16 @@ test('promotionSuggestionView: merges candidate + draft; defaults draft when abs
   const withDraft = promotionSuggestionView(candidate(), { name: 'custom', skillMd: '# custom', llmDrafted: true });
   assert.equal(withDraft.draft.name, 'custom');
   assert.equal(withDraft.draft.llmDrafted, true);
+});
+
+// ── resolvePromotionGates (Phase 4, mirrors orchestrator/knowledge-store.js) ────
+
+test('resolvePromotionGates: defaults + team>global forced review + fail-safe clamp', () => {
+  assert.deepEqual(resolvePromotionGates(null), {
+    'team>team': 'auto', 'team>global': 'review', 'agent>team': 'review',
+  });
+  const g = resolvePromotionGates({ knowledgePromotionGates: { 'team>team': 'bogus', 'team>global': 'auto', 'agent>team': 'auto' } });
+  assert.equal(g['team>team'], 'review'); // invalid → review
+  assert.equal(g['team>global'], 'review'); // forced
+  assert.equal(g['agent>team'], 'auto');
 });

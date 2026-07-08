@@ -21,6 +21,8 @@ const {
   normalizeKnowledgeStore,
   knowledgeAutonomyLevel,
   knowledgeConvergenceConfig,
+  resolvePromotionGates,
+  knowledgeCurationConfig,
   buildHarvestHint,
 } = require('./knowledge-store');
 
@@ -284,4 +286,30 @@ test('serializeEntry byte-matches the shared cross-runtime golden line', () => {
     '"correlationId":"evt-123","sourceRefs":[{"kind":"pr","ref":"459"}],' +
     '"convergence":["cobol-agent"],"tags":["git","workflow"],"status":"active"}';
   assert.equal(serializeEntry(entry), GOLDEN);
+});
+
+// ─── Phase 4: promotion gates + curation config + archived status ───────────────
+
+test('validateKnowledgeEntry accepts status "archived" (Phase 4 non-destructive curation)', () => {
+  const entry = makeKnowledgeEntry({
+    kind: 'fact', text: 'superseded lesson', originAgent: 'a1', teamId: 't', correlationId: 'e1',
+  });
+  entry.status = 'archived';
+  assert.equal(validateKnowledgeEntry(entry).ok, true);
+});
+
+test('resolvePromotionGates: defaults + team>global forced review + fail-safe clamp', () => {
+  assert.deepEqual(resolvePromotionGates(null), {
+    'team>team': 'auto', 'team>global': 'review', 'agent>team': 'review',
+  });
+  // present-but-invalid → review; team>global can never be auto
+  const g = resolvePromotionGates({ knowledgePromotionGates: { 'team>team': 'nope', 'team>global': 'auto' } });
+  assert.equal(g['team>team'], 'review');
+  assert.equal(g['team>global'], 'review');
+});
+
+test('knowledgeCurationConfig: clamp + legacy default', () => {
+  assert.deepEqual(knowledgeCurationConfig(null), { maxAutoPromotionsPerPass: 3 });
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { maxAutoPromotionsPerPass: 10 } }).maxAutoPromotionsPerPass, 10);
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { maxAutoPromotionsPerPass: -2 } }).maxAutoPromotionsPerPass, 3);
 });

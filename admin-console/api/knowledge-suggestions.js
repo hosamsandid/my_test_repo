@@ -15,12 +15,13 @@
 // candidates arrive pre-clustered.
 
 const TIERS = ['agent', 'team', 'global'];
-// A Phase-3 promotion turns a converged TEAM-KB cluster into a skill. `from` is
-// therefore always the KB's tier ("team", team-scoped in Phase 3); `to` is the
-// destination skill tier the operator picks: "team" (default — the normal home)
-// or "global" (team→global == the existing promote-to-global). The agent-KB rung
-// (agent→team) is reserved for the future agent-tier and not built here.
-const ALLOWED_TRANSITIONS = new Set(['team>team', 'team>global']);
+// A promotion either turns a converged TEAM-KB cluster into a skill (`from:"team"`
+// — the KB tier — `to` = "team" (the normal home) or "global" (== the existing
+// promote-to-global)), OR lifts an existing private AGENT skill up to the team
+// pool (`agent→team`, Phase 4). In both cases provenance (`entryIds`) is
+// mandatory: a KB promotion supplies the cluster's entry ids; an agent→team lift
+// carries them forward from the source skill's provenance.json.
+const ALLOWED_TRANSITIONS = new Set(['team>team', 'team>global', 'agent>team']);
 
 // Mirror the api.js SKILL_NAME_RE so a generated name is always writable.
 const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
@@ -139,7 +140,7 @@ function validatePromotion(input) {
   if (!TIERS.includes(from)) return { ok: false, error: `from must be one of ${TIERS.join('|')}` };
   if (!TIERS.includes(to)) return { ok: false, error: `to must be one of ${TIERS.join('|')}` };
   if (!ALLOWED_TRANSITIONS.has(`${from}>${to}`)) {
-    return { ok: false, error: `unsupported promotion ${from}→${to} (allowed: agent→team, team→global)` };
+    return { ok: false, error: `unsupported promotion ${from}→${to} (allowed: team→team, team→global, agent→team)` };
   }
   const name = typeof b.name === 'string' ? b.name.trim() : '';
   if (!name || !SKILL_NAME_RE.test(name)) return { ok: false, error: 'invalid skill name' };
@@ -191,6 +192,31 @@ function buildSkillProvenance({ from, to, teamId, entryIds, candidate, promotedB
 }
 
 // ---------------------------------------------------------------------------
+// Promotion gate policy (Phase 4) — MIRRORS orchestrator/knowledge-store.js
+// resolvePromotionGates. The two services never require each other's code, so the
+// resolver + defaults are duplicated deliberately (same discipline as the two-
+// runtime harvest hint); keep them in sync. The admin-console uses this only to
+// DISPLAY the gate switches; the orchestrator's copy is what actually fires.
+// ---------------------------------------------------------------------------
+
+const PROMOTION_TRANSITIONS = ['team>team', 'team>global', 'agent>team'];
+const GATE_MODES = ['auto', 'review'];
+const DEFAULT_PROMOTION_GATES = { 'team>team': 'auto', 'team>global': 'review', 'agent>team': 'review' };
+
+function resolvePromotionGates(env) {
+  const raw = env && typeof env.knowledgePromotionGates === 'object' && env.knowledgePromotionGates
+    ? env.knowledgePromotionGates
+    : {};
+  const out = {};
+  for (const t of PROMOTION_TRANSITIONS) {
+    if (!(t in raw)) { out[t] = DEFAULT_PROMOTION_GATES[t]; continue; }
+    out[t] = GATE_MODES.includes(raw[t]) ? raw[t] : 'review';
+  }
+  out['team>global'] = 'review';
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // View assembly (candidate + draft → the /promotion-suggestions row the UI gets)
 // ---------------------------------------------------------------------------
 
@@ -223,10 +249,14 @@ module.exports = {
   TIERS,
   ALLOWED_TRANSITIONS,
   SKILL_NAME_RE,
+  PROMOTION_TRANSITIONS,
+  GATE_MODES,
+  DEFAULT_PROMOTION_GATES,
   slugifySkillName,
   buildHeuristicSkillDraft,
   buildSkillDraftRequest,
   validatePromotion,
   buildSkillProvenance,
+  resolvePromotionGates,
   promotionSuggestionView,
 };

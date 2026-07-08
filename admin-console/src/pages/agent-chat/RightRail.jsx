@@ -28,7 +28,7 @@ const COMPACT_WIDTH_PX = 360;
  * twice; the close action moves up to the tab strip.
  */
 export default function RightRail({
-  agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate,
+  agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate,
   workspaceRefreshKey = 0,
 }) {
   const [tab, setTab] = useState(() => {
@@ -159,6 +159,7 @@ export default function RightRail({
             hoveredCorrelationId={hoveredCorrelationId}
             onHoverCorrelation={onHoverCorrelation}
             onCostUpdate={onCostUpdate}
+            onContextUpdate={onContextUpdate}
             embedded
           />
         </div>

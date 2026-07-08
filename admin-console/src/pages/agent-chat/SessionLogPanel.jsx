@@ -33,9 +33,12 @@ import PinnedTodoPanel from './PinnedTodoPanel';
  *   hoveredCorrelationId       — what the chat panel is currently hovering
  *   onHoverCorrelation(id|null)
  *   onClose()                  — parent toggles `logOpen` to false
+ *   onContextUpdate({tokensIn, model}|null) — last completed request's input
+ *     tokens + the model reported by its preceding `system_init` event, fed
+ *     up so the chat toolbar can render the context-window fill indicator (#471)
  */
 export default function SessionLogPanel({
-  agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, embedded = false,
+  agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate, embedded = false,
 }) {
   const [events, setEvents]       = useState([]);
   const [cursor, setCursor]       = useState(0);
@@ -183,6 +186,28 @@ export default function SessionLogPanel({
   useEffect(() => {
     if (onCostUpdate) onCostUpdate(costTotals.usd, costTotals.tokIn, costTotals.tokOut);
   }, [costTotals, onCostUpdate]);
+
+  /* ─── 5b. Last-request context-window snapshot (#471) ──────────────────
+   * Walks events in order, remembering the model from the most recent
+   * `system_init` and the input tokens from the most recent `result` — the
+   * `system_init` for a turn always precedes that turn's `result`, so this
+   * single pass naturally pairs the two without needing correlationId
+   * matching. Unlike costTotals this is NOT cumulative: it reflects only the
+   * last completed request, per the issue's scope.
+   */
+  const lastContext = useMemo(() => {
+    let model = null;
+    let tokensIn = null;
+    for (const ev of events) {
+      if (ev.type === 'system_init' && ev.model) model = ev.model;
+      if (ev.type === 'result' && typeof ev.tokens?.input === 'number') tokensIn = ev.tokens.input;
+    }
+    return tokensIn == null ? null : { tokensIn, model };
+  }, [events]);
+
+  useEffect(() => {
+    if (onContextUpdate) onContextUpdate(lastContext);
+  }, [lastContext, onContextUpdate]);
 
   /* ─── 6. Latest TodoWrite for the pinned panel ─────────────────────────
    * Walk events tail-first to find the most recent `tool_use` whose tool

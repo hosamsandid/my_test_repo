@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, emptyDraftBundle, roleKeyOf } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf } = require('./process-template');
 
 const sampleRoles = [
   {
@@ -390,4 +390,56 @@ test('validateProcessTemplate accepts a string stages array, rejects non-strings
 
 test('emptyDraftBundle seeds an empty stages array', () => {
   assert.deepEqual(emptyDraftBundle('x').stages, []);
+});
+
+// ── stampDerivedActivation (#446): preserve horizon across regeneration ────────
+
+const T0 = '2026-01-01T00:00:00.000Z';
+const NOW = '2026-07-08T12:00:00.000Z';
+
+test('stampDerivedActivation: preserves prior activatedAt for a regenerated channel trigger', () => {
+  const prev = [{ id: 'c-on-pr-d', channel: true, activatedAt: T0 }];
+  const next = [{ id: 'c-on-pr-d', channel: true }]; // freshly regenerated, unstamped
+  const out = stampDerivedActivation(next, prev, NOW);
+  assert.equal(out[0].activatedAt, T0); // kept — NOT bumped to NOW
+});
+
+test('stampDerivedActivation: stamps NOW for a genuinely new derived trigger', () => {
+  const out = stampDerivedActivation([{ id: 'new', dataFlow: true }], [], NOW);
+  assert.equal(out[0].activatedAt, NOW);
+});
+
+test('stampDerivedActivation: treats both channel and dataFlow as derived', () => {
+  const out = stampDerivedActivation(
+    [{ id: 'ch', channel: true }, { id: 'df', dataFlow: true }], [], NOW,
+  );
+  assert.equal(out[0].activatedAt, NOW);
+  assert.equal(out[1].activatedAt, NOW);
+});
+
+test('stampDerivedActivation: leaves non-derived triggers untouched (no stamp added)', () => {
+  const out = stampDerivedActivation([{ id: 'cron', type: 'cron' }], [], NOW);
+  assert.equal('activatedAt' in out[0], false);
+});
+
+test('stampDerivedActivation: keeps an already-stamped derived trigger as-is', () => {
+  const out = stampDerivedActivation(
+    [{ id: 'c', channel: true, activatedAt: '2026-05-05T00:00:00.000Z' }],
+    [{ id: 'c', channel: true, activatedAt: T0 }],
+    NOW,
+  );
+  assert.equal(out[0].activatedAt, '2026-05-05T00:00:00.000Z'); // its own wins over prev/now
+});
+
+test('stampDerivedActivation: preserves other fields and is non-mutating', () => {
+  const next = [{ id: 'c', channel: true, from: ['x'], events: ['pull_request.opened'] }];
+  const out = stampDerivedActivation(next, [], NOW);
+  assert.deepEqual(out[0].from, ['x']);
+  assert.deepEqual(out[0].events, ['pull_request.opened']);
+  assert.equal('activatedAt' in next[0], false); // input not mutated
+});
+
+test('stampDerivedActivation: non-array inputs yield []', () => {
+  assert.deepEqual(stampDerivedActivation(null, null, NOW), []);
+  assert.deepEqual(stampDerivedActivation(undefined, undefined, NOW), []);
 });

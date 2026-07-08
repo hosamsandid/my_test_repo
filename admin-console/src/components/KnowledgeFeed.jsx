@@ -18,15 +18,18 @@ const KIND_COLORS = {
   convention: 'var(--eb-status-warning)',
 };
 
-export default function KnowledgeFeed({ scope, max = 40, onHarvest, emptyHint }) {
+export default function KnowledgeFeed({ scope, max = 40, onHarvest, onEvent, emptyHint }) {
   const [events, setEvents] = useState([]);
   const onHarvestRef = useRef(onHarvest);
   onHarvestRef.current = onHarvest;
+  const onEventRef = useRef(onEvent);
+  onEventRef.current = onEvent;
 
   const handleEvent = useCallback((ev) => {
     if (!ev || typeof ev.type !== 'string' || ev.type.startsWith('_')) return;
     setEvents(prev => [{ ...ev, _rx: Date.now() }, ...prev].slice(0, max));
     if (ev.type === 'harvest') { try { onHarvestRef.current?.(ev); } catch { /* ignore */ } }
+    try { onEventRef.current?.(ev); } catch { /* ignore */ }
   }, [max]);
 
   const url = scope ? `/api/knowledge/stream?scope=${encodeURIComponent(scope)}` : null;
@@ -62,8 +65,35 @@ export default function KnowledgeFeed({ scope, max = 40, onHarvest, emptyHint })
 
 function FeedRow({ ev }) {
   const isPromotion = ev.type === 'promotion';
+  const isSuggestion = ev.type === 'suggestion';
   const entry = ev.entry || null;
   const kind = entry?.kind || 'fact';
+  if (isSuggestion) {
+    const n = ev.count || (Array.isArray(ev.samples) ? ev.samples.length : 1);
+    const sample = Array.isArray(ev.samples) && ev.samples[0];
+    return (
+      <div style={{
+        display: 'flex', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2)',
+        borderRadius: 'var(--eb-radius-md)', marginBottom: 'var(--eb-space-1)',
+        background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-status-warning)',
+        animation: 'kf-fade-in 260ms ease-out',
+      }}>
+        <div style={{ flexShrink: 0, marginTop: 2 }}>
+          <Sparkles size={13} style={{ color: 'var(--eb-status-warning)' }} />
+        </div>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+            {n} promotion suggestion{n === 1 ? '' : 's'} ready to review
+          </div>
+          {sample?.text && (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 2, wordBreak: 'break-word' }}>
+              e.g. “{sample.text}”{sample.convergenceCount > 1 ? ` · ${sample.convergenceCount}× independent` : ''}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
   return (
     <div style={{
       display: 'flex', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2)',

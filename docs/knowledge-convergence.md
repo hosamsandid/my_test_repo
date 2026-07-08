@@ -16,8 +16,9 @@ suggestion card the operator confirms. It **never promotes autonomously** — th
 plus destructive KB curation and review-gated promotion edges, is Phase 4 (#463).
 No MCP sources (Phase 5). Level 0 and level 1 behaviour are preserved exactly.
 
-Status: **design of record for #462** — pending approval. Implementation does not
-begin until the decisions in §0 are confirmed.
+Status: **design of record for #462** — approved (§0 decisions confirmed;
+threshold default = 2 distinct agents, agent nomination allowed below threshold)
+and implemented on `integration/knowledge-flow`.
 
 ---
 
@@ -202,8 +203,8 @@ exactly like `promote-to-global`):
 
 ```jsonc
 {
-  "from": "team",             // "agent" | "team" (source tier)
-  "to":   "global",           // "team" | "global" (target tier)
+  "from": "team",             // KB tier — always "team" in Phase 3 (team-scoped KB)
+  "to":   "global",           // target SKILL tier: "team" (default) | "global"
   "teamId": "acme",
   "name": "poller-conventions",
   "skillMd": "# …operator-approved SKILL.md…",
@@ -213,9 +214,14 @@ exactly like `promote-to-global`):
 }
 ```
 
-**Allowed transitions** (`validatePromotion`, pure): `agent→team`, `team→global`.
-Everything else (`team→team`, `global→*`, unknown tiers) → 400. Missing/empty
-`entryIds` → 400 (**provenance is mandatory, enforced at the API boundary**).
+**Allowed transitions** (`validatePromotion`, pure): a Phase-3 promotion turns a
+converged **team-KB** cluster into a skill, so `from` is always `team` and `to`
+is the destination skill tier — **`team→team`** (KB → team skill, the default,
+normal home) or **`team→global`** (KB → global skill directly; `team→global` is
+exactly the existing promote-to-global). Everything else (`agent→*`, `global→*`,
+`to:"agent"`, unknown tiers) → 400. The agent-tier KB rung is reserved for later.
+Missing/empty `entryIds` → 400 (**provenance is mandatory, enforced at the API
+boundary**).
 
 **Writes:**
 - `to:"team"` → `/workspace/teams/<teamId>/skills/<name>/` (`safeTeamSkillDir`).
@@ -419,8 +425,9 @@ traces skill → entry → agent → session → PR.
   suggestion planning, pure) + `knowledge-convergence.test.js`.
 - `admin-console/api/knowledge-suggestions.js` (heuristic draft + promotion
   validation/provenance builders, pure) + `knowledge-suggestions.test.js`.
-- `admin-console/src/pages/knowledge/PromotionDialog.jsx` (+ a suggestions
-  section, likely a small `PromotionSuggestions.jsx`).
+- The suggestions section + review/promote dialog are implemented **inside**
+  `admin-console/src/pages/KnowledgeFlow.jsx` (`SuggestionsPanel` +
+  `PromotionDialog`), not a separate file — they share the page's card styling.
 
 **Edit:**
 - `orchestrator/orchestrator.js`: `runConvergenceCollector` inside

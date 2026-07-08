@@ -16,6 +16,7 @@ const { computeScope, visibleTeam, visibleAgent } = require('./scope');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope } = require('./knowledge-graph');
+const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle } = require('./process-template');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
@@ -2661,17 +2662,37 @@ function gatherKnowledgeAgents(scope, teamIds) {
   return agents;
 }
 
+// The provenance.json a Phase-3 promotion writes beside SKILL.md — carries the
+// entryIds that drive the graph's T1→T2 edge + the originTeamId for the global
+// lane. Absent for hand-authored / pre-Phase-3 skills (edge simply not drawn).
+function readSkillProvenance(dir) {
+  const p = readJsonFile(path.join(dir, 'provenance.json'), null);
+  return p && typeof p === 'object' ? p : null;
+}
+
 function gatherKnowledgeSkills(scope) {
   const skills = [];
   const poolSkillsDir = path.join(POOL_DIR, 'skills');
   try {
     fs.readdirSync(poolSkillsDir).forEach(name => {
-      if (fs.existsSync(path.join(poolSkillsDir, name, 'SKILL.md'))) skills.push({ name, tier: 'global' });
+      const dir = path.join(poolSkillsDir, name);
+      if (!fs.existsSync(path.join(dir, 'SKILL.md'))) return;
+      const s = { name, tier: 'global' };
+      const prov = readSkillProvenance(dir);
+      if (prov) {
+        s.provenance = prov;
+        if (prov.originTeamId) s.originTeamId = prov.originTeamId;
+      }
+      skills.push(s);
     });
   } catch { /* no pool skills */ }
-  for (const s of listTeamSkills(null)) {
-    if (!visibleTeam(scope, s.teamId)) continue;
-    skills.push({ name: s.name, tier: 'team', teamId: s.teamId });
+  for (const ts of listTeamSkills(null)) {
+    if (!visibleTeam(scope, ts.teamId)) continue;
+    const s = { name: ts.name, tier: 'team', teamId: ts.teamId };
+    const dir = safeTeamSkillDir(ts.teamId, ts.name);
+    const prov = dir ? readSkillProvenance(dir) : null;
+    if (prov) s.provenance = prov;
+    skills.push(s);
   }
   return skills;
 }
@@ -2723,7 +2744,9 @@ app.get('/api/knowledge/item/:id', (req, res) => {
   if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'not found' });
 
   const { entries } = gatherTeamEntries(teamId);
-  const entry = entries.find(e => e && e.id === id) || null;
+  // Prefer a live entry over a merge tombstone of the same id (Phase 3).
+  const entry = entries.find(e => e && e.id === id && e.status !== 'merged')
+    || entries.find(e => e && e.id === id) || null;
   if (!entry) return res.status(404).json({ error: 'not found' });
 
   const originAgent = typeof entry.originAgent === 'string' ? entry.originAgent : null;
@@ -2862,6 +2885,132 @@ app.get('/api/knowledge/stream', (req, res) => {
     if (dirWatcher) { try { dirWatcher.close(); } catch { /* noop */ } dirWatcher = null; }
     try { res.end(); } catch { /* noop */ }
   });
+});
+
+/* ─── Promotion suggestions + promote (Shared Agent Learning, Phase 3) ──────
+ * Autonomy level 2 ("Suggest"): the orchestrator collector raises promotion
+ * candidates into a per-team store; these routes list them (with a heuristic
+ * SKILL.md draft), optionally polish the draft with the LLM, and — on the
+ * operator's confirm — execute promote(from→to) by writing the skill + a
+ * MANDATORY provenance.json to the target tier. No auto-promotion: a skill is
+ * only ever written from an explicit operator POST here. */
+
+const KNOWLEDGE_SUGGESTIONS_DIR = path.join(WORKSPACE, 'knowledge-suggestions');
+
+function readCandidateStore(teamId) {
+  if (!AGENT_ID_RE.test(teamId)) return [];
+  const arr = readJsonFile(path.join(KNOWLEDGE_SUGGESTIONS_DIR, `${path.basename(teamId)}.json`), []);
+  return Array.isArray(arr) ? arr : [];
+}
+
+app.get('/api/knowledge/promotion-suggestions', (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.query.team === 'string' ? req.query.team : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  const open = readCandidateStore(teamId).filter(c => c && c.status === 'open');
+  const suggestions = open.map(c => knowledgeSuggestions.promotionSuggestionView(c, c.draft));
+  res.json({ team: teamId, suggestions });
+});
+
+// Optional LLM polish of a candidate's SKILL.md — operator-initiated (Draft with
+// AI). Heuristic fallback on any failure (mirrors /api/agent-ports/suggest).
+// Not persisted server-side: the dialog holds the returned draft.
+app.post('/api/knowledge/promotion-suggestions/:id/draft', heavyLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.body?.team === 'string' ? req.body.team : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  const cand = readCandidateStore(teamId).find(c => c && c.id === req.params.id);
+  if (!cand) return res.status(404).json({ error: 'suggestion not found' });
+
+  const heuristic = knowledgeSuggestions.buildHeuristicSkillDraft(cand);
+  const fallback = () => res.json({ draft: heuristic, source: 'heuristic' });
+
+  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  if (target.error) return fallback();
+  const url = buildMessagesUrl(target.baseUrl);
+  const headers = {
+    'anthropic-version': '2023-06-01',
+    ...(target.token ? { Authorization: `Bearer ${target.token}`, 'x-api-key': target.token } : {}),
+  };
+  const payload = { model: target.model, ...knowledgeSuggestions.buildSkillDraftRequest(cand) };
+  const result = await httpPostJson(url, headers, payload);
+  if (result.error || result.status < 200 || result.status >= 300) return fallback();
+  const skillMd = extractMessageText(result.body);
+  if (!skillMd) return fallback();
+  res.json({ draft: { name: heuristic.name, skillMd, llmDrafted: true }, source: 'llm', model: target.model });
+});
+
+app.post('/api/knowledge/promotion-suggestions/:id/dismiss', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.body?.team === 'string' ? req.body.team : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
+  if (!visibleTeam(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  try {
+    await fetch(`${ORCH_URL()}/internal/knowledge/dismiss`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, suggestionId: req.params.id }),
+    });
+  } catch { /* best-effort — lifecycle is a convenience, not a gate */ }
+  res.json({ ok: true });
+});
+
+// promote(from → to): write the operator-approved skill + provenance.json to the
+// target tier. Generalises /api/skills/promote-to-global (agent→team, team→global).
+app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
+  if (!visibleTeam(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+
+  const v = knowledgeSuggestions.validatePromotion(req.body);
+  if (!v.ok) return res.status(400).json({ error: v.error });
+
+  const cand = req.body.suggestionId
+    ? readCandidateStore(teamId).find(c => c && c.id === req.body.suggestionId) || null
+    : null;
+
+  // Destination dir by target tier (same containment guards as promote-to-global).
+  let dstDir;
+  if (v.to === 'team') {
+    dstDir = safeTeamSkillDir(teamId, v.name);
+    if (!dstDir) return res.status(400).json({ error: 'Invalid team id or skill name' });
+  } else {
+    const poolSkillsBaseDir = path.resolve(POOL_DIR, 'skills');
+    dstDir = path.resolve(poolSkillsBaseDir, v.name);
+    const rel = path.relative(poolSkillsBaseDir, dstDir);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid skill name' });
+  }
+  if (fs.existsSync(path.join(dstDir, 'SKILL.md')) && !req.body.overwrite) {
+    return res.status(409).json({ error: `Skill '${v.name}' already exists`, exists: true });
+  }
+
+  const prov = knowledgeSuggestions.buildSkillProvenance({
+    from: v.from, to: v.to, teamId, entryIds: v.entryIds, candidate: cand,
+    promotedBy: (req.user && (req.user.sub || req.user.username)) || 'operator',
+  });
+  try {
+    if (req.body.overwrite) fs.rmSync(dstDir, { recursive: true, force: true });
+    fs.mkdirSync(dstDir, { recursive: true });
+    fs.writeFileSync(path.join(dstDir, 'SKILL.md'), v.skillMd.endsWith('\n') ? v.skillMd : v.skillMd + '\n');
+    fs.writeFileSync(path.join(dstDir, 'provenance.json'), JSON.stringify(prov, null, 2));
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to write skill: ${err.message}` });
+  }
+
+  // Best-effort: orchestrator flips the candidate lifecycle + emits the feed event.
+  try {
+    await fetch(`${ORCH_URL()}/internal/knowledge/promoted`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        teamId, suggestionId: req.body.suggestionId || null,
+        skill: { name: v.name, tier: v.to }, entryIds: v.entryIds,
+      }),
+    });
+  } catch { /* best-effort */ }
+
+  res.status(201).json({ name: v.name, tier: v.to, teamId, provenance: prov });
 });
 
 /* ─── Unified orchestration graph (Unified Orchestration #362 / #365) ───────

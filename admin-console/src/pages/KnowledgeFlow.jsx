@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import { Brain, RefreshCw, X, ExternalLink, GitBranch } from 'lucide-react';
+import { Brain, RefreshCw, X, ExternalLink, GitBranch, Sparkles, Check, Wand2 } from 'lucide-react';
 import { computeFlowLayout, assignCrossCoords } from './process/flow-layout';
 import KnowledgeFeed from '../components/KnowledgeFeed';
 
@@ -36,6 +36,8 @@ export default function KnowledgeFlow() {
   const [selected, setSelected] = useState(null); // item id (raw hex)
   const [detail, setDetail] = useState(null);
   const [pulseId, setPulseId] = useState(null);
+  const [suggestions, setSuggestions] = useState([]);
+  const [promoting, setPromoting] = useState(null); // candidate under review
 
   const setScope = useCallback((s) => {
     const next = new URLSearchParams(params);
@@ -70,6 +72,23 @@ export default function KnowledgeFlow() {
     if (scope.startsWith('team:')) return { kind: 'team', id: scope.slice(5) };
     return { kind: 'global', id: null };
   }, [scope]);
+
+  // Promotion suggestions (autonomy level 2) — team scope only (the store is
+  // per-team). Reloaded on scope change and whenever a suggestion/promotion
+  // event lands on the live feed.
+  const loadSuggestions = useCallback(() => {
+    if (parsed.kind !== 'team' || !parsed.id) { setSuggestions([]); return; }
+    fetch(`/api/knowledge/promotion-suggestions?team=${encodeURIComponent(parsed.id)}`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => setSuggestions(Array.isArray(d?.suggestions) ? d.suggestions : []))
+      .catch(() => {});
+  }, [parsed.kind, parsed.id]);
+
+  useEffect(() => { loadSuggestions(); }, [loadSuggestions]);
+
+  const onFeedEvent = useCallback((ev) => {
+    if (ev?.type === 'suggestion' || ev?.type === 'promotion') { loadSuggestions(); load(); }
+  }, [loadSuggestions, load]);
 
   // Apply filter chips to item nodes, then drop edges that lose an endpoint.
   const filtered = useMemo(() => {
@@ -204,13 +223,173 @@ export default function KnowledgeFlow() {
           {selected && detail ? (
             <Provenance detail={detail} onClose={() => { setSelected(null); setDetail(null); }} onOpenAgent={(id) => navigate(`/chats/${encodeURIComponent(id)}`)} />
           ) : (
-            <KnowledgeFeed scope={scope} onHarvest={onHarvest} />
+            <>
+              {parsed.kind === 'team' && suggestions.length > 0 && (
+                <SuggestionsPanel suggestions={suggestions} onReview={(s) => setPromoting(s)} />
+              )}
+              <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+                <KnowledgeFeed scope={scope} onHarvest={onHarvest} onEvent={onFeedEvent} />
+              </div>
+            </>
           )}
+        </div>
+      </div>
+
+      {promoting && (
+        <PromotionDialog
+          suggestion={promoting}
+          teamId={parsed.id}
+          onClose={() => setPromoting(null)}
+          onDone={() => { setPromoting(null); loadSuggestions(); load(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ── Promotion suggestions (autonomy level 2) ───────────────────────────────── */
+
+function SuggestionsPanel({ suggestions, onReview }) {
+  return (
+    <div style={{ borderBottom: '1px solid var(--eb-border-default)', maxHeight: '46%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+        padding: 'var(--eb-space-2) var(--eb-space-3)', borderBottom: '1px solid var(--eb-border-default)',
+        color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)',
+        fontWeight: 'var(--eb-font-semibold)', textTransform: 'uppercase', letterSpacing: '0.04em',
+      }}>
+        <Sparkles size={13} style={{ color: 'var(--eb-status-warning)' }} />
+        <span>Promotion suggestions</span>
+        <span style={{ marginLeft: 'auto', color: 'var(--eb-text-muted)' }}>{suggestions.length}</span>
+      </div>
+      <div style={{ overflowY: 'auto', padding: 'var(--eb-space-2)' }}>
+        {suggestions.map(s => (
+          <div key={s.id} style={{
+            border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+            padding: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-2)', background: 'var(--eb-bg-app)',
+          }}>
+            <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', wordBreak: 'break-word' }}>{s.text}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)' }}>
+              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', fontWeight: 'var(--eb-font-semibold)' }}>
+                {s.convergenceCount}× independent
+              </span>
+              {s.source === 'agent-nominated' && (
+                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>nominated</span>
+              )}
+              <button onClick={() => onReview(s)} style={primaryBtn}>Review & promote</button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
+  const [name, setName] = useState(suggestion.draft?.name || '');
+  const [skillMd, setSkillMd] = useState(suggestion.draft?.skillMd || '');
+  const [tier, setTier] = useState('team');
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+
+  const draftWithAI = () => {
+    setBusy('draft'); setError('');
+    fetch(`/api/knowledge/promotion-suggestions/${encodeURIComponent(suggestion.id)}/draft`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ team: teamId }),
+    })
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (d?.draft?.skillMd) { setSkillMd(d.draft.skillMd); if (d.draft.name) setName(d.draft.name); } })
+      .catch(() => setError('Draft failed'))
+      .finally(() => setBusy(''));
+  };
+
+  const promote = () => {
+    setBusy('promote'); setError('');
+    fetch('/api/knowledge/promote', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: 'team', to: tier, teamId, name, skillMd,
+        entryIds: suggestion.entryIds, suggestionId: suggestion.id,
+      }),
+    })
+      .then(async r => { if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`); return r.json(); })
+      .then(() => onDone())
+      .catch(e => { setError(e.message); setBusy(''); });
+  };
+
+  const dismiss = () => {
+    setBusy('dismiss');
+    fetch(`/api/knowledge/promotion-suggestions/${encodeURIComponent(suggestion.id)}/dismiss`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ team: teamId }),
+    }).catch(() => {}).finally(() => onDone());
+  };
+
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 50,
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 'var(--eb-space-4)',
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        width: 640, maxWidth: '100%', maxHeight: '90vh', overflow: 'auto',
+        background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-lg)', padding: 'var(--eb-space-4)',
+        display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+          <Sparkles size={18} style={{ color: 'var(--eb-status-warning)' }} />
+          <h2 style={{ margin: 0, fontSize: 'var(--eb-text-lg)', color: 'var(--eb-text-primary)' }}>Promote to a skill</h2>
+          <button onClick={onClose} style={{ ...btn(false), marginLeft: 'auto' }}><X size={14} /></button>
+        </div>
+
+        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+          {suggestion.convergenceCount}× independent · {(suggestion.convergence || []).join(', ')}
+        </div>
+        <div style={{
+          fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', background: 'var(--eb-bg-app)',
+          border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)',
+        }}>
+          {suggestion.text}
+        </div>
+
+        <label style={lbl}>Skill name</label>
+        <input value={name} onChange={e => setName(e.target.value)} style={inp} />
+
+        <label style={lbl}>Target tier</label>
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+          <Chip active={tier === 'team'} onClick={() => setTier('team')}>Team skill</Chip>
+          <Chip active={tier === 'global'} onClick={() => setTier('global')}>Global skill</Chip>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+          <label style={lbl}>SKILL.md</label>
+          <button onClick={draftWithAI} disabled={!!busy} style={{ ...btn(false), marginLeft: 'auto' }}>
+            <Wand2 size={13} /> {busy === 'draft' ? 'Drafting…' : 'Draft with AI'}
+          </button>
+        </div>
+        <textarea value={skillMd} onChange={e => setSkillMd(e.target.value)} rows={12}
+          style={{ ...inp, fontFamily: 'var(--eb-font-mono, monospace)', fontSize: 'var(--eb-text-xs)', resize: 'vertical' }} />
+
+        {error && <div style={{ color: 'var(--eb-status-danger)', fontSize: 'var(--eb-text-xs)' }}>{error}</div>}
+
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end' }}>
+          <button onClick={dismiss} disabled={!!busy} style={btn(false)}>Dismiss</button>
+          <button onClick={promote} disabled={!!busy || !name.trim() || !skillMd.trim()} style={primaryBtn}>
+            <Check size={14} /> {busy === 'promote' ? 'Promoting…' : `Promote to ${tier}`}
+          </button>
         </div>
       </div>
     </div>
   );
 }
+
+const lbl = { fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' };
+const inp = {
+  width: '100%', boxSizing: 'border-box', padding: 'var(--eb-space-2)',
+  border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+  background: 'var(--eb-bg-app)', color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)',
+};
 
 /* ── Canvas (lightweight purpose-built SVG) ─────────────────────────────────── */
 
@@ -450,3 +629,10 @@ const btn = () => ({
   border: '1px solid var(--eb-border-default)', background: 'var(--eb-bg-surface)',
   color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer',
 });
+
+const primaryBtn = {
+  display: 'inline-flex', alignItems: 'center', gap: 6,
+  padding: '4px var(--eb-space-3)', borderRadius: 'var(--eb-radius-md)',
+  border: '1px solid var(--eb-accent-primary)', background: 'var(--eb-accent-primary)',
+  color: 'var(--eb-text-on-accent, #fff)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer',
+};

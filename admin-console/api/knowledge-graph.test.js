@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 const {
   parseScope,
   dedupById,
+  foldMerges,
   buildKnowledgeGraph,
   summarizeKnowledge,
 } = require('./knowledge-graph');
@@ -275,4 +276,82 @@ test('summarizeKnowledge returns lean counts with same scope semantics', () => {
   assert.equal(s.today, 1);
   assert.equal(s.converged, 1);
   assert.equal(s.scope, 'team:acme');
+});
+
+// ── foldMerges (Phase 3) ────────────────────────────────────────────────────
+
+test('foldMerges: identity when no tombstones (Phase 2 unchanged)', () => {
+  const entries = [entry({ id: 'aaaaaaaaaaaa' }), entry({ id: 'bbbbbbbbbbbb' })];
+  assert.deepEqual(foldMerges(entries), entries);
+});
+
+test('foldMerges: drops absorbed id, keeps canonical winner', () => {
+  const entries = [
+    entry({ id: 'aaaaaaaaaaaa', convergence: ['dev-1', 'dev-2'], updatedAt: '2026-07-08T11:00:00Z' }),
+    entry({ id: 'bbbbbbbbbbbb', originAgent: 'dev-2', convergence: ['dev-2'] }),
+    { v: 1, id: 'bbbbbbbbbbbb', kind: 'fact', status: 'merged', mergedInto: 'aaaaaaaaaaaa', text: 'x' },
+  ];
+  const folded = foldMerges(entries);
+  const ids = folded.map((e) => e.id).sort();
+  assert.deepEqual(ids, ['aaaaaaaaaaaa']);
+});
+
+test('foldMerges: transitive redirect resolves to terminal', () => {
+  const entries = [
+    entry({ id: 'aaaaaaaaaaaa' }),
+    { v: 1, id: 'bbbbbbbbbbbb', kind: 'fact', status: 'merged', mergedInto: 'cccccccccccc', text: 'x' },
+    { v: 1, id: 'cccccccccccc', kind: 'fact', status: 'merged', mergedInto: 'aaaaaaaaaaaa', text: 'x' },
+    entry({ id: 'bbbbbbbbbbbb' }),
+    entry({ id: 'cccccccccccc' }),
+  ];
+  const ids = foldMerges(entries).map((e) => e.id).sort();
+  assert.deepEqual(ids, ['aaaaaaaaaaaa']);
+});
+
+test('foldMerges: cycle is guarded (no infinite loop)', () => {
+  const entries = [
+    { v: 1, id: 'aaaaaaaaaaaa', kind: 'fact', status: 'merged', mergedInto: 'bbbbbbbbbbbb', text: 'x' },
+    { v: 1, id: 'bbbbbbbbbbbb', kind: 'fact', status: 'merged', mergedInto: 'aaaaaaaaaaaa', text: 'x' },
+  ];
+  // both are tombstones → dropped; no hang
+  assert.deepEqual(foldMerges(entries), []);
+});
+
+test('foldMerges: dangling tombstone (target absent) keeps the live entry', () => {
+  const entries = [
+    entry({ id: 'bbbbbbbbbbbb' }),
+    { v: 1, id: 'bbbbbbbbbbbb', kind: 'fact', status: 'merged', mergedInto: 'zzzzzzzzzzzz', text: 'x' },
+  ];
+  const ids = foldMerges(entries).map((e) => e.id);
+  assert.deepEqual(ids, ['bbbbbbbbbbbb']); // live copy survives; tombstone dropped
+});
+
+test('buildKnowledgeGraph: merged input → one converged node, convergenceCount = union', () => {
+  const entries = [
+    entry({ id: 'aaaaaaaaaaaa', originAgent: 'dev-1', convergence: ['dev-1', 'dev-2', 'dev-3'], updatedAt: '2026-07-08T11:00:00Z', text: 'canonical fact' }),
+    entry({ id: 'bbbbbbbbbbbb', originAgent: 'dev-2', convergence: ['dev-2'], text: 'canonical fact dup' }),
+    { v: 1, id: 'bbbbbbbbbbbb', kind: 'fact', status: 'merged', mergedInto: 'aaaaaaaaaaaa', text: 'canonical fact dup' },
+    entry({ id: 'cccccccccccc', originAgent: 'dev-3', convergence: ['dev-3'], text: 'canonical fact dup2' }),
+    { v: 1, id: 'cccccccccccc', kind: 'fact', status: 'merged', mergedInto: 'aaaaaaaaaaaa', text: 'canonical fact dup2' },
+  ];
+  const g = buildKnowledgeGraph({ scope: 'team:acme', entries, now: NOW });
+  const items = g.nodes.filter((n) => n.kind === 'item');
+  assert.equal(items.length, 1);
+  assert.equal(items[0].convergenceCount, 3);
+  assert.equal(items[0].converged, true);
+  const harvested = g.edges.filter((e) => e.kind === 'harvested');
+  assert.equal(harvested.length, 3); // one fan-in per convergence contributor
+});
+
+test('buildKnowledgeGraph: promoted edge appears when skill provenance names a folded canonical id', () => {
+  const entries = [
+    entry({ id: 'aaaaaaaaaaaa', convergence: ['dev-1', 'dev-2'], updatedAt: '2026-07-08T11:00:00Z' }),
+    entry({ id: 'bbbbbbbbbbbb', originAgent: 'dev-2', convergence: ['dev-2'] }),
+    { v: 1, id: 'bbbbbbbbbbbb', kind: 'fact', status: 'merged', mergedInto: 'aaaaaaaaaaaa', text: 'x' },
+  ];
+  const skills = [{ name: 'poller-conventions', tier: 'team', teamId: 'acme', provenance: { entryIds: ['aaaaaaaaaaaa'] } }];
+  const g = buildKnowledgeGraph({ scope: 'team:acme', entries, skills, now: NOW });
+  const promoted = g.edges.filter((e) => e.kind === 'promoted');
+  assert.equal(promoted.length, 1);
+  assert.deepEqual(promoted[0], { from: 'item:aaaaaaaaaaaa', to: 'skill:poller-conventions', kind: 'promoted' });
 });

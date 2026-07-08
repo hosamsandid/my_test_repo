@@ -12,9 +12,18 @@ const { findEnclosingGitRepo } = require("./git-workspace");
 const { bpsToBriefingsMap } = require("./briefings-graph");
 const { createTeamsStore, DEFAULT_TEAM_ID } = require("./teams-store");
 const { makeSkillSourceResolver } = require("./skill-source");
-const { normalizeKnowledgeStore, knowledgeAutonomyLevel } = require("./knowledge-store");
+const {
+  normalizeKnowledgeStore,
+  knowledgeAutonomyLevel,
+  knowledgeConvergenceConfig,
+  buildDefaultManifest,
+  kindFilePath,
+  parseEntry: parseKnowledgeEntry,
+  KINDS: KNOWLEDGE_KINDS,
+} = require("./knowledge-store");
 const knowledgeSync = require("./knowledge-sync");
 const knowledgeFeed = require("./knowledge-feed");
+const knowledgeConvergence = require("./knowledge-convergence");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const { resolveCloneTarget } = require("./clone-target");
@@ -50,6 +59,10 @@ const KNOWLEDGE_CLONE_ROOT = "/workspace/knowledge";
 const KNOWLEDGE_EVENTS_DIR = "/workspace/knowledge-events";
 const KNOWLEDGE_EVENTS_FILE = path.join(KNOWLEDGE_EVENTS_DIR, "events.jsonl");
 const KNOWLEDGE_REFRESH_MIN_MS = 30_000;
+// Per-team promotion-candidate store (Phase 3). One JSON array file per team,
+// written by the orchestrator (collector + agent nominations), read + lifecycle-
+// updated by the admin-console promotion routes.
+const KNOWLEDGE_SUGGESTIONS_DIR = "/workspace/knowledge-suggestions";
 const TEMPLATE_WORKSPACE = "/template-workspace";
 // Agent id grammar — mirrors AGENT_ID_RE in admin-console/api/api.js. Used to
 // validate ids that arrive from outside (e.g. on import).
@@ -1788,6 +1801,220 @@ function emitKnowledgeHarvest(id, cfg, env, rawBody) {
     ? entries.map((entry) => knowledgeFeed.buildHarvestEvent({ teamId, agentId: id, entry, ts }))
     : [knowledgeFeed.buildHarvestEvent({ teamId, agentId: id, ts })];
   appendKnowledgeEvents(events);
+
+  // Phase 3: grow convergence[] across agents + raise promotion suggestions.
+  try {
+    runConvergenceCollector(teamId, env);
+  } catch (err) {
+    console.warn(`[Orchestrator] convergence collector for '${teamId}' failed: ${err.message}`);
+  }
+}
+
+// ── Convergence collector (Shared Agent Learning, Phase 3) ───────────────────
+// Runs after every KB push, on the freshly-refreshed canonical clone (the only
+// cross-agent read). It (1) projects all per-agent shards into the single-writer
+// canonical <kind>.jsonl — growing convergence[] and writing status:"merged"
+// tombstones, never touching a shard — and (2) at autonomy >= 2 raises batched
+// promotion suggestions for clusters that cross the convergence threshold. All
+// git ops are synchronous (execFileSync), so overlapping pushes serialize on the
+// event loop — no explicit mutex needed. Best-effort throughout: a failure never
+// breaks the push. See docs/knowledge-convergence.md §2.
+
+function _kbStoreRel(env) {
+  const p = env?.knowledgeStore?.path;
+  return (typeof p === "string" && p.trim() ? p : "docs/agent-knowledge/").replace(/^\/+|\/+$/g, "");
+}
+
+function _loadCloneManifest(storeRoot) {
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(storeRoot, "knowledge.manifest.json"), "utf8"));
+    if (m && typeof m === "object" && m.kinds && typeof m.kinds === "object") return m;
+  } catch { /* fall through to default */ }
+  return buildDefaultManifest();
+}
+
+// Read every agent shard from the canonical clone (tolerant-parsed).
+function _readCloneShards(storeRoot, manifest) {
+  const out = [];
+  for (const kind of KNOWLEDGE_KINDS) {
+    let dir;
+    try { dir = path.dirname(kindFilePath(manifest, kind)); } catch { continue; }
+    const shardsDir = path.join(storeRoot, dir, "shards");
+    let names = [];
+    try { names = fs.readdirSync(shardsDir).filter((n) => n.endsWith(".jsonl")); } catch { continue; }
+    for (const name of names) {
+      let raw;
+      try { raw = fs.readFileSync(path.join(shardsDir, name), "utf8"); } catch { continue; }
+      for (const line of raw.split("\n")) {
+        const e = parseKnowledgeEntry(line);
+        if (e) out.push(e);
+      }
+    }
+  }
+  return out;
+}
+
+function _candidatesPath(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  return path.join(KNOWLEDGE_SUGGESTIONS_DIR, `${seg}.json`);
+}
+
+function readKnowledgeCandidates(teamId) {
+  const p = _candidatesPath(teamId);
+  if (!p) return [];
+  try {
+    const arr = JSON.parse(fs.readFileSync(p, "utf8"));
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
+}
+
+function writeKnowledgeCandidates(teamId, list) {
+  const p = _candidatesPath(teamId);
+  if (!p) return;
+  fs.mkdirSync(KNOWLEDGE_SUGGESTIONS_DIR, { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(Array.isArray(list) ? list : [], null, 2));
+}
+
+// Push the canonical-file commit to agent-knowledge, fetch-rebase-retry (clean —
+// the orchestrator only ever writes canonical files, never a shard).
+function _pushKnowledgeClone(clonePath, gitEnv) {
+  const branch = knowledgeSync.KNOWLEDGE_BRANCH;
+  const run = (args, timeout = 30_000) =>
+    execFileSync("git", args, { cwd: clonePath, env: gitEnv, stdio: "pipe", timeout }).toString();
+  let lastErr = "";
+  for (let attempt = 1; attempt <= knowledgeSync.MAX_PUSH_RETRIES; attempt++) {
+    try {
+      run(["fetch", "origin", branch]);
+      run(["rebase", `origin/${branch}`]);
+    } catch {
+      try { run(["rebase", "--abort"]); } catch { /* nothing to abort */ }
+    }
+    try {
+      run(["push", "origin", branch]);
+      return;
+    } catch (err) {
+      lastErr = agentGitOps.sanitizeGitOutput((err.stderr || err.stdout || err.message || "").toString());
+      if (!knowledgeSync.isRetryablePushError(lastErr)) break;
+    }
+  }
+  throw new Error(`knowledge canonical push failed: ${String(lastErr).trim().slice(0, 200)}`);
+}
+
+function runConvergenceCollector(teamId, envArg) {
+  let env = envArg || null;
+  let repoRef = env?.knowledgeStore?.repoRef || null;
+  if (!repoRef) {
+    const resolved = resolveTeamKbRepo(teamId);
+    if (!resolved) return; // no KB repo → nothing to collect
+    repoRef = resolved.repoRef;
+    env = resolved.env;
+  }
+  // Level 0 has no KB at all; convergence-grow is a level >= 1 behaviour.
+  if (knowledgeAutonomyLevel(env) < 1) return;
+
+  const clonePath = knowledgeFeed.canonicalClonePath(KNOWLEDGE_CLONE_ROOT, teamId);
+  if (!clonePath || !fs.existsSync(path.join(clonePath, ".git"))) return; // refresh makes it; nothing yet
+
+  const storeRel = _kbStoreRel(env);
+  const storeRoot = storeRel ? path.join(clonePath, storeRel) : clonePath;
+  const manifest = _loadCloneManifest(storeRoot);
+  const shardEntries = _readCloneShards(storeRoot, manifest);
+  if (shardEntries.length === 0) return;
+
+  const { simThreshold, convergenceThreshold } = knowledgeConvergenceConfig(env);
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const proj = knowledgeConvergence.buildCanonicalProjection(shardEntries, { simThreshold, now });
+
+  // Write the canonical <kind>.jsonl files (single-writer merged view).
+  for (const kind of KNOWLEDGE_KINDS) {
+    const lines = proj.lines[kind];
+    if (!lines) continue;
+    let rel;
+    try { rel = kindFilePath(manifest, kind); } catch { continue; }
+    const file = path.join(storeRoot, rel);
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, lines.length ? lines.join("\n") + "\n" : "");
+    } catch (err) {
+      console.warn(`[Orchestrator] convergence: writing ${rel} failed: ${err.message}`);
+    }
+  }
+
+  // Commit + push only when the canonical projection actually changed (idempotent
+  // → no spurious churn on a re-run over unchanged shards).
+  const gitEnv = _buildKbGitEnv(repoRef, env);
+  const runIn = (args, timeout = 30_000) =>
+    execFileSync("git", args, { cwd: clonePath, env: gitEnv, stdio: "pipe", timeout }).toString();
+  try {
+    const relPath = storeRel || ".";
+    const status = runIn(["status", "--porcelain", "--", relPath]).trim();
+    if (status) {
+      runIn(["add", "--", relPath]);
+      runIn([
+        "-c", "user.name=Agent Studio", "-c", "user.email=knowledge@agents.local",
+        "commit", "-m", `chore(knowledge): converge canonical facts for ${teamId}`,
+      ]);
+      _pushKnowledgeClone(clonePath, gitEnv);
+    }
+  } catch (err) {
+    console.warn(`[Orchestrator] convergence commit/push for '${teamId}' failed: ${err.message}`);
+  }
+
+  // Promotion suggestions gate at autonomy >= 2 ("Suggest").
+  if (knowledgeAutonomyLevel(env) < 2) return;
+  try {
+    const existing = readKnowledgeCandidates(teamId);
+    const { raise, batch } = knowledgeConvergence.planNewSuggestions(proj.clusters, existing, {
+      threshold: convergenceThreshold,
+      teamId,
+      now,
+    });
+    if (raise.length > 0) {
+      writeKnowledgeCandidates(teamId, [...existing, ...raise]);
+      if (batch) appendKnowledgeEvents([batch]);
+    }
+  } catch (err) {
+    console.warn(`[Orchestrator] convergence suggestions for '${teamId}' failed: ${err.message}`);
+  }
+}
+
+// Record an agent nomination (the `knowledge promote <id>` CLI verb). Builds a
+// candidate from the entry's convergence cluster (works below threshold too),
+// dedup-stable so a re-nomination never duplicates. Returns the candidate.
+function nominateKnowledgeEntry(agentId, entryId, note) {
+  const cfg = loadAgentConfig(agentId);
+  if (!cfg) throw new Error(`Agent '${agentId}' not found`);
+  const teamId = cfg.teamId || cfg.parentTeamId || DEFAULT_TEAM_ID;
+  const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+  if (knowledgeAutonomyLevel(env) < 1) throw new Error("knowledge sharing is off for this team");
+
+  // Refresh so the nomination sees the freshest shards, then cluster.
+  try { refreshKnowledgeClone(teamId, { force: true, env }); } catch { /* best-effort */ }
+  const clonePath = knowledgeFeed.canonicalClonePath(KNOWLEDGE_CLONE_ROOT, teamId);
+  if (!clonePath || !fs.existsSync(path.join(clonePath, ".git"))) throw new Error("no team knowledge base yet");
+  const storeRel = _kbStoreRel(env);
+  const storeRoot = storeRel ? path.join(clonePath, storeRel) : clonePath;
+  const manifest = _loadCloneManifest(storeRoot);
+  const shardEntries = _readCloneShards(storeRoot, manifest);
+  const { simThreshold } = knowledgeConvergenceConfig(env);
+  const clusters = knowledgeConvergence.buildCanonicalProjection(shardEntries, { simThreshold }).clusters;
+  const cluster = clusters.find((c) => c.memberIds.includes(entryId));
+  if (!cluster) throw new Error(`entry '${entryId}' not found in the team knowledge base`);
+
+  const cand = knowledgeConvergence.toCandidate(cluster, { teamId, source: "agent-nominated", note });
+  const existing = readKnowledgeCandidates(teamId);
+  const idx = existing.findIndex((c) => c.id === cand.id);
+  if (idx >= 0 && (existing[idx].status === "open" || existing[idx].status === "promoted")) {
+    return existing[idx]; // already raised — idempotent
+  }
+  const next = idx >= 0 ? existing.map((c, i) => (i === idx ? cand : c)) : [...existing, cand];
+  writeKnowledgeCandidates(teamId, next);
+  appendKnowledgeEvents([{
+    type: "suggestion", ts: cand.raisedAt, teamId, count: 1,
+    samples: [{ id: cand.id, canonicalId: cand.canonicalId, text: cand.text, convergenceCount: cand.convergenceCount }],
+  }]);
+  return cand;
 }
 
 // Push the agent's committed work. `body` = { repo?, branch?, remote?,
@@ -5480,6 +5707,75 @@ async function main() {
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, ...result }));
+      });
+      return;
+    }
+
+    // ── Agent nomination — the `knowledge promote <id>` CLI verb (Phase 3) ──────
+    // Raises a promotion suggestion for the entry's convergence cluster (works
+    // below the threshold too). NEVER promotes — the operator confirms in the UI.
+    const knNominateMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/knowledge\/nominate$/);
+    if (knNominateMatch) {
+      const id = decodeURIComponent(knNominateMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const parsed = JSON.parse(body || '{}');
+          const entryId = String(parsed.entryId || '');
+          if (!/^[0-9a-f]{12}$/.test(entryId)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'invalid entryId' }));
+            return;
+          }
+          const candidate = nominateKnowledgeEntry(id, entryId, parsed.note);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, candidate }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+        }
+      });
+      return;
+    }
+
+    // ── Post-promotion side effects (Phase 3) ───────────────────────────────────
+    // Called by the admin-console after it writes a promoted skill: flip the
+    // candidate lifecycle to `promoted` and echo a `promotion` event into the
+    // live feed so the Knowledge Flow view draws the T1→T2 edge.
+    if (req.method === 'POST' && (req.url === '/internal/knowledge/promoted' || req.url === '/internal/knowledge/dismiss')) {
+      const dismiss = req.url.endsWith('/dismiss');
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const p = JSON.parse(body || '{}');
+          const teamId = String(p.teamId || DEFAULT_TEAM_ID);
+          if (p.suggestionId) {
+            const list = readKnowledgeCandidates(teamId);
+            const i = list.findIndex((c) => c && c.id === p.suggestionId);
+            if (i >= 0) {
+              list[i] = { ...list[i], status: dismiss ? 'dismissed' : 'promoted', resolvedAt: new Date().toISOString() };
+              writeKnowledgeCandidates(teamId, list);
+            }
+          }
+          if (!dismiss) {
+            const skill = p.skill && typeof p.skill === 'object'
+              ? { name: p.skill.name, tier: p.skill.tier } : null;
+            appendKnowledgeEvents([{
+              type: 'promotion',
+              ts: new Date().toISOString(),
+              teamId,
+              skill,
+              entryIds: Array.isArray(p.entryIds) ? p.entryIds : [],
+            }]);
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+        }
       });
       return;
     }

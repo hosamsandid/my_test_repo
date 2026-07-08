@@ -32,6 +32,14 @@ const MANIFEST_VERSION = 1;
 const DEFAULT_KB_PATH = 'docs/agent-knowledge/';
 const DEFAULT_AUTONOMY = 1;
 
+// Convergence detection defaults (Phase 3). simThreshold: lexical Jaccard cutoff
+// for "these two facts are the same lesson"; convergenceThreshold: how many
+// DISTINCT agents must independently record it before a promotion suggestion is
+// raised. convergenceThreshold=2 is a product decision (concept open question #3
+// resolved). Both are per-team-overridable via the env `knowledgeConvergence`.
+const DEFAULT_SIM_THRESHOLD = 0.6;
+const DEFAULT_CONVERGENCE_THRESHOLD = 2;
+
 // ---------------------------------------------------------------------------
 // Ids / clock (injectable so tests are deterministic)
 // ---------------------------------------------------------------------------
@@ -339,6 +347,24 @@ function knowledgeAutonomyLevel(env) {
   return n;
 }
 
+// Convergence config (Phase 3), read off the environment the team shares.
+// Clamped with safe defaults so any legacy env (no `knowledgeConvergence`)
+// behaves as { simThreshold: 0.6, convergenceThreshold: 2 } — no behaviour
+// change until the collector reads it. simThreshold clamps to [0,1];
+// convergenceThreshold to an integer >= 2 ("independent" needs at least two).
+function knowledgeConvergenceConfig(env) {
+  const raw = env && typeof env.knowledgeConvergence === 'object' && env.knowledgeConvergence
+    ? env.knowledgeConvergence
+    : {};
+  let sim = Number(raw.simThreshold);
+  if (!Number.isFinite(sim)) sim = DEFAULT_SIM_THRESHOLD;
+  if (sim < 0) sim = 0;
+  if (sim > 1) sim = 1;
+  let conv = Number(raw.convergenceThreshold);
+  if (!Number.isInteger(conv) || conv < 2) conv = DEFAULT_CONVERGENCE_THRESHOLD;
+  return { simThreshold: sim, convergenceThreshold: conv };
+}
+
 // The per-session harvest instruction woven into the agent's memory hint
 // (Shared Agent Learning, Phase 1). Pure + gated on the autonomy dial: level 0
 // (or a non-int) returns '' so the surrounding hint is exactly today's text —
@@ -379,5 +405,8 @@ module.exports = {
   kindFilePath,
   normalizeKnowledgeStore,
   knowledgeAutonomyLevel,
+  knowledgeConvergenceConfig,
   buildHarvestHint,
+  DEFAULT_SIM_THRESHOLD,
+  DEFAULT_CONVERGENCE_THRESHOLD,
 };

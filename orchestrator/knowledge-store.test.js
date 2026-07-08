@@ -20,6 +20,7 @@ const {
   kindFilePath,
   normalizeKnowledgeStore,
   knowledgeAutonomyLevel,
+  knowledgeConvergenceConfig,
   buildHarvestHint,
 } = require('./knowledge-store');
 
@@ -219,6 +220,29 @@ test('knowledgeAutonomyLevel defaults to 1 and clamps to 0..3', () => {
   assert.equal(knowledgeAutonomyLevel({ knowledgeAutonomy: 9 }), 3);
   assert.equal(knowledgeAutonomyLevel({ knowledgeAutonomy: -5 }), 0);
   assert.equal(knowledgeAutonomyLevel({ knowledgeAutonomy: 'nope' }), 1);
+});
+
+// --- knowledgeConvergenceConfig ---------------------------------------------
+
+test('knowledgeConvergenceConfig defaults for legacy env', () => {
+  assert.deepEqual(knowledgeConvergenceConfig(undefined), { simThreshold: 0.6, convergenceThreshold: 2 });
+  assert.deepEqual(knowledgeConvergenceConfig({}), { simThreshold: 0.6, convergenceThreshold: 2 });
+});
+
+test('knowledgeConvergenceConfig honours + clamps overrides', () => {
+  assert.deepEqual(
+    knowledgeConvergenceConfig({ knowledgeConvergence: { simThreshold: 0.8, convergenceThreshold: 3 } }),
+    { simThreshold: 0.8, convergenceThreshold: 3 },
+  );
+  // clamp: sim out of range, threshold below 2 / non-int
+  assert.deepEqual(
+    knowledgeConvergenceConfig({ knowledgeConvergence: { simThreshold: 5, convergenceThreshold: 1 } }),
+    { simThreshold: 1, convergenceThreshold: 2 },
+  );
+  assert.deepEqual(
+    knowledgeConvergenceConfig({ knowledgeConvergence: { simThreshold: -1, convergenceThreshold: 2.5 } }),
+    { simThreshold: 0, convergenceThreshold: 2 },
+  );
 });
 
 // --- buildHarvestHint -------------------------------------------------------

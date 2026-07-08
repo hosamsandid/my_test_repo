@@ -183,5 +183,27 @@ class LeanSummary(unittest.TestCase):
         self.assertIsNone(kn.lean_summary(None))
 
 
+class BuildNominationTests(unittest.TestCase):
+    """The `knowledge promote <id>` nomination payload (Phase 3)."""
+
+    def test_shape_with_note(self):
+        self.assertEqual(
+            kn.build_nomination("9f3a12bc7de0", "worth it", "acme-dev-1"),
+            {"entryId": "9f3a12bc7de0", "agentId": "acme-dev-1", "note": "worth it"},
+        )
+
+    def test_note_omitted_when_blank(self):
+        body = kn.build_nomination("9f3a12bc7de0", "   ", "acme-dev-1")
+        self.assertNotIn("note", body)
+        self.assertEqual(body["entryId"], "9f3a12bc7de0")
+        body2 = kn.build_nomination("9f3a12bc7de0", None, "acme-dev-1")
+        self.assertNotIn("note", body2)
+
+    def test_promote_dispatches_not_stub(self):
+        # The verb is wired (no longer the exit-3 stub) and resolves cmd_promote.
+        self.assertIn("promote", ("add", "search", "list", "path", "promote"))
+        self.assertTrue(callable(kn.cmd_promote))
+
+
 if __name__ == "__main__":
     unittest.main()

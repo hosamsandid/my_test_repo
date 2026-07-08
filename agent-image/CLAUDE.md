@@ -117,8 +117,19 @@ something already there. Nothing durable to add: skip it. This is separate from
 your private `memory/*.md` — memory is your episodic notebook, `knowledge` is the
 team's curated, shared knowledge base.
 
-Inspect with `knowledge list [--mine]` and `knowledge path "<id>"`. (`knowledge
-promote` is reserved for a later phase and is not yet enabled.)
+Inspect with `knowledge list [--mine]` and `knowledge path "<id>"`.
+
+**When a fact is worth becoming a reusable skill**, nominate it — this raises a
+suggestion card for a human to confirm; it never promotes on its own:
+
+```
+knowledge promote <id>
+knowledge promote <id> --note "worth generalising into a skill"
+```
+
+The system also nominates automatically once two or more agents independently
+record the same lesson, so you only need `promote` for something you think is
+skill-worthy before it has converged.
 
 ## Key Constraints
 

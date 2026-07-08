@@ -40,6 +40,52 @@ function parseScope(scope) {
 }
 
 // ---------------------------------------------------------------------------
+// Merge folding (Phase 3)
+// ---------------------------------------------------------------------------
+
+// Resolve the Phase-3 canonical merge: the orchestrator collector writes a
+// `status:"merged"` tombstone { id, mergedInto } into the canonical <kind>.jsonl
+// for every entry it absorbed into a canonical fact, while the winner keeps its
+// id with a grown convergence[]. This drops the absorbed ids so the graph shows
+// ONE node per cluster; dedupById (below) then collapses the winner's own shard
+// copy against the grown canonical copy. Additive: no `status:"merged"` records
+// ⇒ this is the identity function ⇒ Phase 2 output is unchanged.
+function foldMerges(entries) {
+  const list = Array.isArray(entries) ? entries.filter((e) => e && typeof e === 'object') : [];
+  // Build absorbedId → mergedInto, and the set of ids that survive as entries.
+  const redirect = new Map();
+  const presentIds = new Set();
+  for (const e of list) {
+    if (typeof e.id === 'string' && e.id.trim()) presentIds.add(e.id);
+  }
+  for (const e of list) {
+    if (e.status === 'merged' && typeof e.id === 'string' && typeof e.mergedInto === 'string' && e.mergedInto.trim()) {
+      redirect.set(e.id, e.mergedInto);
+    }
+  }
+  // Follow redirects to a terminal target (cycle-guarded).
+  const terminal = (id) => {
+    let cur = id;
+    const seen = new Set();
+    while (redirect.has(cur) && !seen.has(cur)) {
+      seen.add(cur);
+      cur = redirect.get(cur);
+    }
+    return cur;
+  };
+  const out = [];
+  for (const e of list) {
+    if (e.status === 'merged') continue; // tombstones never become nodes
+    const id = typeof e.id === 'string' ? e.id : null;
+    // Drop an entry only when it was absorbed AND its canonical target is present
+    // (a dangling tombstone must not hide a still-live entry).
+    if (id && redirect.has(id) && presentIds.has(terminal(id))) continue;
+    out.push(e);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Dedup
 // ---------------------------------------------------------------------------
 
@@ -148,7 +194,7 @@ function buildKnowledgeGraph({ scope, entries = [], skills = [], agents = [], no
   const parsed = parseScope(scope);
   const nowMs = typeof now === 'number' ? now : Date.parse(now) || Date.now();
 
-  const allItems = dedupById(entries).map(toItem);
+  const allItems = dedupById(foldMerges(entries)).map(toItem);
   const agentMeta = new Map(
     (Array.isArray(agents) ? agents : [])
       .filter((a) => a && typeof a.id === 'string')
@@ -344,7 +390,7 @@ function buildKnowledgeGraph({ scope, entries = [], skills = [], agents = [], no
 function summarizeKnowledge({ scope, entries = [], now = Date.now() } = {}) {
   const parsed = parseScope(scope);
   const nowMs = typeof now === 'number' ? now : Date.parse(now) || Date.now();
-  const items = dedupById(entries).map(toItem);
+  const items = dedupById(foldMerges(entries)).map(toItem);
   let scoped;
   if (parsed.kind === 'agent') {
     scoped = items.filter((it) => it.originAgent === parsed.id || it.convergence.includes(parsed.id));
@@ -372,6 +418,7 @@ module.exports = {
   LANES,
   parseScope,
   dedupById,
+  foldMerges,
   buildKnowledgeGraph,
   summarizeKnowledge,
 };

@@ -24,13 +24,19 @@ Inspect:
     knowledge list --mine          # only what this agent recorded
     knowledge path "<id>"          # which file holds an entry
 
+Nominate a durable fact to become a reusable team skill (raises a suggestion
+card; a human confirms the promotion in the Admin Console — never automatic):
+
+    knowledge promote <id>
+    knowledge promote <id> --note "worth generalising into a skill"
+
 Each agent appends only to its OWN shard (<kind>/shards/<agentId>.jsonl) so
 concurrent writes from N agents never conflict; `knowledge add` commits it with
 your agent identity and pushes it to the shared `agent-knowledge` branch via the
 orchestrator, so teammates see it on their next `knowledge search`.
 
-Exit codes: 0 ok · 1 nothing found (search/path) · 2 usage/validation error ·
-3 recognized but not yet enabled (promote stub).
+Exit codes: 0 ok · 1 nothing found (search/path/promote) · 2 usage/validation
+error.
 """
 
 import json
@@ -293,6 +299,18 @@ def lean_summary(entry):
         "originAgent": entry.get("originAgent"),
         "convergenceCount": count,
     }
+
+
+def build_nomination(entry_id, note, agent_id):
+    """The POST body for `knowledge promote <id>` (Phase 3 nomination).
+
+    Pure — the network POST lives in _nominate_via_orchestrator. Nominating
+    RAISES a promotion suggestion card for a human to confirm; it never promotes.
+    """
+    body = {"entryId": entry_id, "agentId": agent_id}
+    if isinstance(note, str) and note.strip():
+        body["note"] = note.strip()
+    return body
 
 
 def parse_source_ref(spec):
@@ -618,9 +636,70 @@ def cmd_path(argv):
     sys.exit(1)
 
 
+def _nominate_via_orchestrator(entry_id, note):
+    """POST a promotion nomination for `entry_id` to the orchestrator."""
+    base = (os.environ.get("ORCHESTRATOR_INTERNAL_URL")
+            or os.environ.get("AEE_ORCHESTRATOR_URL")
+            or "http://orchestrator:4002").rstrip("/")
+    url = f"{base}/internal/agents/{_agent_id()}/knowledge/nominate"
+    payload = json.dumps(build_nomination(entry_id, note, _agent_id())).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=payload, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return True, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace") if exc.fp else str(exc)
+        return False, f"HTTP {exc.code}: {detail}"
+    except (urllib.error.URLError, OSError) as exc:
+        return False, str(exc)
+
+
 def cmd_promote(argv):
-    sys.stderr.write("knowledge: promotion lands in Phase 3 (not yet enabled)\n")
-    sys.exit(3)
+    """Nominate a KB entry for promotion to a reusable skill.
+
+    This RAISES a suggestion card; a human confirms the actual promotion in the
+    Admin Console (autonomy level 2). It never promotes autonomously.
+    """
+    note = None
+    pos = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--note":
+            i += 1
+            if i < len(argv):
+                note = argv[i]
+        elif a.startswith("--note="):
+            note = a[len("--note="):]
+        else:
+            pos.append(a)
+        i += 1
+    if not pos:
+        _die('promote: usage: knowledge promote <id> [--note "why this is skill-worthy"]')
+    entry_id = pos[0]
+
+    # Confirm the entry exists in the synced KB before nominating.
+    manifest = _load_manifest()
+    if not any(e.get("id") == entry_id for e, _ in _read_all_entries(manifest)):
+        sys.stderr.write(f'knowledge: no entry with id "{entry_id}"\n')
+        sys.exit(1)
+
+    ok, detail = _nominate_via_orchestrator(entry_id, note)
+    if not ok:
+        _die(f"nomination failed: {detail}", 2)
+    try:
+        cand = json.loads(detail).get("candidate", {})
+    except (json.JSONDecodeError, ValueError):
+        cand = {}
+    cid = cand.get("id", "?")
+    print(cid)
+    sys.stderr.write(
+        f"knowledge: nominated {entry_id} for promotion (suggestion {cid}); "
+        "a human confirms in the Admin Console.\n"
+    )
 
 
 def main():

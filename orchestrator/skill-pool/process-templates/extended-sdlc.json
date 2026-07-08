@@ -25,7 +25,6 @@
           "events": [
             "issues.opened"
           ],
-          "from": "humans",
           "emits": [
             "req:refine"
           ],
@@ -61,7 +60,6 @@
             "issues.labeled"
           ],
           "labelFilter": "req:refine",
-          "from": "any-except-self",
           "description": "Refine a triaged work request into acceptance criteria",
           "prompt": "The label `req:refine` was added to an issue in `{{repoFullName}}` (payload above).\n\n1. `git pull`, read the issue and any linked context.\n2. Rewrite the issue body into: problem statement, scope (in/out), numbered acceptance criteria (edit via `gh-as-agent` + `gh issue edit`).\n3. If information is missing, ask the requester concrete questions in a comment and stop.\n4. When the requirement is complete, comment that it is ready and ask a human to apply the `req:approved` label to release it into Design.\n\nReply `[PASS]` if there is nothing to do."
         }
@@ -118,7 +116,6 @@
             "issues.labeled"
           ],
           "labelFilter": "design:author-go",
-          "from": "any-except-self",
           "description": "Author the design for a prepared requirement",
           "prompt": "The label `design:author-go` was added to an issue in `{{repoFullName}}` (payload above).\n\n1. `git pull`, read the issue, its acceptance criteria and the Scout's Evidence comment.\n2. Write the design doc under `docs/design/` on a feature branch.\n3. Commit via `gh-as-agent commit`, push, open a PR referencing the issue (`gh-as-agent stamp` + `gh pr create`).\n4. If blocked: add `design:escalate` to the issue, describe the blocker in a comment, stop.\n\nReply `[PASS]` if there is nothing to do."
         },
@@ -129,7 +126,6 @@
           "events": [
             "pull_request_review.submitted"
           ],
-          "from": "any-except-self",
           "description": "Rework the design PR after a review",
           "prompt": "A review was submitted on a PR in `{{repoFullName}}` (payload above). If it is not one of YOUR design PRs, reply `[PASS]`.\n\n1. `git pull`, check out the PR branch, read every review comment.\n2. Address each point: fix the design doc, or reply explaining why not.\n3. Commit via `gh-as-agent commit`, push, and summarise what changed in a PR comment.\n\nReply `[PASS]` if there is nothing to do."
         },
@@ -171,7 +167,6 @@
             "issues.labeled"
           ],
           "labelFilter": "design:escalate",
-          "from": "any-except-self",
           "description": "Broker a design escalation",
           "prompt": "The label `design:escalate` was added to an issue in `{{repoFullName}}` (payload above).\n\n1. Read the blocker description on the issue.\n2. Gather what is needed: ask the humans concrete questions in the issue, propose options with a recommendation.\n3. Once the decision is clear, summarise it in a comment, remove `design:escalate`, and re-add `design:author-go` so the Design Author continues.\n\nUse `gh-as-agent` for all GitHub actions. Reply `[PASS]` if there is nothing to do."
         },
@@ -185,7 +180,6 @@
             "pull_request_review_comment.created",
             "issues.edited"
           ],
-          "from": "humans",
           "description": "Route human feedback in the Design stage",
           "prompt": "A human commented / reviewed / edited something in `{{repoFullName}}` (payload above). Only act if it concerns a design issue or design PR of this team — otherwise reply `[PASS]`.\n\n1. Read the feedback in context.\n2. If the design must change: distil the feedback into concrete work items in a comment and add `design:author-go` to the requirement issue.\n3. If it is a question: answer it in a comment.\n4. If it is merely informational: acknowledge briefly or `[PASS]`.\n\nUse `gh-as-agent` for all GitHub actions."
         }
@@ -221,7 +215,6 @@
             "issues.labeled"
           ],
           "labelFilter": "build:author-go",
-          "from": "any-except-self",
           "description": "Continue implementation after escalation/feedback resolution",
           "prompt": "The label `build:author-go` was added to an issue in `{{repoFullName}}` (payload above) — an escalation or feedback round was resolved.\n\n1. `git pull`, read the issue and the latest decision comments.\n2. Continue or adjust the implementation accordingly on your feature branch.\n3. Commit via `gh-as-agent commit`, push, update or open the PR.\n\nReply `[PASS]` if there is nothing to do."
         },
@@ -232,7 +225,6 @@
           "events": [
             "pull_request_review.submitted"
           ],
-          "from": "any-except-self",
           "description": "Rework the implementation PR after a review",
           "prompt": "A review was submitted on a PR in `{{repoFullName}}` (payload above). If it is not one of YOUR implementation PRs, reply `[PASS]`.\n\n1. `git pull`, check out the PR branch, read every review comment.\n2. Address each point: fix the code/tests, or reply explaining why not.\n3. Run the tests, commit via `gh-as-agent commit`, push, summarise the changes in a PR comment.\n\nReply `[PASS]` if there is nothing to do."
         },
@@ -289,7 +281,6 @@
             "issues.labeled"
           ],
           "labelFilter": "build:escalate",
-          "from": "any-except-self",
           "description": "Broker a build escalation",
           "prompt": "The label `build:escalate` was added to an issue in `{{repoFullName}}` (payload above).\n\n1. Read the blocker description.\n2. Gather what is needed: ask humans concrete questions in the issue, propose options with a recommendation. If the design itself has a gap, say so explicitly and reference the design doc.\n3. Once resolved, summarise the decision in a comment, remove `build:escalate`, add `build:author-go`.\n\nUse `gh-as-agent` for all GitHub actions. Reply `[PASS]` if there is nothing to do."
         },
@@ -302,7 +293,6 @@
             "pull_request_review_comment.created",
             "issues.edited"
           ],
-          "from": "humans",
           "description": "Route human feedback in the Build stage",
           "prompt": "A human commented / edited something in `{{repoFullName}}` (payload above). Only act if it concerns an implementation issue or implementation PR of this team — otherwise reply `[PASS]`.\n\n1. Read the feedback in context.\n2. If the implementation must change: distil it into concrete work items in a comment and add `build:author-go` to the issue.\n3. If it is a question: answer it.\n4. Otherwise `[PASS]`.\n\nUse `gh-as-agent` for all GitHub actions."
         }
@@ -326,7 +316,6 @@
           "events": [
             "pull_request.closed"
           ],
-          "from": "any-except-self",
           "description": "Sync docs after a merged PR",
           "prompt": "A PR in `{{repoFullName}}` was closed (payload above). If `merged` is not true, or it is a pure docs PR, reply `[PASS]`.\n\n1. `git pull`, read the merged diff.\n2. Check README, docs/ and the linked design doc: what is now wrong, incomplete or missing?\n3. Apply focused updates on a branch, commit via `gh-as-agent commit`, push, open a small docs PR referencing the merged PR.\n\nReply `[PASS]` if the docs are already accurate."
         },
@@ -355,7 +344,6 @@
           "events": [
             "release.published"
           ],
-          "from": "humans",
           "description": "Write release notes for a published release",
           "prompt": "A release was published in `{{repoFullName}}` (payload above).\n\n1. `git pull`, collect merged PRs and closed issues since the previous release tag (`gh pr list --state merged`, `gh release list`).\n2. Write user-facing notes grouped by Added / Changed / Fixed, linking PRs.\n3. Update the release body via `gh-as-agent` + `gh release edit`.\n\nReply `[PASS]` if the release already has curated notes."
         },

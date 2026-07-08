@@ -118,7 +118,6 @@ const COMMON_GITHUB_EVENTS = [
 // passed, the form is pre-filled and the agent picker is locked (you
 // can't move a trigger to a different agent — delete + re-create).
 function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
-  const initialFromIsArray = Array.isArray(initial?.from);
   const [form, setForm] = useState({
     agentId: initial?._agentId || agentOptions?.[0]?.id || '',
     id: initial?.id || '',
@@ -132,13 +131,6 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
     // github-event fields
     repo: initial?.repo || '',
     events: Array.isArray(initial?.events) ? initial.events : [],
-    fromKind: typeof initial?.from === 'string' ? initial.from
-      : initialFromIsArray ? 'allowlist'
-      : (initial?.from && typeof initial.from === 'object' && Array.isArray(initial.from.exclude)) ? 'blocklist'
-      : 'any-except-self',
-    fromList: initialFromIsArray
-      ? initial.from.join(', ')
-      : (initial?.from?.exclude ? initial.from.exclude.join(', ') : ''),
   });
   const update = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const isEdit = !!initial;
@@ -180,17 +172,6 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
     else if (form.type === 'github-event') {
       body.repo = form.repo;
       body.events = form.events;
-      // Translate the form's fromKind + fromList back into the wire shape
-      // applyFromFilter expects.
-      if (form.fromKind === 'any-except-self') body.from = 'any-except-self';
-      else if (form.fromKind === 'humans') body.from = 'humans';
-      else if (form.fromKind === 'agents') body.from = 'agents';
-      else if (form.fromKind === 'team') body.from = 'team';
-      else if (form.fromKind === 'allowlist') {
-        body.from = form.fromList.split(',').map(s => s.trim()).filter(Boolean);
-      } else if (form.fromKind === 'blocklist') {
-        body.from = { exclude: form.fromList.split(',').map(s => s.trim()).filter(Boolean) };
-      }
     }
     return { agentId: form.agentId, body };
   }
@@ -320,33 +301,10 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
             </div>
           </div>
 
-          <div>
-            <div style={fieldLabelStyle}>Origin filter (Layer-2 loop protection)</div>
-            <select
-              value={form.fromKind}
-              onChange={e => update('fromKind', e.target.value)}
-              style={selectStyle}
-            >
-              <option value="any-except-self">Any (except self) — default</option>
-              <option value="humans">Humans only</option>
-              <option value="agents">Agents only</option>
-              <option value="team">Team — humans or members of own team</option>
-              <option value="allowlist">Allowlist — only these origins</option>
-              <option value="blocklist">Blocklist — anyone except these</option>
-            </select>
-            {(form.fromKind === 'allowlist' || form.fromKind === 'blocklist') && (
-              <div style={{ marginTop: 'var(--eb-space-2)' }}>
-                <FormInput
-                  label={form.fromKind === 'allowlist' ? 'Allowed origins (comma-separated agent ids; "humans" allows people too)' : 'Blocked agent ids (humans always pass)'}
-                  value={form.fromList}
-                  onChange={v => update('fromList', v)}
-                  placeholder="business-analyst, developer, humans"
-                />
-              </div>
-            )}
-            <div style={fieldHintStyle}>
-              Self-loops are blocked unconditionally regardless of this setting.
-            </div>
+          <div style={fieldHintStyle}>
+            The trigger fires on every matching event regardless of who caused it
+            (a human, another agent, or this agent itself). Runaway loops are
+            capped by the per-conversation rate throttle, not by origin filtering.
           </div>
         </>
       )}

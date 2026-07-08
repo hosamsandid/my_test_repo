@@ -18,7 +18,6 @@
         "pull_request.opened",
         "pull_request.reopened"
       ],
-      "from": "any-except-self",
       "enabled": true,
       "promptTemplate": "A pull request was opened in repo `{{repoFullName}}`. Read the PR diff and post a constructive review: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>`. Focus on correctness, design and edge cases. Security and test coverage are owned by other agents — don't overlap. If the diff is trivial and clean: a short 'LGTM' comment."
     },

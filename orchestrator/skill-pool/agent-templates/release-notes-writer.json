@@ -17,7 +17,6 @@
       "events": [
         "release.published"
       ],
-      "from": "any-except-self",
       "enabled": true,
       "promptTemplate": "A release was published in repo `{{repoFullName}}`. Draft user-facing release notes from PRs merged since the previous release tag, then update the release body via `gh release edit`. Skip categories with no entries. If nothing to write about (zero merged PRs since the previous release): `[PASS]`.",
       "intrinsic": true

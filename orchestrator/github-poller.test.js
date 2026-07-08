@@ -9,81 +9,12 @@ const {
   selectFreshEvents,
   planBurstHandoffs,
   shouldFetchNextPage,
-  extractOriginAgent,
-  prEventNeedsHydration,
-  applyPrHydration,
   GRACE_MS,
   SEEN_MAX,
   BURST_CAP,
   PER_PAGE,
   MAX_PAGES,
 } = require("./github-poller");
-
-// ── PR-event origin hydration (minimized Events-API payloads) ─────────────────
-
-// The failing live case: a PullRequestEvent whose payload.pull_request carries
-// only { url, id, number, head, base } — no body — so origin resolves to human
-// and a strict allowlist drops it.
-const minimizedPrEvent = () => ({
-  id: "11522620668",
-  type: "PullRequestEvent",
-  payload: {
-    action: "opened",
-    number: 468,
-    pull_request: { url: "https://api.github.com/x", id: 1, number: 468, head: {}, base: {} },
-  },
-});
-
-test("prEventNeedsHydration: minimized PR event (no body) needs hydration", () => {
-  const ev = minimizedPrEvent();
-  assert.equal(extractOriginAgent(ev), null);
-  assert.equal(prEventNeedsHydration(ev), true);
-});
-
-test("prEventNeedsHydration: already-attributable PR event is skipped", () => {
-  const ev = minimizedPrEvent();
-  ev.payload.pull_request.body = "work\n<!-- agent: agent-studio-developer -->";
-  assert.equal(prEventNeedsHydration(ev), false);
-});
-
-test("prEventNeedsHydration: non-PR events never hydrate", () => {
-  assert.equal(prEventNeedsHydration({ type: "IssuesEvent", payload: { issue: { number: 1 } } }), false);
-  assert.equal(prEventNeedsHydration({ type: "PushEvent", payload: {} }), false);
-});
-
-test("prEventNeedsHydration: PR event without a resolvable number is skipped", () => {
-  assert.equal(prEventNeedsHydration({ type: "PullRequestEvent", payload: {} }), false);
-});
-
-test("applyPrHydration: PR body marker restores attribution", () => {
-  const ev = minimizedPrEvent();
-  applyPrHydration(ev, { pull: { body: "summary\n<!-- agent: agent-studio-developer -->", user: { login: "shared" } } });
-  assert.equal(extractOriginAgent(ev), "agent-studio-developer");
-  // Existing minimized fields are preserved (merge, not replace).
-  assert.equal(ev.payload.pull_request.number, 468);
-  assert.equal(prEventNeedsHydration(ev), false);
-});
-
-test("applyPrHydration: commit authors restore attribution when body has no marker", () => {
-  const ev = minimizedPrEvent();
-  applyPrHydration(ev, { pull: { body: "no marker here" } });
-  assert.equal(extractOriginAgent(ev), null);
-  applyPrHydration(ev, {
-    commits: [
-      { commit: { author: { email: "someone@example.com" } } },
-      { commit: { author: { email: "agent-studio-developer@agents.local" } } },
-    ],
-  });
-  assert.equal(extractOriginAgent(ev), "agent-studio-developer");
-});
-
-test("applyPrHydration: tolerates missing payload / empty inputs", () => {
-  assert.doesNotThrow(() => applyPrHydration(null, { pull: { body: "x" } }));
-  assert.doesNotThrow(() => applyPrHydration({}, {}));
-  const ev = minimizedPrEvent();
-  applyPrHydration(ev, {});
-  assert.equal(extractOriginAgent(ev), null);
-});
 
 // ── effectiveHorizon (Baustein A): activatedAt > createdAt > mtime ─────────────
 

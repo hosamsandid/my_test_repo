@@ -41,7 +41,7 @@ Agents don't have to wait to be summoned. A **trigger** wires an agent to fire o
 - **http webhook** — an external system POSTs to wake it
 - **github-event** — a pull request opens, an issue gets labeled, code is pushed
 
-When a trigger fires, the orchestrator wakes the agent, hands it context (including the full event payload), and records the result. Layered loop protection, origin filters, throttling, and burst digests keep a busy repository from launching a flood of sessions.
+When a trigger fires, the orchestrator wakes the agent, hands it context (including the full event payload), and records the result. Triggers fire on any matching event regardless of who caused it (no source/origin filtering); a per-conversation rate throttle and burst digests keep a busy repository from launching a flood of sessions.
 
 ### 5. Flows connect agents into a process
 

@@ -117,7 +117,7 @@ export default function DraftNodeInspector({ role, roles = [], stages = [], ops,
           canvas edges re-derive from the bundle on every save. */}
       {tab === 'triggers' && (
         <div style={{ height: 'min(60vh, 540px)', display: 'flex', flexDirection: 'column', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', overflow: 'hidden' }}>
-          <TriggersPanel agentId={role.id} active ops={ops} siblings={siblingList} onChanged={onChanged} />
+          <TriggersPanel agentId={role.id} active ops={ops} onChanged={onChanged} />
         </div>
       )}
 

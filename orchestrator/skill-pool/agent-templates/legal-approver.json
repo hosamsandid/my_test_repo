@@ -15,7 +15,6 @@
       "id": "legal-submission-approved",
       "type": "github-event",
       "events": ["pull_request_review.submitted"],
-      "from": "any-except-self",
       "enabled": true,
       "promptTemplate": "A review was submitted on a policy submission in `{{repoFullName}}`. Check whether it is a compliance approval (review body contains 'Compliance review: approved'). If it is: read the full submission diff and the compliance review comments, then post your legal sign-off review: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>`. If it is not a compliance approval: reply `[PASS]`."
     },

@@ -15,7 +15,6 @@
       "id": "security-pr-opened",
       "type": "github-event",
       "events": ["pull_request.opened", "pull_request.reopened"],
-      "from": "any-except-self",
       "enabled": true,
       "promptTemplate": "A pull request was opened in repo `{{repoFullName}}`. Review it exclusively for security risks (injection, auth, secrets, supply chain, insecure defaults). Post the result: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>`. Clean diff: a short 'Security ack'. Justify concretely, don't just throw labels."
     },

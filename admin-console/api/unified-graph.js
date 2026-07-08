@@ -131,19 +131,19 @@ function processEdgeToUnified(e) {
     // Raw GitHub event — the repo itself is the source (#410).
     return { from: ACTORS.github, to: e.to, on: 'event', events: [e.label], triggerId: e.triggerId, external: true };
   }
-  // 'agent' label wiring, plus gate/brake/human-set (human-only) edges. The
-  // carrying label events (issue/PR × added/removed) ride along for display.
+  // 'agent' label wiring, plus gate/brake (human-only) edges. The carrying
+  // label events (issue/PR × added/removed) ride along for display.
   const u = { from: e.from, to: e.to, on: 'label', label: e.label, triggerId: e.triggerId };
   if (Array.isArray(e.events) && e.events.length) u.events = e.events;
   if (e.kind === 'gate' || e.kind === 'brake' || isHumanGate(e.label) || isBrake(e.label)) {
     u.gate = 'human';
   }
-  // Edges only a human can fire originate at the GitHub actor: gates, brakes
-  // (from: null in the process graph) and human-set label listeners are all
-  // GitHub label events a person applies — the former @human actor is folded
-  // into @github, the `gate`/`humanSet` flags keep the human semantics visible.
-  if (e.humanSet || (u.from == null && u.gate === 'human')) u.from = ACTORS.github;
-  if (e.humanAssumed) u.humanAssumed = true;
+  // Human-approval gates and brakes have no agent emitter (from: null in the
+  // process graph); a human acts on them through a GitHub label, so they
+  // originate at the @github actor. (Source/origin filters were removed, so
+  // there is no longer any per-trigger `from`-based human inference for plain,
+  // non-gate labels — those simply stay orphans.)
+  if (u.from == null && u.gate === 'human') u.from = ACTORS.github;
   if (e.orphan) u.orphan = true;
   if (e.deadEnd) u.deadEnd = true;
   return u;

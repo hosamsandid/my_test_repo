@@ -125,14 +125,20 @@ test('two triggers on the SAME label (added vs removed) stay two independent edg
   assert.notEqual(edges[0].id, edges[1].id, 'edge ids are distinct per trigger');
 });
 
-test('human-set label listener: from:humans wires @github → agent (no @human actor any more)', () => {
+test('plain label listener with no emitter is an orphan (origin filters removed)', () => {
+  // Without a `from` origin filter we can no longer infer that a human sets a
+  // plain (non-gate) label, so it renders as an orphan — not a @github edge.
+  // Genuine human-approval GATES (`human:*` labels) still wire from @github via
+  // the label-name convention (see the gate test above); this is only about
+  // arbitrary non-gate labels nobody emits.
   const g = buildUnifiedGraph([
-    { id: 'dev', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'priorisiert', from: 'humans', emits: [] }] },
+    { id: 'dev', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'priorisiert', emits: [] }] },
   ]);
   const e = findEdge(g, x => x.on === 'label' && x.label === 'priorisiert');
   assert.ok(e);
-  assert.equal(e.from, '@github');
-  assert.ok(!e.gate, 'a plain human-set label is not an approval gate');
+  assert.equal(e.from, null, 'no @github inference for a plain human-set label');
+  assert.ok(e.orphan, 'rendered as an orphan listener');
+  assert.ok(!e.gate, 'a plain label is not an approval gate');
   assert.ok(!g.nodes.some(n => n.id === '@human'), 'the @human actor is gone');
 });
 

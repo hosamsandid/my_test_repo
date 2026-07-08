@@ -20,7 +20,6 @@
       "events": [
         "pull_request.merged"
       ],
-      "from": "any-except-self",
       "enabled": true,
       "promptTemplate": "A pull request in repo `{{repoFullName}}` was merged. If the diff contained documentation-relevant changes (API signatures, config options, examples, onboarding steps), audit the docs for drift and open a follow-up PR: write the PR body to a file, open the PR with `gh-as-agent pr --title \"<one-line summary>\" --body-file <file>` (this pushes your branch, stamps your identity, and opens the PR in one step — do NOT use raw `git push` / `gh pr create`, which the org's managed Claude Code policy can block in unattended runs). If the diff is doc-irrelevant or the docs already match: reply `[PASS]`.",
       "intrinsic": true

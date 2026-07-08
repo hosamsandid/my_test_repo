@@ -20,7 +20,6 @@
       "events": [
         "issues.labeled"
       ],
-      "from": "any-except-self",
       "labelFilter": "assigned:{{agentId}}",
       "enabled": true,
       "description": "Primary path. Fires immediately when the coordinator workflow applies `assigned:{{agentId}}` to an issue, and starts the implementation.",

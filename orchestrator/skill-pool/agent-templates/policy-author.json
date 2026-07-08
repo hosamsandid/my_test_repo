@@ -15,7 +15,6 @@
       "id": "author-assigned",
       "type": "github-event",
       "events": ["issues.labeled"],
-      "from": "any-except-self",
       "labelFilter": "assigned:{{agentId}}",
       "enabled": true,
       "description": "Fires when a change request is assigned to this Policy Author.",

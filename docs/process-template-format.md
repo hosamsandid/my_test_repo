@@ -48,7 +48,6 @@ role's `{{vars}}` and the target repo are applied per member.
           "enabled": true,
           "events": ["issues.labeled"],   // github-event
           "labelFilter": "assigned:{{agentId}}",
-          "from": "any-except-self",
           "cron": "5 3 * * 1",            // cron
           "at": "2026-01-01T00:00:00Z",   // once
           "emits": ["started:{{agentId}}"],  // labels this run sets → outbound edges

@@ -2457,7 +2457,7 @@ app.get('/api/process/graph', (req, res) => {
       const triggers = effectiveTriggers(
         (t.triggers || []).map(tr => ({
           id: tr.id, type: tr.type, events: tr.events, labelFilter: tr.labelFilter,
-          from: tr.from, cron: tr.cron, at: tr.at, enabled: tr.enabled,
+          cron: tr.cron, at: tr.at, enabled: tr.enabled,
           emits: tr.emits, prompt: tr.promptTemplate,
         })),
         { derive, systemPrompt: t.promptTemplate || '' },
@@ -2545,7 +2545,7 @@ app.get('/api/flows/graph', async (req, res) => {
       const triggers = effectiveTriggers(
         (t.triggers || []).map(tr => ({
           id: tr.id, type: tr.type, events: tr.events, labelFilter: tr.labelFilter,
-          from: tr.from, cron: tr.cron, at: tr.at, enabled: tr.enabled,
+          cron: tr.cron, at: tr.at, enabled: tr.enabled,
           emits: tr.emits, prompt: tr.promptTemplate,
         })),
         { derive, systemPrompt: t.promptTemplate || '' },
@@ -5494,7 +5494,6 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
         };
         if (tr.type === 'github-event') {
           out.events = tr.events || [];
-          out.from = tr.from || 'any-except-self';
           out.repo = vars.repoFullName;
           // Carry the optional label-name filter through if the template
           // defines one (e.g. developer.json pins it to the wizard's
@@ -6031,7 +6030,6 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
         };
         if (tr.type === 'github-event') {
           out.events = tr.events || [];
-          out.from = tr.from || 'any-except-self';
           out.repo = vars.repoFullName;
           // Carry the optional label-name filter through if the template
           // defines one (e.g. developer.json pins it to the wizard's

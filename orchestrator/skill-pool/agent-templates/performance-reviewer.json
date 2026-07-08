@@ -15,7 +15,6 @@
       "id": "perf-pr-opened",
       "type": "github-event",
       "events": ["pull_request.opened", "pull_request.reopened"],
-      "from": "any-except-self",
       "enabled": true,
       "promptTemplate": "A pull request was opened in repo `{{repoFullName}}`. Review it for performance concerns only — algorithmic complexity, N+1, blocking I/O in async paths, hot-path regressions. Post the result: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>`. Clean diff: a short 'Perf ack'. Concrete findings only — no vague 'this might be slow' comments."
     },

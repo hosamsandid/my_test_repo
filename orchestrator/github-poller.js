@@ -150,154 +150,6 @@ function parseRepoFullName(url) {
   return null;
 }
 
-// Loop protection: extract the originating agent id (if any) from an event.
-// Agents stamp their actions via the `gh-as-agent` wrapper:
-//   - commits get author email `<agentId>@agents.local`
-//   - PR / review / comment bodies get an HTML marker `<!-- agent: <id> -->`
-// Returns the agent id if any of those signals match, else null.
-//
-// Edge case — mixed-author push: if a PushEvent contains commits from
-// both an agent and a human, this returns the first agent id found and
-// the entire push is filtered. This is intentional: filtering more
-// aggressively is safer for loop prevention than letting a partial
-// agent-push through. Pure human pushes (no agent commits) are
-// unaffected.
-const AGENT_MARKER_RE = /<!--\s*agent:\s*([a-zA-Z0-9_.-]+)\s*-->/;
-const AGENT_EMAIL_RE = /^([a-zA-Z0-9_.-]+)@agents\.local$/;
-
-function extractOriginAgent(ev) {
-  const p = ev?.payload || {};
-  for (const body of [p.pull_request?.body, p.review?.body, p.comment?.body, p.issue?.body]) {
-    if (typeof body === 'string') {
-      const m = body.match(AGENT_MARKER_RE);
-      if (m) return m[1];
-    }
-  }
-  if (Array.isArray(p.commits)) {
-    for (const c of p.commits) {
-      const email = c?.author?.email;
-      if (typeof email === 'string') {
-        const m = email.match(AGENT_EMAIL_RE);
-        if (m) return m[1];
-      }
-    }
-  }
-  return null;
-}
-
-// Some GitHub deployments (and github.com for certain org/enterprise repos)
-// deliver a MINIMIZED `PullRequestEvent` payload — `payload.pull_request`
-// carries only `{ url, id, number, head, base }`, without `body`, `user`, or
-// `commits`. That strips the `gh-as-agent` origin signals (the `<!-- agent: -->`
-// body marker and the `<id>@agents.local` commit authors), so an agent-opened
-// PR looks human-origin and gets dropped by a strict allowlist `from` filter —
-// the code reviewer never fires. `prEventNeedsHydration` flags exactly those
-// events: a PullRequestEvent we cannot already attribute from its payload but
-// whose PR number we can resolve for a REST round-trip. Pure (+exported) so the
-// decision is unit-testable without the network.
-//
-// Scoped to PullRequestEvent only: for review/comment events the origin we care
-// about is the reviewer/commenter (in `review.body` / `comment.body`), not the
-// PR author, so hydrating from the PR would MIS-attribute those.
-function prEventNeedsHydration(ev) {
-  if (ev?.type !== 'PullRequestEvent') return false;
-  if (extractOriginAgent(ev) !== null) return false;
-  const num = ev?.payload?.pull_request?.number ?? ev?.payload?.number;
-  return num != null;
-}
-
-// Splice REST-fetched PR data back onto a (minimized) PullRequestEvent so
-// extractOriginAgent() can read the `<!-- agent: -->` marker from the PR body,
-// or fall back to the `<id>@agents.local` commit authors. `commits` is the
-// shape returned by `GET /repos/:r/pulls/:n/commits` (`[{ commit: { author } }]`),
-// remapped to the `payload.commits[].author.email` shape extractOriginAgent
-// expects. Pure; mutates and returns `ev`.
-function applyPrHydration(ev, { pull, commits } = {}) {
-  if (!ev || !ev.payload) return ev;
-  if (pull) {
-    const pr = ev.payload.pull_request || {};
-    ev.payload.pull_request = {
-      ...pr,
-      body: typeof pull.body === 'string' ? pull.body : pr.body,
-      user: pull.user || pr.user,
-    };
-  }
-  if (Array.isArray(commits)) {
-    ev.payload.commits = commits
-      .map((c) => ({ author: { email: c?.commit?.author?.email } }))
-      .filter((c) => typeof c.author.email === 'string');
-  }
-  return ev;
-}
-
-// Apply the trigger's `from` filter to a candidate event. Returns
-// `{ deliver, reason }` — `reason` is for logs only, never user-facing.
-//
-// Self-loops are blocked unconditionally before any spec applies (there is
-// no spec value that re-enables self-routing — by design).
-//
-// Spec values:
-//   undefined | null | 'any-except-self' → default. Allow anything except
-//     self-loops. This is the existing pre-`from` behavior.
-//   'humans' → only events without an agent origin (no <!-- agent: -->,
-//     no <id>@agents.local commit author).
-//   'agents' → only events with an agent origin.
-//   'team'   → events from a human OR an agent in the same team as the
-//     subscriber. Origin and subscriber teams come from each agent's
-//     config.json `team` field via the `lookupTeam` callback.
-//   ['<id>', ...] → explicit allowlist. The string 'humans' is a special
-//     token in the array meaning "humans pass too".
-//   { exclude: ['<id>', ...] } → blocklist of agent ids. Humans always pass.
-//
-// Unknown / malformed specs fail-closed (drop) and surface in logs so a
-// typo in triggers.json doesn't silently degrade to "everything passes".
-function applyFromFilter(originAgentId, subscriberAgentId, fromSpec, lookupTeam) {
-  if (originAgentId && originAgentId === subscriberAgentId) {
-    return { deliver: false, reason: 'self-loop' };
-  }
-  if (!fromSpec || fromSpec === 'any-except-self') {
-    return { deliver: true, reason: 'any-except-self' };
-  }
-  if (fromSpec === 'humans') {
-    return originAgentId === null
-      ? { deliver: true, reason: 'humans-only:human' }
-      : { deliver: false, reason: 'humans-only:agent' };
-  }
-  if (fromSpec === 'agents') {
-    return originAgentId !== null
-      ? { deliver: true, reason: 'agents-only:agent' }
-      : { deliver: false, reason: 'agents-only:human' };
-  }
-  if (fromSpec === 'team') {
-    if (originAgentId === null) return { deliver: true, reason: 'team:human-passes' };
-    const subTeam = lookupTeam ? lookupTeam(subscriberAgentId) : null;
-    const origTeam = lookupTeam ? lookupTeam(originAgentId) : null;
-    if (!subTeam || !origTeam) {
-      return { deliver: false, reason: 'team:no-team-info' };
-    }
-    return subTeam === origTeam
-      ? { deliver: true, reason: 'team:match' }
-      : { deliver: false, reason: 'team:mismatch' };
-  }
-  if (Array.isArray(fromSpec)) {
-    if (originAgentId === null) {
-      return fromSpec.includes('humans')
-        ? { deliver: true, reason: 'allowlist:human-token' }
-        : { deliver: false, reason: 'allowlist:human-not-listed' };
-    }
-    return fromSpec.includes(originAgentId)
-      ? { deliver: true, reason: 'allowlist:match' }
-      : { deliver: false, reason: 'allowlist:no-match' };
-  }
-  if (fromSpec && typeof fromSpec === 'object' && Array.isArray(fromSpec.exclude)) {
-    if (originAgentId === null) return { deliver: true, reason: 'blocklist:human-passes' };
-    return fromSpec.exclude.includes(originAgentId)
-      ? { deliver: false, reason: 'blocklist:match' }
-      : { deliver: true, reason: 'blocklist:no-match' };
-  }
-  return { deliver: false, reason: `unknown-spec:${JSON.stringify(fromSpec)}` };
-}
-
 // #320-A: the per-subscriber history horizon. Prefer the trigger's activation
 // stamp (set on create and refreshed on re-enable), then its creation stamp,
 // then the triggers.json mtime as the legacy fallback for triggers authored
@@ -375,7 +227,7 @@ function planBurstHandoffs(deliverables, cap) {
   for (const d of Array.isArray(deliverables) ? deliverables : []) {
     if (!d || !d.agentId) continue;
     const convKey = d.convKey ?? null;
-    const gkey = `${d.agentId} ${convKey ?? ''}`;
+    const gkey = `${d.agentId} ${convKey ?? ''}`;
     let g = groups.get(gkey);
     if (!g) {
       g = { agentId: d.agentId, convKey, items: [] };
@@ -516,10 +368,6 @@ class GitHubPoller {
           agentId,
           triggerId: t.id,
           events: new Set(t.events),
-          // Layer-2 loop protection: the per-trigger `from` filter. Pass it
-          // through unchanged — applyFromFilter() understands all spec shapes
-          // (string keyword / array allowlist / { exclude } blocklist / null).
-          from: t.from || null,
           // Per-subscriber history horizon: events older than this stamp (minus
           // a grace window, see GRACE_MS) are dropped before any other layer
           // fires, so a freshly-added or just-reactivated agent never reacts to
@@ -662,10 +510,6 @@ class GitHubPoller {
       // GitHub returns newest-first; process oldest-first so triggers fire
       // in causal order. Events without a timestamp sort last (stable).
       fresh.sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
-      // Recover origin attribution for minimized PR-event payloads (see
-      // prEventNeedsHydration) before the fan-out reads it, otherwise every
-      // agent-opened PR is filtered as human-origin.
-      await this._hydrateOrigins(repoFullName, token, fresh);
       this._fanOutBatch(repoFullName, fresh, subscribers);
     }
 
@@ -674,28 +518,15 @@ class GitHubPoller {
   }
 
   _fanOutBatch(repoFullName, ghEvents, subscribers) {
-    // Cache `team` lookups for the duration of this batch. A burst of events to
-    // the same subscribers would otherwise re-read the same config.json files
-    // repeatedly. Per-batch (one poll, ~30s) so a late team rename is picked up
-    // on the next poll rather than being stuck behind stale data.
-    const teamCache = new Map();
-    const lookupTeam = (agentId) => {
-      if (teamCache.has(agentId)) return teamCache.get(agentId);
-      let team = null;
-      try {
-        const cfg = JSON.parse(
-          fs.readFileSync(path.join(AGENTS_DIR, agentId, 'config.json'), 'utf8'),
-        );
-        if (typeof cfg?.team === 'string' && cfg.team) team = cfg.team;
-      } catch { /* missing or unreadable config = no team */ }
-      teamCache.set(agentId, team);
-      return team;
-    };
-
-    // Phase 1 — per-event delivery gates (history horizon, label filter, from
-    // filter). Everything that survives becomes a "deliverable" tagged with its
+    // Phase 1 — per-event delivery gates (history horizon, label filter).
+    // Everything that survives becomes a "deliverable" tagged with its
     // subscriber + conversation, to be grouped in phase 2. Events arrive
     // oldest-first (caller sorted), so per-group order stays causal.
+    //
+    // There is deliberately NO source/origin filtering here: a trigger fires on
+    // any matching event regardless of who caused it (human, another agent, or
+    // the subscriber itself). The only backstop against a self-triggering loop
+    // is the frequency-based Layer-3 throttle + burst digest in phase 2.
     //
     // `eventLogEntries` (#469) accumulates one entry per event for the
     // event-transparency log, keyed by event id — populated here with the
@@ -711,7 +542,6 @@ class GitHubPoller {
       const logEntry = { ghEvent, key, outcomes: [] };
       eventLogEntries.set(ghEvent.id, logEntry);
       if (!key) continue;
-      const originAgentId = extractOriginAgent(ghEvent);
       const convKey = conversationKey(ghEvent);
 
       for (const sub of subscribers) {
@@ -739,9 +569,9 @@ class GitHubPoller {
         // Label-name filter for *.labeled / *.unlabeled events. The action
         // payload carries the affected label as `payload.label.name`. When
         // the subscriber pinned a label name, drop everything that doesn't
-        // match before any other layer runs — this is the cheap pre-filter
-        // that saves the Claude wake-up; the from-filter and throttle still
-        // apply afterward. No-op for non-label events.
+        // match — this is content routing (WHICH label), not a source filter,
+        // and is how label hand-offs (incl. human-approval gates) are wired.
+        // No-op for non-label events.
         if (sub.labelFilter) {
           const labelName = ghEvent.payload?.label?.name;
           if (labelName !== sub.labelFilter) {
@@ -753,24 +583,6 @@ class GitHubPoller {
             outcome.reason = 'label-filter';
             continue;
           }
-        }
-
-        const decision = applyFromFilter(originAgentId, sub.agentId, sub.from, lookupTeam);
-        if (!decision.deliver) {
-          if (decision.reason === 'self-loop') {
-            // Preserve the existing log line shape so operators with grep
-            // habits / log dashboards keep working.
-            console.log(
-              `[GH-Poller] Loop-protect: ${key} (${ghEvent.id}) origin=${originAgentId} matches subscriber — skipping`,
-            );
-          } else {
-            console.log(
-              `[GH-Poller] from-filter: ${key} (${ghEvent.id}) origin=${originAgentId || 'human'} → ${sub.agentId} dropped (${decision.reason})`,
-            );
-          }
-          outcome.status = 'dropped';
-          outcome.reason = decision.reason === 'self-loop' ? 'self-loop' : `from-filter:${decision.reason}`;
-          continue;
         }
 
         deliverables.push({
@@ -960,76 +772,6 @@ class GitHubPoller {
     });
   }
 
-  // Best-effort authenticated GET returning parsed JSON, or null on any error
-  // (non-200, network, parse). Used to hydrate minimized event payloads — it
-  // must never throw or the whole poll cycle would abort on one bad PR fetch.
-  _fetchJson(pathName, token) {
-    return new Promise((resolve) => {
-      const req = https.request({
-        hostname: 'api.github.com',
-        path: pathName,
-        method: 'GET',
-        headers: {
-          'User-Agent': 'e-vgh-claw-poller',
-          'Accept': 'application/vnd.github+json',
-          'Authorization': `Bearer ${token}`,
-          'X-GitHub-Api-Version': '2022-11-28',
-        },
-        timeout: 15_000,
-      }, (res) => {
-        const chunks = [];
-        res.on('data', (c) => chunks.push(c));
-        res.on('end', () => {
-          if (res.statusCode !== 200) {
-            console.error(`[GH-Poller] GET ${pathName} → HTTP ${res.statusCode}`);
-            resolve(null);
-            return;
-          }
-          try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
-          catch { resolve(null); }
-        });
-      });
-      req.on('error', (err) => {
-        console.error(`[GH-Poller] GET ${pathName} failed: ${err.message}`);
-        resolve(null);
-      });
-      req.on('timeout', () => { req.destroy(); resolve(null); });
-      req.end();
-    });
-  }
-
-  // Restore origin attribution for events whose payload was minimized by the
-  // Events API (see prEventNeedsHydration / applyPrHydration). Fetches the PR
-  // body first (carries the `<!-- agent: -->` marker), then its commits as a
-  // fallback. Best-effort: at most two REST calls per unattributed PR event
-  // (rare — only when the payload lacks the body), failures leave the event
-  // as-is (still filtered as human, i.e. no regression vs. today).
-  async _hydrateOrigins(repoFullName, token, ghEvents) {
-    for (const ev of ghEvents) {
-      if (!prEventNeedsHydration(ev)) continue;
-      const num = ev.payload.pull_request?.number ?? ev.payload.number;
-      try {
-        const pull = await this._fetchJson(`/repos/${repoFullName}/pulls/${num}`, token);
-        applyPrHydration(ev, { pull });
-        let who = extractOriginAgent(ev);
-        if (who) {
-          console.log(`[GH-Poller] origin-hydrate: PR #${num} (${ev.id}) → ${who} (via PR body)`);
-          continue;
-        }
-        const commits = await this._fetchJson(`/repos/${repoFullName}/pulls/${num}/commits?per_page=100`, token);
-        applyPrHydration(ev, { commits });
-        who = extractOriginAgent(ev);
-        if (who) {
-          console.log(`[GH-Poller] origin-hydrate: PR #${num} (${ev.id}) → ${who} (via commit authors)`);
-        } else {
-          console.log(`[GH-Poller] origin-hydrate: PR #${num} (${ev.id}) still unattributed after hydration`);
-        }
-      } catch (err) {
-        console.error(`[GH-Poller] origin hydration failed for ${repoFullName} PR #${num} (${ev?.id}): ${err.message}`);
-      }
-    }
-  }
-
   _loadState() {
     try {
       if (fs.existsSync(STATE_FILE)) return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) || {};
@@ -1144,10 +886,6 @@ module.exports = {
   parseRepoFullName,
   eventKey,
   conversationKey,
-  extractOriginAgent,
-  prEventNeedsHydration,
-  applyPrHydration,
-  applyFromFilter,
   effectiveHorizon,
   passesHorizon,
   selectFreshEvents,

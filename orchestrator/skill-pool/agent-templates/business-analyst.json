@@ -21,7 +21,6 @@
         "issues.labeled"
       ],
       "labelFilter": "req:refine",
-      "from": "any-except-self",
       "enabled": true,
       "intrinsic": true,
       "description": "Refine a triaged work request into acceptance criteria",
@@ -33,7 +32,6 @@
       "events": [
         "issues.closed"
       ],
-      "from": "any-except-self",
       "enabled": true,
       "promptTemplate": "An issue in repo `{{repoFullName}}` was closed. Follow these steps:\n\n1. Look it up via `gh issue view <number>` to confirm it's one you opened (check the issue author — it should be you, not a triage-closed duplicate from someone else).\n2. **If it's yours:**\n   a. Update `memory/context.md`: find the issue's entry under `## Open Issues` and mark it done — replace the line with `- ~~#<number> <title>~~ ✓ closed`. If the entry is already marked as closed, skip (idempotent).\n   b. Append to `memory/log.md` a one-line entry: `- [<YYYY-MM-DD>] Closed #<number> <title>` — include the closing PR reference if visible in the timeline (`gh issue view <number> --json title,closedAt,timelineItems`). Use `date +%Y-%m-%d` to get today's date.\n   c. Post a short DM to the user — issue number, title, and the merging PR if mentioned in the close timeline. Keep it to two or three sentences, no recap of the implementation.\n3. **If the closed issue is not yours:** reply `[PASS]` — no memory update, no DM.",
       "intrinsic": true

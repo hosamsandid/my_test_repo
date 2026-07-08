@@ -32,7 +32,12 @@ const fs = require("fs");
 const path = require("path");
 const cron = require("node-cron");
 const { marked } = require("marked");
-const { appendEvent, mapStreamJsonLine } = require("./session-log");
+const {
+  appendEvent,
+  mapStreamJsonLine,
+  formatAskUserQuestion,
+  ASK_USER_QUESTION_TOOL,
+} = require("./session-log");
 
 // ============================================================
 // Config
@@ -365,6 +370,7 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT,
     let finalResult = null;          // text from the last `result` event
     let observedSessionId = null;    // freshest session id seen in this run
     const assistantTextChunks = [];  // fallback if no `result` event
+    let askQuestionInput = null;     // first AskUserQuestion tool input (#447)
 
     const logEvent = (ev) => {
       try {
@@ -386,6 +392,13 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT,
           if (typeof ev.result === "string") finalResult = ev.result;
         } else if (ev.type === "assistant_text" && typeof ev.text === "string") {
           assistantTextChunks.push(ev.text);
+        } else if (
+          ev.type === "tool_use" &&
+          ev.tool === ASK_USER_QUESTION_TOOL &&
+          askQuestionInput === null &&
+          ev.input && typeof ev.input === "object"
+        ) {
+          askQuestionInput = ev.input;
         }
       }
     };
@@ -415,8 +428,21 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT,
         handleLine(lineBuf);
         lineBuf = "";
       }
+      // An agent that called AskUserQuestion is pausing for human input. The
+      // tool is denied (non-interactive run) and the CLI may or may not exit
+      // non-zero, but for the user this is a question, not a crash — surface the
+      // rendered question instead of a "no output"/error banner (#447).
+      const askReply = askQuestionInput !== null
+        ? formatAskUserQuestion(askQuestionInput)
+        : null;
       if (code !== 0) {
         const wasUserStop = sessionEntry.userStopRequested;
+        if (askReply !== null && !wasUserStop) {
+          if (roomId && observedSessionId && persistSession) {
+            writeSessionPointer(roomId, observedSessionId);
+          }
+          return resolve(askReply);
+        }
         const err = new Error(wasUserStop ? 'UserAborted' : stderr.substring(0, 300) || `Exit ${code}`);
         err.stderr = stderr;
         err.exitCode = code;
@@ -430,6 +456,7 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT,
       if (roomId && observedSessionId && persistSession) {
         writeSessionPointer(roomId, observedSessionId);
       }
+      if (askReply !== null) return resolve(askReply);
       if (finalResult !== null) return resolve(finalResult);
       if (assistantTextChunks.length) return resolve(assistantTextChunks.join(""));
       // Last-resort: empty output

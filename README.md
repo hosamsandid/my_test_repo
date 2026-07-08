@@ -1,137 +1,179 @@
-# Accenture Agent Studio
+# Agent Studio
 
-> An enterprise AI agent platform — persistent, autonomous, team-capable — running entirely within your own infrastructure.
+> A self-hosted platform for AI agents that **remember**, **act on their own**, and **work together as a team** — running entirely inside your own infrastructure, on the model provider you control.
 
-For a visual walkthrough of all concepts, open **[`docs/architecture-story.html`](./docs/architecture-story.html)** in your browser.
-
----
-
-## The problem it solves
-
-Every enterprise AI pilot eventually hits the same wall: the assistant works in isolation. It forgets yesterday's conversation, doesn't know your codebase, can't act while you sleep, and lives on someone else's servers.
-
-Accenture Agent Studio removes that wall. It is a platform for running AI agents that **persist across sessions**, **operate autonomously on schedules and events**, and **collaborate as a team** — all within your own infrastructure, connected to whichever model provider your organization controls.
+For a guided, visual tour of every concept below, open **[`docs/platform-story.html`](./docs/platform-story.html)** in your browser.
 
 ---
 
-## Three capabilities that set it apart
+## Why it exists
 
-### Agents that remember and learn
+Most enterprise AI assistants share the same three limits: they forget everything between sessions, they only act when a human prompts them, and they live on someone else's servers.
 
-Every agent carries a living memory that it reads and writes during each conversation. It remembers the decisions made last quarter, the domain knowledge it has accumulated, and the context it needs to pick up exactly where it left off — without you having to repeat yourself. Domain knowledge is packaged as **skills** — portable files that can be added to any agent without touching code. You can train a new specialist in minutes.
+Agent Studio is built to remove all three. It gives you **persistent AI agents** that keep a living memory of your domain, **run autonomously** on schedules and real-world events, and **collaborate in orchestrated teams** — all on Podman inside your network, pointed at whichever Anthropic-compatible model gateway your organization uses.
 
-### Autonomous operation, triggered by anything
+Under the hood each agent is a full **Claude Code** instance with its own workspace, so it can read code, edit files, run commands, commit, and open pull requests — not just chat.
 
-Agents don't wait to be summoned. A built-in scheduling system lets an agent send a daily status report every morning, react the moment a pull request opens, respond to a monitoring webhook, or execute a one-time task at a precise moment. You define what triggers them and what they do — the platform handles execution, retries, and loop protection, even while no one is watching.
+---
 
-### Teams of specialists running in parallel, on your servers
+## The mental model
 
-Complex enterprise problems rarely have a single expert. Agent Studio lets you spawn a coordinated team — a code analyst, a documentation writer, a quality gate, a business analyst — that work in parallel in isolated workspaces, coordinate through shared triggers, and report to a central dashboard. The entire stack runs on Podman inside your network. The model provider is fully configurable: point it at an enterprise gateway, LiteLLM, Azure AI Foundry, or the public Anthropic API.
+Five ideas are enough to understand the whole platform.
+
+### 1. An agent is a persistent worker
+
+Each agent is its own Matrix chat user with its own isolated container and workspace. You talk to it in a private 1:1 chat. Between messages it keeps a **memory** — a set of files it reads and writes as it works — so it recalls past decisions and accumulated domain knowledge without you repeating yourself. An agent can be a simple chat specialist or an autonomous worker that acts without being asked.
+
+### 2. Skills teach an agent what it knows
+
+**Skills** are portable folders of domain knowledge and procedure. Drop one into an agent's toolkit and it gains an expertise — COBOL analysis, a review checklist, a migration pattern — with no code change. Skills live in a shared pool (global or per-team) and can be promoted, reused, and versioned. Training a new specialist is a matter of picking the right skills.
+
+### 3. A Working Environment is a reusable workspace recipe
+
+A **Working Environment** bundles *what an agent starts with*: which skills to seed, which git repository to clone, which MCP knowledge sources to connect, and any extra context to inject into its prompt. Point several agents at the same environment and they all begin from the same footing. Credentials (SSH keys, GitHub tokens, MCP secrets) are stored separately and referenced by the environment — so secrets rotate independently and never leak into a config.
+
+### 4. Triggers make agents autonomous
+
+Agents don't have to wait to be summoned. A **trigger** wires an agent to fire on its own:
+
+- **cron** — recurring (a daily status report every morning)
+- **once** — a single future moment
+- **http webhook** — an external system POSTs to wake it
+- **github-event** — a pull request opens, an issue gets labeled, code is pushed
+
+When a trigger fires, the orchestrator wakes the agent, hands it context (including the full event payload), and records the result. Layered loop protection, origin filters, throttling, and burst digests keep a busy repository from launching a flood of sessions.
+
+### 5. Flows connect agents into a process
+
+A single agent is useful; a coordinated **team** solves real enterprise problems. In the **Flows** view you design a multi-agent process on a canvas — a business analyst, a developer, reviewers, a doc writer — and wire them together with first-class connections:
+
+- **Label hand-offs** — one agent emits a label, another listens for it
+- **GitHub PR / Issue channels** — an agent opens a PR or issue; downstream agents react to it
+- **Data-flow hand-offs** — a producer registers an artifact by name; a consumer is woken to pick it up
+- **Hierarchy** — parent/child grouping of members
+- **Human approval gates** — an edge that waits for a person to apply an approving label before work flows on
+
+You can start from a curated **process template**, compose one stage-by-stage, or draw on a blank canvas. Export a finished process as a portable, git-committable JSON bundle and materialize it into a live team with one action. The **Team-Setup wizard** is the guided front door to the same machinery: pick a process, pick an environment, name the team, done.
+
+---
+
+## What sets it apart
+
+**Agents that remember and learn.** Living memory plus portable skills means an agent accumulates expertise instead of starting cold every session.
+
+**Autonomous operation, triggered by anything.** Cron, webhooks, and GitHub events let agents work while no one is watching — with built-in loop protection so automation stays safe.
+
+**Orchestrated teams, designed visually.** The Flows canvas turns "a squad of specialists coordinating over GitHub" from an architecture project into a diagram you draw, template, and share.
+
+**Fully self-hosted, provider-agnostic.** The entire stack runs on Podman in your network. Point it at the public Anthropic API, a LiteLLM proxy, Azure AI Foundry, or an internal enterprise gateway. Model providers support both API-key and Claude subscription (OAuth) authentication.
+
+**Multi-user and governed.** Human **Teams** scope who sees and manages what. Every configuration change is written to an append-only audit trail, and the whole Admin Console sits behind a login.
 
 ---
 
 ## How it works
 
-Agent Studio has four moving parts:
+Agent Studio runs as a single Podman compose stack with four services:
 
-**The Matrix homeserver** is the communication backbone. Agents and humans meet in private 1:1 chat rooms hosted entirely on your network — no external messaging service required.
+| Service | Role |
+|---|---|
+| **Conduwuit** (Matrix homeserver) | The communication backbone. Humans and agents meet in private 1:1 chat rooms hosted entirely on your network — no external messaging service. |
+| **Orchestrator** | The engine. Manages agent lifecycles, spawns **one isolated container per agent**, runs the trigger scheduler, polls GitHub, routes process events, and serves the internal API. It has no chat identity of its own. |
+| **Admin Console** | The control plane on `:4000`. A browser UI for creating agents, managing credentials and environments, designing Flows, watching live sessions, and chatting with any agent directly. |
+| **bp-explorer** | A read-only viewer for Briefing-Pack metadata (used by the orchestrator agent role). |
 
-**The orchestrator** is the engine. It manages agent lifecycles, watches for scheduled and event-driven triggers, relays GitHub activity, and serves the Admin Console. When a trigger fires, it wakes the right agent, provides context, and records the result.
+Each agent runs in its **own container** with an isolated network and filesystem, carries a label so the orchestrator can reconcile live state, and drives the Claude Code CLI. Everything an agent does — messages, tool calls, results, trigger runs — is streamed to an append-only session log you can watch live in the console.
 
-**Agents** are autonomous workers. Each has an isolated workspace, persistent memory, and a skill set matched to its role. An agent can read code, write commits, open pull requests, call external APIs — whatever the role demands.
+```
+Admin Console chat UI  (or any Matrix client, e.g. Element)
+        │
+   Conduwuit  (localhost:8448)
+        │
+        └── 1:1 DM rooms, one per agent
+               ├── @business-analyst:local   ← container: as-agent:latest
+               ├── @developer:local          ← container: as-agent:latest
+               └── @code-reviewer:local      ← container: as-agent:latest (autonomous)
 
-**The Admin Console** is the control plane. A browser-based interface for creating agents, managing credentials, watching live sessions, editing triggers, and browsing workspaces — no config file editing needed.
+   Orchestrator  (control-plane container, no chat identity)
+        ├── Agent lifecycle: create / enable / disable / delete
+        ├── One Podman container per agent (network + filesystem isolation)
+        ├── Trigger scheduler + GitHub poller + process-event routing
+        └── Internal API consumed by the Admin Console
+```
 
 ---
 
 ## Quick Start
 
-**Prerequisites:** Podman with `podman compose`, plus an LLM endpoint that speaks the Anthropic Messages API (the Anthropic API directly, a LiteLLM proxy, Azure AI Foundry, or any internal gateway).
+**Prerequisites:** Podman with `podman compose`, and an LLM endpoint that speaks the Anthropic Messages API (the Anthropic API directly, a LiteLLM proxy, Azure AI Foundry, or any internal gateway).
 
 ```bash
-# 1. Copy the environment config and fill in your provider URL + auth token
+# 1. Copy the environment config and fill in your provider URL + auth token.
 cp .env.example .env
 #    On Windows or Linux, also set PODMAN_HOST_SOCKET in .env — the default
 #    in docker-compose.yml is the macOS path. Discover yours with:
 #      podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}'
 
-# 2. Boot the Matrix homeserver and register the admin account
-#    The script prints an access token — paste it into .env
+# 2. Boot the Matrix homeserver and register the admin account.
+#    The script prints an access token — paste it into .env.
 podman compose up -d conduwuit
 ./orchestrator/setup.sh
 
-# 3. (Optional) Build the per-agent container image on its own. `make up`
-#    (step 5) already builds it automatically, so you only need this for a
-#    standalone rebuild of the agent image.
-make agent-image
-
-# 4. Seed the shared skill pool (one-time): role templates, baseline memory, MCP
-#    reference servers, pool CLAUDE.md. `make up` does NOT seed automatically.
+# 3. Seed the shared pool (one-time): skills, baseline memory, role templates,
+#    process templates, MCP reference servers. `make up` does NOT seed for you.
 make seed-pool
 
-# 5. Start the full stack
+# 4. Start the full stack (builds the per-agent image automatically).
 make up
 
-# 6. Tail logs
+# 5. Tail logs.
 make logs
 ```
 
-7. Open **http://localhost:4000** in your browser.
-8. The Setup Wizard walks you through five steps: Model Provider → SSH key → GitHub token → Working Environment → first agent.
-9. Once created, the agent appears in Agent Chat. Send it a message and watch the session log on the right.
+Then:
+
+6. Open **http://localhost:4000** and log in (default `admin` / `admin` — change it in `.env`).
+7. The **Setup Wizard** walks you through connecting a Model Provider, adding an SSH key and GitHub token, defining a Working Environment, and creating your first agent — or jump straight to **Team Setup** to stand up a whole process.
+8. Open the agent in **Agent Chat**, send it a message, and watch the session log stream on the right.
 
 You now have a live, persistent AI agent running inside your own infrastructure.
 
 ### Windows setup notes
 
-The steps above work on Windows with the following additions:
+The steps above work on Windows with these additions:
 
-**1. Install `jq`** — required by `setup.sh`, not present by default:
-```powershell
-winget install --id jqlang.jq --accept-source-agreements --accept-package-agreements
-```
-Restart your shell (or open a new Git Bash window) so `jq` is on your PATH before running `setup.sh`.
-
-**2. Pre-set credentials in `.env`** — `setup.sh` uses an interactive password prompt (`read -rs`) that doesn't work reliably in Git Bash. Add these lines to `.env` before running the script:
-```
-ADMIN_USER=admin
-ADMIN_PASS=yourpassword
-```
-
-**3. Run `setup.sh` via bash explicitly:**
-```bash
-bash orchestrator/setup.sh
-```
-
-**4. Create `~/.gitconfig` before `make up`** — the `bp-explorer` container bind-mounts `~/.gitconfig`. If the file doesn't exist (common on a fresh Windows machine), the container fails to start with a `statfs: no such file or directory` error. Create it first:
-```bash
-git config --global user.name "Your Name"
-git config --global user.email "you@example.com"
-```
+1. **Install `jq`** (required by `setup.sh`): `winget install --id jqlang.jq`. Restart your shell so it's on `PATH`.
+2. **Pre-set credentials in `.env`** — `setup.sh` uses an interactive password prompt that is unreliable in Git Bash. Add `ADMIN_USER=admin` and `ADMIN_PASS=yourpassword` before running it.
+3. **Run the script via bash explicitly:** `bash orchestrator/setup.sh`.
+4. **Create `~/.gitconfig` before `make up`** — `bp-explorer` bind-mounts it and fails to start if it's missing:
+   ```bash
+   git config --global user.name "Your Name"
+   git config --global user.email "you@example.com"
+   ```
 
 ---
 
-## Architecture
+## Documentation
 
-| Resource | Description |
-|---|---|
-| [admin-console/public/aee-workflow-diagram.html](./admin-console/public/aee-workflow-diagram.html) | Presentation-ready HTML process diagram of the full AEE agent workflow — also embedded in the Team-Setup wizard via a modal |
-| [docs/architecture-story.html](./docs/architecture-story.html) | Visual walkthrough of platform concepts |
-
-## Technical Documentation
+Start with the visual walkthrough, then dive into the reference docs as needed.
 
 | Topic | Document |
 |---|---|
-| Trigger types (cron, one-shot, webhook, GitHub event) | [docs/triggers.md](./docs/triggers.md) |
-| Agent roles and team patterns | [docs/agent-roles.md](./docs/agent-roles.md) |
+| Visual platform walkthrough | [docs/platform-story.html](./docs/platform-story.html) |
+| Agent roles & team patterns | [docs/agent-roles.md](./docs/agent-roles.md) |
 | Working Environments | [docs/working-environments.md](./docs/working-environments.md) |
-| Admin Console reference | [docs/admin-console.md](./docs/admin-console.md) |
-| SSH keys and GitHub tokens | [docs/credentials.md](./docs/credentials.md) |
-| Model Providers | [docs/model-providers.md](./docs/model-providers.md) |
+| Triggers (cron, once, webhook, GitHub event) | [docs/triggers.md](./docs/triggers.md) |
+| Flow / process connection model | [docs/flow-connection-model.md](./docs/flow-connection-model.md) |
+| Process-template bundle format | [docs/process-template-format.md](./docs/process-template-format.md) |
+| Team-Setup wizard & Flow integration | [docs/wizard-flow-integration.md](./docs/wizard-flow-integration.md) |
 | Skills system | [docs/skills-system.md](./docs/skills-system.md) |
 | Persistent memory | [docs/persistent-memory.md](./docs/persistent-memory.md) |
-| Key files and project layout | [docs/key-files.md](./docs/key-files.md) |
-| MCP server configuration | [docs/mcp-servers.md](./docs/mcp-servers.md) |
+| SSH keys & GitHub tokens | [docs/credentials.md](./docs/credentials.md) |
+| Model Providers | [docs/model-providers.md](./docs/model-providers.md) |
+| MCP servers | [docs/mcp-servers.md](./docs/mcp-servers.md) |
+| Admin Console reference | [docs/admin-console.md](./docs/admin-console.md) |
+| Teams & multi-user model | [docs/teams-data-model.md](./docs/teams-data-model.md) · [docs/multi-user-concept.md](./docs/multi-user-concept.md) |
+| Key files & project layout | [docs/key-files.md](./docs/key-files.md) |
 
 ## Contributing
 

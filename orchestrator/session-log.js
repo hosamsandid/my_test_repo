@@ -178,4 +178,66 @@ function mapStreamJsonLine(line, correlationId) {
   return events;
 }
 
-module.exports = { appendEvent, mapStreamJsonLine, sessionFile };
+// Tool name Claude Code uses for its structured "ask the human a question" tool.
+const ASK_USER_QUESTION_TOOL = 'AskUserQuestion';
+
+/**
+ * Render an `AskUserQuestion` tool input as human-readable Markdown for the
+ * central chat (#447). Returns null when the input carries no usable question,
+ * so the caller can fall back to the normal reply.
+ *
+ * The tool is intentionally not in the runner's --allowedTools whitelist: an
+ * agent turn is a single non-interactive process (stdin closed), so it can
+ * never be answered in-line. Instead the runner intercepts the tool_use, posts
+ * the rendered question to the chat, and lets the user's next message continue
+ * the resumed session.
+ */
+function formatAskUserQuestion(toolInput) {
+  if (!toolInput || typeof toolInput !== 'object') return null;
+  const questions = toolInput.questions;
+  if (!Array.isArray(questions) || questions.length === 0) return null;
+
+  const blocks = [];
+  for (const q of questions) {
+    if (!q || typeof q !== 'object') continue;
+    const lines = [];
+    if (typeof q.header === 'string' && q.header.trim()) {
+      lines.push(`**${q.header.trim()}**`);
+    }
+    if (typeof q.question === 'string' && q.question.trim()) {
+      lines.push(q.question.trim());
+    }
+    if (Array.isArray(q.options)) {
+      for (const opt of q.options) {
+        if (!opt || typeof opt !== 'object') continue;
+        if (typeof opt.label !== 'string' || !opt.label.trim()) continue;
+        if (typeof opt.description === 'string' && opt.description.trim()) {
+          lines.push(`- **${opt.label.trim()}** — ${opt.description.trim()}`);
+        } else {
+          lines.push(`- **${opt.label.trim()}**`);
+        }
+      }
+    }
+    if (q.multiSelect === true) {
+      lines.push('_(You can pick more than one.)_');
+    }
+    if (lines.length) blocks.push(lines.join('\n'));
+  }
+
+  if (!blocks.length) return null;
+
+  const body = blocks.join('\n\n');
+  return (
+    '❓ **The agent has a question before it can continue:**\n\n' +
+    `${body}\n\n` +
+    '_Reply here to answer — the agent will pick up where it left off._'
+  );
+}
+
+module.exports = {
+  appendEvent,
+  mapStreamJsonLine,
+  sessionFile,
+  formatAskUserQuestion,
+  ASK_USER_QUESTION_TOOL,
+};

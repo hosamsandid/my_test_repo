@@ -768,6 +768,70 @@ def _map_stream_json_line(line: str, correlation_id: str) -> list[dict]:
     return events
 
 
+# ---- AskUserQuestion → chat message (#447) ----
+#
+# `AskUserQuestion` is Claude Code's structured "ask the human a question" tool.
+# It is intentionally NOT in the runner's --allowedTools whitelist: an agent turn
+# is a single non-interactive process (stdin closed), so the tool can never be
+# answered in-line and the CLI denies it. Rather than let that surface as a
+# silent "no output" / generic error, we intercept the tool_use, render the
+# question(s) into a readable chat message, and post it. The user's next chat
+# message then continues the resumed session — the answer arrives as a normal,
+# context-bearing turn.
+_ASK_USER_QUESTION_TOOL = "AskUserQuestion"
+
+
+def _format_ask_user_question(tool_input) -> str | None:
+    """Render an `AskUserQuestion` tool input as human-readable Markdown for the
+    central chat. Returns None when the input carries no usable question, so the
+    caller falls back to the normal reply.
+    """
+    if not isinstance(tool_input, dict):
+        return None
+    questions = tool_input.get("questions")
+    if not isinstance(questions, list) or not questions:
+        return None
+
+    blocks: list[str] = []
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+        lines: list[str] = []
+        header = q.get("header")
+        if isinstance(header, str) and header.strip():
+            lines.append(f"**{header.strip()}**")
+        text = q.get("question")
+        if isinstance(text, str) and text.strip():
+            lines.append(text.strip())
+        options = q.get("options")
+        if isinstance(options, list):
+            for opt in options:
+                if not isinstance(opt, dict):
+                    continue
+                label = opt.get("label")
+                if not (isinstance(label, str) and label.strip()):
+                    continue
+                desc = opt.get("description")
+                if isinstance(desc, str) and desc.strip():
+                    lines.append(f"- **{label.strip()}** — {desc.strip()}")
+                else:
+                    lines.append(f"- **{label.strip()}**")
+        if q.get("multiSelect") is True:
+            lines.append("_(You can pick more than one.)_")
+        if lines:
+            blocks.append("\n".join(lines))
+
+    if not blocks:
+        return None
+
+    body = "\n\n".join(blocks)
+    return (
+        "❓ **The agent has a question before it can continue:**\n\n"
+        f"{body}\n\n"
+        "_Reply here to answer — the agent will pick up where it left off._"
+    )
+
+
 # ---- status.json ----
 #
 # Shared between DM-listener path and trigger path. The Node reference
@@ -1020,11 +1084,12 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     observed_session: str | None = None
     assistant_chunks: list[str] = []
     stderr_chunks: list[str] = []
+    ask_question_input: dict | None = None  # first AskUserQuestion tool input (#447)
 
     def handle_line(line: str) -> None:
-        nonlocal final_result, observed_session
+        nonlocal final_result, observed_session, ask_question_input
         for ev in _map_stream_json_line(line, correlation_id):
-            _append_event(room_id, ev)
+            _append_event(room_id, ev)  # log tab is unchanged (#447 AC6)
             if ev.get("type") == "system_init" and isinstance(ev.get("sessionId"), str):
                 observed_session = ev["sessionId"]
             elif ev.get("type") == "result":
@@ -1034,6 +1099,11 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
                     final_result = ev["result"]
             elif ev.get("type") == "assistant_text" and isinstance(ev.get("text"), str):
                 assistant_chunks.append(ev["text"])
+            elif (ev.get("type") == "tool_use"
+                    and ev.get("tool") == _ASK_USER_QUESTION_TOOL
+                    and ask_question_input is None
+                    and isinstance(ev.get("input"), dict)):
+                ask_question_input = ev["input"]
 
     def drain_stderr():
         try:
@@ -1068,12 +1138,28 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     rc = proc.returncode
     stderr_blob = "".join(stderr_chunks)
 
+    # An agent that called AskUserQuestion is pausing for human input. The tool
+    # is denied (non-interactive run) and the CLI may or may not exit non-zero,
+    # but for the user this is a question, not a crash — surface the rendered
+    # question instead of a "no output"/error banner (#447).
+    ask_reply = (
+        _format_ask_user_question(ask_question_input)
+        if ask_question_input is not None else None
+    )
+
     if rc != 0:
         was_user_stop = _user_stop_requested
         _user_stop_requested = False
+        if ask_reply is not None and not was_user_stop:
+            print("[Runner] AskUserQuestion captured — posting question to chat "
+                  "instead of the tool error", file=sys.stderr)
+            return ask_reply, observed_session
         err = subprocess.CalledProcessError(rc, "claude", output=None, stderr=stderr_blob)
         err.user_aborted = was_user_stop  # type: ignore[attr-defined]
         raise err
+
+    if ask_reply is not None:
+        return ask_reply, observed_session
 
     final_text = final_result if final_result is not None else "".join(assistant_chunks)
     return final_text, observed_session

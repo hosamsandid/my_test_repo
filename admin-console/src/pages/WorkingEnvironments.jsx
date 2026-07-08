@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Edit, Trash2, Plus, GitBranch, Key, Github, X, Check, AlertTriangle, Loader2, Cpu } from 'lucide-react';
+import { Edit, Trash2, Plus, GitBranch, Key, Github, X, Check, AlertTriangle, Loader2, Cpu, Users } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
@@ -394,6 +394,48 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
           : <>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only (e.g. <code>cobol-migration</code>). <strong>Cannot be changed after creation.</strong></>}
       />
 
+      {isEdit && (
+        <div style={{
+          border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-md)',
+          padding: 'var(--eb-space-3)',
+          display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+            <Users size={14} />
+            <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
+              Agents using this environment
+            </span>
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+              ({(initial?.agents || []).length})
+            </span>
+          </div>
+          {(initial?.agents || []).length === 0 ? (
+            <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
+              No agents use this environment.
+            </div>
+          ) : (
+            <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+              {initial.agents.map(a => (
+                <li
+                  key={a.id}
+                  style={{
+                    fontSize: 'var(--eb-text-xs)',
+                    fontFamily: 'var(--eb-font-mono)',
+                    color: 'var(--eb-text-secondary)',
+                    padding: 'var(--eb-space-1) var(--eb-space-2)',
+                    background: 'var(--eb-bg-elevated)',
+                    borderRadius: 'var(--eb-radius-sm)',
+                  }}
+                >
+                  {a.displayName && a.displayName !== a.id ? `${a.displayName} (${a.id})` : a.id}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
       <div>
         <div style={labelStyle}>Description</div>
         <textarea
@@ -657,6 +699,21 @@ export default function WorkingEnvironments() {
             style={{ fontSize: 'var(--eb-text-xs)', display: 'inline-flex', alignItems: 'center', gap: 4 }}
           >
             <GitBranch size={12} /> {repos.length} repos
+          </span>
+        );
+      },
+    },
+    {
+      key: 'agentCount',
+      label: 'Agents',
+      render: (v, row) => {
+        const count = Array.isArray(row.agents) ? row.agents.length : (v || 0);
+        return (
+          <span
+            title={count > 0 ? row.agents.map(a => a.displayName || a.id).join('\n') : 'No agents use this environment'}
+            style={{ fontSize: 'var(--eb-text-xs)', color: count > 0 ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)' }}
+          >
+            {count}
           </span>
         );
       },

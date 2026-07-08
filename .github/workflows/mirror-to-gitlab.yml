@@ -9,6 +9,11 @@ on:
     branches: [main]      # fires on every merge to main
   workflow_dispatch: {}   # allows a manual test run from the Actions tab
 
+# Least-privilege: the job only reads the repo (checkout) and pushes to GitLab
+# with a separate secret — it never writes back to GitHub.
+permissions:
+  contents: read
+
 # Prevent overlapping mirror pushes racing each other
 concurrency:
   group: mirror-to-gitlab

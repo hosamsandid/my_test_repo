@@ -308,6 +308,50 @@ select option:disabled {
   animation: eb-status-pulse 1.4s ease-in-out infinite;
 }
 
+/* ─── Icon-only action button: fast tooltip (no native-title delay) ──
+   Pairs with admin-console/src/components/IconButton.jsx. Shown on
+   hover AND :focus-within so the label is reachable via keyboard too. */
+.eb-icon-btn-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.eb-icon-btn-tooltip {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--eb-bg-elevated);
+  color: var(--eb-text-primary);
+  border: 1px solid var(--eb-border-default);
+  padding: 2px 8px;
+  border-radius: var(--eb-radius-sm);
+  font-size: var(--eb-text-xs);
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity var(--eb-transition-fast);
+  z-index: 30;
+}
+.eb-icon-btn-wrap:hover .eb-icon-btn-tooltip,
+.eb-icon-btn-wrap:focus-within .eb-icon-btn-tooltip {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* ─── Tablet-width (≤768px) action-row wrap ───────────────────────────
+   Added as a className alongside existing inline flex styles (which
+   never set flex-wrap), so it only takes effect at the breakpoint and
+   never changes desktop layout. Applied to both the outer row and the
+   inner action-button group so overflowing rows wrap as a whole first,
+   and individual buttons wrap too if the group itself is still tight. */
+@media (max-width: 768px) {
+  .eb-wrap-md {
+    flex-wrap: wrap;
+    row-gap: var(--eb-space-2);
+  }
+}
+
 /* ─── Shiki dual-theme switching (rehype-pretty-code) ────────────────────
    rehype-pretty-code v0.13 with `theme: { light, dark }` emits CSS
    variables `--shiki-light`, `--shiki-light-bg`, `--shiki-dark`,

@@ -73,6 +73,14 @@ const SEEN_MAX = 500;
 // the digest *bundles* without losing any event.
 const BURST_CAP = 3;
 
+// #449: Events-API pagination. The API returns newest-first, one page at a time.
+// A burst of more than PER_PAGE events between two polls pushes the older-but-
+// still-unseen events onto later pages; reading only page 1 would silently lose
+// them. We page backwards until we reach already-seen territory. MAX_PAGES caps
+// the work (GitHub serves at most ~3 pages / 300 events on this endpoint anyway).
+const PER_PAGE = 100;
+const MAX_PAGES = 10;
+
 // tokenId is operator-supplied via the Working Environment config, but a
 // rogue or typo'd value like "../../etc/passwd" would otherwise resolve
 // outside GH_TOKENS_DIR via path.join. Restrict to the same character set
@@ -299,6 +307,21 @@ function selectFreshEvents(events, seenArr, seenMax) {
 //                     the Layer-3 throttle unchanged).
 // Group insertion order and per-group event order (caller passes oldest-first)
 // are preserved. Pure — no I/O.
+// #449 (pure): should the poller fetch the NEXT Events-API page? We only page to
+// recover events a burst pushed off page 1. Continue while the page just read was
+// FULL (so more may exist), we're under the page cap, and it contained NO
+// already-seen id — a seen id means we've reached previously-processed territory,
+// so everything older is already known and we stop. `pageIndex` is 1-based (the
+// page we just read). A partial/empty page is always the last one.
+function shouldFetchNextPage(pageEvents, seenArr, pageIndex, { perPage = PER_PAGE, maxPages = MAX_PAGES } = {}) {
+  const list = Array.isArray(pageEvents) ? pageEvents : [];
+  if (list.length < perPage) return false;
+  if (pageIndex >= maxPages) return false;
+  const seen = new Set((Array.isArray(seenArr) ? seenArr : []).map(String));
+  const reachedKnown = list.some(e => e && e.id != null && seen.has(String(e.id)));
+  return !reachedKnown;
+}
+
 function planBurstHandoffs(deliverables, cap) {
   const CAP = Number.isInteger(cap) && cap >= 0 ? cap : BURST_CAP;
   const groups = new Map();
@@ -487,7 +510,7 @@ class GitHubPoller {
 
     let result;
     try {
-      result = await this._fetchEvents(repoFullName, token, repoState.etag);
+      result = await this._fetchEvents(repoFullName, token, repoState.etag, 1);
     } catch (err) {
       // Track consecutive failures and back off exponentially (1m, 2m, 4m,
       // ...) up to 30m. Auth failures (revoked PAT) otherwise spam the log
@@ -540,6 +563,8 @@ class GitHubPoller {
     // horizon (#320-A/B) is the guard against reacting to pre-activation
     // activity — the cursor's only job is "have I processed this id before?".
     if (!Array.isArray(repoState.seen)) {
+      // Baseline reads page 1 only — we're recording, not firing, so there's no
+      // backlog to backfill.
       repoState.seen = selectFreshEvents(result.events, [], SEEN_MAX).nextSeen;
       delete repoState.lastCreatedAt;
       delete repoState.lastEventId;
@@ -549,7 +574,34 @@ class GitHubPoller {
       return;
     }
 
-    const { fresh, nextSeen } = selectFreshEvents(result.events, repoState.seen, SEEN_MAX);
+    // #449 pagination: page 1 is the newest PER_PAGE events. A burst since the
+    // last poll can push older-but-unseen events onto later pages, which reading
+    // only page 1 would silently drop. Page backwards until we reach already-seen
+    // territory, a partial page, or the cap. Backfill pages are unconditional
+    // GETs (the ETag is page 1's); a transient failure on a later page just stops
+    // paging — page 1 is never lost and the next poll retries.
+    let allEvents = Array.isArray(result.events) ? result.events.slice() : [];
+    let pageEvents = allEvents;
+    let page = 1;
+    while (shouldFetchNextPage(pageEvents, repoState.seen, page, { perPage: PER_PAGE, maxPages: MAX_PAGES })) {
+      page += 1;
+      let next;
+      try {
+        next = await this._fetchEvents(repoFullName, token, null, page);
+      } catch (err) {
+        console.error(`[GH-Poller] ${repoFullName}: page ${page} fetch failed (${err.message}) — proceeding with ${allEvents.length} event(s)`);
+        break;
+      }
+      if (next.status !== 200) break;
+      pageEvents = Array.isArray(next.events) ? next.events : [];
+      if (pageEvents.length === 0) break;
+      allEvents = allEvents.concat(pageEvents);
+    }
+    if (page > 1) {
+      console.log(`[GH-Poller] ${repoFullName}: burst backfill — read ${page} event pages (${allEvents.length} events)`);
+    }
+
+    const { fresh, nextSeen } = selectFreshEvents(allEvents, repoState.seen, SEEN_MAX);
     repoState.seen = nextSeen;
 
     if (fresh.length > 0) {
@@ -757,7 +809,7 @@ class GitHubPoller {
     console.log(`[GH-Poller] Queued ${key} (${ghEvent.id}) → agent=${agentId} trigger=${triggerId}`);
   }
 
-  _fetchEvents(repoFullName, token, etag) {
+  _fetchEvents(repoFullName, token, etag, page = 1) {
     return new Promise((resolve, reject) => {
       const [owner, repo] = repoFullName.split('/');
       const headers = {
@@ -766,10 +818,12 @@ class GitHubPoller {
         'Authorization': `Bearer ${token}`,
         'X-GitHub-Api-Version': '2022-11-28',
       };
+      // The stored ETag is page 1's; the caller passes it only for page 1 and
+      // null for backfill pages (#449).
       if (etag) headers['If-None-Match'] = etag;
       const req = https.request({
         hostname: 'api.github.com',
-        path: `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/events?per_page=100`,
+        path: `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/events?per_page=${PER_PAGE}&page=${page}`,
         method: 'GET',
         headers,
         timeout: 15_000,
@@ -924,9 +978,12 @@ module.exports = {
   passesHorizon,
   selectFreshEvents,
   planBurstHandoffs,
+  shouldFetchNextPage,
   THROTTLE_THRESHOLD,
   THROTTLE_WINDOW_MS,
   GRACE_MS,
   SEEN_MAX,
   BURST_CAP,
+  PER_PAGE,
+  MAX_PAGES,
 };

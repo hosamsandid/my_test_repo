@@ -273,6 +273,30 @@ function isChannelTrigger(t) {
   return !!(t && t.channel === true);
 }
 
+// A derived trigger owns no stable authoring point: channel (#380) and data-flow
+// (#379) triggers are stripped and regenerated on every reconcile. Without a
+// stamp, the poller's per-subscriber history horizon falls back to the volatile
+// triggers.json mtime (effectiveHorizon in github-poller.js), so each reconcile
+// rewrite pushes the horizon to "now" and can silently drop events that arrived
+// in between (the #446 residual). `stampDerivedActivation` carries the prior
+// same-id trigger's `activatedAt` onto its regenerated replacement — keeping the
+// horizon fixed across reconciles — and stamps a genuinely new derived trigger
+// with `now`. Non-derived and already-stamped triggers pass through untouched.
+// Pure; `now` is injectable for tests.
+function stampDerivedActivation(nextTriggers, prevTriggers, now) {
+  const prevAt = new Map();
+  for (const t of (Array.isArray(prevTriggers) ? prevTriggers : [])) {
+    if (t && typeof t.id === 'string' && t.activatedAt) prevAt.set(t.id, t.activatedAt);
+  }
+  const stamp = now || new Date().toISOString();
+  return (Array.isArray(nextTriggers) ? nextTriggers : []).map((t) => {
+    if (!t || typeof t !== 'object') return t;
+    const derived = t.channel === true || t.dataFlow === true;
+    if (!derived || t.activatedAt) return t;
+    return { ...t, activatedAt: prevAt.get(t.id) || stamp };
+  });
+}
+
 function consumePrPrompt(producerName, { label, human } = {}) {
   const lead = human && label
     ? `A human applied the \`${label}\` label to a pull request from **${producerName}** — that is your go-ahead.`
@@ -536,6 +560,7 @@ function expandDataFlowSteps(bundle, { teamId } = {}) {
 module.exports = {
   buildProcessTemplate, validateProcessTemplate, templateToCustomRoles,
   expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview,
-  channelTriggerId, isChannelTrigger, emptyDraftBundle, roleKeyOf, VERSION,
+  channelTriggerId, isChannelTrigger, stampDerivedActivation,
+  emptyDraftBundle, roleKeyOf, VERSION,
   artifactKey, artifactHint, artifactIsNamed,
 };

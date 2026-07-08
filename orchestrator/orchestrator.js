@@ -4370,37 +4370,8 @@ async function main() {
           orchestrator.agentConfigs.delete(id);
           await orchestrator.deactivateMatrixUser(id);
 
-          // Reap the env if no agent references it anymore. The Team-Setup
-          // wizard creates one env per team (env id = team id) and there is
-          // no other way to clean it up from the UI, so without this every
-          // wizard-created team leaves behind an orphan env that blocks the
-          // next create-team-with-the-same-id attempt with "Some resources
-          // for team … already exist". Manually managed envs survive because
-          // they're either shared between agents or reused after a delete —
-          // we only delete envs whose last referencing agent just went away.
-          let reapedEnv = null;
-          if (parentCfg?.environmentId) {
-            const envId = parentCfg.environmentId;
-            const stillReferenced = listAgentIds().some(otherId => {
-              const cfg = loadAgentConfig(otherId);
-              return cfg && cfg.environmentId === envId;
-            });
-            if (!stillReferenced) {
-              const envDir = path.join(ENVIRONMENTS_DIR, envId);
-              try {
-                if (fs.existsSync(envDir)) {
-                  fs.rmSync(envDir, { recursive: true, force: true });
-                  reapedEnv = envId;
-                  console.log(`[Orchestrator] Reaped now-unused environment '${envId}' after deleting '${id}'`);
-                }
-              } catch (err) {
-                console.error(`[Orchestrator] Failed to reap env '${envId}': ${err.message}`);
-              }
-            }
-          }
-
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, cascaded, reapedEnv }));
+          res.end(JSON.stringify({ ok: true, cascaded }));
         } catch (err) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));

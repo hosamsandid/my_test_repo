@@ -12,7 +12,8 @@ const { findEnclosingGitRepo } = require("./git-workspace");
 const { bpsToBriefingsMap } = require("./briefings-graph");
 const { createTeamsStore, DEFAULT_TEAM_ID } = require("./teams-store");
 const { makeSkillSourceResolver } = require("./skill-source");
-const { normalizeKnowledgeStore } = require("./knowledge-store");
+const { normalizeKnowledgeStore, knowledgeAutonomyLevel } = require("./knowledge-store");
+const knowledgeSync = require("./knowledge-sync");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const { resolveCloneTarget } = require("./clone-target");
@@ -197,6 +198,25 @@ function startAgentProcess(config) {
   // envless agents — because it also strips the orchestrator's inherited
   // GIT_SSH_COMMAND, which would otherwise dangle in every agent.
   materializeAgentSshKey(id, env, childEnv);
+
+  // Shared Agent Learning (Phase 1): expose the team Knowledge Base to the
+  // agent runtime + `knowledge` CLI. The autonomy dial is ALWAYS injected
+  // explicitly (never left to the runtime default) so an agent whose env can't
+  // resolve a KB repo — or that opted to level 0 — sees harvest OFF and never
+  // gets nudged to use a KB it doesn't have. Level >= 1 with a resolvable KB
+  // repo turns harvesting on and points the CLI at the synced working copy.
+  {
+    const level = knowledgeAutonomyLevel(env);
+    const kbRepoRef = env?.knowledgeStore?.repoRef || null;
+    const kbAvailable = level >= 1 && !!kbRepoRef;
+    childEnv.KNOWLEDGE_AUTONOMY = String(kbAvailable ? level : 0);
+    if (kbAvailable) {
+      childEnv.KNOWLEDGE_TEAM_ID = config.teamId || DEFAULT_TEAM_ID;
+      childEnv.KNOWLEDGE_STORE_PATH = env.knowledgeStore.path;
+      childEnv.KNOWLEDGE_BRANCH = knowledgeSync.KNOWLEDGE_BRANCH;
+      childEnv.KNOWLEDGE_DIR = path.join("/workspace/agents", id, "knowledge");
+    }
+  }
 
   // Seam #3 fail-closed guard. With per-agent filesystem isolation the
   // container mounts only `agents/<id>` (SubPath) of the pool volume. If the
@@ -823,6 +843,12 @@ function seedAgentWorkspace(id, env, opts = {}) {
 
   // 5. Optional git clone(s)
   const clones = cloneEnvironmentRepositories(dest, env, warnings);
+
+  // 6. Shared team Knowledge Base working copy (Shared Agent Learning, Phase 1).
+  //    Only when the autonomy dial is on (>= 1); best-effort, never fails the seed.
+  if (knowledgeAutonomyLevel(env) >= 1) {
+    provisionKnowledgeCheckout(id, dest, env, warnings);
+  }
 
   const cloneSummary = clones.length > 0 ? `, repos=${clones.map(c => c.repoName).join(",")}` : "";
   const mcpSummary = mcpSeeded.length > 0 ? `, mcp=${mcpSeeded.join(",")}` : "";
@@ -1514,6 +1540,133 @@ function _buildAgentGitEnv(id, repo, env) {
     sshKeysDir: SSH_KEYS_DIR,
     ghTokensDir: GH_TOKENS_DIR,
   });
+}
+
+// ── Shared team Knowledge Base (Shared Agent Learning, Phase 1) ──────────────
+// KB working copy = a dedicated checkout of the KB repo on the non-protected
+// `agent-knowledge` branch, at <agent>/knowledge. Separate from the agent's
+// feature-branch repo clone. See docs/knowledge-cli.md §3.
+
+function _buildKbGitEnv(repoRef, env) {
+  return agentGitOps.buildRepoGitEnv({
+    env,
+    repoUrl: repoRef.url,
+    sshKeyId: repoRef.sshKeyId || null,
+    githubTokenId: repoRef.githubTokenId || env?.githubTokenId || null,
+    baseEnv: process.env,
+    sshKeysDir: SSH_KEYS_DIR,
+    ghTokensDir: GH_TOKENS_DIR,
+  });
+}
+
+// Provision the KB working copy into an agent's workspace at seed time. Gated by
+// the caller on autonomy >= 1. Best-effort: never throws — a failure just leaves
+// the agent without a KB (it degrades to level-0 behaviour) and is surfaced as a
+// warning. First agent on a team bootstraps the branch from the shipped template.
+function provisionKnowledgeCheckout(id, dest, env, warnings) {
+  const repoRef = env?.knowledgeStore?.repoRef || null;
+  if (!repoRef || !repoRef.url) {
+    warnings.push("knowledge: no KB repo could be resolved from the environment — skipping KB provisioning");
+    return;
+  }
+  const kbDir = path.join(dest, "knowledge");
+  if (fs.existsSync(path.join(kbDir, ".git"))) return; // already provisioned
+
+  const branch = knowledgeSync.KNOWLEDGE_BRANCH;
+  const gitEnv = _buildKbGitEnv(repoRef, env);
+  const runIn = (cwd, args, timeout = 120_000) =>
+    execFileSync("git", args, { cwd, env: gitEnv, stdio: "pipe", timeout }).toString();
+
+  try {
+    fs.mkdirSync(dest, { recursive: true });
+    execFileSync("git", ["clone", "--", repoRef.url, "knowledge"], {
+      cwd: dest, env: gitEnv, stdio: "pipe", timeout: 120_000,
+    });
+
+    let hasBranch = false;
+    try {
+      hasBranch = runIn(kbDir, ["ls-remote", "--heads", "origin", branch], 30_000).trim() !== "";
+    } catch { /* treat as absent */ }
+
+    if (hasBranch) {
+      runIn(kbDir, ["checkout", branch]);
+    } else {
+      // Bootstrap: a dedicated branch carrying the KB template at the store path.
+      runIn(kbDir, ["checkout", "-b", branch]);
+      bootstrapKbTemplate(kbDir, env.knowledgeStore.path);
+      runIn(kbDir, ["add", "-A"]);
+      runIn(kbDir, [
+        "-c", "user.name=Agent Studio", "-c", "user.email=knowledge@agents.local",
+        "commit", "-m", "chore(knowledge): initialize team knowledge base",
+      ]);
+      runIn(kbDir, ["push", "--set-upstream", "origin", branch], 60_000);
+    }
+    console.log(`[Orchestrator] Provisioned KB working copy for ${id} on branch ${branch}`);
+  } catch (err) {
+    const detail = agentGitOps
+      .sanitizeGitOutput((err.stderr || err.message || "").toString())
+      .slice(0, 200);
+    warnings.push(`knowledge: KB provisioning failed: ${detail}`);
+  }
+}
+
+// Lay the shipped default KB template (facts/entities/conventions + manifest +
+// README) into <kbDir>/<storePath> without clobbering anything already there.
+function bootstrapKbTemplate(kbDir, storePath) {
+  const templateDir = path.join(__dirname, "knowledge-template");
+  if (!fs.existsSync(templateDir)) return;
+  const rel = String(storePath || "docs/agent-knowledge/").replace(/^\/+|\/+$/g, "");
+  const storeFull = path.join(kbDir, rel);
+  fs.mkdirSync(storeFull, { recursive: true });
+  fs.cpSync(templateDir, storeFull, { recursive: true, force: false, errorOnExist: false });
+}
+
+// Push the agent's local KB commits to the shared branch. Fetch-rebase-retry so
+// a concurrent agent's push can't make us lose our (own-shard-only) append.
+// Throws caller-facing Errors (safe to return over the internal API).
+function agentKnowledgePush(id) {
+  const cfg = loadAgentConfig(id);
+  const env = cfg && cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+  const repoRef = env?.knowledgeStore?.repoRef || null;
+  if (!repoRef || !repoRef.url) throw new Error("no knowledge repo is configured for this agent");
+
+  const kbDir = path.join(agentDir(id), "knowledge");
+  if (!fs.existsSync(path.join(kbDir, ".git"))) {
+    throw new Error("knowledge working copy is not provisioned for this agent");
+  }
+
+  const branch = knowledgeSync.KNOWLEDGE_BRANCH;
+  const gitEnv = _buildKbGitEnv(repoRef, env);
+  const run = (args, timeout = 30_000) =>
+    execFileSync("git", args, { cwd: kbDir, env: gitEnv, stdio: "pipe", timeout }).toString();
+
+  const current = run(["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+  if (!knowledgeSync.knowledgeBranchAllowed(current)) {
+    throw new Error(`knowledge push refused: checkout is on '${current}', not ${branch}`);
+  }
+
+  let lastErr = "";
+  for (let attempt = 1; attempt <= knowledgeSync.MAX_PUSH_RETRIES; attempt++) {
+    // Rebase our local commits onto the latest shared tip (clean: each agent
+    // only ever touches its own shard file). Both steps tolerate a not-yet-
+    // existing remote branch (first push on the team).
+    try {
+      run(["fetch", "origin", branch]);
+      run(["rebase", `origin/${branch}`]);
+    } catch {
+      try { run(["rebase", "--abort"]); } catch { /* nothing to abort */ }
+    }
+    try {
+      const out = run(["push", "--set-upstream", "origin", branch]);
+      return { ok: true, branch, output: agentGitOps.sanitizeGitOutput(out).trim() };
+    } catch (err) {
+      lastErr = agentGitOps.sanitizeGitOutput((err.stderr || err.stdout || err.message || "").toString());
+      if (!knowledgeSync.isRetryablePushError(lastErr)) break;
+    }
+  }
+  const e = new Error(`knowledge push failed: ${String(lastErr).trim().slice(0, 400)}`);
+  e.gitFailed = true;
+  throw e;
 }
 
 // Push the agent's committed work. `body` = { repo?, branch?, remote?,
@@ -5141,6 +5294,38 @@ async function main() {
           // auth, etc.); 400 for request/config problems.
           const status = err && err.gitFailed ? 409 : 400;
           console.warn(`[Orchestrator] git ${gitPushMatch ? 'push' : 'pr'} for ${id}: ${msg}`);
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: msg }));
+        }
+      });
+      return;
+    }
+
+    // ── Push the agent's KB shard to the shared agent-knowledge branch ──────────
+    // Shared Agent Learning (Phase 1): the `knowledge` CLI commits the entry to
+    // its own shard locally, then calls this to push it — the credentialed
+    // network step (mirrors gh-as-agent push), on the one dedicated non-protected
+    // branch, with fetch-rebase-retry so concurrent agents can't lose an append.
+    const knPushMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/knowledge\/push$/);
+    if (knPushMatch) {
+      const id = decodeURIComponent(knPushMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const cfg = loadAgentConfig(id);
+          if (!cfg) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: `Agent '${id}' not found` }));
+            return;
+          }
+          const result = agentKnowledgePush(id);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          const msg = (err && err.message) ? err.message : String(err);
+          const status = err && err.gitFailed ? 409 : 400;
+          console.warn(`[Orchestrator] knowledge push for ${id}: ${msg}`);
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: msg }));
         }

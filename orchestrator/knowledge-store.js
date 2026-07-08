@@ -339,6 +339,29 @@ function knowledgeAutonomyLevel(env) {
   return n;
 }
 
+// The per-session harvest instruction woven into the agent's memory hint
+// (Shared Agent Learning, Phase 1). Pure + gated on the autonomy dial: level 0
+// (or a non-int) returns '' so the surrounding hint is exactly today's text —
+// this IS autonomy level 0 == today. Level >= 1 asks the agent to also record
+// durable, team-useful lessons in the shared KB via the `knowledge` CLI.
+//
+// Kept byte-identical to agent-entrypoint.py `build_harvest_hint` (the live
+// runtime); agent-runner.js is the legacy reference and consumes this so the
+// two never drift.
+function buildHarvestHint(autonomyLevel) {
+  if (!Number.isInteger(autonomyLevel) || autonomyLevel < 1) return '';
+  return (
+    ' In addition to your memory files, share durable lessons with your ' +
+    'teammates through the team knowledge base. For each insight that would ' +
+    'help ANY teammate on this repo (a project convention, an environment ' +
+    'fact, a key entity) run: knowledge add fact|entity|convention ' +
+    '"<one-line statement>". Provenance is attached automatically — record ' +
+    'only lessons that hold beyond this one run, no PR/issue-specific ' +
+    'detail. First run knowledge search "<topic>" to avoid restating ' +
+    'something already recorded. Nothing durable to add: skip it.'
+  );
+}
+
 module.exports = {
   KINDS,
   SOURCE_REF_KINDS,
@@ -356,4 +379,5 @@ module.exports = {
   kindFilePath,
   normalizeKnowledgeStore,
   knowledgeAutonomyLevel,
+  buildHarvestHint,
 };

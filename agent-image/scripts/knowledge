@@ -1,0 +1,621 @@
+#!/usr/bin/env python3
+"""knowledge — record and query the shared team Knowledge Base (KB).
+
+The KB is tier T1 of the Shared Agent Learning & Knowledge Flow: durable,
+team-scoped facts/entities/conventions that outlive a single run and help every
+teammate on the repo. It is git-backed markdown/JSONL (the durable bridge is
+git, same doctrine as aee-artifact), synced into a local working copy so queries
+are real-time and offline.
+
+Record a durable lesson (provenance is attached automatically):
+
+    knowledge add fact "This repo unit-tests pure helper cores only"
+    knowledge add entity "github-poller.js polls the Events API every 30s" --tag polling
+    knowledge add convention "Branch from origin/main" --source pr:459
+
+Query what the team already knows (offline search over the synced copy):
+
+    knowledge search "poller pagination"
+    knowledge search "npm install" --kind fact --json --limit 5
+
+Inspect:
+
+    knowledge list                 # everything (JSON lines)
+    knowledge list --mine          # only what this agent recorded
+    knowledge path "<id>"          # which file holds an entry
+
+Each agent appends only to its OWN shard (<kind>/shards/<agentId>.jsonl) so
+concurrent writes from N agents never conflict; `knowledge add` commits it with
+your agent identity and pushes it to the shared `agent-knowledge` branch via the
+orchestrator, so teammates see it on their next `knowledge search`.
+
+Exit codes: 0 ok · 1 nothing found (search/path) · 2 usage/validation error ·
+3 recognized but not yet enabled (promote stub).
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+
+# ===========================================================================
+# Pure core — a Python mirror of orchestrator/knowledge-store.js. No fs / no
+# network here (an injected `now`/`id_gen` keeps it deterministic); the thin
+# cmd_* wrappers below own all IO. Unit-tested in test_knowledge.py.
+# ===========================================================================
+
+KINDS = ("fact", "entity", "convention")
+SOURCE_REF_KINDS = ("pr", "issue", "commit", "branch", "url")
+STATUSES = ("active", "merged", "promoted", "archived")
+
+SCHEMA_VERSION = 1
+MANIFEST_VERSION = 1
+DEFAULT_KB_PATH = "docs/agent-knowledge/"
+
+# Stable key order so git diffs are minimal and the serialized line is
+# byte-identical to knowledge-store.js `serializeEntry` (cross-runtime guard).
+KEY_ORDER = (
+    "v", "id", "kind", "text", "originAgent", "teamId", "createdAt",
+    "correlationId", "sessionId", "sourceRefs", "convergence", "tags",
+    "status", "updatedAt",
+)
+
+
+def _default_id_gen():
+    return os.urandom(6).hex()
+
+
+def _default_now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _norm_str_array(arr):
+    if not isinstance(arr, list):
+        return []
+    seen = set()
+    out = []
+    for v in arr:
+        if not isinstance(v, str):
+            continue
+        t = v.strip()
+        if t == "" or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out
+
+
+def normalize_source_refs(source_refs):
+    if not isinstance(source_refs, list):
+        return []
+    out = []
+    for ref in source_refs:
+        if not isinstance(ref, dict):
+            continue
+        kind = ref.get("kind")
+        val = ref.get("ref")
+        if kind not in SOURCE_REF_KINDS:
+            continue
+        if not isinstance(val, str) or val.strip() == "":
+            continue
+        out.append({"kind": kind, "ref": val.strip()})
+    return out
+
+
+def has_provenance_link(entry):
+    """Provenance is mandatory: at least one hard link back to the session/PR."""
+    return (
+        (isinstance(entry.get("correlationId"), str) and entry["correlationId"].strip() != "")
+        or (isinstance(entry.get("sessionId"), str) and entry["sessionId"].strip() != "")
+        or (isinstance(entry.get("sourceRefs"), list) and len(entry["sourceRefs"]) > 0)
+    )
+
+
+def validate_entry(entry):
+    """Validate a fully-formed entry. Returns (ok, errors)."""
+    errors = []
+    if not isinstance(entry, dict):
+        return False, ["entry is not an object"]
+    if entry.get("v") != SCHEMA_VERSION:
+        errors.append(f"v must be {SCHEMA_VERSION}")
+    if not isinstance(entry.get("id"), str) or not re.fullmatch(r"[0-9a-f]{12}", entry.get("id", "")):
+        errors.append("id must be a 12-char hex string")
+    if entry.get("kind") not in KINDS:
+        errors.append("kind must be one of " + "|".join(KINDS))
+    if not isinstance(entry.get("text"), str) or entry.get("text", "").strip() == "":
+        errors.append("text must be a non-empty string")
+    if not isinstance(entry.get("originAgent"), str) or entry.get("originAgent", "").strip() == "":
+        errors.append("originAgent is required (provenance)")
+    if not isinstance(entry.get("teamId"), str) or entry.get("teamId", "").strip() == "":
+        errors.append("teamId is required (provenance)")
+    if not isinstance(entry.get("createdAt"), str) or entry.get("createdAt", "").strip() == "":
+        errors.append("createdAt is required (provenance)")
+    if not has_provenance_link(entry):
+        errors.append("at least one of correlationId, sessionId or sourceRefs is required (provenance)")
+    conv = entry.get("convergence")
+    if not isinstance(conv, list) or len(conv) == 0:
+        errors.append("convergence must be a non-empty array")
+    if entry.get("status") not in STATUSES:
+        errors.append("status must be one of " + "|".join(STATUSES))
+    return len(errors) == 0, errors
+
+
+def build_entry(kind, text, *, origin_agent="", team_id="", correlation_id=None,
+                session_id=None, source_refs=None, tags=None, status="active",
+                convergence=None, entry_id=None, created_at=None,
+                now=_default_now, id_gen=_default_id_gen):
+    """Build a validated KB entry with defaults + provenance filled in.
+
+    Raises ValueError on invalid input so a caller can never silently emit an
+    unprovenanced entry (mirrors makeKnowledgeEntry).
+    """
+    if kind not in KINDS:
+        raise ValueError("build_entry: kind must be one of " + "|".join(KINDS))
+    text = text.strip() if isinstance(text, str) else ""
+    if text == "":
+        raise ValueError("build_entry: text must be a non-empty string")
+
+    origin_agent = origin_agent.strip() if isinstance(origin_agent, str) else ""
+    team_id = team_id.strip() if isinstance(team_id, str) else ""
+    refs = normalize_source_refs(source_refs)
+
+    conv_src = convergence if isinstance(convergence, list) and convergence else [origin_agent]
+
+    entry = {
+        "v": SCHEMA_VERSION,
+        "id": entry_id if isinstance(entry_id, str) and re.fullmatch(r"[0-9a-f]{12}", entry_id) else id_gen(),
+        "kind": kind,
+        "text": text,
+        "originAgent": origin_agent,
+        "teamId": team_id,
+        "createdAt": created_at.strip() if isinstance(created_at, str) and created_at.strip() != "" else now(),
+        "convergence": _norm_str_array(conv_src),
+        "status": status if status in STATUSES else "active",
+    }
+
+    if isinstance(correlation_id, str) and correlation_id.strip() != "":
+        entry["correlationId"] = correlation_id.strip()
+    if isinstance(session_id, str) and session_id.strip() != "":
+        entry["sessionId"] = session_id.strip()
+    if refs:
+        entry["sourceRefs"] = refs
+    tag_list = _norm_str_array(tags)
+    if tag_list:
+        entry["tags"] = tag_list
+
+    ok, errors = validate_entry(entry)
+    if not ok:
+        raise ValueError("build_entry: invalid entry — " + "; ".join(errors))
+    return entry
+
+
+def serialize_entry(entry):
+    """Serialize to one JSONL line, key order + spacing identical to the JS core."""
+    ordered = {}
+    for k in KEY_ORDER:
+        if entry.get(k) is not None:
+            ordered[k] = entry[k]
+    for k in entry:
+        if k not in ordered:
+            ordered[k] = entry[k]
+    return json.dumps(ordered, ensure_ascii=False, separators=(",", ":"))
+
+
+def parse_entry(line):
+    """Tolerant parse of one JSONL line — a mangled line returns None."""
+    if not isinstance(line, str):
+        return None
+    trimmed = line.strip()
+    if trimmed == "":
+        return None
+    try:
+        obj = json.loads(trimmed)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    return obj
+
+
+def match_entries(entries, query, kind=None):
+    """Filter entries whose text/tags match the (case-insensitive regex) query.
+
+    An invalid regex falls back to a literal substring match, so a query with
+    stray regex metacharacters never crashes a search.
+    """
+    if kind is not None and kind not in KINDS:
+        return []
+    try:
+        pat = re.compile(query, re.IGNORECASE) if query else None
+    except re.error:
+        pat = None
+    q_lower = (query or "").lower()
+
+    def hit(e):
+        if kind is not None and e.get("kind") != kind:
+            return False
+        if not query:
+            return True
+        hay = " ".join([e.get("text", "")] + [str(t) for t in (e.get("tags") or [])])
+        if pat is not None:
+            return pat.search(hay) is not None
+        return q_lower in hay.lower()
+
+    return [e for e in entries if hit(e)]
+
+
+def build_default_manifest():
+    return {
+        "manifestVersion": MANIFEST_VERSION,
+        "schemaVersion": SCHEMA_VERSION,
+        "kinds": {
+            "fact": {"dir": "facts", "file": "facts.jsonl"},
+            "entity": {"dir": "entities", "file": "entities.jsonl"},
+            "convention": {"dir": "conventions", "file": "conventions.jsonl"},
+        },
+    }
+
+
+def kind_dir(manifest, kind):
+    m = (manifest or {}).get("kinds", {}).get(kind)
+    if not isinstance(m, dict) or not isinstance(m.get("dir"), str):
+        raise ValueError(f"manifest has no entry for kind '{kind}'")
+    return m["dir"].rstrip("/")
+
+
+def kind_canonical_file(manifest, kind):
+    m = (manifest or {}).get("kinds", {}).get(kind)
+    if not isinstance(m, dict) or not isinstance(m.get("file"), str):
+        raise ValueError(f"manifest has no entry for kind '{kind}'")
+    return f"{m['dir'].rstrip('/')}/{m['file']}"
+
+
+def parse_source_ref(spec):
+    """`pr:123` / `issue:9` / `url:https://…` -> {kind, ref}; else None."""
+    if not isinstance(spec, str) or ":" not in spec:
+        return None
+    kind, ref = spec.split(":", 1)
+    kind = kind.strip()
+    ref = ref.strip()
+    if kind not in SOURCE_REF_KINDS or ref == "":
+        return None
+    return {"kind": kind, "ref": ref}
+
+
+# ===========================================================================
+# IO layer — store resolution, working-copy read/write, git + orchestrator push
+# ===========================================================================
+
+BRANCH = os.environ.get("KNOWLEDGE_BRANCH", "agent-knowledge")
+
+
+def _agent_id():
+    return os.environ.get("AGENT_ID", "unknown")
+
+
+def _checkout_root():
+    """The KB working copy (a git checkout of the agent-knowledge branch)."""
+    explicit = os.environ.get("KNOWLEDGE_DIR")
+    if explicit:
+        return explicit
+    return os.path.join("/workspace/agents", _agent_id(), "knowledge")
+
+
+def _store_root():
+    """The KB root within the checkout (…/docs/agent-knowledge/)."""
+    rel = os.environ.get("KNOWLEDGE_STORE_PATH", DEFAULT_KB_PATH).strip("/")
+    root = _checkout_root()
+    return os.path.join(root, rel) if rel else root
+
+
+def _load_manifest():
+    p = os.path.join(_store_root(), "knowledge.manifest.json")
+    if os.path.exists(p):
+        try:
+            with open(p, "r", encoding="utf-8") as fh:
+                m = json.load(fh)
+            if isinstance(m, dict) and isinstance(m.get("kinds"), dict):
+                return m
+        except (OSError, ValueError):
+            pass
+    return build_default_manifest()
+
+
+def _shard_path(manifest, kind):
+    return os.path.join(_store_root(), kind_dir(manifest, kind), "shards", f"{_agent_id()}.jsonl")
+
+
+def _git(*args, timeout=15):
+    return subprocess.run(
+        ["git", "-C", _checkout_root(), *args],
+        capture_output=True, text=True, timeout=timeout,
+    )
+
+
+def _read_all_entries(manifest, kind=None):
+    """Read every entry from all shard files (+ any curated canonical file)."""
+    import glob
+    root = _store_root()
+    kinds = [kind] if kind else list(KINDS)
+    out = []
+    for k in kinds:
+        try:
+            kdir = kind_dir(manifest, k)
+        except ValueError:
+            continue
+        files = sorted(glob.glob(os.path.join(root, kdir, "shards", "*.jsonl")))
+        canonical = os.path.join(root, kind_canonical_file(manifest, k))
+        if os.path.exists(canonical):
+            files.append(canonical)
+        for fpath in files:
+            try:
+                with open(fpath, "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        e = parse_entry(line)
+                        if e is not None:
+                            out.append((e, fpath))
+            except OSError:
+                continue
+    return out
+
+
+def _refresh_checkout():
+    """Best-effort pull-on-demand. Never raises — offline search still works."""
+    root = _checkout_root()
+    if not os.path.isdir(os.path.join(root, ".git")):
+        return
+    try:
+        _git("fetch", "origin", BRANCH, timeout=15)
+        _git("checkout", BRANCH, timeout=10)
+        _git("reset", "--hard", f"origin/{BRANCH}", timeout=10)
+    except (subprocess.SubprocessError, OSError):
+        pass
+
+
+def _push_via_orchestrator():
+    """Route the credentialed push through the orchestrator (mirrors gh-as-agent)."""
+    base = (os.environ.get("ORCHESTRATOR_INTERNAL_URL")
+            or os.environ.get("AEE_ORCHESTRATOR_URL")
+            or "http://orchestrator:4002").rstrip("/")
+    url = f"{base}/internal/agents/{_agent_id()}/knowledge/push"
+    req = urllib.request.Request(
+        url, data=b"{}", method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode("utf-8", "replace")
+        return True, body
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace") if exc.fp else str(exc)
+        return False, f"HTTP {exc.code}: {detail}"
+    except (urllib.error.URLError, OSError) as exc:
+        return False, str(exc)
+
+
+# ===========================================================================
+# Commands
+# ===========================================================================
+
+def _die(msg, code=2):
+    sys.stderr.write(f"knowledge: {msg}\n")
+    sys.exit(code)
+
+
+def cmd_add(argv):
+    tags = []
+    source_refs = []
+    as_json = False
+    no_push = False
+    pos = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--tag":
+            i += 1
+            if i < len(argv):
+                tags.append(argv[i])
+        elif a.startswith("--tag="):
+            tags.append(a[len("--tag="):])
+        elif a == "--source":
+            i += 1
+            if i < len(argv):
+                ref = parse_source_ref(argv[i])
+                if not ref:
+                    _die(f"invalid --source '{argv[i]}' (expected pr:123 / issue:9 / commit:sha / branch:name / url:…)")
+                source_refs.append(ref)
+        elif a.startswith("--source="):
+            ref = parse_source_ref(a[len("--source="):])
+            if not ref:
+                _die("invalid --source value")
+            source_refs.append(ref)
+        elif a == "--json":
+            as_json = True
+        elif a == "--no-push":
+            no_push = True
+        else:
+            pos.append(a)
+        i += 1
+
+    if len(pos) < 2:
+        _die('add: usage: knowledge add <fact|entity|convention> "<text>" [--tag t] [--source pr:123] [--json] [--no-push]')
+    kind, text = pos[0], pos[1]
+
+    try:
+        entry = build_entry(
+            kind, text,
+            origin_agent=_agent_id(),
+            team_id=os.environ.get("KNOWLEDGE_TEAM_ID", ""),
+            correlation_id=os.environ.get("KNOWLEDGE_CORRELATION_ID"),
+            session_id=os.environ.get("KNOWLEDGE_SESSION_ID"),
+            source_refs=source_refs,
+            tags=tags,
+        )
+    except ValueError as exc:
+        _die(str(exc))
+
+    manifest = _load_manifest()
+    shard = _shard_path(manifest, kind)
+    try:
+        os.makedirs(os.path.dirname(shard), exist_ok=True)
+        with open(shard, "a", encoding="utf-8") as fh:
+            fh.write(serialize_entry(entry) + "\n")
+    except OSError as exc:
+        _die(f"could not write shard {shard}: {exc}", 2)
+
+    # Commit with the agent identity so provenance holds on the shared branch.
+    rel = os.path.relpath(shard, _checkout_root())
+    _git("add", rel)
+    commit = _git(
+        "commit",
+        "--author", f"{_agent_id()} <{_agent_id()}@agents.local>",
+        "-m", f"knowledge({kind}): {entry['id']}",
+    )
+    if commit.returncode != 0:
+        sys.stderr.write(f"knowledge: local commit failed: {commit.stderr.strip()}\n")
+
+    if not no_push:
+        ok, detail = _push_via_orchestrator()
+        if not ok:
+            sys.stderr.write(
+                f"knowledge: recorded locally ({entry['id']}) but push failed: {detail}\n"
+                "It will be shared on the next successful push.\n"
+            )
+
+    if as_json:
+        print(serialize_entry(entry))
+    else:
+        print(entry["id"])
+        sys.stderr.write(f'knowledge: recorded {kind} "{entry["text"]}" ({entry["id"]})\n')
+
+
+def _kind_flag(argv):
+    kind = None
+    rest = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--kind":
+            i += 1
+            kind = argv[i] if i < len(argv) else None
+        elif a.startswith("--kind="):
+            kind = a[len("--kind="):]
+        else:
+            rest.append(a)
+        i += 1
+    if kind is not None and kind not in KINDS:
+        _die("--kind must be one of " + "|".join(KINDS))
+    return kind, rest
+
+
+def cmd_search(argv):
+    kind, rest = _kind_flag(argv)
+    as_json = False
+    no_sync = False
+    limit = None
+    query_parts = []
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a == "--json":
+            as_json = True
+        elif a == "--no-sync":
+            no_sync = True
+        elif a == "--limit":
+            i += 1
+            limit = int(rest[i]) if i < len(rest) and rest[i].isdigit() else None
+        elif a.startswith("--limit="):
+            v = a[len("--limit="):]
+            limit = int(v) if v.isdigit() else None
+        elif a in ("--tier", "--source"):
+            i += 1  # reserved; accepted and ignored in Phase 1
+        else:
+            query_parts.append(a)
+        i += 1
+    query = " ".join(query_parts).strip()
+    if query == "":
+        _die('search: usage: knowledge search "<query>" [--kind k] [--limit N] [--json] [--no-sync]')
+
+    if not no_sync:
+        _refresh_checkout()
+
+    manifest = _load_manifest()
+    pairs = _read_all_entries(manifest, kind)
+    matched = match_entries([e for e, _ in pairs], query, kind)
+    if limit is not None:
+        matched = matched[:limit]
+
+    if not matched:
+        sys.stderr.write(f'knowledge: no matches for "{query}"\n')
+        sys.exit(1)
+
+    for e in matched:
+        if as_json:
+            print(serialize_entry(e))
+        else:
+            conv = len(e.get("convergence") or [])
+            print(f'[team] {e.get("text","")}  (id={e.get("id","?")} by={e.get("originAgent","?")} conv={conv})')
+
+
+def cmd_list(argv):
+    kind, rest = _kind_flag(argv)
+    mine = "--mine" in rest
+    as_json = "--json" in rest
+    manifest = _load_manifest()
+    pairs = _read_all_entries(manifest, kind)
+    entries = [e for e, _ in pairs]
+    if mine:
+        entries = [e for e in entries if e.get("originAgent") == _agent_id()]
+    for e in entries:
+        if as_json:
+            print(serialize_entry(e))
+        else:
+            print(f'{e.get("kind","?"):11} {e.get("text","")}  (id={e.get("id","?")} by={e.get("originAgent","?")})')
+
+
+def cmd_path(argv):
+    if not argv:
+        _die('path: usage: knowledge path "<id>"')
+    wanted = argv[0]
+    manifest = _load_manifest()
+    for e, fpath in _read_all_entries(manifest):
+        if e.get("id") == wanted:
+            print(os.path.relpath(fpath, _store_root()))
+            return
+    sys.stderr.write(f'knowledge: no entry with id "{wanted}"\n')
+    sys.exit(1)
+
+
+def cmd_promote(argv):
+    sys.stderr.write("knowledge: promotion lands in Phase 3 (not yet enabled)\n")
+    sys.exit(3)
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
+        sys.stdout.write(__doc__)
+        return
+    cmd, rest = sys.argv[1], sys.argv[2:]
+    dispatch = {
+        "add": cmd_add,
+        "search": cmd_search,
+        "list": cmd_list,
+        "path": cmd_path,
+        "promote": cmd_promote,
+    }
+    fn = dispatch.get(cmd)
+    if not fn:
+        sys.stderr.write(
+            f"knowledge: unknown subcommand '{cmd}'. "
+            "Supported: add, search, list, path, promote.\n"
+        )
+        sys.exit(2)
+    fn(rest)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Unit tests for the pure core of the `knowledge` CLI.
+
+The CLI has no `.py` extension (it lives on PATH as `knowledge`), so it is
+loaded via SourceFileLoader — the same trick test_agent_entrypoint.py uses for
+the entrypoint. Only the PURE core is tested (build_entry / serialize / parse /
+match / manifest); the git + network IO in the cmd_* wrappers is verified
+manually per repo convention. Run with:
+
+    python3 -m unittest agent-image/scripts/test_knowledge.py
+"""
+import importlib.util
+import unittest
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+
+_CLI_PATH = Path(__file__).resolve().parent / "knowledge"
+_loader = SourceFileLoader("knowledge_cli", str(_CLI_PATH))
+_spec = importlib.util.spec_from_loader("knowledge_cli", _loader)
+kn = importlib.util.module_from_spec(_spec)
+_loader.exec_module(kn)
+
+# The cross-runtime guard: this exact string must be produced by BOTH the Python
+# core here and orchestrator/knowledge-store.js `serializeEntry` (see the mirror
+# assertion in the node --test). If either side reorders keys or changes JSON
+# spacing, the shared KB files diverge — so both tests pin the same golden line.
+GOLDEN = (
+    '{"v":1,"id":"0123456789ab","kind":"fact","text":"Branch from origin/main",'
+    '"originAgent":"cobol-agent","teamId":"team-x","createdAt":"2026-07-08T10:00:00Z",'
+    '"correlationId":"evt-123","sourceRefs":[{"kind":"pr","ref":"459"}],'
+    '"convergence":["cobol-agent"],"tags":["git","workflow"],"status":"active"}'
+)
+
+
+def _golden_entry():
+    return kn.build_entry(
+        "fact", "Branch from origin/main",
+        origin_agent="cobol-agent", team_id="team-x",
+        correlation_id="evt-123", source_refs=[{"kind": "pr", "ref": "459"}],
+        tags=["git", "workflow"],
+        entry_id="0123456789ab", created_at="2026-07-08T10:00:00Z",
+    )
+
+
+class BuildEntry(unittest.TestCase):
+    def test_defaults_and_convergence_seed(self):
+        e = kn.build_entry("fact", "x", origin_agent="a1", team_id="t",
+                           correlation_id="c1")
+        self.assertEqual(e["v"], 1)
+        self.assertEqual(e["kind"], "fact")
+        self.assertEqual(e["convergence"], ["a1"])  # seeded [originAgent]
+        self.assertEqual(e["status"], "active")
+        self.assertTrue(len(e["id"]) == 12)
+
+    def test_id_is_12_hex(self):
+        e = kn.build_entry("fact", "x", origin_agent="a", team_id="t", correlation_id="c")
+        import re
+        self.assertRegex(e["id"], r"^[0-9a-f]{12}$")
+
+    def test_missing_provenance_link_raises(self):
+        # originAgent/teamId/createdAt present but NO correlationId/sessionId/sourceRefs
+        with self.assertRaises(ValueError):
+            kn.build_entry("fact", "x", origin_agent="a", team_id="t")
+
+    def test_correlation_id_alone_satisfies_provenance(self):
+        e = kn.build_entry("fact", "x", origin_agent="a", team_id="t", correlation_id="c1")
+        self.assertEqual(e["correlationId"], "c1")
+
+    def test_source_ref_alone_satisfies_provenance(self):
+        e = kn.build_entry("fact", "x", origin_agent="a", team_id="t",
+                           source_refs=[{"kind": "pr", "ref": "1"}])
+        self.assertEqual(e["sourceRefs"], [{"kind": "pr", "ref": "1"}])
+
+    def test_bad_kind_raises(self):
+        with self.assertRaises(ValueError):
+            kn.build_entry("nonsense", "x", origin_agent="a", team_id="t", correlation_id="c")
+
+    def test_empty_text_raises(self):
+        with self.assertRaises(ValueError):
+            kn.build_entry("fact", "   ", origin_agent="a", team_id="t", correlation_id="c")
+
+    def test_missing_origin_agent_raises(self):
+        with self.assertRaises(ValueError):
+            kn.build_entry("fact", "x", origin_agent="", team_id="t", correlation_id="c")
+
+    def test_bad_source_refs_dropped(self):
+        e = kn.build_entry("fact", "x", origin_agent="a", team_id="t",
+                           correlation_id="c",
+                           source_refs=[{"kind": "bogus", "ref": "1"}, {"kind": "pr", "ref": "9"}])
+        self.assertEqual(e["sourceRefs"], [{"kind": "pr", "ref": "9"}])
+
+
+class Serialize(unittest.TestCase):
+    def test_golden_matches_js_core(self):
+        self.assertEqual(kn.serialize_entry(_golden_entry()), GOLDEN)
+
+    def test_key_order_no_spaces(self):
+        line = kn.serialize_entry(_golden_entry())
+        self.assertNotIn(", ", line)  # separators=(",",":"), matches JSON.stringify
+        self.assertTrue(line.startswith('{"v":1,"id":'))
+
+    def test_round_trip(self):
+        e = _golden_entry()
+        self.assertEqual(kn.parse_entry(kn.serialize_entry(e)), e)
+
+
+class Parse(unittest.TestCase):
+    def test_blank_and_mangled_return_none(self):
+        for bad in ("", "   ", "{not json", "[1,2,3]", "42", None):
+            self.assertIsNone(kn.parse_entry(bad))
+
+    def test_valid_line(self):
+        self.assertEqual(kn.parse_entry(GOLDEN)["id"], "0123456789ab")
+
+
+class Match(unittest.TestCase):
+    def setUp(self):
+        self.entries = [
+            {"kind": "fact", "text": "poller pagination handles bursts", "tags": ["polling"]},
+            {"kind": "entity", "text": "github-poller.js polls every 30s"},
+            {"kind": "convention", "text": "Branch from origin/main"},
+        ]
+
+    def test_substring_case_insensitive(self):
+        m = kn.match_entries(self.entries, "POLLER")
+        self.assertEqual(len(m), 2)
+
+    def test_kind_filter(self):
+        m = kn.match_entries(self.entries, "poller", kind="fact")
+        self.assertEqual(len(m), 1)
+        self.assertEqual(m[0]["kind"], "fact")
+
+    def test_tag_match(self):
+        m = kn.match_entries(self.entries, "polling")
+        self.assertEqual(len(m), 1)
+
+    def test_invalid_regex_falls_back_to_substring(self):
+        # a stray unbalanced paren must not crash the search
+        m = kn.match_entries(self.entries, "origin/main(")
+        self.assertEqual(m, [])  # no literal match, but no crash
+        m2 = kn.match_entries([{"kind": "fact", "text": "a(b"}], "a(")
+        self.assertEqual(len(m2), 1)
+
+    def test_empty_query_returns_all(self):
+        self.assertEqual(len(kn.match_entries(self.entries, "")), 3)
+
+    def test_bad_kind_returns_empty(self):
+        self.assertEqual(kn.match_entries(self.entries, "x", kind="bogus"), [])
+
+
+class Manifest(unittest.TestCase):
+    def test_default_manifest_shape(self):
+        m = kn.build_default_manifest()
+        self.assertEqual(kn.kind_dir(m, "fact"), "facts")
+        self.assertEqual(kn.kind_canonical_file(m, "fact"), "facts/facts.jsonl")
+
+    def test_parse_source_ref(self):
+        self.assertEqual(kn.parse_source_ref("pr:459"), {"kind": "pr", "ref": "459"})
+        self.assertEqual(kn.parse_source_ref("url:https://x/y"), {"kind": "url", "ref": "https://x/y"})
+        self.assertIsNone(kn.parse_source_ref("bogus:1"))
+        self.assertIsNone(kn.parse_source_ref("nope"))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -93,5 +93,26 @@ class FormatAskUserQuestion(unittest.TestCase):
         self.assertNotIn("no label", out)
 
 
+class BuildHarvestHint(unittest.TestCase):
+    fn = staticmethod(entrypoint.build_harvest_hint)
+
+    def test_level_0_is_empty(self):
+        self.assertEqual(self.fn(0), "")
+
+    def test_negative_or_noninteger_is_empty(self):
+        self.assertEqual(self.fn(-1), "")
+        self.assertEqual(self.fn("1"), "")  # not an int -> today's behaviour
+        self.assertEqual(self.fn(None), "")
+
+    def test_level_1_mentions_knowledge_add(self):
+        out = self.fn(1)
+        self.assertIn("knowledge add", out)
+        self.assertIn("knowledge search", out)
+
+    def test_higher_levels_still_harvest(self):
+        for lvl in (2, 3):
+            self.assertIn("knowledge add", self.fn(lvl))
+
+
 if __name__ == "__main__":
     unittest.main()

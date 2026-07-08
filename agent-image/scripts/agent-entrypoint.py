@@ -985,9 +985,45 @@ def _save_next_batch(token: str) -> None:
         pass
 
 
+# ---- Knowledge harvest hint (Shared Agent Learning, Phase 1) ----
+
+def _knowledge_autonomy_level() -> int:
+    """Resolve the 0..3 autonomy dial the orchestrator injected (default 1)."""
+    raw = os.environ.get("KNOWLEDGE_AUTONOMY")
+    try:
+        n = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 1
+    return 0 if n < 0 else 3 if n > 3 else n
+
+
+def build_harvest_hint(autonomy_level: int) -> str:
+    """The per-session harvest instruction, gated on the autonomy dial.
+
+    Pure: level 0 (or a non-int) returns "" so the surrounding hint is exactly
+    today's text — this is autonomy level 0 == today. Level >= 1 asks Claude to
+    also record durable, team-useful lessons in the shared KB via the CLI.
+    Woven into the shared memory hint, so it reaches BOTH DM and per-invocation
+    runs (decision #2). Mirrored in orchestrator/agent-runner.js buildHarvestHint.
+    """
+    if not isinstance(autonomy_level, int) or autonomy_level < 1:
+        return ""
+    return (
+        " In addition to your memory files, share durable lessons with your "
+        "teammates through the team knowledge base. For each insight that would "
+        "help ANY teammate on this repo (a project convention, an environment "
+        "fact, a key entity) run: knowledge add fact|entity|convention "
+        '"<one-line statement>". Provenance is attached automatically — record '
+        "only lessons that hold beyond this one run, no PR/issue-specific "
+        'detail. First run knowledge search "<topic>" to avoid restating '
+        "something already recorded. Nothing durable to add: skip it."
+    )
+
+
 # ---- Memory hint (port from agent-runner.js) ----
 
 def _build_memory_hint(blueprint_id: str | None) -> str:
+    harvest = build_harvest_hint(_knowledge_autonomy_level())
     if blueprint_id:
         return (
             f"This agent is an instance of blueprint '{blueprint_id}'. "
@@ -1002,6 +1038,7 @@ def _build_memory_hint(blueprint_id: str | None) -> str:
             f"curl -s -X PUT -H 'Content-Type: text/plain' --data-binary @memory/context.md http://localhost:4002/internal/blueprints/{blueprint_id}/memory/context.md; "
             f"curl -s -X PUT -H 'Content-Type: text/plain' --data-binary @memory/log.md http://localhost:4002/internal/blueprints/{blueprint_id}/memory/log.md. "
             f"IMPORTANT: Your workspace root is the current working directory."
+            + harvest
         )
     return (
         "Read memory/context.md and memory/log.md first (if they exist) before responding. "
@@ -1009,6 +1046,7 @@ def _build_memory_hint(blueprint_id: str | None) -> str:
         "IMPORTANT: Your workspace root is the current working directory. "
         "Memory entries may reference absolute paths like /workspace/... from a different context. "
         "Translate these to relative paths in your current directory (e.g. /workspace/314092_foo/ becomes ./314092_foo/)."
+        + harvest
     )
 
 
@@ -1068,6 +1106,14 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     # $HOME/.claude/projects/...) survive container restarts. The default
     # /root path is wiped every time podman recreates the container.
     env = {**os.environ, "HOME": str(_agent_workdir())}
+    # Provenance for `knowledge add` calls the agent makes during this run: the
+    # CLI stamps every KB entry with these (correlationId ties it to the session
+    # log; sessionId is best-effort). Team id / autonomy / store paths ride in
+    # from the container env the orchestrator injected, so they need no per-run
+    # override here. (Shared Agent Learning, Phase 1.)
+    env["KNOWLEDGE_CORRELATION_ID"] = correlation_id or ""
+    if resume_id:
+        env["KNOWLEDGE_SESSION_ID"] = resume_id
     proc = subprocess.Popen(
         ["claude", *args],
         cwd=str(_agent_workdir()),

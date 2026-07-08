@@ -85,6 +85,41 @@ aee-artifact list "Functional Design"      # all matching entries
 If the upstream pushed but never registered an artifact you expect, do not guess
 a path — tell the user it is missing and stop.
 
+## Shared team knowledge (`knowledge`)
+
+`aee-artifact` hands **one deliverable** to **one downstream agent**. The
+`knowledge` CLI is different: it is the shared, team-wide memory of durable
+**lessons** — project conventions, environment facts, key entities — that help
+*any* teammate on this repo, now and in future runs. It is git-backed and synced
+into a local working copy, so it is queryable in real time and offline.
+
+**Before you start non-trivial work, check what the team already knows:**
+
+```
+knowledge search "poller pagination"
+knowledge search "npm install" --kind fact
+```
+
+**When you learn something durable, record it** (provenance — who/when/which
+session — is attached automatically):
+
+```
+knowledge add fact "This repo unit-tests pure helper cores only; IO is verified manually"
+knowledge add entity "github-poller.js polls the Events API every 30s" --tag polling
+knowledge add convention "Branch from origin/main" --source pr:459
+```
+
+`add` appends to *your own* shard, commits it as you, and pushes it to the shared
+`agent-knowledge` branch through the orchestrator — teammates see it on their
+next `knowledge search`. Record only lessons that hold **beyond this one run**
+(no PR/issue-specific detail); `knowledge search` first so you don't restate
+something already there. Nothing durable to add: skip it. This is separate from
+your private `memory/*.md` — memory is your episodic notebook, `knowledge` is the
+team's curated, shared knowledge base.
+
+Inspect with `knowledge list [--mine]` and `knowledge path "<id>"`. (`knowledge
+promote` is reserved for a later phase and is not yet enabled.)
+
 ## Key Constraints
 
 - Follow the LoopScript phases strictly and sequentially.

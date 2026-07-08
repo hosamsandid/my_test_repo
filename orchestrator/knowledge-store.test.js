@@ -20,6 +20,7 @@ const {
   kindFilePath,
   normalizeKnowledgeStore,
   knowledgeAutonomyLevel,
+  buildHarvestHint,
 } = require('./knowledge-store');
 
 // Deterministic injections.
@@ -218,4 +219,45 @@ test('knowledgeAutonomyLevel defaults to 1 and clamps to 0..3', () => {
   assert.equal(knowledgeAutonomyLevel({ knowledgeAutonomy: 9 }), 3);
   assert.equal(knowledgeAutonomyLevel({ knowledgeAutonomy: -5 }), 0);
   assert.equal(knowledgeAutonomyLevel({ knowledgeAutonomy: 'nope' }), 1);
+});
+
+// --- buildHarvestHint -------------------------------------------------------
+
+test('buildHarvestHint returns empty at level 0 (today) and non-int', () => {
+  assert.equal(buildHarvestHint(0), '');
+  assert.equal(buildHarvestHint(-1), '');
+  assert.equal(buildHarvestHint('1'), '');
+  assert.equal(buildHarvestHint(undefined), '');
+});
+
+test('buildHarvestHint mentions the CLI at level >= 1', () => {
+  for (const lvl of [1, 2, 3]) {
+    const out = buildHarvestHint(lvl);
+    assert.ok(out.includes('knowledge add'));
+    assert.ok(out.includes('knowledge search'));
+  }
+});
+
+// --- Cross-runtime serialization guard --------------------------------------
+// This EXACT string must also be produced by the Python core's serialize_entry
+// (agent-image/scripts/test_knowledge.py GOLDEN). If either side reorders keys
+// or changes JSON spacing, the shared KB files diverge between runtimes.
+test('serializeEntry byte-matches the shared cross-runtime golden line', () => {
+  const entry = makeKnowledgeEntry({
+    kind: 'fact',
+    text: 'Branch from origin/main',
+    originAgent: 'cobol-agent',
+    teamId: 'team-x',
+    correlationId: 'evt-123',
+    sourceRefs: [{ kind: 'pr', ref: '459' }],
+    tags: ['git', 'workflow'],
+    id: '0123456789ab',
+    createdAt: '2026-07-08T10:00:00Z',
+  });
+  const GOLDEN =
+    '{"v":1,"id":"0123456789ab","kind":"fact","text":"Branch from origin/main",' +
+    '"originAgent":"cobol-agent","teamId":"team-x","createdAt":"2026-07-08T10:00:00Z",' +
+    '"correlationId":"evt-123","sourceRefs":[{"kind":"pr","ref":"459"}],' +
+    '"convergence":["cobol-agent"],"tags":["git","workflow"],"status":"active"}';
+  assert.equal(serializeEntry(entry), GOLDEN);
 });

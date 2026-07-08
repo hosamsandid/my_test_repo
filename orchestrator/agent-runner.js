@@ -30,6 +30,7 @@ const { spawn } = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const { buildHarvestHint, knowledgeAutonomyLevel } = require("./knowledge-store");
 const cron = require("node-cron");
 const { marked } = require("marked");
 const {
@@ -310,6 +311,14 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT,
       "Memory entries may reference absolute paths like /workspace/... from a different context. " +
       "Translate these to relative paths in your current directory (e.g. /workspace/314092_foo/ becomes ./314092_foo/).";
 
+  // Shared Agent Learning (Phase 1): weave the KB harvest instruction into the
+  // memory hint at autonomy level >= 1 (default 1). Reaches BOTH DM and
+  // per-invocation runs. Level 0 returns '' → today's behaviour unchanged.
+  const harvestHint = buildHarvestHint(
+    knowledgeAutonomyLevel({ knowledgeAutonomy: process.env.KNOWLEDGE_AUTONOMY }),
+  );
+  const memoryHintFull = memoryHint + harvestHint;
+
   // Per-message model selection. Re-read config.json on every invocation so a
   // change made via the chat UI (writes `modelOverride`) is picked up without
   // restarting the runner. Falls back to AGENT_DEFAULT_MODEL (set by the
@@ -331,7 +340,7 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT,
     // allowedTools whitelist below covers the same practical surface
     // without prompts for the tools agents actually use.
     "--permission-mode", "acceptEdits",
-    "--append-system-prompt", memoryHint,
+    "--append-system-prompt", memoryHintFull,
     ...(modelArg ? ["--model", modelArg] : []),
     "--allowedTools", "Bash(*)",
     "--allowedTools", "Read(*)",
@@ -360,7 +369,10 @@ function callClaude(prompt, { roomId, correlationId, timeoutMs = CLAUDE_TIMEOUT,
     const args = withResumeId ? ["--resume", withResumeId, ...baseArgs] : baseArgs;
     const proc = spawn("claude", args, {
       cwd: AGENT_WORKDIR,
-      env: { ...process.env, HOME: "/root" },
+      // KNOWLEDGE_CORRELATION_ID: provenance stamp for any `knowledge add` the
+      // agent runs this session (ties the KB entry to the session log). Team
+      // id / autonomy / store paths ride in from the container env.
+      env: { ...process.env, HOME: "/root", KNOWLEDGE_CORRELATION_ID: correlationId || "" },
       stdio: ["ignore", "pipe", "pipe"],
     });
     sessionEntry.proc = proc;

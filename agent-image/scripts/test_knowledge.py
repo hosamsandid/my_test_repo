@@ -161,5 +161,27 @@ class Manifest(unittest.TestCase):
         self.assertIsNone(kn.parse_source_ref("nope"))
 
 
+class LeanSummary(unittest.TestCase):
+    """The Phase-2 push summary — only whitelisted fields, count from convergence."""
+
+    def test_whitelists_fields(self):
+        entry = {
+            "id": "9f3a12bc7de0", "kind": "fact", "text": "hi",
+            "originAgent": "acme-dev-1", "teamId": "acme",
+            "convergence": ["acme-dev-1", "acme-dev-2"], "correlationId": "$evt1",
+        }
+        self.assertEqual(kn.lean_summary(entry), {
+            "id": "9f3a12bc7de0", "kind": "fact", "text": "hi",
+            "originAgent": "acme-dev-1", "convergenceCount": 2,
+        })
+
+    def test_defaults_count_to_one(self):
+        self.assertEqual(kn.lean_summary({"id": "aaaaaaaaaaaa"})["convergenceCount"], 1)
+
+    def test_drops_idless(self):
+        self.assertIsNone(kn.lean_summary({"kind": "fact"}))
+        self.assertIsNone(kn.lean_summary(None))
+
+
 if __name__ == "__main__":
     unittest.main()

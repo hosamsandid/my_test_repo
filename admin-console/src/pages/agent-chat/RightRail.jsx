@@ -1,9 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { PanelRightClose, ScrollText, FolderTree, CalendarClock, Activity } from 'lucide-react';
+import { PanelRightClose, ScrollText, FolderTree, CalendarClock, Activity, Brain } from 'lucide-react';
 import SessionLogPanel from './SessionLogPanel';
 import WorkspaceBrowser from './WorkspaceBrowser';
 import TriggersPanel from './TriggersPanel';
 import RunningSessionsPanel from './RunningSessionsPanel';
+import KnowledgeFeed from '../../components/KnowledgeFeed';
+import LearningBadge from '../../components/LearningBadge';
 import { apiCall } from '../../hooks/useApi';
 
 const TAB_KEY = 'agentChat.rightRailTab';
@@ -128,6 +130,13 @@ export default function RightRail({
           active={tab === 'sessions'}
           onClick={() => setTab('sessions')}
         />
+        <TabButton
+          icon={<Brain size={13} />}
+          label="Knowledge"
+          compact={compact}
+          active={tab === 'knowledge'}
+          onClick={() => setTab('knowledge')}
+        />
         <div style={{ flex: 1 }} />
         <button
           onClick={onClose}
@@ -170,6 +179,15 @@ export default function RightRail({
         </div>
         <div style={{ display: tab === 'sessions' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           <RunningSessionsPanel agentId={agentId} active={tab === 'sessions'} />
+        </div>
+        <div style={{ display: tab === 'knowledge' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+          <div style={{ padding: 'var(--eb-space-3)', borderBottom: '1px solid var(--eb-border-default)', display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>What this agent has learned</span>
+            <span style={{ marginLeft: 'auto' }}><LearningBadge scope={`agent:${agentId}`} showZero /></span>
+          </div>
+          <div style={{ flex: 1, minHeight: 0 }}>
+            <KnowledgeFeed scope={`agent:${agentId}`} emptyHint="Nothing harvested from this agent yet." />
+          </div>
         </div>
       </div>
     </div>

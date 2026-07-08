@@ -274,6 +274,27 @@ def kind_canonical_file(manifest, kind):
     return f"{m['dir'].rstrip('/')}/{m['file']}"
 
 
+def lean_summary(entry):
+    """The provenance-lean push summary for the Phase-2 live feed.
+
+    Only whitelisted fields (id/kind/text/originAgent/convergenceCount) — no
+    secrets; the same values the shard already exposes. The orchestrator echoes
+    these into the knowledge feed after a successful push. Mirrors leanEntry in
+    orchestrator/knowledge-feed.js.
+    """
+    if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+        return None
+    conv = entry.get("convergence")
+    count = len(conv) if isinstance(conv, list) and conv else 1
+    return {
+        "id": entry["id"],
+        "kind": entry.get("kind", "fact"),
+        "text": entry.get("text", ""),
+        "originAgent": entry.get("originAgent"),
+        "convergenceCount": count,
+    }
+
+
 def parse_source_ref(spec):
     """`pr:123` / `issue:9` / `url:https://…` -> {kind, ref}; else None."""
     if not isinstance(spec, str) or ":" not in spec:
@@ -376,14 +397,21 @@ def _refresh_checkout():
         pass
 
 
-def _push_via_orchestrator():
-    """Route the credentialed push through the orchestrator (mirrors gh-as-agent)."""
+def _push_via_orchestrator(entries=None):
+    """Route the credentialed push through the orchestrator (mirrors gh-as-agent).
+
+    Carries a lean summary of the just-added entries so the orchestrator can echo
+    them into the Phase-2 live feed. The values are already in the shard, so
+    nothing secret is added; an empty body still works (older orchestrator).
+    """
     base = (os.environ.get("ORCHESTRATOR_INTERNAL_URL")
             or os.environ.get("AEE_ORCHESTRATOR_URL")
             or "http://orchestrator:4002").rstrip("/")
     url = f"{base}/internal/agents/{_agent_id()}/knowledge/push"
+    summaries = [s for s in (lean_summary(e) for e in (entries or [])) if s]
+    payload = json.dumps({"entries": summaries}).encode("utf-8")
     req = urllib.request.Request(
-        url, data=b"{}", method="POST",
+        url, data=payload, method="POST",
         headers={"Content-Type": "application/json"},
     )
     try:
@@ -479,7 +507,7 @@ def cmd_add(argv):
         sys.stderr.write(f"knowledge: local commit failed: {commit.stderr.strip()}\n")
 
     if not no_push:
-        ok, detail = _push_via_orchestrator()
+        ok, detail = _push_via_orchestrator([entry])
         if not ok:
             sys.stderr.write(
                 f"knowledge: recorded locally ({entry['id']}) but push failed: {detail}\n"

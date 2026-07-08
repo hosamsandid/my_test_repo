@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight,
   Boxes, Key, MessageCircle, Github, Layers, GitBranch,
-  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2,
+  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2, Brain,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
@@ -48,6 +48,7 @@ const NAV = [
     { path: '/team-setup',   label: 'Team Wizard',         Icon: Users2 },
     { path: '/agents',       label: 'Agents',              Icon: Layers },
     { path: '/flows',         label: 'Flows',               Icon: GitBranch },
+    { path: '/knowledge',    label: 'Knowledge',           Icon: Brain },
     { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
     // { path: '/orchestrator-wizard', label: 'Orchestrator Wizard', Icon: Wand2 },
   ]},
@@ -72,6 +73,7 @@ const BREADCRUMBS = {
   '/team-setup':   'Team Wizard',
   '/agents':       'Agents',
   '/flows':        'Flows',
+  '/knowledge':    'Knowledge',
   '/chats':        'Agent Chat',
   '/environments': 'Working Environments',
   '/ssh-keys':     'SSH Keys',

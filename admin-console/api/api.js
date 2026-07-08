@@ -15,6 +15,8 @@ const audit = require('./audit');
 const { computeScope, visibleTeam, visibleAgent } = require('./scope');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
+const { buildKnowledgeGraph, summarizeKnowledge, parseScope } = require('./knowledge-graph');
+const knowledgeLinks = require('./knowledge-links');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle } = require('./process-template');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { normalizeTemplatePorts } = require('./catalog-ports');
@@ -2494,6 +2496,372 @@ app.post('/api/process/graph', (req, res) => {
     triggers: (r.triggers || []).map(t => ({ ...t, emits: Array.isArray(t.emits) ? t.emits : [] })),
   }));
   res.json({ level: 'template', team: null, imported: true, name: bundle.name, ...buildProcessGraph(agents) });
+});
+
+/* ─── Knowledge Flow (Shared Agent Learning, Phase 2) ───────────────────────
+ * Read-only aggregation of the team Knowledge Base into the lane/node/edge model
+ * the KnowledgeFlow page renders (T0 agent → T1 team KB → T2 skill), plus a lean
+ * summary for the LearningBadge, a live SSE feed of harvests, and a provenance
+ * drill-down. All heavy logic is in the pure builders (knowledge-graph.js /
+ * knowledge-links.js); these routes are the IO shell that gathers KB entries off
+ * the shared volume (the orchestrator-maintained canonical clone, agent-checkout
+ * fallback), skills, and agent metadata — mirroring how /api/process/graph
+ * gathers its inputs. */
+
+const KNOWLEDGE_CLONE_ROOT = path.join(WORKSPACE, 'knowledge');
+const KNOWLEDGE_EVENTS_FILE = path.join(WORKSPACE, 'knowledge-events', 'events.jsonl');
+const KB_KINDS = ['fact', 'entity', 'convention'];
+const KB_DEFAULT_DIRS = { fact: 'facts', entity: 'entities', convention: 'conventions' };
+const KB_DEFAULT_STORE_PATH = 'docs/agent-knowledge/';
+
+function kbParseLine(line) {
+  try {
+    const o = JSON.parse(line);
+    return o && typeof o === 'object' && !Array.isArray(o) ? o : null;
+  } catch { return null; }
+}
+
+// Resolve a team's KB store-relative path (e.g. docs/agent-knowledge/) from any
+// of its agents' environments — a team shares one env → one KB config.
+function resolveTeamStorePath(teamId) {
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    const t = cfg.teamId || cfg.parentTeamId || 'default';
+    if (t !== teamId || !cfg.environmentId) continue;
+    const env = loadEnvironment(cfg.environmentId);
+    const p = env && env.knowledgeStore && typeof env.knowledgeStore.path === 'string'
+      ? env.knowledgeStore.path : null;
+    if (p) return p.replace(/^\/+|\/+$/g, '') + '/';
+  }
+  return KB_DEFAULT_STORE_PATH;
+}
+
+// Resolve a team's KB repo web URL for provenance links (sourceRefs → PR/issue).
+function resolveTeamRepoUrl(teamId) {
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    const t = cfg.teamId || cfg.parentTeamId || 'default';
+    if (t !== teamId || !cfg.environmentId) continue;
+    const env = loadEnvironment(cfg.environmentId);
+    const ref = env && env.knowledgeStore && env.knowledgeStore.repoRef;
+    if (ref && ref.url) return ref.url;
+    const repos = (env && env.repositories) || [];
+    if (repos[0] && repos[0].url) return repos[0].url;
+  }
+  return null;
+}
+
+function teamAgentIds(teamId) {
+  return listAgentDirs().filter(id => {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    return (cfg.teamId || cfg.parentTeamId || 'default') === teamId;
+  });
+}
+
+// Kind → { dir, file }, honouring a store's manifest if present, else defaults.
+function kbKindDirs(storeRoot) {
+  const m = readJsonFile(path.join(storeRoot, 'knowledge.manifest.json'), null);
+  if (m && m.kinds && typeof m.kinds === 'object') {
+    const out = [];
+    for (const k of KB_KINDS) {
+      const e = m.kinds[k];
+      if (e && typeof e.dir === 'string' && typeof e.file === 'string') {
+        out.push({ dir: e.dir.replace(/\/+$/, ''), file: e.file });
+      }
+    }
+    if (out.length) return out;
+  }
+  return KB_KINDS.map(k => ({ dir: KB_DEFAULT_DIRS[k], file: `${KB_DEFAULT_DIRS[k]}.jsonl` }));
+}
+
+function kbReadStore(entries, storeRoot) {
+  for (const { dir, file } of kbKindDirs(storeRoot)) {
+    const kindDir = path.join(storeRoot, dir);
+    const shardsDir = path.join(kindDir, 'shards');
+    let shardNames = [];
+    try { shardNames = fs.readdirSync(shardsDir).filter(n => n.endsWith('.jsonl')); } catch { /* none */ }
+    const files = shardNames.map(n => path.join(shardsDir, n));
+    const canonical = path.join(kindDir, file);
+    if (fs.existsSync(canonical)) files.push(canonical);
+    for (const fp of files) {
+      let raw;
+      try { raw = fs.readFileSync(fp, 'utf8'); } catch { continue; }
+      for (const line of raw.split('\n')) {
+        if (!line.trim()) continue;
+        const e = kbParseLine(line);
+        if (e) entries.push(e);
+      }
+    }
+  }
+}
+
+// Gather a team's KB entries from the canonical clone (preferred, fresh) or,
+// when it doesn't exist yet, union the shards from every team agent's checkout.
+// dedupById in the builder converges regardless of how many stale copies we see.
+function gatherTeamEntries(teamId) {
+  const entries = [];
+  const warnings = [];
+  if (!AGENT_ID_RE.test(teamId)) return { entries, warnings };
+  const storeRel = resolveTeamStorePath(teamId);
+  const cloneRoot = path.join(KNOWLEDGE_CLONE_ROOT, path.basename(teamId));
+  const cloneStore = path.join(cloneRoot, storeRel);
+  if (fs.existsSync(path.join(cloneRoot, '.git')) && fs.existsSync(cloneStore)) {
+    kbReadStore(entries, cloneStore);
+    return { entries, warnings };
+  }
+  for (const agentId of teamAgentIds(teamId)) {
+    const store = path.join(AGENTS_DIR, agentId, 'knowledge', storeRel);
+    if (fs.existsSync(store)) kbReadStore(entries, store);
+  }
+  warnings.push(`no canonical KB clone for team '${teamId}'; read from agent checkouts`);
+  return { entries, warnings };
+}
+
+// Which teams does this scope + membership resolve to?
+function knowledgeScopeTeams(parsed, scope) {
+  if (parsed.kind === 'team') return [parsed.id];
+  if (parsed.kind === 'agent') {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, parsed.id, 'config.json'), {});
+    return [cfg.teamId || cfg.parentTeamId || 'default'];
+  }
+  // global: every team that has agents, narrowed by membership scope.
+  const teams = new Set();
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    teams.add(cfg.teamId || cfg.parentTeamId || 'default');
+  }
+  return [...teams].filter(t => visibleTeam(scope, t));
+}
+
+// Fire-and-forget refresh of a team's canonical clone before we read it, so the
+// on-disk shards are current. Never waits beyond a short timeout.
+function refreshTeamCloneBestEffort(teamId) {
+  const url = `${ORCH_URL()}/internal/knowledge/refresh`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 2500);
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ teamId }),
+    signal: ctrl.signal,
+  }).catch(() => {}).finally(() => clearTimeout(timer));
+}
+
+function gatherKnowledgeAgents(scope, teamIds) {
+  const set = new Set(teamIds);
+  const agents = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    if (cfg.role === 'team') continue; // template holder, not a contributor
+    const teamId = cfg.teamId || cfg.parentTeamId || 'default';
+    if (!set.has(teamId)) continue;
+    if (!visibleAgent(scope, cfg)) continue;
+    agents.push({ id, parentTeamId: teamId, environmentId: cfg.environmentId || null, displayName: cfg.displayName || id });
+  }
+  return agents;
+}
+
+function gatherKnowledgeSkills(scope) {
+  const skills = [];
+  const poolSkillsDir = path.join(POOL_DIR, 'skills');
+  try {
+    fs.readdirSync(poolSkillsDir).forEach(name => {
+      if (fs.existsSync(path.join(poolSkillsDir, name, 'SKILL.md'))) skills.push({ name, tier: 'global' });
+    });
+  } catch { /* no pool skills */ }
+  for (const s of listTeamSkills(null)) {
+    if (!visibleTeam(scope, s.teamId)) continue;
+    skills.push({ name: s.name, tier: 'team', teamId: s.teamId });
+  }
+  return skills;
+}
+
+// Validate a scope query param; unknown / malformed → global.
+function knowledgeScopeParam(req) {
+  const raw = typeof req.query.scope === 'string' ? req.query.scope.trim() : '';
+  const parsed = parseScope(raw);
+  if ((parsed.kind === 'agent' || parsed.kind === 'team') && !AGENT_ID_RE.test(parsed.id)) {
+    return parseScope('global');
+  }
+  return parsed;
+}
+
+app.get('/api/knowledge/graph', async (req, res) => {
+  const scope = getScope(req);
+  const parsed = knowledgeScopeParam(req);
+  const teamIds = knowledgeScopeTeams(parsed, scope);
+
+  await Promise.all(teamIds.map(refreshTeamCloneBestEffort));
+
+  const entries = [];
+  const warnings = [];
+  for (const teamId of teamIds) {
+    const g = gatherTeamEntries(teamId);
+    entries.push(...g.entries);
+    warnings.push(...g.warnings);
+  }
+  const agents = gatherKnowledgeAgents(scope, teamIds);
+  const skills = gatherKnowledgeSkills(scope);
+  res.json(buildKnowledgeGraph({ scope: parsed.scope, entries, skills, agents, now: Date.now(), warnings }));
+});
+
+app.get('/api/knowledge/summary', async (req, res) => {
+  const scope = getScope(req);
+  const parsed = knowledgeScopeParam(req);
+  const teamIds = knowledgeScopeTeams(parsed, scope);
+  const entries = [];
+  for (const teamId of teamIds) entries.push(...gatherTeamEntries(teamId).entries);
+  res.json(summarizeKnowledge({ scope: parsed.scope, entries, now: Date.now() }));
+});
+
+app.get('/api/knowledge/item/:id', (req, res) => {
+  const scope = getScope(req);
+  const { id } = req.params;
+  const teamId = typeof req.query.teamId === 'string' ? req.query.teamId : '';
+  if (!/^[0-9a-f]{12}$/.test(id)) return res.status(400).json({ error: 'invalid id' });
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'invalid teamId' });
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'not found' });
+
+  const { entries } = gatherTeamEntries(teamId);
+  const entry = entries.find(e => e && e.id === id) || null;
+  if (!entry) return res.status(404).json({ error: 'not found' });
+
+  const originAgent = typeof entry.originAgent === 'string' ? entry.originAgent : null;
+  const correlationId = typeof entry.correlationId === 'string' ? entry.correlationId : null;
+  const roomId = originAgent && correlationId ? findRoomForCorrelation(originAgent, correlationId) : null;
+  const repoUrl = resolveTeamRepoUrl(teamId);
+  const sourceRefs = Array.isArray(entry.sourceRefs) ? entry.sourceRefs : [];
+
+  const links = {
+    originAgent: originAgent ? { agentId: originAgent, href: `/chats/${encodeURIComponent(originAgent)}` } : null,
+    session: originAgent ? knowledgeLinks.buildSessionDeepLink({ agentId: originAgent, roomId, correlationId }) : null,
+    sourceRefs: sourceRefs
+      .map(ref => ({ kind: ref && ref.kind, ref: ref && ref.ref, url: knowledgeLinks.buildSourceRefUrl(ref, repoUrl) }))
+      .filter(r => r.url),
+  };
+  res.json({ entry, links });
+});
+
+// Locate which of an agent's session logs holds a row with `correlationId`.
+// Returns the roomId (log filename sans .jsonl) or null. Capped read per file.
+function findRoomForCorrelation(agentId, correlationId) {
+  if (!AGENT_ID_RE.test(agentId)) return null;
+  const dir = controlOrAgentPath(agentId, 'sessions');
+  let files;
+  try { files = fs.readdirSync(dir).filter(n => n.endsWith('.jsonl')); } catch { return null; }
+  for (const name of files) {
+    let raw;
+    try { raw = fs.readFileSync(path.join(dir, name), 'utf8'); } catch { continue; }
+    if (!raw.includes(correlationId)) continue; // cheap pre-filter
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      const row = kbParseLine(line);
+      if (row && row.correlationId === correlationId) return name.replace(/\.jsonl$/, '');
+    }
+  }
+  return null;
+}
+
+// Live feed — tails the append-only events file the orchestrator writes, applies
+// the scope filter, forwards matching harvest/promotion events. Same byte-offset
+// + fs.watch tailer as the session-log stream (/session/:roomId/stream).
+app.get('/api/knowledge/stream', (req, res) => {
+  const parsed = knowledgeScopeParam(req);
+  const scope = parsed.scope;
+  const filepath = KNOWLEDGE_EVENTS_FILE;
+  const dirpath = path.dirname(filepath);
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  let cursor;
+  if (req.query.since !== undefined) {
+    cursor = Math.max(0, parseInt(req.query.since, 10) || 0);
+  } else {
+    try { cursor = fs.existsSync(filepath) ? fs.statSync(filepath).size : 0; } catch { cursor = 0; }
+  }
+
+  let lineBuf = '';
+  let fileWatcher = null;
+  let dirWatcher = null;
+  let draining = false;
+  let pending = false;
+  let closed = false;
+
+  const writeEvent = (obj) => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch { /* noop */ } };
+  const writeCursor = () => writeEvent({ type: '_cursor', cursor });
+
+  try { res.write(': ready\n\n'); } catch { /* noop */ }
+  writeCursor();
+  const heartbeat = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* noop */ } }, 15000);
+
+  const emitLine = (line) => {
+    const ev = kbParseLine(line);
+    if (ev && knowledgeLinks.matchesScope(ev, scope)) writeEvent(ev);
+  };
+
+  const drain = () => {
+    if (closed) return;
+    if (draining) { pending = true; return; }
+    draining = true;
+    let size;
+    try {
+      if (!fs.existsSync(filepath)) { draining = false; if (pending) { pending = false; setImmediate(drain); } return; }
+      size = fs.statSync(filepath).size;
+    } catch { draining = false; return; }
+    if (size < cursor) { cursor = 0; lineBuf = ''; writeEvent({ type: '_truncated' }); }
+    if (size === cursor) { draining = false; if (pending) { pending = false; setImmediate(drain); } return; }
+    const stream = fs.createReadStream(filepath, { start: cursor, end: size - 1, encoding: 'utf8' });
+    stream.on('data', (chunk) => {
+      lineBuf += chunk;
+      let idx;
+      while ((idx = lineBuf.indexOf('\n')) >= 0) {
+        const line = lineBuf.slice(0, idx);
+        lineBuf = lineBuf.slice(idx + 1);
+        if (line.trim()) emitLine(line);
+      }
+    });
+    stream.on('error', () => { draining = false; if (pending) { pending = false; setImmediate(drain); } });
+    stream.on('end', () => { cursor = size; writeCursor(); draining = false; if (pending) { pending = false; setImmediate(drain); } });
+  };
+
+  const startFileWatcher = () => {
+    if (fileWatcher || closed) return;
+    try {
+      fileWatcher = fs.watch(filepath, { persistent: false }, () => drain());
+      fileWatcher.on('error', () => { try { fileWatcher.close(); } catch { /* noop */ } fileWatcher = null; startDirWatcher(); });
+    } catch { fileWatcher = null; startDirWatcher(); }
+  };
+  const startDirWatcher = () => {
+    if (dirWatcher || closed) return;
+    try { fs.mkdirSync(dirpath, { recursive: true }); } catch { /* noop */ }
+    try {
+      dirWatcher = fs.watch(dirpath, { persistent: false }, (_evt, fname) => {
+        if (closed) return;
+        if (fname && fname !== path.basename(filepath)) return;
+        if (fs.existsSync(filepath)) {
+          try { dirWatcher.close(); } catch { /* noop */ }
+          dirWatcher = null;
+          startFileWatcher();
+          drain();
+        }
+      });
+      dirWatcher.on('error', () => { try { dirWatcher.close(); } catch { /* noop */ } dirWatcher = null; });
+    } catch { dirWatcher = null; }
+  };
+
+  if (fs.existsSync(filepath)) { startFileWatcher(); drain(); } else { startDirWatcher(); }
+
+  req.on('close', () => {
+    closed = true;
+    clearInterval(heartbeat);
+    if (fileWatcher) { try { fileWatcher.close(); } catch { /* noop */ } fileWatcher = null; }
+    if (dirWatcher) { try { dirWatcher.close(); } catch { /* noop */ } dirWatcher = null; }
+    try { res.end(); } catch { /* noop */ }
+  });
 });
 
 /* ─── Unified orchestration graph (Unified Orchestration #362 / #365) ───────

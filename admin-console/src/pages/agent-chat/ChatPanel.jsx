@@ -6,6 +6,7 @@ import ConfirmDialog from '../../components/ConfirmDialog';
 import HandoffDialog from './HandoffDialog';
 import Message from './Message';
 import MessageInput from './MessageInput';
+import LearningBadge from '../../components/LearningBadge';
 
 // Default prompt sent when the user clicks "Reset & learn". The agent
 // continues in its current Claude session (so it has full conversational
@@ -670,6 +671,7 @@ export default function ChatPanel({
                 </span>
               </div>
             )}
+            <LearningBadge scope={`agent:${agent.id}`} refreshKey={sessionUpdatedAt} />
           </div>
           {gitInfo && gitInfo.length > 0 && (
             <div

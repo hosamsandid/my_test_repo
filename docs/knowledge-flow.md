@@ -13,7 +13,8 @@ feed of harvests, renders the three-lane ladder, and drills into provenance. It
 adds **no** dedup, convergence *detection*, promotion automation, or MCP sources
 (Phases 3–5). The `knowledge promote` CLI verb stays a stub.
 
-Status: **design of record for #461** — awaiting review before implementation.
+Status: **design of record for #461** — approved (decisions §0 #1/#3 confirmed) and
+implemented on `integration/knowledge-flow`.
 
 ---
 

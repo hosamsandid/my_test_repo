@@ -14,6 +14,7 @@ const { createTeamsStore, DEFAULT_TEAM_ID } = require("./teams-store");
 const { makeSkillSourceResolver } = require("./skill-source");
 const { normalizeKnowledgeStore, knowledgeAutonomyLevel } = require("./knowledge-store");
 const knowledgeSync = require("./knowledge-sync");
+const knowledgeFeed = require("./knowledge-feed");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const { resolveCloneTarget } = require("./clone-target");
@@ -41,6 +42,14 @@ const CONTROL_DIR = "/control/agents";
 const PER_AGENT_VOLUME = process.env.AEE_PER_AGENT_VOLUME === '1';
 const BLUEPRINTS_DIR = "/workspace/blueprints";
 const WORKSPACE = "/workspace";
+// Shared Agent Learning (Phase 2): the orchestrator-maintained canonical KB
+// clone per team (aggregator source of truth) + the append-only live-feed file
+// the admin-console tails. Both sit on the shared /workspace volume; neither is
+// inside a team's git clone.
+const KNOWLEDGE_CLONE_ROOT = "/workspace/knowledge";
+const KNOWLEDGE_EVENTS_DIR = "/workspace/knowledge-events";
+const KNOWLEDGE_EVENTS_FILE = path.join(KNOWLEDGE_EVENTS_DIR, "events.jsonl");
+const KNOWLEDGE_REFRESH_MIN_MS = 30_000;
 const TEMPLATE_WORKSPACE = "/template-workspace";
 // Agent id grammar — mirrors AGENT_ID_RE in admin-console/api/api.js. Used to
 // validate ids that arrive from outside (e.g. on import).
@@ -1667,6 +1676,118 @@ function agentKnowledgePush(id) {
   const e = new Error(`knowledge push failed: ${String(lastErr).trim().slice(0, 400)}`);
   e.gitFailed = true;
   throw e;
+}
+
+// ── Canonical KB clone + live feed (Shared Agent Learning, Phase 2) ──────────
+// The orchestrator keeps ONE authoritative clone per team at
+// /workspace/knowledge/<teamId>/ on the agent-knowledge branch (mirrors the
+// briefings clone the BP-event router force-pulls). The admin-console reads its
+// JSONL shards off the shared volume — no git in the admin-console. It also
+// appends a lean event per harvest to a feed file the admin-console tails.
+
+const _kbRefreshThrottles = new Map(); // teamId -> last refresh ms
+
+// Resolve the KB repo for a team from any of its agents' environments (a team
+// shares one env → one KB repo). Returns { repoRef, env } or null.
+function resolveTeamKbRepo(teamId) {
+  for (const id of listAgentIds()) {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) continue;
+    const t = cfg.teamId || cfg.parentTeamId || DEFAULT_TEAM_ID;
+    if (t !== teamId) continue;
+    if (!cfg.environmentId) continue;
+    const env = loadEnvironment(cfg.environmentId);
+    const repoRef = env?.knowledgeStore?.repoRef || null;
+    if (repoRef && repoRef.url) return { repoRef, env };
+  }
+  return null;
+}
+
+// Ensure/refresh the canonical clone for a team. Best-effort, throttled per team
+// (force bypasses the throttle). Never throws — a missing/failing clone just
+// means the admin-console reads whatever is on disk (agent-checkout fallback).
+// Returns { refreshedAt, warnings }.
+function refreshKnowledgeClone(teamId, { force = false, repoRef = null, env = null } = {}) {
+  const warnings = [];
+  const clonePath = knowledgeFeed.canonicalClonePath(KNOWLEDGE_CLONE_ROOT, teamId);
+  if (!clonePath) {
+    warnings.push(`knowledge: refusing unsafe team id '${teamId}'`);
+    return { refreshedAt: null, warnings };
+  }
+
+  const last = _kbRefreshThrottles.get(teamId) || 0;
+  if (!force && !knowledgeFeed.shouldRefresh(last, Date.now(), KNOWLEDGE_REFRESH_MIN_MS)) {
+    return { refreshedAt: last, warnings };
+  }
+
+  let ref = repoRef;
+  let kbEnv = env;
+  if (!ref) {
+    const resolved = resolveTeamKbRepo(teamId);
+    if (!resolved) {
+      warnings.push(`knowledge: no KB repo resolvable for team '${teamId}'`);
+      return { refreshedAt: null, warnings };
+    }
+    ref = resolved.repoRef;
+    kbEnv = resolved.env;
+  }
+
+  const branch = knowledgeSync.KNOWLEDGE_BRANCH;
+  const gitEnv = _buildKbGitEnv(ref, kbEnv);
+  const runIn = (cwd, args, timeout = 60_000) =>
+    execFileSync("git", args, { cwd, env: gitEnv, stdio: "pipe", timeout }).toString();
+  try {
+    if (!fs.existsSync(path.join(clonePath, ".git"))) {
+      fs.mkdirSync(KNOWLEDGE_CLONE_ROOT, { recursive: true });
+      execFileSync("git", ["clone", "--branch", branch, "--", ref.url, clonePath], {
+        env: gitEnv, stdio: "pipe", timeout: 120_000,
+      });
+    } else {
+      runIn(clonePath, ["fetch", "origin", branch], 30_000);
+      runIn(clonePath, ["reset", "--hard", `origin/${branch}`], 30_000);
+    }
+    const now = Date.now();
+    _kbRefreshThrottles.set(teamId, now);
+    return { refreshedAt: now, warnings };
+  } catch (err) {
+    const detail = agentGitOps
+      .sanitizeGitOutput((err.stderr || err.stdout || err.message || "").toString())
+      .slice(0, 200);
+    warnings.push(`knowledge: canonical clone refresh failed for '${teamId}': ${detail}`);
+    return { refreshedAt: null, warnings };
+  }
+}
+
+// Append lean harvest/promotion events to the live-feed file the admin-console
+// tails. Best-effort — a failure never breaks a push.
+function appendKnowledgeEvents(events) {
+  if (!Array.isArray(events) || events.length === 0) return;
+  try {
+    fs.mkdirSync(KNOWLEDGE_EVENTS_DIR, { recursive: true });
+    const lines = events.map((e) => knowledgeFeed.serializeEvent(e)).join("\n") + "\n";
+    fs.appendFileSync(KNOWLEDGE_EVENTS_FILE, lines);
+  } catch (err) {
+    console.warn(`[Orchestrator] knowledge feed append failed: ${err.message}`);
+  }
+}
+
+// After a successful KB push: (a) refresh the team's canonical clone so the
+// operator view is fresh, and (b) append one harvest event per pushed entry
+// (count-only if the CLI sent no summary). Resolves teamId from the agent config.
+function emitKnowledgeHarvest(id, cfg, env, rawBody) {
+  const teamId = (cfg && (cfg.teamId || cfg.parentTeamId)) || DEFAULT_TEAM_ID;
+  const repoRef = env?.knowledgeStore?.repoRef || null;
+  try {
+    refreshKnowledgeClone(teamId, { force: true, repoRef, env });
+  } catch (err) {
+    console.warn(`[Orchestrator] knowledge clone refresh (post-push) failed: ${err.message}`);
+  }
+  const ts = new Date().toISOString();
+  const entries = knowledgeFeed.parsePushEntries(rawBody);
+  const events = entries.length > 0
+    ? entries.map((entry) => knowledgeFeed.buildHarvestEvent({ teamId, agentId: id, entry, ts }))
+    : [knowledgeFeed.buildHarvestEvent({ teamId, agentId: id, ts })];
+  appendKnowledgeEvents(events);
 }
 
 // Push the agent's committed work. `body` = { repo?, branch?, remote?,
@@ -5320,6 +5441,14 @@ async function main() {
             return;
           }
           const result = agentKnowledgePush(id);
+          // Phase 2: echo the pushed entry summary into the live feed + refresh
+          // the team's canonical clone. Best-effort — never fails the push.
+          try {
+            const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+            emitKnowledgeHarvest(id, cfg, env, body);
+          } catch (feedErr) {
+            console.warn(`[Orchestrator] knowledge feed/refresh for ${id}: ${feedErr.message}`);
+          }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(result));
         } catch (err) {
@@ -5329,6 +5458,28 @@ async function main() {
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: msg }));
         }
+      });
+      return;
+    }
+
+    // ── Ensure/refresh a team's canonical KB clone (Phase 2) ────────────────────
+    // The admin-console calls this opportunistically (fire-and-forget) before it
+    // reads the KB shards, so the on-disk copy is current. Best-effort, throttled
+    // per team, never throws to the caller.
+    if (req.method === 'POST' && req.url === '/internal/knowledge/refresh') {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        let teamId = DEFAULT_TEAM_ID;
+        try { teamId = (JSON.parse(body || '{}').teamId) || DEFAULT_TEAM_ID; } catch { /* default */ }
+        let result;
+        try {
+          result = refreshKnowledgeClone(String(teamId), { force: false });
+        } catch (err) {
+          result = { refreshedAt: null, warnings: [String(err && err.message || err)] };
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, ...result }));
       });
       return;
     }

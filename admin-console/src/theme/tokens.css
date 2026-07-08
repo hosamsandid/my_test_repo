@@ -309,17 +309,18 @@ select option:disabled {
 }
 
 /* ─── Icon-only action button: fast tooltip (no native-title delay) ──
-   Pairs with admin-console/src/components/IconButton.jsx. Shown on
-   hover AND :focus-within so the label is reachable via keyboard too. */
+   Pairs with admin-console/src/components/IconButton.jsx. Rendered via a
+   React portal into document.body with position: fixed (coordinates from
+   the button's getBoundingClientRect()) so it can never be clipped by an
+   ancestor's `overflow` — e.g. DataTable's horizontal-scroll wrapper —
+   the way an absolutely-positioned in-flow tooltip would be. Shown on
+   hover AND focus so the label is reachable via keyboard too. */
 .eb-icon-btn-wrap {
-  position: relative;
   display: inline-flex;
 }
 .eb-icon-btn-tooltip {
-  position: absolute;
-  bottom: calc(100% + 4px);
-  left: 50%;
-  transform: translateX(-50%);
+  position: fixed;
+  transform: translate(-50%, -100%);
   background: var(--eb-bg-elevated);
   color: var(--eb-text-primary);
   border: 1px solid var(--eb-border-default);
@@ -327,16 +328,8 @@ select option:disabled {
   border-radius: var(--eb-radius-sm);
   font-size: var(--eb-text-xs);
   white-space: nowrap;
-  opacity: 0;
-  visibility: hidden;
   pointer-events: none;
-  transition: opacity var(--eb-transition-fast);
-  z-index: 30;
-}
-.eb-icon-btn-wrap:hover .eb-icon-btn-tooltip,
-.eb-icon-btn-wrap:focus-within .eb-icon-btn-tooltip {
-  opacity: 1;
-  visibility: visible;
+  z-index: 1000;
 }
 
 /* ─── Tablet-width (≤768px) action-row wrap ───────────────────────────

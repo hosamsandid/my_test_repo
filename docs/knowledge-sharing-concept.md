@@ -78,7 +78,6 @@ Team → Global.
 - **Cadence is event-driven** (per session / per write / per convergence), not a weekly cron.
 - Repo convention respected: **pure helper cores are unit-tested** (`node --test`; Python helpers via the
   stdlib-`unittest` + `importlib` pattern already used in `agent-image/scripts/test_agent_entrypoint.py`).
-  Runner changes are mirrored in the legacy Node reference `orchestrator/agent-runner.js`.
 - Product name in any user-facing copy is **Agent Studio**; internal codenames stay out of the UI.
 
 ## Autonomy dial (one control, four states)
@@ -149,12 +148,12 @@ Deliverables:
   - `knowledge promote <id|cluster>` — stub, wired in Phase 3.
 - **KB working copy** synced into the workspace at seed time + `git pull` on demand.
 - **Harvest hook**: extend the per-invocation learn-hint in `agent-image/scripts/agent-entrypoint.py`
-  (mirror in `orchestrator/agent-runner.js`) so that, in addition to writing `memory/log.md`, it distils
+  so that, in addition to writing `memory/log.md`, it distils
   durable facts/entities and calls `knowledge add`. Event-driven, once per session.
 - Autonomy dial levels **0/1**; default 1. Level 0 = skip harvest (today's behaviour).
 
 Key files: `agent-image/scripts/knowledge`, `agent-image/scripts/agent-entrypoint.py` (+ `sase_lib.py`),
-`orchestrator/agent-runner.js` (reference), `agent-image/CLAUDE.md`.
+`agent-image/CLAUDE.md`.
 
 Verification: pure-core tests for the distiller/provenance stamping; manual — run the three developers,
 confirm the KB fills and duplicates collapse (inspect via git).

@@ -1683,7 +1683,7 @@ app.post('/api/agents/:id/handover', handoverLimiter, async (req, res) => {
     }
 
     // 3. Build the structured DM body and send it. The receiving agent's
-    // DM heuristic in agent-runner.js picks it up like any other user
+    // DM heuristic in the agent runtime picks it up like any other user
     // message and invokes Claude with the body as the prompt.
     const noteText = (typeof perTargetMap[targetId] === 'string' ? perTargetMap[targetId] : sharedNote).trim();
     const body = renderHandoverBody({

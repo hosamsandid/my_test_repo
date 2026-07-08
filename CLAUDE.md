@@ -47,7 +47,7 @@ orchestrator.js  (control-plane container, no Matrix presence)
 - Each agent is bound to a **Working Environment** (see below) which defines what gets seeded into its workspace.
 - Matrix users auto-created via Conduwuit admin room
 - **Container-per-agent.** The `orchestrator` is a control-plane container that manages **one container per agent** — it does not host agents in-process. Each agent container is isolated three ways: per-agent **network** (Seam #2), per-agent **filesystem** via a SubPath mount of the pool volume (Seam #3, `AEE_WORKSPACE_ISOLATION`, default on), and an optional **dedicated volume** (`AEE_PER_AGENT_VOLUME`, opt-in). Containers carry an `aee.agent.id` label so the orchestrator reconciles live container state against its in-memory process map.
-- **Agent runtime.** The agent container's entrypoint (`agent-image/scripts/agent-entrypoint.py`, with `sase_lib.py`) is a Python port of the legacy Node `orchestrator/agent-runner.js`. References to "agent-runner.js" elsewhere in this doc describe that behaviour (Matrix client + Claude CLI invocations + trigger scheduler), not the process actually running inside agent containers today.
+- **Agent runtime.** The agent container's entrypoint (`agent-image/scripts/agent-entrypoint.py`, with `sase_lib.py`) is the live per-agent runtime: Matrix client + Claude CLI invocations + trigger scheduler. It was originally built as a Node process (`orchestrator/agent-runner.js`); that file has since been removed as dead code, and the Python entrypoint is now the sole reference for this behaviour.
 
 ### Teams (human collaboration & visibility scope)
 
@@ -358,7 +358,7 @@ NDJSON lines from stdout are parsed event-by-event and written, together with wr
 
 The schema is defined in `docs/agent-chat-plan.md` §4.1 and includes `assistant_text`, `tool_use`, `tool_result`, `thinking`, and `result` events. Every entry carries a `correlationId` (the originating Matrix `event_id`, or a synthetic `trigger:<id>:<ts>` for cron triggers) so the Admin Console can tie log rows to chat bubbles.
 
-**DM heuristic.** Every message the agent receives is checked against a single rule (in `agent-runner.js`): `getJoinedRoomMembers(roomId)` returns exactly two members (this agent + one other) AND the sender is not this agent. Anything else is ignored. Membership counts are cached for 30 s.
+**DM heuristic.** Every message the agent receives is checked against a single rule (in `agent-image/scripts/agent-entrypoint.py`): `getJoinedRoomMembers(roomId)` returns exactly two members (this agent + one other) AND the sender is not this agent. Anything else is ignored. Membership counts are cached for 30 s.
 
 ### Agent Chat UI
 
@@ -397,10 +397,8 @@ The Admin Console embeds a Matrix client at `/chats` (and `/chats/:agentId`) so 
 | `orchestrator/orchestrator.js` | Backend service: agent lifecycle, child-process spawning, environment-aware workspace seeding, internal HTTP API for the admin console |
 | `orchestrator/spawn-container.js` | Spawns/kills the per-agent Podman container over the libpod socket; provisions per-agent network (Seam #2), filesystem SubPath (Seam #3), and dedicated-volume (`AEE_PER_AGENT_VOLUME`) isolation. |
 | `orchestrator/teams-store.js` | Single source of truth for the human **Team** data model (#299): pure factory for Teams / users / memberships CRUD, referential integrity, default-team + System-Admin bootstrap. Unit-tested in `teams-store.test.js`. See `docs/teams-data-model.md`. |
-| `agent-image/` | The per-agent container image `as-agent:latest` (`python:3.12-slim`). Entrypoint `scripts/agent-entrypoint.py` (+ `sase_lib.py`) is the live agent runtime — a Python port of `agent-runner.js`. |
-| `orchestrator/agent-runner.js` | **Legacy** Node per-agent runner: Matrix client + Claude CLI invocations + trigger scheduler. Behaviour ported to `agent-image/`'s Python entrypoint (the process actually run in agent containers); kept as the reference for that behaviour. Honors `sessionPolicy: per-invocation` and posts plain-text throttle warnings on `kind: throttle-warning` queue entries. |
+| `agent-image/` | The per-agent container image `as-agent:latest` (`python:3.12-slim`). Entrypoint `scripts/agent-entrypoint.py` (+ `sase_lib.py`) is the live agent runtime: Matrix client + Claude CLI invocations + trigger scheduler. Honors `sessionPolicy: per-invocation` and posts plain-text throttle warnings on `kind: throttle-warning` queue entries. |
 | `orchestrator/github-poller.js` | Polls the GitHub Events API; matches events by type + optional `labelFilter` + history horizon (no source/origin filtering), then applies the frequency throttle (`_checkAndIncThrottle`) and the #449 burst-cap digest (`planBurstHandoffs`) before fanning events out to per-agent `pending-triggers.json`. |
-| `orchestrator/session-log.js` | JSONL session logger: maps Claude `stream-json` NDJSON to normalized events, append-only writer |
 | `orchestrator/Dockerfile` | Node 22 + Claude Code CLI + git + openssh-client |
 | `orchestrator/CLAUDE-template.md` | Base template baked into the image as `/defaults/CLAUDE.md`, used as fallback when the skill-pool volume has no CLAUDE.md |
 | `orchestrator/skill-pool/agent-templates/` | Role-template JSON files for the Team-Setup wizard (seeded into `/template-workspace/agent-templates/` via `make seed-templates`). |

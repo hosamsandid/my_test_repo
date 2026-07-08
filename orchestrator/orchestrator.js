@@ -2042,9 +2042,9 @@ function defaultSystemPromptFor(role, extra = {}) {
 // Orchestrator (backend service — no Matrix routing identity)
 //
 // The orchestrator runs as a pure backend service: it manages the per-agent
-// child processes (agent-runner.js) and exposes an internal HTTP API for the
-// admin console. It holds an admin Matrix client to create/deactivate user
-// accounts via the Conduwuit admin room, but does not have a chat presence.
+// containers (agent-image's Python entrypoint) and exposes an internal HTTP
+// API for the admin console. It holds an admin Matrix client to create/deactivate
+// user accounts via the Conduwuit admin room, but does not have a chat presence.
 // All human↔agent communication happens via direct messages to each agent.
 // ============================================================
 class Orchestrator {

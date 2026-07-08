@@ -11,11 +11,16 @@
 //      type=github-event, matching repo).
 //   2. For each repo in the plan, issues a conditional GET with
 //      If-None-Match (so 304 responses don't decrement the rate limit).
-//   3. Filters fresh events by id > lastEventId, fans them out by writing
-//      to each subscriber's pending-triggers.json — same queue HTTP triggers
-//      use, so the agent-runner picks them up via its existing 5s drain.
+//   3. Selects fresh events by id membership against a per-repo sliding
+//      seen-id set (#320 — not a created_at high-water-mark, since GitHub
+//      neither orders events nor delivers them promptly), then gates each
+//      subscriber by its history horizon (activatedAt/createdAt/mtime, with
+//      a grace window) before fanning them out by writing to each
+//      subscriber's pending-triggers.json — same queue HTTP triggers use,
+//      so the agent-runner picks them up via its existing 5s drain.
 //
-// State (`state.json`) holds per-repo `etag`, `lastEventId`, `lastPolledAt`.
+// State (`state.json`) holds per-repo `etag`, `seen` (event-id set, capped
+// at SEEN_MAX), `lastPolledAt`.
 // ============================================================
 
 const fs = require('fs');
@@ -46,6 +51,19 @@ const THROTTLE_THRESHOLD = 5;
 // recovers within at most one work-break.
 const BACKOFF_BASE_MS = 60_000;
 const BACKOFF_MAX_MS = 30 * 60_000;
+
+// #320-B: safety look-back applied to the per-subscriber history horizon. The
+// GitHub Events API delivers events out of order and up to hours late, so an
+// event that legitimately belongs to a subscriber can carry a `created_at`
+// slightly older than the subscriber's activation stamp. Widening the horizon
+// by GRACE_MS catches those border cases without letting a real backlog in.
+const GRACE_MS = 5 * 60_000;
+
+// #320-F: upper bound on the sliding set of processed event ids kept per repo.
+// One page of the Events API is <=100 events; retaining several polls' worth
+// means a delayed/re-observed event is still recognised as already-seen. Tiny
+// on disk; oldest ids beyond this bound are pruned.
+const SEEN_MAX = 500;
 
 // tokenId is operator-supplied via the Working Environment config, but a
 // rogue or typo'd value like "../../etc/passwd" would otherwise resolve
@@ -218,6 +236,52 @@ function applyFromFilter(originAgentId, subscriberAgentId, fromSpec, lookupTeam)
   return { deliver: false, reason: `unknown-spec:${JSON.stringify(fromSpec)}` };
 }
 
+// #320-A: the per-subscriber history horizon. Prefer the trigger's activation
+// stamp (set on create and refreshed on re-enable), then its creation stamp,
+// then the triggers.json mtime as the legacy fallback for triggers authored
+// before the stamps existed. Returns an ISO string or null (no horizon known).
+function effectiveHorizon(trigger, triggersMtime) {
+  return (trigger && (trigger.activatedAt || trigger.createdAt)) || triggersMtime || null;
+}
+
+// #320-B: is `eventCreatedAt` recent enough to reach a subscriber whose horizon
+// is `horizonIso`? The horizon is widened by `graceMs` to absorb late/out-of-
+// order delivery. Missing horizon or timestamp fails open (deliver) — the same
+// posture the code had before a horizon existed.
+function passesHorizon(eventCreatedAt, horizonIso, graceMs) {
+  if (!horizonIso || !eventCreatedAt) return true;
+  const cutoff = Date.parse(horizonIso) - (graceMs || 0);
+  const ts = Date.parse(eventCreatedAt);
+  if (Number.isNaN(cutoff) || Number.isNaN(ts)) return true;
+  return ts >= cutoff;
+}
+
+// #320-F: split a freshly fetched event list into the events not yet processed
+// (`fresh`) and the next sliding id set (`nextSeen`), given the previous set.
+// Membership is by event id, so GitHub's lack of ordering and delayed delivery
+// no longer matter: an event with an older `created_at` but an unseen id is
+// still fresh, and a re-observed id is never re-delivered. `nextSeen` prepends
+// every currently visible id (so ids still in the API window stay remembered),
+// dedups preserving newest-first order, and caps at `seenMax`.
+function selectFreshEvents(events, seenArr, seenMax) {
+  const list = Array.isArray(events) ? events : [];
+  const seen = new Set(Array.isArray(seenArr) ? seenArr : []);
+  const fresh = list.filter(e => e && e.id != null && !seen.has(String(e.id)));
+
+  const nextSeen = [];
+  const added = new Set();
+  const push = (id) => {
+    if (id == null) return;
+    const s = String(id);
+    if (added.has(s)) return;
+    added.add(s);
+    nextSeen.push(s);
+  };
+  for (const e of list) push(e && e.id);
+  for (const id of (Array.isArray(seenArr) ? seenArr : [])) push(id);
+  return { fresh, nextSeen: nextSeen.slice(0, seenMax || SEEN_MAX) };
+}
+
 class GitHubPoller {
   constructor({ loadEnvironment, listEnvironmentIds, enqueuePending, triggersPath } = {}) {
     this.loadEnvironment = loadEnvironment;
@@ -335,12 +399,13 @@ class GitHubPoller {
           // through unchanged — applyFromFilter() understands all spec shapes
           // (string keyword / array allowlist / { exclude } blocklist / null).
           from: t.from || null,
-          // Per-subscriber history horizon: events with `created_at` strictly
-          // older than this stamp are dropped before any other layer fires,
-          // so a freshly-added agent never reacts to activity that predates
-          // it (e.g. PRs that were already open when the team was set up).
-          // Falls back to the triggers.json mtime for legacy triggers.
-          createdAt: t.createdAt || triggersMtime,
+          // Per-subscriber history horizon: events older than this stamp (minus
+          // a grace window, see GRACE_MS) are dropped before any other layer
+          // fires, so a freshly-added or just-reactivated agent never reacts to
+          // activity that predates it (e.g. PRs already open when the team was
+          // set up, or the backlog that accrued while a trigger was disabled).
+          // Prefers activatedAt → createdAt → triggers.json mtime (legacy).
+          horizon: effectiveHorizon(t, triggersMtime),
           // Optional exact-match filter on payload.label.name for *.labeled
           // and *.unlabeled events. Empty / null / undefined = no filter
           // (legacy behavior — fire on any label change). When set, the
@@ -418,44 +483,38 @@ class GitHubPoller {
 
     if (result.etag) repoState.etag = result.etag;
 
-    // Cursor is the `created_at` of the newest event seen. We don't use
-    // event ids because GitHub event ids are not globally monotonic across
-    // event types — PullRequestEvent ids are in a completely different
-    // numeric range from PushEvent / CreateEvent ids, so a BigInt compare
-    // would systematically misclassify some types as "already seen".
-    // Legacy state files with `lastEventId` are ignored — the next poll
-    // re-baselines from `created_at`.
-    if (!repoState.lastCreatedAt) {
-      const newestCreatedAt = result.events
-        .map(e => e.created_at)
-        .filter(Boolean)
-        .sort()
-        .pop();
-      repoState.lastCreatedAt = newestCreatedAt || new Date().toISOString();
+    // Cursor is a sliding set of processed event ids (#320-F), not a
+    // `created_at` high-water-mark. GitHub guarantees no ordering and delivers
+    // events up to hours late; a high-water-mark silently drops any event that
+    // arrives with a `created_at` behind the cursor. Set membership is immune
+    // to ordering: an unseen id is fresh regardless of its timestamp, and a
+    // re-observed id is never re-delivered. (Ids need not be monotonic — we
+    // only test membership, never compare magnitudes.)
+    //
+    // First poll (or a legacy state file with `lastCreatedAt`) only records a
+    // baseline so startup / upgrade doesn't replay history. The per-subscriber
+    // horizon (#320-A/B) is the guard against reacting to pre-activation
+    // activity — the cursor's only job is "have I processed this id before?".
+    if (!Array.isArray(repoState.seen)) {
+      repoState.seen = selectFreshEvents(result.events, [], SEEN_MAX).nextSeen;
+      delete repoState.lastCreatedAt;
       delete repoState.lastEventId;
       this.state[repoFullName] = repoState;
       this._saveState();
-      console.log(`[GH-Poller] ${repoFullName}: baseline established (created_at=${repoState.lastCreatedAt})`);
+      console.log(`[GH-Poller] ${repoFullName}: baseline established (${repoState.seen.length} event id(s) seen)`);
       return;
     }
 
-    const cursor = repoState.lastCreatedAt;
-    const fresh = [];
-    let newestCreatedAt = cursor;
-    for (const ev of result.events) {
-      if (!ev.created_at) continue;
-      if (ev.created_at > cursor) fresh.push(ev);
-      if (ev.created_at > newestCreatedAt) newestCreatedAt = ev.created_at;
-    }
+    const { fresh, nextSeen } = selectFreshEvents(result.events, repoState.seen, SEEN_MAX);
+    repoState.seen = nextSeen;
 
     if (fresh.length > 0) {
       // GitHub returns newest-first; process oldest-first so triggers fire
-      // in causal order.
-      fresh.sort((a, b) => a.created_at.localeCompare(b.created_at));
+      // in causal order. Events without a timestamp sort last (stable).
+      fresh.sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
       for (const ev of fresh) {
         this._fanOut(repoFullName, ev, subscribers);
       }
-      repoState.lastCreatedAt = newestCreatedAt;
     }
 
     this.state[repoFullName] = repoState;
@@ -492,16 +551,16 @@ class GitHubPoller {
     for (const sub of subscribers) {
       if (!sub.events.has(key)) continue;
 
-      // History horizon: skip events older than the subscriber's createdAt.
-      // Cheapest check, runs before everything else — a brand-new agent
-      // never reads (let alone reacts to) activity that pre-dates its own
-      // creation, even when the per-repo cursor is stale (e.g. another
-      // agent already advanced it past those events). String compare on
-      // ISO-8601 UTC timestamps is correct.
-      if (sub.createdAt && ghEvent.created_at && ghEvent.created_at < sub.createdAt) {
+      // History horizon (#320-A/B): skip events older than the subscriber's
+      // horizon, widened by GRACE_MS to absorb late/out-of-order delivery.
+      // Cheapest check, runs before everything else — a brand-new or just-
+      // reactivated agent never reads (let alone reacts to) activity that
+      // pre-dates it, even when the per-repo cursor is stale (e.g. another
+      // agent already advanced it past those events).
+      if (!passesHorizon(ghEvent.created_at, sub.horizon, GRACE_MS)) {
         console.log(
           `[GH-Poller] history-horizon: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
-          `(event=${ghEvent.created_at}, sub-since=${sub.createdAt})`,
+          `(event=${ghEvent.created_at}, sub-since=${sub.horizon}, grace=${GRACE_MS}ms)`,
         );
         continue;
       }
@@ -762,6 +821,11 @@ module.exports = {
   conversationKey,
   extractOriginAgent,
   applyFromFilter,
+  effectiveHorizon,
+  passesHorizon,
+  selectFreshEvents,
   THROTTLE_THRESHOLD,
   THROTTLE_WINDOW_MS,
+  GRACE_MS,
+  SEEN_MAX,
 };

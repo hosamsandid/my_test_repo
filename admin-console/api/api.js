@@ -3104,6 +3104,31 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
   res.status(201).json({ name: v.name, tier: v.to, teamId, provenance: prov });
 });
 
+// List an agent's PRIVATE (agent-tier) skills — the bottom rung of the skill
+// ladder. They live in the agent's own pool and never appear in the shared
+// knowledge graph, so the operator lifts them to the team (agent→team) from here.
+app.get('/api/agents/:id/private-skills', (req, res) => {
+  const scope = getScope(req);
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'invalid agent id' });
+  const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+  if (!cfg) return res.status(404).json({ error: 'agent not found' });
+  const teamId = cfg.teamId || cfg.parentTeamId || 'default';
+  if (!visibleAgent(scope, { ...cfg, teamId })) return res.status(403).json({ error: 'forbidden' });
+  const skillsDir = path.join(AGENTS_DIR, id, 'skills');
+  const skills = [];
+  try {
+    for (const name of fs.readdirSync(skillsDir)) {
+      const dir = path.join(skillsDir, name);
+      if (!fs.existsSync(path.join(dir, 'SKILL.md'))) continue;
+      const prov = readSkillProvenance(dir);
+      skills.push({ name, provenance: prov || null });
+    }
+  } catch { /* no private pool yet */ }
+  skills.sort((a, b) => a.name.localeCompare(b.name));
+  res.json({ agentId: id, teamId, skills });
+});
+
 // The environment a team shares (from any of its agents' configs). Mirrors the
 // orchestrator's resolveTeamEnvId; used only to read/display config here.
 function teamEnvironment(teamId) {

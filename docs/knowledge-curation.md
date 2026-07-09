@@ -189,6 +189,11 @@ deferred here). Phase 4 lights it up:
    `/api/knowledge/promote` route learns a `from:"agent"` branch requiring an
    `agentId` for the source dir (same containment guards as `/api/skills/promote`).
    This is operator-initiated (gate `agent>team` defaults to `review`).
+   **UI (follow-up):** in **agent scope** the Knowledge Flow right rail shows a
+   **Private skills** panel (`GET /api/agents/:id/private-skills`) with a **Lift to
+   team** button per skill → the `from:"agent"` promote; agent-tier skills live in
+   the agent's own pool and don't appear in the shared graph, so this panel is
+   where they surface.
 3. **Where agent-tier skills come from.** An agent authors a private skill by
    writing `SKILL.md` (+ `provenance.json`) into its own pool — it owns that
    directory, exactly as it owns `memory/`. **Implemented (follow-up):**
@@ -335,6 +340,9 @@ review at every level.
   sees which promotions the curator made vs. an operator.
 - The existing `SuggestionsPanel` / `PromotionDialog` are reused unchanged for
   the review cards (auto-drafted candidates render there like any other).
+- **Private skills panel (agent scope, follow-up):** lists the agent's
+  agent-tier skills with a **Lift to team** action (agent→team), plus the
+  "Show archived" filter + Archive/Unarchive in the drill-down (§6).
 
 ---
 
@@ -409,10 +417,12 @@ level 2 behaviour is unchanged (no auto-promotion).
   `agent>team` (skill-lift, provenance carried).
 - `admin-console/api/api.js`: `GET/PUT /api/knowledge/gates`; `/api/knowledge/promote`
   `from:"agent"` lift branch; `POST /api/knowledge/item/:id/archive`;
-  `?includeArchived=1` on the graph route; pending-edge/ghost-node in the graph route.
+  `GET /api/agents/:id/private-skills`; `?includeArchived=1` on the graph route;
+  pending-edge/ghost-node in the graph route.
 - `admin-console/src/pages/KnowledgeFlow.jsx`: autonomy/gate control panel,
   needs-review edges + ghost nodes, `promotedBy:"curator"` surfacing, "Show
-  archived" filter + Archive/Unarchive in the drill-down.
+  archived" filter + Archive/Unarchive in the drill-down, Private-skills panel
+  (agent→team lift).
 - `orchestrator/orchestrator.js` (archive, follow-up): archived-id store +
   `status:"archived"` overlay in the collector + `archiveKnowledgeEntry` +
   `/internal/knowledge/archive`.

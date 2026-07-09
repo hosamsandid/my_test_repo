@@ -109,6 +109,18 @@ export default function KnowledgeFlow() {
       .catch(() => {});
   }, [parsed.id, loadGates, load]);
 
+  // Private (agent-tier) skills — agent scope only. The lift target (agent→team).
+  const [privateSkills, setPrivateSkills] = useState([]);
+  const [privateTeam, setPrivateTeam] = useState('default');
+  const loadPrivateSkills = useCallback(() => {
+    if (parsed.kind !== 'agent' || !parsed.id) { setPrivateSkills([]); return; }
+    fetch(`/api/agents/${encodeURIComponent(parsed.id)}/private-skills`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { setPrivateSkills(Array.isArray(d?.skills) ? d.skills : []); if (d?.teamId) setPrivateTeam(d.teamId); })
+      .catch(() => {});
+  }, [parsed.kind, parsed.id]);
+  useEffect(() => { loadPrivateSkills(); }, [loadPrivateSkills]);
+
   const onFeedEvent = useCallback((ev) => {
     if (ev?.type === 'suggestion' || ev?.type === 'promotion') { loadSuggestions(); load(); }
   }, [loadSuggestions, load]);
@@ -273,6 +285,10 @@ export default function KnowledgeFlow() {
               {parsed.kind === 'team' && suggestions.length > 0 && (
                 <SuggestionsPanel suggestions={suggestions} onReview={(s) => setPromoting(s)} />
               )}
+              {parsed.kind === 'agent' && privateSkills.length > 0 && (
+                <PrivateSkillsPanel agentId={parsed.id} teamId={privateTeam} skills={privateSkills}
+                  onDone={() => { loadPrivateSkills(); load(); }} />
+              )}
               <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
                 <KnowledgeFeed scope={scope} onHarvest={onHarvest} onEvent={onFeedEvent} />
               </div>
@@ -326,6 +342,67 @@ function SuggestionsPanel({ suggestions, onReview }) {
             </div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+/* ── Private (agent-tier) skills — lift to team (Phase 4 agent→team) ─────────── */
+
+function PrivateSkillsPanel({ agentId, teamId, skills, onDone }) {
+  const [state, setState] = useState({}); // name -> 'lifting' | 'done' | 'exists' | 'error'
+  const [errMsg, setErrMsg] = useState({}); // name -> server error text
+
+  const lift = (name) => {
+    setState(s => ({ ...s, [name]: 'lifting' }));
+    fetch('/api/knowledge/promote', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: 'agent', to: 'team', teamId, agentId, name }),
+    })
+      .then(async r => {
+        if (r.status === 201) { setState(s => ({ ...s, [name]: 'done' })); onDone && onDone(); return; }
+        if (r.status === 409) { setState(s => ({ ...s, [name]: 'exists' })); return; }
+        const body = await r.json().catch(() => ({}));
+        setErrMsg(m => ({ ...m, [name]: body.error || 'Lift failed' }));
+        setState(s => ({ ...s, [name]: 'error' }));
+      })
+      .catch(() => setState(s => ({ ...s, [name]: 'error' })));
+  };
+
+  return (
+    <div style={{ borderBottom: '1px solid var(--eb-border-default)', maxHeight: '46%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+        padding: 'var(--eb-space-2) var(--eb-space-3)', borderBottom: '1px solid var(--eb-border-default)',
+        color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)',
+        fontWeight: 'var(--eb-font-semibold)', textTransform: 'uppercase', letterSpacing: '0.04em',
+      }}>
+        <GitBranch size={13} style={{ color: 'var(--eb-status-warning)' }} />
+        <span>Private skills</span>
+        <span style={{ marginLeft: 'auto', color: 'var(--eb-text-muted)' }}>{skills.length}</span>
+      </div>
+      <div style={{ overflowY: 'auto', padding: 'var(--eb-space-2)' }}>
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', padding: '0 var(--eb-space-1) var(--eb-space-2)' }}>
+          Lift a private skill up to <strong>{teamId}</strong> so the whole team gets it (agent→team).
+        </div>
+        {skills.map(sk => {
+          const st = state[sk.name];
+          return (
+            <div key={sk.name} style={{
+              border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+              padding: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-2)', background: 'var(--eb-bg-app)',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+                <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)', wordBreak: 'break-word', flex: 1 }}>{sk.name}</div>
+                <button onClick={() => lift(sk.name)} disabled={st === 'lifting' || st === 'done'} style={primaryBtn}>
+                  {st === 'lifting' ? 'Lifting…' : st === 'done' ? 'Lifted ✓' : 'Lift to team'}
+                </button>
+              </div>
+              {st === 'exists' && <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', marginTop: 4 }}>A team skill with this name already exists.</div>}
+              {st === 'error' && <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', marginTop: 4 }}>{errMsg[sk.name] || 'Lift failed — try again.'}</div>}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

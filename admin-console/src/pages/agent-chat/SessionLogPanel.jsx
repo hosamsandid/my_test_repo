@@ -38,9 +38,16 @@ import { sumContextTokens } from './context-window';
  *     tokens (input + cache-creation + cache-read, #490) + the model reported
  *     by its preceding `system_init` event, fed up so the chat toolbar can
  *     render the context-window fill indicator (#471)
+ *   todoCloseSignal            — bumped by the parent (AgentChat.jsx) whenever
+ *     a session boundary occurs elsewhere in the UI (new message sent, Reset
+ *     Session clicked, or a trigger-started run's first message arrives, see
+ *     ChatPanel's `onTodoBoundary`) so the pinned To-Do panel from the
+ *     *previous* session is dismissed even though no new TodoWrite has
+ *     arrived yet (#273). Default 0 = "never fired" so mount doesn't dismiss.
  */
 export default function SessionLogPanel({
-  agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate, embedded = false,
+  agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate,
+  todoCloseSignal = 0, embedded = false,
 }) {
   const [events, setEvents]       = useState([]);
   const [cursor, setCursor]       = useState(0);
@@ -242,6 +249,20 @@ export default function SessionLogPanel({
   useEffect(() => {
     setDismissedTodoId(null);
   }, [agentId, roomId]);
+
+  // Session-boundary dismissal (#273): a new message, a session reset, or a
+  // trigger-started run's first message all mean the previous session has
+  // ended, so the pinned panel must close even though no new TodoWrite has
+  // arrived yet. Skip the initial 0 so mounting doesn't dismiss anything.
+  const firstTodoSignalRef = useRef(true);
+  useEffect(() => {
+    if (firstTodoSignalRef.current) {
+      firstTodoSignalRef.current = false;
+      return;
+    }
+    setDismissedTodoId(latestTodoWrite?.toolId || '__session_boundary__');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [todoCloseSignal]);
 
   const todoVisible = !!latestTodoWrite && latestTodoWrite.toolId !== dismissedTodoId;
 

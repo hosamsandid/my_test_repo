@@ -40,7 +40,7 @@ const TAB_KEYS = ['log', 'workspace', 'triggers', 'sessions', 'prompt'];
  */
 export default function RightRail({
   agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate,
-  workspaceRefreshKey = 0,
+  todoCloseSignal = 0, workspaceRefreshKey = 0,
 }) {
   const [tab, setTab] = useState(() => {
     try {
@@ -310,6 +310,7 @@ export default function RightRail({
             onHoverCorrelation={onHoverCorrelation}
             onCostUpdate={onCostUpdate}
             onContextUpdate={onContextUpdate}
+            todoCloseSignal={todoCloseSignal}
             embedded
           />
         </div>

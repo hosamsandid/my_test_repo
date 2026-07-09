@@ -15,7 +15,6 @@
       "id": "dispatcher-ready-labeled",
       "type": "github-event",
       "events": ["issues.labeled"],
-      "from": "any-except-self",
       "labelFilter": "{{readyLabel}}",
       "enabled": true,
       "promptTemplate": "An issue in repo `{{repoFullName}}` was labeled `{{readyLabel}}`. Re-run your full dispatch decision (rules 1–5 in your system prompt) over all `{{readyLabel}}` issues — not just this one. Apply `{{dispatchLabel}}` where appropriate. Reply `[PASS]` if nothing changes."
@@ -24,7 +23,6 @@
       "id": "dispatcher-pr-closed",
       "type": "github-event",
       "events": ["pull_request.closed"],
-      "from": "any-except-self",
       "enabled": true,
       "promptTemplate": "A pull request in repo `{{repoFullName}}` was closed. If it was merged, a previously blocking issue may now be done and free up dependent candidates. Re-run your full dispatch decision over all open `{{readyLabel}}` issues. If the PR was closed without merging: still re-check, since WIP capacity might have changed. Reply `[PASS]` if nothing changes."
     },

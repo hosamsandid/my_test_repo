@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Wifi, WifiOff, Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Trash2, GitBranch, ArrowRight } from 'lucide-react';
+import { Wifi, WifiOff, Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
 import ConfirmDialog from '../../components/ConfirmDialog';
@@ -7,6 +7,7 @@ import HandoffDialog from './HandoffDialog';
 import Message from './Message';
 import MessageInput from './MessageInput';
 import LearningBadge from '../../components/LearningBadge';
+import { resolveContextWindowTokens, computeContextFillLevel } from './context-window';
 
 // Default prompt sent when the user clicks "Reset & learn". The agent
 // continues in its current Claude session (so it has full conversational
@@ -51,7 +52,7 @@ const LEARN_PROMPT =
  *        in the workspace, so the Workspace tab can refresh its tree.
  */
 export default function ChatPanel({
-  agent, roomId, onRoomCreated, hoveredCorrelationId, onHoverCorrelation, sessionCost,
+  agent, roomId, onRoomCreated, hoveredCorrelationId, onHoverCorrelation, sessionCost, contextFill,
   onWorkspaceChanged,
 }) {
   const [messages, setMessages]      = useState([]);
@@ -92,6 +93,21 @@ export default function ChatPanel({
   // override. `modelSwitching` blocks rapid double-clicks during the PATCH.
   const [modelOptions, setModelOptions] = useState(null);
   const [modelSwitching, setModelSwitching] = useState(false);
+  // Context-window fill for the last completed request (#471). `contextFill`
+  // (from the parent, fed by SessionLogPanel) carries the raw input-token
+  // count + the model actually used; resolve that model's window size against
+  // the agent's catalog (falling back to the known-Claude-family table) and
+  // derive the percentage + warning level. Hidden entirely when the window
+  // size can't be determined (AC 7) rather than showing a misleading value.
+  const contextWindowTokens = useMemo(() => {
+    if (!contextFill?.model) return null;
+    const modelEntry = (modelOptions?.models || []).find(m => m.id === contextFill.model);
+    return resolveContextWindowTokens(modelEntry || { id: contextFill.model });
+  }, [contextFill, modelOptions]);
+  const contextFillLevel = useMemo(() => {
+    if (!contextFill || contextWindowTokens == null) return null;
+    return computeContextFillLevel(contextFill.tokensIn, contextWindowTokens);
+  }, [contextFill, contextWindowTokens]);
   // Wall-clock at the moment the user clicked "Full Learn". The
   // post-message effect uses it to decide which agent reply to treat as
   // "the response to the learn prompt" — namely, the next agent message
@@ -803,6 +819,25 @@ export default function ChatPanel({
           >
             <DollarSign size={10} />
             {sessionCost.usd.toFixed(4)}
+          </span>
+        )}
+        {contextFillLevel && (
+          <span
+            title={`${contextFill.tokensIn.toLocaleString()} / ${contextWindowTokens.toLocaleString()} tokens · ${contextFill.model}`}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 3,
+              fontFamily: 'var(--eb-font-mono)',
+              fontSize: 'var(--eb-text-xs)',
+              color: contextFillLevel.level === 'critical' ? 'var(--eb-status-error)'
+                : contextFillLevel.level === 'warning' ? 'var(--eb-status-warning)'
+                : 'var(--eb-text-muted)',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            <Gauge size={10} />
+            {contextFillLevel.pct}%
           </span>
         )}
         {sessionId && (

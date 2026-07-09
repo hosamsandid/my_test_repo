@@ -13,7 +13,7 @@
 //     processTemplateVersion: 1,
 //     name, level,                       // level: 'live' | 'template' (informational)
 //     roles: [ { id, displayName, role, sessionPolicy, systemPrompt,
-//                triggers: [ { id, type, events, labelFilter, from, cron, at,
+//                triggers: [ { id, type, events, labelFilter, cron, at,
 //                              emits, description, prompt } ] } ],
 //     gates:  [ { label } ],
 //     labels: [ { name, humanGate, brake } ],
@@ -46,7 +46,6 @@ function bundleTrigger(t) {
   const out = { id: t.id, type: t.type, enabled: t.enabled !== false };
   if (t.type === 'github-event') {
     out.events = Array.isArray(t.events) ? t.events : [];
-    if (t.from) out.from = t.from;
     if (t.labelFilter) out.labelFilter = t.labelFilter;
   } else if (t.type === 'cron') {
     out.cron = t.cron || null;
@@ -193,7 +192,6 @@ function templateToCustomRoles(bundle) {
       enabled: t.enabled !== false,
       events: t.events,
       labelFilter: t.labelFilter,
-      from: t.from,
       cron: t.cron,
       at: t.at,
       emits: t.emits,
@@ -338,16 +336,15 @@ function consumeIssuePrompt(producerName, { label, human } = {}) {
  * than leaving a stale trigger behind. Idempotent. Roles without channels are
  * untouched (no-op for catalog teams).
  * @param {object} bundle
- * @param {{ teamId?: string }} [opts] - teamId maps a producer role id → member
- *   id (`<teamId>-<roleId>`) for the scoped `from` allowlist.
+ * @param {object} [_opts] - accepted for call-site parity; derived channel
+ *   triggers carry no origin filter, so no team→member mapping is needed.
  */
-function expandGithubChannels(bundle, { teamId } = {}) {
+function expandGithubChannels(bundle, _opts = {}) {
   const roles = (bundle.roles || []).map(r => ({
     ...r,
     triggers: (r.triggers || []).filter(t => !isChannelTrigger(t)),
   }));
   const byId = new Map(roles.map(r => [r.id, r]));
-  const memberId = (roleId) => (teamId ? `${teamId}-${roleId}` : roleId);
 
   for (const b of roles) {
     for (const ch of (b.channels || [])) {
@@ -365,10 +362,9 @@ function expandGithubChannels(bundle, { teamId } = {}) {
         type: 'github-event',
         events,
         ...(label ? { labelFilter: label } : {}),
-        // A human gate means the *human* applies the label; anyone-but-self would
-        // let an agent trip it. Scope non-gated channels to the producer so only
-        // that upstream's PR/issue wakes the consumer.
-        from: human ? 'humans' : [memberId(from)],
+        // No origin filter: the trigger fires on any matching PR/issue event.
+        // A human gate is expressed purely by the `human:*` label convention
+        // (the labelFilter above) — humans apply it; agents don't, by convention.
         channel: true,
         enabled: true,
         description: `${artifact === 'pr' ? 'PR' : 'Issue'} from ${producerName}`
@@ -421,17 +417,13 @@ function normalizeLegacyReview(bundle) {
 // push by an upstream agent IS the signal that downstream data is ready. This
 // expansion (run only at materialise time) turns each data-flow edge —
 // `depends_on` (ordering) and artifact output→input matches (data) — into a
-// concrete `push` github-event trigger on the *consumer*, scoped via
-// `from: ['<teamId>-<upstream>']` to that one upstream agent. Far more targeted
-// than a generic push trigger: it fires only when a predecessor in the data
-// chain pushes. The poller's existing origin attribution (commit author
-// `<id>@agents.local`), `from` allowlist, and loop protection (layers 0/2/3)
-// carry it — no runtime/router change.
+// concrete `push` github-event trigger on the *consumer*. The trigger carries
+// no origin filter — it fires on any push to the repo and the woken agent
+// decides whether the change is relevant (it can `[PASS]`). The Layer-3
+// throttle caps runaway wake-ups per branch. No runtime/router change.
 //
-// Path-level precision is deliberately NOT applied: the trigger fires on any
-// push by the upstream and the woken agent decides whether the change is
-// relevant (it can `[PASS]`). This also covers the case where an agent chose to
-// produce something other than its declared artifact.
+// Path-level precision is deliberately NOT applied: this also covers the case
+// where an agent chose to produce something other than its declared artifact.
 //
 // Artifacts are matched by their *logical name* (#382), not their physical path:
 // an agent instance may write "the Functional Design" to a different path each
@@ -496,13 +488,12 @@ function dataFlowPrompt(upstreamName, artifacts) {
  * teams). `inputs/outputs/dependsOn` stay on the roles (carried to config by
  * templateToCustomRoles for the live graph).
  * @param {object} bundle
- * @param {{ teamId?: string }} [opts] - teamId to map a role id → member id
- *   (`<teamId>-<roleId>`) for the `from` allowlist.
+ * @param {{ teamId?: string }} [opts] - teamId (accepted for signature parity
+ *   with expandGithubChannels; the derived triggers carry no origin filter).
  */
-function expandDataFlowSteps(bundle, { teamId } = {}) {
+function expandDataFlowSteps(bundle) {
   const roles = (bundle.roles || []).map(r => ({ ...r, triggers: (r.triggers || []).slice() }));
   const byId = new Map(roles.map(r => [r.id, r]));
-  const memberId = (roleId) => (teamId ? `${teamId}-${roleId}` : roleId);
 
   // Producers by artifact match key (logical name, else path).
   const producersByKey = new Map();
@@ -542,7 +533,6 @@ function expandDataFlowSteps(bundle, { teamId } = {}) {
         id: triggerId,
         type: 'github-event',
         events: ['push'],
-        from: [memberId(upId)],
         // Marker so the UI renders this as an agent data-flow dependency (an
         // editable "push from <upstream>" hand-off) rather than a raw push
         // trigger. The poller ignores unknown fields. (#379)

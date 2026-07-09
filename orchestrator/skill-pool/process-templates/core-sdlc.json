@@ -32,7 +32,6 @@
           "type": "github-event",
           "enabled": true,
           "events": ["pull_request_review.submitted"],
-          "from": "any-except-self",
           "description": "Rework the PR after a review",
           "prompt": "A review was submitted on a PR in `{{repoFullName}}` (payload above). If it is not one of YOUR PRs, reply `[PASS]`.\n\n1. `git pull`, check out the PR branch, read every review comment.\n2. Address each point: fix the code/tests, or reply explaining why not.\n3. Run the tests, commit via `gh-as-agent commit`, push, summarise the changes in a PR comment.\n\nReply `[PASS]` if there is nothing to do."
         },

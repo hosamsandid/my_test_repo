@@ -184,7 +184,7 @@ test('the same generic template in two stages gets distinct stage-scoped ids', (
   assert.deepEqual(ids, ['build-author', 'build-companion', 'design-author', 'design-companion']);
 });
 
-test('inline roles keep all their triggers and get a from default', () => {
+test('inline roles keep all their triggers (no origin filter added)', () => {
   const { bundle } = weaveProcess({
     name: 'Inline',
     stages: [{
@@ -198,7 +198,8 @@ test('inline roles keep all their triggers and get a from default', () => {
   });
   assert.deepEqual(nonInfoLints(bundle), []);
   const t = bundle.roles[0].triggers.find(x => x.id === 'on-release');
-  assert.equal(t.from, 'any-except-self');
+  assert.ok(t, 'inline trigger is kept');
+  assert.ok(!('from' in t), 'no origin filter is synthesised');
 });
 
 test('invalid input throws instead of producing a broken bundle', () => {

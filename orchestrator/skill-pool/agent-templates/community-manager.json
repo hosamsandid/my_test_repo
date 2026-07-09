@@ -15,7 +15,6 @@
       "id": "community-issue-comment",
       "type": "github-event",
       "events": ["issue_comment.created"],
-      "from": "humans",
       "enabled": true,
       "promptTemplate": "A human posted a comment on an issue or PR in repo `{{repoFullName}}`. Decide whether a friendly first-line reply adds value (question / bug report / feature suggestion / drive-by). If yes, reply: write the comment body to a file, run `gh-as-agent stamp <file>`, then `gh issue comment <number> --body-file <file>`. If the comment is a status update, internal team chatter, or already answered: `[PASS]`."
     },

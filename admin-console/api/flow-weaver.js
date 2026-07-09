@@ -185,9 +185,6 @@ function weaveProcess(input) {
         enabled: tr.enabled !== false,
         ...(tr.type === 'github-event' ? {
           events: Array.isArray(tr.events) ? tr.events.slice() : [],
-          // Default the origin filter so a kept trigger can never be an
-          // unguarded self-trigger (lint contract).
-          from: tr.from || 'any-except-self',
           ...(tr.labelFilter ? { labelFilter: renderStageVars(tr.labelFilter, vars) } : {}),
         } : {}),
         ...(tr.type === 'cron' ? { cron: tr.cron } : {}),
@@ -258,7 +255,7 @@ function weaveProcess(input) {
       if (scouts.length || companions.length) {
         addTrigger(author, {
           id: 'author-wake', type: 'github-event', enabled: true,
-          events: ['issues.labeled'], labelFilter: authorGo, from: 'any-except-self',
+          events: ['issues.labeled'], labelFilter: authorGo,
           emits: companions.length ? [escalate] : [],
           description: `Start/continue when \`${authorGo}\` is applied`,
           prompt: authorWakePrompt(stage.name, { authorGo, escalate: companions.length ? escalate : null }),
@@ -267,7 +264,7 @@ function weaveProcess(input) {
       if (author.produces.pr) {
         addTrigger(author, {
           id: 'rework-on-review', type: 'github-event', enabled: true,
-          events: ['pull_request_review.submitted'], from: 'any-except-self',
+          events: ['pull_request_review.submitted'],
           description: 'Rework the PR after a review',
           prompt: reworkPrompt(stage.name),
         });
@@ -295,7 +292,7 @@ function weaveProcess(input) {
         companion.emits.push(authorGo);
         addTrigger(companion, {
           id: 'escalate-wake', type: 'github-event', enabled: true,
-          events: ['issues.labeled'], labelFilter: escalate, from: 'any-except-self',
+          events: ['issues.labeled'], labelFilter: escalate,
           description: `Broker a ${stage.name} escalation`,
           prompt: escalateWakePrompt(stage.name, { authorGo, escalate }),
         });
@@ -305,7 +302,6 @@ function weaveProcess(input) {
       addTrigger(companion, {
         id: 'human-feedback', type: 'github-event', enabled: true,
         events: ['issue_comment.created', 'pull_request_review.submitted', 'pull_request_review_comment.created', 'issues.edited'],
-        from: 'humans',
         description: `Route human feedback in the ${stage.name} stage`,
         prompt: humanFeedbackPrompt(stage.name, { authorGo }),
       });

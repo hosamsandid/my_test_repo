@@ -15,7 +15,6 @@
       "id": "compliance-submission-opened",
       "type": "github-event",
       "events": ["pull_request.opened", "pull_request.reopened"],
-      "from": "any-except-self",
       "enabled": true,
       "promptTemplate": "A policy submission was opened in `{{repoFullName}}`. Read the submission diff and the originating change request (look for `Closes #N` in the submission body to find the change request number). Review the draft policy for regulatory accuracy and coverage. Post your findings: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>`. If clean: 'Compliance review: approved'."
     },

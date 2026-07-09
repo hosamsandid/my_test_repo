@@ -24,7 +24,6 @@
       "id": "change-request-closed",
       "type": "github-event",
       "events": ["issues.closed"],
-      "from": "any-except-self",
       "enabled": true,
       "promptTemplate": "A change request in `{{repoFullName}}` was closed. Check if it was one you opened:\n1. Run `gh issue view <number>` to confirm authorship.\n2. If it is yours: update `memory/context.md` (mark the item done); append a one-line entry to `memory/log.md`; post a short DM to the user with the issue number, title, and the closing policy submission if visible.\n3. If not yours: reply `[PASS]`."
     },

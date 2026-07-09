@@ -24,19 +24,6 @@ function isBrake(label) {
   return BRAKES.has(label);
 }
 
-// Whether a trigger's origin filter (Layer-2 `from` spec) lets a *human* fire
-// it. Mirrors the github-poller's applyFromFilter semantics: absent /
-// any-except-self / humans include humans; agents / team exclude them; an
-// allowlist includes humans only via the "humans" token; an exclude-list
-// blocks them only when it names "humans". Unknown specs fail closed.
-function fromIncludesHumans(from) {
-  if (from == null || from === 'any-except-self' || from === 'humans') return true;
-  if (from === 'agents' || from === 'team') return false;
-  if (Array.isArray(from)) return from.includes('humans');
-  if (typeof from === 'object' && Array.isArray(from.exclude)) return !from.exclude.includes('humans');
-  return false;
-}
-
 // The keys a trigger reacts to. A github-event trigger with a labelFilter reacts
 // to that one label (the carrying event — issues.labeled — is implied, so we do
 // not also emit an edge for it). Without a labelFilter it reacts to its raw
@@ -81,7 +68,6 @@ function triggerView(t) {
   const v = { id: t.id, type: t.type, enabled: t.enabled !== false };
   if (t.type === 'github-event') {
     v.events = Array.isArray(t.events) ? t.events : [];
-    if (t.from) v.from = t.from;
     if (t.labelFilter) v.labelFilter = t.labelFilter;
   } else if (t.type === 'cron') {
     v.cron = t.cron || null;
@@ -215,21 +201,11 @@ function buildProcessGraph(agents) {
         } else {
           const emitters = [...(emitIndex.get(key) || [])];
           if (emitters.length === 0) {
-            if (fromIncludesHumans(t.from)) {
-              // No agent emits this label, but the origin filter lets a human
-              // set it — the edge originates at the human actor (#410), e.g. a
-              // human labelling a human-created issue. An *explicit*
-              // `from: humans` is by-design human-triggered (no lint at all);
-              // a human-including default keeps an advisory info lint so a
-              // typo'd label name still surfaces.
-              edges.push({
-                from: null, to: n.id, label: key, kind, triggerId: t.id, humanSet: true, ...evs,
-                ...(t.from === 'humans' ? {} : { humanAssumed: true }),
-              });
-            } else {
-              // Orphan listener: nothing (agent or human) can set this label.
-              edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, orphan: true, ...evs });
-            }
+            // No agent emits this label. Without an origin filter we can't infer
+            // whether a human sets it, so it's drawn as an orphan listener
+            // (advisory lint) — a human applying the label still fires it at
+            // runtime; this is only about what the static graph can prove.
+            edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, orphan: true, ...evs });
           } else {
             for (const s of emitters) {
               edges.push({ from: s, to: n.id, label: key, kind, triggerId: t.id, ...evs });
@@ -291,12 +267,6 @@ function computeLints(nodes, edges) {
       lints.push({ code: 'orphan-listener', severity: 'warning', label: e.label, nodeId: e.to,
         message: `\`${e.to}\` listens on \`${e.label}\` but no agent emits it.` });
     }
-    if (e.humanAssumed) {
-      // Human-reachable listener with no agent emitter (#410): drawn from the
-      // human actor, advisory only — could be intentional, could be a typo.
-      lints.push({ code: 'orphan-listener', severity: 'info', label: e.label, nodeId: e.to,
-        message: `\`${e.to}\` listens on \`${e.label}\` — no agent emits it; only a human can set it.` });
-    }
     if (e.deadEnd) {
       lints.push({ code: 'dead-end-emitter', severity: 'warning', label: e.label, nodeId: e.from,
         message: `\`${e.from}\` emits \`${e.label}\` but nothing listens on it.` });
@@ -338,10 +308,6 @@ function computeLints(nodes, edges) {
     }
     const stageEmits = new Set();
     for (const t of n.triggers || []) {
-      if (t.type === 'github-event' && !t.from) {
-        lints.push({ code: 'unguarded-self-trigger', severity: 'warning', nodeId: n.id, triggerId: t.id,
-          message: `Trigger \`${t.id}\` on \`${n.id}\` has no origin filter (\`from\`) — self-loop risk.` });
-      }
       for (const lbl of t.emits || []) {
         if (isHumanGate(lbl)) {
           lints.push({ code: 'gate-violation', severity: 'error', nodeId: n.id, label: lbl, triggerId: t.id,
@@ -358,4 +324,4 @@ function computeLints(nodes, edges) {
   return lints;
 }
 
-module.exports = { buildProcessGraph, computeLints, listenKeys, classifyKind, isHumanGate, isBrake, fromIncludesHumans };
+module.exports = { buildProcessGraph, computeLints, listenKeys, classifyKind, isHumanGate, isBrake };

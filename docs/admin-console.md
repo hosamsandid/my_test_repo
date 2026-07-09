@@ -6,8 +6,7 @@ The Admin Console at `http://localhost:4000` (configurable via `.env`) is the ce
 
 | Page | Route | Purpose |
 |---|---|---|
-| **Dashboard** | `/` | Live agent status (Unread / Busy / Idle / Offline), aggregate stats, setup progress nudge |
-| **Agent Chat** | `/chats` | 1:1 chat with any agent; session log; workspace browser; trigger editor |
+| **Agent Chat** | `/` (redirects to `/chats`) | 1:1 chat with any agent; session log; workspace browser; trigger editor — the console's entry page |
 | **Agents** | `/agents` | Create, edit, enable/disable, delete, export, and import agents |
 | **Working Environments** | `/environments` | Reusable workspace recipes (skills, repos, GitHub token, model provider) |
 | **SSH Keys** | `/ssh-keys` | Register SSH key pairs for private repository access |

@@ -303,6 +303,14 @@ export default function AgentChat() {
     setSessionCost({ usd, tokIn, tokOut });
   }, []);
 
+  // Last completed request's input tokens + model, fed by SessionLogPanel via
+  // onContextUpdate — drives the context-window fill indicator (#471). Unlike
+  // sessionCost this is NOT cumulative.
+  const [contextFill, setContextFill] = useState(null); // null = no data yet
+  const handleContextUpdate = useCallback((ctx) => {
+    setContextFill(ctx);
+  }, []);
+
   const selectedAgent = (agents ?? []).find(a => a.id === agentId) || null;
   const effectiveRoomId =
     (selectedAgent && createdRooms[selectedAgent.id]) ||
@@ -523,6 +531,7 @@ export default function AgentChat() {
             hoveredCorrelationId={hoveredCorrelationId}
             onHoverCorrelation={setHoveredCorrelationId}
             sessionCost={sessionCost}
+            contextFill={contextFill}
             onWorkspaceChanged={handleWorkspaceChanged}
           />
         ) : (
@@ -551,6 +560,7 @@ export default function AgentChat() {
             onHoverCorrelation={setHoveredCorrelationId}
             onClose={() => setLogOpen(false)}
             onCostUpdate={handleCostUpdate}
+            onContextUpdate={handleContextUpdate}
             workspaceRefreshKey={workspaceRefreshKey}
           />
         </div>

@@ -1040,12 +1040,16 @@ def _build_memory_hint(blueprint_id: str | None) -> str:
             f"IMPORTANT: Your workspace root is the current working directory."
             + harvest
         )
+    # NOTE: kept byte-identical to buildMemoryHint() in
+    # orchestrator/prompt-assembly.js (used by the prompt-preview endpoint). The
+    # /workspace path-translation example now lives ONCE in the CLAUDE.md
+    # Workspace section, and this no longer names a 2-file subset that
+    # contradicts the 5-file Memory System.
     return (
-        "Read memory/context.md and memory/log.md first (if they exist) before responding. "
-        "If the user asks you to remember something: update the memory files. "
-        "IMPORTANT: Your workspace root is the current working directory. "
-        "Memory entries may reference absolute paths like /workspace/... from a different context. "
-        "Translate these to relative paths in your current directory (e.g. /workspace/314092_foo/ becomes ./314092_foo/)."
+        "Before responding, read your memory files: start with memory/context.md and memory/log.md, "
+        "and consult memory/facts.md, memory/entities.md and memory/users.md when the topic calls for it. "
+        "If the user asks you to remember something, update the relevant memory files. "
+        "IMPORTANT: Your workspace root is the current working directory."
         + harvest
     )
 
@@ -1989,6 +1993,37 @@ class TriggerScheduler:
 
     # -- execute -------------------------------------------------------------
 
+    @staticmethod
+    def _github_event_detail(event_key: str, payload: dict) -> str | None:
+        """Best-effort human-readable detail for a `github-event` trigger notice.
+
+        Returns None (caller falls back to the plain event/repo body) when the
+        event key isn't one we know how to describe, or the payload is
+        missing the fields we need — this must never raise.
+        """
+        try:
+            if event_key.startswith("issues."):
+                issue = payload.get("issue") or {}
+                number, title, url = issue.get("number"), issue.get("title"), issue.get("html_url")
+                if number is not None and title and url:
+                    return f"Issue #{number}: {title} — {url}"
+            elif event_key.startswith("pull_request.") or event_key.startswith("pull_request_review."):
+                pr = payload.get("pull_request") or {}
+                number, title, url = pr.get("number"), pr.get("title"), pr.get("html_url")
+                if number is not None and title and url:
+                    return f"PR #{number}: {title} — {url}"
+            elif event_key == "push":
+                ref = payload.get("ref")
+                if isinstance(ref, str) and ref:
+                    branch = ref.removeprefix("refs/heads/")
+                    head = payload.get("head")
+                    if isinstance(head, str) and head:
+                        return f"branch `{branch}` @ `{head[:7]}`"
+                    return f"branch `{branch}`"
+        except Exception:
+            pass
+        return None
+
     async def _post_trigger_notice(self, trigger: dict, ctx: dict | None,
                                    room_id: str) -> None:
         """Send the m.notice envelope that issue #158 republishes.
@@ -2009,9 +2044,12 @@ class TriggerScheduler:
         elif ttype == "github-event":
             event_key = gh.get("event") or tid
             repo = gh.get("repo") or ""
+            payload = gh.get("payload") if isinstance(gh.get("payload"), dict) else {}
+            detail = self._github_event_detail(gh.get("event") or "", payload)
+            detail_suffix = f" — {detail}" if detail else ""
             body = (
                 f"⚡ Trigger fired (GitHub: `{event_key}` on `{repo}`)"
-                f"{desc} — starting work…"
+                f"{detail_suffix}{desc} — starting work…"
             )
         elif ttype == "http":
             body = f"⚡ Trigger fired (HTTP: `{tid}`){desc} — starting work…"

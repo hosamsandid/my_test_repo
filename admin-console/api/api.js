@@ -12,6 +12,7 @@ const { spawnSync } = require('child_process');
 const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
+const githubEventLog = require('./github-event-log');
 const { computeScope, visibleTeam, visibleAgent } = require('./scope');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
@@ -171,6 +172,29 @@ app.use('/api', auth.gate);
 // Read recent audit entries (newest first). Protected by the gate above.
 app.get('/api/audit', (req, res) => {
   res.json(audit.recentEntries(Number(req.query.limit) || 200));
+});
+
+// Read GitHub poller event-transparency entries (#469): every fresh event the
+// poller saw, whether delivered, dropped (with reason), digested, or matching
+// no subscriber at all. Protected by the gate above.
+app.get('/api/github-events', (req, res) => {
+  const entries = githubEventLog.queryEntries({
+    since: req.query.since,
+    until: req.query.until,
+    limit: Number(req.query.limit) || undefined,
+  });
+  const nameCache = new Map();
+  const agentName = (agentId) => {
+    if (!nameCache.has(agentId)) {
+      const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
+      nameCache.set(agentId, cfg?.name || agentId);
+    }
+    return nameCache.get(agentId);
+  };
+  res.json(entries.map((e) => ({
+    ...e,
+    outcomes: (e.outcomes || []).map((o) => ({ ...o, agentName: agentName(o.agentId) })),
+  })));
 });
 
 const MCP_SERVER_ID_RE = /^[a-z0-9-]+$/;
@@ -847,47 +871,6 @@ app.get('/api/setup/status', (req, res) => {
   res.json({ isComplete, steps, completionPercent: Math.round((doneCount / steps.length) * 100) });
 });
 
-/* ─── Dashboard ─────────────────────────────────────────────────────── */
-
-app.get('/api/dashboard', (req, res) => {
-  const agentDirs = listAgentDirs();
-  let active = 0;
-  let disabled = 0;
-  let agentSkills = 0;
-  let triggerCount = 0;
-
-  for (const id of agentDirs) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (cfg.enabled === false) disabled++;
-    else active++;
-
-    const skillsDir = path.join(AGENTS_DIR, id, 'skills');
-    try {
-      const skills = fs.readdirSync(skillsDir).filter(n => {
-        return fs.existsSync(path.join(skillsDir, n, 'SKILL.md'));
-      });
-      agentSkills += skills.length;
-    } catch { /* no skills dir */ }
-
-    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []); // canonical copy (#185)
-    if (Array.isArray(triggers)) triggerCount += triggers.length;
-  }
-
-  let poolSkills = 0;
-  const poolSkillsDir = path.join(POOL_DIR, 'skills');
-  try {
-    poolSkills = fs.readdirSync(poolSkillsDir).filter(n =>
-      fs.existsSync(path.join(poolSkillsDir, n, 'SKILL.md'))
-    ).length;
-  } catch { /* no dir */ }
-
-  res.json({
-    agents: { total: agentDirs.length, active, disabled },
-    jobs: { total: triggerCount },
-    skills: { total: poolSkills + agentSkills },
-  });
-});
-
 /* ─── Agents ────────────────────────────────────────────────────────── */
 
 app.get('/api/agents', (req, res) => {
@@ -949,6 +932,23 @@ app.get('/api/agents/:id', (req, res) => {
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
   const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []); // canonical copy (#185)
   res.json({ id, ...cfg, triggers });
+});
+
+// Prompt preview: proxy to the orchestrator, which renders the fully-composed
+// system prompt (seeded CLAUDE.md + runtime append hint) via the same assembly
+// path as workspace seeding. Lets an operator review the composed whole instead
+// of reading the template, the env, and the runtime hint separately.
+app.get('/api/agents/:id/prompt-preview', apiLimiter, async (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/prompt-preview`);
+    const body = await r.json().catch(() => ({ error: 'invalid orchestrator response' }));
+    return res.status(r.status).json(body);
+  } catch (err) {
+    return res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
 });
 
 // Best-effort: nudge a running agent (SIGUSR2 via the orchestrator) to re-pull
@@ -1091,6 +1091,20 @@ function notifyAgentReseed(agentId, paths) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ paths }),
+  }).catch(() => {});
+}
+
+// Best-effort: after an environment's spawn-time credentials change (today: the
+// GitHub PAT it points at), ask the orchestrator to respawn the running agents
+// bound to that env so they pick up the new credential. The token is baked into
+// each container's environment at spawn time, so without this a rotated PAT
+// would only reach a container on its next manual disable/enable.
+function notifyEnvCredentialChange(envId, reason) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  fetch(`${orchestratorUrl}/internal/environments/${encodeURIComponent(envId)}/respawn-agents`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason }),
   }).catch(() => {});
 }
 
@@ -1662,7 +1676,7 @@ app.post('/api/agents/:id/handover', handoverLimiter, async (req, res) => {
     }
 
     // 3. Build the structured DM body and send it. The receiving agent's
-    // DM heuristic in agent-runner.js picks it up like any other user
+    // DM heuristic in the agent runtime picks it up like any other user
     // message and invokes Claude with the body as the prompt.
     const noteText = (typeof perTargetMap[targetId] === 'string' ? perTargetMap[targetId] : sharedNote).trim();
     const body = renderHandoverBody({
@@ -2436,7 +2450,7 @@ app.get('/api/process/graph', (req, res) => {
       const triggers = effectiveTriggers(
         (t.triggers || []).map(tr => ({
           id: tr.id, type: tr.type, events: tr.events, labelFilter: tr.labelFilter,
-          from: tr.from, cron: tr.cron, at: tr.at, enabled: tr.enabled,
+          cron: tr.cron, at: tr.at, enabled: tr.enabled,
           emits: tr.emits, prompt: tr.promptTemplate,
         })),
         { derive, systemPrompt: t.promptTemplate || '' },
@@ -3218,7 +3232,7 @@ app.get('/api/flows/graph', async (req, res) => {
       const triggers = effectiveTriggers(
         (t.triggers || []).map(tr => ({
           id: tr.id, type: tr.type, events: tr.events, labelFilter: tr.labelFilter,
-          from: tr.from, cron: tr.cron, at: tr.at, enabled: tr.enabled,
+          cron: tr.cron, at: tr.at, enabled: tr.enabled,
           emits: tr.emits, prompt: tr.promptTemplate,
         })),
         { derive, systemPrompt: t.promptTemplate || '' },
@@ -5248,6 +5262,7 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
 app.put('/api/environments/:id', apiLimiter, (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
+  const prevGithubTokenId = env.githubTokenId || null;
   const { name, description, skills, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers, teamId } = req.body || {};
 
   if (githubTokenId) {
@@ -5294,6 +5309,11 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   if (additionalContext !== undefined) env.additionalContext = additionalContext;
   env.updatedAt = new Date().toISOString();
   saveEnvironment(env.id, env);
+  // If the GitHub PAT the env points at changed, respawn its running agents so
+  // the new token is re-injected into their containers (baked in at spawn time).
+  if ((env.githubTokenId || null) !== prevGithubTokenId) {
+    notifyEnvCredentialChange(env.id, 'githubTokenId-changed');
+  }
   res.json(env);
 });
 
@@ -6167,7 +6187,6 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
         };
         if (tr.type === 'github-event') {
           out.events = tr.events || [];
-          out.from = tr.from || 'any-except-self';
           out.repo = vars.repoFullName;
           // Carry the optional label-name filter through if the template
           // defines one (e.g. developer.json pins it to the wizard's
@@ -6704,7 +6723,6 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
         };
         if (tr.type === 'github-event') {
           out.events = tr.events || [];
-          out.from = tr.from || 'any-except-self';
           out.repo = vars.repoFullName;
           // Carry the optional label-name filter through if the template
           // defines one (e.g. developer.json pins it to the wizard's

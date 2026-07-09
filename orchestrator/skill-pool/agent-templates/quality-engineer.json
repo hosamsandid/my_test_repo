@@ -15,7 +15,6 @@
       "id": "qa-issue-ready",
       "type": "github-event",
       "events": ["issues.labeled"],
-      "from": "any-except-self",
       "labelFilter": "{{readyLabel}}",
       "enabled": true,
       "promptTemplate": "An issue in repo `{{repoFullName}}` was labeled `{{readyLabel}}`. Draft an independent test plan from the acceptance criteria and post it as a comment on the issue: write the comment body to a file, run `gh-as-agent stamp <file>`, then `gh issue comment <number> --body-file <file>`. Title the comment **Test plan**. Do NOT implement — the Developer is working on this in parallel."

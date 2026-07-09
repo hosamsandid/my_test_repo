@@ -294,9 +294,8 @@ function stripYamlFrontmatter(text) {
   return text.replace(/^\s*---\n[\s\S]*?\n---\s*\n?/, '');
 }
 
-// Compact, dashboard-aligned typography for the brief.md body. Without
-// these the browser's default heading sizes look oversized inside a
-// 640px side panel.
+// Compact typography for the brief.md body. Without these the browser's
+// default heading sizes look oversized inside a 640px side panel.
 const BRIEF_MD_COMPONENTS = {
   h1: (props) => <h2 style={{ fontSize: 'var(--eb-text-lg)', fontWeight: 'var(--eb-font-semibold)', margin: '1em 0 0.4em' }} {...props} />,
   h2: (props) => <h3 style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', margin: '1em 0 0.4em' }} {...props} />,
@@ -1945,6 +1944,7 @@ export default function Agents() {
   const [panelMode, setPanelMode] = useState(null); // null | 'create' | 'edit'
   const [selectedAgent, setSelectedAgent] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const [deactivateTarget, setDeactivateTarget] = useState(null);
   const [deactivateWarning, setDeactivateWarning] = useState(null); // { agent, busy, activeTriggers }
   const [disableWarning, setDisableWarning] = useState(null); // { agent, busy, activeTriggers }
@@ -2171,6 +2171,7 @@ export default function Agents() {
   }
 
   async function handleDelete() {
+    setDeleteBusy(true);
     try {
       await apiCall('DELETE', `/api/agents/${deleteTarget.id}`);
       setDeleteTarget(null);
@@ -2178,6 +2179,8 @@ export default function Agents() {
     } catch (e) {
       setActionError(e.message);
       setDeleteTarget(null);
+    } finally {
+      setDeleteBusy(false);
     }
   }
 
@@ -2498,6 +2501,7 @@ export default function Agents() {
         }
         onConfirm={handleDelete}
         onCancel={() => setDeleteTarget(null)}
+        busy={deleteBusy}
       />
 
       <ConfirmDialog

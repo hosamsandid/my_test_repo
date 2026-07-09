@@ -75,26 +75,20 @@ test('orphan listener: nothing can set the label (agents-only origin)', () => {
   assert.ok(g.lints.some(l => l.code === 'orphan-listener' && l.severity === 'warning'));
 });
 
-test('human-set listener (#410): explicit from:humans is a human edge, no lint', () => {
+test('label listener with no agent emitter is a plain orphan (origin filters removed)', () => {
+  // With source/origin filters gone there is no `from` to infer human-settability
+  // from, so a label nobody emits is always a plain orphan (warning). A human
+  // applying the label still fires the trigger at runtime — this is only about
+  // what the static graph can prove.
   const g = buildProcessGraph([
-    { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: 'priorisiert', from: 'humans' }] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: 'priorisiert' }] },
   ]);
   const e = g.edges.find(x => x.to === 'b' && x.label === 'priorisiert');
   assert.equal(e.from, null);
-  assert.equal(e.humanSet, true);
-  assert.ok(!e.orphan);
-  assert.ok(!g.lints.some(l => l.code === 'orphan-listener'));
-});
-
-test('human-reachable listener (#410): default origin keeps an advisory info lint', () => {
-  const g = buildProcessGraph([
-    { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: 'dispatch' }] },
-  ]);
-  const e = g.edges.find(x => x.to === 'b' && x.label === 'dispatch');
-  assert.equal(e.humanSet, true);
-  assert.equal(e.humanAssumed, true);
+  assert.equal(e.orphan, true);
+  assert.ok(!e.humanSet && !e.humanAssumed, 'no human-origin inference any more');
   const lint = g.lints.find(l => l.code === 'orphan-listener');
-  assert.equal(lint.severity, 'info');
+  assert.equal(lint.severity, 'warning');
 });
 
 test('http trigger (#410): becomes a webhook edge from outside', () => {
@@ -226,16 +220,14 @@ test('lint: dead-end emitter fires', () => {
   assert.ok(g.lints.some(l => l.code === 'dead-end-emitter' && l.nodeId === 'a'));
 });
 
-test('lint: unguarded self-trigger when from is absent', () => {
+test('lint: no unguarded-self-trigger lint (origin filters removed)', () => {
+  // The lint keyed off the absence of a `from` origin filter; with source
+  // filtering gone, self-triggering is allowed by design (the Layer-3 throttle
+  // is the backstop), so the lint must no longer fire.
   const g = buildProcessGraph([
     { id: 'a', triggers: [{ id: 't', type: 'github-event', events: ['issues.opened'] }] },
   ]);
-  assert.ok(g.lints.some(l => l.code === 'unguarded-self-trigger' && l.triggerId === 't'));
-  // ...and does NOT fire when a from filter is present
-  const g2 = buildProcessGraph([
-    { id: 'a', triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['issues.opened'] }] },
-  ]);
-  assert.ok(!g2.lints.some(l => l.code === 'unguarded-self-trigger'));
+  assert.ok(!g.lints.some(l => l.code === 'unguarded-self-trigger'));
 });
 
 test('lint: competing stage labels', () => {
@@ -343,7 +335,7 @@ test('node view exposes the expected fields', () => {
   const g = buildProcessGraph([{
     id: 'dev', role: 'team-member', displayName: 'Developer', sessionPolicy: 'per-invocation',
     environmentId: 'team-x',
-    triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], from: 'any-except-self',
+    triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'],
       labelFilter: 'assigned:dev', emits: ['started:dev'], emitsDerived: true }],
   }]);
   const n = g.nodes[0];
@@ -353,7 +345,7 @@ test('node view exposes the expected fields', () => {
   assert.equal(n.environmentId, 'team-x');
   const t = n.triggers[0];
   assert.deepEqual(t.events, ['issues.labeled']);
-  assert.equal(t.from, 'any-except-self');
+  assert.ok(!('from' in t), 'origin filter removed from the trigger view');
   assert.equal(t.labelFilter, 'assigned:dev');
   assert.deepEqual(t.emits, ['started:dev']);
   assert.equal(t.emitsDerived, true);

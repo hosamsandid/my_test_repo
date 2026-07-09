@@ -41,6 +41,7 @@ test('buildProcessTemplate shapes a versioned bundle and drops team-specifics', 
   assert.deepEqual(t.emits, ['started:dev']);
   assert.equal(t.prompt, 'Implement it.');
   assert.ok(!('repo' in t), 'repo is team-specific and must not be in the bundle');
+  assert.ok(!('from' in t), 'origin filter removed — triggers fire on any matching event');
   assert.deepEqual(b.gates, [{ label: 'human:td-approved' }]);
 });
 
@@ -129,13 +130,13 @@ test('expandGithubChannels: a consumer channel yields a scoped PR-opened trigger
   assert.ok(t);
   assert.equal(t.channel, true);
   assert.deepEqual(t.events, ['pull_request.opened', 'pull_request.reopened']);
-  assert.deepEqual(t.from, ['acme-developer']); // scoped to the producer member id
+  assert.ok(!('from' in t), 'no origin filter — the trigger fires on any matching PR event');
   assert.equal(t.labelFilter, undefined);
   // non-consumer roles untouched
   assert.equal(out.roles.find(r => r.id === 'release').triggers.length, 0);
 });
 
-test('expandGithubChannels: a labelled human gate reacts to *.labeled from humans', () => {
+test('expandGithubChannels: a labelled human gate reacts to *.labeled (label-only, no origin filter)', () => {
   const bundle = {
     processTemplateVersion: 1, name: 'x', level: 'template',
     roles: [
@@ -147,7 +148,9 @@ test('expandGithubChannels: a labelled human gate reacts to *.labeled from human
   const t = out.roles.find(r => r.id === 'deployer').triggers[0];
   assert.deepEqual(t.events, ['pull_request.labeled']);
   assert.equal(t.labelFilter, 'approved');
-  assert.equal(t.from, 'humans');
+  // The human gate is expressed purely by the `approved` label convention —
+  // no origin filter. A human applies the label; agents don't, by convention.
+  assert.ok(!('from' in t), 'human gate is label-only');
 });
 
 test('expandGithubChannels: regenerates (strips stale) derived channel triggers, idempotent', () => {
@@ -255,7 +258,7 @@ test('expandDataFlowSteps: depends_on becomes a push trigger scoped to the upstr
   assert.equal(t.type, 'github-event');
   assert.deepEqual(t.events, ['push']);
   assert.equal(t.dataFlow, true, 'marked as a data-flow dependency for the UI');
-  assert.deepEqual(t.from, ['acme-a'], 'scoped to the upstream member id, not a generic push');
+  assert.ok(!('from' in t), 'no origin filter — fires on any push, agent decides relevance');
   assert.match(t.prompt, /Analyst/);
   // The upstream itself gets no data-flow trigger.
   assert.equal(out.roles.find(r => r.id === 'a').triggers.length, 0);
@@ -273,7 +276,7 @@ test('expandDataFlowSteps: artifact output→input match creates a push trigger 
   const out = expandDataFlowSteps(bundle, { teamId: 'acme' });
   const t = out.roles.find(r => r.id === 'consumer').triggers.find(x => x.id === 'consumer-on-push-producer');
   assert.ok(t);
-  assert.deepEqual(t.from, ['acme-producer']);
+  assert.ok(!('from' in t), 'no origin filter on the derived push trigger');
   assert.match(t.prompt, /spec\.md/, 'declared input path appears in the hand-off prompt');
 });
 
@@ -291,7 +294,7 @@ test('expandDataFlowSteps: artifacts match by logical name, not path (#382)', ()
   const out = expandDataFlowSteps(bundle, { teamId: 'acme' });
   const t = out.roles.find(r => r.id === 'dev').triggers.find(x => x.id === 'dev-on-push-ba');
   assert.ok(t, 'named artifact links producer → consumer');
-  assert.deepEqual(t.from, ['acme-ba']);
+  assert.ok(!('from' in t), 'no origin filter on the derived push trigger');
   assert.match(t.prompt, /Functional Design/, 'the artifact name appears in the prompt');
   assert.match(t.prompt, /aee-artifact/, 'the prompt tells the consumer to resolve the path from the manifest');
   assert.match(t.prompt, /designs\/\*\*/, 'the path hint is surfaced');
@@ -366,7 +369,8 @@ test('expandDataFlowSteps idempotent through the full materialise chain (push tr
   assert.deepEqual(b.inputs, [{ path: 'spec.md' }]);
   // push trigger flattened with prompt → promptTemplate
   const t = b.triggers.find(x => x.id === 'b-on-push-a');
-  assert.ok(t && t.promptTemplate && t.from.includes('acme-a'));
+  assert.ok(t && t.promptTemplate);
+  assert.ok(!('from' in t), 'no origin filter carried through the materialise chain');
 });
 
 // ─── ordered stages (layout backbone) ────────────────────────────────────────
@@ -432,9 +436,9 @@ test('stampDerivedActivation: keeps an already-stamped derived trigger as-is', (
 });
 
 test('stampDerivedActivation: preserves other fields and is non-mutating', () => {
-  const next = [{ id: 'c', channel: true, from: ['x'], events: ['pull_request.opened'] }];
+  const next = [{ id: 'c', channel: true, labelFilter: 'x', events: ['pull_request.opened'] }];
   const out = stampDerivedActivation(next, [], NOW);
-  assert.deepEqual(out[0].from, ['x']);
+  assert.equal(out[0].labelFilter, 'x');
   assert.deepEqual(out[0].events, ['pull_request.opened']);
   assert.equal('activatedAt' in next[0], false); // input not mutated
 });

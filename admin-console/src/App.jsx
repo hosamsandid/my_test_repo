@@ -11,7 +11,6 @@ function ProcessTeamRedirect() {
   return <Navigate to={`/flows?proc=${encodeURIComponent(teamId)}`} replace />;
 }
 
-const Dashboard           = lazy(() => import('./pages/Dashboard'));
 const Agents              = lazy(() => import('./pages/Agents'));
 const AgentChat           = lazy(() => import('./pages/AgentChat'));
 const QuickStart          = lazy(() => import('./pages/QuickStart'));
@@ -21,6 +20,7 @@ const SshKeys             = lazy(() => import('./pages/SshKeys'));
 const GithubTokens        = lazy(() => import('./pages/GithubTokens'));
 const SkillsRegistry      = lazy(() => import('./pages/SkillsRegistry'));
 const ScheduledJobs       = lazy(() => import('./pages/ScheduledJobs'));
+const GithubEventLog      = lazy(() => import('./pages/GithubEventLog'));
 const ModelRegistry       = lazy(() => import('./pages/ModelRegistry'));
 const McpServers          = lazy(() => import('./pages/McpServers'));
 const Teams               = lazy(() => import('./pages/Teams'));
@@ -83,7 +83,7 @@ export default function App() {
     <Shell>
       <Suspense fallback={<div style={{ padding: 'var(--eb-space-6)', color: 'var(--eb-text-muted)' }}>Loading...</div>}>
         <Routes>
-          <Route path="/"             element={<Dashboard />} />
+          <Route path="/"             element={<Navigate to="/chats" replace />} />
           <Route path="/agents"       element={<Agents />} />
           <Route path="/blueprints"   element={<Navigate to="/agents" replace />} />
           <Route path="/chats"           element={<AgentChat />} />
@@ -96,6 +96,7 @@ export default function App() {
           <Route path="/github-tokens" element={<GithubTokens />} />
           <Route path="/skills"       element={<SkillsRegistry />} />
           <Route path="/jobs"         element={<ScheduledJobs />} />
+          <Route path="/github-events" element={<GithubEventLog />} />
           <Route path="/models"       element={<ModelRegistry />} />
           <Route path="/mcp"          element={<McpServers />} />
           <Route path="/teams"        element={<Teams />} />

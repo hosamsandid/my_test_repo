@@ -19,18 +19,14 @@ function scriptNameFromPath(scriptPath) {
 
 const POLL_MS = 30_000;
 
-// A data-flow trigger is an agent dependency: a push by an upstream agent wakes
+// A data-flow trigger is an agent dependency: a push to the team repo wakes
 // this one with a hand-off prompt. Under the hood it's a github-event/push
-// trigger scoped via a `from` allowlist of upstream member ids (#379). The
-// `dataFlow` marker is authoritative; we also detect the shape for robustness.
+// trigger. It fires on any push (source filtering was removed); the woken
+// agent decides whether the change is relevant. Identified solely by the
+// `dataFlow` marker — a plain push trigger (no marker) is just a push trigger.
 function isDataFlowTrigger(t) {
-  if (!t) return false;
-  if (t.dataFlow === true) return true;
-  return t.type === 'github-event'
-    && Array.isArray(t.events) && t.events.length === 1 && t.events[0] === 'push'
-    && Array.isArray(t.from);
+  return !!t && t.dataFlow === true;
 }
-const upstreamsOf = (t) => (Array.isArray(t?.from) ? t.from : []);
 
 // Subset of GitHub Events API event types most useful for agent workflows.
 // (The Events API does not emit every webhook action — e.g. pull_request
@@ -546,7 +542,7 @@ const ghostBtnStyle = {
   padding: '2px 10px', cursor: 'pointer',
 };
 
-function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onToggled, nameOf = (id) => id }) {
+function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onToggled }) {
   const [toggling, setToggling] = useState(false);
   const [scriptPanelName, setScriptPanelName] = useState(null);
   const preCheckScriptName = scriptNameFromPath(trigger.preCheckScript);
@@ -556,10 +552,7 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
   const isDataFlow = isDataFlowTrigger(trigger);
   let schedule;
   if (isDataFlow) {
-    const ups = upstreamsOf(trigger).map(nameOf);
-    schedule = ups.length
-      ? `wakes on push from ${ups.join(', ')}`
-      : 'push from (no upstream agent set)';
+    schedule = `wakes on push${trigger.repo ? ` to ${trigger.repo}` : ' to the team repo'}`;
   } else if (trigger.type === 'http') {
     schedule = `/hooks/${agentId}/${trigger.id}`;
   } else if (trigger.type === 'github-event') {
@@ -744,7 +737,7 @@ function generateSecret() {
 }
 
 /* ── Trigger form (create & edit) ───────────────────────────────────── */
-function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, siblings = [], ops = liveOps }) {
+function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, ops = liveOps }) {
   const isEdit = !!initialValues;
   // Draft mode (process-canvas drafts): there is no live agent/environment yet,
   // so the repo is unknown by design — it is applied at materialise time.
@@ -766,21 +759,12 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
     // Empty string = match any label (legacy behavior). The poller treats
     // missing or empty as no filter, so the wire format is `string | undefined`.
     labelFilter: initialValues?.labelFilter ?? '',
-    // `from` preserved verbatim for non-data-flow github triggers (keyword like
-    // 'any-except-self' or an allowlist) so editing never silently drops it.
-    from:        initialValues?.from ?? null,
-    // Data-flow upstreams: agent ids whose push wakes this agent.
-    upstreams:   Array.isArray(initialValues?.from) ? initialValues.from.filter(x => x !== 'humans') : [],
     secret:      initialValues?.secret      ?? (initialType === 'http' ? '' : generateSecret()),
     description: initialValues?.description ?? '',
     prompt:      initialValues?.prompt      ?? '',
     enabled:     initialValues?.enabled !== false,
   }));
   const isDataFlow = form.type === 'data-flow';
-  const toggleUpstream = (id) => setForm(f => ({
-    ...f,
-    upstreams: f.upstreams.includes(id) ? f.upstreams.filter(u => u !== id) : [...f.upstreams, id],
-  }));
   const showLabelFilter = form.type === 'github-event'
     && form.events.some(e => LABEL_FILTERABLE_EVENTS.has(e));
   const [copyDone, setCopyDone] = useState(null); // 'path' | 'secret' | null
@@ -865,7 +849,6 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
     }
     if (isDataFlow) {
       if (!form.repo && !isDraftMode) { setFormError('A repository is required (the team repo agents push to).'); return; }
-      if (form.upstreams.length === 0) { setFormError('Pick at least one upstream agent.'); return; }
     }
     if (form.type === 'http' && !form.secret.trim()) { setFormError('Secret is required for HTTP triggers.'); return; }
     if (!form.prompt.trim()) { setFormError('Prompt is required.'); return; }
@@ -877,10 +860,10 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
     };
     if (!isEdit) body.id = form.id.trim() || undefined;
     if (isDataFlow) {
-      // A data-flow dependency is a push trigger scoped to the upstream agents.
+      // A data-flow dependency is a push trigger. It fires on any push to the
+      // repo (no origin scoping); the woken agent decides relevance.
       if (form.repo) body.repo = form.repo; // a draft's repo lands at materialise
       body.events = ['push'];
-      body.from = form.upstreams;
       body.dataFlow = true;
     } else if (form.type === 'cron')       body.cron = form.cron.trim();
     else if (form.type === 'once')         body.at   = form.at.trim();
@@ -895,9 +878,6 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
       // path clear an existing filter when the user blanks the field.
       const lf = (form.labelFilter || '').trim();
       body.labelFilter = (showLabelFilter && lf) ? lf : null;
-      // Preserve an existing origin filter (keyword or allowlist) so editing
-      // events/label never silently drops it.
-      if (form.from != null) body.from = form.from;
     }
     await onSave(body);
   }
@@ -953,40 +933,11 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
             borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5,
           }}>
             <GitBranch size={11} style={{ verticalAlign: 'middle', marginRight: 4, color: 'var(--eb-accent-primary)' }} />
-            This agent is woken when an <strong>upstream agent pushes</strong> to the team repo
-            (its committed work is the hand-off). Pick the upstream agents this one depends on.
-          </div>
-
-          <div>
-            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
-              Upstream agents (their push wakes this agent)
-            </div>
-            {siblings.length === 0 ? (
-              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', padding: 'var(--eb-space-2)' }}>
-                No other agents in this team to depend on.
-              </div>
-            ) : (
-              <div style={{
-                display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)',
-                padding: 'var(--eb-space-2)', background: 'var(--eb-bg-elevated)',
-                border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
-                maxHeight: 200, overflowY: 'auto',
-              }}>
-                {siblings.map(s => (
-                  <label key={s.id} style={{
-                    display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
-                    padding: '2px 4px', cursor: 'pointer', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)',
-                  }}>
-                    <input type="checkbox" checked={form.upstreams.includes(s.id)} onChange={() => toggleUpstream(s.id)} />
-                    <span style={{ flex: 1 }}>{s.displayName}</span>
-                    <code style={{ fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)' }}>{s.id}</code>
-                  </label>
-                ))}
-              </div>
-            )}
-            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-              Only pushes by the selected agents wake this one — not every push to the repo.
-            </div>
+            This agent is woken on <strong>any push</strong> to the team repo (a
+            teammate's committed work is the hand-off). It fires regardless of who
+            pushed — including this agent's own pushes — so the woken agent should
+            <code> git pull</code>, check whether the change is relevant, and reply
+            <code> [PASS]</code> if there's nothing to do.
           </div>
 
           {isDraftMode ? (
@@ -1275,10 +1226,9 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
  * Write-target abstraction: pass `ops` (edit-adapters surface) to edit a
  * process-draft role's triggers instead of a live agent — the panel then
  * mutates the draft bundle (ops.mode === 'draft'), skips the live-only
- * lookups (env repos, emit suggestions, sibling fetch) and stops polling.
- * Pass `siblings` to supply the upstream candidates explicitly (draft roles).
+ * lookups (env repos, emit suggestions) and stops polling.
  */
-export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp = null, siblings: siblingsProp = null }) {
+export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp = null }) {
   const ops = opsProp || liveOps;
   const isDraft = ops.mode === 'draft';
   const [triggers, setTriggers]   = useState([]);
@@ -1289,34 +1239,6 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
   const [editTarget, setEditTarget]     = useState(null);
   const [saving, setSaving]             = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
-
-  // Sibling agents (same parent team) — the candidate upstreams a data-flow
-  // dependency can listen to, and the source for resolving member ids to names.
-  const [siblings, setSiblings] = useState(siblingsProp || []); // [{ id, displayName }]
-  useEffect(() => {
-    if (siblingsProp) { setSiblings(siblingsProp); return; }
-    if (!agentId || !active || isDraft) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const [me, all] = await Promise.all([
-          apiCall('GET', `/api/agents/${agentId}`),
-          apiCall('GET', '/api/agents'),
-        ]);
-        const list = Array.isArray(all) ? all : [];
-        const team = me?.parentTeamId;
-        const sibs = (team ? list.filter(a => a.parentTeamId === team) : list)
-          .filter(a => a.id !== agentId)
-          .map(a => ({ id: a.id, displayName: a.displayName || a.id }));
-        if (!cancelled) setSiblings(sibs);
-      } catch { if (!cancelled) setSiblings([]); }
-    })();
-    return () => { cancelled = true; };
-  }, [agentId, active, isDraft, siblingsProp]);
-  const nameOf = useCallback(
-    (id) => siblings.find(s => s.id === id)?.displayName || id,
-    [siblings],
-  );
 
   const fetchTriggers = useCallback(async (id) => {
     if (!id) { setTriggers([]); return; }
@@ -1476,7 +1398,6 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
             trigger={t}
             agentId={agentId}
             ops={ops}
-            nameOf={nameOf}
             onEdit={setEditTarget}
             onDeleted={setDeleteTarget}
             onToggled={afterRowMutation}
@@ -1487,7 +1408,6 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
       <SidePanel open={addOpen} onClose={() => setAddOpen(false)} title="Add Trigger">
         <TriggerForm
           agentId={agentId}
-          siblings={siblings}
           ops={ops}
           saving={saving}
           onSave={handleSave}
@@ -1499,7 +1419,6 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
         {editTarget && (
           <TriggerForm
             agentId={agentId}
-            siblings={siblings}
             ops={ops}
             initialValues={editTarget}
             saving={saving}

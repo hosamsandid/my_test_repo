@@ -10,7 +10,6 @@ const LABEL_EVENTS = [
   { value: 'issues.unlabeled', label: 'Issue unlabeled' },
   { value: 'pull_request.unlabeled', label: 'PR unlabeled' },
 ];
-const FROM_OPTIONS = ['any-except-self', 'humans', 'agents', 'team'];
 
 // The one GitHub event catalog the unified trigger dialog offers — raw repo
 // events plus the label events. (The Events API splits closed PRs: `closed`
@@ -91,7 +90,6 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
   const [label, setLabel] = useState('');
   const [target, setTarget] = useState('issues');       // issues | pull_request
   const [action, setAction] = useState('labeled');       // labeled | unlabeled
-  const [fromFilter, setFromFilter] = useState('any-except-self');
   const [repo, setRepo] = useState('');
   const [prompt, setPrompt] = useState('');
 
@@ -140,7 +138,6 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
         await ops.createTrigger(to, {
           type: 'github-event',
           events: [event],
-          from: fromFilter,
           repo: repo || undefined,
           labelFilter: trimmed,
           enabled: true,
@@ -206,12 +203,6 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
               and <strong>{toName || to}</strong> gets a listener — no need to pre-configure a trigger on {fromName || from}.
             </div>
           )}
-
-          <Field label="Origin filter (from)">
-            <select value={fromFilter} onChange={e => setFromFilter(e.target.value)} style={input}>
-              {FROM_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
-            </select>
-          </Field>
 
           <Field label="Listener prompt">
             <textarea value={effectivePrompt} onChange={e => setPrompt(e.target.value)}
@@ -626,7 +617,6 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
   const [action, setAction] = useState('labeled');
   const [labelName, setLabelName] = useState(label || '');
   const [initialEvents, setInitialEvents] = useState([]);
-  const [fromFilter, setFromFilter] = useState('any-except-self');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [delListener, setDelListener] = useState(true);
   const [delEmit, setDelEmit] = useState(!humanSource);
@@ -647,7 +637,6 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
           if (typeof t.labelFilter === 'string' && t.labelFilter.trim()) {
             setLabelName(t.labelFilter.trim());
           }
-          setFromFilter(t.from || 'any-except-self');
         }
       } catch (e) {
         if (alive) setError(e.message);
@@ -668,7 +657,7 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
     setSaving(true); setError(null);
     try {
       await ops.updateTrigger(to, triggerId, {
-        events: [event], from: fromFilter, labelFilter: newLabel,
+        events: [event], labelFilter: newLabel,
       });
       // Renaming the label keeps the source's emits in sync (agent-sourced
       // hand-offs only — human-set labels have no emitter to rewrite).
@@ -739,11 +728,6 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
                 Renaming updates this listener and <strong>{fromName || from}</strong>'s emitted labels.
               </small>
             )}
-          </Field>
-          <Field label="Origin filter (from)">
-            <select value={fromFilter} onChange={e => setFromFilter(e.target.value)} style={input}>
-              {FROM_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
-            </select>
           </Field>
 
           {error && <span style={errStyle}>{error}</span>}
@@ -943,7 +927,6 @@ function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
   const [event, setEvent] = useState('');
   const [initialEvents, setInitialEvents] = useState([]);
   const [label, setLabel] = useState('');
-  const [fromFilter, setFromFilter] = useState('any-except-self');
 
   useEffect(() => {
     let alive = true;
@@ -957,7 +940,6 @@ function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
           setInitialEvents(evs);
           setEvent(evs[0] || '');
           setLabel(typeof t.labelFilter === 'string' ? t.labelFilter : '');
-          setFromFilter(typeof t.from === 'string' ? t.from : 'any-except-self');
         }
       } catch (e) { if (alive) setError(e.message); }
       finally { if (alive) setLoading(false); }
@@ -977,7 +959,7 @@ function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
     try {
       const lf = label.trim();
       await ops.updateTrigger(to, triggerId, {
-        events: [event], from: fromFilter,
+        events: [event],
         labelFilter: (showLabelFilter && lf) ? lf : null,
       });
       onDone?.();
@@ -1009,11 +991,6 @@ function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
                 placeholder="e.g. priorisiert, human:approved — empty = any label" style={input} />
             </Field>
           )}
-          <Field label="Origin filter (from)">
-            <select value={fromFilter} onChange={e => setFromFilter(e.target.value)} style={input}>
-              {FROM_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
-            </select>
-          </Field>
           {error && <span style={errStyle}>{error}</span>}
           <div style={actions}>
             <button onClick={remove} disabled={saving}
@@ -1108,16 +1085,16 @@ function ReadonlyEdgeDialog({ edge, fromName, toName, onClose }) {
  * inspector's trigger tab writes, reachable with the same ● drag gesture. */
 
 // The ONE GitHub-trigger dialog: raw repo events AND label-based triggers
-// (including labels a human sets — the former "Label set by a human" form is
-// folded in here via the `humans` origin filter). One trigger reacts to exactly
-// ONE event — reacting to a second event (e.g. label removed as well as added)
-// is a second, independently configured trigger. No repo input: the repo is
-// resolved from the agent's working environment (live) or at materialise
-// time (draft), since it is unknown while modelling the flow.
+// (including labels a human sets — a `human:*` label renders as an approval
+// gate). One trigger reacts to exactly ONE event — reacting to a second event
+// (e.g. label removed as well as added) is a second, independently configured
+// trigger. There is no origin filter: the trigger fires on any matching event
+// regardless of who caused it. No repo input either: the repo is resolved from
+// the agent's working environment (live) or at materialise time (draft), since
+// it is unknown while modelling the flow.
 export function GithubTriggerForm({ to, toName, labels, ops = liveOps, onBack, onClose, onDone }) {
   const [event, setEvent] = useState('');
   const [label, setLabel] = useState('');
-  const [fromFilter, setFromFilter] = useState('any-except-self');
   const [prompt, setPrompt] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -1139,7 +1116,6 @@ export function GithubTriggerForm({ to, toName, labels, ops = liveOps, onBack, o
       await ops.createTrigger(to, {
         type: 'github-event',
         events: [event],
-        from: fromFilter,
         ...(labelActive ? { labelFilter: trimmedLabel } : {}),
         enabled: true,
         description: labelActive
@@ -1182,12 +1158,6 @@ export function GithubTriggerForm({ to, toName, labels, ops = liveOps, onBack, o
             {isGate && <small style={small}><code>{trimmedLabel}</code> is an approval-gate label — it renders as a gate on the edge.</small>}
           </Field>
         )}
-        <Field label="Origin filter (from)">
-          <select value={fromFilter} onChange={e => setFromFilter(e.target.value)} style={input}>
-            {FROM_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
-          </select>
-          <small style={small}>Use <code>humans</code> to react only to events humans caused (e.g. a label a person applies).</small>
-        </Field>
         <Field label="Listener prompt">
           <textarea value={effectivePrompt} onChange={e => setPrompt(e.target.value)}
             style={{ ...input, minHeight: 100, fontFamily: 'var(--eb-font-mono)', resize: 'vertical' }} />

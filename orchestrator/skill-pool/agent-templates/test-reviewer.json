@@ -15,7 +15,6 @@
       "id": "test-pr-opened",
       "type": "github-event",
       "events": ["pull_request.opened", "pull_request.reopened"],
-      "from": "any-except-self",
       "enabled": true,
       "promptTemplate": "A pull request was opened in repo `{{repoFullName}}`. Review test coverage of the diff. Post the result: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>`. Full coverage: a short ack. Gaps: concrete `it(...)` / `test(...)` suggestions in the comment."
     },

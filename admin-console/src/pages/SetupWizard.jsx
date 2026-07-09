@@ -820,7 +820,7 @@ function StepAgent({ onFinish, onSkip, environmentIdHint }) {
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         <button onClick={onFinish} style={btnPrimary}>
-          <Check size={15} /> Go to Dashboard
+          <Check size={15} /> Go to Agent Chat
         </button>
         {!saved && (
           <button onClick={onSkip} style={btnSecondary}>

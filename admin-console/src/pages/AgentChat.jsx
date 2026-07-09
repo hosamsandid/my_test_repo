@@ -311,6 +311,13 @@ export default function AgentChat() {
     setContextFill(ctx);
   }, []);
 
+  // Bumped by ChatPanel whenever a session boundary occurs — a new message
+  // sent, "Reset Session" clicked, or a trigger-started run's first message
+  // arriving — so SessionLogPanel can dismiss a stale pinned To-Do window
+  // from a previous session even before any new TodoWrite call lands (#273).
+  const [todoCloseSignal, setTodoCloseSignal] = useState(0);
+  const handleTodoBoundary = useCallback(() => setTodoCloseSignal(s => s + 1), []);
+
   const selectedAgent = (agents ?? []).find(a => a.id === agentId) || null;
   const effectiveRoomId =
     (selectedAgent && createdRooms[selectedAgent.id]) ||
@@ -533,6 +540,7 @@ export default function AgentChat() {
             sessionCost={sessionCost}
             contextFill={contextFill}
             onWorkspaceChanged={handleWorkspaceChanged}
+            onTodoBoundary={handleTodoBoundary}
           />
         ) : (
           <EmptyState />
@@ -561,6 +569,7 @@ export default function AgentChat() {
             onClose={() => setLogOpen(false)}
             onCostUpdate={handleCostUpdate}
             onContextUpdate={handleContextUpdate}
+            todoCloseSignal={todoCloseSignal}
             workspaceRefreshKey={workspaceRefreshKey}
           />
         </div>

@@ -5,7 +5,7 @@
 #   make up        # build the agent image + build + start the full stack
 #   make down      # stop the stack
 #   make restart   # down + up
-#   make build     # rebuild orchestrator image
+#   make build     # rebuild orchestrator + admin-console images
 #   make agent-image # build the per-agent container image (as-agent:latest)
 #   make update    # git pull + down + up (pulls latest, restarts with rebuild)
 #   make ps        # show container status
@@ -29,6 +29,18 @@ ifeq ($(COMPOSE_PROJECT_NAME),)
 SKILL_POOL_VOLUME      = vgh-claw_claude-workspace
 endif
 
+# Admin Console version footer (#483) — resolved here (not inside the
+# Docker build) since the admin-console build context is admin-console/,
+# which has no .git. Falls back to "unknown"/clean so a missing .git (e.g.
+# a tarball checkout) never fails the build.
+GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+GIT_DIRTY  := $(shell git status --porcelain 2>/dev/null | grep -q . && echo dirty || echo)
+# Make doesn't export its own variables to recipe subprocesses by default —
+# without this, podman-compose would never see GIT_COMMIT/GIT_DIRTY and the
+# docker-compose.yml `${GIT_COMMIT:-unknown}` interpolation would always fall
+# back to "unknown".
+export GIT_COMMIT GIT_DIRTY
+
 .PHONY: up down restart build agent-image update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers
 
 # `up` depends on `agent-image` so a fresh bring-up always has the per-agent
@@ -51,7 +63,7 @@ down:
 restart: down up
 
 build:
-	$(COMPOSE) -f $(COMPOSE_FILE) build orchestrator
+	$(COMPOSE) -f $(COMPOSE_FILE) build orchestrator admin-console
 
 agent-image:
 	podman build -t as-agent:latest -f agent-image/Dockerfile agent-image/

@@ -602,20 +602,21 @@ export default function AgentChat() {
 
 /**
  * Native <select> bound to the agent-list filter spec. Lists every visible
- * team (with member count) followed by every individual agent, so the user
- * can narrow down to either a whole team or a single chat.
+ * team (with member count), every orchestrator, then every agent that
+ * belongs to neither ("Individual agents" — team/orchestrator members are
+ * already reachable via their group entry), so the user can narrow down to
+ * a whole team, an orchestrator, or a single standalone chat.
  */
 function FilterSelect({ agents, filter, onChange }) {
   const { groups, singles } = buildGroups(agents);
   const teams         = groups.filter(g => g.kind === 'team');
   const orchestrators = groups.filter(g => g.kind === 'orchestrator');
 
-  const byName = (a, b) =>
-    (a.displayName || a.id).localeCompare(b.displayName || b.id);
-  const everyAgent = [
-    ...groups.flatMap(g => [g.header, ...g.children].filter(Boolean)),
-    ...singles,
-  ].sort(byName);
+  // "Individual agents" = agents with no team/orchestrator membership at
+  // all — `singles` already excludes anyone captured by a `groups` entry
+  // (see `buildGroups` in AgentList.jsx), so team/orchestrator members must
+  // not be re-added here.
+  const individualAgents = singles;
 
   const value =
     filter.kind === 'team'         ? `team:${filter.id}`         :
@@ -673,9 +674,9 @@ function FilterSelect({ agents, filter, onChange }) {
         </optgroup>
       )}
 
-      {everyAgent.length > 0 && (
+      {individualAgents.length > 0 && (
         <optgroup label="Individual agents">
-          {everyAgent.map(a => (
+          {individualAgents.map(a => (
             <option key={a.id} value={`agent:${a.id}`}>
               {a.displayName || a.id}
             </option>

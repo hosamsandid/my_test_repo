@@ -185,7 +185,9 @@ export default function SessionLogPanel({
     for (const ev of events) {
       if (ev.type === 'result' && typeof ev.costUsd === 'number') {
         usd += ev.costUsd;
-        tokIn  += ev.tokens?.input  ?? 0;
+        // #494: same undercount as #490 (context-window fill) — "tokens in"
+        // must include cache-creation/-read tokens, not just input_tokens.
+        tokIn  += sumContextTokens(ev.tokens) ?? 0;
         tokOut += ev.tokens?.output ?? 0;
       }
     }

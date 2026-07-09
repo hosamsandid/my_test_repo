@@ -18,10 +18,11 @@ promotion arrow flips between "automatic" and "needs review" on one switch, and 
 gated edge routes through an operator approval card instead of firing. Levels
 0/1/2 behave **exactly** as today; level 2 (draft + operator confirm) is untouched.
 
-Status: **design of record for #463** — approved (§0 decisions confirmed; the two
-optional sub-decisions deferred: no `knowledge promote --to agent` CLI verb, and
-auto-archive off in v1) and implemented on `integration/knowledge-flow` (stacked
-on Phase 3, commit 88d78ee).
+Status: **design of record for #463** — approved (§0 decisions confirmed) and
+implemented on `integration/knowledge-flow` (stacked on Phase 3, commit 88d78ee).
+Follow-up (post-approval, on request): the two optional sub-decisions were then
+built too — the `knowledge promote --to agent` CLI verb (§4) and a **manual**
+archive action (§6). Fully-automatic staleness/supersession archiving stays out.
 
 ---
 
@@ -189,13 +190,15 @@ deferred here). Phase 4 lights it up:
    `agentId` for the source dir (same containment guards as `/api/skills/promote`).
    This is operator-initiated (gate `agent>team` defaults to `review`).
 3. **Where agent-tier skills come from.** An agent authors a private skill by
-   writing `SKILL.md` (+ optional `provenance.json`) into its own pool — it owns
-   that directory, exactly as it owns `memory/`. *(Decision to lock, optional:
-   also add a `knowledge promote --to agent` CLI verb + `team>agent` KB→private
-   promotion so a converged cluster can seed a private skill directly. Recommended
-   **deferred** unless wanted now — the lift + materialised pool already deliver
-   the "Agent → Team → Global" wiring the phase requires, and a hand-authored or
-   operator-promoted agent skill is a sufficient source.)*
+   writing `SKILL.md` (+ `provenance.json`) into its own pool — it owns that
+   directory, exactly as it owns `memory/`. **Implemented (follow-up):**
+   `knowledge promote <id> --to agent [--name X]` (`agent-image/scripts/knowledge`)
+   builds a private agent-tier skill from a KB entry and writes it into the agent's
+   own pool locally (no human, no network — the agent owns its private tier;
+   provenance carries `entryIds` so the later `agent→team` lift + the graph's
+   `promoted` edge resolve). Pure `build_agent_skill` + `slugify_skill_name`, unit-
+   tested in `test_knowledge.py`. The `team>agent` KB→private *server* promotion
+   stays out (the CLI covers the agent-authoring path).
 
 The resolver's agent-first precedence means a private agent skill **shadows** the
 team's copy of the same name until it is lifted — the intended "personal
@@ -271,13 +274,18 @@ is **merge + promote, not prune** — archiving is *not* fired aggressively, bec
 archiving a *promoted* cluster's canonical entry would drop the `item:` node and
 erase the `promoted` edge (breaking the "ladder visibly completes" story). So:
 
-- **Auto-archive is OFF by default.** Promoted canonical entries stay live (the
-  skill's provenance keeps pointing at them; the edge keeps rendering).
-- Archiving is available as an **operator/curator tidy action** for genuinely
-  superseded entries (e.g. a manual "archive" on the item, or a future
-  supersession rule). *(Decision to lock: keep auto-archive out of v1. Recommended
-  — it adds a destructive-feeling behaviour with fuzzy "stale" detection for
-  little gain; the merge already collapses duplicates.)*
+- **Auto-archive is OFF.** Promoted canonical entries stay live (the skill's
+  provenance keeps pointing at them; the edge keeps rendering).
+- Archiving is a **manual operator action** (implemented, follow-up):
+  `POST /api/knowledge/item/:id/archive {teamId, archived}` →
+  `/internal/knowledge/archive`. The orchestrator keeps a per-team archived-id set
+  (`/workspace/knowledge-archived/<team>.json`), overlaid as `status:"archived"`
+  onto the canonical files on every collector pass (durable across re-projections,
+  same pattern as the promoted overlay), then re-projects + commits (git audit).
+  It **refuses to archive a promoted entry** (it backs a skill — hiding it would
+  erase the `promoted` edge). The Knowledge Flow view has a "Show archived" filter
+  + an Archive/Unarchive button in the drill-down. Fully-automatic
+  staleness/supersession detection stays out (fuzzy, little gain over the merge).
 
 Git history of the `agent-knowledge` branch (canonical files) is the audit +
 rollback for every archive, merge, and promotion stamp.
@@ -400,11 +408,17 @@ level 2 behaviour is unchanged (no auto-promotion).
 - `admin-console/api/knowledge-suggestions.js`: `validatePromotion` gains
   `agent>team` (skill-lift, provenance carried).
 - `admin-console/api/api.js`: `GET/PUT /api/knowledge/gates`; `/api/knowledge/promote`
-  `from:"agent"` lift branch; pending-edge/ghost-node in the graph route.
+  `from:"agent"` lift branch; `POST /api/knowledge/item/:id/archive`;
+  `?includeArchived=1` on the graph route; pending-edge/ghost-node in the graph route.
 - `admin-console/src/pages/KnowledgeFlow.jsx`: autonomy/gate control panel,
-  needs-review edges + ghost nodes, `promotedBy:"curator"` surfacing.
-- *(optional, decision c)* `agent-image/scripts/knowledge` + `test_knowledge.py` +
-  `agent-image/CLAUDE.md`: the `knowledge promote --to agent` verb.
+  needs-review edges + ghost nodes, `promotedBy:"curator"` surfacing, "Show
+  archived" filter + Archive/Unarchive in the drill-down.
+- `orchestrator/orchestrator.js` (archive, follow-up): archived-id store +
+  `status:"archived"` overlay in the collector + `archiveKnowledgeEntry` +
+  `/internal/knowledge/archive`.
+- `agent-image/scripts/knowledge` + `test_knowledge.py` + `agent-image/CLAUDE.md`
+  (follow-up): the `knowledge promote --to agent` verb (`build_agent_skill` /
+  `slugify_skill_name`).
 
 ---
 
@@ -414,8 +428,9 @@ level 2 behaviour is unchanged (no auto-promotion).
   backend is still not built.
 - **MCP knowledge sources** → Phase 5 (#464). The default path stays MCP-free.
 - **Aggressive auto-archive / staleness detection** — Phase 4 ships the
-  non-destructive `status:"archived"` mechanism + fold, but auto-archive is off by
-  default (decision b/§6); rule-based supersession is a later refinement.
+  non-destructive `status:"archived"` mechanism + fold + a **manual** archive
+  action (§6), but the curator never fires archiving on its own; rule-based
+  supersession is a later refinement.
 - **Curator LLM distillation on the hot path** — auto-promotion uses the heuristic
   draft; LLM polish stays operator-initiated (level 2).
 - **Single-writer shard compaction** — deliberately rejected (decision b).

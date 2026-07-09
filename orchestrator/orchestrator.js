@@ -69,6 +69,11 @@ const KNOWLEDGE_REFRESH_MIN_MS = 30_000;
 // written by the orchestrator (collector + agent nominations), read + lifecycle-
 // updated by the admin-console promotion routes.
 const KNOWLEDGE_SUGGESTIONS_DIR = "/workspace/knowledge-suggestions";
+// Per-team set of canonical ids the operator archived (Phase 4, non-destructive
+// curation). One JSON array file per team; overlaid onto the canonical <kind>.jsonl
+// as status:"archived" on every collector pass, so the archive is durable across
+// re-projections (shards, the source of truth, are never touched).
+const KNOWLEDGE_ARCHIVED_DIR = "/workspace/knowledge-archived";
 const TEMPLATE_WORKSPACE = "/template-workspace";
 // Agent id grammar — mirrors AGENT_ID_RE in admin-console/api/api.js. Used to
 // validate ids that arrive from outside (e.g. on import).
@@ -1917,6 +1922,28 @@ function writeKnowledgeCandidates(teamId, list) {
   fs.writeFileSync(p, JSON.stringify(Array.isArray(list) ? list : [], null, 2));
 }
 
+function _archivedPath(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  return path.join(KNOWLEDGE_ARCHIVED_DIR, `${seg}.json`);
+}
+
+function readArchivedIds(teamId) {
+  const p = _archivedPath(teamId);
+  if (!p) return [];
+  try {
+    const arr = JSON.parse(fs.readFileSync(p, "utf8"));
+    return Array.isArray(arr) ? arr.filter((x) => typeof x === "string") : [];
+  } catch { return []; }
+}
+
+function writeArchivedIds(teamId, list) {
+  const p = _archivedPath(teamId);
+  if (!p) return;
+  fs.mkdirSync(KNOWLEDGE_ARCHIVED_DIR, { recursive: true });
+  fs.writeFileSync(p, JSON.stringify([...new Set(Array.isArray(list) ? list : [])], null, 2));
+}
+
 // Push the canonical-file commit to agent-knowledge, fetch-rebase-retry (clean —
 // the orchestrator only ever writes canonical files, never a shard).
 function _pushKnowledgeClone(clonePath, gitEnv) {
@@ -1978,17 +2005,20 @@ function runConvergenceCollector(teamId, envArg) {
   const promotedCanonicalIds = new Set(
     candidates.filter((c) => c && c.status === "promoted" && c.canonicalId).map((c) => c.canonicalId),
   );
+  // Canonical ids the operator archived (Phase 4 non-destructive curation) — the
+  // same durable-overlay pattern as promoted, so an archive survives re-projection.
+  const archivedCanonicalIds = new Set(readArchivedIds(teamId));
 
   // Write the canonical <kind>.jsonl files (single-writer merged view), applying
-  // the promoted-status overlay. Byte-identical to proj.lines when the overlay is
-  // empty, so idempotency (no spurious git churn) is preserved.
+  // the promoted/archived-status overlay. Byte-identical to proj.lines when both
+  // overlays are empty, so idempotency (no spurious git churn) is preserved.
   for (const kind of KNOWLEDGE_KINDS) {
     const bucket = proj.byKind[kind];
     if (!bucket) continue;
     let rel;
     try { rel = kindFilePath(manifest, kind); } catch { continue; }
     const file = path.join(storeRoot, rel);
-    const lines = _serializeCanonicalKind(bucket, promotedCanonicalIds);
+    const lines = _serializeCanonicalKind(bucket, promotedCanonicalIds, archivedCanonicalIds);
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, lines.length ? lines.join("\n") + "\n" : "");
@@ -2046,21 +2076,55 @@ function runConvergenceCollector(teamId, envArg) {
 
 // Serialize one kind's canonical bucket (canonical entries first, then merge
 // tombstones) in the SAME deterministic order buildCanonicalProjection uses, with
-// a promoted-status overlay: any canonical entry whose id a promotion marked
-// promoted is written status:"promoted". Empty overlay ⇒ byte-identical to
-// proj.lines[kind].
-function _serializeCanonicalKind(bucket, promotedIds) {
+// a status overlay: a canonical entry whose id was archived is written
+// status:"archived"; else one marked promoted is written status:"promoted"
+// (archived wins). Empty overlays ⇒ byte-identical to proj.lines[kind].
+function _serializeCanonicalKind(bucket, promotedIds, archivedIds) {
   const canon = bucket.canonical.slice().sort(
     (a, b) => (a.createdAt || "").localeCompare(b.createdAt || "") || String(a.id).localeCompare(String(b.id)),
   );
   const tombs = bucket.tombstones.slice().sort((a, b) => String(a.id).localeCompare(String(b.id)));
   const out = [];
   for (const e of canon) {
-    const entry = promotedIds && promotedIds.has(e.id) && e.status !== "promoted" ? { ...e, status: "promoted" } : e;
+    let entry = e;
+    if (archivedIds && archivedIds.has(e.id)) {
+      if (e.status !== "archived") entry = { ...e, status: "archived" };
+    } else if (promotedIds && promotedIds.has(e.id) && e.status !== "promoted") {
+      entry = { ...e, status: "promoted" };
+    }
     out.push(serializeKnowledgeEntry(entry));
   }
   for (const e of tombs) out.push(serializeKnowledgeEntry(e));
   return out;
+}
+
+// Archive / unarchive a canonical KB entry (Phase 4 manual curation, operator-
+// initiated). Non-destructive: updates the per-team archived-id set, then re-runs
+// the collector so the canonical file is re-projected with the overlay + committed
+// (git audit). Refuses to archive a promoted entry — it backs a skill, and hiding
+// it would erase the T1→T2 promoted edge. Best-effort on the git side.
+function archiveKnowledgeEntry(teamId, id, archived) {
+  if (!/^[0-9a-f]{12}$/.test(id)) throw new Error("invalid id");
+  let env = null;
+  const resolved = resolveTeamKbRepo(teamId);
+  if (resolved) env = resolved.env;
+  if (archived) {
+    const promoted = readKnowledgeCandidates(teamId).some(
+      (c) => c && c.status === "promoted" && c.canonicalId === id,
+    );
+    if (promoted) throw new Error("cannot archive a promoted entry (it backs a skill) — remove the skill first");
+  }
+  const ids = new Set(readArchivedIds(teamId));
+  if (archived) ids.add(id); else ids.delete(id);
+  writeArchivedIds(teamId, [...ids]);
+  // Re-project + commit so the change is reflected + git-audited. Best-effort.
+  try {
+    refreshKnowledgeClone(teamId, { force: true, env });
+    runConvergenceCollector(teamId, env);
+  } catch (err) {
+    console.warn(`[Orchestrator] archive re-projection for '${teamId}' failed: ${err.message}`);
+  }
+  return { id, archived: !!archived };
 }
 
 // Guarded destination dir for a curator-written TEAM skill:
@@ -5972,6 +6036,27 @@ async function main() {
           if (!PROMOTION_TRANSITIONS.includes(transition)) throw new Error('invalid transition');
           if (!GATE_MODES.includes(mode)) throw new Error('invalid mode');
           const result = writeTeamPromotionGate(teamId, transition, mode);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+        }
+      });
+      return;
+    }
+
+    // ── Archive / unarchive a canonical KB entry (Phase 4) ──────────────────────
+    if (req.method === 'POST' && req.url === '/internal/knowledge/archive') {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const p = JSON.parse(body || '{}');
+          const teamId = String(p.teamId || '');
+          const id = String(p.id || '');
+          if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
+          const result = archiveKnowledgeEntry(teamId, id, p.archived !== false);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {

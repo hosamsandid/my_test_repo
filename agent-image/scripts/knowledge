@@ -30,6 +30,12 @@ card; a human confirms the promotion in the Admin Console — never automatic):
     knowledge promote <id>
     knowledge promote <id> --note "worth generalising into a skill"
 
+Keep a fact as your OWN private skill (agent tier — no human needed; lift it to
+the team later from the Admin Console):
+
+    knowledge promote <id> --to agent
+    knowledge promote <id> --to agent --name my-private-skill
+
 Each agent appends only to its OWN shard (<kind>/shards/<agentId>.jsonl) so
 concurrent writes from N agents never conflict; `knowledge add` commits it with
 your agent identity and pushes it to the shared `agent-knowledge` branch via the
@@ -311,6 +317,78 @@ def build_nomination(entry_id, note, agent_id):
     if isinstance(note, str) and note.strip():
         body["note"] = note.strip()
     return body
+
+
+SKILL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$")
+
+
+def slugify_skill_name(text, kind="fact"):
+    """Safe skill slug from free text; falls back to a kind-based name. Mirrors
+    slugifySkillName in admin-console/api/knowledge-suggestions.js + the curator."""
+    base = re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-")
+    base = "-".join(base.split("-")[:6])
+    if base and SKILL_NAME_RE.match(base):
+        return base
+    return f"{kind}-skill"
+
+
+def build_agent_skill(entry, *, name=None, agent_id="", team_id="", now=_default_now):
+    """Build a PRIVATE agent-tier skill from a KB entry (`knowledge promote --to
+    agent`). Pure — the local dir write lives in _write_agent_skill.
+
+    The agent tier is the bottom rung of the Agent → Team → Global ladder: a
+    personal specialisation the agent keeps in its own pool, later liftable to the
+    team (agent→team) from the Admin Console. Provenance is MANDATORY and carried
+    on `provenance.json` (entryIds present) so the lift + the graph's promoted
+    edge resolve. Returns {name, skill_md, provenance}. Raises ValueError on bad
+    input so a caller can never write an unprovenanced skill.
+    """
+    if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+        raise ValueError("build_agent_skill: an entry with an id is required")
+    text = (entry.get("text") or "").strip()
+    kind = entry.get("kind", "fact")
+    skill_name = name.strip() if isinstance(name, str) and name.strip() else slugify_skill_name(text, kind)
+    if not SKILL_NAME_RE.match(skill_name):
+        raise ValueError(f"build_agent_skill: invalid skill name '{skill_name}'")
+    origin = entry.get("originAgent") or agent_id or "unknown"
+    convergence = entry.get("convergence") if isinstance(entry.get("convergence"), list) else [origin]
+    ts = now() if callable(now) else now
+    team = team_id or entry.get("teamId") or "default"
+
+    skill_md = "\n".join([
+        f"# {text or 'Personal knowledge'}",
+        "",
+        "## What",
+        "",
+        f"- {text}",
+        "",
+        "## Why this is a skill",
+        "",
+        "A durable lesson this agent recorded, kept as a private skill for reuse.",
+        "",
+        "## Provenance",
+        "",
+        f"Authored from knowledge base entry `{entry['id']}` by {origin}.",
+        "",
+    ])
+    provenance = {
+        "fromTier": "team",
+        "toTier": "agent",
+        "teamId": team,
+        "entryIds": [entry["id"]],
+        "canonicalId": entry["id"],
+        "originAgents": [origin],
+        "convergence": convergence,
+        "sourceRefs": entry.get("sourceRefs") if isinstance(entry.get("sourceRefs"), list) else [],
+        "sessions": (
+            [{"agentId": origin, "correlationId": entry["correlationId"]}]
+            if isinstance(entry.get("correlationId"), str) and entry["correlationId"].strip() else []
+        ),
+        "originTeamId": team,
+        "promotedAt": ts,
+        "promotedBy": agent_id or origin,
+    }
+    return {"name": skill_name, "skill_md": skill_md, "provenance": provenance}
 
 
 def parse_source_ref(spec):
@@ -636,6 +714,30 @@ def cmd_path(argv):
     sys.exit(1)
 
 
+def _agent_skills_root():
+    """This agent's private skill pool (bottom rung of the skill ladder)."""
+    explicit = os.environ.get("AGENT_SKILLS_DIR")
+    if explicit:
+        return explicit
+    return os.path.join("/workspace/agents", _agent_id(), "skills")
+
+
+def _write_agent_skill(skill):
+    """Write a private agent-tier skill (SKILL.md + provenance.json) into this
+    agent's own pool. Local only — no network: the agent owns its private tier,
+    exactly as it owns memory/. Returns the destination dir."""
+    dst = os.path.join(_agent_skills_root(), skill["name"])
+    os.makedirs(dst, exist_ok=True)
+    md = skill["skill_md"]
+    if not md.endswith("\n"):
+        md += "\n"
+    with open(os.path.join(dst, "SKILL.md"), "w", encoding="utf-8") as fh:
+        fh.write(md)
+    with open(os.path.join(dst, "provenance.json"), "w", encoding="utf-8") as fh:
+        json.dump(skill["provenance"], fh, indent=2)
+    return dst
+
+
 def _nominate_via_orchestrator(entry_id, note):
     """POST a promotion nomination for `entry_id` to the orchestrator."""
     base = (os.environ.get("ORCHESTRATOR_INTERNAL_URL")
@@ -658,12 +760,20 @@ def _nominate_via_orchestrator(entry_id, note):
 
 
 def cmd_promote(argv):
-    """Nominate a KB entry for promotion to a reusable skill.
+    """Nominate a KB entry for a team skill, or (--to agent) keep it as a private
+    agent-tier skill.
 
-    This RAISES a suggestion card; a human confirms the actual promotion in the
-    Admin Console (autonomy level 2). It never promotes autonomously.
+    Default (team-ward): RAISES a suggestion card; a human confirms the actual
+    promotion in the Admin Console (autonomy level 2). It never promotes to the
+    team autonomously.
+
+    `--to agent`: writes a PRIVATE skill into this agent's own pool right away (no
+    human needed — the agent owns its private tier). Lift it to the team later
+    (agent→team) from the Admin Console.
     """
     note = None
+    to = None
+    name = None
     pos = []
     i = 0
     while i < len(argv):
@@ -674,18 +784,49 @@ def cmd_promote(argv):
                 note = argv[i]
         elif a.startswith("--note="):
             note = a[len("--note="):]
+        elif a == "--to":
+            i += 1
+            if i < len(argv):
+                to = argv[i]
+        elif a.startswith("--to="):
+            to = a[len("--to="):]
+        elif a == "--name":
+            i += 1
+            if i < len(argv):
+                name = argv[i]
+        elif a.startswith("--name="):
+            name = a[len("--name="):]
         else:
             pos.append(a)
         i += 1
     if not pos:
-        _die('promote: usage: knowledge promote <id> [--note "why this is skill-worthy"]')
+        _die('promote: usage: knowledge promote <id> [--to agent] [--name X] [--note "why skill-worthy"]')
     entry_id = pos[0]
 
-    # Confirm the entry exists in the synced KB before nominating.
+    # Resolve the entry from the synced KB.
     manifest = _load_manifest()
-    if not any(e.get("id") == entry_id for e, _ in _read_all_entries(manifest)):
+    entry = next((e for e, _ in _read_all_entries(manifest) if e.get("id") == entry_id), None)
+    if entry is None:
         sys.stderr.write(f'knowledge: no entry with id "{entry_id}"\n')
         sys.exit(1)
+
+    if to == "agent":
+        try:
+            skill = build_agent_skill(
+                entry, name=name, agent_id=_agent_id(),
+                team_id=os.environ.get("KNOWLEDGE_TEAM_ID", ""),
+            )
+        except ValueError as exc:
+            _die(str(exc))
+        dst = _write_agent_skill(skill)
+        print(skill["name"])
+        sys.stderr.write(
+            f'knowledge: wrote private agent skill "{skill["name"]}" ({dst}); '
+            "lift it to the team (agent→team) from the Admin Console when it is team-ready.\n"
+        )
+        return
+    if to not in (None, "team"):
+        _die(f"promote: unsupported --to '{to}' (use 'agent', or omit to nominate a team skill)")
 
     ok, detail = _nominate_via_orchestrator(entry_id, note)
     if not ok:

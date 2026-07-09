@@ -176,6 +176,8 @@ function toItem(e) {
     teamId: typeof e.teamId === 'string' && e.teamId.trim() ? e.teamId.trim() : 'default',
     createdAt: typeof e.createdAt === 'string' ? e.createdAt : null,
     originAgent,
+    status: typeof e.status === 'string' ? e.status : 'active',
+    archived: e.status === 'archived',
     convergence,
     convergenceCount: convergence.length,
     converged: convergence.length >= 2,
@@ -217,11 +219,14 @@ function skillEntryIds(skill) {
  * @param {string[]} args.warnings       IO-layer warnings to echo (e.g. no canonical clone)
  * @returns {{ scope, lanes, nodes, edges, counts, warnings }}
  */
-function buildKnowledgeGraph({ scope, entries = [], skills = [], agents = [], now = Date.now(), warnings = [] } = {}) {
+function buildKnowledgeGraph({ scope, entries = [], skills = [], agents = [], now = Date.now(), warnings = [], includeArchived = false } = {}) {
   const parsed = parseScope(scope);
   const nowMs = typeof now === 'number' ? now : Date.parse(now) || Date.now();
 
-  const allItems = dedupById(foldArchived(foldMerges(entries))).map(toItem);
+  // includeArchived keeps status:"archived" entries visible (so the operator can
+  // find + unarchive them); the default view folds them out.
+  const merged = foldMerges(entries);
+  const allItems = dedupById(includeArchived ? merged : foldArchived(merged)).map(toItem);
   const agentMeta = new Map(
     (Array.isArray(agents) ? agents : [])
       .filter((a) => a && typeof a.id === 'string')
@@ -331,6 +336,7 @@ function buildKnowledgeGraph({ scope, entries = [], skills = [], agents = [], no
       convergence: it.convergence,
       convergenceCount: it.convergenceCount,
       converged: it.converged,
+      archived: it.archived,
       provenance: it.provenance,
     });
     // T0→T1: one harvested edge per convergence contributor → the fan-in that

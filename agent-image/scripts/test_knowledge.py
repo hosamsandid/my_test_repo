@@ -205,5 +205,66 @@ class BuildNominationTests(unittest.TestCase):
         self.assertTrue(callable(kn.cmd_promote))
 
 
+class SlugifySkillNameTests(unittest.TestCase):
+    """Mirror of slugifySkillName in the JS suggestions/curator cores."""
+
+    def test_slug_from_text(self):
+        self.assertEqual(kn.slugify_skill_name("This repo unit-tests pure helper cores only"),
+                         "this-repo-unit-tests-pure-helper")
+
+    def test_fallback_on_empty_or_invalid(self):
+        self.assertEqual(kn.slugify_skill_name("", "entity"), "entity-skill")
+        self.assertEqual(kn.slugify_skill_name("!!!", "convention"), "convention-skill")
+
+
+class BuildAgentSkillTests(unittest.TestCase):
+    """`knowledge promote <id> --to agent` — a private agent-tier skill (Phase 4)."""
+
+    def _entry(self, **over):
+        base = {
+            "v": 1, "id": "9f3a12bc7de0", "kind": "fact",
+            "text": "Branch from origin/main",
+            "originAgent": "acme-dev-1", "teamId": "acme",
+            "createdAt": "2026-07-08T09:00:00Z", "correlationId": "$evt1",
+            "convergence": ["acme-dev-1"], "status": "active",
+            "sourceRefs": [{"kind": "pr", "ref": "459"}],
+        }
+        base.update(over)
+        return base
+
+    def test_shape_and_mandatory_provenance(self):
+        s = kn.build_agent_skill(self._entry(), agent_id="acme-dev-1", team_id="acme",
+                                 now=lambda: "2026-07-09T00:00:00Z")
+        self.assertEqual(s["name"], "branch-from-origin-main")
+        self.assertTrue(s["skill_md"].startswith("# Branch from origin/main"))
+        self.assertIn("Branch from origin/main", s["skill_md"])
+        prov = s["provenance"]
+        self.assertEqual(prov["toTier"], "agent")
+        self.assertEqual(prov["entryIds"], ["9f3a12bc7de0"])  # graph skillEntryIds needs this
+        self.assertEqual(prov["originAgents"], ["acme-dev-1"])
+        self.assertEqual(prov["promotedBy"], "acme-dev-1")
+        self.assertEqual(prov["promotedAt"], "2026-07-09T00:00:00Z")
+        self.assertEqual(prov["sourceRefs"], [{"kind": "pr", "ref": "459"}])
+        self.assertEqual(prov["sessions"], [{"agentId": "acme-dev-1", "correlationId": "$evt1"}])
+
+    def test_custom_name_and_no_correlation(self):
+        s = kn.build_agent_skill(self._entry(correlationId=None), name="my-skill",
+                                 agent_id="a1", now=lambda: "t")
+        self.assertEqual(s["name"], "my-skill")
+        self.assertEqual(s["provenance"]["sessions"], [])
+
+    def test_invalid_name_raises(self):
+        with self.assertRaises(ValueError):
+            kn.build_agent_skill(self._entry(), name="bad name!", agent_id="a1")
+
+    def test_entry_without_id_raises(self):
+        with self.assertRaises(ValueError):
+            kn.build_agent_skill({"text": "x"}, agent_id="a1")
+
+    def test_no_secrets_in_body(self):
+        s = kn.build_agent_skill(self._entry(), agent_id="a1", now=lambda: "t")
+        self.assertNotIn("$evt1", s["skill_md"])  # correlationId stays out of the body
+
+
 if __name__ == "__main__":
     unittest.main()

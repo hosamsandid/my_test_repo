@@ -398,3 +398,20 @@ test('foldArchived composes with foldMerges + dedupById in the graph (archived i
   const itemTexts = g.nodes.filter((n) => n.kind === 'item').map((n) => n.text);
   assert.deepEqual(itemTexts, ['live fact']);
 });
+
+// ── includeArchived (Phase 4 manual curation) ───────────────────────────────────
+
+test('buildKnowledgeGraph: includeArchived keeps archived items (flagged), default hides them', () => {
+  const entries = [
+    entry({ id: 'aaaaaaaaaaaa', text: 'live fact', originAgent: 'd1' }),
+    entry({ id: 'bbbbbbbbbbbb', text: 'retired fact', originAgent: 'd2', status: 'archived', updatedAt: '2026-07-08T11:00:00Z' }),
+  ];
+  const hidden = buildKnowledgeGraph({ scope: 'team:acme', entries, now: NOW });
+  assert.deepEqual(hidden.nodes.filter(n => n.kind === 'item').map(n => n.text), ['live fact']);
+
+  const shown = buildKnowledgeGraph({ scope: 'team:acme', entries, now: NOW, includeArchived: true });
+  const items = shown.nodes.filter(n => n.kind === 'item');
+  assert.equal(items.length, 2);
+  const archived = items.find(n => n.text === 'retired fact');
+  assert.equal(archived.archived, true);
+});

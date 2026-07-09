@@ -32,7 +32,7 @@ export default function KnowledgeFlow() {
   const [loading, setLoading] = useState(false);
   const [teams, setTeams] = useState([]);
   const [agents, setAgents] = useState([]);
-  const [filters, setFilters] = useState({ kind: 'all', convergedOnly: false, today: false });
+  const [filters, setFilters] = useState({ kind: 'all', convergedOnly: false, today: false, showArchived: false });
   const [selected, setSelected] = useState(null); // item id (raw hex)
   const [detail, setDetail] = useState(null);
   const [pulseId, setPulseId] = useState(null);
@@ -47,12 +47,13 @@ export default function KnowledgeFlow() {
 
   const load = useCallback(() => {
     setLoading(true);
-    fetch(`/api/knowledge/graph?scope=${encodeURIComponent(scope)}`)
+    const q = filters.showArchived ? '&includeArchived=1' : '';
+    fetch(`/api/knowledge/graph?scope=${encodeURIComponent(scope)}${q}`)
       .then(r => (r.ok ? r.json() : null))
       .then(data => { if (data) setGraph(data); })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, [scope]);
+  }, [scope, filters.showArchived]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -173,12 +174,27 @@ export default function KnowledgeFlow() {
     });
   }, [load]);
 
-  const openItem = useCallback((rawId, teamId) => {
+  const archiveItem = useCallback((id, teamId, archived) => {
+    fetch(`/api/knowledge/item/${encodeURIComponent(id)}/archive`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId: teamId || parsed.id || 'default', archived }),
+    })
+      .then(r => (r.ok ? r.json() : null))
+      .then(() => { setSelected(null); setDetail(null); load(); })
+      .catch(() => {});
+  }, [parsed.id, load]);
+
+  const openItem = useCallback((rawId, teamId, archivedHint) => {
     setSelected(rawId);
     setDetail(null);
     fetch(`/api/knowledge/item/${encodeURIComponent(rawId)}?teamId=${encodeURIComponent(teamId || parsed.id || 'default')}`)
       .then(r => (r.ok ? r.json() : null))
-      .then(d => setDetail(d))
+      .then(d => {
+        // The graph node's status is authoritative (it reflects the archived
+        // overlay on the canonical file); the item route may see a stale shard copy.
+        if (d && d.entry && archivedHint) d.entry.status = 'archived';
+        setDetail(d);
+      })
       .catch(() => {});
   }, [parsed.id]);
 
@@ -217,6 +233,7 @@ export default function KnowledgeFlow() {
           options={[{ value: 'all', label: 'All kinds' }, { value: 'fact', label: 'Facts' }, { value: 'entity', label: 'Entities' }, { value: 'convention', label: 'Conventions' }]} />
         <Chip active={filters.convergedOnly} onClick={() => setFilters(f => ({ ...f, convergedOnly: !f.convergedOnly }))}>Converged only</Chip>
         <Chip active={filters.today} onClick={() => setFilters(f => ({ ...f, today: !f.today }))}>Today</Chip>
+        <Chip active={filters.showArchived} onClick={() => setFilters(f => ({ ...f, showArchived: !f.showArchived }))}>Show archived</Chip>
       </div>
 
       {(graph?.warnings || []).length > 0 && (
@@ -236,7 +253,7 @@ export default function KnowledgeFlow() {
           ) : (
             <Canvas graph={filtered} layout={layout} pulseId={pulseId}
               selectedId={selected ? `item:${selected}` : null}
-              onSelectItem={(node) => openItem(node.id.slice(5), node.teamId)}
+              onSelectItem={(node) => openItem(node.id.slice(5), node.teamId, node.archived)}
               onReviewPending={(node) => {
                 const s = suggestions.find(x => x.id === node.suggestionId);
                 if (s) setPromoting(s);
@@ -247,7 +264,7 @@ export default function KnowledgeFlow() {
 
         <div style={{ width: 340, flexShrink: 0, borderLeft: '1px solid var(--eb-border-default)', display: 'flex', flexDirection: 'column', minHeight: 0, background: 'var(--eb-bg-surface)' }}>
           {selected && detail ? (
-            <Provenance detail={detail} onClose={() => { setSelected(null); setDetail(null); }} onOpenAgent={(id) => navigate(`/chats/${encodeURIComponent(id)}`)} />
+            <Provenance detail={detail} onClose={() => { setSelected(null); setDetail(null); }} onOpenAgent={(id) => navigate(`/chats/${encodeURIComponent(id)}`)} onArchive={archiveItem} />
           ) : (
             <>
               {parsed.kind === 'team' && gates && (
@@ -505,10 +522,13 @@ function ItemCard({ node, x, y, w, h, selected, pulsing, onClick }) {
   return (
     <g className={pulsing ? 'kf-node-pulse' : undefined} style={{ cursor: 'pointer' }} onClick={onClick}>
       {foreign(x, y, w, h, (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3, opacity: node.archived ? 0.5 : 1 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)' }}>
             <span style={{ width: 7, height: 7, borderRadius: 'var(--eb-radius-full)', background: KIND_COLORS[node.entryKind] || 'var(--eb-accent-primary)', flexShrink: 0 }} />
             <span style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.03em', color: 'var(--eb-text-muted)' }}>{node.entryKind}</span>
+            {node.archived && (
+              <span style={{ marginLeft: node.converged ? 0 : 'auto', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', border: '1px solid var(--eb-border-default)', padding: '0 5px', borderRadius: 'var(--eb-radius-full)' }}>archived</span>
+            )}
             {node.converged && (
               <span style={{ marginLeft: 'auto', fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-accent-primary)', background: 'var(--eb-accent-muted)', padding: '0 6px', borderRadius: 'var(--eb-radius-full)' }}>
                 {node.convergenceCount}× independent
@@ -631,8 +651,10 @@ function LaneHeaders() {
 
 /* ── Provenance drill-down ──────────────────────────────────────────────────── */
 
-function Provenance({ detail, onClose, onOpenAgent }) {
+function Provenance({ detail, onClose, onOpenAgent, onArchive }) {
   const { entry, links } = detail;
+  const archived = entry.status === 'archived';
+  const promoted = entry.status === 'promoted';
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div style={{ display: 'flex', alignItems: 'center', padding: 'var(--eb-space-3)', borderBottom: '1px solid var(--eb-border-default)' }}>
@@ -669,9 +691,20 @@ function Provenance({ detail, onClose, onOpenAgent }) {
           </div>
         </Lineage>
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-          {entry.teamId} · {entry.createdAt}
+          {entry.teamId} · {entry.createdAt}{entry.status && entry.status !== 'active' ? ` · ${entry.status}` : ''}
         </div>
       </div>
+      {onArchive && (
+        <div style={{ borderTop: '1px solid var(--eb-border-default)', padding: 'var(--eb-space-3)' }}>
+          <button
+            onClick={() => onArchive(entry.id, entry.teamId, !archived)}
+            disabled={promoted}
+            title={promoted ? 'A promoted entry backs a skill and cannot be archived' : (archived ? 'Restore to the active KB' : 'Retire this entry from the active KB (non-destructive; kept in git)')}
+            style={{ ...btn(false), width: '100%', justifyContent: 'center', opacity: promoted ? 0.5 : 1, cursor: promoted ? 'not-allowed' : 'pointer' }}>
+            {archived ? 'Unarchive entry' : 'Archive entry'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

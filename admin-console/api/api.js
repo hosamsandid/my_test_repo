@@ -2723,7 +2723,8 @@ app.get('/api/knowledge/graph', async (req, res) => {
   }
   const agents = gatherKnowledgeAgents(scope, teamIds);
   const skills = gatherKnowledgeSkills(scope);
-  const graph = buildKnowledgeGraph({ scope: parsed.scope, entries, skills, agents, now: Date.now(), warnings });
+  const includeArchived = req.query.includeArchived === '1' || req.query.includeArchived === 'true';
+  const graph = buildKnowledgeGraph({ scope: parsed.scope, entries, skills, agents, now: Date.now(), warnings, includeArchived });
   augmentPendingPromotions(graph, teamIds);
   res.json(graph);
 });
@@ -2793,6 +2794,29 @@ app.get('/api/knowledge/item/:id', (req, res) => {
       .filter(r => r.url),
   };
   res.json({ entry, links });
+});
+
+// Archive / unarchive a canonical KB entry (Phase 4 manual curation). Proxies to
+// the orchestrator (the canonical-file writer). Non-destructive — the shards stay.
+app.post('/api/knowledge/item/:id/archive', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const { id } = req.params;
+  const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
+  if (!/^[0-9a-f]{12}$/.test(id)) return res.status(400).json({ error: 'invalid id' });
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
+  if (!visibleTeam(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  const archived = req.body?.archived !== false;
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/archive`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, id, archived }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) return res.status(r.status === 400 ? 400 : 502).json({ error: (out && out.error) || 'archive failed' });
+    res.json({ ok: true, id, archived });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
 });
 
 // Locate which of an agent's session logs holds a row with `correlationId`.

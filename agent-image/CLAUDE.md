@@ -131,6 +131,18 @@ The system also nominates automatically once two or more agents independently
 record the same lesson, so you only need `promote` for something you think is
 skill-worthy before it has converged.
 
+**To keep a lesson as your own private skill** (personal specialisation, not yet
+team-ready), promote it to the agent tier — this writes it straight into your own
+pool, no human needed:
+
+```
+knowledge promote <id> --to agent
+knowledge promote <id> --to agent --name my-private-skill
+```
+
+A human can later lift it to the whole team (agent→team) from the Admin Console
+when it proves broadly useful.
+
 ## Key Constraints
 
 - Follow the LoopScript phases strictly and sequentially.

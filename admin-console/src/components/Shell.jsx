@@ -9,9 +9,11 @@ import {
 import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
 import AccentureLogo from './AccentureLogo';
+import { formatVersionLabel } from './version-info';
 
 const STATUS_POLL_MS = 5_000;
 const LAST_VIEWED_KEY = 'agentChat.lastViewed';
+const VERSION_LABEL = formatVersionLabel(import.meta.env.VITE_GIT_COMMIT, import.meta.env.VITE_GIT_DIRTY);
 
 function loadLastViewed() {
   try { return JSON.parse(localStorage.getItem(LAST_VIEWED_KEY) || '{}'); }
@@ -311,7 +313,8 @@ export default function Shell({ children }) {
             borderTop: '1px solid var(--eb-border-default)',
             whiteSpace: 'nowrap',
           }}>
-            © 2026 Accenture. All rights reserved.
+            <div>© 2026 Accenture. All rights reserved.</div>
+            <div style={{ color: 'var(--eb-text-muted)' }}>v{VERSION_LABEL}</div>
           </div>
         )}
       </aside>

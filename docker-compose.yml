@@ -110,6 +110,12 @@ services:
   admin-console:
     build:
       context: ./admin-console
+      args:
+        # Resolved on the host by the Makefile (git isn't available inside
+        # this build context) and defaulted so a bare `podman compose build`
+        # still succeeds without git metadata.
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        GIT_DIRTY: ${GIT_DIRTY:-}
     container_name: ${COMPOSE_PROJECT_NAME}-admin-console
     restart: unless-stopped
     # Required for podman socket access on SELinux-enforcing hosts (Fedora CoreOS).

@@ -28,6 +28,11 @@ const RETENTION_DAYS = 7;
 // (subscribers that don't listen to this event type at all are not
 // represented — see issue #469 AC #4, which distinguishes "no one is
 // listening" from "someone listened but a gate dropped it").
+//
+// `label` (#487) captures `payload.label.name` for *.labeled / *.unlabeled
+// events (issues and, where GitHub delivers them, PRs) — the same field the
+// poller's labelFilter gate already reads. null for event types that don't
+// carry a label.
 function buildEventEntry({ ghEvent, repoFullName, key, outcomes }) {
   const list = Array.isArray(outcomes) ? outcomes : [];
   return {
@@ -37,6 +42,7 @@ function buildEventEntry({ ghEvent, repoFullName, key, outcomes }) {
     event: key || null,
     actor: ghEvent.actor?.login || null,
     createdAt: ghEvent.created_at || null,
+    label: ghEvent.payload?.label?.name || null,
     outcomes: list,
     noMatchingTrigger: list.length === 0,
   };

@@ -81,8 +81,10 @@ export default function GithubEventLog() {
   const COLS = [
     { key: 'ts', label: 'Time', render: v => v ? new Date(v).toLocaleString() : '—' },
     { key: 'repo', label: 'Repository' },
-    { key: 'event', label: 'Event', render: v => (
-      <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v || '—'}</span>
+    { key: 'event', label: 'Event', render: (v, row) => (
+      <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
+        {v || '—'}{row.label ? ` (${row.label})` : ''}
+      </span>
     ) },
     { key: 'actor', label: 'Actor', render: v => v || '—' },
     { key: 'outcomes', label: 'Outcomes', sortable: false, render: (v, row) => {

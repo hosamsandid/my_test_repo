@@ -45,6 +45,30 @@ test('buildEventEntry tolerates a missing actor and null event key', () => {
   assert.equal(entry.event, null);
 });
 
+test('buildEventEntry captures the label name for a labeled event', () => {
+  const ghEvent = {
+    id: '999', actor: { login: 'carol' }, created_at: '2026-07-09T10:00:00Z',
+    payload: { label: { name: 'ready' } },
+  };
+  const entry = eventLog.buildEventEntry({ ghEvent, repoFullName: 'org/repo', key: 'issues.labeled', outcomes: [] });
+  assert.equal(entry.label, 'ready');
+});
+
+test('buildEventEntry captures the label name for an unlabeled event', () => {
+  const ghEvent = {
+    id: '1000', actor: { login: 'dave' }, created_at: '2026-07-09T10:05:00Z',
+    payload: { label: { name: 'ready' } },
+  };
+  const entry = eventLog.buildEventEntry({ ghEvent, repoFullName: 'org/repo', key: 'issues.unlabeled', outcomes: [] });
+  assert.equal(entry.label, 'ready');
+});
+
+test('buildEventEntry leaves label null for events without a label payload', () => {
+  const ghEvent = { id: '1001', actor: { login: 'erin' }, created_at: '2026-07-09T10:10:00Z' };
+  const entry = eventLog.buildEventEntry({ ghEvent, repoFullName: 'org/repo', key: 'issues.opened', outcomes: [] });
+  assert.equal(entry.label, null);
+});
+
 test('record + file round-trip: one JSONL line per entry, day-bucketed', () => {
   eventLog.record(eventLog.buildEventEntry({
     ghEvent: { id: '1', actor: { login: 'a' }, created_at: '2026-06-30T10:00:00Z' },

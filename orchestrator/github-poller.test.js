@@ -4,11 +4,13 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  GitHubPoller,
   effectiveHorizon,
   passesHorizon,
   selectFreshEvents,
   planBurstHandoffs,
   shouldFetchNextPage,
+  prApiUrlToHtmlUrl,
   GRACE_MS,
   SEEN_MAX,
   BURST_CAP,
@@ -241,4 +243,100 @@ test("shouldFetchNextPage: empty seen set with a full page → page again", () =
 test("shouldFetchNextPage: non-array / empty page → stop", () => {
   assert.equal(shouldFetchNextPage(null, [], 1), false);
   assert.equal(shouldFetchNextPage([], [], 1), false);
+});
+
+// ── prApiUrlToHtmlUrl (#496): derive the web URL from the API `url` field ───────
+
+test("prApiUrlToHtmlUrl: converts a pulls API url to the web pull url", () => {
+  assert.equal(
+    prApiUrlToHtmlUrl("https://api.github.com/repos/o/r/pulls/42"),
+    "https://github.com/o/r/pull/42",
+  );
+});
+
+test("prApiUrlToHtmlUrl: rejects non-matching or non-string input", () => {
+  assert.equal(prApiUrlToHtmlUrl("https://api.github.com/repos/o/r/issues/42"), null);
+  assert.equal(prApiUrlToHtmlUrl("not a url"), null);
+  assert.equal(prApiUrlToHtmlUrl(null), null);
+  assert.equal(prApiUrlToHtmlUrl(undefined), null);
+});
+
+// ── _enrichPullRequestPayload (#496 regression) ─────────────────────────────────
+// Root cause: the live Events API's PullRequestEvent/PullRequestReviewEvent
+// payload.pull_request is a *reduced* object (id/number/url/base/head) — no
+// title, no html_url — unlike the full webhook-shaped payload the #470/#475
+// synthetic tests assumed. This is what a real `gh api repos/<o>/<r>/events`
+// PullRequestEvent looked like when this bug was diagnosed (trimmed to the
+// fields relevant here).
+const LIVE_SHAPED_PR_PAYLOAD = {
+  action: "opened",
+  number: 500,
+  pull_request: {
+    url: "https://api.github.com/repos/o/r/pulls/500",
+    id: 4024312716,
+    number: 500,
+    base: { ref: "main" },
+    head: { ref: "fix/x" },
+  },
+};
+
+test("_enrichPullRequestPayload: live-shaped payload gets html_url derived and title fetched", async () => {
+  const poller = new GitHubPoller();
+  poller._fetchJson = async (url) => {
+    assert.equal(url, "https://api.github.com/repos/o/r/pulls/500");
+    return { title: "Fix the thing" };
+  };
+  const out = await poller._enrichPullRequestPayload(
+    "pull_request.opened", LIVE_SHAPED_PR_PAYLOAD, "tok",
+  );
+  assert.equal(out.pull_request.title, "Fix the thing");
+  assert.equal(out.pull_request.html_url, "https://github.com/o/r/pull/500");
+  // Untouched fields survive.
+  assert.equal(out.pull_request.number, 500);
+});
+
+test("_enrichPullRequestPayload: same reduced shape for pull_request_review events", async () => {
+  const poller = new GitHubPoller();
+  poller._fetchJson = async () => ({ title: "Fix the thing" });
+  const out = await poller._enrichPullRequestPayload(
+    "pull_request_review.submitted", LIVE_SHAPED_PR_PAYLOAD, "tok",
+  );
+  assert.equal(out.pull_request.title, "Fix the thing");
+  assert.equal(out.pull_request.html_url, "https://github.com/o/r/pull/500");
+});
+
+test("_enrichPullRequestPayload: already-complete (webhook-shaped) payload is untouched — no fetch", async () => {
+  const poller = new GitHubPoller();
+  poller._fetchJson = async () => { throw new Error("should not be called"); };
+  const payload = {
+    pull_request: { number: 12, title: "Add feature", html_url: "https://github.com/o/r/pull/12" },
+  };
+  const out = await poller._enrichPullRequestPayload("pull_request.opened", payload, "tok");
+  assert.equal(out, payload); // identity — untouched
+});
+
+test("_enrichPullRequestPayload: non-PR event key is untouched — no fetch", async () => {
+  const poller = new GitHubPoller();
+  poller._fetchJson = async () => { throw new Error("should not be called"); };
+  const payload = { issue: { number: 1 } };
+  const out = await poller._enrichPullRequestPayload("issues.labeled", payload, "tok");
+  assert.equal(out, payload);
+});
+
+test("_enrichPullRequestPayload: title fetch failure still yields the derived html_url (graceful)", async () => {
+  const poller = new GitHubPoller();
+  poller._fetchJson = async () => { throw new Error("HTTP 502"); };
+  const out = await poller._enrichPullRequestPayload(
+    "pull_request.opened", LIVE_SHAPED_PR_PAYLOAD, "tok",
+  );
+  assert.equal(out.pull_request.html_url, "https://github.com/o/r/pull/500");
+  assert.equal(out.pull_request.title, undefined);
+});
+
+test("_enrichPullRequestPayload: missing pull_request is untouched", async () => {
+  const poller = new GitHubPoller();
+  poller._fetchJson = async () => { throw new Error("should not be called"); };
+  const payload = {};
+  const out = await poller._enrichPullRequestPayload("pull_request.opened", payload, "tok");
+  assert.equal(out, payload);
 });

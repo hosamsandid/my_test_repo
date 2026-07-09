@@ -75,7 +75,17 @@ When an agent is created via the Admin Console, the orchestrator:
 3. Patches absolute `/workspace/` paths in seeded memory
 4. Materializes the env's MCP server refs into the agent's own `.claude/settings.json` (substituting credentials per-agent — see *MCP Servers*)
 5. If the env has a repository, runs `git clone` — SSH URLs use `GIT_SSH_COMMAND` pointing at the env's SSH key; HTTPS GitHub URLs inject the GitHub token via `GIT_CONFIG_*` env vars
-6. Builds a merged CLAUDE.md: base template + env section + agent prompt
+6. Builds the agent's CLAUDE.md via the prompt-assembly pipeline (see below)
+
+#### System-prompt assembly & preview
+
+What an agent actually receives is more than its authored role prompt: the seeded `CLAUDE.md` and a runtime `--append-system-prompt` memory hint are composed from several layers. All composition rules live in one pure, unit-tested module — **`orchestrator/prompt-assembly.js`** — which both the seed path (`buildAgentClaudeMd`) and the preview endpoint call, so the preview is byte-identical to what gets seeded.
+
+- **Ordering.** The authored **Agent Role is hoisted to the top** (after a short identity + interaction-framing preamble), ahead of the generic blocks: Working Environment → Workspace → Response Formatting → Memory System → Skills → GitHub Actions → Trigger management → Important Notes → (Blueprint shared-memory). The base template text is read from disk (`/template-workspace/CLAUDE.md`, else `/defaults/CLAUDE.md`), split by H2, and re-ordered in code.
+- **Conditional gating (no dead weight).** The **Git/`gh-as-agent`** section is injected only when the env has a repository; the **Trigger-management** docs and the unattended-run framing only for **autonomous** agents (`sessionPolicy: per-invocation`, `orchestrator`/`bp-instance`, or an agent that already has triggers — `agentIsAutonomous()`); the **Skills** section only when the env grants skills. A pure-DM agent with no repo therefore never sees the git wrapper or `triggers.json` docs. *Known limitation:* adding a trigger to a persistent agent later only injects the trigger docs at the next prompt edit / rebuild; the preview always reflects the live state.
+- **De-duplication / consistency.** The `/workspace` path-translation rule lives **once** (the Workspace section), no longer repeated in the runtime hint. The memory guidance is consistent across template and runtime hint (no more "read all five" vs "read two" contradiction). The relocated sections (Workspace / GitHub Actions / Trigger management) are **code-owned**: if a stale base template still carries them they are dropped, never double-injected.
+- **Runtime hint.** `buildMemoryHint(blueprintId)` in `prompt-assembly.js` is kept **byte-identical** to `_build_memory_hint()` in `agent-image/scripts/agent-entrypoint.py` (the live runtime); a test asserts the Python source contains the same sentences so the two can't drift.
+- **Preview.** `GET /api/agents/:id/prompt-preview` (proxied to the orchestrator's `/internal/agents/:id/prompt-preview`) renders the composed `claudeMd` + `appendSystemPrompt` + gating `meta`. Surfaced read-only as the **Prompt** tab in the agent chat's right rail (`PromptPreviewPanel.jsx`).
 
 SSH keys are stored at `/workspace/environments/_keys/<keyId>` (mode 0600) with metadata in `_keys/index.json`. The private key value is **never** returned by the API after creation; only its fingerprint.
 
@@ -401,6 +411,7 @@ The Admin Console embeds a Matrix client at `/chats` (and `/chats/:agentId`) so 
 | `orchestrator/github-poller.js` | Polls the GitHub Events API; matches events by type + optional `labelFilter` + history horizon (no source/origin filtering), then applies the frequency throttle (`_checkAndIncThrottle`) and the #449 burst-cap digest (`planBurstHandoffs`) before fanning events out to per-agent `pending-triggers.json`. |
 | `orchestrator/Dockerfile` | Node 22 + Claude Code CLI + git + openssh-client |
 | `orchestrator/CLAUDE-template.md` | Base template baked into the image as `/defaults/CLAUDE.md`, used as fallback when the skill-pool volume has no CLAUDE.md |
+| `orchestrator/prompt-assembly.js` | Pure, unit-tested single source of truth for system-prompt composition: CLAUDE.md ordering, conditional gating (git/trigger/skills), de-duplication, and the runtime memory hint. Used by both `buildAgentClaudeMd` (seeding) and the prompt-preview endpoint. See *System-prompt assembly & preview*. |
 | `orchestrator/skill-pool/agent-templates/` | Role-template JSON files for the Team-Setup wizard (seeded into `/template-workspace/agent-templates/` via `make seed-templates`). |
 | `orchestrator/setup.sh` | Initial setup: register the admin Matrix user, print the access token |
 | `admin-console/api/api.js` | Express API: agents, environments, ssh-keys, skills, models, mcp, **`POST /api/teams`** (Team-Setup wizard backend), `GET /api/agent-templates`. |

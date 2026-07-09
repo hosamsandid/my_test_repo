@@ -1003,12 +1003,16 @@ def _build_memory_hint(blueprint_id: str | None) -> str:
             f"curl -s -X PUT -H 'Content-Type: text/plain' --data-binary @memory/log.md http://localhost:4002/internal/blueprints/{blueprint_id}/memory/log.md. "
             f"IMPORTANT: Your workspace root is the current working directory."
         )
+    # NOTE: kept byte-identical to buildMemoryHint() in
+    # orchestrator/prompt-assembly.js (used by the prompt-preview endpoint). The
+    # /workspace path-translation example now lives ONCE in the CLAUDE.md
+    # Workspace section, and this no longer names a 2-file subset that
+    # contradicts the 5-file Memory System.
     return (
-        "Read memory/context.md and memory/log.md first (if they exist) before responding. "
-        "If the user asks you to remember something: update the memory files. "
-        "IMPORTANT: Your workspace root is the current working directory. "
-        "Memory entries may reference absolute paths like /workspace/... from a different context. "
-        "Translate these to relative paths in your current directory (e.g. /workspace/314092_foo/ becomes ./314092_foo/)."
+        "Before responding, read your memory files: start with memory/context.md and memory/log.md, "
+        "and consult memory/facts.md, memory/entities.md and memory/users.md when the topic calls for it. "
+        "If the user asks you to remember something, update the relevant memory files. "
+        "IMPORTANT: Your workspace root is the current working directory."
     )
 
 

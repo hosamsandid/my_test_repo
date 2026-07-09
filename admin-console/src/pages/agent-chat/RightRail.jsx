@@ -1,15 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { PanelRightClose, ScrollText, FolderTree, CalendarClock, Activity } from 'lucide-react';
+import { PanelRightClose, ScrollText, FolderTree, CalendarClock, Activity, FileText } from 'lucide-react';
 import SessionLogPanel from './SessionLogPanel';
 import WorkspaceBrowser from './WorkspaceBrowser';
 import TriggersPanel from './TriggersPanel';
 import RunningSessionsPanel from './RunningSessionsPanel';
+import PromptPreviewPanel from './PromptPreviewPanel';
 import { apiCall } from '../../hooks/useApi';
 
 const TAB_KEY = 'agentChat.rightRailTab';
 const SESSION_POLL_MS = 3_000;
 // Below this rail width, tab labels collapse and only icons remain — the
-// close button always stays visible. Tuned so the four current tabs plus
+// close button always stays visible. Tuned so the current tabs plus
 // the close button still fit comfortably above the threshold.
 const COMPACT_WIDTH_PX = 360;
 
@@ -34,7 +35,7 @@ export default function RightRail({
   const [tab, setTab] = useState(() => {
     try {
       const v = localStorage.getItem(TAB_KEY);
-      if (v === 'workspace' || v === 'log' || v === 'triggers' || v === 'sessions') return v;
+      if (v === 'workspace' || v === 'log' || v === 'triggers' || v === 'sessions' || v === 'prompt') return v;
     } catch { /* ignore */ }
     return 'log';
   });
@@ -128,6 +129,13 @@ export default function RightRail({
           active={tab === 'sessions'}
           onClick={() => setTab('sessions')}
         />
+        <TabButton
+          icon={<FileText size={13} />}
+          label="Prompt"
+          compact={compact}
+          active={tab === 'prompt'}
+          onClick={() => setTab('prompt')}
+        />
         <div style={{ flex: 1 }} />
         <button
           onClick={onClose}
@@ -171,6 +179,9 @@ export default function RightRail({
         </div>
         <div style={{ display: tab === 'sessions' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           <RunningSessionsPanel agentId={agentId} active={tab === 'sessions'} />
+        </div>
+        <div style={{ display: tab === 'prompt' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+          <PromptPreviewPanel agentId={agentId} embedded />
         </div>
       </div>
     </div>

@@ -15,6 +15,7 @@ const { makeSkillSourceResolver } = require("./skill-source");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const { resolveCloneTarget } = require("./clone-target");
+const { assembleClaudeMd, buildMemoryHint } = require("./prompt-assembly");
 
 // ============================================================
 // Config
@@ -515,11 +516,35 @@ function resolveOwnerTeamId(teamId) {
   return teamId;
 }
 
+// Is this agent driven by anything other than interactive DM? Gates the
+// injection of the trigger-management docs and the unattended-run framing into
+// its CLAUDE.md. Autonomous = a reactive session policy, an inherently
+// autonomous role, or an already-configured trigger. Best-effort: at
+// create-time config.json is written before this is read (so sessionPolicy is
+// visible) but triggers.json may not exist yet — reactive roles set
+// sessionPolicy=per-invocation, which is the signal we rely on there.
+function agentIsAutonomous(id, role) {
+  if (role === "orchestrator" || role === "bp-instance") return true;
+  try {
+    const cfg = loadAgentConfig(id);
+    if (cfg?.sessionPolicy === "per-invocation") return true;
+  } catch { /* no config yet */ }
+  try {
+    const p = controlOrPoolPath(id, "triggers.json");
+    if (fs.existsSync(p)) {
+      const arr = JSON.parse(fs.readFileSync(p, "utf8"));
+      if (Array.isArray(arr) && arr.length > 0) return true;
+    }
+  } catch { /* unparsable / missing triggers */ }
+  return false;
+}
+
 function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
   const dir = agentDir(id);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "AGENT-PROMPT.md"), prompt);
-  fs.writeFileSync(path.join(dir, "CLAUDE.md"), buildAgentClaudeMd(prompt, role, env, blueprintId));
+  const autonomous = agentIsAutonomous(id, role);
+  fs.writeFileSync(path.join(dir, "CLAUDE.md"), buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous }));
 }
 
 // ============================================================
@@ -630,7 +655,11 @@ function seedBlueprintMemory(blueprintId) {
   }
 }
 
-function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null) {
+// Compose an agent's CLAUDE.md. The base template is read here (I/O); the
+// ordering / conditional-gating / de-duplication rules live in the pure,
+// unit-tested `prompt-assembly` module, which the prompt-preview endpoint also
+// calls so the preview is byte-identical to what gets seeded.
+function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null, opts = {}) {
   const candidates = [
     path.join(TEMPLATE_WORKSPACE, "CLAUDE.md"),
     "/defaults/CLAUDE.md",
@@ -648,99 +677,14 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null) {
   }
   if (!base) return agentPrompt;
 
-  const pathNote =
-    "## Workspace\n\n" +
-    "Your workspace root is the current working directory. All files (repos, skills, memory) are here.\n" +
-    "Memory entries may contain absolute paths like `/workspace/...` from a shared template — " +
-    "translate these to relative paths (e.g. `/workspace/314092_foo/` → `./314092_foo/`).\n";
-
-  const extra =
-    "\n---\n\n## Trigger management (triggers.json)\n\n" +
-    "Your runs can be driven by triggers defined in `triggers.json` at your workspace root. " +
-    "You can read and edit this file yourself to adjust your own schedule.\n\n" +
-    "### Trigger types\n\n" +
-    "**Recurring (cron):**\n" +
-    "```json\n" +
-    "{\n" +
-    '  "id": "unique-id",\n' +
-    '  "type": "cron",\n' +
-    '  "enabled": true,\n' +
-    '  "cron": "*/30 * * * *",\n' +
-    '  "description": "Description",\n' +
-    '  "prompt": "What you should do on each run"\n' +
-    "}\n" +
-    "```\n" +
-    "Cron format: `Minute Hour Day Month Weekday`\n\n" +
-    "**One-shot (once):**\n" +
-    "```json\n" +
-    "{\n" +
-    '  "id": "unique-id",\n' +
-    '  "type": "once",\n' +
-    '  "enabled": true,\n' +
-    '  "at": "2026-04-25T09:00:00",\n' +
-    '  "description": "Description",\n' +
-    '  "prompt": "What you should do"\n' +
-    "}\n" +
-    "```\n\n" +
-    "### Managing triggers\n\n" +
-    "1. Read `triggers.json`\n" +
-    "2. Add, modify or remove triggers\n" +
-    "3. Write the file back\n" +
-    "4. Changes are picked up automatically within 60 seconds\n\n" +
-    "### Optional fields\n\n" +
-    "- `roomId` — target room for the output (default: direct-message room with the admin)\n" +
-    "- `timeoutSeconds` — max execution time (default: 3600)\n\n" +
-    "If a scheduled run has nothing to report, reply with `[PASS]`.\n";
-
-  let envSection = "";
-  if (env) {
-    const parts = [];
-    if (env.name) parts.push(`**Working Environment:** ${env.name}`);
-    if (env.description) parts.push(env.description);
-    const repos = Array.isArray(env.repositories) ? env.repositories : [];
-    if (repos.length === 1) {
-      const repoName = (repos[0].url.split("/").pop() || "repo").replace(/\.git$/, "");
-      parts.push(`**Repository:** \`${repos[0].url}\` — cloned to \`./${repoName}/\``);
-    } else if (repos.length > 1) {
-      const lines = repos.map(r => {
-        const repoName = (r.url.split("/").pop() || "repo").replace(/\.git$/, "");
-        return `- \`${r.url}\` — cloned to \`./${repoName}/\``;
-      });
-      parts.push(`**Repositories:**\n${lines.join("\n")}`);
-    }
-    if (Array.isArray(env.skills) && env.skills.length > 0) {
-      parts.push(`**Skills:** ${env.skills.map((s) => `\`${s}\``).join(", ")}`);
-    }
-    if (env.additionalContext) parts.push(env.additionalContext);
-    if (parts.length > 0) {
-      envSection = `\n---\n\n## Working Environment\n\n${parts.join("\n\n")}\n`;
-    }
-  }
-
-  let blueprintSection = "";
-  if (blueprintId) {
-    const bpBase = `http://localhost:4002/internal/blueprints/${blueprintId}/memory`;
-    const memFiles = ["context.md", "log.md", "facts.md", "entities.md", "users.md"];
-    const pullCmds = memFiles.map(f => `curl -sf ${bpBase}/${f} > memory/${f} || true`).join("\n");
-    const pushCmds = memFiles.map(f => `curl -s -X PUT -H 'Content-Type: text/plain' --data-binary @memory/${f} ${bpBase}/${f}`).join("\n");
-    blueprintSection =
-      `\n---\n\n## Memory System (Shared — Blueprint Instance)\n\n` +
-      `This agent is an **instance of blueprint \`${blueprintId}\`**. ` +
-      `Memory is **shared** across all instances of this blueprint — whatever one instance learns, all instances know.\n\n` +
-      `### Reading memory (do this at the start of each conversation)\n\n` +
-      "```bash\n" +
-      `${pullCmds}\n` +
-      "```\n\n" +
-      `Then read all five files.\n\n` +
-      `### Writing memory (when wrapping up or asked to remember something)\n\n` +
-      `Edit the local files as usual, then push all to the shared store:\n\n` +
-      "```bash\n" +
-      `${pushCmds}\n` +
-      "```\n\n" +
-      `**Always pull before reading** — another instance may have updated memory since your last session.\n`;
-  }
-
-  return `${base}\n\n---\n\n${pathNote}${envSection}\n---\n\n## Agent Role\n\n${agentPrompt}${extra}${blueprintSection}`;
+  return assembleClaudeMd({
+    base,
+    agentPrompt,
+    role,
+    env,
+    blueprintId,
+    autonomous: !!opts.autonomous,
+  });
 }
 
 function seedAgentWorkspace(id, env, opts = {}) {
@@ -4269,6 +4213,51 @@ async function main() {
     }
 
     // ── End blueprint routes ───────────────────────────────────────────────
+
+    // Prompt preview: render the fully-composed system prompt an agent actually
+    // receives — the seeded CLAUDE.md plus the runtime `--append-system-prompt`
+    // memory hint — using the SAME assembly path as workspace seeding, so what
+    // the operator sees is what the agent gets. Recomputed live from the agent's
+    // current AGENT-PROMPT.md + role + environment + triggers.
+    const promptPreviewMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/agents\/([^/]+)\/prompt-preview$/);
+    if (promptPreviewMatch) {
+      const id = decodeURIComponent(promptPreviewMatch[1]);
+      try {
+        const cfg = loadAgentConfig(id);
+        if (!cfg) return sendJson(res, 404, { error: 'agent not found' });
+        let prompt = '';
+        try {
+          prompt = fs.readFileSync(path.join(agentDir(id), 'AGENT-PROMPT.md'), 'utf8');
+        } catch {
+          prompt = cfg.systemPrompt || cfg.systemPromptTemplate || '';
+        }
+        const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+        const blueprintId = cfg.blueprintId || null;
+        const autonomous = agentIsAutonomous(id, cfg.role);
+        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous });
+        const appendSystemPrompt = buildMemoryHint(blueprintId);
+        return sendJson(res, 200, {
+          agentId: id,
+          role: cfg.role || null,
+          claudeMd,
+          appendSystemPrompt,
+          agentPrompt: prompt,
+          meta: {
+            autonomous,
+            sessionPolicy: cfg.sessionPolicy || 'persistent',
+            blueprintInstance: !!blueprintId,
+            hasRepository: !!(env && Array.isArray(env.repositories) && env.repositories.length > 0),
+            hasSkills: !!(env && Array.isArray(env.skills) && env.skills.length > 0),
+            environmentId: cfg.environmentId || null,
+            environmentName: (env && env.name) || null,
+          },
+        });
+      } catch (err) {
+        console.error(`[Orchestrator] prompt-preview error for ${id}: ${err.message}`);
+        return sendJson(res, 500, { error: err.message });
+      }
+    }
 
     const cloneMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/clone$/);
     if (cloneMatch) {

@@ -106,6 +106,8 @@ The two credentials are kept deliberately separate as **defense-in-depth** — t
 
 The setup wizard and the SSH-keys / GitHub-tokens admin pages explain this rationale inline so that operators understand why both are required.
 
+**Credential rotation propagates to running agents.** Spawn-time credentials — the `GH_TOKEN`/`GITHUB_TOKEN` derived from `env.githubTokenId`, and the per-agent SSH identity — are read from disk and baked into each agent container's environment by `startAgentProcess`; they are immutable for the container's lifetime. So when an operator repoints an environment at a different GitHub token, the admin-console's `PUT /api/environments/:id` detects the `githubTokenId` change and best-effort calls the orchestrator's `POST /internal/environments/:id/respawn-agents` (`respawnAgentsForEnvironment`), which recreates every currently-running, materialized agent bound to that env so the new token is re-injected. Disabled/stopped agents are left alone — they pick up the fresh credential on their next enable. (GitHub tokens are create-only in the API, so a value rotation always surfaces as a `githubTokenId` change on the env, which is the trigger.)
+
 ### MCP Servers
 
 Static skills live in the agent's workspace; **MCP servers** are how agents reach things they need to query at *runtime* — wikis, vector stores, graph DBs. The pattern intentionally mirrors the SSH-key / GitHub-PAT split: a *catalog* of servers, a *separate* credential store, and an environment that pairs the two.

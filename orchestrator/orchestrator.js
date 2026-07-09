@@ -3145,6 +3145,42 @@ class Orchestrator {
     return { id, enabled: false };
   }
 
+  // Re-inject an environment's credentials into every running agent bound to it.
+  //
+  // Credentials (GH_TOKEN/GITHUB_TOKEN from env.githubTokenId, the per-agent SSH
+  // identity) are read from disk and baked into the container's environment at
+  // spawn time by startAgentProcess — they are immutable for the container's
+  // lifetime. So when an operator rotates the GitHub PAT (or repoints the env at
+  // a different token), already-running containers keep the stale value until
+  // they are recreated. This respawns each currently-running, materialized agent
+  // on the env (startAgentProcess stops the old container and creates a new one
+  // with a freshly-read childEnv), so the new credential takes effect without a
+  // manual disable/enable. Best-effort and idempotent; disabled/stopped agents
+  // are left alone (they pick up the fresh credential on their next enable).
+  async respawnAgentsForEnvironment(envId, { reason } = {}) {
+    if (!envId) return { envId, respawned: [], skipped: [] };
+    const respawned = [];
+    const skipped = [];
+    for (const [id] of this.agentConfigs) {
+      const cfg = loadAgentConfig(id); // fresh read — canonical on-disk config
+      if (!cfg || cfg.environmentId !== envId) continue;
+      if (cfg.enabled === false || !cfg.token) { skipped.push(id); continue; }
+      if (!agentProcesses.has(id)) { skipped.push(id); continue; }
+      try {
+        this.agentConfigs.set(id, { config: cfg });
+        startAgentProcess(cfg); // stops old container, recreates with fresh env
+        respawned.push(id);
+      } catch (err) {
+        console.error(`[Orchestrator] respawn for env ${envId} failed for ${id}: ${err.message}`);
+        skipped.push(id);
+      }
+    }
+    if (respawned.length) {
+      console.log(`[Orchestrator] env ${envId} credential change (${reason || 'update'}) → respawned ${respawned.length} agent(s): ${respawned.join(', ')}`);
+    }
+    return { envId, respawned, skipped };
+  }
+
   // Reset an agent back to its stub state: stop the process, deactivate the
   // Matrix user (best-effort), wipe the workspace, and strip the config of
   // any runtime identity (token, userId). The stub config keeps just the
@@ -4991,6 +5027,33 @@ async function main() {
           res.end(JSON.stringify({ error: err.message }));
         }
       })();
+      return;
+    }
+
+    // ── Re-inject an env's credentials into its running agents ──────────
+    // Fired by the admin-console after an environment's GitHub token (or other
+    // spawn-time credential) changes, so already-running containers pick up the
+    // new value by being recreated. Best-effort on the caller's side.
+    const respawnEnvMatch = req.method === 'POST' && req.url.match(/^\/internal\/environments\/([^/]+)\/respawn-agents$/);
+    if (respawnEnvMatch) {
+      const envId = decodeURIComponent(respawnEnvMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* ignore */ }
+        (async () => {
+          try {
+            const result = await orchestrator.respawnAgentsForEnvironment(envId, { reason: parsed.reason });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+          } catch (err) {
+            console.error(`[Orchestrator] respawnAgentsForEnvironment error for ${envId}: ${err.message}`);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+          }
+        })();
+      });
       return;
     }
 

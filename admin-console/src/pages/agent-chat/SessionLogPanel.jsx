@@ -3,6 +3,7 @@ import { Wifi, WifiOff, Loader2, PanelRightClose } from 'lucide-react';
 import { useSSE } from '../../hooks/useSSE';
 import LogEvent from './LogEvent';
 import PinnedTodoPanel from './PinnedTodoPanel';
+import { sumContextTokens } from './context-window';
 
 /**
  * Right-rail panel showing the structured timeline of internal agent
@@ -34,8 +35,9 @@ import PinnedTodoPanel from './PinnedTodoPanel';
  *   onHoverCorrelation(id|null)
  *   onClose()                  — parent toggles `logOpen` to false
  *   onContextUpdate({tokensIn, model}|null) — last completed request's input
- *     tokens + the model reported by its preceding `system_init` event, fed
- *     up so the chat toolbar can render the context-window fill indicator (#471)
+ *     tokens (input + cache-creation + cache-read, #490) + the model reported
+ *     by its preceding `system_init` event, fed up so the chat toolbar can
+ *     render the context-window fill indicator (#471)
  */
 export default function SessionLogPanel({
   agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate, embedded = false,
@@ -200,7 +202,10 @@ export default function SessionLogPanel({
     let tokensIn = null;
     for (const ev of events) {
       if (ev.type === 'system_init' && ev.model) model = ev.model;
-      if (ev.type === 'result' && typeof ev.tokens?.input === 'number') tokensIn = ev.tokens.input;
+      if (ev.type === 'result' && ev.tokens) {
+        const summed = sumContextTokens(ev.tokens);
+        if (summed != null) tokensIn = summed;
+      }
     }
     return tokensIn == null ? null : { tokensIn, model };
   }, [events]);

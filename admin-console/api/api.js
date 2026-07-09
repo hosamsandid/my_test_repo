@@ -1091,6 +1091,20 @@ function notifyAgentReseed(agentId, paths) {
   }).catch(() => {});
 }
 
+// Best-effort: after an environment's spawn-time credentials change (today: the
+// GitHub PAT it points at), ask the orchestrator to respawn the running agents
+// bound to that env so they pick up the new credential. The token is baked into
+// each container's environment at spawn time, so without this a rotated PAT
+// would only reach a container on its next manual disable/enable.
+function notifyEnvCredentialChange(envId, reason) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  fetch(`${orchestratorUrl}/internal/environments/${encodeURIComponent(envId)}/respawn-agents`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason }),
+  }).catch(() => {});
+}
+
 app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
@@ -4551,6 +4565,7 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
 app.put('/api/environments/:id', apiLimiter, (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
+  const prevGithubTokenId = env.githubTokenId || null;
   const { name, description, skills, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers, teamId } = req.body || {};
 
   if (githubTokenId) {
@@ -4597,6 +4612,11 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   if (additionalContext !== undefined) env.additionalContext = additionalContext;
   env.updatedAt = new Date().toISOString();
   saveEnvironment(env.id, env);
+  // If the GitHub PAT the env points at changed, respawn its running agents so
+  // the new token is re-injected into their containers (baked in at spawn time).
+  if ((env.githubTokenId || null) !== prevGithubTokenId) {
+    notifyEnvCredentialChange(env.id, 'githubTokenId-changed');
+  }
   res.json(env);
 });
 

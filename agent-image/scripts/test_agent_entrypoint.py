@@ -11,10 +11,13 @@ or directly:
 
     python3 agent-image/scripts/test_agent_entrypoint.py
 """
+import asyncio
 import importlib.util
+import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 _MODULE_PATH = Path(__file__).resolve().parent / "agent-entrypoint.py"
 _spec = importlib.util.spec_from_file_location("agent_entrypoint", _MODULE_PATH)
@@ -207,6 +210,194 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(content["io.aee.trigger"],
                           {"triggerId": "g1", "triggerType": "github-event",
                            "event": "issues.opened"})
+
+
+class DescribeInFlightMarker(unittest.TestCase):
+    """#506: human-readable detail used in the crash-reconciliation notice."""
+
+    def test_once_marker(self):
+        self.assertEqual(
+            entrypoint.TriggerScheduler._describe_in_flight_marker(
+                {"kind": "once", "triggerId": "o1"}),
+            "one-shot trigger `o1`",
+        )
+
+    def test_pending_http_marker(self):
+        self.assertEqual(
+            entrypoint.TriggerScheduler._describe_in_flight_marker(
+                {"kind": "pending", "triggerId": "h1", "triggerType": "http"}),
+            "http trigger `h1`",
+        )
+
+    def test_pending_github_event_marker(self):
+        self.assertEqual(
+            entrypoint.TriggerScheduler._describe_in_flight_marker({
+                "kind": "pending", "triggerId": "t-gh", "triggerType": "github-event",
+                "repo": "o/r", "event": "issues.labeled",
+            }),
+            "github-event trigger `t-gh` (`issues.labeled` on `o/r`)",
+        )
+
+
+class InFlightMarkerReconciliation(unittest.IsolatedAsyncioTestCase):
+    """#506: crash reconciliation for the pending-queue-drain race (Race 1)
+    and the once-trigger-removal race (Race 2) — durable markers must be
+    written before the risky mutation, cleared once execution genuinely
+    completes, and surfaced as a visible notice if still present at the next
+    scheduler startup."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.workdir = Path(self._tmpdir.name)
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir", return_value=self.workdir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        client = AsyncMock()
+        send_formatted = AsyncMock(return_value="$evt")
+        scheduler = entrypoint.TriggerScheduler(
+            client=client, agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=send_formatted, blueprint_id=None,
+        )
+        return scheduler, client, send_formatted
+
+    def _write_dm_room(self):
+        entrypoint._atomic_write_json(self.workdir / "dm-room.json", {"roomId": "!room:local"})
+
+    async def _drain_all_tasks(self):
+        for t in [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]:
+            await t
+
+    # -- Race 1: pending-queue drain -----------------------------------------
+
+    def test_attach_pending_markers_marks_http_and_github_event_entries_only(self):
+        entries = [
+            {"triggerId": "t-http"},
+            {"triggerId": "t-gh", "github": {"event": "issues.labeled", "repo": "o/r", "eventId": 1}},
+            {"kind": "handover-dm", "roomId": "!x", "body": "hi"},
+            {"kind": "session-reset", "roomId": "!x"},
+        ]
+        entrypoint.TriggerScheduler._attach_pending_markers(entries)
+
+        self.assertIn("_inFlightMarkerId", entries[0])
+        self.assertIn("_inFlightMarkerId", entries[1])
+        self.assertNotIn("_inFlightMarkerId", entries[2])
+        self.assertNotIn("_inFlightMarkerId", entries[3])
+
+        markers = entrypoint._load_in_flight()
+        self.assertEqual(len(markers), 2)
+        gh_marker = next(m for m in markers if m["triggerId"] == "t-gh")
+        self.assertEqual(gh_marker["triggerType"], "github-event")
+        self.assertEqual(gh_marker["repo"], "o/r")
+        self.assertEqual(gh_marker["event"], "issues.labeled")
+        http_marker = next(m for m in markers if m["triggerId"] == "t-http")
+        self.assertEqual(http_marker["triggerType"], "http")
+
+    async def test_process_pending_clears_marker_on_normal_completion(self):
+        scheduler, _client, _send = self._scheduler()
+        entrypoint._save_triggers([
+            {"id": "t-gh", "type": "github-event", "enabled": True, "prompt": "p"},
+        ])
+        entrypoint._atomic_write_json(self.workdir / entrypoint._PENDING_FILENAME, [
+            {"triggerId": "t-gh", "github": {"event": "issues.labeled", "repo": "o/r", "eventId": 1}},
+        ])
+        scheduler._execute = AsyncMock()
+
+        await scheduler._process_pending()
+
+        scheduler._execute.assert_awaited_once()
+        self.assertEqual(entrypoint._load_in_flight(), [])
+
+    async def test_process_pending_clears_marker_even_when_trigger_not_found(self):
+        scheduler, _client, _send = self._scheduler()
+        entrypoint._save_triggers([])  # no matching trigger — a legitimate, non-crash outcome
+        entrypoint._atomic_write_json(self.workdir / entrypoint._PENDING_FILENAME, [
+            {"triggerId": "missing"},
+        ])
+
+        await scheduler._process_pending()
+
+        self.assertEqual(entrypoint._load_in_flight(), [])
+
+    async def test_process_pending_never_marks_control_kind_entries(self):
+        scheduler, _client, _send = self._scheduler()
+        entrypoint._atomic_write_json(self.workdir / entrypoint._PENDING_FILENAME, [
+            {"kind": "handover-dm", "roomId": "!room:local", "body": "hand-off"},
+        ])
+        scheduler._execute_handover_dm = AsyncMock()
+
+        await scheduler._process_pending()
+
+        scheduler._execute_handover_dm.assert_awaited_once()
+        self.assertEqual(entrypoint._load_in_flight(), [])
+
+    # -- Race 2: once-trigger removal -----------------------------------------
+
+    async def test_sync_marks_once_trigger_before_removal_then_clears_after_execution(self):
+        scheduler, _client, _send = self._scheduler()
+        past = (datetime.now(tz=entrypoint._TRIGGER_TZ) - timedelta(minutes=1)).isoformat()
+        entrypoint._save_triggers([
+            {"id": "o1", "type": "once", "at": past, "prompt": "p", "roomId": "!room:local"},
+        ])
+        scheduler._execute = AsyncMock()
+
+        await scheduler._sync()
+
+        # By the time _sync() returns, the trigger has already been removed
+        # from triggers.json and its marker persisted — both happen before
+        # the spawned execution task is even scheduled to run.
+        self.assertEqual(entrypoint._load_triggers(), [])
+        in_flight = entrypoint._load_in_flight()
+        self.assertEqual(len(in_flight), 1)
+        self.assertEqual(in_flight[0]["kind"], "once")
+        self.assertEqual(in_flight[0]["triggerId"], "o1")
+
+        await self._drain_all_tasks()
+
+        scheduler._execute.assert_awaited_once()
+        self.assertEqual(entrypoint._load_in_flight(), [])
+
+    # -- startup reconciliation (AC1/AC2/AC3) ---------------------------------
+
+    async def test_reconcile_in_flight_posts_notice_for_each_orphaned_marker(self):
+        scheduler, _client, send_formatted = self._scheduler()
+        self._write_dm_room()
+        entrypoint._save_in_flight([
+            {"id": "once:o1:1", "kind": "once", "triggerId": "o1"},
+            {"id": "pending:t-gh:1:0", "kind": "pending", "triggerId": "t-gh",
+             "triggerType": "github-event", "repo": "o/r", "event": "issues.labeled"},
+        ])
+
+        await scheduler._reconcile_in_flight()
+
+        self.assertEqual(entrypoint._load_in_flight(), [])  # AC3: cleared, no re-fire
+        self.assertEqual(send_formatted.await_count, 2)
+        bodies = [call.args[1] for call in send_formatted.await_args_list]
+        self.assertTrue(any("one-shot trigger `o1`" in b for b in bodies))
+        self.assertTrue(any(
+            "github-event trigger `t-gh`" in b and "issues.labeled" in b and "o/r" in b
+            for b in bodies
+        ))
+        self.assertTrue(all("automatic re-run" in b for b in bodies))  # AC3: informational only
+
+    async def test_reconcile_in_flight_noop_when_nothing_orphaned(self):
+        scheduler, _client, send_formatted = self._scheduler()
+        self._write_dm_room()
+
+        await scheduler._reconcile_in_flight()  # AC4: no false positives
+
+        send_formatted.assert_not_awaited()
+
+    async def test_reconcile_in_flight_skips_notice_without_dm_room_but_still_clears(self):
+        scheduler, _client, send_formatted = self._scheduler()
+        entrypoint._save_in_flight([{"id": "once:o1:1", "kind": "once", "triggerId": "o1"}])
+
+        await scheduler._reconcile_in_flight()
+
+        send_formatted.assert_not_awaited()
+        self.assertEqual(entrypoint._load_in_flight(), [])
 
 
 class ResultEventTokens(unittest.TestCase):

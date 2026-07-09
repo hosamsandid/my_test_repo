@@ -1,4 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { PanelRightClose, ScrollText, FolderTree, CalendarClock, Activity, FileText, MoreHorizontal } from 'lucide-react';
 import SessionLogPanel from './SessionLogPanel';
 import WorkspaceBrowser from './WorkspaceBrowser';
@@ -132,19 +133,39 @@ export default function RightRail({
   const activeInOverflow = overflowTabs.some((t) => t.key === tab);
 
   // --- Overflow dropdown open/close --------------------------------------
+  // The dropdown is rendered through a portal (see IconButton for the same
+  // pattern) because the tab strip needs `overflow: hidden` for its own
+  // measurement row, which would otherwise clip an in-flow absolutely
+  // positioned dropdown regardless of the open-state toggling correctly.
   const [menuOpen, setMenuOpen] = useState(false);
+  const [menuCoords, setMenuCoords] = useState(null);
   const menuWrapRef = useRef(null);
+  const menuToggleRef = useRef(null);
+  const menuContentRef = useRef(null);
+
+  const positionMenu = () => {
+    const btn = menuToggleRef.current;
+    if (!btn) return;
+    const rect = btn.getBoundingClientRect();
+    setMenuCoords({ top: rect.bottom + 2, right: window.innerWidth - rect.right });
+  };
+
   useEffect(() => {
     if (!menuOpen) return undefined;
+    positionMenu();
     const onDocClick = (e) => {
-      if (menuWrapRef.current && !menuWrapRef.current.contains(e.target)) setMenuOpen(false);
+      const insideToggle = menuWrapRef.current && menuWrapRef.current.contains(e.target);
+      const insideMenu = menuContentRef.current && menuContentRef.current.contains(e.target);
+      if (!insideToggle && !insideMenu) setMenuOpen(false);
     };
     const onKey = (e) => { if (e.key === 'Escape') setMenuOpen(false); };
     document.addEventListener('mousedown', onDocClick);
     document.addEventListener('keydown', onKey);
+    window.addEventListener('resize', positionMenu);
     return () => {
       document.removeEventListener('mousedown', onDocClick);
       document.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', positionMenu);
     };
   }, [menuOpen]);
   // Close the menu if everything fits again after a resize.
@@ -183,6 +204,7 @@ export default function RightRail({
         {overflowTabs.length > 0 && (
           <div ref={menuWrapRef} style={{ position: 'relative', display: 'flex', alignItems: 'stretch' }}>
             <button
+              ref={menuToggleRef}
               type="button"
               onClick={() => setMenuOpen((v) => !v)}
               title="More tabs"
@@ -206,20 +228,23 @@ export default function RightRail({
             >
               <MoreHorizontal size={16} />
             </button>
-            {menuOpen && (
-              <div role="menu" style={{
-                position: 'absolute',
-                top: '100%',
-                right: 0,
-                marginTop: 2,
-                minWidth: 160,
-                background: 'var(--eb-bg-surface)',
-                border: '1px solid var(--eb-border-default)',
-                borderRadius: 'var(--eb-radius-md)',
-                boxShadow: 'var(--eb-shadow-md)',
-                padding: 'var(--eb-space-1)',
-                zIndex: 20,
-              }}>
+            {menuOpen && menuCoords && createPortal(
+              <div
+                ref={menuContentRef}
+                role="menu"
+                style={{
+                  position: 'fixed',
+                  top: menuCoords.top,
+                  right: menuCoords.right,
+                  minWidth: 160,
+                  background: 'var(--eb-bg-surface)',
+                  border: '1px solid var(--eb-border-default)',
+                  borderRadius: 'var(--eb-radius-md)',
+                  boxShadow: 'var(--eb-shadow-md)',
+                  padding: 'var(--eb-space-1)',
+                  zIndex: 1000,
+                }}
+              >
                 {overflowTabs.map((t) => (
                   <MenuItem
                     key={t.key}
@@ -230,7 +255,8 @@ export default function RightRail({
                     onClick={() => { setTab(t.key); setMenuOpen(false); }}
                   />
                 ))}
-              </div>
+              </div>,
+              document.body,
             )}
           </div>
         )}

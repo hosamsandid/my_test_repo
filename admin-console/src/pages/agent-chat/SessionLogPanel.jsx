@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Wifi, WifiOff, Loader2, PanelRightClose } from 'lucide-react';
+import { Loader2, PanelRightClose } from 'lucide-react';
 import { useSSE } from '../../hooks/useSSE';
 import LogEvent from './LogEvent';
 import PinnedTodoPanel from './PinnedTodoPanel';
@@ -271,7 +271,6 @@ export default function SessionLogPanel({
             Session Log
           </div>
           <div style={{ flex: 1 }} />
-          <ConnectionDot status={sseStatus} />
           <button
             onClick={onClose}
             title="Hide log panel (Cmd+Shift+L)"
@@ -307,12 +306,6 @@ export default function SessionLogPanel({
         <Chip label="Tool Calls" active={filter === 'tools'}   onClick={() => setFilter('tools')} />
         <Chip label="Errors"     active={filter === 'errors'}  onClick={() => setFilter('errors')} />
         <Chip label="Posted"     active={filter === 'posted'}  onClick={() => setFilter('posted')} />
-        {embedded && (
-          <>
-            <div style={{ flex: 1 }} />
-            <ConnectionDot status={sseStatus} />
-          </>
-        )}
       </div>
 
       {error && (
@@ -457,24 +450,6 @@ function Chip({ label, active, onClick }) {
     >
       {label}
     </button>
-  );
-}
-
-function ConnectionDot({ status }) {
-  let color = 'var(--eb-text-muted)';
-  let label = 'Idle';
-  let Icon  = WifiOff;
-  if (status === 'open')              { color = 'var(--eb-status-success)'; label = 'Live';          Icon = Wifi; }
-  else if (status === 'connecting')   { color = 'var(--eb-status-warning)'; label = 'Connecting…';   Icon = Loader2; }
-  else if (status === 'reconnecting') { color = 'var(--eb-status-warning)'; label = 'Reconnecting…'; Icon = Loader2; }
-  const animate = status === 'connecting' || status === 'reconnecting';
-  return (
-    <div title={label} style={{
-      display: 'flex', alignItems: 'center', gap: 4, color,
-      fontSize: 'var(--eb-text-xs)',
-    }}>
-      <Icon size={11} style={animate ? { animation: 'spin 1s linear infinite' } : undefined} />
-    </div>
   );
 }
 

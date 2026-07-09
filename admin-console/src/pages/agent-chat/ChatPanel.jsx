@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Wifi, WifiOff, Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight } from 'lucide-react';
+import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
 import ConfirmDialog from '../../components/ConfirmDialog';
@@ -299,7 +299,7 @@ export default function ChatPanel({
   }, []);
 
   const sseUrl = roomId ? `/api/matrix/rooms/${encodeURIComponent(roomId)}/stream` : null;
-  const { status: sseStatus } = useSSE(sseUrl, {
+  useSSE(sseUrl, {
     onEvent: handleEvent,
     enabled: !!roomId,
   });
@@ -723,7 +723,6 @@ export default function ChatPanel({
             </div>
           )}
         </div>
-        <ConnectionDot status={sseStatus} />
       </div>
 
       {/* Session-control toolbar. flexWrap lets the controls flow onto a
@@ -1238,22 +1237,3 @@ function sessionBtnStyle(isDisabled) {
   };
 }
 
-function ConnectionDot({ status }) {
-  let color = 'var(--eb-text-muted)';
-  let label = 'Idle';
-  let Icon  = WifiOff;
-  if (status === 'open')         { color = 'var(--eb-status-success)'; label = 'Live';         Icon = Wifi; }
-  else if (status === 'connecting')   { color = 'var(--eb-status-warning)'; label = 'Connecting…'; Icon = Loader2; }
-  else if (status === 'reconnecting') { color = 'var(--eb-status-warning)'; label = 'Reconnecting…'; Icon = Loader2; }
-
-  const animate = status === 'connecting' || status === 'reconnecting';
-  return (
-    <div title={label} style={{
-      display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
-      color, fontSize: 'var(--eb-text-xs)',
-    }}>
-      <Icon size={12} style={animate ? { animation: 'spin 1s linear infinite' } : undefined} />
-      <span>{label}</span>
-    </div>
-  );
-}

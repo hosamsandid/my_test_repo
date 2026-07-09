@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { PanelRightClose, ScrollText, FolderTree, CalendarClock, Activity, FileText } from 'lucide-react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { PanelRightClose, ScrollText, FolderTree, CalendarClock, Activity, FileText, MoreHorizontal } from 'lucide-react';
 import SessionLogPanel from './SessionLogPanel';
 import WorkspaceBrowser from './WorkspaceBrowser';
 import TriggersPanel from './TriggersPanel';
@@ -9,10 +9,11 @@ import { apiCall } from '../../hooks/useApi';
 
 const TAB_KEY = 'agentChat.rightRailTab';
 const SESSION_POLL_MS = 3_000;
-// Below this rail width, tab labels collapse and only icons remain — the
-// close button always stays visible. Tuned so the current tabs plus
-// the close button still fit comfortably above the threshold.
-const COMPACT_WIDTH_PX = 360;
+// Width reserved (px) for the overflow "⋯" toggle when it is shown. Used only
+// as a layout budget in the fit computation; the button sizes itself.
+const OVERFLOW_BTN_WIDTH = 40;
+
+const TAB_KEYS = ['log', 'workspace', 'triggers', 'sessions', 'prompt'];
 
 /**
  * Tabbed right rail for the agent chat page.
@@ -20,9 +21,17 @@ const COMPACT_WIDTH_PX = 360;
  * Tabs:
  *   - "Log"       — structured session timeline (existing SessionLogPanel)
  *   - "Workspace" — read-only file tree of /workspace/agents/<id>/
+ *   - "Triggers"  — the agent's triggers.json
+ *   - "Sessions"  — running Claude sessions (with a live count badge)
+ *   - "Prompt"    — read-only preview of the composed system prompt
  *
  * The active tab is persisted in localStorage so it survives reloads. The
  * close button lifts state up to the page-level `logOpen` toggle.
+ *
+ * The rail is independently resizable, so the tab strip measures itself: tabs
+ * always render icon + label, and whichever ones no longer fit spill into an
+ * overflow "⋯" menu. This adapts to any rail width and any number of tabs
+ * (rather than a single hard-coded icons-only breakpoint).
  *
  * SessionLogPanel keeps its own header/filter chrome — we intentionally
  * mount it without an `onClose` prop so its close button doesn't appear
@@ -35,30 +44,13 @@ export default function RightRail({
   const [tab, setTab] = useState(() => {
     try {
       const v = localStorage.getItem(TAB_KEY);
-      if (v === 'workspace' || v === 'log' || v === 'triggers' || v === 'sessions' || v === 'prompt') return v;
+      if (TAB_KEYS.includes(v)) return v;
     } catch { /* ignore */ }
     return 'log';
   });
   useEffect(() => {
     try { localStorage.setItem(TAB_KEY, tab); } catch { /* ignore */ }
   }, [tab]);
-
-  // Container-width awareness so tab labels collapse to icons-only when the
-  // rail is dragged narrow. Viewport media queries don't help here — the
-  // rail is independently resizable from AgentChat.
-  const containerRef = useRef(null);
-  const [compact, setCompact] = useState(false);
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') return undefined;
-    const ro = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        setCompact(entry.contentRect.width < COMPACT_WIDTH_PX);
-      }
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
 
   // Lightweight poll of just the session COUNT — so the "Sessions" tab
   // can show a badge regardless of which tab is currently visible. The
@@ -83,8 +75,83 @@ export default function RightRail({
     };
   }, [agentId]);
 
+  const tabs = useMemo(() => [
+    { key: 'log', icon: <ScrollText size={13} />, label: 'Log' },
+    { key: 'workspace', icon: <FolderTree size={13} />, label: 'Workspace' },
+    { key: 'triggers', icon: <CalendarClock size={13} />, label: 'Triggers' },
+    { key: 'sessions', icon: <Activity size={13} />, label: 'Sessions', badge: sessionCount > 0 ? sessionCount : null },
+    { key: 'prompt', icon: <FileText size={13} />, label: 'Prompt' },
+  ], [sessionCount]);
+
+  // --- Overflow measurement ---------------------------------------------
+  // We render a hidden, full-width copy of the tab row to learn each tab's
+  // natural width, then greedily fit as many as the strip allows. Whatever
+  // doesn't fit spills into the overflow menu. Re-measured on resize and
+  // whenever a tab's width can change (e.g. the Sessions badge appears).
+  const stripRef = useRef(null);
+  const measureRef = useRef(null);
+  const closeRef = useRef(null);
+  const [visibleCount, setVisibleCount] = useState(tabs.length);
+
+  useLayoutEffect(() => {
+    const strip = stripRef.current;
+    const measure = measureRef.current;
+    if (!strip || !measure || typeof ResizeObserver === 'undefined') return undefined;
+
+    const recompute = () => {
+      const stripWidth = strip.clientWidth;
+      const closeWidth = closeRef.current ? closeRef.current.offsetWidth : 0;
+      const widths = Array.from(measure.children).map((el) => el.getBoundingClientRect().width);
+      const total = widths.reduce((a, b) => a + b, 0);
+
+      // Everything fits alongside the close button → no overflow menu.
+      if (total <= stripWidth - closeWidth) {
+        setVisibleCount(tabs.length);
+        return;
+      }
+      // Otherwise reserve room for the "⋯" toggle and fit greedily.
+      const budget = stripWidth - closeWidth - OVERFLOW_BTN_WIDTH;
+      let used = 0;
+      let count = 0;
+      for (const w of widths) {
+        if (used + w > budget) break;
+        used += w;
+        count += 1;
+      }
+      setVisibleCount(Math.max(1, count)); // always keep at least one real tab
+    };
+
+    recompute();
+    const ro = new ResizeObserver(recompute);
+    ro.observe(strip);
+    return () => ro.disconnect();
+  }, [tabs]);
+
+  const visibleTabs = tabs.slice(0, visibleCount);
+  const overflowTabs = tabs.slice(visibleCount);
+  const activeInOverflow = overflowTabs.some((t) => t.key === tab);
+
+  // --- Overflow dropdown open/close --------------------------------------
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuWrapRef = useRef(null);
+  useEffect(() => {
+    if (!menuOpen) return undefined;
+    const onDocClick = (e) => {
+      if (menuWrapRef.current && !menuWrapRef.current.contains(e.target)) setMenuOpen(false);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') setMenuOpen(false); };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [menuOpen]);
+  // Close the menu if everything fits again after a resize.
+  useEffect(() => { if (overflowTabs.length === 0) setMenuOpen(false); }, [overflowTabs.length]);
+
   return (
-    <div ref={containerRef} style={{
+    <div style={{
       display: 'flex',
       flexDirection: 'column',
       height: '100%',
@@ -92,52 +159,85 @@ export default function RightRail({
       background: 'var(--eb-bg-app)',
     }}>
       {/* Tab strip */}
-      <div style={{
+      <div ref={stripRef} style={{
+        position: 'relative',
         height: 'var(--eb-header-height)',
         flexShrink: 0,
         display: 'flex',
         alignItems: 'stretch',
         borderBottom: '1px solid var(--eb-border-default)',
         background: 'var(--eb-bg-surface)',
+        overflow: 'hidden',
       }}>
-        <TabButton
-          icon={<ScrollText size={13} />}
-          label="Log"
-          compact={compact}
-          active={tab === 'log'}
-          onClick={() => setTab('log')}
-        />
-        <TabButton
-          icon={<FolderTree size={13} />}
-          label="Workspace"
-          compact={compact}
-          active={tab === 'workspace'}
-          onClick={() => setTab('workspace')}
-        />
-        <TabButton
-          icon={<CalendarClock size={13} />}
-          label="Triggers"
-          compact={compact}
-          active={tab === 'triggers'}
-          onClick={() => setTab('triggers')}
-        />
-        <TabButton
-          icon={<Activity size={13} />}
-          label="Sessions"
-          compact={compact}
-          badge={sessionCount > 0 ? sessionCount : null}
-          active={tab === 'sessions'}
-          onClick={() => setTab('sessions')}
-        />
-        <TabButton
-          icon={<FileText size={13} />}
-          label="Prompt"
-          compact={compact}
-          active={tab === 'prompt'}
-          onClick={() => setTab('prompt')}
-        />
+        {visibleTabs.map((t) => (
+          <TabButton
+            key={t.key}
+            icon={t.icon}
+            label={t.label}
+            badge={t.badge ?? null}
+            active={tab === t.key}
+            onClick={() => setTab(t.key)}
+          />
+        ))}
+
+        {overflowTabs.length > 0 && (
+          <div ref={menuWrapRef} style={{ position: 'relative', display: 'flex', alignItems: 'stretch' }}>
+            <button
+              type="button"
+              onClick={() => setMenuOpen((v) => !v)}
+              title="More tabs"
+              aria-label="More tabs"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '0 var(--eb-space-3)',
+                background: 'none',
+                border: 'none',
+                borderBottom: `2px solid ${activeInOverflow ? 'var(--eb-accent-primary)' : 'transparent'}`,
+                color: (menuOpen || activeInOverflow) ? 'var(--eb-text-primary)' : 'var(--eb-text-muted)',
+                cursor: 'pointer',
+                transition: 'color var(--eb-transition-fast), border-color var(--eb-transition-fast)',
+              }}
+              onMouseEnter={e => { if (!menuOpen && !activeInOverflow) e.currentTarget.style.color = 'var(--eb-text-secondary)'; }}
+              onMouseLeave={e => { if (!menuOpen && !activeInOverflow) e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
+            >
+              <MoreHorizontal size={16} />
+            </button>
+            {menuOpen && (
+              <div role="menu" style={{
+                position: 'absolute',
+                top: '100%',
+                right: 0,
+                marginTop: 2,
+                minWidth: 160,
+                background: 'var(--eb-bg-surface)',
+                border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-md)',
+                boxShadow: 'var(--eb-shadow-md)',
+                padding: 'var(--eb-space-1)',
+                zIndex: 20,
+              }}>
+                {overflowTabs.map((t) => (
+                  <MenuItem
+                    key={t.key}
+                    icon={t.icon}
+                    label={t.label}
+                    badge={t.badge ?? null}
+                    active={tab === t.key}
+                    onClick={() => { setTab(t.key); setMenuOpen(false); }}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         <div style={{ flex: 1 }} />
         <button
+          ref={closeRef}
           onClick={onClose}
           title="Hide panel (Cmd+Shift+L)"
           aria-label="Hide panel"
@@ -155,6 +255,22 @@ export default function RightRail({
         >
           <PanelRightClose size={16} />
         </button>
+
+        {/* Hidden measurement row: full-width copy of all tabs so we can learn
+            their natural widths without affecting layout. */}
+        <div ref={measureRef} aria-hidden="true" style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          display: 'flex',
+          visibility: 'hidden',
+          pointerEvents: 'none',
+          whiteSpace: 'nowrap',
+        }}>
+          {tabs.map((t) => (
+            <TabButton key={t.key} icon={t.icon} label={t.label} badge={t.badge ?? null} active={false} onClick={() => {}} />
+          ))}
+        </div>
       </div>
 
       {/* Body — keep both subtrees mounted via display:none so the user
@@ -188,18 +304,16 @@ export default function RightRail({
   );
 }
 
-function TabButton({ icon, label, active, onClick, badge = null, compact = false }) {
+function TabButton({ icon, label, active, onClick, badge = null }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      title={compact ? label : undefined}
-      aria-label={compact ? label : undefined}
       style={{
         display: 'inline-flex',
         alignItems: 'center',
-        gap: compact ? 4 : 6,
-        padding: compact ? '0 var(--eb-space-2)' : '0 var(--eb-space-3)',
+        gap: 6,
+        padding: '0 var(--eb-space-3)',
         background: 'none',
         border: 'none',
         borderBottom: `2px solid ${active ? 'var(--eb-accent-primary)' : 'transparent'}`,
@@ -207,6 +321,7 @@ function TabButton({ icon, label, active, onClick, badge = null, compact = false
         fontSize: 'var(--eb-text-sm)',
         fontWeight: active ? 'var(--eb-font-semibold)' : 'var(--eb-font-medium)',
         fontFamily: 'inherit',
+        whiteSpace: 'nowrap',
         cursor: 'pointer',
         transition: 'color var(--eb-transition-fast), border-color var(--eb-transition-fast)',
       }}
@@ -214,25 +329,62 @@ function TabButton({ icon, label, active, onClick, badge = null, compact = false
       onMouseLeave={e => { if (!active) e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
     >
       {icon}
-      {!compact && label}
-      {badge !== null && badge !== undefined && (
-        <span style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          minWidth: 16,
-          height: 16,
-          padding: '0 5px',
-          borderRadius: 'var(--eb-radius-full)',
-          background: 'var(--eb-accent-primary)',
-          color: 'var(--eb-bg-app)',
-          fontSize: 10,
-          fontWeight: 'var(--eb-font-semibold)',
-          lineHeight: 1,
-        }}>
-          {badge}
-        </span>
-      )}
+      {label}
+      {badge !== null && badge !== undefined && <Badge value={badge} />}
     </button>
+  );
+}
+
+function MenuItem({ icon, label, active, onClick, badge = null }) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onClick}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 'var(--eb-space-2)',
+        width: '100%',
+        padding: 'var(--eb-space-2) var(--eb-space-3)',
+        background: active ? 'var(--eb-bg-hover)' : 'none',
+        border: 'none',
+        borderRadius: 'var(--eb-radius-sm)',
+        color: active ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
+        fontSize: 'var(--eb-text-sm)',
+        fontWeight: active ? 'var(--eb-font-semibold)' : 'var(--eb-font-medium)',
+        fontFamily: 'inherit',
+        textAlign: 'left',
+        whiteSpace: 'nowrap',
+        cursor: 'pointer',
+      }}
+      onMouseEnter={e => { e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
+      onMouseLeave={e => { e.currentTarget.style.background = active ? 'var(--eb-bg-hover)' : 'none'; }}
+    >
+      {icon}
+      <span style={{ flex: 1 }}>{label}</span>
+      {badge !== null && badge !== undefined && <Badge value={badge} />}
+    </button>
+  );
+}
+
+function Badge({ value }) {
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      minWidth: 16,
+      height: 16,
+      padding: '0 5px',
+      borderRadius: 'var(--eb-radius-full)',
+      background: 'var(--eb-accent-primary)',
+      color: 'var(--eb-bg-app)',
+      fontSize: 10,
+      fontWeight: 'var(--eb-font-semibold)',
+      lineHeight: 1,
+    }}>
+      {value}
+    </span>
   );
 }

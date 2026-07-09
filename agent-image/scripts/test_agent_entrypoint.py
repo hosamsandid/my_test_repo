@@ -23,6 +23,7 @@ _spec.loader.exec_module(entrypoint)
 
 fmt = entrypoint._format_ask_user_question
 github_event_detail = entrypoint.TriggerScheduler._github_event_detail
+map_stream_json_line = entrypoint._map_stream_json_line
 
 
 class FormatAskUserQuestion(unittest.TestCase):
@@ -206,6 +207,40 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(content["io.aee.trigger"],
                           {"triggerId": "g1", "triggerType": "github-event",
                            "event": "issues.opened"})
+
+
+class ResultEventTokens(unittest.TestCase):
+    """#490: the result-event wrapper must surface cache tokens alongside
+    input/output so the admin console can count them into the context-window
+    fill (prompt caching means input_tokens alone understates it)."""
+
+    def _tokens(self, usage):
+        line = __import__("json").dumps({"type": "result", "usage": usage})
+        events = map_stream_json_line(line, "corr-1")
+        return next(e for e in events if e["type"] == "result")["tokens"]
+
+    def test_cache_tokens_included_when_present(self):
+        tokens = self._tokens({
+            "input_tokens": 100, "output_tokens": 50,
+            "cache_creation_input_tokens": 20, "cache_read_input_tokens": 3000,
+        })
+        self.assertEqual(tokens, {
+            "input": 100, "output": 50,
+            "cacheCreationInput": 20, "cacheReadInput": 3000,
+        })
+
+    def test_cache_tokens_default_to_zero_when_absent(self):
+        tokens = self._tokens({"input_tokens": 100, "output_tokens": 50})
+        self.assertEqual(tokens["cacheCreationInput"], 0)
+        self.assertEqual(tokens["cacheReadInput"], 0)
+
+    def test_cache_tokens_default_to_zero_when_null(self):
+        tokens = self._tokens({
+            "input_tokens": 100, "output_tokens": 50,
+            "cache_creation_input_tokens": None, "cache_read_input_tokens": None,
+        })
+        self.assertEqual(tokens["cacheCreationInput"], 0)
+        self.assertEqual(tokens["cacheReadInput"], 0)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ import ConfirmDialog from '../../components/ConfirmDialog';
 import HandoffDialog from './HandoffDialog';
 import Message from './Message';
 import MessageInput from './MessageInput';
-import { resolveContextWindowTokens, computeContextFillLevel } from './context-window';
+import { resolveContextWindowTokens, computeContextFillLevel, formatTokenCountK } from './context-window';
 
 // Default prompt sent when the user clicks "Reset & learn". The agent
 // continues in its current Claude session (so it has full conversational
@@ -92,12 +92,17 @@ export default function ChatPanel({
   // override. `modelSwitching` blocks rapid double-clicks during the PATCH.
   const [modelOptions, setModelOptions] = useState(null);
   const [modelSwitching, setModelSwitching] = useState(false);
-  // Context-window fill for the last completed request (#471). `contextFill`
-  // (from the parent, fed by SessionLogPanel) carries the raw input-token
-  // count + the model actually used; resolve that model's window size against
-  // the agent's catalog (falling back to the known-Claude-family table) and
-  // derive the percentage + warning level. Hidden entirely when the window
-  // size can't be determined (AC 7) rather than showing a misleading value.
+  // Context-window fill for the last completed request (#471, cache-tokens
+  // fix #490). `contextFill` (from the parent, fed by SessionLogPanel) carries
+  // the token count actually held in context — input + cache-creation +
+  // cache-read tokens, since a `--resume`d session runs on prompt caching and
+  // most of its held context lives in the cache fields, not `input` — plus
+  // the model actually used. Resolve that model's window size against the
+  // agent's catalog (falling back to the known-Claude-family table) and
+  // derive the warning level from the (corrected) ratio; the toolbar renders
+  // it as a rounded "<used>K / <limit>K" token count rather than a
+  // percentage. Hidden entirely when the window size can't be determined
+  // (AC 7) rather than showing a misleading value.
   const contextWindowTokens = useMemo(() => {
     if (!contextFill?.model) return null;
     const modelEntry = (modelOptions?.models || []).find(m => m.id === contextFill.model);
@@ -835,7 +840,7 @@ export default function ChatPanel({
             }}
           >
             <Gauge size={10} />
-            {contextFillLevel.pct}%
+            {formatTokenCountK(contextFill.tokensIn)} / {formatTokenCountK(contextWindowTokens)}
           </span>
         )}
         {sessionId && (

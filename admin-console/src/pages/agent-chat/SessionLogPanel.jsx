@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Wifi, WifiOff, Loader2, PanelRightClose } from 'lucide-react';
+import { Loader2, PanelRightClose } from 'lucide-react';
 import { useSSE } from '../../hooks/useSSE';
 import LogEvent from './LogEvent';
 import PinnedTodoPanel from './PinnedTodoPanel';
+import { sumContextTokens } from './context-window';
 
 /**
  * Right-rail panel showing the structured timeline of internal agent
@@ -34,11 +35,19 @@ import PinnedTodoPanel from './PinnedTodoPanel';
  *   onHoverCorrelation(id|null)
  *   onClose()                  — parent toggles `logOpen` to false
  *   onContextUpdate({tokensIn, model}|null) — last completed request's input
- *     tokens + the model reported by its preceding `system_init` event, fed
- *     up so the chat toolbar can render the context-window fill indicator (#471)
+ *     tokens (input + cache-creation + cache-read, #490) + the model reported
+ *     by its preceding `system_init` event, fed up so the chat toolbar can
+ *     render the context-window fill indicator (#471)
+ *   todoCloseSignal            — bumped by the parent (AgentChat.jsx) whenever
+ *     a session boundary occurs elsewhere in the UI (new message sent, Reset
+ *     Session clicked, or a trigger-started run's first message arrives, see
+ *     ChatPanel's `onTodoBoundary`) so the pinned To-Do panel from the
+ *     *previous* session is dismissed even though no new TodoWrite has
+ *     arrived yet (#273). Default 0 = "never fired" so mount doesn't dismiss.
  */
 export default function SessionLogPanel({
-  agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate, embedded = false,
+  agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate,
+  todoCloseSignal = 0, embedded = false,
 }) {
   const [events, setEvents]       = useState([]);
   const [cursor, setCursor]       = useState(0);
@@ -176,7 +185,9 @@ export default function SessionLogPanel({
     for (const ev of events) {
       if (ev.type === 'result' && typeof ev.costUsd === 'number') {
         usd += ev.costUsd;
-        tokIn  += ev.tokens?.input  ?? 0;
+        // #494: same undercount as #490 (context-window fill) — "tokens in"
+        // must include cache-creation/-read tokens, not just input_tokens.
+        tokIn  += sumContextTokens(ev.tokens) ?? 0;
         tokOut += ev.tokens?.output ?? 0;
       }
     }
@@ -200,7 +211,10 @@ export default function SessionLogPanel({
     let tokensIn = null;
     for (const ev of events) {
       if (ev.type === 'system_init' && ev.model) model = ev.model;
-      if (ev.type === 'result' && typeof ev.tokens?.input === 'number') tokensIn = ev.tokens.input;
+      if (ev.type === 'result' && ev.tokens) {
+        const summed = sumContextTokens(ev.tokens);
+        if (summed != null) tokensIn = summed;
+      }
     }
     return tokensIn == null ? null : { tokensIn, model };
   }, [events]);
@@ -238,6 +252,20 @@ export default function SessionLogPanel({
     setDismissedTodoId(null);
   }, [agentId, roomId]);
 
+  // Session-boundary dismissal (#273): a new message, a session reset, or a
+  // trigger-started run's first message all mean the previous session has
+  // ended, so the pinned panel must close even though no new TodoWrite has
+  // arrived yet. Skip the initial 0 so mounting doesn't dismiss anything.
+  const firstTodoSignalRef = useRef(true);
+  useEffect(() => {
+    if (firstTodoSignalRef.current) {
+      firstTodoSignalRef.current = false;
+      return;
+    }
+    setDismissedTodoId(latestTodoWrite?.toolId || '__session_boundary__');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [todoCloseSignal]);
+
   const todoVisible = !!latestTodoWrite && latestTodoWrite.toolId !== dismissedTodoId;
 
   /* ─── Render ────────────────────────────────────────────────────────── */
@@ -271,7 +299,6 @@ export default function SessionLogPanel({
             Session Log
           </div>
           <div style={{ flex: 1 }} />
-          <ConnectionDot status={sseStatus} />
           <button
             onClick={onClose}
             title="Hide log panel (Cmd+Shift+L)"
@@ -307,12 +334,6 @@ export default function SessionLogPanel({
         <Chip label="Tool Calls" active={filter === 'tools'}   onClick={() => setFilter('tools')} />
         <Chip label="Errors"     active={filter === 'errors'}  onClick={() => setFilter('errors')} />
         <Chip label="Posted"     active={filter === 'posted'}  onClick={() => setFilter('posted')} />
-        {embedded && (
-          <>
-            <div style={{ flex: 1 }} />
-            <ConnectionDot status={sseStatus} />
-          </>
-        )}
       </div>
 
       {error && (
@@ -457,24 +478,6 @@ function Chip({ label, active, onClick }) {
     >
       {label}
     </button>
-  );
-}
-
-function ConnectionDot({ status }) {
-  let color = 'var(--eb-text-muted)';
-  let label = 'Idle';
-  let Icon  = WifiOff;
-  if (status === 'open')              { color = 'var(--eb-status-success)'; label = 'Live';          Icon = Wifi; }
-  else if (status === 'connecting')   { color = 'var(--eb-status-warning)'; label = 'Connecting…';   Icon = Loader2; }
-  else if (status === 'reconnecting') { color = 'var(--eb-status-warning)'; label = 'Reconnecting…'; Icon = Loader2; }
-  const animate = status === 'connecting' || status === 'reconnecting';
-  return (
-    <div title={label} style={{
-      display: 'flex', alignItems: 'center', gap: 4, color,
-      fontSize: 'var(--eb-text-xs)',
-    }}>
-      <Icon size={11} style={animate ? { animation: 'spin 1s linear infinite' } : undefined} />
-    </div>
   );
 }
 

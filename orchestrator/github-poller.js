@@ -82,6 +82,20 @@ const BURST_CAP = 3;
 const PER_PAGE = 100;
 const MAX_PAGES = 10;
 
+// #496: the GitHub Events API's PullRequestEvent/PullRequestReviewEvent
+// payload carries a *reduced* `pull_request` object — `id`/`number`/`url`/
+// `base`/`head`, but (unlike the full webhook payload the docs describe and
+// the #470/#475 synthetic tests assumed) no `title` and no `html_url`. This
+// derives the web URL from the always-present API `url` field without a
+// network round-trip. Returns null for anything that doesn't match the
+// expected shape (defensive — caller falls back to no enrichment).
+function prApiUrlToHtmlUrl(apiUrl) {
+  if (typeof apiUrl !== 'string') return null;
+  const m = apiUrl.match(/^https:\/\/api\.github\.com\/repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)$/);
+  if (!m) return null;
+  return `https://github.com/${m[1]}/${m[2]}/pull/${m[3]}`;
+}
+
 // tokenId is operator-supplied via the Working Environment config, but a
 // rogue or typo'd value like "../../etc/passwd" would otherwise resolve
 // outside GH_TOKENS_DIR via path.join. Restrict to the same character set
@@ -510,14 +524,14 @@ class GitHubPoller {
       // GitHub returns newest-first; process oldest-first so triggers fire
       // in causal order. Events without a timestamp sort last (stable).
       fresh.sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
-      this._fanOutBatch(repoFullName, fresh, subscribers);
+      await this._fanOutBatch(repoFullName, fresh, subscribers, token);
     }
 
     this.state[repoFullName] = repoState;
     this._saveState();
   }
 
-  _fanOutBatch(repoFullName, ghEvents, subscribers) {
+  async _fanOutBatch(repoFullName, ghEvents, subscribers, token) {
     // Phase 1 — per-event delivery gates (history horizon, label filter).
     // Everything that survives becomes a "deliverable" tagged with its
     // subscriber + conversation, to be grouped in phase 2. Events arrive
@@ -603,6 +617,12 @@ class GitHubPoller {
     // _enqueueDigest).
     const plans = planBurstHandoffs(deliverables, BURST_CAP);
     let throttleStateDirty = false;
+    // #496: cache the enrichment per event id — a PR event fanning out to
+    // several subscribers (e.g. code-reviewer + security-reviewer +
+    // test-reviewer all on pull_request.opened) enriches once, not once per
+    // subscriber. Keyed by event id since that's what identifies a ghEvent
+    // within this batch; value is the (possibly unchanged) payload.
+    const enrichedPayloads = new Map();
 
     for (const plan of plans) {
       if (plan.mode === 'digest') {
@@ -636,7 +656,16 @@ class GitHubPoller {
           continue;
         }
 
-        this._enqueue(it.agentId, it.triggerId, it.key, it.ghEvent);
+        if (!enrichedPayloads.has(it.ghEvent.id)) {
+          enrichedPayloads.set(
+            it.ghEvent.id,
+            await this._enrichPullRequestPayload(it.key, it.ghEvent.payload, token),
+          );
+        }
+        const payload = enrichedPayloads.get(it.ghEvent.id);
+        const ghEvent = payload === it.ghEvent.payload ? it.ghEvent : { ...it.ghEvent, payload };
+
+        this._enqueue(it.agentId, it.triggerId, it.key, ghEvent);
         it.outcome.status = 'delivered';
       }
     }
@@ -721,6 +750,86 @@ class GitHubPoller {
       },
     });
     console.log(`[GH-Poller] Queued ${key} (${ghEvent.id}) → agent=${agentId} trigger=${triggerId}`);
+  }
+
+  // #496: best-effort GET of an arbitrary GitHub API resource (used to fetch
+  // the PR title the Events API omits — see prApiUrlToHtmlUrl above). Kept
+  // separate from _fetchEvents (which is list-shaped and ETag-aware).
+  _fetchJson(url, token) {
+    return new Promise((resolve, reject) => {
+      let u;
+      try {
+        u = new URL(url);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      const req = https.request({
+        hostname: u.hostname,
+        path: u.pathname + u.search,
+        method: 'GET',
+        headers: {
+          'User-Agent': 'e-vgh-claw-poller',
+          'Accept': 'application/vnd.github+json',
+          'Authorization': `Bearer ${token}`,
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+        timeout: 15_000,
+      }, (res) => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => {
+          if (res.statusCode !== 200) {
+            reject(new Error(`HTTP ${res.statusCode}`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(Buffer.concat(chunks).toString()));
+          } catch (err) {
+            reject(err);
+          }
+        });
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(new Error('timeout')); });
+      req.end();
+    });
+  }
+
+  // #496: fills in the `title`/`html_url` the live Events API omits from
+  // `payload.pull_request` for pull_request(_review) events, so
+  // _github_event_detail (agent-entrypoint.py) can render "PR #<n>: <title>
+  // — <url>" instead of silently falling back to the bare event/repo line.
+  // `html_url` is derived from the always-present API `url` (no request);
+  // `title` needs one best-effort GET per delivered event — never throws,
+  // and leaves the payload untouched (identity) when there's nothing to add
+  // or the event isn't PR-shaped, so non-PR events and already-complete
+  // payloads (webhook-shaped fixtures, future API changes) pay no cost.
+  async _enrichPullRequestPayload(key, payload, token) {
+    if (typeof key !== 'string' || !key.startsWith('pull_request')) return payload;
+    const pr = payload && payload.pull_request;
+    if (!pr || typeof pr !== 'object') return payload;
+    if (pr.title && pr.html_url) return payload;
+
+    const htmlUrl = pr.html_url || prApiUrlToHtmlUrl(pr.url);
+    let title = pr.title || null;
+    if (!title && typeof pr.url === 'string') {
+      try {
+        const detail = await this._fetchJson(pr.url, token);
+        if (detail && typeof detail.title === 'string') title = detail.title;
+      } catch (err) {
+        console.error(`[GH-Poller] PR title fetch failed for ${pr.url}: ${err.message}`);
+      }
+    }
+    if (!htmlUrl && !title) return payload;
+    return {
+      ...payload,
+      pull_request: {
+        ...pr,
+        ...(htmlUrl ? { html_url: htmlUrl } : {}),
+        ...(title ? { title } : {}),
+      },
+    };
   }
 
   _fetchEvents(repoFullName, token, etag, page = 1) {
@@ -884,6 +993,7 @@ class GitHubPoller {
 module.exports = {
   GitHubPoller,
   parseRepoFullName,
+  prApiUrlToHtmlUrl,
   eventKey,
   conversationKey,
   effectiveHorizon,

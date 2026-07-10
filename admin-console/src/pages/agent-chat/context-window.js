@@ -39,3 +39,27 @@ export function computeContextFillLevel(inputTokens, contextWindowTokens) {
     'normal';
   return { pct, level };
 }
+
+// #490: with prompt caching active (every `--resume`d session), most of what
+// actually occupies the context window shows up as `cacheCreationInput` /
+// `cacheReadInput` on the result event, not `input` — counting `input` alone
+// systematically understates the fill, down to a misleading "0%"/"0K" on a
+// session with substantial history. The fill's numerator is therefore the
+// sum of all three.
+export function sumContextTokens(tokens) {
+  if (!tokens || typeof tokens.input !== 'number') return null;
+  const cacheCreation = typeof tokens.cacheCreationInput === 'number' ? tokens.cacheCreationInput : 0;
+  const cacheRead = typeof tokens.cacheReadInput === 'number' ? tokens.cacheReadInput : 0;
+  return tokens.input + cacheCreation + cacheRead;
+}
+
+// Toolbar display format (#490): a raw token count rounded to whole
+// thousands, e.g. 34_300 -> "34K". Deliberately no "M" abbreviation, even for
+// six-figure-plus limits (1_000_000 -> "1000K") — the issue asks for a flat
+// "K" scale. Anything under 1000 tokens shows as "0K" rather than rounding
+// up to "1K".
+export function formatTokenCountK(tokens) {
+  if (typeof tokens !== 'number' || tokens < 0) return null;
+  if (tokens < 1000) return '0K';
+  return `${Math.round(tokens / 1000)}K`;
+}

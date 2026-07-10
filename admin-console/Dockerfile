@@ -3,6 +3,13 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install
 COPY . .
+# Git metadata isn't available in this build context (context root is
+# admin-console/, not the repo root with .git) - the caller (Makefile)
+# resolves the commit/dirty state on the host and passes it in as build args.
+ARG GIT_COMMIT=unknown
+ARG GIT_DIRTY=""
+ENV VITE_GIT_COMMIT=$GIT_COMMIT
+ENV VITE_GIT_DIRTY=$GIT_DIRTY
 RUN npm run build
 
 FROM node:22-slim

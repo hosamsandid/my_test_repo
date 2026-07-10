@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
-import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, Boxes, FileText, Plus, Trash2, Pencil, Check } from 'lucide-react';
+import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, Boxes, FileText, Plus, Trash2, Pencil, Check, Upload } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { FlowGraph } from './process/FlowGraph';
 
@@ -462,6 +462,46 @@ export default function Briefings() {
     } catch { /* surfaced elsewhere; keep the list usable */ }
   }
 
+  // Import a previously-exported process-template JSON (#512) — the entry
+  // point lives here, next to "New process", rather than inside an
+  // already-open flow (importing always creates a brand-new flow, so the
+  // previously-open one was irrelevant context). Validation/preview logic is
+  // unchanged from the former in-editor flow, just moved up a level: on
+  // success, `ProcessGraphPanel` is mounted with scope 'import' to render the
+  // read-only preview from `pendingImport`.
+  const importInputRef = useRef(null);
+  const [pendingImport, setPendingImport] = useState(null); // { bundle, graph }
+  const [importError, setImportError] = useState(null);
+  const [importBusy, setImportBusy] = useState(false);
+
+  const clearPendingImport = useCallback(() => setPendingImport(null), []);
+  const closeImportPreview = useCallback(() => setSearchParams({}), [setSearchParams]);
+
+  async function onImportFile(e) {
+    setImportError(null);
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-importing the same file
+    if (!file) return;
+    let bundle;
+    try { bundle = JSON.parse(await file.text()); }
+    catch { setImportError('Not valid JSON.'); return; }
+    setImportBusy(true);
+    try {
+      const res = await fetch('/api/flows/graph', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ processTemplate: bundle }),
+      });
+      const g = await res.json();
+      if (!res.ok) { setImportError(g.error || `HTTP ${res.status}`); return; }
+      setPendingImport({ bundle, graph: g });
+      setSearchParams({ proc: 'import' });
+    } catch (err) {
+      setImportError(err.message);
+    } finally {
+      setImportBusy(false);
+    }
+  }
+
   async function deleteDraft(d) {
     if (!window.confirm(`Delete draft “${d.name}”? This cannot be undone.`)) return;
     try {
@@ -625,20 +665,47 @@ export default function Briefings() {
             </div>
 
             <div style={{ flex: 1, overflowY: 'auto' }}>
-              {/* Start a new process (a draft) from scratch */}
-              <div style={{ padding: 'var(--eb-space-3) var(--eb-space-3) var(--eb-space-1)' }}>
+              {/* Start a new process (a draft) from scratch, or import a
+                  previously-exported one (#512) — both create flows, so both
+                  live here, side by side, rather than Import being reachable
+                  only from inside an already-open flow. */}
+              <div style={{ padding: 'var(--eb-space-3) var(--eb-space-3) var(--eb-space-1)', display: 'flex', gap: 'var(--eb-space-2)' }}>
                 <button
                   onClick={newProcess}
                   style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, width: '100%',
-                    padding: 'var(--eb-space-2)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+                    flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                    padding: 'var(--eb-space-2) var(--eb-space-1)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
                     border: 'none', borderRadius: 'var(--eb-radius-md)', cursor: 'pointer',
                     fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+                    whiteSpace: 'nowrap',
                   }}
                 >
                   <Plus size={15} /> New process
                 </button>
+                <input
+                  ref={importInputRef} type="file" accept="application/json,.json"
+                  onChange={onImportFile} style={{ display: 'none' }}
+                />
+                <button
+                  onClick={() => importInputRef.current?.click()}
+                  disabled={importBusy}
+                  style={{
+                    flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                    padding: 'var(--eb-space-2) var(--eb-space-1)', background: 'var(--eb-bg-surface)', color: 'var(--eb-text-secondary)',
+                    border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+                    cursor: importBusy ? 'not-allowed' : 'pointer', opacity: importBusy ? 0.6 : 1,
+                    fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  <Upload size={15} /> {importBusy ? 'Importing…' : 'Import'}
+                </button>
               </div>
+              {importError && (
+                <div style={{ padding: '0 var(--eb-space-3) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>
+                  {importError}
+                </div>
+              )}
 
               {/* Teams — each team is a process (live orchestration graph) */}
               <SectionHeader>Teams</SectionHeader>
@@ -735,6 +802,9 @@ export default function Briefings() {
                 scope={proc}
                 onNavigate={selectProc}
                 onDraftsChanged={refetchDrafts}
+                pendingImport={pendingImport}
+                onImportConsumed={clearPendingImport}
+                onImportClosed={closeImportPreview}
               />
             </Suspense>
           ) : !selectedAgent ? (

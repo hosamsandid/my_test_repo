@@ -1,7 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Wrench, PauseCircle } from 'lucide-react';
+import { Wrench, PauseCircle, CheckCircle2, Activity } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import FormInput from '../components/FormInput';
+import { countActiveSessions } from './active-sessions';
+
+const ACTIVE_SESSIONS_POLL_MS = 5_000;
 
 function formatDuration(totalSec) {
   const sec = Math.max(0, Math.round(totalSec));
@@ -47,9 +50,22 @@ export default function MaintenanceMode() {
   const [formError, setFormError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const [activeSessions, setActiveSessions] = useState(0);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    const poll = () => {
+      fetch('/api/agents/statuses')
+        .then((r) => (r.ok ? r.json() : []))
+        .then((list) => setActiveSessions(countActiveSessions(list)))
+        .catch(() => {});
+    };
+    poll();
+    const id = setInterval(poll, ACTIVE_SESSIONS_POLL_MS);
     return () => clearInterval(id);
   }, []);
 
@@ -100,6 +116,33 @@ export default function MaintenanceMode() {
         Signals an upcoming platform restart so in-flight agent sessions can wind down.
         This does not stop, restart, or lock anything by itself — the actual restart stays a manual, external step.
       </p>
+
+      <div style={{
+        ...cardStyle,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 'var(--eb-space-3)',
+        padding: 'var(--eb-space-4)',
+        background: activeSessions === 0 ? 'var(--eb-status-success-bg)' : 'var(--eb-status-warning-bg)',
+        border: `1px solid ${activeSessions === 0 ? 'var(--eb-status-success)' : 'var(--eb-status-warning)'}`,
+      }}>
+        {activeSessions === 0
+          ? <CheckCircle2 size={24} color="var(--eb-status-success)" />
+          : <Activity size={24} color="var(--eb-status-warning)" />}
+        <div>
+          <div style={{
+            fontSize: 'var(--eb-text-lg, 18px)', fontWeight: 'var(--eb-font-semibold)',
+            color: activeSessions === 0 ? 'var(--eb-status-success)' : 'var(--eb-status-warning)',
+          }}>
+            {activeSessions} active session{activeSessions === 1 ? '' : 's'}
+          </div>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+            {activeSessions === 0
+              ? 'Safe to update — no agent is currently busy, across all teams.'
+              : 'Not safe to update yet — at least one agent is still busy, across all teams.'}
+          </div>
+        </div>
+      </div>
 
       {loading ? (
         <div style={{ height: 160, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)', maxWidth: 480 }} />

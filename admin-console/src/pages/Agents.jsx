@@ -1271,6 +1271,9 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
             onChange={e => update('systemPromptTemplate', e.target.value)}
             style={{ ...inputStyle, minHeight: 160, fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-sm)' }}
           />
+          <div style={{ marginTop: 'var(--eb-space-1)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            Prompt changes take effect from each member's next session.
+          </div>
         </div>
       )}
 
@@ -1319,6 +1322,9 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
             onCustomChange={v => update('promptOverride', v)}
             customMultiline
           />
+          <div style={{ marginTop: 'calc(-1 * var(--eb-space-2))', marginBottom: 'var(--eb-space-3)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            Prompt changes take effect from this agent's next session.
+          </div>
 
           <InheritOrCustom
             label="Skills"

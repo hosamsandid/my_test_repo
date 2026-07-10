@@ -78,6 +78,28 @@ test('Agent Role is hoisted above the generic base sections', () => {
   assert.match(md, /## Agent Role\n\nDo the thing\./);
 });
 
+// ---- reference mode (#510) -------------------------------------------------
+
+test('promptRef emits an @-import instead of inlining the prompt', () => {
+  const md = assembleClaudeMd({
+    base: BASE, agentPrompt: 'Inlined body that must not appear.',
+    role: 'agent', env: null, promptRef: 'AGENT-PROMPT.md',
+  });
+  const order = headings(md);
+  assert.equal(order[0], 'Agent Role');
+  // The Agent Role block references the file, not the resolved prompt text.
+  assert.match(md, /## Agent Role\n\n@AGENT-PROMPT\.md/);
+  assert.ok(!md.includes('Inlined body that must not appear.'));
+});
+
+test('without promptRef the prompt is still inlined (preview / AC7)', () => {
+  const md = assembleClaudeMd({
+    base: BASE, agentPrompt: 'Inlined body.', role: 'agent', env: null,
+  });
+  assert.match(md, /## Agent Role\n\nInlined body\./);
+  assert.ok(!md.includes('@AGENT-PROMPT.md'));
+});
+
 // ---- conditional gating (fix C) --------------------------------------------
 
 test('Git section is injected only when the env has a repository', () => {

@@ -1298,11 +1298,14 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
 
   // Team-member inheritance toggles. `null` means "switch to inherit"
   // (delete the field); a string / array means "set the override".
+  let promptOverrideChanged = false;
   if (fresh.role === 'team-member') {
     if (systemPrompt === null) {
       delete fresh.systemPrompt;
+      promptOverrideChanged = true;
     } else if (typeof systemPrompt === 'string') {
       fresh.systemPrompt = systemPrompt;
+      promptOverrideChanged = true;
     }
     if (skillsOverride === null) {
       delete fresh.skillsOverride;
@@ -1321,6 +1324,33 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   }
 
   writeJsonAtomic(cfgPath, fresh);
+  // A team-member's own prompt override was toggled/edited (#510). Because
+  // CLAUDE.md now references the prompt via `@AGENT-PROMPT.md`, the effective
+  // prompt lives solely in AGENT-PROMPT.md — we only rewrite that file (CLAUDE.md
+  // is static and never rebuilt for a prompt change). Resolve the effective
+  // prompt (the override string, or — when switching back to inherit — the
+  // parent team's systemPromptTemplate), mirror it into the agent's volume, and
+  // wake the agent so the next session reads it.
+  if (promptOverrideChanged) {
+    let resolvedPrompt = '';
+    if (typeof fresh.systemPrompt === 'string') {
+      resolvedPrompt = fresh.systemPrompt;
+    } else if (fresh.parentTeamId) {
+      const teamCfg = readJsonFile(path.join(AGENTS_DIR, fresh.parentTeamId, 'config.json'), null);
+      if (teamCfg && typeof teamCfg.systemPromptTemplate === 'string') {
+        resolvedPrompt = teamCfg.systemPromptTemplate;
+      }
+    }
+    const promptPath = path.join(AGENTS_DIR, id, 'AGENT-PROMPT.md');
+    try {
+      const tmp = promptPath + '.tmp';
+      fs.writeFileSync(tmp, resolvedPrompt, 'utf8');
+      fs.renameSync(tmp, promptPath);
+      notifyAgentReseed(id, ['AGENT-PROMPT.md']);
+    } catch (err) {
+      console.error(`[API] Failed to write AGENT-PROMPT.md for ${id}: ${err.message}`);
+    }
+  }
   // A data-flow port change re-derives the team's functional push triggers so a
   // live edit takes effect at runtime without a re-materialise (best-effort).
   if (dataFlowChanged && fresh.parentTeamId) {
@@ -2191,8 +2221,9 @@ app.put('/api/agents/:id/prompt', apiLimiter, (req, res) => {
   fs.writeFileSync(tmp, content, 'utf8');
   fs.renameSync(tmp, promptPath);
   // Mirror exactly what we wrote into an isolated agent's volume (#185 item 5).
-  // Only AGENT-PROMPT.md — this route does not rebuild CLAUDE.md, so copying the
-  // pool's (stale) CLAUDE.md would be wrong.
+  // Only AGENT-PROMPT.md — CLAUDE.md references the prompt via `@AGENT-PROMPT.md`
+  // (#510), so rewriting this one file is sufficient and the static CLAUDE.md
+  // never needs a rebuild for a prompt edit.
   notifyAgentReseed(id, ['AGENT-PROMPT.md']);
   res.json({ ok: true });
 });
@@ -3662,7 +3693,7 @@ app.get('/api/process/drafts', (req, res) => {
 });
 
 app.post('/api/process/drafts', apiLimiter, (req, res) => {
-  const name = typeof req.body?.name === 'string' && req.body.name.trim() ? req.body.name.trim() : 'Untitled process';
+  const name = typeof req.body?.name === 'string' && req.body.name.trim() ? req.body.name.trim() : 'Untitled flow';
   // Derive a unique slug id.
   let base = slugifyDraft(name);
   if (!DRAFT_ID_RE.test(base)) base = 'process';

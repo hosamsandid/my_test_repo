@@ -6,6 +6,7 @@ const assert = require("node:assert/strict");
 const {
   GitHubPoller,
   effectiveHorizon,
+  backfillHorizonStamps,
   passesHorizon,
   selectFreshEvents,
   planBurstHandoffs,
@@ -38,6 +39,72 @@ test("effectiveHorizon: falls back to triggers mtime for unstamped triggers", ()
 test("effectiveHorizon: null when nothing is available", () => {
   assert.equal(effectiveHorizon({}, null), null);
   assert.equal(effectiveHorizon(null, undefined), null);
+});
+
+// ── backfillHorizonStamps (#525): pin the horizon of unstamped github triggers ─
+
+test("backfillHorizonStamps: stamps createdAt+activatedAt on an unstamped github trigger", () => {
+  const triggers = [{ id: "t1", type: "github-event", repo: "o/r", events: ["issues.labeled"] }];
+  const { triggers: out, changed } = backfillHorizonStamps(triggers, "2026-05-01T00:00:00Z");
+  assert.equal(changed, true);
+  assert.equal(out[0].createdAt, "2026-05-01T00:00:00Z");
+  assert.equal(out[0].activatedAt, "2026-05-01T00:00:00Z");
+  // Other fields preserved.
+  assert.equal(out[0].repo, "o/r");
+  // Input not mutated.
+  assert.equal(triggers[0].createdAt, undefined);
+});
+
+test("backfillHorizonStamps: already-stamped github trigger is untouched (idempotent)", () => {
+  const triggers = [{ id: "t1", type: "github-event", createdAt: "2026-01-01T00:00:00Z", activatedAt: "2026-02-01T00:00:00Z" }];
+  const { triggers: out, changed } = backfillHorizonStamps(triggers, "2026-05-01T00:00:00Z");
+  assert.equal(changed, false);
+  assert.equal(out, triggers); // same reference — no rewrite
+});
+
+test("backfillHorizonStamps: a createdAt-only trigger keeps its stable horizon", () => {
+  // createdAt present ⇒ horizon already stable ⇒ leave activatedAt alone (don't flip precedence).
+  const triggers = [{ id: "t1", type: "github-event", createdAt: "2026-01-01T00:00:00Z" }];
+  const { triggers: out, changed } = backfillHorizonStamps(triggers, "2026-05-01T00:00:00Z");
+  assert.equal(changed, false);
+  assert.equal(out[0].activatedAt, undefined);
+});
+
+test("backfillHorizonStamps: preserves an existing activatedAt when only createdAt is missing", () => {
+  const triggers = [{ id: "t1", type: "github-event", activatedAt: "2026-03-01T00:00:00Z" }];
+  const { triggers: out, changed } = backfillHorizonStamps(triggers, "2026-05-01T00:00:00Z");
+  assert.equal(changed, true);
+  assert.equal(out[0].createdAt, "2026-05-01T00:00:00Z");
+  assert.equal(out[0].activatedAt, "2026-03-01T00:00:00Z");
+});
+
+test("backfillHorizonStamps: non-github-event triggers are ignored", () => {
+  const triggers = [
+    { id: "c1", type: "cron", cron: "0 9 * * *" },
+    { id: "o1", type: "once", at: "2026-05-01T00:00:00Z" },
+  ];
+  const { triggers: out, changed } = backfillHorizonStamps(triggers, "2026-05-01T00:00:00Z");
+  assert.equal(changed, false);
+  assert.equal(out, triggers);
+});
+
+test("backfillHorizonStamps: mixed set stamps only the unstamped github trigger", () => {
+  const triggers = [
+    { id: "g1", type: "github-event", createdAt: "2026-01-01T00:00:00Z", activatedAt: "2026-01-01T00:00:00Z" },
+    { id: "g2", type: "github-event" },
+    { id: "c1", type: "cron", cron: "0 9 * * *" },
+  ];
+  const { triggers: out, changed } = backfillHorizonStamps(triggers, "2026-05-01T00:00:00Z");
+  assert.equal(changed, true);
+  assert.equal(out[0].createdAt, "2026-01-01T00:00:00Z"); // untouched
+  assert.equal(out[1].createdAt, "2026-05-01T00:00:00Z"); // stamped
+  assert.equal(out[2].createdAt, undefined); // cron untouched
+});
+
+test("backfillHorizonStamps: guards non-arrays and missing stamp", () => {
+  assert.deepEqual(backfillHorizonStamps(null, "2026-05-01T00:00:00Z"), { triggers: null, changed: false });
+  const t = [{ id: "g1", type: "github-event" }];
+  assert.deepEqual(backfillHorizonStamps(t, null), { triggers: t, changed: false });
 });
 
 // ── passesHorizon (Baustein B): >= horizon − grace ────────────────────────────

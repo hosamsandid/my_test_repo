@@ -580,6 +580,43 @@ function backfillResourceOwnership() {
   }
 }
 
+// #525: pin the history horizon of pre-existing github-event triggers. The
+// #320/#446 fix stamps createdAt/activatedAt on every trigger at create/edit
+// time, but a trigger authored before that fix (and never edited since) still
+// has neither stamp, so its poller horizon falls back to the triggers.json
+// mtime — a volatile value that any unrelated rewrite bumps to "now", silently
+// dropping events that arrived just before. Until now the only backfill was
+// lazy (on a PUT edit), so a never-edited legacy trigger kept riding the mtime.
+// This one-time startup pass closes that gap: for each agent it reads the
+// triggers file, captures its CURRENT mtime (a stable value equal to what the
+// horizon resolves to right now — so no event backlog is replayed), stamps any
+// unstamped github-event trigger with it, and writes back only files that
+// actually changed. Idempotent: an already-stamped file is left untouched, so
+// this is safe to run on every startup alongside the other migrations.
+function backfillTriggerHorizonStamps() {
+  const { backfillHorizonStamps } = require("./github-poller");
+  let stamped = 0;
+  for (const id of listAgentIds()) {
+    const p = controlOrPoolPath(id, "triggers.json");
+    if (!fs.existsSync(p)) continue;
+    let triggers, mtimeIso;
+    try {
+      triggers = JSON.parse(fs.readFileSync(p, "utf8"));
+      mtimeIso = fs.statSync(p).mtime.toISOString();
+    } catch (err) {
+      console.error(`[Orchestrator] Trigger horizon backfill: skipping ${id}: ${err.message}`);
+      continue;
+    }
+    const { triggers: next, changed } = backfillHorizonStamps(triggers, mtimeIso);
+    if (!changed) continue;
+    saveTriggers(id, next);
+    stamped++;
+  }
+  if (stamped > 0) {
+    console.log(`[Orchestrator] Backfilled history-horizon stamps onto github-event triggers for ${stamped} agent(s)`);
+  }
+}
+
 // Resolve the owning (human) Team for a newly created resource. An explicit id
 // must reference an existing team; absence falls back to the default team.
 function resolveOwnerTeamId(teamId) {
@@ -3945,6 +3982,7 @@ async function main() {
   await migrateAgentClaudeMdToReference();
   bootstrapTeams();
   backfillResourceOwnership();
+  backfillTriggerHorizonStamps();
 
   const orchestrator = new Orchestrator();
   await orchestrator.init();

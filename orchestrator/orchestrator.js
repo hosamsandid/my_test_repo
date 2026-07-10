@@ -1693,50 +1693,44 @@ function resolveTeamEnvId(teamId) {
   return null;
 }
 
-// Persist one per-transition promotion gate onto the team's shared environment.
-// Reads the RAW environment.json (not the normalized view) so unrelated fields
-// round-trip untouched, sets knowledgePromotionGates[transition]=mode, writes back.
-function writeTeamPromotionGate(teamId, transition, mode) {
+// Read the team's shared environment.json RAW (not the normalized view, so
+// unrelated fields round-trip untouched), apply `mutate(raw)`, write it back, and
+// return `project(raw)`. The one place the three knowledge env-config writers
+// (gate / autonomy / review) share, so the round-trip can't drift between them.
+function patchTeamEnv(teamId, mutate, project) {
   const envId = resolveTeamEnvId(teamId);
   if (!envId) throw new Error(`no environment resolvable for team '${teamId}'`);
   const p = path.join(ENVIRONMENTS_DIR, envId, "environment.json");
   let raw;
   try { raw = JSON.parse(fs.readFileSync(p, "utf8")); } catch { throw new Error(`cannot read environment '${envId}'`); }
-  const gates = raw.knowledgePromotionGates && typeof raw.knowledgePromotionGates === "object"
-    ? { ...raw.knowledgePromotionGates } : {};
-  gates[transition] = mode;
-  raw.knowledgePromotionGates = gates;
+  mutate(raw);
   fs.writeFileSync(p, JSON.stringify(raw, null, 2));
-  return { envId, gates: resolvePromotionGates(raw) };
+  return { envId, ...project(raw) };
 }
 
-// Persist the 0..3 autonomy dial onto the team's shared environment. Same
-// raw-round-trip pattern as writeTeamPromotionGate so unrelated fields are
-// untouched. The level takes effect immediately for the orchestrator-side
-// convergence/suggestion/curation steps (they read the env fresh each pass);
+// Persist one per-transition promotion gate onto the team's shared environment.
+function writeTeamPromotionGate(teamId, transition, mode) {
+  return patchTeamEnv(teamId, (raw) => {
+    const gates = raw.knowledgePromotionGates && typeof raw.knowledgePromotionGates === "object"
+      ? { ...raw.knowledgePromotionGates } : {};
+    gates[transition] = mode;
+    raw.knowledgePromotionGates = gates;
+  }, (raw) => ({ gates: resolvePromotionGates(raw) }));
+}
+
+// Persist the 0..3 autonomy dial. Takes effect immediately for the orchestrator-
+// side convergence/suggestion/curation steps (they read the env fresh each pass);
 // the agent-side harvest hint + KB provisioning are read at spawn/seed, so a
 // running agent picks a level change up on its next rebuild (the UI says so).
 function writeTeamAutonomy(teamId, level) {
-  const envId = resolveTeamEnvId(teamId);
-  if (!envId) throw new Error(`no environment resolvable for team '${teamId}'`);
-  const p = path.join(ENVIRONMENTS_DIR, envId, "environment.json");
-  let raw;
-  try { raw = JSON.parse(fs.readFileSync(p, "utf8")); } catch { throw new Error(`cannot read environment '${envId}'`); }
-  raw.knowledgeAutonomy = level;
-  fs.writeFileSync(p, JSON.stringify(raw, null, 2));
-  return { envId, autonomy: knowledgeAutonomyLevel(raw) };
+  return patchTeamEnv(teamId, (raw) => { raw.knowledgeAutonomy = level; },
+    (raw) => ({ autonomy: knowledgeAutonomyLevel(raw) }));
 }
 
 // Persist the supervised-review toggle onto the team's shared environment.
 function writeTeamReview(teamId, enabled) {
-  const envId = resolveTeamEnvId(teamId);
-  if (!envId) throw new Error(`no environment resolvable for team '${teamId}'`);
-  const p = path.join(ENVIRONMENTS_DIR, envId, "environment.json");
-  let raw;
-  try { raw = JSON.parse(fs.readFileSync(p, "utf8")); } catch { throw new Error(`cannot read environment '${envId}'`); }
-  raw.knowledgeReview = !!enabled;
-  fs.writeFileSync(p, JSON.stringify(raw, null, 2));
-  return { envId, review: knowledgeReviewEnabled(raw) };
+  return patchTeamEnv(teamId, (raw) => { raw.knowledgeReview = !!enabled; },
+    (raw) => ({ review: knowledgeReviewEnabled(raw) }));
 }
 
 // Ensure/refresh the canonical clone for a team. Best-effort, throttled per team
@@ -6297,12 +6291,20 @@ async function main() {
           const teamId = String(p.teamId || '');
           if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
           const enabled = p.enabled === true || p.enabled === 'true';
+          const resolved = resolveTeamKbRepo(teamId);
+          const env = resolved ? resolved.env : null;
           // Grandfather existing KB before flipping on, so review holds only NEW facts.
-          if (enabled) {
-            const resolved = resolveTeamKbRepo(teamId);
-            baselineReviewApprovals(teamId, resolved ? resolved.env : null);
-          }
+          if (enabled) baselineReviewApprovals(teamId, env);
           const result = writeTeamReview(teamId, enabled);
+          // Re-project immediately so the canonical overlay matches the new mode
+          // (turning review OFF must release held entries now, not at the next
+          // daily backstop; turning ON stamps pending on anything not baselined).
+          try {
+            refreshKnowledgeClone(teamId, { force: true, env });
+            runConvergenceCollector(teamId, env);
+          } catch (err) {
+            console.warn(`[Orchestrator] review-mode re-projection for '${teamId}' failed: ${err.message}`);
+          }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {

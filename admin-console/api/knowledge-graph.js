@@ -107,7 +107,10 @@ function entryTime(e) {
 // an id is archived, every copy of that id is dropped — a stale live shard copy
 // can't resurrect an archived entry. Additive: no archived records ⇒ identity ⇒
 // Phase 2/3 output byte-identical.
-function foldArchived(entries) {
+// Drop every copy of an id whose LATEST copy (by updatedAt/createdAt) has a status
+// the predicate hides. Shared by foldArchived + foldReview: same latest-per-id
+// tie-break, only the hidden-status test differs. Identity when nothing matches.
+function foldByStatus(entries, isHidden) {
   const list = Array.isArray(entries) ? entries.filter((e) => e && typeof e === 'object') : [];
   const latest = new Map();
   for (const e of list) {
@@ -116,10 +119,14 @@ function foldArchived(entries) {
     const prev = latest.get(id);
     if (!prev || entryTime(e) >= entryTime(prev)) latest.set(id, e);
   }
-  const archivedIds = new Set();
-  for (const [id, e] of latest) if (e.status === 'archived') archivedIds.add(id);
-  if (archivedIds.size === 0) return list;
-  return list.filter((e) => !(typeof e.id === 'string' && archivedIds.has(e.id)));
+  const hiddenIds = new Set();
+  for (const [id, e] of latest) if (isHidden(e.status)) hiddenIds.add(id);
+  if (hiddenIds.size === 0) return list;
+  return list.filter((e) => !(typeof e.id === 'string' && hiddenIds.has(e.id)));
+}
+
+function foldArchived(entries) {
+  return foldByStatus(entries, (s) => s === 'archived');
 }
 
 // ---------------------------------------------------------------------------
@@ -136,18 +143,7 @@ function foldArchived(entries) {
 // pending/rejected records ⇒ identity ⇒ non-review teams are byte-identical.
 const REVIEW_HELD = new Set(['pending', 'rejected']);
 function foldReview(entries) {
-  const list = Array.isArray(entries) ? entries.filter((e) => e && typeof e === 'object') : [];
-  const latest = new Map();
-  for (const e of list) {
-    const id = typeof e.id === 'string' && e.id.trim() ? e.id : null;
-    if (!id) continue;
-    const prev = latest.get(id);
-    if (!prev || entryTime(e) >= entryTime(prev)) latest.set(id, e);
-  }
-  const heldIds = new Set();
-  for (const [id, e] of latest) if (REVIEW_HELD.has(e.status)) heldIds.add(id);
-  if (heldIds.size === 0) return list;
-  return list.filter((e) => !(typeof e.id === 'string' && heldIds.has(e.id)));
+  return foldByStatus(entries, (s) => REVIEW_HELD.has(s));
 }
 
 // The inverse of foldReview for the review-queue endpoint: the deduped set of

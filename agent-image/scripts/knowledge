@@ -62,7 +62,12 @@ from datetime import datetime, timezone
 
 KINDS = ("fact", "entity", "convention")
 SOURCE_REF_KINDS = ("pr", "issue", "commit", "branch", "url")
-STATUSES = ("active", "merged", "promoted", "archived")
+STATUSES = ("active", "merged", "promoted", "archived", "pending", "rejected")
+# Statuses that are NOT part of the shared, curated team knowledge and so must be
+# hidden from `knowledge search` / `list`: merge tombstones, retired entries, and
+# supervised-review holds. Mirrors the admin-console graph folds (foldMerges /
+# foldArchived / foldReview) so an agent's query and the operator's view agree.
+HIDDEN_STATUSES = frozenset(("merged", "archived", "pending", "rejected"))
 
 SCHEMA_VERSION = 1
 MANIFEST_VERSION = 1
@@ -258,6 +263,38 @@ def match_entries(entries, query, kind=None):
         return q_lower in hay.lower()
 
     return [e for e in entries if hit(e)]
+
+
+def _entry_time(e):
+    """Sort key for last-writer-wins: updatedAt, else createdAt, else ''."""
+    return (e.get("updatedAt") or e.get("createdAt") or "")
+
+
+def visible_entries(entries):
+    """Reduce raw shard+canonical lines to the shared, curated team knowledge an
+    agent should actually see: collapse copies that share an id (last writer wins),
+    then drop the ones whose latest status is a merge tombstone, a retired entry, or
+    a supervised-review hold (pending/rejected). Pure — mirrors the admin-console
+    graph folds so `knowledge search` and the operator's Knowledge Flow agree, and
+    so a fact a human has NOT yet approved never reaches a teammate's query.
+
+    Iteration order is preserved by `createdAt` then first-seen so output is stable;
+    within one id the copy with the newest time wins (ties keep the last seen, which
+    is the canonical file since callers read shards before canonical)."""
+    latest = {}
+    order = []
+    for e in entries:
+        eid = e.get("id")
+        if not isinstance(eid, str) or eid == "":
+            continue
+        if eid not in latest:
+            order.append(eid)
+            latest[eid] = e
+        elif _entry_time(e) >= _entry_time(latest[eid]):
+            latest[eid] = e
+    out = [latest[eid] for eid in order if latest[eid].get("status") not in HIDDEN_STATUSES]
+    out.sort(key=lambda e: (e.get("createdAt") or "", e.get("id") or ""))
+    return out
 
 
 def build_default_manifest():
@@ -669,7 +706,7 @@ def cmd_search(argv):
 
     manifest = _load_manifest()
     pairs = _read_all_entries(manifest, kind)
-    matched = match_entries([e for e, _ in pairs], query, kind)
+    matched = match_entries(visible_entries([e for e, _ in pairs]), query, kind)
     if limit is not None:
         matched = matched[:limit]
 
@@ -691,7 +728,7 @@ def cmd_list(argv):
     as_json = "--json" in rest
     manifest = _load_manifest()
     pairs = _read_all_entries(manifest, kind)
-    entries = [e for e, _ in pairs]
+    entries = visible_entries([e for e, _ in pairs])
     if mine:
         entries = [e for e in entries if e.get("originAgent") == _agent_id()]
     for e in entries:

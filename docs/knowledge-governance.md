@@ -56,18 +56,29 @@ curation design), so it inherits its proofs:**
   **pending** while review is on.
 - In `runConvergenceCollector`, when review is on, each canonical entry that is
   not `approved` is overlaid `status:"pending"` (rejected → `status:"rejected"`)
-  with a fresh `updatedAt`, written into the canonical `<kind>.jsonl`. Two new
-  reserved statuses in `knowledge-store.js` `STATUSES`. Shards (the source of
-  truth) are **never** touched — held knowledge is a property of the derived
-  canonical view only.
+  in the canonical `<kind>.jsonl` — a **status-only** overlay (no synthetic
+  timestamp), exactly like the archived overlay. Two new reserved statuses in
+  `knowledge-store.js` `STATUSES`. Shards (the source of truth) are **never**
+  touched — held knowledge is a property of the derived canonical view only. The
+  overlay is a pure function of shards + the decision map, so re-runs are
+  byte-identical (no git churn).
 - The graph builder folds them out of the **active** graph with a new pure
-  `foldReview` (`admin-console/api/knowledge-graph.js`, sibling of `foldArchived`
-  — identity when no pending/rejected present, so non-review teams are
-  byte-identical). Held entries surface only in the **review queue**
-  (`selectReviewQueue`).
+  `foldReview` (`admin-console/api/knowledge-graph.js`; `foldArchived` and
+  `foldReview` now share one `foldByStatus` core — identity when no matching
+  status is present, so non-review teams are byte-identical). It decides per id by
+  the latest copy; where a held canonical copy ties with its own active shard copy
+  on time, the canonical copy wins because the reader (`kbReadStore`) appends it
+  after the shards and the tie-break keeps the last seen. Held entries surface only
+  in the **review queue** (`selectReviewQueue`).
 - The held set also **gates the downstream pipeline**: the collector filters
   held clusters out of the suggestion / auto-promotion planning, so un-reviewed
   knowledge can never become a skill.
+- The **agent runtime honours the same fold**: `knowledge search` / `list` run
+  their entries through a pure `visible_entries` (`agent-image/scripts/knowledge`,
+  the mirror of the graph folds — dedup by id + drop `merged`/`archived`/`pending`/
+  `rejected`), so a held fact never reaches a teammate's query either, not only the
+  operator's view. (This also fixes a pre-existing gap where archived/merged/
+  duplicate lines leaked into `knowledge search`.)
 
 | Method + path | Where | Purpose |
 |---|---|---|
@@ -82,14 +93,14 @@ learned *after* it — it never retroactively yanks facts the team already relie
 into the queue. This mirrors the github-poller's "first poll re-baselines, no
 flood" discipline.
 
-**Scope boundary (documented, not a bug):** review gates the **curated canonical
-team KB** — the authoritative shared/converged view the UI shows, that promotions
-draw from, and that `knowledge search` surfaces as `conv=N` canonical facts. The
-raw per-agent shard line that recorded the contribution stays in git (the
-append-only audit log) and remains findable by that agent's own `knowledge
-search`, exactly as an archived entry's shard does. Truly withholding a line from
-every agent's local query would require a cross-agent read inside the agent
-container, which the isolation model forbids.
+**Scope boundary.** Review gates the **curated shared knowledge** — the canonical
+team KB the UI shows, what promotions draw from, and what `knowledge search` /
+`list` surface (the reader folds held/archived/merged out, see above). A held
+fact's raw shard line still lives in git as the append-only audit log, and
+`knowledge path "<id>"` can still locate it by id (inspection is deliberately not
+folded), but it is invisible to the "what does the team know" queries and to the
+promotion pipeline until approved. This is the intended guarantee — the human
+approves before the knowledge is shared.
 
 ## 3. One-click per-item veto (retire on the card)
 

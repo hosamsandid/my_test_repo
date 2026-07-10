@@ -396,6 +396,13 @@ test('emptyDraftBundle seeds an empty stages array', () => {
   assert.deepEqual(emptyDraftBundle('x').stages, []);
 });
 
+// #522: the default (unnamed) draft is labelled with the standardised "Flow"
+// terminology, not the legacy "Process" wording.
+test('emptyDraftBundle defaults an unnamed draft to "Untitled flow"', () => {
+  assert.equal(emptyDraftBundle().name, 'Untitled flow');
+  assert.equal(emptyDraftBundle('').name, 'Untitled flow');
+});
+
 // ── stampDerivedActivation (#446): preserve horizon across regeneration ────────
 
 const T0 = '2026-01-01T00:00:00.000Z';

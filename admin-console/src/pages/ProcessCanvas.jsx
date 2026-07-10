@@ -70,7 +70,7 @@ function EditableDraftTitle({ name, onRename }) {
       }}
     >
       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {name || 'Untitled process'}
+        {name || 'Untitled flow'}
       </span>
       <Pencil size={13} style={{ flexShrink: 0, color: 'var(--eb-text-muted)' }} />
     </button>

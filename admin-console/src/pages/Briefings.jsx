@@ -68,7 +68,7 @@ function HelpPanel({ onClose }) {
               Flows hosts two kinds of orchestration, selectable in the left list:
             </p>
             <ul style={{ paddingLeft: 'var(--eb-space-4)', margin: 0 }}>
-              <li><strong>Process graphs</strong> — for each <strong>Team</strong> (and editable <strong>Drafts</strong>),
+              <li><strong>Flow graphs</strong> — for each <strong>Team</strong> (and editable <strong>Drafts</strong>),
                 a label-driven graph of which agent reacts to which event, in what order.</li>
               <li><strong>BriefingPack flows</strong> — an <strong>Orchestrator</strong> agent that monitors a
                 directory of BriefingPacks and renders their dependency graph.</li>
@@ -77,7 +77,7 @@ function HelpPanel({ onClose }) {
 
           <section style={{ marginBottom: 'var(--eb-space-5)' }}>
             <h3 style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-md)' }}>
-              Process graphs (Teams &amp; Drafts)
+              Flow graphs (Teams &amp; Drafts)
             </h3>
             <p style={{ margin: '0 0 var(--eb-space-2)' }}>
               Selecting a <strong>Team</strong> shows its live orchestration graph. Agents don't call each other
@@ -85,7 +85,7 @@ function HelpPanel({ onClose }) {
               <em> listens</em> on it, and that wiring is the graph.
             </p>
             <p style={{ margin: 0 }}>
-              Click <strong>New process</strong> to author a <strong>Draft</strong> from scratch (add roles, then
+              Click <strong>New flow</strong> to author a <strong>Draft</strong> from scratch (add roles, then
               wire hand-offs — GitHub PR/Issue channels, labels, data flows, human-approval gates on the
               edges), then <strong>Materialize</strong> it into a real team. The read-only <strong>Role templates</strong> blueprint shows the catalog wiring before any
               team exists.
@@ -122,7 +122,7 @@ function HelpPanel({ onClose }) {
               red dashed edges are <em>dependencies</em> (a BP can only start once its
               upstream BPs are done) and green edges are <em>data flow</em> (one BP's
               output artifact is another's input). It is the same unified viewer used
-              for process graphs.
+              for flow graphs.
             </p>
           </section>
 
@@ -130,9 +130,9 @@ function HelpPanel({ onClose }) {
             <h3 style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-md)' }}>
               How do you create one?
             </h3>
-            <p style={{ margin: '0 0 var(--eb-space-1)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>Process graph</p>
+            <p style={{ margin: '0 0 var(--eb-space-1)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>Flow graph</p>
             <ol style={{ paddingLeft: 'var(--eb-space-4)', margin: '0 0 var(--eb-space-3)' }}>
-              <li>Click <strong>New process</strong> to start a draft, or pick an existing <strong>Team</strong>.</li>
+              <li>Click <strong>New flow</strong> to start a draft, or pick an existing <strong>Team</strong>.</li>
               <li>Add roles and wire hand-offs, then <strong>Materialize</strong> the draft into a team.</li>
             </ol>
             <p style={{ margin: '0 0 var(--eb-space-1)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>BriefingPack flow</p>
@@ -202,8 +202,8 @@ function InfoBanner({ onDismiss }) {
         Flows hosts two kinds of orchestration, selectable on the left:
       </p>
       <p style={{ margin: '0 0 var(--eb-space-2)' }}>
-        <strong>Process graphs</strong> — pick a <strong>Team</strong> to see its label-driven orchestration graph
-        (which agent reacts to which event, in what order), or click <strong>New process</strong> to author a
+        <strong>Flow graphs</strong> — pick a <strong>Team</strong> to see its label-driven orchestration graph
+        (which agent reacts to which event, in what order), or click <strong>New flow</strong> to author a
         <strong> Draft</strong> from scratch and materialize it into a team.
       </p>
       <p style={{ margin: '0 0 var(--eb-space-2)' }}>
@@ -456,7 +456,7 @@ export default function Briefings() {
 
   async function newProcess() {
     try {
-      const d = await apiCall('POST', '/api/process/drafts', { name: 'Untitled process' });
+      const d = await apiCall('POST', '/api/process/drafts', { name: 'Untitled flow' });
       refetchDrafts();
       setSearchParams({ proc: `draft:${d.id}` });
     } catch { /* surfaced elsewhere; keep the list usable */ }
@@ -680,7 +680,7 @@ export default function Briefings() {
                     whiteSpace: 'nowrap',
                   }}
                 >
-                  <Plus size={15} /> New process
+                  <Plus size={15} /> New flow
                 </button>
                 <input
                   ref={importInputRef} type="file" accept="application/json,.json"
@@ -730,7 +730,7 @@ export default function Briefings() {
               <SectionHeader>Drafts</SectionHeader>
               {drafts.length === 0 ? (
                 <div style={{ padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-                  No drafts. Use “New process”.
+                  No drafts. Use “New flow”.
                 </div>
               ) : (
                 drafts.map(d => (
@@ -821,7 +821,7 @@ export default function Briefings() {
               <button
                 onClick={importBriefings}
                 disabled={importing}
-                title="Import this BriefingPack hierarchy as an editable process draft"
+                title="Import this BriefingPack hierarchy as an editable flow draft"
                 style={{
                   position: 'absolute', top: 'var(--eb-space-3)', right: 'var(--eb-space-3)', zIndex: 5,
                   display: 'inline-flex', alignItems: 'center', gap: 6,

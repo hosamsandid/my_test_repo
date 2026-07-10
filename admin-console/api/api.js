@@ -2851,7 +2851,7 @@ app.get('/api/process/drafts', (req, res) => {
 });
 
 app.post('/api/process/drafts', apiLimiter, (req, res) => {
-  const name = typeof req.body?.name === 'string' && req.body.name.trim() ? req.body.name.trim() : 'Untitled process';
+  const name = typeof req.body?.name === 'string' && req.body.name.trim() ? req.body.name.trim() : 'Untitled flow';
   // Derive a unique slug id.
   let base = slugifyDraft(name);
   if (!DRAFT_ID_RE.test(base)) base = 'process';

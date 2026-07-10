@@ -3,7 +3,7 @@ import { Loader2, PanelRightClose } from 'lucide-react';
 import { useSSE } from '../../hooks/useSSE';
 import LogEvent from './LogEvent';
 import PinnedTodoPanel from './PinnedTodoPanel';
-import { sumContextTokens } from './context-window';
+import { sumContextTokens, resolveContextTokensForResult } from './context-window';
 
 /**
  * Right-rail panel showing the structured timeline of internal agent
@@ -34,10 +34,14 @@ import { sumContextTokens } from './context-window';
  *   hoveredCorrelationId       — what the chat panel is currently hovering
  *   onHoverCorrelation(id|null)
  *   onClose()                  — parent toggles `logOpen` to false
- *   onContextUpdate({tokensIn, model}|null) — last completed request's input
- *     tokens (input + cache-creation + cache-read, #490) + the model reported
- *     by its preceding `system_init` event, fed up so the chat toolbar can
- *     render the context-window fill indicator (#471)
+ *   onContextUpdate({tokensIn, model}|null) — a plausible estimate of the
+ *     tokens actually held in context as of the last completed turn (input +
+ *     cache-creation + cache-read of the turn's *last individual* API call,
+ *     `result.contextTokens` from the entrypoint, #509 — NOT `result.tokens`,
+ *     which sums/duplicates across every internal tool-call round-trip in the
+ *     turn and can wildly overcount) + the model reported by its preceding
+ *     `system_init` event, fed up so the chat toolbar can render the
+ *     context-window fill indicator (#471)
  *   todoCloseSignal            — bumped by the parent (AgentChat.jsx) whenever
  *     a session boundary occurs elsewhere in the UI (new message sent, Reset
  *     Session clicked, or a trigger-started run's first message arrives, see
@@ -198,21 +202,29 @@ export default function SessionLogPanel({
     if (onCostUpdate) onCostUpdate(costTotals.usd, costTotals.tokIn, costTotals.tokOut);
   }, [costTotals, onCostUpdate]);
 
-  /* ─── 5b. Last-request context-window snapshot (#471) ──────────────────
+  /* ─── 5b. Last-request context-window snapshot (#471, #509) ────────────
    * Walks events in order, remembering the model from the most recent
-   * `system_init` and the input tokens from the most recent `result` — the
+   * `system_init` and the context tokens from the most recent `result` — the
    * `system_init` for a turn always precedes that turn's `result`, so this
    * single pass naturally pairs the two without needing correlationId
    * matching. Unlike costTotals this is NOT cumulative: it reflects only the
    * last completed request, per the issue's scope.
+   *
+   * #509: reads `result.contextTokens` (the entrypoint's per-call usage
+   * snapshot from the turn's last internal assistant message), NOT
+   * `result.tokens` (the turn-wide aggregate, still correct for costTotals
+   * above) — the latter sums/duplicates across every internal tool-call
+   * round-trip in the turn and can overcount by a large multiple. Falls back
+   * to `result.tokens` only for log entries written before this fix (no
+   * `contextTokens` field yet), so old sessions don't just go blank.
    */
   const lastContext = useMemo(() => {
     let model = null;
     let tokensIn = null;
     for (const ev of events) {
       if (ev.type === 'system_init' && ev.model) model = ev.model;
-      if (ev.type === 'result' && ev.tokens) {
-        const summed = sumContextTokens(ev.tokens);
+      if (ev.type === 'result') {
+        const summed = resolveContextTokensForResult(ev);
         if (summed != null) tokensIn = summed;
       }
     }

@@ -26,6 +26,10 @@ const CONDUWUIT_ADMIN_ROOM = process.env.CONDUWUIT_ADMIN_ROOM;
 const BP_EXPLORER_URL = process.env.BP_EXPLORER_URL || "http://bp-explorer:8765";
 
 const AGENTS_DIR = "/workspace/agents";
+// The filename CLAUDE.md references for the authored prompt. The seeded
+// CLAUDE.md carries `@AGENT-PROMPT.md` rather than an inlined copy, so editing
+// this file alone re-takes effect on the next session (#510).
+const AGENT_PROMPT_FILENAME = "AGENT-PROMPT.md";
 // Control-plane state pushed by agents (#185). Lives on a dedicated volume
 // mounted only by the orchestrator + admin-console, so monitoring (status,
 // session-log) no longer depends on reading an agent's own workspace — the
@@ -416,6 +420,50 @@ function migrateLegacyAgentConfigs() {
   }
 }
 
+// One-time migration (#510): rewrite existing agents' CLAUDE.md so the Agent
+// Role block references AGENT-PROMPT.md (`@AGENT-PROMPT.md`) instead of inlining
+// the prompt text. Older CLAUDE.md files carry a stale inlined copy that never
+// got rebuilt when the prompt was edited; converting them to the reference form
+// makes future edits take effect on the next session with no rebuild. Idempotent
+// — an already-referencing CLAUDE.md is left untouched, and agents without an
+// AGENT-PROMPT.md (bare stubs) are skipped.
+function migrateAgentClaudeMdToReference() {
+  if (!fs.existsSync(AGENTS_DIR)) return;
+  const marker = `@${AGENT_PROMPT_FILENAME}`;
+  let migrated = 0;
+  for (const id of listAgentIds()) {
+    const dir = agentDir(id);
+    const promptPath = path.join(dir, AGENT_PROMPT_FILENAME);
+    const claudePath = path.join(dir, "CLAUDE.md");
+    if (!fs.existsSync(promptPath) || !fs.existsSync(claudePath)) continue;
+    let current;
+    try { current = fs.readFileSync(claudePath, "utf8"); } catch { continue; }
+    if (current.includes(marker)) continue; // already reference form
+    const cfg = loadAgentConfig(id);
+    if (!cfg) continue;
+    let prompt;
+    try { prompt = fs.readFileSync(promptPath, "utf8"); } catch { continue; }
+    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+    const autonomous = agentIsAutonomous(id, cfg.role);
+    const rebuilt = buildAgentClaudeMd(prompt, cfg.role, env, cfg.blueprintId || null, {
+      autonomous,
+      promptRef: AGENT_PROMPT_FILENAME,
+    });
+    // Guard: only write if the rebuild actually produced the reference form
+    // (a missing base template makes buildAgentClaudeMd echo the prompt back).
+    if (!rebuilt.includes(marker)) continue;
+    try {
+      fs.writeFileSync(claudePath, rebuilt);
+      migrated++;
+    } catch (err) {
+      console.error(`[Orchestrator] claude-md migrate: cannot write ${claudePath}: ${err.message}`);
+    }
+  }
+  if (migrated > 0) {
+    console.log(`[Orchestrator] Migrated ${migrated} agent CLAUDE.md file(s) to reference AGENT-PROMPT.md (#510)`);
+  }
+}
+
 // ============================================================
 // Teams: bootstrap + ownership backfill (#299)
 // ============================================================
@@ -542,9 +590,13 @@ function agentIsAutonomous(id, role) {
 function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
   const dir = agentDir(id);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, "AGENT-PROMPT.md"), prompt);
+  fs.writeFileSync(path.join(dir, AGENT_PROMPT_FILENAME), prompt);
   const autonomous = agentIsAutonomous(id, role);
-  fs.writeFileSync(path.join(dir, "CLAUDE.md"), buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous }));
+  // Reference mode: CLAUDE.md points at AGENT-PROMPT.md instead of inlining it.
+  fs.writeFileSync(
+    path.join(dir, "CLAUDE.md"),
+    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, promptRef: AGENT_PROMPT_FILENAME }),
+  );
 }
 
 // ============================================================
@@ -684,6 +736,9 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null, opts = {
     env,
     blueprintId,
     autonomous: !!opts.autonomous,
+    // Seeding passes promptRef so CLAUDE.md references AGENT-PROMPT.md; the
+    // prompt-preview endpoint omits it to render the fully-resolved prompt.
+    promptRef: opts.promptRef || null,
   });
 }
 
@@ -3861,6 +3916,7 @@ async function main() {
     process.exit(1);
   }
   migrateLegacyAgentConfigs();
+  migrateAgentClaudeMdToReference();
   bootstrapTeams();
   backfillResourceOwnership();
 

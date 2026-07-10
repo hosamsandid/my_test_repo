@@ -258,6 +258,36 @@ def _resolve_loopscript(value: str | None, rigor: str | None) -> Path | None:
 # Prompt assembly
 # ---------------------------------------------------------------------------
 
+def _expand_claude_imports(text: str, base_dir: Path, _depth: int = 0) -> str:
+    """Inline Claude Code `@path` imports the way cwd-discovery would.
+
+    The DM / trigger path runs `claude` with cwd set to the agent workspace, so
+    the CLI auto-discovers CLAUDE.md and expands its `@AGENT-PROMPT.md` import
+    natively. The BP dispatch path instead reads CLAUDE.md and passes it via
+    `--system-prompt`, where no import expansion happens — so we replicate it
+    here (#510). A `@path` token (line-leading or after whitespace, not inside a
+    fenced code span or an email-like address) is replaced by the referenced
+    file's content, resolved relative to the file that contains it. Recurses up
+    to 5 hops like the CLI; a missing target is left verbatim.
+    """
+    if _depth >= 5:
+        return text
+
+    def _replace(match: "re.Match[str]") -> str:
+        rel = match.group("path")
+        target = (base_dir / rel).resolve()
+        try:
+            body = target.read_text(encoding="utf-8")
+        except OSError:
+            return match.group(0)  # unresolved — leave the token as written
+        return match.group("lead") + _expand_claude_imports(body, target.parent, _depth + 1)
+
+    # Leading whitespace/start-of-line, then @<relative-path> (no scheme, not an
+    # email — require the char before @ to be start or whitespace).
+    pattern = re.compile(r"(?P<lead>^|\s)@(?P<path>[^\s@`]+)", re.MULTILINE)
+    return pattern.sub(_replace, text)
+
+
 def build_agent_prompt(context: dict, agent_id: str, bp_hash: str) -> tuple[str, str]:
     """Build system prompt and user prompt from loaded context.
 
@@ -265,11 +295,14 @@ def build_agent_prompt(context: dict, agent_id: str, bp_hash: str) -> tuple[str,
     """
     system_parts: list[str] = []
 
-    # CLAUDE.md
+    # CLAUDE.md — expand `@`-imports (e.g. `@AGENT-PROMPT.md`) up front because
+    # this path feeds the text to `--system-prompt`, which does not expand them.
     if CLAUDE_MD.exists():
+        claude_md = _expand_claude_imports(
+            CLAUDE_MD.read_text(encoding="utf-8"), CLAUDE_MD.parent
+        )
         system_parts.append(
-            f"# Project Instructions (CLAUDE.md)\n\n"
-            f"{CLAUDE_MD.read_text(encoding='utf-8')}"
+            f"# Project Instructions (CLAUDE.md)\n\n{claude_md}"
         )
 
     # LoopScript

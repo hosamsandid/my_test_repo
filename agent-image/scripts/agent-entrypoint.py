@@ -265,10 +265,17 @@ def _expand_claude_imports(text: str, base_dir: Path, _depth: int = 0) -> str:
     the CLI auto-discovers CLAUDE.md and expands its `@AGENT-PROMPT.md` import
     natively. The BP dispatch path instead reads CLAUDE.md and passes it via
     `--system-prompt`, where no import expansion happens — so we replicate it
-    here (#510). A `@path` token (line-leading or after whitespace, not inside a
-    fenced code span or an email-like address) is replaced by the referenced
-    file's content, resolved relative to the file that contains it. Recurses up
-    to 5 hops like the CLI; a missing target is left verbatim.
+    here (#510). A `@path` token (line-leading or preceded by whitespace, and
+    not email-like — the char before `@` must be start-of-line or whitespace) is
+    replaced by the referenced file's content, resolved relative to the file that
+    contains it. Recurses up to 5 hops like the CLI; a missing target is left
+    verbatim.
+
+    Note: unlike the real CLI, this does NOT skip `@path` tokens inside fenced
+    code spans — it has no fence awareness. That is safe for the #510 use here
+    (the `## Agent Role` reference lives in prose, and incidental `@token`s that
+    would need skipping — e.g. `@cobol-agent:local` — don't resolve to a real
+    file and are therefore left verbatim anyway).
     """
     if _depth >= 5:
         return text

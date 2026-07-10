@@ -427,10 +427,24 @@ function migrateLegacyAgentConfigs() {
 // makes future edits take effect on the next session with no rebuild. Idempotent
 // — an already-referencing CLAUDE.md is left untouched, and agents without an
 // AGENT-PROMPT.md (bare stubs) are skipped.
-function migrateAgentClaudeMdToReference() {
+//
+// The rewrite above only touches the pool subpath copy. Under
+// AEE_PER_AGENT_VOLUME each agent boots off its OWN dedicated volume, whose
+// CLAUDE.md is authoritative and is NOT refreshed by a plain respawn
+// (seedPerAgentVolume copies only into an EMPTY /dst, and startAllEnabledAgents
+// re-spawns without reseeding). Left alone, a pre-existing agent on a dedicated
+// volume would keep serving the OLD inlined CLAUDE.md — so subsequent prompt
+// edits (which only reseed AGENT-PROMPT.md) still wouldn't take effect, exactly
+// the bug #510 fixes. So after the pool rewrite we mirror CLAUDE.md into each
+// migrated agent's dedicated volume (force-copy even into a non-empty volume).
+// This runs pre-init(), before agents are spawned, but the volumes persist
+// across restarts so a pre-existing agent's volume already exists; a not-yet-
+// provisioned agent is a no-op here and gets the migrated pool copy via a fresh
+// seed on its next spawn. Best-effort — a mirror failure never aborts boot.
+async function migrateAgentClaudeMdToReference() {
   if (!fs.existsSync(AGENTS_DIR)) return;
   const marker = `@${AGENT_PROMPT_FILENAME}`;
-  let migrated = 0;
+  const migratedIds = [];
   for (const id of listAgentIds()) {
     const dir = agentDir(id);
     const promptPath = path.join(dir, AGENT_PROMPT_FILENAME);
@@ -454,13 +468,25 @@ function migrateAgentClaudeMdToReference() {
     if (!rebuilt.includes(marker)) continue;
     try {
       fs.writeFileSync(claudePath, rebuilt);
-      migrated++;
+      migratedIds.push(id);
     } catch (err) {
       console.error(`[Orchestrator] claude-md migrate: cannot write ${claudePath}: ${err.message}`);
     }
   }
-  if (migrated > 0) {
-    console.log(`[Orchestrator] Migrated ${migrated} agent CLAUDE.md file(s) to reference AGENT-PROMPT.md (#510)`);
+  if (migratedIds.length > 0) {
+    console.log(`[Orchestrator] Migrated ${migratedIds.length} agent CLAUDE.md file(s) to reference AGENT-PROMPT.md (#510)`);
+  }
+  // Mirror the migrated CLAUDE.md into per-agent dedicated volumes (AC4). A
+  // missing volume is skipped inside reseedPerAgentVolume, so an unprovisioned
+  // agent is a harmless no-op here.
+  if (PER_AGENT_VOLUME) {
+    for (const id of migratedIds) {
+      try {
+        await reseedPerAgentVolume(id, ['CLAUDE.md']);
+      } catch (err) {
+        console.warn(`[Orchestrator] claude-md migrate: volume mirror ${id}: ${err.message}`);
+      }
+    }
   }
 }
 
@@ -3916,7 +3942,7 @@ async function main() {
     process.exit(1);
   }
   migrateLegacyAgentConfigs();
-  migrateAgentClaudeMdToReference();
+  await migrateAgentClaudeMdToReference();
   bootstrapTeams();
   backfillResourceOwnership();
 

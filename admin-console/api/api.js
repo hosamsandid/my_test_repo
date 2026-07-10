@@ -17,7 +17,7 @@ const maintenanceMode = require('./maintenance-mode');
 const { computeScope, visibleTeam, visibleAgent } = require('./scope');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
-const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue } = require('./knowledge-graph');
+const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle } = require('./process-template');
@@ -2591,13 +2591,40 @@ function kbParseLine(line) {
   } catch { return null; }
 }
 
+// The team an agent shares KNOWLEDGE with — the AGENT team (the squad: a
+// member's `parentTeamId`, a `team` agent's own id), NOT the human tenant Team
+// (`teamId`, #299/#302, which is backfilled onto every agent and would lump all
+// squads into 'default'). Standalone agents without a squad fall back to their
+// human team. Mirrors the orchestrator's agentKnowledgeTeamId.
+function agentKnowledgeTeam(cfg) {
+  if (!cfg) return 'default';
+  if (typeof cfg.parentTeamId === 'string' && cfg.parentTeamId.trim()) return cfg.parentTeamId;
+  if (cfg.role === 'team' && typeof cfg.id === 'string' && cfg.id.trim()) return cfg.id;
+  return cfg.teamId || 'default';
+}
+
+// Knowledge-team visibility: a knowledge team (agent squad) is visible when the
+// caller can see the HUMAN team any of its agents belongs to. Admin scopes
+// (all:true) short-circuit. Falls back to a direct id match so a membership that
+// (unusually) names the squad id keeps working.
+function knowledgeTeamVisible(scope, knowledgeTeamId) {
+  if (!scope) return false;
+  if (scope.all) return true;
+  if (visibleTeam(scope, knowledgeTeamId)) return true;
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    if (agentKnowledgeTeam(cfg) !== knowledgeTeamId) continue;
+    if (visibleTeam(scope, cfg.teamId)) return true;
+  }
+  return false;
+}
+
 // Resolve a team's KB store-relative path (e.g. docs/agent-knowledge/) from any
 // of its agents' environments — a team shares one env → one KB config.
 function resolveTeamStorePath(teamId) {
   for (const id of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    const t = cfg.teamId || cfg.parentTeamId || 'default';
-    if (t !== teamId || !cfg.environmentId) continue;
+    if (agentKnowledgeTeam(cfg) !== teamId || !cfg.environmentId) continue;
     const env = loadEnvironment(cfg.environmentId);
     const p = env && env.knowledgeStore && typeof env.knowledgeStore.path === 'string'
       ? env.knowledgeStore.path : null;
@@ -2610,8 +2637,7 @@ function resolveTeamStorePath(teamId) {
 function resolveTeamRepoUrl(teamId) {
   for (const id of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    const t = cfg.teamId || cfg.parentTeamId || 'default';
-    if (t !== teamId || !cfg.environmentId) continue;
+    if (agentKnowledgeTeam(cfg) !== teamId || !cfg.environmentId) continue;
     const env = loadEnvironment(cfg.environmentId);
     const ref = env && env.knowledgeStore && env.knowledgeStore.repoRef;
     if (ref && ref.url) return ref.url;
@@ -2624,7 +2650,7 @@ function resolveTeamRepoUrl(teamId) {
 function teamAgentIds(teamId) {
   return listAgentDirs().filter(id => {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    return (cfg.teamId || cfg.parentTeamId || 'default') === teamId;
+    return agentKnowledgeTeam(cfg) === teamId;
   });
 }
 
@@ -2665,11 +2691,41 @@ function kbReadStore(entries, storeRoot) {
   }
 }
 
+// originAgent → knowledge team, for re-homing entries at read time. Entries are
+// stamped with the CLI's KNOWLEDGE_TEAM_ID at harvest, which historically was
+// the human tenant team ('default' for everyone) — and two squads can share one
+// env, i.e. one KB store, so the store location alone can't separate them
+// either. The recording agent's squad is authoritative.
+function knowledgeTeamByAgent() {
+  const map = new Map();
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    map.set(id, agentKnowledgeTeam({ ...cfg, id: cfg.id || id }));
+  }
+  return map;
+}
+
+const KNOWLEDGE_ARCHIVED_DIR = path.join(WORKSPACE, 'knowledge-archived');
+const KNOWLEDGE_REVIEW_DIR = path.join(WORKSPACE, 'knowledge-review');
+
+function readArchivedIdsFor(teamId) {
+  const arr = readJsonFile(path.join(KNOWLEDGE_ARCHIVED_DIR, `${path.basename(teamId)}.json`), []);
+  return Array.isArray(arr) ? arr.filter((x) => typeof x === 'string') : [];
+}
+
+function readReviewDecisionsFor(teamId) {
+  const obj = readJsonFile(path.join(KNOWLEDGE_REVIEW_DIR, `${path.basename(teamId)}.json`), {});
+  return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {};
+}
+
 // Gather a team's KB entries from the canonical clone (preferred, fresh) or,
 // when it doesn't exist yet, union the shards from every team agent's checkout.
 // dedupById in the builder converges regardless of how many stale copies we see.
+// Entries are re-homed to their origin agent's squad, and the operator-decision
+// overlays (archive, supervised review) are re-applied at read time so they hold
+// even when the git-sync side lags (see overlayStatuses).
 function gatherTeamEntries(teamId) {
-  const entries = [];
+  let entries = [];
   const warnings = [];
   if (!AGENT_ID_RE.test(teamId)) return { entries, warnings };
   const storeRel = resolveTeamStorePath(teamId);
@@ -2677,13 +2733,39 @@ function gatherTeamEntries(teamId) {
   const cloneStore = path.join(cloneRoot, storeRel);
   if (fs.existsSync(path.join(cloneRoot, '.git')) && fs.existsSync(cloneStore)) {
     kbReadStore(entries, cloneStore);
-    return { entries, warnings };
+  } else {
+    for (const agentId of teamAgentIds(teamId)) {
+      const store = path.join(AGENTS_DIR, agentId, 'knowledge', storeRel);
+      if (fs.existsSync(store)) kbReadStore(entries, store);
+    }
+    warnings.push(`no canonical KB clone for team '${teamId}'; read from agent checkouts`);
   }
-  for (const agentId of teamAgentIds(teamId)) {
-    const store = path.join(AGENTS_DIR, agentId, 'knowledge', storeRel);
-    if (fs.existsSync(store)) kbReadStore(entries, store);
+
+  // Re-home each entry to its origin agent's squad; an unknown origin keeps the
+  // entry in the team whose store we are reading. Then drop sibling squads'
+  // entries (a shared env means a shared store — the canonical clone can carry
+  // both squads' shards).
+  const originTeams = knowledgeTeamByAgent();
+  entries = entries
+    .map((e) => {
+      if (!e || typeof e !== 'object') return e;
+      const t = (typeof e.originAgent === 'string' && originTeams.get(e.originAgent)) || teamId;
+      return e.teamId === t ? e : { ...e, teamId: t };
+    })
+    .filter((e) => !e || typeof e !== 'object' || e.teamId === teamId);
+
+  // Operator-decision overlays: this team's stores plus (legacy) the 'default'
+  // human-team store, so decisions taken before the squad re-homing still hold.
+  const archived = new Set(readArchivedIdsFor(teamId));
+  const decisions = { ...readReviewDecisionsFor(teamId) };
+  if (teamId !== 'default') {
+    for (const id of readArchivedIdsFor('default')) archived.add(id);
+    for (const [k, v] of Object.entries(readReviewDecisionsFor('default'))) {
+      if (!(k in decisions)) decisions[k] = v;
+    }
   }
-  warnings.push(`no canonical KB clone for team '${teamId}'; read from agent checkouts`);
+  const reviewOn = knowledgeReviewOn(teamEnvironment(teamId));
+  entries = overlayStatuses(entries, { archivedIds: archived, decisions, reviewOn });
   return { entries, warnings };
 }
 
@@ -2692,15 +2774,15 @@ function knowledgeScopeTeams(parsed, scope) {
   if (parsed.kind === 'team') return [parsed.id];
   if (parsed.kind === 'agent') {
     const cfg = readJsonFile(path.join(AGENTS_DIR, parsed.id, 'config.json'), {});
-    return [cfg.teamId || cfg.parentTeamId || 'default'];
+    return [agentKnowledgeTeam({ ...cfg, id: cfg.id || parsed.id })];
   }
   // global: every team that has agents, narrowed by membership scope.
   const teams = new Set();
   for (const id of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    teams.add(cfg.teamId || cfg.parentTeamId || 'default');
+    teams.add(agentKnowledgeTeam({ ...cfg, id: cfg.id || id }));
   }
-  return [...teams].filter(t => visibleTeam(scope, t));
+  return [...teams].filter(t => knowledgeTeamVisible(scope, t));
 }
 
 // Fire-and-forget refresh of a team's canonical clone before we read it, so the
@@ -2723,7 +2805,7 @@ function gatherKnowledgeAgents(scope, teamIds) {
   for (const id of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
     if (cfg.role === 'team') continue; // template holder, not a contributor
-    const teamId = cfg.teamId || cfg.parentTeamId || 'default';
+    const teamId = agentKnowledgeTeam({ ...cfg, id: cfg.id || id });
     if (!set.has(teamId)) continue;
     if (!visibleAgent(scope, cfg)) continue;
     agents.push({ id, parentTeamId: teamId, environmentId: cfg.environmentId || null, displayName: cfg.displayName || id });
@@ -2756,7 +2838,7 @@ function gatherKnowledgeSkills(scope) {
     });
   } catch { /* no pool skills */ }
   for (const ts of listTeamSkills(null)) {
-    if (!visibleTeam(scope, ts.teamId)) continue;
+    if (!knowledgeTeamVisible(scope, ts.teamId)) continue;
     const s = { name: ts.name, tier: 'team', teamId: ts.teamId };
     const dir = safeTeamSkillDir(ts.teamId, ts.name);
     const prov = dir ? readSkillProvenance(dir) : null;
@@ -2841,7 +2923,7 @@ app.get('/api/knowledge/item/:id', (req, res) => {
   const teamId = typeof req.query.teamId === 'string' ? req.query.teamId : '';
   if (!/^[0-9a-f]{12}$/.test(id)) return res.status(400).json({ error: 'invalid id' });
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'invalid teamId' });
-  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
 
   const { entries } = gatherTeamEntries(teamId);
   // Prefer a live entry over a merge tombstone of the same id (Phase 3).
@@ -2873,7 +2955,7 @@ app.post('/api/knowledge/item/:id/archive', apiLimiter, async (req, res) => {
   const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
   if (!/^[0-9a-f]{12}$/.test(id)) return res.status(400).json({ error: 'invalid id' });
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
-  if (!visibleTeam(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
   const archived = req.body?.archived !== false;
   try {
     const r = await fetch(`${ORCH_URL()}/internal/knowledge/archive`, {
@@ -3030,7 +3112,7 @@ app.get('/api/knowledge/promotion-suggestions', (req, res) => {
   const scope = getScope(req);
   const teamId = typeof req.query.team === 'string' ? req.query.team : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
-  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
   const open = readCandidateStore(teamId).filter(c => c && c.status === 'open');
   const suggestions = open.map(c => knowledgeSuggestions.promotionSuggestionView(c, c.draft));
   res.json({ team: teamId, suggestions });
@@ -3043,7 +3125,7 @@ app.post('/api/knowledge/promotion-suggestions/:id/draft', heavyLimiter, async (
   const scope = getScope(req);
   const teamId = typeof req.body?.team === 'string' ? req.body.team : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
-  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
   const cand = readCandidateStore(teamId).find(c => c && c.id === req.params.id);
   if (!cand) return res.status(404).json({ error: 'suggestion not found' });
 
@@ -3069,7 +3151,7 @@ app.post('/api/knowledge/promotion-suggestions/:id/dismiss', apiLimiter, async (
   const scope = getScope(req);
   const teamId = typeof req.body?.team === 'string' ? req.body.team : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
-  if (!visibleTeam(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
   try {
     await fetch(`${ORCH_URL()}/internal/knowledge/dismiss`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -3085,7 +3167,7 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
   const scope = getScope(req);
   const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
-  if (!visibleTeam(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
 
   // agent→team lift (Phase 4): the source is a private AGENT skill. Resolve it and
   // pre-fill skillMd + entryIds from its SKILL.md / provenance.json, so the caller
@@ -3182,8 +3264,9 @@ app.get('/api/agents/:id/private-skills', (req, res) => {
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'invalid agent id' });
   const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
   if (!cfg) return res.status(404).json({ error: 'agent not found' });
-  const teamId = cfg.teamId || cfg.parentTeamId || 'default';
-  if (!visibleAgent(scope, { ...cfg, teamId })) return res.status(403).json({ error: 'forbidden' });
+  // The lift target is the agent's SQUAD pool (/workspace/teams/<squad>/skills).
+  const teamId = agentKnowledgeTeam({ ...cfg, id: cfg.id || id });
+  if (!visibleAgent(scope, cfg)) return res.status(403).json({ error: 'forbidden' });
   const skillsDir = path.join(AGENTS_DIR, id, 'skills');
   const skills = [];
   try {
@@ -3206,8 +3289,7 @@ function teamEnvironment(teamId) {
   for (const id of ids) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
     if (!cfg) continue;
-    const t = cfg.teamId || cfg.parentTeamId || 'default';
-    if (t === teamId && cfg.environmentId) {
+    if (agentKnowledgeTeam({ ...cfg, id: cfg.id || id }) === teamId && cfg.environmentId) {
       const env = loadEnvironment(cfg.environmentId);
       if (env) return env;
     }
@@ -3217,8 +3299,14 @@ function teamEnvironment(teamId) {
 
 // Team autonomy level (0..3, default 1). Local read — api.js does not import the
 // orchestrator's knowledge-store; the clamp mirrors knowledgeAutonomyLevel.
+// NOTE the `env ? … : undefined` shape: `Number(null)` is 0, so the previous
+// `Number(env && env.knowledgeAutonomy)` silently displayed level 0 ("Off") for
+// a team whose env could not be resolved — while the system actually ran at the
+// default level 1.
 function teamAutonomyLevel(env) {
-  const n = Number(env && env.knowledgeAutonomy);
+  const raw = env ? env.knowledgeAutonomy : undefined;
+  if (raw === null || raw === undefined || raw === '') return 1;
+  const n = Number(raw);
   if (!Number.isInteger(n)) return 1;
   return Math.max(0, Math.min(3, n));
 }
@@ -3237,13 +3325,28 @@ app.get('/api/knowledge/gates', (req, res) => {
   const scope = getScope(req);
   const teamId = typeof req.query.team === 'string' ? req.query.team : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
-  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
   const env = teamEnvironment(teamId);
+  // Squads sharing one environment share one dial — name the env + siblings so
+  // the UI can say "this setting also applies to <other team>".
+  let sharedWith = [];
+  if (env && env.id) {
+    const siblings = new Set();
+    for (const id of listAgentDirs()) {
+      const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+      if (cfg.environmentId !== env.id) continue;
+      const t = agentKnowledgeTeam({ ...cfg, id: cfg.id || id });
+      if (t !== teamId) siblings.add(t);
+    }
+    sharedWith = [...siblings].sort();
+  }
   res.json({
     team: teamId,
     autonomy: teamAutonomyLevel(env),
     review: knowledgeReviewOn(env),
     gates: knowledgeSuggestions.resolvePromotionGates(env),
+    environment: env ? { id: env.id, name: env.name || env.id } : null,
+    sharedWith,
   });
 });
 
@@ -3255,7 +3358,7 @@ app.put('/api/knowledge/gates', apiLimiter, async (req, res) => {
   const transition = typeof req.body?.transition === 'string' ? req.body.transition : '';
   const mode = typeof req.body?.mode === 'string' ? req.body.mode : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
-  if (!visibleTeam(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
   if (!knowledgeSuggestions.PROMOTION_TRANSITIONS.includes(transition)) return res.status(400).json({ error: 'invalid transition' });
   if (!knowledgeSuggestions.GATE_MODES.includes(mode)) return res.status(400).json({ error: 'invalid mode' });
   try {
@@ -3280,7 +3383,7 @@ app.put('/api/knowledge/autonomy', apiLimiter, async (req, res) => {
   const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
   const level = Number(req.body?.level);
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
-  if (!visibleTeam(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
   if (!Number.isInteger(level) || level < 0 || level > 3) return res.status(400).json({ error: 'level must be an integer 0..3' });
   try {
     const r = await fetch(`${ORCH_URL()}/internal/knowledge/autonomy`, {
@@ -3302,7 +3405,7 @@ app.put('/api/knowledge/review-mode', apiLimiter, async (req, res) => {
   const scope = getScope(req);
   const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
-  if (!visibleTeam(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
   const enabled = req.body?.enabled === true || req.body?.enabled === 'true';
   try {
     const r = await fetch(`${ORCH_URL()}/internal/knowledge/review-mode`, {
@@ -3326,7 +3429,7 @@ app.get('/api/knowledge/review-queue', async (req, res) => {
   const scope = getScope(req);
   const teamId = typeof req.query.team === 'string' ? req.query.team : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
-  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
   await refreshTeamCloneBestEffort(teamId);
   const { entries, warnings } = gatherTeamEntries(teamId);
   const only = req.query.include === 'rejected' ? null : 'pending';
@@ -3341,7 +3444,7 @@ app.post('/api/knowledge/item/:id/review', apiLimiter, async (req, res) => {
   const id = typeof req.params.id === 'string' ? req.params.id : '';
   const decision = typeof req.body?.decision === 'string' ? req.body.decision : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
-  if (!visibleTeam(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
   if (!/^[0-9a-f]{12}$/.test(id)) return res.status(400).json({ error: 'invalid id' });
   if (!['approved', 'rejected', 'reset'].includes(decision)) return res.status(400).json({ error: 'invalid decision' });
   try {
@@ -3366,8 +3469,8 @@ app.post('/api/knowledge/share-to-team', apiLimiter, async (req, res) => {
   const scope = getScope(req);
   const v = knowledgeSuggestions.validateShareToTeam(req.body, { teamIdRe: AGENT_ID_RE });
   if (!v.ok) return res.status(400).json({ error: v.error });
-  if (!visibleTeam(scope, v.targetTeamId)) return res.status(403).json({ error: 'forbidden (target team)' });
-  if (v.from === 'team' && !visibleTeam(scope, v.sourceTeamId)) return res.status(403).json({ error: 'forbidden (source team)' });
+  if (!knowledgeTeamVisible(scope, v.targetTeamId)) return res.status(403).json({ error: 'forbidden (target team)' });
+  if (v.from === 'team' && !knowledgeTeamVisible(scope, v.sourceTeamId)) return res.status(403).json({ error: 'forbidden (source team)' });
 
   // Resolve the source skill dir (containment-guarded), read SKILL.md + provenance.
   let srcDir;

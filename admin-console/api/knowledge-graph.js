@@ -146,6 +146,38 @@ function foldReview(entries) {
   return foldByStatus(entries, (s) => REVIEW_HELD.has(s));
 }
 
+// Apply the operator-decision overlays at READ time, as a pure function of
+// (entries, decision stores) — the mirror of what the orchestrator collector
+// stamps into the canonical files. This makes archive + supervised review work
+// even when a team has no canonical clone yet (the git-sync side is best-effort
+// and may lag or be unprovisioned): the admin-console reads raw shards and this
+// overlay re-derives the same statuses the collector would have written.
+// Identity for entries whose id is in no store. Never overrides a terminal
+// status (merged / promoted).
+//   archivedIds: Set/array of entry ids the operator retired.
+//   decisions:   { <id>: "approved" | "rejected" } review decisions.
+//   reviewOn:    when true, an undecided entry is held as "pending".
+function overlayStatuses(entries, { archivedIds = [], decisions = {}, reviewOn = false } = {}) {
+  const archived = archivedIds instanceof Set ? archivedIds : new Set(archivedIds);
+  const list = Array.isArray(entries) ? entries : [];
+  const KEEP = new Set(['merged', 'promoted']);
+  return list.map((e) => {
+    if (!e || typeof e !== 'object' || typeof e.id !== 'string') return e;
+    if (KEEP.has(e.status)) return e;
+    if (archived.has(e.id)) {
+      return e.status === 'archived' ? e : { ...e, status: 'archived' };
+    }
+    const d = decisions && decisions[e.id];
+    if (d === 'rejected') return e.status === 'rejected' ? e : { ...e, status: 'rejected' };
+    if (d === 'approved') {
+      // An earlier overlay copy may still say pending — approval releases it.
+      return e.status === 'pending' || e.status === 'rejected' ? { ...e, status: 'active' } : e;
+    }
+    if (reviewOn) return e.status === 'pending' ? e : { ...e, status: 'pending' };
+    return e;
+  });
+}
+
 // The inverse of foldReview for the review-queue endpoint: the deduped set of
 // entries whose latest copy is pending/rejected, newest first, as item views.
 // `only` optionally narrows to one status ("pending" | "rejected").
@@ -498,6 +530,7 @@ module.exports = {
   foldMerges,
   foldArchived,
   foldReview,
+  overlayStatuses,
   selectReviewQueue,
   buildKnowledgeGraph,
   summarizeKnowledge,

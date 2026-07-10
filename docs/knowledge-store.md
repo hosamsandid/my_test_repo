@@ -34,6 +34,22 @@ non-empty `sourceRefs`. This makes "trace any promoted skill back to the
 agent/session/PR that learned it" enforceable from day one. `makeKnowledgeEntry`
 throws rather than emit an unprovenanced entry.
 
+**Which team is the knowledge team?** The AGENT team (squad) — a member's
+`parentTeamId`, a `team` agent's own id — NOT the human tenant Team (#299),
+whose `teamId` is backfilled onto every agent (#302) and would lump every squad
+into `default`. One helper on each side owns the rule:
+`agentKnowledgeTeamId(cfg)` (orchestrator) ≡ `agentKnowledgeTeam(cfg)`
+(admin-console). A standalone agent without a squad falls back to its human
+team. Because historical entries were stamped with the human team — and because
+two squads can share one environment, i.e. one physical KB store — the
+admin-console read path additionally **re-homes each entry to its
+`originAgent`'s squad** at read time (`gatherTeamEntries`), so team-scoped views
+group correctly regardless of the stamp. Operator-decision overlays (archive,
+supervised review) are also re-applied at read time from their id stores
+(`overlayStatuses` in `knowledge-graph.js`), so they hold even while the
+git-sync side is unprovisioned or lagging; the legacy `default` store is folded
+in for decisions taken before the re-homing.
+
 ## 2. Physical layout (open question #1 → resolved)
 
 **One canonical JSONL file per kind.** Each line is a full entry including

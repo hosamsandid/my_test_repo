@@ -253,7 +253,7 @@ function startAgentProcess(config) {
     const kbAvailable = level >= 1 && !!kbRepoRef;
     childEnv.KNOWLEDGE_AUTONOMY = String(kbAvailable ? level : 0);
     if (kbAvailable) {
-      childEnv.KNOWLEDGE_TEAM_ID = config.teamId || DEFAULT_TEAM_ID;
+      childEnv.KNOWLEDGE_TEAM_ID = agentKnowledgeTeamId(config);
       childEnv.KNOWLEDGE_STORE_PATH = env.knowledgeStore.path;
       childEnv.KNOWLEDGE_BRANCH = knowledgeSync.KNOWLEDGE_BRANCH;
       childEnv.KNOWLEDGE_DIR = path.join("/workspace/agents", id, "knowledge");
@@ -1725,6 +1725,102 @@ function bootstrapKbTemplate(kbDir, storePath) {
   fs.cpSync(templateDir, storeFull, { recursive: true, force: false, errorOnExist: false });
 }
 
+// Self-heal a knowledge working copy that has shard content but no git checkout.
+// This is the state of every agent seeded BEFORE the knowledge feature (or whose
+// seed-time clone failed): the `knowledge` CLI kept appending shard lines locally
+// while every push 400'd with "not provisioned" — so the lessons never reached
+// the team. On the next push we move the un-synced tree aside, provision a fresh
+// checkout, merge the local shard lines back in (append-only, dedup by entry id),
+// and commit — after which the caller's normal rebase+push flow takes over.
+function healKnowledgeCheckout(id, kbDir, env, warnings) {
+  const dest = agentDir(id);
+  const sources = [];
+  // A previous heal that died between rename and merge leaves *.unsynced-* dirs.
+  try {
+    for (const name of fs.readdirSync(dest)) {
+      if (name.startsWith("knowledge.unsynced-")) sources.push(path.join(dest, name));
+    }
+  } catch { /* no agent dir → provisioning will fail loudly below */ }
+  if (fs.existsSync(kbDir)) {
+    const aside = path.join(dest, `knowledge.unsynced-${Date.now()}`);
+    fs.renameSync(kbDir, aside);
+    sources.push(aside);
+  }
+
+  provisionKnowledgeCheckout(id, dest, env, warnings);
+  if (!fs.existsSync(path.join(kbDir, ".git"))) {
+    throw new Error(
+      `knowledge working copy could not be provisioned: ${warnings.join("; ") || "git clone failed"}`,
+    );
+  }
+
+  // Merge every un-synced shard file back in: append lines whose entry id (or,
+  // for an unparseable line, the raw line itself) is not already present.
+  let mergedLines = 0;
+  for (const src of sources) {
+    for (const shard of _walkShardFiles(src)) {
+      const rel = path.relative(src, shard);
+      const target = path.join(kbDir, rel);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      const have = new Set();
+      const haveRaw = new Set();
+      if (fs.existsSync(target)) {
+        for (const line of fs.readFileSync(target, "utf8").split("\n")) {
+          if (!line.trim()) continue;
+          haveRaw.add(line);
+          const e = parseKnowledgeEntry(line);
+          if (e && e.id) have.add(e.id);
+        }
+      }
+      const add = [];
+      for (const line of fs.readFileSync(shard, "utf8").split("\n")) {
+        if (!line.trim() || haveRaw.has(line)) continue;
+        const e = parseKnowledgeEntry(line);
+        if (e && e.id && have.has(e.id)) continue;
+        add.push(line);
+      }
+      if (add.length > 0) {
+        fs.appendFileSync(target, add.join("\n") + "\n");
+        mergedLines += add.length;
+      }
+    }
+  }
+  if (mergedLines > 0) {
+    const gitEnv = _buildKbGitEnv(env?.knowledgeStore?.repoRef || {}, env);
+    const runIn = (args, timeout = 30_000) =>
+      execFileSync("git", args, { cwd: kbDir, env: gitEnv, stdio: "pipe", timeout }).toString();
+    runIn(["add", "-A"]);
+    runIn([
+      "-c", `user.name=${id}`, "-c", `user.email=${id}@agents.local`,
+      "commit", "-m", "chore(knowledge): recover locally-recorded entries into the synced checkout",
+    ]);
+  }
+  for (const src of sources) {
+    try { fs.rmSync(src, { recursive: true, force: true }); } catch { /* leftover is re-merged next heal */ }
+  }
+  console.log(`[Orchestrator] healed knowledge checkout for ${id} (${mergedLines} recovered line(s))`);
+}
+
+// All shard JSONL files under a knowledge tree (any store path / manifest).
+function _walkShardFiles(root) {
+  const out = [];
+  const walk = (dir) => {
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const d of entries) {
+      const p = path.join(dir, d.name);
+      if (d.isDirectory()) {
+        if (d.name === ".git") continue;
+        walk(p);
+      } else if (d.isFile() && d.name.endsWith(".jsonl") && path.basename(dir) === "shards") {
+        out.push(p);
+      }
+    }
+  };
+  walk(root);
+  return out;
+}
+
 // Push the agent's local KB commits to the shared branch. Fetch-rebase-retry so
 // a concurrent agent's push can't make us lose our (own-shard-only) append.
 // Throws caller-facing Errors (safe to return over the internal API).
@@ -1736,7 +1832,7 @@ function agentKnowledgePush(id) {
 
   const kbDir = path.join(agentDir(id), "knowledge");
   if (!fs.existsSync(path.join(kbDir, ".git"))) {
-    throw new Error("knowledge working copy is not provisioned for this agent");
+    healKnowledgeCheckout(id, kbDir, env, []);
   }
 
   const branch = knowledgeSync.KNOWLEDGE_BRANCH;
@@ -1782,14 +1878,29 @@ function agentKnowledgePush(id) {
 
 const _kbRefreshThrottles = new Map(); // teamId -> last refresh ms
 
+// The team an agent shares KNOWLEDGE with. This is the AGENT team — the squad
+// materialised by the Team-Setup wizard (`parentTeamId` on a member, a `team`
+// agent's own id) — NOT the human tenant Team (`teamId`, #299): knowledge is
+// pooled per working squad, and that is also the team id operators see in the
+// Knowledge Flow UI. A standalone agent without a squad falls back to its human
+// team so it still gets a KB scope. (Before this helper the knowledge paths used
+// `cfg.teamId || cfg.parentTeamId`, which — since #302 backfills teamId onto
+// every agent — always resolved to the human team and broke team-scoped reads
+// and env writes for squads.)
+function agentKnowledgeTeamId(cfg) {
+  if (!cfg) return DEFAULT_TEAM_ID;
+  if (typeof cfg.parentTeamId === "string" && cfg.parentTeamId.trim()) return cfg.parentTeamId;
+  if (cfg.role === "team" && typeof cfg.id === "string" && cfg.id.trim()) return cfg.id;
+  return cfg.teamId || DEFAULT_TEAM_ID;
+}
+
 // Resolve the KB repo for a team from any of its agents' environments (a team
 // shares one env → one KB repo). Returns { repoRef, env } or null.
 function resolveTeamKbRepo(teamId) {
   for (const id of listAgentIds()) {
     const cfg = loadAgentConfig(id);
     if (!cfg) continue;
-    const t = cfg.teamId || cfg.parentTeamId || DEFAULT_TEAM_ID;
-    if (t !== teamId) continue;
+    if (agentKnowledgeTeamId(cfg) !== teamId) continue;
     if (!cfg.environmentId) continue;
     const env = loadEnvironment(cfg.environmentId);
     const repoRef = env?.knowledgeStore?.repoRef || null;
@@ -1805,8 +1916,7 @@ function resolveTeamEnvId(teamId) {
   for (const id of listAgentIds()) {
     const cfg = loadAgentConfig(id);
     if (!cfg) continue;
-    const t = cfg.teamId || cfg.parentTeamId || DEFAULT_TEAM_ID;
-    if (t === teamId && cfg.environmentId) return cfg.environmentId;
+    if (agentKnowledgeTeamId(cfg) === teamId && cfg.environmentId) return cfg.environmentId;
   }
   return null;
 }
@@ -1923,7 +2033,7 @@ function appendKnowledgeEvents(events) {
 // operator view is fresh, and (b) append one harvest event per pushed entry
 // (count-only if the CLI sent no summary). Resolves teamId from the agent config.
 function emitKnowledgeHarvest(id, cfg, env, rawBody) {
-  const teamId = (cfg && (cfg.teamId || cfg.parentTeamId)) || DEFAULT_TEAM_ID;
+  const teamId = agentKnowledgeTeamId(cfg);
   const repoRef = env?.knowledgeStore?.repoRef || null;
   try {
     refreshKnowledgeClone(teamId, { force: true, repoRef, env });
@@ -2076,11 +2186,26 @@ function baselineReviewApprovals(teamId, env) {
   try {
     refreshKnowledgeClone(teamId, { force: true, env });
     const clonePath = knowledgeFeed.canonicalClonePath(KNOWLEDGE_CLONE_ROOT, teamId);
-    if (!clonePath || !fs.existsSync(path.join(clonePath, ".git"))) return;
-    const storeRel = _kbStoreRel(env);
-    const storeRoot = storeRel ? path.join(clonePath, storeRel) : clonePath;
-    const manifest = _loadCloneManifest(storeRoot);
-    const shardEntries = _readCloneShards(storeRoot, manifest);
+    let shardEntries = [];
+    if (clonePath && fs.existsSync(path.join(clonePath, ".git"))) {
+      const storeRel = _kbStoreRel(env);
+      const storeRoot = storeRel ? path.join(clonePath, storeRel) : clonePath;
+      const manifest = _loadCloneManifest(storeRoot);
+      shardEntries = _readCloneShards(storeRoot, manifest);
+    }
+    // No canonical clone (yet): baseline from the team agents' local checkouts
+    // instead, so flipping review on still grandfathers everything already
+    // learned — an un-synced KB must not flood the queue with old facts.
+    if (shardEntries.length === 0) {
+      for (const id of listAgentIds()) {
+        const cfg = loadAgentConfig(id);
+        if (!cfg || agentKnowledgeTeamId(cfg) !== teamId) continue;
+        const agentEnv = cfg.environmentId ? loadEnvironment(cfg.environmentId) : env;
+        const storeRoot = path.join(agentDir(id), "knowledge", _kbStoreRel(agentEnv));
+        if (!fs.existsSync(storeRoot)) continue;
+        shardEntries.push(..._readCloneShards(storeRoot, _loadCloneManifest(storeRoot)));
+      }
+    }
     if (shardEntries.length === 0) return;
     const { simThreshold } = knowledgeConvergenceConfig(env);
     const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -2092,6 +2217,12 @@ function baselineReviewApprovals(teamId, env) {
       for (const e of bucket.canonical) {
         if (!decisions[e.id]) decisions[e.id] = "approved";
       }
+    }
+    // Belt-and-braces: approve the raw entry ids too — when the canonical
+    // projection later merges differently, an already-learned entry still never
+    // lands in the review queue.
+    for (const e of shardEntries) {
+      if (e && e.id && !decisions[e.id]) decisions[e.id] = "approved";
     }
     writeReviewDecisions(teamId, decisions);
   } catch (err) {
@@ -2446,7 +2577,7 @@ function autoPromoteStep(teamId, env, clusters, candidates, { convergenceThresho
 function nominateKnowledgeEntry(agentId, entryId, note) {
   const cfg = loadAgentConfig(agentId);
   if (!cfg) throw new Error(`Agent '${agentId}' not found`);
-  const teamId = cfg.teamId || cfg.parentTeamId || DEFAULT_TEAM_ID;
+  const teamId = agentKnowledgeTeamId(cfg);
   const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
   if (knowledgeAutonomyLevel(env) < 1) throw new Error("knowledge sharing is off for this team");
 
@@ -6949,7 +7080,7 @@ async function main() {
     try {
       teamIds = [...new Set(
         listAgentIds()
-          .map((id) => { const c = loadAgentConfig(id); return c && (c.teamId || c.parentTeamId); })
+          .map((id) => { const c = loadAgentConfig(id); return c && agentKnowledgeTeamId(c); })
           .filter((t) => typeof t === "string" && t),
       )];
     } catch (err) {

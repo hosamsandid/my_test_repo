@@ -9,6 +9,7 @@ const {
   foldMerges,
   foldArchived,
   foldReview,
+  overlayStatuses,
   selectReviewQueue,
   buildKnowledgeGraph,
   summarizeKnowledge,
@@ -489,4 +490,46 @@ test('summarizeKnowledge: held entries are not counted as learned', () => {
   ];
   const s = summarizeKnowledge({ scope: 'team:acme', entries, now: NOW });
   assert.equal(s.items, 1);
+});
+
+test('overlayStatuses: identity when no decision store matches', () => {
+  const entries = [entry({ id: 'aaaaaaaaaaaa' }), entry({ id: 'bbbbbbbbbbbb', status: 'merged' })];
+  const out = overlayStatuses(entries, { archivedIds: [], decisions: {}, reviewOn: false });
+  assert.deepEqual(out, entries);
+});
+
+test('overlayStatuses: archived-id set stamps status archived at read time', () => {
+  const out = overlayStatuses([entry({ id: 'aaaaaaaaaaaa' })], { archivedIds: ['aaaaaaaaaaaa'] });
+  assert.equal(out[0].status, 'archived');
+});
+
+test('overlayStatuses: never overrides a terminal status (merged/promoted)', () => {
+  const entries = [
+    entry({ id: 'aaaaaaaaaaaa', status: 'promoted' }),
+    entry({ id: 'bbbbbbbbbbbb', status: 'merged' }),
+  ];
+  const out = overlayStatuses(entries, { archivedIds: ['aaaaaaaaaaaa', 'bbbbbbbbbbbb'], reviewOn: true });
+  assert.deepEqual(out.map((e) => e.status), ['promoted', 'merged']);
+});
+
+test('overlayStatuses: review mode holds undecided entries as pending, honours decisions', () => {
+  const entries = [
+    entry({ id: 'aaaaaaaaaaaa' }),                          // undecided → pending
+    entry({ id: 'bbbbbbbbbbbb' }),                          // approved → stays active
+    entry({ id: 'cccccccccccc' }),                          // rejected → rejected
+    entry({ id: 'dddddddddddd', status: 'pending' }),       // approved later → released
+  ];
+  const out = overlayStatuses(entries, {
+    decisions: { bbbbbbbbbbbb: 'approved', cccccccccccc: 'rejected', dddddddddddd: 'approved' },
+    reviewOn: true,
+  });
+  assert.deepEqual(out.map((e) => e.status), ['pending', 'active', 'rejected', 'active']);
+});
+
+test('overlayStatuses: review off leaves undecided entries untouched but still applies rejects', () => {
+  const out = overlayStatuses(
+    [entry({ id: 'aaaaaaaaaaaa' }), entry({ id: 'bbbbbbbbbbbb' })],
+    { decisions: { bbbbbbbbbbbb: 'rejected' }, reviewOn: false },
+  );
+  assert.deepEqual(out.map((e) => e.status), ['active', 'rejected']);
 });

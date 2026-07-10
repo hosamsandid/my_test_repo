@@ -70,7 +70,7 @@ function EditableDraftTitle({ name, onRename }) {
       }}
     >
       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {name || 'Untitled process'}
+        {name || 'Untitled flow'}
       </span>
       <Pencil size={13} style={{ flexShrink: 0, color: 'var(--eb-text-muted)' }} />
     </button>
@@ -265,7 +265,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     try {
       const tpl = imported.bundle;
       const d = await apiCall('POST', '/api/process/drafts', {
-        name: tpl.name || 'Imported process',
+        name: tpl.name || 'Imported flow',
         processTemplate: tpl,
       });
       if (onDraftsChanged) onDraftsChanged();

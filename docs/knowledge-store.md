@@ -25,7 +25,7 @@ One entry = one line in a JSONL file. Fields (`orchestrator/knowledge-store.js`)
 | `sourceRefs` | array | ○ | `[{ kind: pr\|issue\|commit\|branch\|url, ref }]`. **provenance** |
 | `convergence` | string[] | ✓ | Agent ids that independently recorded this fact. Seeded `[originAgent]`; grown in Phase 3. |
 | `tags` | string[] | ○ | Optional topic filters. |
-| `status` | enum | ✓ | `active` (default). Reserved: `merged` \| `promoted` \| `archived`. |
+| `status` | enum | ✓ | `active` (default). Overlay statuses (stamped by the orchestrator on the canonical view, never on a shard): `merged` \| `promoted` \| `archived` \| `pending` \| `rejected` (the last two = supervised-review holds, see `docs/knowledge-governance.md`). |
 | `updatedAt` | string | ○ | Set when convergence/merge touches it (Phase 3). |
 
 **Mandatory provenance (validated, locked decision):** `originAgent`, `teamId`,
@@ -96,6 +96,11 @@ multi-repo ⇒ first repo + a warning. `own-repo` without a `repoRef` ⇒ a warn
 
 Phase 0 reads nothing behaviorally, so the default causes no change until Phase 1
 wires harvest at level ≥ 1. Level 0 reproduces today's behaviour exactly.
+
+The dial is now settable from the Knowledge Flow UI (no hand-editing
+`environment.json`), and an orthogonal per-team `knowledgeReview` flag (default
+false) adds a human approve-before-share checkpoint. Both are documented in
+`docs/knowledge-governance.md`.
 
 ## 5. Three-tier skill pool (open question #4 → resolved)
 

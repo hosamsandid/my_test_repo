@@ -8,6 +8,8 @@ const {
   dedupById,
   foldMerges,
   foldArchived,
+  foldReview,
+  selectReviewQueue,
   buildKnowledgeGraph,
   summarizeKnowledge,
 } = require('./knowledge-graph');
@@ -414,4 +416,77 @@ test('buildKnowledgeGraph: includeArchived keeps archived items (flagged), defau
   assert.equal(items.length, 2);
   const archived = items.find(n => n.text === 'retired fact');
   assert.equal(archived.archived, true);
+});
+
+// ── foldReview / selectReviewQueue (supervised-review mode) ─────────────────────
+
+test('foldReview: identity when no pending/rejected records (non-review teams unchanged)', () => {
+  const entries = [entry({ id: 'aaaaaaaaaaaa' }), entry({ id: 'bbbbbbbbbbbb', originAgent: 'd2' })];
+  assert.deepEqual(foldReview(entries), entries);
+});
+
+test('foldReview: drops a pending and a rejected canonical entry from the active set', () => {
+  const entries = [
+    entry({ id: 'aaaaaaaaaaaa', text: 'approved fact' }),
+    entry({ id: 'bbbbbbbbbbbb', text: 'awaiting review', status: 'pending', updatedAt: '2026-07-08T11:00:00Z' }),
+    entry({ id: 'cccccccccccc', text: 'rejected fact', status: 'rejected', updatedAt: '2026-07-08T11:00:00Z' }),
+  ];
+  const out = foldReview(entries);
+  assert.deepEqual(out.map((e) => e.id), ['aaaaaaaaaaaa']);
+});
+
+test('foldReview: a stale live shard copy cannot resurrect a pending entry (latest wins)', () => {
+  const entries = [
+    entry({ id: 'bbbbbbbbbbbb', text: 'shard copy', status: 'active', createdAt: '2026-07-08T09:00:00Z' }),
+    entry({ id: 'bbbbbbbbbbbb', text: 'held copy', status: 'pending', updatedAt: '2026-07-08T11:00:00Z' }),
+  ];
+  assert.equal(foldReview(entries).length, 0);
+});
+
+test('foldReview: a pending overlay older than a live update keeps the entry (approved later)', () => {
+  const entries = [
+    entry({ id: 'bbbbbbbbbbbb', text: 'held', status: 'pending', updatedAt: '2026-07-08T09:00:00Z' }),
+    entry({ id: 'bbbbbbbbbbbb', text: 'approved', status: 'active', updatedAt: '2026-07-08T11:00:00Z' }),
+  ];
+  assert.equal(foldReview(entries).length, 2); // latest is active → id survives
+});
+
+test('selectReviewQueue: returns pending+rejected items newest-first, foldable by status', () => {
+  const entries = [
+    entry({ id: 'aaaaaaaaaaaa', text: 'approved', status: 'active' }),
+    entry({ id: 'bbbbbbbbbbbb', text: 'pending A', status: 'pending', updatedAt: '2026-07-08T10:00:00Z' }),
+    entry({ id: 'cccccccccccc', text: 'pending B', status: 'pending', updatedAt: '2026-07-08T11:00:00Z' }),
+    entry({ id: 'dddddddddddd', text: 'rejected', status: 'rejected', updatedAt: '2026-07-08T09:30:00Z' }),
+  ];
+  const all = selectReviewQueue(entries);
+  assert.deepEqual(all.map((i) => i.text), ['pending B', 'pending A', 'rejected']);
+  const onlyPending = selectReviewQueue(entries, { only: 'pending' });
+  assert.deepEqual(onlyPending.map((i) => i.text), ['pending B', 'pending A']);
+});
+
+test('buildKnowledgeGraph: pending/rejected entries never appear in the active team lane', () => {
+  const entries = [
+    entry({ id: 'aaaaaaaaaaaa', text: 'approved fact', originAgent: 'd1' }),
+    entry({ id: 'bbbbbbbbbbbb', text: 'held fact', originAgent: 'd2', status: 'pending', updatedAt: '2026-07-08T11:00:00Z' }),
+  ];
+  const g = buildKnowledgeGraph({ scope: 'team:acme', entries, now: NOW });
+  assert.deepEqual(g.nodes.filter((n) => n.kind === 'item').map((n) => n.text), ['approved fact']);
+});
+
+test('foldReview: status-only overlay drops the entry when canonical is read last (no synthetic updatedAt)', () => {
+  // Mirrors the real read: kbReadStore pushes the shard copy first, the canonical
+  // copy second; both carry the same createdAt and no updatedAt, so the held
+  // canonical copy wins the >= tie-break exactly as the archived overlay does.
+  const shard = entry({ id: 'bbbbbbbbbbbb', text: 'contribution', status: 'active' });
+  const canonicalHeld = entry({ id: 'bbbbbbbbbbbb', text: 'contribution', status: 'pending' });
+  assert.equal(foldReview([shard, canonicalHeld]).length, 0);
+});
+
+test('summarizeKnowledge: held entries are not counted as learned', () => {
+  const entries = [
+    entry({ id: 'aaaaaaaaaaaa', originAgent: 'd1' }),
+    entry({ id: 'bbbbbbbbbbbb', originAgent: 'd2', status: 'pending', updatedAt: '2026-07-08T11:00:00Z' }),
+  ];
+  const s = summarizeKnowledge({ scope: 'team:acme', entries, now: NOW });
+  assert.equal(s.items, 1);
 });

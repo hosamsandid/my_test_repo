@@ -192,6 +192,57 @@ function buildSkillProvenance({ from, to, teamId, entryIds, candidate, promotedB
 }
 
 // ---------------------------------------------------------------------------
+// Directed cross-team sharing (human-in-control lateral knowledge flow)
+// ---------------------------------------------------------------------------
+
+// Promotion moves knowledge UP the ladder (agent→team→global). Sharing moves it
+// SIDEWAYS: a human copies an existing skill from one team's pool (or the global
+// pool) into ANOTHER specific team's pool, so a lesson learned in one stage/team
+// reaches another team directly instead of only via a broadcast-to-global. It is
+// always operator-initiated (never automated) and provenance-preserving.
+//
+// Validate a share request. Returns { ok, error?, from, name, sourceTeamId?,
+// targetTeamId }. `from` ∈ "team" (copy from sourceTeamId's pool) | "global"
+// (copy from the global pool). The target must differ from the source team.
+const SHARE_SOURCES = ['team', 'global'];
+function validateShareToTeam(input, { teamIdRe = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/ } = {}) {
+  const b = input && typeof input === 'object' ? input : {};
+  const from = typeof b.from === 'string' ? b.from.trim() : '';
+  if (!SHARE_SOURCES.includes(from)) return { ok: false, error: `from must be one of ${SHARE_SOURCES.join('|')}` };
+  const name = typeof b.name === 'string' ? b.name.trim() : '';
+  if (!name || !SKILL_NAME_RE.test(name)) return { ok: false, error: 'invalid skill name' };
+  const targetTeamId = typeof b.targetTeamId === 'string' ? b.targetTeamId.trim() : '';
+  if (!teamIdRe.test(targetTeamId)) return { ok: false, error: 'invalid targetTeamId' };
+  let sourceTeamId = '';
+  if (from === 'team') {
+    sourceTeamId = typeof b.sourceTeamId === 'string' ? b.sourceTeamId.trim() : '';
+    if (!teamIdRe.test(sourceTeamId)) return { ok: false, error: 'invalid sourceTeamId' };
+    if (sourceTeamId === targetTeamId) return { ok: false, error: 'source and target team are the same' };
+  }
+  return { ok: true, from, name, sourceTeamId: sourceTeamId || null, targetTeamId };
+}
+
+// Stamp a shared skill's provenance so the lineage records that it arrived by a
+// lateral share (who, from where, when) rather than an up-the-ladder promotion.
+// Preserves the source skill's original provenance under `sharedFrom` so the
+// trace back to the KB entries that first justified it survives the copy.
+function buildShareProvenance({ from, sourceTeamId, targetTeamId, name, sourceProvenance, sharedBy, now } = {}) {
+  const ts = typeof now === 'string' && now.trim() ? now.trim() : new Date().toISOString();
+  const src = sourceProvenance && typeof sourceProvenance === 'object' ? sourceProvenance : {};
+  return {
+    ...src,
+    teamId: targetTeamId,
+    toTier: 'team',
+    sharedFrom: { tier: from, teamId: sourceTeamId || null, name },
+    sharedBy: typeof sharedBy === 'string' && sharedBy.trim() ? sharedBy.trim() : 'operator',
+    sharedAt: ts,
+    // entryIds/originTeamId/originAgents carry forward from src so the T1→T2 edge
+    // + drill-down still resolve; originTeamId marks where the knowledge was born.
+    originTeamId: src.originTeamId || sourceTeamId || null,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Promotion gate policy (Phase 4) — MIRRORS orchestrator/knowledge-store.js
 // resolvePromotionGates. The two services never require each other's code, so the
 // resolver + defaults are duplicated deliberately (same discipline as the two-
@@ -257,6 +308,9 @@ module.exports = {
   buildSkillDraftRequest,
   validatePromotion,
   buildSkillProvenance,
+  SHARE_SOURCES,
+  validateShareToTeam,
+  buildShareProvenance,
   resolvePromotionGates,
   promotionSuggestionView,
 };

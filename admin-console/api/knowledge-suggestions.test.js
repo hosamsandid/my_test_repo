@@ -8,6 +8,8 @@ const {
   buildHeuristicSkillDraft,
   validatePromotion,
   buildSkillProvenance,
+  validateShareToTeam,
+  buildShareProvenance,
   promotionSuggestionView,
   resolvePromotionGates,
 } = require('./knowledge-suggestions');
@@ -131,4 +133,42 @@ test('resolvePromotionGates: defaults + team>global forced review + fail-safe cl
   assert.equal(g['team>team'], 'review'); // invalid → review
   assert.equal(g['team>global'], 'review'); // forced
   assert.equal(g['agent>team'], 'auto');
+});
+
+// ── validateShareToTeam / buildShareProvenance (directed cross-team sharing) ────
+
+test('validateShareToTeam: from team requires distinct source + target', () => {
+  const ok = validateShareToTeam({ from: 'team', name: 'poller', sourceTeamId: 'acme', targetTeamId: 'beta' });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.sourceTeamId, 'acme');
+  assert.equal(ok.targetTeamId, 'beta');
+
+  assert.equal(validateShareToTeam({ from: 'team', name: 'x', sourceTeamId: 'acme', targetTeamId: 'acme' }).ok, false);
+  assert.equal(validateShareToTeam({ from: 'team', name: 'x', targetTeamId: 'beta' }).ok, false); // no source
+});
+
+test('validateShareToTeam: from global needs only a target (source is the global pool)', () => {
+  const ok = validateShareToTeam({ from: 'global', name: 'cobol-analysis', targetTeamId: 'beta' });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.sourceTeamId, null);
+});
+
+test('validateShareToTeam: rejects bad source, name, target', () => {
+  assert.equal(validateShareToTeam({ from: 'agent', name: 'x', targetTeamId: 'beta' }).ok, false);
+  assert.equal(validateShareToTeam({ from: 'global', name: 'bad name!', targetTeamId: 'beta' }).ok, false);
+  assert.equal(validateShareToTeam({ from: 'global', name: 'x', targetTeamId: '' }).ok, false);
+});
+
+test('buildShareProvenance: preserves origin, records the lateral share', () => {
+  const src = { entryIds: ['9f3a12bc7de0'], originTeamId: 'acme', originAgents: ['acme-dev-1'], promotedBy: 'operator' };
+  const p = buildShareProvenance({
+    from: 'team', sourceTeamId: 'acme', targetTeamId: 'beta', name: 'poller',
+    sourceProvenance: src, sharedBy: 'alice', now: NOW,
+  });
+  assert.deepEqual(p.entryIds, ['9f3a12bc7de0']); // provenance link survives the copy
+  assert.equal(p.teamId, 'beta');
+  assert.equal(p.originTeamId, 'acme'); // born in acme
+  assert.deepEqual(p.sharedFrom, { tier: 'team', teamId: 'acme', name: 'poller' });
+  assert.equal(p.sharedBy, 'alice');
+  assert.equal(p.sharedAt, NOW);
 });

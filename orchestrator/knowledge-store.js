@@ -25,7 +25,13 @@ const crypto = require('crypto');
 
 const KINDS = ['fact', 'entity', 'convention'];
 const SOURCE_REF_KINDS = ['pr', 'issue', 'commit', 'branch', 'url'];
-const STATUSES = ['active', 'merged', 'promoted', 'archived'];
+// `pending` / `rejected` are overlay statuses stamped by the orchestrator onto
+// the canonical <kind>.jsonl when a team runs in supervised-review mode
+// (knowledgeReview): a newly-learned canonical entry the operator has not yet
+// approved is `pending`; one they rejected is `rejected`. Like `archived`, they
+// never originate on an agent shard (agents only ever write `active`) — they are
+// a property of the single-writer curated view. Reserved-but-tolerant on read.
+const STATUSES = ['active', 'merged', 'promoted', 'archived', 'pending', 'rejected'];
 
 const SCHEMA_VERSION = 1;
 const MANIFEST_VERSION = 1;
@@ -360,6 +366,21 @@ function knowledgeAutonomyLevel(env) {
   return n;
 }
 
+// Supervised-review mode (opt-in, per team, rides on the shared environment).
+// When true, a newly-learned canonical KB entry is held as `pending` and does
+// NOT enter the curated team KB — nor become promotable — until a human approves
+// it (a rejected one is hidden like an archive). Default false ⇒ today's
+// behaviour byte-for-byte (harvests flow straight into the shared KB). Orthogonal
+// to the 0..3 autonomy dial: it gates WHAT enters the KB, the dial gates HOW MUCH
+// automation acts on it. Accepts a boolean, or the string "true"/"1" for tolerant
+// hand-edited configs.
+function knowledgeReviewEnabled(env) {
+  const raw = env ? env.knowledgeReview : undefined;
+  if (raw === true) return true;
+  if (typeof raw === 'string') return raw === 'true' || raw === '1';
+  return false;
+}
+
 // Convergence config (Phase 3), read off the environment the team shares.
 // Clamped with safe defaults so any legacy env (no `knowledgeConvergence`)
 // behaves as { simThreshold: 0.6, convergenceThreshold: 2 } — no behaviour
@@ -449,6 +470,7 @@ module.exports = {
   kindFilePath,
   normalizeKnowledgeStore,
   knowledgeAutonomyLevel,
+  knowledgeReviewEnabled,
   knowledgeConvergenceConfig,
   resolvePromotionGates,
   knowledgeCurationConfig,

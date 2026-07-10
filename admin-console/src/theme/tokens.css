@@ -412,3 +412,7 @@ select option:disabled {
 }
 .kf-spin { animation: kf-spin 900ms linear infinite; }
 @keyframes kf-spin { to { transform: rotate(360deg); } }
+/* One-click retire (veto) on an item card — revealed on hover so it never
+   clutters the card, but is one click away. */
+.kf-item .kf-retire { opacity: 0; transition: opacity 120ms ease; }
+.kf-item:hover .kf-retire { opacity: 1; }

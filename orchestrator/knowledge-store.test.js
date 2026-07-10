@@ -20,6 +20,7 @@ const {
   kindFilePath,
   normalizeKnowledgeStore,
   knowledgeAutonomyLevel,
+  knowledgeReviewEnabled,
   knowledgeConvergenceConfig,
   resolvePromotionGates,
   knowledgeCurationConfig,
@@ -222,6 +223,19 @@ test('knowledgeAutonomyLevel defaults to 1 and clamps to 0..3', () => {
   assert.equal(knowledgeAutonomyLevel({ knowledgeAutonomy: 9 }), 3);
   assert.equal(knowledgeAutonomyLevel({ knowledgeAutonomy: -5 }), 0);
   assert.equal(knowledgeAutonomyLevel({ knowledgeAutonomy: 'nope' }), 1);
+});
+
+// --- knowledgeReviewEnabled -------------------------------------------------
+
+test('knowledgeReviewEnabled defaults off and is tolerant', () => {
+  assert.equal(knowledgeReviewEnabled(undefined), false);
+  assert.equal(knowledgeReviewEnabled({}), false);
+  assert.equal(knowledgeReviewEnabled({ knowledgeReview: false }), false);
+  assert.equal(knowledgeReviewEnabled({ knowledgeReview: true }), true);
+  assert.equal(knowledgeReviewEnabled({ knowledgeReview: 'true' }), true);
+  assert.equal(knowledgeReviewEnabled({ knowledgeReview: '1' }), true);
+  assert.equal(knowledgeReviewEnabled({ knowledgeReview: 'no' }), false);
+  assert.equal(knowledgeReviewEnabled({ knowledgeReview: 1 }), false); // number 1 is not the string "1"
 });
 
 // --- knowledgeConvergenceConfig ---------------------------------------------

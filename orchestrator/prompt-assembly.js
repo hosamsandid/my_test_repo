@@ -262,7 +262,15 @@ function envHasSkills(env) {
 //  10. ## Important Notes       (from base)
 //  11. any other base sections an operator added (preserved verbatim)
 //  12. ## Memory System (Shared — Blueprint Instance) (if a blueprint instance)
-function assembleClaudeMd({ base, agentPrompt, role, env, blueprintId = null, autonomous = false } = {}) {
+//
+// `promptRef` (e.g. "AGENT-PROMPT.md"): when set, the Agent Role block emits a
+// native Claude Code `@`-import that references the prompt file instead of
+// inlining its text. The seeded CLAUDE.md then stays constant while the authored
+// prompt lives in AGENT-PROMPT.md alone, so an edited prompt takes effect on the
+// next session with no CLAUDE.md rebuild and no duplicated copy to drift (#510).
+// Left null (the default) the prompt is inlined — the form the prompt-preview
+// endpoint uses so the operator sees the fully-resolved text.
+function assembleClaudeMd({ base, agentPrompt, role, env, blueprintId = null, autonomous = false, promptRef = null } = {}) {
   const { preamble, sections } = splitSections(base);
   const byHeading = new Map(sections.map((s) => [s.heading, s.text]));
   const consumed = new Set();
@@ -277,8 +285,13 @@ function assembleClaudeMd({ base, agentPrompt, role, env, blueprintId = null, au
   const intro = [preamble, interactionNote(autonomous)].filter(Boolean).join("\n\n");
   if (intro) blocks.push(intro);
 
-  // 2. Agent Role — hoisted to the top
-  blocks.push(`## Agent Role\n\n${String(agentPrompt == null ? "" : agentPrompt).trim()}`);
+  // 2. Agent Role — hoisted to the top. In reference mode emit the `@`-import
+  //    so the file, not its content, is the source of truth for the prompt.
+  if (promptRef) {
+    blocks.push(`## Agent Role\n\n@${promptRef}`);
+  } else {
+    blocks.push(`## Agent Role\n\n${String(agentPrompt == null ? "" : agentPrompt).trim()}`);
+  }
 
   // 3. Working Environment
   const envBlock = workingEnvironmentSection(env);

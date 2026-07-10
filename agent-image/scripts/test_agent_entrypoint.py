@@ -264,5 +264,76 @@ class ResultEventTokens(unittest.TestCase):
         self.assertEqual(tokens["cacheReadInput"], 0)
 
 
+class ResultEventContextTokens(unittest.TestCase):
+    """#509: `result.usage` is a turn-wide aggregate across every internal
+    API round-trip in the agentic tool-call loop (confirmed against a live
+    `claude --output-format stream-json` invocation of this repo's pinned CLI
+    version, matching anthropics/claude-code #6805) — it can be a large
+    multiple of the model's actual context size once a turn makes several
+    tool calls. `result.contextTokens` must instead reflect only the *last*
+    individual assistant-message's usage, threaded via the `usage_sink`
+    argument shared across every line of one `claude` invocation."""
+
+    def _assistant_line(self, usage):
+        import json
+        return json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}],
+                        "usage": usage},
+        })
+
+    def _result_line(self, usage):
+        import json
+        return json.dumps({"type": "result", "usage": usage})
+
+    def test_context_tokens_reflects_last_assistant_call_not_the_sum(self):
+        sink = {}
+        # Three internal round-trips within one turn, each reporting a growing
+        # cache-read count (as prompt caching would for a stable, resumed
+        # session) — the turn-wide `result.usage` sums all of them, but
+        # `contextTokens` must land on only the last one.
+        map_stream_json_line(self._assistant_line({
+            "input_tokens": 10, "output_tokens": 5,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 50_000,
+        }), "corr-1", sink)
+        map_stream_json_line(self._assistant_line({
+            "input_tokens": 10, "output_tokens": 5,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 60_000,
+        }), "corr-1", sink)
+        map_stream_json_line(self._assistant_line({
+            "input_tokens": 10, "output_tokens": 5,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 70_000,
+        }), "corr-1", sink)
+        events = map_stream_json_line(self._result_line({
+            # Simulates the CLI's turn-wide aggregate: ~3x a single call.
+            "input_tokens": 30, "output_tokens": 15,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 180_000,
+        }), "corr-1", sink)
+        result = next(e for e in events if e["type"] == "result")
+        self.assertEqual(result["tokens"]["cacheReadInput"], 180_000)  # aggregate, unchanged
+        self.assertEqual(result["contextTokens"], {
+            "input": 10, "output": 5, "cacheCreationInput": 0, "cacheReadInput": 70_000,
+        })
+
+    def test_context_tokens_none_when_no_sink_provided(self):
+        events = map_stream_json_line(self._result_line({"input_tokens": 10, "output_tokens": 5}), "corr-1")
+        result = next(e for e in events if e["type"] == "result")
+        self.assertIsNone(result["contextTokens"])
+
+    def test_context_tokens_none_when_no_assistant_message_seen(self):
+        sink = {}
+        events = map_stream_json_line(self._result_line({"input_tokens": 10, "output_tokens": 5}), "corr-1", sink)
+        result = next(e for e in events if e["type"] == "result")
+        self.assertIsNone(result["contextTokens"])
+
+    def test_assistant_message_without_usage_does_not_touch_sink(self):
+        import json
+        sink = {"input": 1, "output": 1, "cacheCreationInput": 0, "cacheReadInput": 1}
+        line = json.dumps({"type": "assistant",
+                            "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}})
+        map_stream_json_line(line, "corr-1", sink)
+        self.assertEqual(sink, {"input": 1, "output": 1, "cacheCreationInput": 0, "cacheReadInput": 1})
+
+
 if __name__ == "__main__":
     unittest.main()

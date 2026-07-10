@@ -671,9 +671,39 @@ def _append_event(room_id: str, event: dict) -> None:
         print(f"[Runner] session-log append failed: {exc}", file=sys.stderr)
 
 
-def _map_stream_json_line(line: str, correlation_id: str) -> list[dict]:
+def _normalize_usage_tokens(usage: dict) -> dict:
+    """Shape a Claude Code stream-json `usage` object (assistant-message or
+    result-event, same field names either way) into the token-count dict used
+    throughout the log/session pipeline. `input`/`output` pass through as-is
+    (may be None); the cache fields default to 0 since prompt caching often
+    omits them entirely on a cache-miss call."""
+    return {
+        "input": usage.get("input_tokens"),
+        "output": usage.get("output_tokens"),
+        "cacheCreationInput": usage.get("cache_creation_input_tokens") or 0,
+        "cacheReadInput": usage.get("cache_read_input_tokens") or 0,
+    }
+
+
+def _map_stream_json_line(line: str, correlation_id: str,
+                          usage_sink: dict | None = None) -> list[dict]:
     """Translate one NDJSON line from `claude --output-format stream-json --verbose`
     into normalized event objects. Mirrors session-log.js mapStreamJsonLine.
+
+    `usage_sink`, when given, is mutated in place with the normalized usage of
+    the most recent `assistant` message seen (#509): a single user-visible
+    turn commonly drives several internal API round-trips (one per tool call
+    in the agentic loop), and each shows up as its own `assistant` stream-json
+    event carrying that individual call's `message.usage` — the closest
+    available signal to "what the model actually holds in context" at a given
+    point, unlike the turn-wide `result` event's `usage`, which is an
+    aggregate/duplicate across every one of those round-trips (confirmed
+    against a live `claude --output-format stream-json` invocation of this
+    repo's pinned CLI version; see anthropics/claude-code #6805 for the same
+    behavior reported upstream). The caller threads one `usage_sink` dict
+    through an entire `claude` invocation so that by the time the `result`
+    event arrives, it holds the last individual call's usage rather than the
+    turn's summed total.
     """
     try:
         parsed = json.loads(line)
@@ -708,6 +738,9 @@ def _map_stream_json_line(line: str, correlation_id: str) -> list[dict]:
 
     elif ptype == "assistant":
         msg = parsed.get("message") or {}
+        if usage_sink is not None and isinstance(msg.get("usage"), dict):
+            usage_sink.clear()
+            usage_sink.update(_normalize_usage_tokens(msg["usage"]))
         for block in (msg.get("content") or []):
             if not isinstance(block, dict):
                 continue
@@ -754,10 +787,16 @@ def _map_stream_json_line(line: str, correlation_id: str) -> list[dict]:
         events.append({
             "type": "result",
             "durationMs": parsed.get("duration_ms"),
-            "tokens": {"input": usage.get("input_tokens"),
-                       "output": usage.get("output_tokens"),
-                       "cacheCreationInput": usage.get("cache_creation_input_tokens") or 0,
-                       "cacheReadInput": usage.get("cache_read_input_tokens") or 0},
+            # Turn-wide aggregate — correct for cost accounting (#494's
+            # costTotals legitimately sums this across turns) but NOT a
+            # context-size snapshot; see contextTokens below and #509.
+            "tokens": _normalize_usage_tokens(usage),
+            # #509: the last individual assistant-message usage observed this
+            # invocation (see usage_sink docs above) — a plausible estimate of
+            # what the model actually held in context at the end of the turn,
+            # unlike `tokens` above. None if no assistant message carried
+            # usage before this result (defensive; shouldn't normally happen).
+            "contextTokens": dict(usage_sink) if usage_sink else None,
             "costUsd": parsed.get("total_cost_usd"),
             "sessionId": parsed.get("session_id"),
             "result": parsed.get("result"),
@@ -1137,10 +1176,11 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     assistant_chunks: list[str] = []
     stderr_chunks: list[str] = []
     ask_question_input: dict | None = None  # first AskUserQuestion tool input (#447)
+    context_usage: dict = {}  # last assistant-message usage this invocation (#509)
 
     def handle_line(line: str) -> None:
         nonlocal final_result, observed_session, ask_question_input
-        for ev in _map_stream_json_line(line, correlation_id):
+        for ev in _map_stream_json_line(line, correlation_id, context_usage):
             _append_event(room_id, ev)  # log tab is unchanged (#447 AC6)
             if ev.get("type") == "system_init" and isinstance(ev.get("sessionId"), str):
                 observed_session = ev["sessionId"]

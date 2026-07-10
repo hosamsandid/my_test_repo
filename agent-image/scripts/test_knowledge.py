@@ -266,5 +266,50 @@ class BuildAgentSkillTests(unittest.TestCase):
         self.assertNotIn("$evt1", s["skill_md"])  # correlationId stays out of the body
 
 
+class TestVisibleEntries(unittest.TestCase):
+    """visible_entries hides non-curated lines from `knowledge search` / `list` so an
+    agent's query matches the operator's Knowledge Flow (and never surfaces a fact a
+    human has not yet approved)."""
+
+    def _e(self, eid, status="active", **over):
+        d = {"id": eid, "kind": "fact", "text": eid, "status": status,
+             "createdAt": "2026-07-08T09:00:00Z"}
+        d.update(over)
+        return d
+
+    def test_active_kept_hidden_statuses_dropped(self):
+        entries = [
+            self._e("a" * 12, "active"),
+            self._e("b" * 12, "promoted"),
+            self._e("c" * 12, "archived"),
+            self._e("d" * 12, "pending"),
+            self._e("e" * 12, "rejected"),
+            self._e("f" * 12, "merged", mergedInto="a" * 12),
+        ]
+        ids = [e["id"] for e in kn.visible_entries(entries)]
+        self.assertEqual(ids, ["a" * 12, "b" * 12])
+
+    def test_shard_active_plus_canonical_pending_same_id_is_hidden(self):
+        # shard copy (active) read first, canonical held copy (pending) read last —
+        # the held status must win so the fact never reaches the query.
+        entries = [
+            self._e("b" * 12, "active", createdAt="2026-07-08T09:00:00Z"),
+            self._e("b" * 12, "pending", createdAt="2026-07-08T09:00:00Z"),
+        ]
+        self.assertEqual(kn.visible_entries(entries), [])
+
+    def test_newer_active_update_beats_stale_pending(self):
+        entries = [
+            self._e("b" * 12, "pending", updatedAt="2026-07-08T09:00:00Z"),
+            self._e("b" * 12, "active", updatedAt="2026-07-08T11:00:00Z"),
+        ]
+        ids = [e["id"] for e in kn.visible_entries(entries)]
+        self.assertEqual(ids, ["b" * 12])  # approved later → visible again
+
+    def test_no_id_skipped_and_output_stable(self):
+        entries = [self._e("a" * 12), {"text": "no id"}, self._e("a" * 12)]
+        self.assertEqual([e["id"] for e in kn.visible_entries(entries)], ["a" * 12])
+
+
 if __name__ == "__main__":
     unittest.main()

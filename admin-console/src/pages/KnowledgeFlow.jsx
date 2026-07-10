@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import { Brain, RefreshCw, X, ExternalLink, GitBranch, Sparkles, Check, Wand2 } from 'lucide-react';
+import { Brain, RefreshCw, X, ExternalLink, GitBranch, Sparkles, Check, Wand2, Archive, Share2, ShieldCheck, Ban } from 'lucide-react';
 import { computeFlowLayout, assignCrossCoords } from './process/flow-layout';
 import KnowledgeFeed from '../components/KnowledgeFeed';
 
@@ -38,6 +38,7 @@ export default function KnowledgeFlow() {
   const [pulseId, setPulseId] = useState(null);
   const [suggestions, setSuggestions] = useState([]);
   const [promoting, setPromoting] = useState(null); // candidate under review
+  const [sharing, setSharing] = useState(null); // skill node being shared to a team
 
   const setScope = useCallback((s) => {
     const next = new URLSearchParams(params);
@@ -109,6 +110,54 @@ export default function KnowledgeFlow() {
       .catch(() => {});
   }, [parsed.id, loadGates, load]);
 
+  // Review queue (supervised-review mode) — facts held for human approval before
+  // they enter the shared team KB. Team scope only; empty unless review is on.
+  const [reviewQueue, setReviewQueue] = useState([]);
+  const loadReviewQueue = useCallback(() => {
+    if (parsed.kind !== 'team' || !parsed.id) { setReviewQueue([]); return; }
+    fetch(`/api/knowledge/review-queue?team=${encodeURIComponent(parsed.id)}`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => setReviewQueue(Array.isArray(d?.items) ? d.items : []))
+      .catch(() => {});
+  }, [parsed.kind, parsed.id]);
+  useEffect(() => { loadReviewQueue(); }, [loadReviewQueue]);
+
+  // The master control: set the 0..3 autonomy dial for the team.
+  const setAutonomy = useCallback((level) => {
+    if (!parsed.id) return;
+    fetch('/api/knowledge/autonomy', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId: parsed.id, level }),
+    })
+      .then(r => (r.ok ? r.json() : null))
+      .then(() => { loadGates(); load(); })
+      .catch(() => {});
+  }, [parsed.id, loadGates, load]);
+
+  // Toggle supervised-review mode for the team.
+  const setReviewMode = useCallback((enabled) => {
+    if (!parsed.id) return;
+    fetch('/api/knowledge/review-mode', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId: parsed.id, enabled }),
+    })
+      .then(r => (r.ok ? r.json() : null))
+      .then(() => { loadGates(); loadReviewQueue(); load(); })
+      .catch(() => {});
+  }, [parsed.id, loadGates, loadReviewQueue, load]);
+
+  // Approve / reject / reset a held entry, then refresh the queue + graph.
+  const reviewItem = useCallback((id, decision) => {
+    if (!parsed.id) return;
+    fetch(`/api/knowledge/item/${encodeURIComponent(id)}/review`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId: parsed.id, decision }),
+    })
+      .then(r => (r.ok ? r.json() : null))
+      .then(() => { loadReviewQueue(); load(); })
+      .catch(() => {});
+  }, [parsed.id, loadReviewQueue, load]);
+
   // Private (agent-tier) skills — agent scope only. The lift target (agent→team).
   const [privateSkills, setPrivateSkills] = useState([]);
   const [privateTeam, setPrivateTeam] = useState('default');
@@ -123,7 +172,8 @@ export default function KnowledgeFlow() {
 
   const onFeedEvent = useCallback((ev) => {
     if (ev?.type === 'suggestion' || ev?.type === 'promotion') { loadSuggestions(); load(); }
-  }, [loadSuggestions, load]);
+    if (ev?.type === 'harvest') loadReviewQueue(); // a held harvest lands in the queue
+  }, [loadSuggestions, load, loadReviewQueue]);
 
   // Apply filter chips to item nodes, then drop edges that lose an endpoint.
   const filtered = useMemo(() => {
@@ -266,6 +316,12 @@ export default function KnowledgeFlow() {
             <Canvas graph={filtered} layout={layout} pulseId={pulseId}
               selectedId={selected ? `item:${selected}` : null}
               onSelectItem={(node) => openItem(node.id.slice(5), node.teamId, node.archived)}
+              onRetireItem={(node) => {
+                if (window.confirm(`Retire this learning from the shared KB?\n\n"${node.text}"\n\nIt stays in git for audit and can be un-retired.`)) {
+                  archiveItem(node.id.slice(5), node.teamId, true);
+                }
+              }}
+              onShareSkill={(node) => setSharing(node)}
               onReviewPending={(node) => {
                 const s = suggestions.find(x => x.id === node.suggestionId);
                 if (s) setPromoting(s);
@@ -280,7 +336,10 @@ export default function KnowledgeFlow() {
           ) : (
             <>
               {parsed.kind === 'team' && gates && (
-                <GatePanel data={gates} onSet={setGate} />
+                <GatePanel data={gates} onSet={setGate} onSetAutonomy={setAutonomy} onSetReview={setReviewMode} />
+              )}
+              {parsed.kind === 'team' && reviewQueue.length > 0 && (
+                <ReviewQueuePanel items={reviewQueue} onDecide={reviewItem} />
               )}
               {parsed.kind === 'team' && suggestions.length > 0 && (
                 <SuggestionsPanel suggestions={suggestions} onReview={(s) => setPromoting(s)} />
@@ -303,6 +362,15 @@ export default function KnowledgeFlow() {
           teamId={parsed.id}
           onClose={() => setPromoting(null)}
           onDone={() => { setPromoting(null); loadSuggestions(); load(); }}
+        />
+      )}
+
+      {sharing && (
+        <ShareDialog
+          node={sharing}
+          teams={teams}
+          onClose={() => setSharing(null)}
+          onDone={() => { setSharing(null); load(); }}
         />
       )}
     </div>
@@ -513,10 +581,19 @@ const inp = {
   border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
   background: 'var(--eb-bg-app)', color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)',
 };
+const overlay = {
+  position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 50,
+  display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 'var(--eb-space-4)',
+};
+const dialog = {
+  maxWidth: '100%', maxHeight: '90vh', overflow: 'auto',
+  background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-lg)', padding: 'var(--eb-space-4)',
+};
 
 /* ── Canvas (lightweight purpose-built SVG) ─────────────────────────────────── */
 
-function Canvas({ graph, layout, pulseId, selectedId, onSelectItem, onSelectAgent, onReviewPending }) {
+function Canvas({ graph, layout, pulseId, selectedId, onSelectItem, onSelectAgent, onReviewPending, onRetireItem, onShareSkill }) {
   const { positions, width, height } = layout;
   return (
     <svg width={width} height={height} style={{ display: 'block' }}>
@@ -552,13 +629,15 @@ function Canvas({ graph, layout, pulseId, selectedId, onSelectItem, onSelectAgen
         }
         if (n.kind === 'item') {
           return <ItemCard key={n.id} node={n} x={x} y={y} w={p.w} h={p.h}
-            selected={n.id === selectedId} pulsing={pulsing} onClick={() => onSelectItem(n)} />;
+            selected={n.id === selectedId} pulsing={pulsing} onClick={() => onSelectItem(n)}
+            onRetire={onRetireItem} />;
         }
         if (n.kind === 'pending') {
           return <PendingCard key={n.id} node={n} x={x} y={y} w={p.w} h={p.h}
             onClick={() => onReviewPending && onReviewPending(n)} />;
         }
-        return <SkillCard key={n.id} node={n} x={x} y={y} w={p.w} h={p.h} />;
+        return <SkillCard key={n.id} node={n} x={x} y={y} w={p.w} h={p.h}
+          onShare={onShareSkill} />;
       })}
     </svg>
   );
@@ -595,11 +674,12 @@ function AgentCard({ node, x, y, w, h, onClick, pulsing }) {
   );
 }
 
-function ItemCard({ node, x, y, w, h, selected, pulsing, onClick }) {
+function ItemCard({ node, x, y, w, h, selected, pulsing, onClick, onRetire }) {
+  const canRetire = onRetire && !node.archived && node.status !== 'promoted';
   return (
-    <g className={pulsing ? 'kf-node-pulse' : undefined} style={{ cursor: 'pointer' }} onClick={onClick}>
+    <g className={`kf-item${pulsing ? ' kf-node-pulse' : ''}`} style={{ cursor: 'pointer' }} onClick={onClick}>
       {foreign(x, y, w, h, (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 3, opacity: node.archived ? 0.5 : 1 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3, opacity: node.archived ? 0.5 : 1, position: 'relative' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)' }}>
             <span style={{ width: 7, height: 7, borderRadius: 'var(--eb-radius-full)', background: KIND_COLORS[node.entryKind] || 'var(--eb-accent-primary)', flexShrink: 0 }} />
             <span style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.03em', color: 'var(--eb-text-muted)' }}>{node.entryKind}</span>
@@ -616,16 +696,31 @@ function ItemCard({ node, x, y, w, h, selected, pulsing, onClick }) {
             fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', lineHeight: 1.3,
             display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
           }}>{node.text}</div>
+          {canRetire && (
+            <button
+              className="kf-retire"
+              title="Retire this learning from the shared KB (non-destructive; kept in git)"
+              onClick={(e) => { e.stopPropagation(); onRetire(node); }}
+              style={{
+                position: 'absolute', top: -2, right: -2, display: 'flex', alignItems: 'center',
+                border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-full)',
+                background: 'var(--eb-bg-surface)', color: 'var(--eb-status-warning)', cursor: 'pointer',
+                padding: 2, lineHeight: 0,
+              }}>
+              <Archive size={12} />
+            </button>
+          )}
         </div>
       ), selected ? { borderColor: 'var(--eb-accent-primary)', boxShadow: '0 0 0 2px var(--eb-accent-muted)' } : {})}
     </g>
   );
 }
 
-function SkillCard({ node, x, y, w, h }) {
+function SkillCard({ node, x, y, w, h, onShare }) {
   const auto = node.promotedBy === 'curator';
   return (
-    <g>
+    <g style={onShare ? { cursor: 'pointer' } : undefined}
+      onClick={onShare ? () => onShare(node) : undefined}>
       {foreign(x, y, w, h, (
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
           <GitBranch size={13} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
@@ -635,6 +730,9 @@ function SkillCard({ node, x, y, w, h }) {
           </div>
           {auto && (
             <span title="Auto-promoted by the curator" style={{ flexShrink: 0, fontSize: 10, fontWeight: 600, color: 'var(--eb-status-warning)', border: '1px solid var(--eb-status-warning)', borderRadius: 4, padding: '1px 4px' }}>auto</span>
+          )}
+          {onShare && (
+            <Share2 size={12} title="Share to another team" style={{ flexShrink: 0, color: 'var(--eb-text-muted)' }} />
           )}
         </div>
       ), { background: 'var(--eb-bg-elevated)' })}
@@ -662,11 +760,22 @@ function PendingCard({ node, x, y, w, h, onClick }) {
   );
 }
 
-// Autonomy level + per-transition promotion gates (Phase 4). The operator's one
-// switch: flip a promotion arrow between "automatic" and "needs review".
-function GatePanel({ data, onSet }) {
+// The human-in-control panel: the master autonomy dial (0..3), the supervised-
+// review toggle, and the per-transition promotion gates. This is where the
+// operator consciously decides how much the system learns and shares, with plain-
+// language descriptions of each level — no hand-editing environment.json.
+const AUTONOMY_LEVELS = [
+  { level: 0, label: 'Off', desc: 'Private memory only — nothing is shared between agents.' },
+  { level: 1, label: 'Share', desc: 'Agents pool durable lessons into the shared team KB (real-time, queryable). No promotion.' },
+  { level: 2, label: 'Suggest', desc: 'Converged facts raise one-click promotion cards; you confirm each.' },
+  { level: 3, label: 'Auto-curate', desc: 'Converged facts auto-promote to team skills within the gate policy below.' },
+];
+
+function GatePanel({ data, onSet, onSetAutonomy, onSetReview }) {
   const gates = (data && data.gates) || {};
   const autonomy = data ? data.autonomy : 1;
+  const review = !!(data && data.review);
+  const current = AUTONOMY_LEVELS.find(l => l.level === autonomy) || AUTONOMY_LEVELS[1];
   const LABELS = {
     'team>team': 'KB → team skill',
     'team>global': 'team → global',
@@ -699,16 +808,170 @@ function GatePanel({ data, onSet }) {
   return (
     <div style={{ padding: 'var(--eb-space-3) var(--eb-space-4)', borderBottom: '1px solid var(--eb-border-default)' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-        <Sparkles size={14} style={{ color: 'var(--eb-accent-primary)' }} />
-        <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>Promotion gates</span>
-        <span style={{ fontSize: 10, color: 'var(--eb-text-muted)', marginLeft: 'auto' }}>autonomy {autonomy}</span>
+        <ShieldCheck size={14} style={{ color: 'var(--eb-accent-primary)' }} />
+        <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>Learning controls</span>
       </div>
+
+      {/* Master autonomy dial 0..3 */}
+      <div style={{ fontSize: 10, color: 'var(--eb-text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>Autonomy</div>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
+        {AUTONOMY_LEVELS.map(({ level, label }) => {
+          const active = level === autonomy;
+          return (
+            <button key={level} onClick={() => onSetAutonomy && onSetAutonomy(level)}
+              title={`Level ${level} — ${label}`}
+              style={{
+                flex: 1, fontSize: 10, fontWeight: 600, cursor: 'pointer', borderRadius: 4, padding: '3px 2px',
+                border: `1px solid ${active ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+                color: active ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)',
+                background: active ? 'var(--eb-accent-muted)' : 'transparent',
+              }}>
+              {level} {label}
+            </button>
+          );
+        })}
+      </div>
+      <div style={{ fontSize: 10, color: 'var(--eb-text-muted)', marginBottom: 10 }}>{current.desc}</div>
+
+      {/* Supervised-review toggle */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', marginBottom: 2 }}>
+        <span style={{ flex: 1, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+          Supervised review
+        </span>
+        <button
+          onClick={() => onSetReview && onSetReview(!review)}
+          title="Hold newly-learned facts for human approval before they enter the shared KB"
+          disabled={autonomy < 1}
+          style={{
+            fontSize: 10, fontWeight: 600, cursor: autonomy < 1 ? 'not-allowed' : 'pointer', borderRadius: 4, padding: '2px 6px',
+            border: `1px solid ${review ? 'var(--eb-status-warning)' : 'var(--eb-border-default)'}`,
+            color: review ? 'var(--eb-status-warning)' : 'var(--eb-text-muted)',
+            background: 'transparent', opacity: autonomy < 1 ? 0.5 : 1,
+          }}>
+          {review ? 'on — approve first' : 'off — auto-share'}
+        </button>
+      </div>
+      <div style={{ fontSize: 10, color: 'var(--eb-text-muted)', marginBottom: 10 }}>
+        {review
+          ? 'New facts are held in the review queue until you approve them.'
+          : 'New facts flow straight into the shared KB.'}
+      </div>
+
+      {/* Promotion gates */}
+      <div style={{ fontSize: 10, color: 'var(--eb-text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 2 }}>Promotion gates</div>
       {autonomy < 3 && (
         <div style={{ fontSize: 10, color: 'var(--eb-text-muted)', marginBottom: 4 }}>
-          Auto-promotion runs at autonomy 3. Gates below take effect there.
+          Auto-promotion runs at autonomy 3. Gates take effect there.
         </div>
       )}
       {['team>team', 'agent>team', 'team>global'].map(row)}
+    </div>
+  );
+}
+
+// Review queue (supervised-review mode): facts held for human approval before
+// they enter the shared team KB. Each card = one held fact with its origin +
+// convergence; the operator approves (lets it in) or rejects (keeps it out).
+function ReviewQueuePanel({ items, onDecide }) {
+  return (
+    <div style={{ borderBottom: '1px solid var(--eb-border-default)', maxHeight: '46%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+        padding: 'var(--eb-space-2) var(--eb-space-3)', borderBottom: '1px solid var(--eb-border-default)',
+        color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)',
+        fontWeight: 'var(--eb-font-semibold)', textTransform: 'uppercase', letterSpacing: '0.04em',
+      }}>
+        <ShieldCheck size={13} style={{ color: 'var(--eb-status-warning)' }} />
+        <span>Awaiting your review</span>
+        <span style={{ marginLeft: 'auto', color: 'var(--eb-text-muted)' }}>{items.length}</span>
+      </div>
+      <div style={{ overflowY: 'auto', padding: 'var(--eb-space-2)' }}>
+        {items.map(it => (
+          <div key={it.id} style={{
+            border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+            padding: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-2)', background: 'var(--eb-bg-app)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+              <span style={{ width: 7, height: 7, borderRadius: 'var(--eb-radius-full)', background: KIND_COLORS[it.entryKind] || 'var(--eb-accent-primary)', flexShrink: 0 }} />
+              <span style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', color: 'var(--eb-text-muted)' }}>{it.entryKind}</span>
+              <span style={{ marginLeft: 'auto', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{it.originAgent}</span>
+            </div>
+            <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', wordBreak: 'break-word' }}>{it.text}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)' }}>
+              {it.rejected && (
+                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error, var(--eb-status-warning))' }}>rejected</span>
+              )}
+              <button onClick={() => onDecide(it.id, 'approved')} title="Let this fact into the shared KB"
+                style={{ ...primaryBtn, marginLeft: it.rejected ? 0 : 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
+                <Check size={12} /> Approve
+              </button>
+              {!it.rejected && (
+                <button onClick={() => onDecide(it.id, 'rejected')} title="Keep this fact out of the shared KB"
+                  style={{ ...btn(false), display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <Ban size={12} /> Reject
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Directed cross-team sharing: copy this skill into another team's pool so a
+// lesson learned in one team/stage reaches another team directly (lateral flow),
+// preserving provenance. Operator picks the destination team.
+function ShareDialog({ node, teams, onClose, onDone }) {
+  const name = node.label;
+  const sourceIsTeam = node.tier === 'team';
+  const sourceTeamId = sourceIsTeam ? (node.teamId || node.originTeamId || null) : null;
+  const options = (Array.isArray(teams) ? teams : []).filter(t => t !== sourceTeamId);
+  const [target, setTarget] = useState(options[0] || '');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  const share = () => {
+    setBusy(true); setErr('');
+    fetch('/api/knowledge/share-to-team', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: sourceIsTeam ? 'team' : 'global', name, sourceTeamId, targetTeamId: target }),
+    })
+      .then(async r => { const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || 'share failed'); return d; })
+      .then(() => onDone())
+      .catch(e => { setErr(e.message); setBusy(false); });
+  };
+
+  return (
+    <div onClick={onClose} style={overlay}>
+      <div onClick={(e) => e.stopPropagation()} style={{ ...dialog, width: 420 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 'var(--eb-space-3)' }}>
+          <Share2 size={16} style={{ color: 'var(--eb-accent-primary)' }} />
+          <span style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>Share skill to a team</span>
+          <button onClick={onClose} style={{ marginLeft: 'auto', ...btn(false), padding: 4 }}><X size={14} /></button>
+        </div>
+        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-3)' }}>
+          Copy <b style={{ color: 'var(--eb-text-primary)' }}>{name}</b> ({node.tier} skill{sourceTeamId ? ` from ${sourceTeamId}` : ''}) into another team's pool.
+          Provenance is preserved.
+        </div>
+        {options.length === 0 ? (
+          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>No other team to share with.</div>
+        ) : (
+          <>
+            <div style={lbl}>Target team</div>
+            <select value={target} onChange={(e) => setTarget(e.target.value)} style={{ ...inp, marginBottom: 'var(--eb-space-3)' }}>
+              {options.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </>
+        )}
+        {err && <div style={{ color: 'var(--eb-status-error, var(--eb-status-warning))', fontSize: 'var(--eb-text-xs)', marginBottom: 'var(--eb-space-2)' }}>{err}</div>}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)' }}>
+          <button onClick={onClose} style={btn(false)}>Cancel</button>
+          <button onClick={share} disabled={busy || !target} style={{ ...primaryBtn, opacity: (busy || !target) ? 0.6 : 1 }}>
+            <Share2 size={14} /> {busy ? 'Sharing…' : 'Share'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

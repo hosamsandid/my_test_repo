@@ -107,7 +107,10 @@ function entryTime(e) {
 // an id is archived, every copy of that id is dropped — a stale live shard copy
 // can't resurrect an archived entry. Additive: no archived records ⇒ identity ⇒
 // Phase 2/3 output byte-identical.
-function foldArchived(entries) {
+// Drop every copy of an id whose LATEST copy (by updatedAt/createdAt) has a status
+// the predicate hides. Shared by foldArchived + foldReview: same latest-per-id
+// tie-break, only the hidden-status test differs. Identity when nothing matches.
+function foldByStatus(entries, isHidden) {
   const list = Array.isArray(entries) ? entries.filter((e) => e && typeof e === 'object') : [];
   const latest = new Map();
   for (const e of list) {
@@ -116,10 +119,42 @@ function foldArchived(entries) {
     const prev = latest.get(id);
     if (!prev || entryTime(e) >= entryTime(prev)) latest.set(id, e);
   }
-  const archivedIds = new Set();
-  for (const [id, e] of latest) if (e.status === 'archived') archivedIds.add(id);
-  if (archivedIds.size === 0) return list;
-  return list.filter((e) => !(typeof e.id === 'string' && archivedIds.has(e.id)));
+  const hiddenIds = new Set();
+  for (const [id, e] of latest) if (isHidden(e.status)) hiddenIds.add(id);
+  if (hiddenIds.size === 0) return list;
+  return list.filter((e) => !(typeof e.id === 'string' && hiddenIds.has(e.id)));
+}
+
+function foldArchived(entries) {
+  return foldByStatus(entries, (s) => s === 'archived');
+}
+
+// ---------------------------------------------------------------------------
+// Review folding (supervised-review mode)
+// ---------------------------------------------------------------------------
+
+// Drop entries a team running in supervised-review mode has not yet let into the
+// curated KB: the orchestrator collector stamps an un-approved canonical entry
+// status:"pending" and a rejected one status:"rejected". Like foldArchived this
+// decides per id by the LATEST copy (updatedAt/createdAt) — the collector always
+// refreshes the overlay copy's updatedAt, so a stale live shard copy can't
+// resurrect a held entry into the active graph. These entries surface only in the
+// review queue (selectReviewQueue), never the active lanes. Additive: no
+// pending/rejected records ⇒ identity ⇒ non-review teams are byte-identical.
+const REVIEW_HELD = new Set(['pending', 'rejected']);
+function foldReview(entries) {
+  return foldByStatus(entries, (s) => REVIEW_HELD.has(s));
+}
+
+// The inverse of foldReview for the review-queue endpoint: the deduped set of
+// entries whose latest copy is pending/rejected, newest first, as item views.
+// `only` optionally narrows to one status ("pending" | "rejected").
+function selectReviewQueue(entries, { only = null } = {}) {
+  const merged = foldMerges(Array.isArray(entries) ? entries : []);
+  const deduped = dedupById(merged);
+  const held = deduped.filter((e) => REVIEW_HELD.has(e && e.status) && (!only || e.status === only));
+  held.sort((a, b) => entryTime(b) - entryTime(a));
+  return held.map(toItem);
 }
 
 // Collapse entries that share an `id` — the same KB entry seen across multiple
@@ -178,6 +213,8 @@ function toItem(e) {
     originAgent,
     status: typeof e.status === 'string' ? e.status : 'active',
     archived: e.status === 'archived',
+    pending: e.status === 'pending',
+    rejected: e.status === 'rejected',
     convergence,
     convergenceCount: convergence.length,
     converged: convergence.length >= 2,
@@ -225,8 +262,12 @@ function buildKnowledgeGraph({ scope, entries = [], skills = [], agents = [], no
 
   // includeArchived keeps status:"archived" entries visible (so the operator can
   // find + unarchive them); the default view folds them out.
+  // Fold pipeline: merges → archived (unless includeArchived) → review-held
+  // (pending/rejected always fold out of the active graph; they live in the
+  // review queue). Each fold is identity when its status isn't present.
   const merged = foldMerges(entries);
-  const allItems = dedupById(includeArchived ? merged : foldArchived(merged)).map(toItem);
+  const afterArchive = includeArchived ? merged : foldArchived(merged);
+  const allItems = dedupById(foldReview(afterArchive)).map(toItem);
   const agentMeta = new Map(
     (Array.isArray(agents) ? agents : [])
       .filter((a) => a && typeof a.id === 'string')
@@ -424,7 +465,9 @@ function buildKnowledgeGraph({ scope, entries = [], skills = [], agents = [], no
 function summarizeKnowledge({ scope, entries = [], now = Date.now() } = {}) {
   const parsed = parseScope(scope);
   const nowMs = typeof now === 'number' ? now : Date.parse(now) || Date.now();
-  const items = dedupById(foldArchived(foldMerges(entries))).map(toItem);
+  // Held (pending/rejected) entries aren't in the curated KB yet, so a badge
+  // must not count them as "learned" — fold them out like archived.
+  const items = dedupById(foldReview(foldArchived(foldMerges(entries)))).map(toItem);
   let scoped;
   if (parsed.kind === 'agent') {
     scoped = items.filter((it) => it.originAgent === parsed.id || it.convergence.includes(parsed.id));
@@ -454,6 +497,8 @@ module.exports = {
   dedupById,
   foldMerges,
   foldArchived,
+  foldReview,
+  selectReviewQueue,
   buildKnowledgeGraph,
   summarizeKnowledge,
 };

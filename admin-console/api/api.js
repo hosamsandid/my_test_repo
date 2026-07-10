@@ -16,7 +16,7 @@ const githubEventLog = require('./github-event-log');
 const { computeScope, visibleTeam, visibleAgent } = require('./scope');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
-const { buildKnowledgeGraph, summarizeKnowledge, parseScope } = require('./knowledge-graph');
+const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle } = require('./process-template');
@@ -3168,6 +3168,14 @@ function teamAutonomyLevel(env) {
   return Math.max(0, Math.min(3, n));
 }
 
+// Supervised-review flag (default off) — mirrors orchestrator knowledgeReviewEnabled.
+function knowledgeReviewOn(env) {
+  const raw = env ? env.knowledgeReview : undefined;
+  if (raw === true) return true;
+  if (typeof raw === 'string') return raw === 'true' || raw === '1';
+  return false;
+}
+
 // Promotion gate policy for a team (Phase 4) + its autonomy level, for the
 // Knowledge Flow gate switches.
 app.get('/api/knowledge/gates', (req, res) => {
@@ -3179,6 +3187,7 @@ app.get('/api/knowledge/gates', (req, res) => {
   res.json({
     team: teamId,
     autonomy: teamAutonomyLevel(env),
+    review: knowledgeReviewOn(env),
     gates: knowledgeSuggestions.resolvePromotionGates(env),
   });
 });
@@ -3205,6 +3214,142 @@ app.put('/api/knowledge/gates', apiLimiter, async (req, res) => {
   } catch (err) {
     res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
   }
+});
+
+// ── Autonomy dial (0..3) — the master human-in-control switch ──────────────────
+// The Knowledge Flow page drives this: it turns the whole learning system Off /
+// Share / Suggest / Auto-curate. Proxies to the orchestrator, the env-config
+// writer. GET /api/knowledge/gates already returns the current level for display.
+app.put('/api/knowledge/autonomy', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
+  const level = Number(req.body?.level);
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
+  if (!visibleTeam(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  if (!Number.isInteger(level) || level < 0 || level > 3) return res.status(400).json({ error: 'level must be an integer 0..3' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/autonomy`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, level }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) return res.status(502).json({ error: (out && out.error) || 'autonomy update failed' });
+    res.json({ ok: true, autonomy: out.autonomy });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// ── Supervised-review toggle ────────────────────────────────────────────────
+// When on, newly-learned facts are HELD for human approval before they enter the
+// shared team KB (see GET /api/knowledge/review-queue). Proxies to the orchestrator.
+app.put('/api/knowledge/review-mode', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
+  if (!visibleTeam(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  const enabled = req.body?.enabled === true || req.body?.enabled === 'true';
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/review-mode`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, enabled }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) return res.status(502).json({ error: (out && out.error) || 'review-mode update failed' });
+    res.json({ ok: true, review: out.review });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// ── Review queue — facts held for human approval before entering the shared KB ──
+// Returns the pending (and, with ?include=rejected, rejected) entries for a team,
+// each with the same provenance the drill-down uses, so the operator can judge a
+// fact before letting it into the team's knowledge. Empty unless the team runs in
+// supervised-review mode. Membership-scoped like the other knowledge reads.
+app.get('/api/knowledge/review-queue', async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.query.team === 'string' ? req.query.team : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  await refreshTeamCloneBestEffort(teamId);
+  const { entries, warnings } = gatherTeamEntries(teamId);
+  const only = req.query.include === 'rejected' ? null : 'pending';
+  const items = selectReviewQueue(entries, { only });
+  res.json({ team: teamId, review: knowledgeReviewOn(teamEnvironment(teamId)), items, warnings });
+});
+
+// ── Approve / reject / reset a held KB entry ────────────────────────────────
+app.post('/api/knowledge/item/:id/review', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
+  const id = typeof req.params.id === 'string' ? req.params.id : '';
+  const decision = typeof req.body?.decision === 'string' ? req.body.decision : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
+  if (!visibleTeam(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  if (!/^[0-9a-f]{12}$/.test(id)) return res.status(400).json({ error: 'invalid id' });
+  if (!['approved', 'rejected', 'reset'].includes(decision)) return res.status(400).json({ error: 'invalid decision' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/review`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, id, decision }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) return res.status(502).json({ error: (out && out.error) || 'review update failed' });
+    res.json({ ok: true, id, decision });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// ── Directed cross-team sharing — route a learned skill sideways ───────────────
+// A human copies an existing skill from the global pool (or one team's pool) into
+// ANOTHER team's pool, so knowledge learned in one stage/team reaches another
+// directly (not only via broadcast-to-global). Always operator-initiated;
+// provenance is preserved + stamped with the lateral share.
+app.post('/api/knowledge/share-to-team', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const v = knowledgeSuggestions.validateShareToTeam(req.body, { teamIdRe: AGENT_ID_RE });
+  if (!v.ok) return res.status(400).json({ error: v.error });
+  if (!visibleTeam(scope, v.targetTeamId)) return res.status(403).json({ error: 'forbidden (target team)' });
+  if (v.from === 'team' && !visibleTeam(scope, v.sourceTeamId)) return res.status(403).json({ error: 'forbidden (source team)' });
+
+  // Resolve the source skill dir (containment-guarded), read SKILL.md + provenance.
+  let srcDir;
+  if (v.from === 'team') {
+    srcDir = safeTeamSkillDir(v.sourceTeamId, v.name);
+    if (!srcDir) return res.status(400).json({ error: 'invalid source team or skill name' });
+  } else {
+    const poolSkillsBaseDir = path.resolve(POOL_DIR, 'skills');
+    srcDir = path.resolve(poolSkillsBaseDir, v.name);
+    const rel = path.relative(poolSkillsBaseDir, srcDir);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'invalid skill name' });
+  }
+  const srcSkill = path.join(srcDir, 'SKILL.md');
+  if (!fs.existsSync(srcSkill)) return res.status(404).json({ error: `skill '${v.name}' not found in the ${v.from} source` });
+
+  const dstDir = safeTeamSkillDir(v.targetTeamId, v.name);
+  if (!dstDir) return res.status(400).json({ error: 'invalid target team or skill name' });
+  if (fs.existsSync(path.join(dstDir, 'SKILL.md')) && !req.body.overwrite) {
+    return res.status(409).json({ error: `Skill '${v.name}' already exists in team '${v.targetTeamId}'`, exists: true });
+  }
+
+  const sharedBy = (req.user && (req.user.sub || req.user.username)) || 'operator';
+  const prov = knowledgeSuggestions.buildShareProvenance({
+    from: v.from, sourceTeamId: v.sourceTeamId, targetTeamId: v.targetTeamId, name: v.name,
+    sourceProvenance: readSkillProvenance(srcDir), sharedBy,
+  });
+  try {
+    let md;
+    try { md = fs.readFileSync(srcSkill, 'utf8'); } catch { md = ''; }
+    if (req.body.overwrite) fs.rmSync(dstDir, { recursive: true, force: true });
+    fs.mkdirSync(dstDir, { recursive: true });
+    fs.writeFileSync(path.join(dstDir, 'SKILL.md'), md.endsWith('\n') ? md : md + '\n');
+    fs.writeFileSync(path.join(dstDir, 'provenance.json'), JSON.stringify(prov, null, 2));
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to write shared skill: ${err.message}` });
+  }
+  res.status(201).json({ name: v.name, tier: 'team', teamId: v.targetTeamId, from: v.from, sourceTeamId: v.sourceTeamId, provenance: prov });
 });
 
 /* ─── Unified orchestration graph (Unified Orchestration #362 / #365) ───────

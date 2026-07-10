@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Wifi, WifiOff, Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight } from 'lucide-react';
+import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
 import ConfirmDialog from '../../components/ConfirmDialog';
@@ -7,7 +7,7 @@ import HandoffDialog from './HandoffDialog';
 import Message from './Message';
 import MessageInput from './MessageInput';
 import LearningBadge from '../../components/LearningBadge';
-import { resolveContextWindowTokens, computeContextFillLevel } from './context-window';
+import { resolveContextWindowTokens, computeContextFillLevel, formatTokenCountK } from './context-window';
 
 // Default prompt sent when the user clicks "Reset & learn". The agent
 // continues in its current Claude session (so it has full conversational
@@ -50,10 +50,14 @@ const LEARN_PROMPT =
  * @param {(id:string|null)=>void} onHoverCorrelation
  * @param {()=>void} [onWorkspaceChanged]  Notify parent after a chat upload lands
  *        in the workspace, so the Workspace tab can refresh its tree.
+ * @param {()=>void} [onTodoBoundary]  Notify parent (AgentChat.jsx) that a
+ *        session boundary just occurred — sending a message, resetting the
+ *        session, or a trigger-started run's first message arriving — so the
+ *        pinned To-Do panel from a previous session gets dismissed (#273).
  */
 export default function ChatPanel({
   agent, roomId, onRoomCreated, hoveredCorrelationId, onHoverCorrelation, sessionCost, contextFill,
-  onWorkspaceChanged,
+  onWorkspaceChanged, onTodoBoundary,
 }) {
   const [messages, setMessages]      = useState([]);
   const [loading, setLoading]        = useState(false);
@@ -93,12 +97,17 @@ export default function ChatPanel({
   // override. `modelSwitching` blocks rapid double-clicks during the PATCH.
   const [modelOptions, setModelOptions] = useState(null);
   const [modelSwitching, setModelSwitching] = useState(false);
-  // Context-window fill for the last completed request (#471). `contextFill`
-  // (from the parent, fed by SessionLogPanel) carries the raw input-token
-  // count + the model actually used; resolve that model's window size against
-  // the agent's catalog (falling back to the known-Claude-family table) and
-  // derive the percentage + warning level. Hidden entirely when the window
-  // size can't be determined (AC 7) rather than showing a misleading value.
+  // Context-window fill for the last completed request (#471, cache-tokens
+  // fix #490). `contextFill` (from the parent, fed by SessionLogPanel) carries
+  // the token count actually held in context — input + cache-creation +
+  // cache-read tokens, since a `--resume`d session runs on prompt caching and
+  // most of its held context lives in the cache fields, not `input` — plus
+  // the model actually used. Resolve that model's window size against the
+  // agent's catalog (falling back to the known-Claude-family table) and
+  // derive the warning level from the (corrected) ratio; the toolbar renders
+  // it as a rounded "<used>K / <limit>K" token count rather than a
+  // percentage. Hidden entirely when the window size can't be determined
+  // (AC 7) rather than showing a misleading value.
   const contextWindowTokens = useMemo(() => {
     if (!contextFill?.model) return null;
     const modelEntry = (modelOptions?.models || []).find(m => m.id === contextFill.model);
@@ -263,14 +272,21 @@ export default function ChatPanel({
   /* ─── 3. Live stream ─────────────────────────────────────────────── */
   const handleEvent = useCallback((ev) => {
     if (!ev?.event_id) return;
+    const triggerMeta = ev.content?.['io.aee.trigger'] || null;
     const incoming = {
       event_id: ev.event_id,
       sender:   ev.sender,
       ts:       ev.origin_server_ts,
       body:     ev.content?.body || '',
       msgtype:  ev.content?.msgtype || 'm.text',
-      'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
+      'io.aee.trigger':  triggerMeta,
     };
+
+    // A trigger-started run always posts this notice before invoking Claude
+    // (agent-entrypoint.py's `_post_trigger_notice`), so its arrival is the
+    // earliest observable signal that a new, unrelated session has begun in
+    // this room — close any stale To-Do window from the previous run (#273).
+    if (triggerMeta) onTodoBoundary?.();
 
     setMessages(prev => {
       // Already have the canonical event — skip.
@@ -297,10 +313,10 @@ export default function ChatPanel({
       }
       return [...prev, incoming];
     });
-  }, []);
+  }, [onTodoBoundary]);
 
   const sseUrl = roomId ? `/api/matrix/rooms/${encodeURIComponent(roomId)}/stream` : null;
-  const { status: sseStatus } = useSSE(sseUrl, {
+  useSSE(sseUrl, {
     onEvent: handleEvent,
     enabled: !!roomId,
   });
@@ -438,6 +454,7 @@ export default function ChatPanel({
 
   async function handleResetSession() {
     if (!sessionApiBase || resetting) return;
+    onTodoBoundary?.();
     setResetting(true);
     setError(null);
     try {
@@ -531,6 +548,7 @@ export default function ChatPanel({
     if (!roomId) return;
     const body = text.trim();
     if (!body) return;
+    onTodoBoundary?.();
     const optimisticId = `pending-${crypto.randomUUID()}`;
     const ts = Date.now();
     // We don't know the admin user id yet, so use a sentinel that won't match
@@ -725,7 +743,6 @@ export default function ChatPanel({
             </div>
           )}
         </div>
-        <ConnectionDot status={sseStatus} />
       </div>
 
       {/* Session-control toolbar. flexWrap lets the controls flow onto a
@@ -837,7 +854,7 @@ export default function ChatPanel({
             }}
           >
             <Gauge size={10} />
-            {contextFillLevel.pct}%
+            {formatTokenCountK(contextFill.tokensIn)} / {formatTokenCountK(contextWindowTokens)}
           </span>
         )}
         {sessionId && (
@@ -1240,22 +1257,3 @@ function sessionBtnStyle(isDisabled) {
   };
 }
 
-function ConnectionDot({ status }) {
-  let color = 'var(--eb-text-muted)';
-  let label = 'Idle';
-  let Icon  = WifiOff;
-  if (status === 'open')         { color = 'var(--eb-status-success)'; label = 'Live';         Icon = Wifi; }
-  else if (status === 'connecting')   { color = 'var(--eb-status-warning)'; label = 'Connecting…'; Icon = Loader2; }
-  else if (status === 'reconnecting') { color = 'var(--eb-status-warning)'; label = 'Reconnecting…'; Icon = Loader2; }
-
-  const animate = status === 'connecting' || status === 'reconnecting';
-  return (
-    <div title={label} style={{
-      display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
-      color, fontSize: 'var(--eb-text-xs)',
-    }}>
-      <Icon size={12} style={animate ? { animation: 'spin 1s linear infinite' } : undefined} />
-      <span>{label}</span>
-    </div>
-  );
-}

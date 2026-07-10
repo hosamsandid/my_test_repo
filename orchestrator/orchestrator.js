@@ -15,6 +15,7 @@ const { makeSkillSourceResolver } = require("./skill-source");
 const {
   normalizeKnowledgeStore,
   knowledgeAutonomyLevel,
+  knowledgeReviewEnabled,
   knowledgeConvergenceConfig,
   resolvePromotionGates,
   knowledgeCurationConfig,
@@ -75,6 +76,9 @@ const KNOWLEDGE_SUGGESTIONS_DIR = "/workspace/knowledge-suggestions";
 // as status:"archived" on every collector pass, so the archive is durable across
 // re-projections (shards, the source of truth, are never touched).
 const KNOWLEDGE_ARCHIVED_DIR = "/workspace/knowledge-archived";
+// Per-team operator review decisions (supervised-review mode). One JSON map per
+// team { <canonicalId>: "approved"|"rejected" }; an absent id is "pending".
+const KNOWLEDGE_REVIEW_DIR = "/workspace/knowledge-review";
 const TEMPLATE_WORKSPACE = "/template-workspace";
 // Agent id grammar — mirrors AGENT_ID_RE in admin-console/api/api.js. Used to
 // validate ids that arrive from outside (e.g. on import).
@@ -1689,21 +1693,44 @@ function resolveTeamEnvId(teamId) {
   return null;
 }
 
-// Persist one per-transition promotion gate onto the team's shared environment.
-// Reads the RAW environment.json (not the normalized view) so unrelated fields
-// round-trip untouched, sets knowledgePromotionGates[transition]=mode, writes back.
-function writeTeamPromotionGate(teamId, transition, mode) {
+// Read the team's shared environment.json RAW (not the normalized view, so
+// unrelated fields round-trip untouched), apply `mutate(raw)`, write it back, and
+// return `project(raw)`. The one place the three knowledge env-config writers
+// (gate / autonomy / review) share, so the round-trip can't drift between them.
+function patchTeamEnv(teamId, mutate, project) {
   const envId = resolveTeamEnvId(teamId);
   if (!envId) throw new Error(`no environment resolvable for team '${teamId}'`);
   const p = path.join(ENVIRONMENTS_DIR, envId, "environment.json");
   let raw;
   try { raw = JSON.parse(fs.readFileSync(p, "utf8")); } catch { throw new Error(`cannot read environment '${envId}'`); }
-  const gates = raw.knowledgePromotionGates && typeof raw.knowledgePromotionGates === "object"
-    ? { ...raw.knowledgePromotionGates } : {};
-  gates[transition] = mode;
-  raw.knowledgePromotionGates = gates;
+  mutate(raw);
   fs.writeFileSync(p, JSON.stringify(raw, null, 2));
-  return { envId, gates: resolvePromotionGates(raw) };
+  return { envId, ...project(raw) };
+}
+
+// Persist one per-transition promotion gate onto the team's shared environment.
+function writeTeamPromotionGate(teamId, transition, mode) {
+  return patchTeamEnv(teamId, (raw) => {
+    const gates = raw.knowledgePromotionGates && typeof raw.knowledgePromotionGates === "object"
+      ? { ...raw.knowledgePromotionGates } : {};
+    gates[transition] = mode;
+    raw.knowledgePromotionGates = gates;
+  }, (raw) => ({ gates: resolvePromotionGates(raw) }));
+}
+
+// Persist the 0..3 autonomy dial. Takes effect immediately for the orchestrator-
+// side convergence/suggestion/curation steps (they read the env fresh each pass);
+// the agent-side harvest hint + KB provisioning are read at spawn/seed, so a
+// running agent picks a level change up on its next rebuild (the UI says so).
+function writeTeamAutonomy(teamId, level) {
+  return patchTeamEnv(teamId, (raw) => { raw.knowledgeAutonomy = level; },
+    (raw) => ({ autonomy: knowledgeAutonomyLevel(raw) }));
+}
+
+// Persist the supervised-review toggle onto the team's shared environment.
+function writeTeamReview(teamId, enabled) {
+  return patchTeamEnv(teamId, (raw) => { raw.knowledgeReview = !!enabled; },
+    (raw) => ({ review: knowledgeReviewEnabled(raw) }));
 }
 
 // Ensure/refresh the canonical clone for a team. Best-effort, throttled per team
@@ -1888,6 +1915,95 @@ function writeArchivedIds(teamId, list) {
   fs.writeFileSync(p, JSON.stringify([...new Set(Array.isArray(list) ? list : [])], null, 2));
 }
 
+// Per-team operator review decisions for supervised-review mode: a map
+// { <canonicalId>: "approved" | "rejected" }. Same shared-volume JSON-per-team
+// pattern as the archived-id set. An id absent from the map is "pending" while
+// the team runs in review mode (knowledgeReview). Overlaid onto the canonical
+// <kind>.jsonl each collector pass (§ runConvergenceCollector), so a decision is
+// durable across re-projections and shards (the source of truth) stay untouched.
+function _reviewPath(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  return path.join(KNOWLEDGE_REVIEW_DIR, `${seg}.json`);
+}
+
+function readReviewDecisions(teamId) {
+  const p = _reviewPath(teamId);
+  if (!p) return {};
+  try {
+    const obj = JSON.parse(fs.readFileSync(p, "utf8"));
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return {};
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (/^[0-9a-f]{12}$/.test(k) && (v === "approved" || v === "rejected")) out[k] = v;
+    }
+    return out;
+  } catch { return {}; }
+}
+
+function writeReviewDecisions(teamId, decisions) {
+  const p = _reviewPath(teamId);
+  if (!p) return;
+  fs.mkdirSync(KNOWLEDGE_REVIEW_DIR, { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(decisions && typeof decisions === "object" ? decisions : {}, null, 2));
+}
+
+// Grandfather the knowledge a team already shares when review mode is switched
+// ON: mark every existing canonical id "approved" (unless already decided) so
+// turning review on holds only NEW learnings, never retroactively yanks facts the
+// team already relies on out of the KB. Mirrors the github-poller's "first poll
+// re-baselines, no flood" discipline. Best-effort — a failure just means the next
+// collector pass treats existing entries as pending (safe, if noisier).
+function baselineReviewApprovals(teamId, env) {
+  try {
+    refreshKnowledgeClone(teamId, { force: true, env });
+    const clonePath = knowledgeFeed.canonicalClonePath(KNOWLEDGE_CLONE_ROOT, teamId);
+    if (!clonePath || !fs.existsSync(path.join(clonePath, ".git"))) return;
+    const storeRel = _kbStoreRel(env);
+    const storeRoot = storeRel ? path.join(clonePath, storeRel) : clonePath;
+    const manifest = _loadCloneManifest(storeRoot);
+    const shardEntries = _readCloneShards(storeRoot, manifest);
+    if (shardEntries.length === 0) return;
+    const { simThreshold } = knowledgeConvergenceConfig(env);
+    const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+    const proj = knowledgeConvergence.buildCanonicalProjection(shardEntries, { simThreshold, now });
+    const decisions = readReviewDecisions(teamId);
+    for (const kind of KNOWLEDGE_KINDS) {
+      const bucket = proj.byKind[kind];
+      if (!bucket) continue;
+      for (const e of bucket.canonical) {
+        if (!decisions[e.id]) decisions[e.id] = "approved";
+      }
+    }
+    writeReviewDecisions(teamId, decisions);
+  } catch (err) {
+    console.warn(`[Orchestrator] review baseline for '${teamId}' failed: ${err.message}`);
+  }
+}
+
+// Record an operator's approve/reject on one canonical KB entry (supervised
+// review), then re-project + commit so the overlay is reflected + git-audited.
+// decision ∈ "approved" | "rejected" | "reset" (reset drops the decision, back to
+// pending). Best-effort on the git side, mirroring archiveKnowledgeEntry.
+function reviewKnowledgeEntry(teamId, id, decision) {
+  if (!/^[0-9a-f]{12}$/.test(id)) throw new Error("invalid id");
+  if (!["approved", "rejected", "reset"].includes(decision)) throw new Error("invalid decision");
+  let env = null;
+  const resolved = resolveTeamKbRepo(teamId);
+  if (resolved) env = resolved.env;
+  const decisions = readReviewDecisions(teamId);
+  if (decision === "reset") delete decisions[id];
+  else decisions[id] = decision;
+  writeReviewDecisions(teamId, decisions);
+  try {
+    refreshKnowledgeClone(teamId, { force: true, env });
+    runConvergenceCollector(teamId, env);
+  } catch (err) {
+    console.warn(`[Orchestrator] review re-projection for '${teamId}' failed: ${err.message}`);
+  }
+  return { id, decision };
+}
+
 // Push the canonical-file commit to agent-knowledge, fetch-rebase-retry (clean —
 // the orchestrator only ever writes canonical files, never a shard).
 function _pushKnowledgeClone(clonePath, gitEnv) {
@@ -1953,16 +2069,41 @@ function runConvergenceCollector(teamId, envArg) {
   // same durable-overlay pattern as promoted, so an archive survives re-projection.
   const archivedCanonicalIds = new Set(readArchivedIds(teamId));
 
+  // Supervised-review overlay: when review mode is on, a canonical entry the
+  // operator has not yet approved is stamped status:"pending" (held out of the
+  // curated KB) and a rejected one status:"rejected". Empty when review is off ⇒
+  // no overlay ⇒ byte-identical projection (idempotent, no git churn). The held
+  // set also gates the downstream suggestion/promotion steps below, so un-reviewed
+  // knowledge can never become a skill.
+  const reviewOn = knowledgeReviewEnabled(env);
+  const reviewDecisions = reviewOn ? readReviewDecisions(teamId) : {};
+  const pendingCanonicalIds = new Set();
+  const rejectedCanonicalIds = new Set();
+  if (reviewOn) {
+    for (const kind of KNOWLEDGE_KINDS) {
+      const bucket = proj.byKind[kind];
+      if (!bucket) continue;
+      for (const e of bucket.canonical) {
+        const d = reviewDecisions[e.id];
+        if (d === "rejected") rejectedCanonicalIds.add(e.id);
+        else if (d !== "approved") pendingCanonicalIds.add(e.id);
+      }
+    }
+  }
+  const heldCanonicalIds = new Set([...pendingCanonicalIds, ...rejectedCanonicalIds]);
+
   // Write the canonical <kind>.jsonl files (single-writer merged view), applying
-  // the promoted/archived-status overlay. Byte-identical to proj.lines when both
-  // overlays are empty, so idempotency (no spurious git churn) is preserved.
+  // the promoted/archived/review-status overlay. Byte-identical to proj.lines when
+  // all overlays are empty, so idempotency (no spurious git churn) is preserved.
   for (const kind of KNOWLEDGE_KINDS) {
     const bucket = proj.byKind[kind];
     if (!bucket) continue;
     let rel;
     try { rel = kindFilePath(manifest, kind); } catch { continue; }
     const file = path.join(storeRoot, rel);
-    const lines = _serializeCanonicalKind(bucket, promotedCanonicalIds, archivedCanonicalIds);
+    const lines = _serializeCanonicalKind(bucket, promotedCanonicalIds, archivedCanonicalIds, {
+      pendingIds: pendingCanonicalIds, rejectedIds: rejectedCanonicalIds,
+    });
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, lines.length ? lines.join("\n") + "\n" : "");
@@ -1994,16 +2135,24 @@ function runConvergenceCollector(teamId, envArg) {
   // Level 3 ("Auto-curate"): the curator auto-promotes converged clusters within
   // the gate policy and defers the rest to review cards. Level 2 ("Suggest"):
   // raise convergence cards only. Level 1: nothing more (merge already done).
+  //
+  // Supervised-review gate: a held (pending/rejected) cluster is NOT eligible for
+  // a suggestion or an auto-promotion — un-reviewed knowledge must never become a
+  // skill. Filtering the clusters here (rather than deep in the pure planners)
+  // keeps review a single, understandable choke-point.
+  const eligibleClusters = heldCanonicalIds.size === 0
+    ? proj.clusters
+    : proj.clusters.filter((c) => c && !heldCanonicalIds.has(c.canonicalId));
   const level = knowledgeAutonomyLevel(env);
   if (level >= 3) {
     try {
-      autoPromoteStep(teamId, env, proj.clusters, candidates, { convergenceThreshold, now });
+      autoPromoteStep(teamId, env, eligibleClusters, candidates, { convergenceThreshold, now });
     } catch (err) {
       console.warn(`[Orchestrator] auto-promotion for '${teamId}' failed: ${err.message}`);
     }
   } else if (level >= 2) {
     try {
-      const { raise, batch } = knowledgeConvergence.planNewSuggestions(proj.clusters, candidates, {
+      const { raise, batch } = knowledgeConvergence.planNewSuggestions(eligibleClusters, candidates, {
         threshold: convergenceThreshold,
         teamId,
         now,
@@ -2023,7 +2172,8 @@ function runConvergenceCollector(teamId, envArg) {
 // a status overlay: a canonical entry whose id was archived is written
 // status:"archived"; else one marked promoted is written status:"promoted"
 // (archived wins). Empty overlays ⇒ byte-identical to proj.lines[kind].
-function _serializeCanonicalKind(bucket, promotedIds, archivedIds) {
+function _serializeCanonicalKind(bucket, promotedIds, archivedIds, review = {}) {
+  const { pendingIds, rejectedIds } = review;
   const canon = bucket.canonical.slice().sort(
     (a, b) => (a.createdAt || "").localeCompare(b.createdAt || "") || String(a.id).localeCompare(String(b.id)),
   );
@@ -2031,7 +2181,17 @@ function _serializeCanonicalKind(bucket, promotedIds, archivedIds) {
   const out = [];
   for (const e of canon) {
     let entry = e;
-    if (archivedIds && archivedIds.has(e.id)) {
+    // Review overlay wins over promoted/archived (a held entry isn't in the KB at
+    // all yet). Status-only overlay (no synthetic updatedAt) exactly like the
+    // archived overlay: the admin-console reads the canonical file AFTER the shard
+    // copies, so foldReview's last-writer-wins tie-break already prefers the held
+    // canonical copy — and the projection stays a pure function of shards+decisions,
+    // so idempotent re-runs produce byte-identical files (no spurious git churn).
+    if (rejectedIds && rejectedIds.has(e.id)) {
+      if (e.status !== "rejected") entry = { ...e, status: "rejected" };
+    } else if (pendingIds && pendingIds.has(e.id)) {
+      if (e.status !== "pending") entry = { ...e, status: "pending" };
+    } else if (archivedIds && archivedIds.has(e.id)) {
       if (e.status !== "archived") entry = { ...e, status: "archived" };
     } else if (promotedIds && promotedIds.has(e.id) && e.status !== "promoted") {
       entry = { ...e, status: "promoted" };
@@ -6088,6 +6248,85 @@ async function main() {
           if (!PROMOTION_TRANSITIONS.includes(transition)) throw new Error('invalid transition');
           if (!GATE_MODES.includes(mode)) throw new Error('invalid mode');
           const result = writeTeamPromotionGate(teamId, transition, mode);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+        }
+      });
+      return;
+    }
+
+    // ── Set the 0..3 autonomy dial for a team (human-in-control) ────────────────
+    // The admin-console PUT /api/knowledge/autonomy proxies here.
+    if (req.method === 'POST' && req.url === '/internal/knowledge/autonomy') {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const p = JSON.parse(body || '{}');
+          const teamId = String(p.teamId || '');
+          const level = Number(p.level);
+          if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
+          if (!Number.isInteger(level) || level < 0 || level > 3) throw new Error('level must be an integer 0..3');
+          const result = writeTeamAutonomy(teamId, level);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+        }
+      });
+      return;
+    }
+
+    // ── Toggle supervised-review mode for a team ────────────────────────────────
+    if (req.method === 'POST' && req.url === '/internal/knowledge/review-mode') {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const p = JSON.parse(body || '{}');
+          const teamId = String(p.teamId || '');
+          if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
+          const enabled = p.enabled === true || p.enabled === 'true';
+          const resolved = resolveTeamKbRepo(teamId);
+          const env = resolved ? resolved.env : null;
+          // Grandfather existing KB before flipping on, so review holds only NEW facts.
+          if (enabled) baselineReviewApprovals(teamId, env);
+          const result = writeTeamReview(teamId, enabled);
+          // Re-project immediately so the canonical overlay matches the new mode
+          // (turning review OFF must release held entries now, not at the next
+          // daily backstop; turning ON stamps pending on anything not baselined).
+          try {
+            refreshKnowledgeClone(teamId, { force: true, env });
+            runConvergenceCollector(teamId, env);
+          } catch (err) {
+            console.warn(`[Orchestrator] review-mode re-projection for '${teamId}' failed: ${err.message}`);
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+        }
+      });
+      return;
+    }
+
+    // ── Approve / reject a held KB entry (supervised review) ─────────────────────
+    if (req.method === 'POST' && req.url === '/internal/knowledge/review') {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const p = JSON.parse(body || '{}');
+          const teamId = String(p.teamId || '');
+          const id = String(p.id || '');
+          const decision = String(p.decision || '');
+          if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
+          const result = reviewKnowledgeEntry(teamId, id, decision);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {

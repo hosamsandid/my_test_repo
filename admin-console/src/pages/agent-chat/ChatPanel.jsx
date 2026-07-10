@@ -2,11 +2,13 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
+import { useMaintenanceMode } from '../../context/MaintenanceModeContext';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import HandoffDialog from './HandoffDialog';
 import Message from './Message';
 import MessageInput from './MessageInput';
 import { resolveContextWindowTokens, computeContextFillLevel, formatTokenCountK } from './context-window';
+import { maintenanceBannerText } from './maintenance-banner';
 
 // Default prompt sent when the user clicks "Reset & learn". The agent
 // continues in its current Claude session (so it has full conversational
@@ -655,6 +657,8 @@ export default function ChatPanel({
 
   /* ─── Render ─────────────────────────────────────────────────────── */
   const disabled = agent.enabled === false;
+  const maintenance = useMaintenanceMode();
+  const maintenanceBanner = maintenanceBannerText(maintenance);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, position: 'relative' }}>
@@ -886,6 +890,19 @@ export default function ChatPanel({
         </div>
       )}
 
+      {maintenanceBanner && (
+        <div style={{
+          padding: 'var(--eb-space-3) var(--eb-space-4)',
+          background: 'var(--eb-status-warning-bg)',
+          borderBottom: '1px solid var(--eb-status-warning)',
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-primary)',
+          flexShrink: 0,
+        }}>
+          {maintenanceBanner}
+        </div>
+      )}
+
       {error && (
         <div role="alert" style={{
           padding: 'var(--eb-space-2) var(--eb-space-4)',
@@ -1064,7 +1081,7 @@ export default function ChatPanel({
       {/* Input */}
       <MessageInput
         onSend={handleSend}
-        disabled={disabled || !roomId || sending}
+        disabled={disabled || !roomId || sending || maintenance.active}
         agentDisplayName={agent.displayName || agent.id}
         onUpload={handleUpload}
         uploading={uploading}

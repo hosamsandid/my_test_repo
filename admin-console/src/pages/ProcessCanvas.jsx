@@ -265,7 +265,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     try {
       const tpl = imported.bundle;
       const d = await apiCall('POST', '/api/process/drafts', {
-        name: tpl.name || 'Imported process',
+        name: tpl.name || 'Imported flow',
         processTemplate: tpl,
       });
       if (onDraftsChanged) onDraftsChanged();

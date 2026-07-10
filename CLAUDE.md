@@ -195,6 +195,16 @@ X-Hook-Secret: <trigger.secret>
 - The server enqueues the event in `/workspace/agents/:agentId/pending-triggers.json`; the agent-runner drains this queue every 5 seconds.
 - **Security:** every HTTP trigger carries its own `secret` in `triggers.json` (auto-generated when created via the Admin Console). The webhook server validates `X-Hook-Secret` against that field; triggers without a secret are rejected with 401. There is intentionally no global "open" mode.
 - No payload processing — the POST body is ignored. The prompt defined in the trigger is what Claude receives.
+- **Known limitation (#504):** the queue in `pending-triggers.json` only protects against the *Maintenance Mode flag* being active — an event delivered while the receiving agent container (or the orchestrator's webhook server) is genuinely down for other reasons (crash, redeploy, host restart) is lost with no retry or catch-up, since there is no timestamp/cursor mechanism for `http` triggers (unlike `github-event`'s seen-id cursor, or `cron`'s Maintenance-Mode catch-up below). Prefer `github-event` triggers over `http` for anything that must not silently drop deliveries during downtime.
+
+**Maintenance Mode and triggers (#504)**
+
+While platform-wide Maintenance Mode (see the admin console's Maintenance page) is active, every agent's trigger scheduler checks the flag via the orchestrator's `GET /internal/maintenance-mode` before firing:
+
+- `cron` and `once` triggers whose scheduled time falls inside the window do not fire.
+- `http` / `github-event` events keep queuing in `pending-triggers.json` as normal, but are left undrained until maintenance ends, then processed normally.
+- For `cron`, exactly one catch-up run executes right after maintenance ends for a trigger that would have fired during the window — never a backlog flood, no matter how many fires were missed.
+- `once` and `github-event` triggers need no special catch-up logic: an overdue `once` self-heals on the next 60 s sync tick, and `github-event` is already polling-based and self-heals on poller restart — both already true across container restarts, independent of Maintenance Mode.
 
 **GitHub poller (`github-event` triggers)**
 

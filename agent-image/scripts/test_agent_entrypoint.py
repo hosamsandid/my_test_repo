@@ -13,8 +13,9 @@ or directly:
 """
 import importlib.util
 import unittest
+from datetime import timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 _MODULE_PATH = Path(__file__).resolve().parent / "agent-entrypoint.py"
 _spec = importlib.util.spec_from_file_location("agent_entrypoint", _MODULE_PATH)
@@ -241,6 +242,115 @@ class ResultEventTokens(unittest.TestCase):
         })
         self.assertEqual(tokens["cacheCreationInput"], 0)
         self.assertEqual(tokens["cacheReadInput"], 0)
+
+
+class MaintenanceModeGating(unittest.IsolatedAsyncioTestCase):
+    """#504: cron/once triggers must not fire while Maintenance Mode (#501) is
+    active, http/github-event pending entries must not be drained/processed
+    while active, and a cron trigger whose fire fell inside the window gets
+    exactly one catch-up run once it ends."""
+
+    def _scheduler(self):
+        client = AsyncMock()
+        return entrypoint.TriggerScheduler(
+            client=client, agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=None, blueprint_id=None,
+        )
+
+    async def test_maintenance_active_true_when_orchestrator_reports_active(self):
+        scheduler = self._scheduler()
+        with patch.object(entrypoint.TriggerScheduler, "_orch_get",
+                           return_value=(200, '{"ok": true, "active": true}')):
+            self.assertTrue(await scheduler._maintenance_active())
+
+    async def test_maintenance_active_false_when_orchestrator_reports_inactive(self):
+        scheduler = self._scheduler()
+        with patch.object(entrypoint.TriggerScheduler, "_orch_get",
+                           return_value=(200, '{"ok": true, "active": false}')):
+            self.assertFalse(await scheduler._maintenance_active())
+
+    async def test_maintenance_active_false_when_orchestrator_unreachable(self):
+        scheduler = self._scheduler()
+        with patch.object(entrypoint.TriggerScheduler, "_orch_get",
+                           return_value=(0, "connection refused")):
+            self.assertFalse(await scheduler._maintenance_active())
+
+    async def test_maintenance_active_false_on_malformed_body(self):
+        scheduler = self._scheduler()
+        with patch.object(entrypoint.TriggerScheduler, "_orch_get",
+                           return_value=(200, "not json")):
+            self.assertFalse(await scheduler._maintenance_active())
+
+    async def test_once_trigger_not_fired_while_maintenance_active(self):
+        scheduler = self._scheduler()
+        past = (entrypoint.datetime.now(entrypoint._TRIGGER_TZ)
+                - timedelta(minutes=1)).isoformat()
+        trigger = {"id": "o1", "type": "once", "at": past, "enabled": True}
+        with patch.object(entrypoint, "_load_triggers", return_value=[trigger]), \
+             patch.object(entrypoint, "_save_triggers") as save_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=True)):
+            await scheduler._sync()
+        save_mock.assert_not_called()
+        self.assertNotIn("o1", scheduler._fired_once)
+
+    async def test_once_trigger_fires_when_maintenance_inactive(self):
+        scheduler = self._scheduler()
+        past = (entrypoint.datetime.now(entrypoint._TRIGGER_TZ)
+                - timedelta(minutes=1)).isoformat()
+        trigger = {"id": "o1", "type": "once", "at": past, "enabled": True}
+        with patch.object(entrypoint, "_load_triggers", return_value=[trigger]), \
+             patch.object(entrypoint, "_save_triggers") as save_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._sync()
+        save_mock.assert_called_once()
+        self.assertIn("o1", scheduler._fired_once)
+
+    async def test_pending_loop_skips_processing_during_maintenance(self):
+        scheduler = self._scheduler()
+        process_mock = AsyncMock()
+
+        async def fake_maintenance_active():
+            scheduler._shutdown_event.set()
+            return True
+
+        with patch.object(scheduler, "_process_pending", process_mock), \
+             patch.object(scheduler, "_maintenance_active", fake_maintenance_active):
+            await scheduler._pending_loop()
+        process_mock.assert_not_called()
+
+    async def test_pending_loop_processes_when_maintenance_inactive(self):
+        scheduler = self._scheduler()
+
+        async def fake_process_pending():
+            scheduler._shutdown_event.set()
+
+        maintenance_mock = AsyncMock(return_value=False)
+        with patch.object(scheduler, "_process_pending", fake_process_pending), \
+             patch.object(scheduler, "_maintenance_active", maintenance_mock):
+            await scheduler._pending_loop()
+        maintenance_mock.assert_called_once()
+
+    async def test_cron_runner_skips_and_catches_up_exactly_once(self):
+        scheduler = self._scheduler()
+
+        async def fake_execute(_trigger):
+            scheduler._shutdown_event.set()
+
+        execute_mock = AsyncMock(side_effect=fake_execute)
+        maintenance_calls = []
+
+        async def fake_maintenance_active():
+            maintenance_calls.append(None)
+            # Active on the trigger's scheduled fire; inactive on the
+            # follow-up check inside the wait-it-out loop (maintenance ended).
+            return len(maintenance_calls) == 1
+
+        with patch.object(scheduler, "_execute", execute_mock), \
+             patch.object(scheduler, "_maintenance_active", fake_maintenance_active), \
+             patch.object(entrypoint.asyncio, "sleep", AsyncMock(return_value=None)):
+            await scheduler._cron_runner({"id": "c1", "type": "cron"}, "* * * * *")
+        execute_mock.assert_called_once()
+        self.assertEqual(len(maintenance_calls), 2)
 
 
 if __name__ == "__main__":

@@ -1552,6 +1552,13 @@ class TriggerScheduler:
                     continue
                 now = datetime.now(tz=_TRIGGER_TZ)
                 if now >= fire_at:
+                    # AC1 (#504): don't fire while Maintenance Mode is active.
+                    # No catch-up bookkeeping needed — the trigger is left in
+                    # place (overdue), so the next 60 s sync tick fires it as
+                    # soon as maintenance ends, same self-healing path this
+                    # already relies on across container restarts.
+                    if await self._maintenance_active():
+                        continue
                     # Guard against a re-fire if a pull re-introduces this once
                     # (e.g. the consumed-report below lagged or failed). #185
                     if tid in self._fired_once:
@@ -1606,6 +1613,22 @@ class TriggerScheduler:
                     raise
                 if self._shutdown_event.is_set():
                     return
+                if await self._maintenance_active():
+                    # AC1/AC3 (#504): this fire time fell inside a Maintenance
+                    # Mode window — skip it, then wait out the window and run
+                    # exactly one catch-up execution once it ends (no matter
+                    # how many further fire times would have landed while we
+                    # waited — croniter's next_fire recompute below always
+                    # looks forward from "now" again, so no backlog flood).
+                    print(f"[Runner:{self._agent_id}] cron {tid} fire skipped "
+                          f"(maintenance mode active) — will catch up once it ends",
+                          file=sys.stderr)
+                    while not self._shutdown_event.is_set() and await self._maintenance_active():
+                        await asyncio.sleep(5.0)
+                    if self._shutdown_event.is_set():
+                        return
+                    print(f"[Runner:{self._agent_id}] cron {tid} catching up "
+                          f"after maintenance mode ended", file=sys.stderr)
                 try:
                     await self._execute(trigger)
                 except Exception as exc:
@@ -1652,12 +1675,39 @@ class TriggerScheduler:
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             return 0, str(exc)
 
+    # -- maintenance mode (#504) ----------------------------------------------
+
+    async def _maintenance_active(self) -> bool:
+        """Best-effort check of the platform-wide Maintenance Mode flag (#501).
+
+        The state file (`/workspace/maintenance/state.json`) lives outside this
+        agent's own workspace subtree, which the default SubPath / per-agent-
+        volume isolation (Seam #3) does not mount — so we ask the orchestrator
+        (which always mounts the full pool volume) over the same internal HTTP
+        channel used for trigger/config pulls, rather than reading the file
+        directly. Any failure (unreachable, malformed) reads as "not active",
+        matching the admin-console module's own fail-open-to-inactive posture.
+        """
+        status, body = await asyncio.to_thread(self._orch_get, "/internal/maintenance-mode")
+        if status != 200:
+            return False
+        try:
+            data = json.loads(body)
+        except Exception:
+            return False
+        return bool(isinstance(data, dict) and data.get("active"))
+
     # -- pending queue (http / github-event) ---------------------------------
 
     async def _pending_loop(self) -> None:
         while not self._shutdown_event.is_set():
             try:
-                await self._process_pending()
+                # AC2/AC4 (#504): during Maintenance Mode, http/github-event
+                # entries keep queuing on the orchestrator/pending-file side
+                # (unaffected by this check) but are left undrained here, so
+                # they're processed normally once maintenance ends.
+                if not await self._maintenance_active():
+                    await self._process_pending()
             except Exception as exc:
                 print(f"[Runner:{self._agent_id}] pending error: {exc}",
                       file=sys.stderr)

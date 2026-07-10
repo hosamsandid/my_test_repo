@@ -13,6 +13,7 @@ const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
 const githubEventLog = require('./github-event-log');
+const maintenanceMode = require('./maintenance-mode');
 const { computeScope, visibleTeam, visibleAgent } = require('./scope');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
@@ -843,6 +844,29 @@ function httpPostJson(targetUrl, headers = {}, bodyObj = {}, timeoutMs = 30000) 
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
+});
+
+/* ─── Maintenance Mode (#501) ────────────────────────────────────────── */
+// Central, persisted status endpoint — the single source of truth other
+// components (chat UI, trigger processing) can query. No enforcement lives
+// here; that is scoped to follow-up issues under epic #508.
+
+app.get('/api/maintenance-mode', (req, res) => {
+  res.json(maintenanceMode.getStatus());
+});
+
+app.post('/api/maintenance-mode/activate', (req, res) => {
+  try {
+    maintenanceMode.activate(req.body && req.body.gracePeriodSec);
+    res.json(maintenanceMode.getStatus());
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.post('/api/maintenance-mode/deactivate', (req, res) => {
+  maintenanceMode.deactivate();
+  res.json(maintenanceMode.getStatus());
 });
 
 /* ─── Setup Status ──────────────────────────────────────────────────── */

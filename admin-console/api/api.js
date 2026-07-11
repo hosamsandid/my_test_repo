@@ -3267,10 +3267,18 @@ app.get('/api/agents/:id/private-skills', (req, res) => {
   // The lift target is the agent's SQUAD pool (/workspace/teams/<squad>/skills).
   const teamId = agentKnowledgeTeam({ ...cfg, id: cfg.id || id });
   if (!visibleAgent(scope, cfg)) return res.status(403).json({ error: 'forbidden' });
+  // Seed-time skill grants (env skills / member skillsOverride) land in the same
+  // per-agent skills dir — they are copies of pool skills, not agent-authored
+  // knowledge, so they are not "private" and must not surface as lift candidates.
+  const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+  const granted = new Set(Array.isArray(cfg.skillsOverride)
+    ? cfg.skillsOverride
+    : (env && Array.isArray(env.skills) ? env.skills : []));
   const skillsDir = path.join(AGENTS_DIR, id, 'skills');
   const skills = [];
   try {
     for (const name of fs.readdirSync(skillsDir)) {
+      if (granted.has(name)) continue;
       const dir = path.join(skillsDir, name);
       if (!fs.existsSync(path.join(dir, 'SKILL.md'))) continue;
       const prov = readSkillProvenance(dir);

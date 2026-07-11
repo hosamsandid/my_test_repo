@@ -236,9 +236,9 @@ export default function KnowledgeFlow() {
             <X size={12} style={{ cursor: 'pointer', color: 'var(--eb-text-muted)' }} onClick={() => setFilters(f => ({ ...f, q: '' }))} />
           )}
         </div>
-        {['all', 'fact', 'entity', 'convention'].map(k => (
+        {[['all', 'All kinds'], ['fact', 'Facts'], ['entity', 'Entities'], ['convention', 'Conventions']].map(([k, label]) => (
           <Chip key={k} active={filters.kind === k} onClick={() => setFilters(f => ({ ...f, kind: k }))}>
-            {k === 'all' ? 'All kinds' : `${k[0].toUpperCase()}${k.slice(1)}s`}
+            {label}
           </Chip>
         ))}
         <div style={{ width: 1, height: 20, background: 'var(--eb-border-default)' }} />

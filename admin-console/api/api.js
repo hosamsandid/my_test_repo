@@ -2970,6 +2970,33 @@ app.post('/api/knowledge/item/:id/archive', apiLimiter, async (req, res) => {
   }
 });
 
+// Nominate a KB entry for promotion (operator-initiated, from the agent-chat
+// Knowledge tab). Raises a promotion-suggestion card for the entry's convergence
+// cluster — works below the convergence threshold too; never promotes by itself.
+// Proxies the same orchestrator endpoint the `knowledge nominate` CLI uses.
+app.post('/api/knowledge/item/:id/nominate', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const { id } = req.params;
+  const agentId = typeof req.body?.agentId === 'string' ? req.body.agentId : '';
+  const note = typeof req.body?.note === 'string' ? req.body.note : undefined;
+  if (!/^[0-9a-f]{12}$/.test(id)) return res.status(400).json({ error: 'invalid id' });
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'agentId is required' });
+  const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
+  if (!cfg) return res.status(404).json({ error: 'agent not found' });
+  if (!visibleAgent(scope, cfg)) return res.status(403).json({ error: 'forbidden' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/agents/${encodeURIComponent(agentId)}/knowledge/nominate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entryId: id, note }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) return res.status(r.status === 400 ? 400 : 502).json({ error: (out && out.error) || 'nominate failed' });
+    res.json({ ok: true, candidate: out.candidate });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
 // Locate which of an agent's session logs holds a row with `correlationId`.
 // Returns the roomId (log filename sans .jsonl) or null. Capped read per file.
 function findRoomForCorrelation(agentId, correlationId) {

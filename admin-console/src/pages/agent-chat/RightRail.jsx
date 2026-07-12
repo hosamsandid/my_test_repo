@@ -6,8 +6,7 @@ import WorkspaceBrowser from './WorkspaceBrowser';
 import TriggersPanel from './TriggersPanel';
 import RunningSessionsPanel from './RunningSessionsPanel';
 import PromptPreviewPanel from './PromptPreviewPanel';
-import KnowledgeFeed from '../../components/KnowledgeFeed';
-import LearningBadge from '../../components/LearningBadge';
+import AgentKnowledgePanel from './AgentKnowledgePanel';
 import { apiCall } from '../../hooks/useApi';
 
 const TAB_KEY = 'agentChat.rightRailTab';
@@ -42,7 +41,7 @@ const TAB_KEYS = ['log', 'workspace', 'triggers', 'sessions', 'prompt', 'knowled
  */
 export default function RightRail({
   agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate,
-  todoCloseSignal = 0, workspaceRefreshKey = 0,
+  todoCloseSignal = 0, workspaceRefreshKey = 0, openTabRequest = null,
 }) {
   const [tab, setTab] = useState(() => {
     try {
@@ -54,6 +53,12 @@ export default function RightRail({
   useEffect(() => {
     try { localStorage.setItem(TAB_KEY, tab); } catch { /* ignore */ }
   }, [tab]);
+
+  // External tab request (e.g. clicking the "N learned" badge in the chat
+  // header switches to the Knowledge tab). `ts` disambiguates repeat clicks.
+  useEffect(() => {
+    if (openTabRequest && TAB_KEYS.includes(openTabRequest.tab)) setTab(openTabRequest.tab);
+  }, [openTabRequest]);
 
   // Lightweight poll of just the session COUNT — so the "Sessions" tab
   // can show a badge regardless of which tab is currently visible. The
@@ -330,13 +335,7 @@ export default function RightRail({
           <PromptPreviewPanel agentId={agentId} embedded />
         </div>
         <div style={{ display: tab === 'knowledge' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
-          <div style={{ padding: 'var(--eb-space-3)', borderBottom: '1px solid var(--eb-border-default)', display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>What this agent has learned</span>
-            <span style={{ marginLeft: 'auto' }}><LearningBadge scope={`agent:${agentId}`} showZero /></span>
-          </div>
-          <div style={{ flex: 1, minHeight: 0 }}>
-            <KnowledgeFeed scope={`agent:${agentId}`} emptyHint="Nothing harvested from this agent yet." />
-          </div>
+          <AgentKnowledgePanel agentId={agentId} active={tab === 'knowledge'} />
         </div>
       </div>
     </div>

@@ -54,10 +54,12 @@ const LEARN_PROMPT =
  *        session boundary just occurred — sending a message, resetting the
  *        session, or a trigger-started run's first message arriving — so the
  *        pinned To-Do panel from a previous session gets dismissed (#273).
+ * @param {()=>void} [onOpenKnowledge] Open the right rail on its Knowledge tab
+ *        (wired to the "N learned" badge in the header).
  */
 export default function ChatPanel({
   agent, roomId, onRoomCreated, hoveredCorrelationId, onHoverCorrelation, sessionCost, contextFill,
-  onWorkspaceChanged, onTodoBoundary,
+  onWorkspaceChanged, onTodoBoundary, onOpenKnowledge,
 }) {
   const [messages, setMessages]      = useState([]);
   const [loading, setLoading]        = useState(false);
@@ -709,7 +711,12 @@ export default function ChatPanel({
                 </span>
               </div>
             )}
-            <LearningBadge scope={`agent:${agent.id}`} refreshKey={sessionUpdatedAt} />
+            <LearningBadge
+              scope={`agent:${agent.id}`}
+              refreshKey={sessionUpdatedAt}
+              onClick={onOpenKnowledge}
+              title="Show what this agent has learned (Knowledge tab)"
+            />
           </div>
           {gitInfo && gitInfo.length > 0 && (
             <div

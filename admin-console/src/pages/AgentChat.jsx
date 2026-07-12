@@ -318,6 +318,14 @@ export default function AgentChat() {
   const [todoCloseSignal, setTodoCloseSignal] = useState(0);
   const handleTodoBoundary = useCallback(() => setTodoCloseSignal(s => s + 1), []);
 
+  // Clicking the "N learned" badge in the chat header opens the right rail on
+  // its Knowledge tab. `ts` makes repeat clicks re-fire the effect in RightRail.
+  const [railTabRequest, setRailTabRequest] = useState(null);
+  const handleOpenKnowledge = useCallback(() => {
+    setLogOpen(true);
+    setRailTabRequest({ tab: 'knowledge', ts: Date.now() });
+  }, []);
+
   const selectedAgent = (agents ?? []).find(a => a.id === agentId) || null;
   const effectiveRoomId =
     (selectedAgent && createdRooms[selectedAgent.id]) ||
@@ -541,6 +549,7 @@ export default function AgentChat() {
             contextFill={contextFill}
             onWorkspaceChanged={handleWorkspaceChanged}
             onTodoBoundary={handleTodoBoundary}
+            onOpenKnowledge={handleOpenKnowledge}
           />
         ) : (
           <EmptyState />
@@ -571,6 +580,7 @@ export default function AgentChat() {
             onContextUpdate={handleContextUpdate}
             todoCloseSignal={todoCloseSignal}
             workspaceRefreshKey={workspaceRefreshKey}
+            openTabRequest={railTabRequest}
           />
         </div>
         </>

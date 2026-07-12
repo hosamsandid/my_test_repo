@@ -51,12 +51,16 @@ function slugifySkillName(text, kind = 'fact') {
 // A templated SKILL.md built from the cluster alone — cheap, dependency-free,
 // no secrets (only the durable statements + who converged, which the KB already
 // exposes). The operator edits it; "Draft with AI" can replace the body later.
+// Aggregated candidates (source "related" — the collector's thematic grouping —
+// or "manual" — an operator's multi-select combine) get a synthesis-flavoured
+// rationale instead of the same-lesson-N-times one.
 function buildHeuristicSkillDraft(candidate) {
   const c = candidate && typeof candidate === 'object' ? candidate : {};
   const name = slugifySkillName(c.text, c.kind);
   const title = (c.text || 'Team knowledge').trim();
   const members = Array.isArray(c.members) ? c.members : [];
   const convergence = Array.isArray(c.convergence) ? c.convergence : [];
+  const aggregated = c.source === 'related' || c.source === 'manual';
 
   const statements = [];
   const seen = new Set();
@@ -78,14 +82,27 @@ function buildHeuristicSkillDraft(candidate) {
   lines.push('');
   lines.push('## Why this is a skill');
   lines.push('');
-  lines.push(
-    `${convergence.length} agent(s) recorded this independently ` +
-    `(${convergence.join(', ') || 'n/a'}), so it is durable, team-useful knowledge worth reusing.`,
-  );
+  if (aggregated) {
+    const n = c.lessonCount || statements.length;
+    lines.push(
+      `Combines ${n} related lesson(s) about one topic, recorded by ` +
+      `${convergence.length} agent(s) (${convergence.join(', ') || 'n/a'}) — together they form ` +
+      'coherent, reusable knowledge.',
+    );
+  } else {
+    lines.push(
+      `${convergence.length} agent(s) recorded this independently ` +
+      `(${convergence.join(', ') || 'n/a'}), so it is durable, team-useful knowledge worth reusing.`,
+    );
+  }
   lines.push('');
   lines.push('## Provenance');
   lines.push('');
-  lines.push('Promoted from the team Knowledge Base. Traces back to:');
+  lines.push(
+    c.source === 'manual'
+      ? 'Combined by the operator from the team Knowledge Base. Traces back to:'
+      : 'Promoted from the team Knowledge Base. Traces back to:',
+  );
   for (const m of members) {
     const who = (m && m.originAgent) || 'unknown';
     const when = (m && m.createdAt) || '';
@@ -94,6 +111,63 @@ function buildHeuristicSkillDraft(candidate) {
   lines.push('');
 
   return { name, skillMd: lines.join('\n'), llmDrafted: false };
+}
+
+// Build a candidate-shaped record straight from raw KB entries — the ad-hoc
+// sibling of the orchestrator's toCandidate, used when the OPERATOR selects
+// entries to combine (no pre-clustered candidate exists). Same shape the draft/
+// provenance builders and the promotion dialog consume.
+function candidateFromEntries(entries, { teamId, source = 'manual', now } = {}) {
+  const ts = typeof now === 'string' && now.trim() ? now.trim() : new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const list = (Array.isArray(entries) ? entries : []).filter(
+    (e) => e && typeof e === 'object' && typeof e.id === 'string' && typeof e.text === 'string',
+  );
+  const members = [];
+  const seen = new Set();
+  for (const e of list) {
+    if (seen.has(e.id)) continue;
+    seen.add(e.id);
+    members.push({
+      id: e.id,
+      originAgent: e.originAgent,
+      text: e.text,
+      createdAt: e.createdAt,
+      correlationId: e.correlationId || null,
+      sessionId: e.sessionId || null,
+      ...(Array.isArray(e.sourceRefs) && e.sourceRefs.length ? { sourceRefs: e.sourceRefs } : {}),
+    });
+  }
+  const agents = new Set();
+  for (const e of list) {
+    if (typeof e.originAgent === 'string' && e.originAgent.trim()) agents.add(e.originAgent.trim());
+    for (const a of Array.isArray(e.convergence) ? e.convergence : []) {
+      if (typeof a === 'string' && a.trim()) agents.add(a.trim());
+    }
+  }
+  const kindCounts = new Map();
+  for (const m of list) kindCounts.set(m.kind || 'fact', (kindCounts.get(m.kind || 'fact') || 0) + 1);
+  let kind = 'fact';
+  let bestN = -1;
+  for (const [k, n] of [...kindCounts.entries()].sort((a, b) => String(a[0]).localeCompare(String(b[0])))) {
+    if (n > bestN) { kind = k; bestN = n; }
+  }
+  const lead = members[0] || {};
+  return {
+    id: null, // ad-hoc: not a stored candidate
+    teamId: teamId || (list[0] && list[0].teamId) || 'default',
+    kind,
+    kinds: [...new Set(list.map((e) => e.kind || 'fact'))].sort(),
+    canonicalId: lead.id || null,
+    entryIds: members.map((m) => m.id),
+    convergence: [...agents].sort(),
+    convergenceCount: agents.size,
+    lessonCount: members.length,
+    text: lead.text || '',
+    members,
+    source,
+    status: 'open',
+    raisedAt: ts,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -106,19 +180,29 @@ function buildSkillDraftRequest(candidate) {
   const c = candidate && typeof candidate === 'object' ? candidate : {};
   const members = Array.isArray(c.members) ? c.members : [];
   const facts = members.map((m) => `- ${(m && m.text) || ''}`).join('\n') || `- ${c.text || ''}`;
+  const aggregated = c.source === 'related' || c.source === 'manual';
+  const framing = aggregated
+    ? [
+        'The team knowledge base holds several DISTINCT but RELATED lessons about one topic.',
+        'Synthesise them into ONE coherent, reusable SKILL.md — organise, deduplicate and',
+        'generalise; do not just list the statements verbatim.',
+      ]
+    : [
+        'Several agents independently recorded the same durable lesson in the team knowledge base.',
+        'Turn it into a concise, reusable SKILL.md.',
+      ];
   const instruction = [
     'You curate reusable skills for a team of AI software-delivery agents.',
-    'Several agents independently recorded the same durable lesson in the team knowledge base.',
-    'Turn it into a concise, reusable SKILL.md.',
+    ...framing,
     '',
     `Kind: ${c.kind || 'fact'}`,
-    'The recorded statements (deduplicate and generalise them):',
+    aggregated ? 'The recorded lessons:' : 'The recorded statements (deduplicate and generalise them):',
     facts,
     '',
     'Requirements for the SKILL.md you produce:',
     '- Start with a single H1 title line, then short sections.',
     '- Capture the durable, reusable knowledge — no PR/issue-specific or run-specific detail.',
-    '- Practical and concise (roughly 80–200 words).',
+    `- Practical and concise (roughly ${aggregated ? '120–300' : '80–200'} words).`,
     '- Do NOT invent tool names, repo names, file paths or credentials that were not stated.',
     '- Output ONLY the Markdown of the SKILL.md — no preamble, no surrounding code fences.',
   ].join('\n');
@@ -278,10 +362,12 @@ function promotionSuggestionView(candidate, draft) {
     id: c.id,
     teamId: c.teamId,
     kind: c.kind,
+    kinds: Array.isArray(c.kinds) && c.kinds.length ? c.kinds : [c.kind].filter(Boolean),
     canonicalId: c.canonicalId,
     entryIds: Array.isArray(c.entryIds) ? c.entryIds : [],
     convergence: Array.isArray(c.convergence) ? c.convergence : [],
     convergenceCount: c.convergenceCount || (Array.isArray(c.convergence) ? c.convergence.length : 0),
+    lessonCount: Number.isInteger(c.lessonCount) ? c.lessonCount : null,
     text: c.text,
     members: Array.isArray(c.members) ? c.members : [],
     source: c.source || 'convergence',
@@ -305,6 +391,7 @@ module.exports = {
   DEFAULT_PROMOTION_GATES,
   slugifySkillName,
   buildHeuristicSkillDraft,
+  candidateFromEntries,
   buildSkillDraftRequest,
   validatePromotion,
   buildSkillProvenance,

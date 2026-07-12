@@ -285,6 +285,10 @@ function toCandidate(cluster, { teamId, source = 'convergence', note, now } = {}
     createdAt: m.createdAt,
     correlationId: m.correlationId || null,
     sessionId: m.sessionId || null,
+    // Carried so the skill-provenance builders (admin-console
+    // buildSkillProvenance, knowledge-curator curatorSkillProvenance) can trace
+    // the promoted skill back to its PR/issue/commit.
+    ...(Array.isArray(m.sourceRefs) && m.sourceRefs.length ? { sourceRefs: m.sourceRefs } : {}),
   }));
   const cand = {
     id: stableSuggestionId(cluster),
@@ -318,9 +322,12 @@ function toCandidate(cluster, { teamId, source = 'convergence', note, now } = {}
  *   (null when nothing new).
  */
 function planNewSuggestions(clusters, existing, { threshold = 2, teamId, now } = {}) {
+  // Dismissed is in the known set on purpose: the operator said no to exactly
+  // this member set (stable id). A grown cluster gets a new id and re-raises —
+  // same semantics the level-3 curator applies in planAutoPromotions.
   const known = new Set(
     (Array.isArray(existing) ? existing : [])
-      .filter((c) => c && (c.status === 'open' || c.status === 'promoted'))
+      .filter((c) => c && (c.status === 'open' || c.status === 'promoted' || c.status === 'dismissed'))
       .map((c) => c.id),
   );
   const raise = [];
@@ -342,6 +349,231 @@ function planNewSuggestions(clusters, existing, { threshold = 2, teamId, now } =
   return { raise, batch };
 }
 
+// ---------------------------------------------------------------------------
+// Related-theme aggregation
+// ---------------------------------------------------------------------------
+//
+// Convergence (above) finds the SAME lesson recorded by several agents. A skill,
+// however, is typically a SYNTHESIS: several distinct-but-related lessons about
+// one topic ("how we handle GitHub labels") that only together make a coherent,
+// reusable instruction. This second, looser stage groups the already-converged
+// clusters into topic themes — across kinds, since a convention + the facts
+// around it belong in one skill — and raises ONE combined promotion suggestion
+// per qualifying theme (source: "related"). Themes are never auto-promoted, even
+// at autonomy 3: synthesising distinct lessons into one skill needs judgment, so
+// they always surface as review cards.
+
+// Topic tokens: the normalized tokens long enough to carry topic meaning
+// (drops "the", "for", "a", ... without needing a stopword list).
+function topicTokens(text) {
+  return new Set([...tokenSet(text)].filter((t) => t.length >= 4));
+}
+
+// Relatedness = overlap coefficient (|A∩B| / min|A|,|B|) over topic tokens.
+// Jaccard (the convergence seam) punishes length differences — two long,
+// distinct sentences about one topic score ~0.1 — while the overlap
+// coefficient asks "how much of the SMALLER lesson's vocabulary appears in
+// the other", which is the right question for topical relatedness.
+function relatedness(aText, bText) {
+  const a = topicTokens(aText);
+  const b = topicTokens(bText);
+  if (a.size === 0 || b.size === 0) return 0;
+  let inter = 0;
+  for (const t of a) if (b.has(t)) inter += 1;
+  return inter / Math.min(a.size, b.size);
+}
+
+// Single-link grouping of clusters by topical relatedness. Cross-kind on
+// purpose (a convention + the facts around it belong in one skill). Returns
+// only groups of >= 2 clusters — a lone cluster is not a theme.
+function groupRelatedClusters(clusters, { relatedThreshold = 0.3 } = {}) {
+  const list = (Array.isArray(clusters) ? clusters : []).filter(
+    (c) => c && typeof c.text === 'string' && c.text.trim() !== '' && Array.isArray(c.memberIds),
+  );
+  // One token set per cluster, computed once — the O(n²) pairwise loop below
+  // must not re-tokenize the same texts on every comparison.
+  const toks = new Map(list.map((c) => [c, topicTokens(c.text)]));
+  const related = (a, b) => {
+    const ta = toks.get(a);
+    const tb = toks.get(b);
+    if (ta.size === 0 || tb.size === 0) return false;
+    let inter = 0;
+    for (const t of ta) if (tb.has(t)) inter += 1;
+    return inter / Math.min(ta.size, tb.size) >= relatedThreshold;
+  };
+  const groups = [];
+  for (const c of list) {
+    let joined = null;
+    for (const g of groups) {
+      if (g.some((m) => related(m, c))) {
+        g.push(c);
+        joined = g;
+        break;
+      }
+    }
+    if (!joined) groups.push([c]);
+  }
+  return groups.filter((g) => g.length >= 2);
+}
+
+// A theme is worth suggesting when it is either broad (>= strongLessons distinct
+// lessons — even a single agent accumulating a topic deserves the card) or
+// cross-agent (>= minLessons lessons from >= minAgents distinct agents — the
+// theme-level analogue of "2× independent").
+function themeQualifies(group, { minLessons = 2, minAgents = 2, strongLessons = 3 } = {}) {
+  const g = Array.isArray(group) ? group : [];
+  if (g.length >= strongLessons) return true;
+  if (g.length < minLessons) return false;
+  const agents = new Set();
+  for (const c of g) for (const a of c.convergence || []) agents.add(a);
+  return agents.size >= minAgents;
+}
+
+// Shape a qualifying theme into a candidate row. Same shape toCandidate emits,
+// plus: source "related", `kinds` (the distinct kinds bundled), and
+// `lessonCount` (distinct lessons — clusters — in the theme). The id hashes the
+// full member-id set under the pseudo-kind "related" so it can never collide
+// with a single-cluster convergence candidate over the same entries.
+function themeToCandidate(group, { teamId, now } = {}) {
+  const ts = typeof now === 'string' && now.trim() ? now.trim() : new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const clusters = sortThemeClusters(group);
+  const lead = clusters[0];
+  const members = [];
+  const seen = new Set();
+  for (const c of clusters) {
+    for (const m of c.members || []) {
+      if (!m || seen.has(m.id)) continue;
+      seen.add(m.id);
+      members.push({
+        id: m.id,
+        originAgent: m.originAgent,
+        text: m.text,
+        createdAt: m.createdAt,
+        correlationId: m.correlationId || null,
+        sessionId: m.sessionId || null,
+        ...(Array.isArray(m.sourceRefs) && m.sourceRefs.length ? { sourceRefs: m.sourceRefs } : {}),
+      });
+    }
+  }
+  const agents = new Set();
+  for (const c of clusters) for (const a of c.convergence || []) agents.add(a);
+  const convergence = [...agents].sort();
+  const memberIds = members.map((m) => m.id);
+  const kinds = [...new Set(clusters.map((c) => c.kind))].sort();
+  return {
+    id: stableSuggestionId({ kind: 'related', memberIds }),
+    teamId: typeof teamId === 'string' ? teamId : (lead.teamId || 'default'),
+    kind: dominantKind(clusters),
+    kinds,
+    canonicalId: lead.canonicalId,
+    entryIds: memberIds.slice(),
+    convergence,
+    convergenceCount: convergence.length,
+    lessonCount: clusters.length,
+    text: lead.text,
+    members,
+    source: 'related',
+    status: 'open',
+    raisedAt: ts,
+  };
+}
+
+function sortThemeClusters(group) {
+  return (Array.isArray(group) ? group : []).slice().sort(
+    (a, b) => entryCreatedMs(a.members && a.members[0]) - entryCreatedMs(b.members && b.members[0])
+      || String(a.canonicalId).localeCompare(String(b.canonicalId)),
+  );
+}
+
+function dominantKind(clusters) {
+  const counts = new Map();
+  for (const c of clusters) counts.set(c.kind, (counts.get(c.kind) || 0) + 1);
+  let best = 'fact';
+  let bestN = -1;
+  for (const [k, n] of [...counts.entries()].sort((a, b) => String(a[0]).localeCompare(String(b[0])))) {
+    if (n > bestN) { best = k; bestN = n; }
+  }
+  return best;
+}
+
+/**
+ * Decide which related themes are NEWLY suggestable. Mirrors planNewSuggestions:
+ * idempotent against the candidate store (open/promoted/dismissed by stable id),
+ * one batched feed event. Clusters whose knowledge already backs a promoted
+ * skill are excluded from grouping — re-suggesting promoted knowledge is noise.
+ *
+ * @param {object[]} clusters   from clusterEntries/buildCanonicalProjection
+ * @param {object[]} existing   the team's current candidate store rows
+ * @param {{ relatedThreshold?: number, minLessons?: number, minAgents?: number,
+ *           strongLessons?: number, teamId?: string, now?: string }} opts
+ * @returns {{ raise: object[], batch: object|null }}
+ */
+function planRelatedSuggestions(clusters, existing, {
+  relatedThreshold = 0.3, minLessons = 2, minAgents = 2, strongLessons = 3, teamId, now,
+} = {}) {
+  const rows = Array.isArray(existing) ? existing : [];
+  const known = new Set(
+    rows
+      .filter((c) => c && (c.status === 'open' || c.status === 'promoted' || c.status === 'dismissed'))
+      .map((c) => c.id),
+  );
+  const promotedEntryIds = new Set();
+  const promotedCanonicalIds = new Set();
+  for (const c of rows) {
+    if (!c || c.status !== 'promoted') continue;
+    if (c.canonicalId) promotedCanonicalIds.add(c.canonicalId);
+    for (const id of c.entryIds || []) promotedEntryIds.add(id);
+  }
+  const eligible = (Array.isArray(clusters) ? clusters : []).filter((c) => {
+    if (!c) return false;
+    if (promotedCanonicalIds.has(c.canonicalId)) return false;
+    const ids = Array.isArray(c.memberIds) ? c.memberIds : [];
+    if (ids.length > 0 && ids.every((id) => promotedEntryIds.has(id))) return false;
+    return true;
+  });
+  const raise = [];
+  for (const group of groupRelatedClusters(eligible, { relatedThreshold })) {
+    if (!themeQualifies(group, { minLessons, minAgents, strongLessons })) continue;
+    const cand = themeToCandidate(group, { teamId, now });
+    if (known.has(cand.id)) continue;
+    raise.push(cand);
+  }
+  if (raise.length === 0) return { raise: [], batch: null };
+  const ts = typeof now === 'string' && now.trim() ? now.trim() : new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const batch = {
+    type: 'suggestion',
+    ts,
+    teamId: typeof teamId === 'string' ? teamId : null,
+    count: raise.length,
+    samples: raise.slice(0, 5).map((c) => ({
+      id: c.id, canonicalId: c.canonicalId, text: c.text,
+      convergenceCount: c.convergenceCount, lessonCount: c.lessonCount, source: 'related',
+    })),
+  };
+  return { raise, batch };
+}
+
+/**
+ * Canonical ids of clusters fully covered by an open/promoted AGGREGATED
+ * candidate's entry set — a raised related-theme card, or a manual combine the
+ * operator already promoted. Used by the collector so a lesson that is already
+ * part of such a bundle does not also raise its own single-lesson card.
+ */
+function clustersCoveredByThemes(clusters, candidates) {
+  const themeSets = (Array.isArray(candidates) ? candidates : [])
+    .filter((c) => c && (c.source === 'related' || c.source === 'manual')
+      && (c.status === 'open' || c.status === 'promoted'))
+    .map((t) => new Set(t.entryIds || []));
+  const covered = new Set();
+  for (const cluster of Array.isArray(clusters) ? clusters : []) {
+    if (!cluster || !Array.isArray(cluster.memberIds) || cluster.memberIds.length === 0) continue;
+    if (themeSets.some((ids) => cluster.memberIds.every((id) => ids.has(id)))) {
+      covered.add(cluster.canonicalId);
+    }
+  }
+  return covered;
+}
+
 module.exports = {
   normalizeText,
   tokenSet,
@@ -357,4 +589,11 @@ module.exports = {
   stableSuggestionId,
   toCandidate,
   planNewSuggestions,
+  topicTokens,
+  relatedness,
+  groupRelatedClusters,
+  themeQualifies,
+  themeToCandidate,
+  planRelatedSuggestions,
+  clustersCoveredByThemes,
 };

@@ -3,7 +3,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   Brain, RefreshCw, X, ExternalLink, GitBranch, Sparkles, Check, Wand2,
   Archive, Share2, ShieldCheck, Ban, MessageSquare, Search, ArrowRight, Users,
-  HelpCircle, BookOpen,
+  HelpCircle, BookOpen, Combine,
 } from 'lucide-react';
 import KnowledgeFeed from '../components/KnowledgeFeed';
 import InfoTip from '../components/InfoTip';
@@ -60,6 +60,29 @@ const KIND_EXPLAIN = {
   entity: 'Entity — a named thing (a system, repo, service, person) and what the team knows about it.',
   convention: 'Convention — how the team does things (processes, labels, rituals — e.g. “PRs need the ready-for-review label”).',
 };
+
+// Shape an operator's multi-select into the candidate shape PromotionDialog
+// renders — id: null marks it as ad-hoc (no stored suggestion; the server
+// rebuilds provenance from the entry ids).
+function manualSuggestionFrom(items) {
+  const list = Array.isArray(items) ? items : [];
+  const agents = [...new Set(list.flatMap(i => (i.convergence && i.convergence.length ? i.convergence : [i.provenance?.originAgent]).filter(Boolean)))].sort();
+  return {
+    id: null,
+    source: 'manual',
+    text: (list[0] && list[0].text) || '',
+    entryIds: list.map(i => i.id),
+    members: list.map(i => ({
+      id: i.id,
+      originAgent: i.provenance?.originAgent || (i.convergence || [])[0] || null,
+      text: i.text,
+      createdAt: i.createdAt,
+    })),
+    convergence: agents,
+    convergenceCount: agents.length,
+    lessonCount: list.length,
+  };
+}
 
 // The knowledge team ("squad") an agent belongs to — mirrors the backend's
 // agentKnowledgeTeam: member → its parent team, team agent → itself,
@@ -336,6 +359,7 @@ export default function KnowledgeFlow() {
                 onUnarchiveItem={(item) => archiveItem(item.id, t.id, false)}
                 onOpenChat={(agentId) => navigate(`/chats/${encodeURIComponent(agentId)}`)}
                 onReviewSuggestion={(s) => setPromoting({ suggestion: s, teamId: t.id })}
+                onCombineItems={(sel) => setPromoting({ suggestion: manualSuggestionFrom(sel), teamId: t.id })}
                 onShareSkill={(node) => setSharing({ node, teamId: t.id })}
                 onControlsChanged={() => loadTeamData(t.id, t.members, { withPrivate: false })}
                 onLifted={() => loadTeamData(t.id, t.members)}
@@ -438,9 +462,10 @@ function HowItWorks({ onDismiss }) {
         <div style={stepStyle}>
           <div style={stepTitle}>{num(3)} The best knowledge becomes skills</div>
           <p style={stepBody}>
-            Converged knowledge can be <strong>promoted to a skill</strong>: a reusable instruction
-            file that agents load automatically at the start of their work. You review each
-            promotion — unless you raise the team’s autonomy and let it curate itself.
+            Knowledge can be <strong>promoted to a skill</strong>: a reusable instruction file
+            agents load automatically. A skill is often a <em>combination</em> of related lessons —
+            the system suggests such bundles, and you can also tick several lessons yourself and
+            combine them. You review every promotion, unless you let the team curate itself.
           </p>
         </div>
       </div>
@@ -462,10 +487,18 @@ function HowItWorks({ onDismiss }) {
 const TeamSection = React.forwardRef(function TeamSection({
   team, data, filters, pulseId, selectedId,
   onOpenItem, onRetireItem, onUnarchiveItem, onOpenChat,
-  onReviewSuggestion, onShareSkill, onControlsChanged, onLifted,
+  onReviewSuggestion, onShareSkill, onCombineItems, onControlsChanged, onLifted,
 }, ref) {
   const [agentFilter, setAgentFilter] = useState(null); // agentId | null
   const [hoverConv, setHoverConv] = useState(null); // Set<agentId> | null
+  const [picked, setPicked] = useState(() => new Set()); // entry ids ticked for combining
+  const togglePick = useCallback((id) => {
+    setPicked(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
 
   const graph = data?.graph;
   const counts = graph?.counts || { items: 0, today: 0, converged: 0, skills: 0 };
@@ -507,6 +540,18 @@ const TeamSection = React.forwardRef(function TeamSection({
 
   const skills = useMemo(() => (graph?.nodes || []).filter(n => n.kind === 'skill'), [graph]);
   const pending = useMemo(() => (graph?.nodes || []).filter(n => n.kind === 'pending'), [graph]);
+
+  // The picked entries, resolved against ALL of the team's items (not the
+  // filtered view — a tick must survive a filter change).
+  const allItems = useMemo(() => (graph?.nodes || [])
+    .filter(n => n.kind === 'item')
+    .map(n => ({ ...n, id: n.id.slice(5) })), [graph]);
+  const pickedItems = useMemo(() => allItems.filter(n => picked.has(n.id)), [allItems, picked]);
+  const combine = useCallback(() => {
+    if (pickedItems.length < 2) return;
+    onCombineItems(pickedItems);
+    setPicked(new Set());
+  }, [pickedItems, onCombineItems]);
   const suggestions = data?.suggestions || [];
   const reviewQueue = data?.reviewQueue || [];
   const privateSkills = data?.privateSkills || [];
@@ -579,7 +624,7 @@ const TeamSection = React.forwardRef(function TeamSection({
             hint="what the whole team knows"
             tip={{
               title: 'The shared knowledge base',
-              text: 'Everything this team’s agents have learned, pooled so every agent can use it. Click a card to see where it came from — which agent, which session, which PR. “N× independent” means several agents learned it on their own.',
+              text: 'Everything this team’s agents have learned, pooled so every agent can use it. Click a card to see where it came from — which agent, which session, which PR. Tick the checkboxes to combine several related lessons into one skill.',
             }}
             trailing={agentFilter && (
               <Chip active title="Clear this filter" onClick={() => setAgentFilter(null)}>only {agentFilter} ✕</Chip>
@@ -587,6 +632,32 @@ const TeamSection = React.forwardRef(function TeamSection({
           />
           {reviewQueue.length > 0 && (
             <ReviewQueueBlock teamId={team.id} items={reviewQueue} onChanged={onControlsChanged} />
+          )}
+          {picked.size > 0 && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8, marginBottom: 'var(--eb-space-2)',
+              border: '1px solid var(--eb-accent-primary)', borderRadius: 'var(--eb-radius-md)',
+              background: 'var(--eb-accent-muted)', padding: 'var(--eb-space-2) var(--eb-space-3)',
+            }}>
+              <Combine size={13} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)' }}>
+                {picked.size} lesson{picked.size === 1 ? '' : 's'} selected
+                {picked.size < 2 ? ' — pick at least one more to combine' : ''}
+              </span>
+              <InfoTip
+                size={12}
+                title="Combine related lessons into one skill"
+                text="Tick the lessons that belong to one topic — a skill is usually a synthesis of several related lessons, not a single fact. You review and edit the combined draft before anything is created."
+              />
+              <button
+                onClick={combine}
+                disabled={picked.size < 2}
+                title={picked.size < 2 ? 'Select at least two lessons' : 'Open the review dialog with these lessons combined'}
+                style={{ ...primaryBtn, marginLeft: 'auto', padding: '2px 10px', fontSize: 'var(--eb-text-xs)', opacity: picked.size < 2 ? 0.5 : 1 }}>
+                Combine into one skill
+              </button>
+              <button onClick={() => setPicked(new Set())} style={{ ...miniBtn }}>Clear</button>
+            </div>
           )}
           {items.length === 0 ? (
             <EmptyKnowledge autonomy={autonomy} counts={counts} filtered={!!(filters.q || filters.kind !== 'all' || filters.convergedOnly || filters.today || agentFilter)} />
@@ -597,6 +668,9 @@ const TeamSection = React.forwardRef(function TeamSection({
                 item={n}
                 pulsing={pulseId === n.id}
                 selected={selectedId === n.id}
+                picked={picked.has(n.id)}
+                anyPicked={picked.size > 0}
+                onPick={() => togglePick(n.id)}
                 onClick={() => onOpenItem(n.id, team.id)}
                 onHover={(on) => setHoverConv(on ? new Set(n.convergence || []) : null)}
                 onRetire={() => onRetireItem(n)}
@@ -709,8 +783,9 @@ function EmptyKnowledge({ autonomy, counts, filtered }) {
   );
 }
 
-function ItemCard({ item, pulsing, selected, onClick, onHover, onRetire, onUnarchive }) {
+function ItemCard({ item, pulsing, selected, picked, anyPicked, onPick, onClick, onHover, onRetire, onUnarchive }) {
   const canRetire = !item.archived && item.status !== 'promoted';
+  const pickable = !item.archived && item.status !== 'promoted' && !!onPick;
   return (
     <div
       className={`kf-item${pulsing ? ' kf-node-pulse' : ''}`}
@@ -718,13 +793,24 @@ function ItemCard({ item, pulsing, selected, onClick, onHover, onRetire, onUnarc
       onMouseEnter={() => onHover && onHover(true)}
       onMouseLeave={() => onHover && onHover(false)}
       style={{
-        position: 'relative', border: `1px solid ${selected ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+        position: 'relative', border: `1px solid ${selected || picked ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
         boxShadow: selected ? '0 0 0 2px var(--eb-accent-muted)' : 'none',
-        borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-app)',
+        borderRadius: 'var(--eb-radius-md)', background: picked ? 'var(--eb-accent-muted)' : 'var(--eb-bg-app)',
         padding: 'var(--eb-space-2) var(--eb-space-3)', marginBottom: 'var(--eb-space-2)',
         cursor: 'pointer', opacity: item.archived ? 0.55 : 1,
       }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+        {pickable && (
+          <input
+            type="checkbox"
+            className={anyPicked || picked ? undefined : 'kf-pick'}
+            checked={!!picked}
+            onChange={onPick}
+            onClick={(e) => e.stopPropagation()}
+            title="Select this lesson to combine it with others into one skill"
+            style={{ margin: 0, cursor: 'pointer', accentColor: 'var(--eb-accent-primary)', flexShrink: 0 }}
+          />
+        )}
         <span style={{ width: 7, height: 7, borderRadius: 'var(--eb-radius-full)', background: KIND_COLORS[item.entryKind] || 'var(--eb-accent-primary)', flexShrink: 0 }} />
         <span title={KIND_EXPLAIN[item.entryKind]} style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.03em', color: 'var(--eb-text-muted)', cursor: 'help' }}>{item.entryKind}</span>
         {item.archived && (
@@ -798,24 +884,38 @@ const amberCard = {
 };
 
 function SuggestionCard({ suggestion, onReview }) {
+  const related = suggestion.source === 'related';
   return (
     <div style={{ ...amberCard, flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        <Sparkles size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
+        {related
+          ? <Combine size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
+          : <Sparkles size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />}
         <span
-          title="This knowledge looks important enough to become a reusable skill. Review it to promote — or dismiss it."
+          title={related
+            ? 'Several distinct but related lessons about one topic — review to combine them into a single reusable skill.'
+            : 'This knowledge looks important enough to become a reusable skill. Review it to promote — or dismiss it.'}
           style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-status-warning)', cursor: 'help' }}>
-          Suggested skill
+          {related ? 'Related lessons — suggested skill' : 'Suggested skill'}
         </span>
         <span
           style={{ marginLeft: 'auto', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', cursor: 'help' }}
-          title={suggestion.source === 'agent-nominated'
-            ? 'An agent itself nominated this as worth promoting'
-            : `${suggestion.convergenceCount} agents learned this independently`}>
-          {suggestion.convergenceCount}× learned{suggestion.source === 'agent-nominated' ? ' · nominated' : ''}
+          title={related
+            ? `${suggestion.lessonCount} related lessons from ${suggestion.convergenceCount} agent(s) — they belong to one topic`
+            : suggestion.source === 'agent-nominated'
+              ? 'An agent itself nominated this as worth promoting'
+              : `${suggestion.convergenceCount} agents learned this independently`}>
+          {related
+            ? `${suggestion.lessonCount} lessons · ${suggestion.convergenceCount} agent${suggestion.convergenceCount === 1 ? '' : 's'}`
+            : `${suggestion.convergenceCount}× learned${suggestion.source === 'agent-nominated' ? ' · nominated' : ''}`}
         </span>
       </div>
-      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)', wordBreak: 'break-word' }}>{suggestion.text}</div>
+      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)', wordBreak: 'break-word' }}>
+        {suggestion.text}
+        {related && suggestion.lessonCount > 1 && (
+          <span style={{ color: 'var(--eb-text-muted)' }}> + {suggestion.lessonCount - 1} related lesson{suggestion.lessonCount === 2 ? '' : 's'}</span>
+        )}
+      </div>
       <button onClick={onReview} title="Open the review dialog — nothing is promoted until you confirm" style={{ ...primaryBtn, alignSelf: 'flex-end' }}>Review & promote</button>
     </div>
   );
@@ -1161,12 +1261,54 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
 
+  // manual = operator multi-select (no stored suggestion); aggregated = the
+  // lessons are distinct and the skill is their synthesis (manual OR the
+  // collector's related-theme card).
+  const manual = !suggestion.id;
+  const aggregated = manual || suggestion.source === 'related';
+  const memberTexts = useMemo(() => {
+    const seen = new Set();
+    const out = [];
+    for (const m of suggestion.members || []) {
+      const t = (m && typeof m.text === 'string' ? m.text.trim() : '');
+      if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); out.push(t); }
+    }
+    return out;
+  }, [suggestion.members]);
+
+  // Manual combine opens without a draft — prefill instantly with the cheap
+  // heuristic one so the operator never faces an empty SKILL.md.
+  useEffect(() => {
+    if (!manual) return;
+    setBusy('draft');
+    fetch('/api/knowledge/draft', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ team: teamId, entryIds: suggestion.entryIds, heuristicOnly: true }),
+    })
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => {
+        if (d?.draft) {
+          setSkillMd(md => md || d.draft.skillMd || '');
+          setName(n => n || d.draft.name || '');
+        }
+      })
+      .catch(() => {})
+      .finally(() => setBusy(''));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const draftWithAI = () => {
     setBusy('draft'); setError('');
-    fetch(`/api/knowledge/promotion-suggestions/${encodeURIComponent(suggestion.id)}/draft`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ team: teamId }),
-    })
+    const req = manual
+      ? fetch('/api/knowledge/draft', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ team: teamId, entryIds: suggestion.entryIds }),
+        })
+      : fetch(`/api/knowledge/promotion-suggestions/${encodeURIComponent(suggestion.id)}/draft`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ team: teamId }),
+        });
+    req
       .then(r => (r.ok ? r.json() : null))
       .then(d => { if (d?.draft?.skillMd) { setSkillMd(d.draft.skillMd); if (d.draft.name) setName(d.draft.name); } })
       .catch(() => setError('Draft failed'))
@@ -1179,7 +1321,8 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         from: 'team', to: tier, teamId, name, skillMd,
-        entryIds: suggestion.entryIds, suggestionId: suggestion.id,
+        entryIds: suggestion.entryIds,
+        ...(suggestion.id ? { suggestionId: suggestion.id } : {}),
       }),
     })
       .then(async r => { if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`); return r.json(); })
@@ -1199,26 +1342,42 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
     <div onClick={onClose} style={overlay}>
       <div onClick={e => e.stopPropagation()} style={{ ...dialog, width: 640, display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-          <Sparkles size={18} style={{ color: 'var(--eb-status-warning)' }} />
-          <h2 style={{ margin: 0, fontSize: 'var(--eb-text-lg)', color: 'var(--eb-text-primary)' }}>Turn this knowledge into a skill</h2>
+          {aggregated
+            ? <Combine size={18} style={{ color: 'var(--eb-status-warning)' }} />
+            : <Sparkles size={18} style={{ color: 'var(--eb-status-warning)' }} />}
+          <h2 style={{ margin: 0, fontSize: 'var(--eb-text-lg)', color: 'var(--eb-text-primary)' }}>
+            {aggregated
+              ? `Combine ${suggestion.lessonCount || memberTexts.length} lessons into a skill`
+              : 'Turn this knowledge into a skill'}
+          </h2>
           <button onClick={onClose} style={{ ...btn, marginLeft: 'auto' }}><X size={14} /></button>
         </div>
 
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
           A skill is a reusable instruction file (SKILL.md) that agents load automatically at the
-          start of their work. Give it a name, check the instructions — “Draft with AI” writes them
-          from the learned knowledge — and choose who should get it.
+          start of their work. {aggregated
+            ? 'The selected lessons are synthesised into one coherent instruction — “Draft with AI” organises and generalises them for you.'
+            : 'Give it a name, check the instructions — “Draft with AI” writes them from the learned knowledge — and choose who should get it.'}
         </div>
 
         <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}
-          title="Which agents learned this, independently of each other">
-          Learned {suggestion.convergenceCount}× independently · by {(suggestion.convergence || []).join(', ')}
+          title={aggregated ? 'The agents whose lessons are being combined' : 'Which agents learned this, independently of each other'}>
+          {aggregated
+            ? <>Combining {suggestion.lessonCount || memberTexts.length} lessons · from {(suggestion.convergence || []).join(', ') || 'unknown'}</>
+            : <>Learned {suggestion.convergenceCount}× independently · by {(suggestion.convergence || []).join(', ')}</>}
         </div>
         <div style={{
           fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', background: 'var(--eb-bg-app)',
           border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)',
+          maxHeight: 180, overflowY: 'auto',
         }}>
-          {suggestion.text}
+          {aggregated && memberTexts.length > 1 ? (
+            <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {memberTexts.map((t, i) => <li key={i} style={{ wordBreak: 'break-word' }}>{t}</li>)}
+            </ul>
+          ) : (
+            suggestion.text
+          )}
         </div>
 
         <label style={lbl}>Skill name</label>
@@ -1242,9 +1401,14 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
         {error && <div style={{ color: 'var(--eb-status-error, #d33)', fontSize: 'var(--eb-text-xs)' }}>{error}</div>}
 
         <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end' }}>
-          <button onClick={dismiss} disabled={!!busy} title="Don’t promote — the suggestion goes away, the knowledge itself stays in the team KB" style={btn}>Dismiss</button>
+          {!manual && (
+            <button onClick={dismiss} disabled={!!busy} title="Don’t promote — the suggestion goes away, the knowledge itself stays in the team KB" style={btn}>Dismiss</button>
+          )}
+          {manual && (
+            <button onClick={onClose} disabled={!!busy} style={btn}>Cancel</button>
+          )}
           <button onClick={promote} disabled={!!busy || !name.trim() || !skillMd.trim()} style={primaryBtn}>
-            <Check size={14} /> {busy === 'promote' ? 'Promoting…' : `Promote to ${tier}`}
+            <Check size={14} /> {busy === 'promote' ? 'Promoting…' : aggregated ? `Create combined ${tier} skill` : `Promote to ${tier}`}
           </button>
         </div>
       </div>

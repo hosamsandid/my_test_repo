@@ -2299,7 +2299,7 @@ function runConvergenceCollector(teamId, envArg) {
   const shardEntries = _readCloneShards(storeRoot, manifest);
   if (shardEntries.length === 0) return;
 
-  const { simThreshold, convergenceThreshold } = knowledgeConvergenceConfig(env);
+  const { simThreshold, convergenceThreshold, relatedThreshold } = knowledgeConvergenceConfig(env);
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   const proj = knowledgeConvergence.buildCanonicalProjection(shardEntries, { simThreshold, now });
 
@@ -2311,8 +2311,15 @@ function runConvergenceCollector(teamId, envArg) {
   // prior pass) marked promoted. Overlaid onto the freshly-projected canonical
   // entries so status:"promoted" is durable in git across re-projections
   // (buildCanonicalProjection reads shards, which always carry status "active").
+  // A multi-lesson (related-theme / manual-combine) candidate spans SEVERAL
+  // canonical entries — its entryIds, not just the lead canonicalId — so the
+  // overlay unions both. Extra member ids that only exist as tombstones are
+  // harmless: the overlay below matches canonical entries by id.
   const promotedCanonicalIds = new Set(
-    candidates.filter((c) => c && c.status === "promoted" && c.canonicalId).map((c) => c.canonicalId),
+    candidates
+      .filter((c) => c && c.status === "promoted")
+      .flatMap((c) => [c.canonicalId, ...(Array.isArray(c.entryIds) ? c.entryIds : [])])
+      .filter(Boolean),
   );
   // Canonical ids the operator archived (Phase 4 non-destructive curation) — the
   // same durable-overlay pattern as promoted, so an archive survives re-projection.
@@ -2399,21 +2406,51 @@ function runConvergenceCollector(teamId, envArg) {
     } catch (err) {
       console.warn(`[Orchestrator] auto-promotion for '${teamId}' failed: ${err.message}`);
     }
+    // Related themes are review cards even at level 3 — synthesising distinct
+    // lessons into one skill needs judgment, so the curator never auto-promotes
+    // them. Re-read the store: autoPromoteStep just rewrote it.
+    try {
+      raiseRelatedSuggestions(teamId, eligibleClusters, readKnowledgeCandidates(teamId), { relatedThreshold, now });
+    } catch (err) {
+      console.warn(`[Orchestrator] related-theme suggestions for '${teamId}' failed: ${err.message}`);
+    }
   } else if (level >= 2) {
     try {
-      const { raise, batch } = knowledgeConvergence.planNewSuggestions(eligibleClusters, candidates, {
+      // Themes first: a lesson bundled into a raised theme card must not also
+      // raise its own single-lesson convergence card (one decision, not two).
+      const afterThemes = raiseRelatedSuggestions(teamId, eligibleClusters, candidates, { relatedThreshold, now });
+      const covered = knowledgeConvergence.clustersCoveredByThemes(eligibleClusters, afterThemes);
+      const singles = covered.size === 0
+        ? eligibleClusters
+        : eligibleClusters.filter((c) => c && !covered.has(c.canonicalId));
+      const { raise, batch } = knowledgeConvergence.planNewSuggestions(singles, afterThemes, {
         threshold: convergenceThreshold,
         teamId,
         now,
       });
       if (raise.length > 0) {
-        writeKnowledgeCandidates(teamId, [...candidates, ...raise]);
+        writeKnowledgeCandidates(teamId, [...afterThemes, ...raise]);
         if (batch) appendKnowledgeEvents([batch]);
       }
     } catch (err) {
       console.warn(`[Orchestrator] convergence suggestions for '${teamId}' failed: ${err.message}`);
     }
   }
+}
+
+// Raise related-theme (thematic aggregation) suggestion cards for a team and
+// return the up-to-date candidate list (written when anything new was raised).
+function raiseRelatedSuggestions(teamId, clusters, candidates, { relatedThreshold, now }) {
+  const { raise, batch } = knowledgeConvergence.planRelatedSuggestions(clusters, candidates, {
+    relatedThreshold,
+    teamId,
+    now,
+  });
+  if (raise.length === 0) return candidates;
+  const next = [...candidates, ...raise];
+  writeKnowledgeCandidates(teamId, next);
+  if (batch) appendKnowledgeEvents([batch]);
+  return next;
 }
 
 // Serialize one kind's canonical bucket (canonical entries first, then merge
@@ -2462,8 +2499,11 @@ function archiveKnowledgeEntry(teamId, id, archived) {
   const resolved = resolveTeamKbRepo(teamId);
   if (resolved) env = resolved.env;
   if (archived) {
+    // Every entry a promoted candidate bundles backs the skill — not just the
+    // lead canonicalId (multi-lesson related/manual candidates span several).
     const promoted = readKnowledgeCandidates(teamId).some(
-      (c) => c && c.status === "promoted" && c.canonicalId === id,
+      (c) => c && c.status === "promoted"
+        && (c.canonicalId === id || (Array.isArray(c.entryIds) && c.entryIds.includes(id))),
     );
     if (promoted) throw new Error("cannot archive a promoted entry (it backs a skill) — remove the skill first");
   }
@@ -6453,11 +6493,35 @@ async function main() {
         try {
           const p = JSON.parse(body || '{}');
           const teamId = String(p.teamId || DEFAULT_TEAM_ID);
+          const entryIds = Array.isArray(p.entryIds)
+            ? p.entryIds.filter((x) => typeof x === 'string' && /^[0-9a-f]{12}$/.test(x))
+            : [];
           if (p.suggestionId) {
             const list = readKnowledgeCandidates(teamId);
             const i = list.findIndex((c) => c && c.id === p.suggestionId);
             if (i >= 0) {
               list[i] = { ...list[i], status: dismiss ? 'dismissed' : 'promoted', resolvedAt: new Date().toISOString() };
+              writeKnowledgeCandidates(teamId, list);
+            }
+          } else if (!dismiss && entryIds.length > 0) {
+            // Promotion without a stored suggestion (manual combine, agent→team
+            // lift): record a synthetic promoted row so the collector's promoted
+            // overlay, the archive guard, and the planners' promoted-entry
+            // filters all see these entries as skill-backing.
+            const list = readKnowledgeCandidates(teamId);
+            const already = list.some((c) => c && c.status === 'promoted'
+              && Array.isArray(c.entryIds) && entryIds.every((id) => c.entryIds.includes(id)));
+            if (!already) {
+              list.push({
+                id: crypto.randomBytes(6).toString('hex'),
+                teamId,
+                source: 'manual',
+                status: 'promoted',
+                canonicalId: entryIds[0],
+                entryIds,
+                skill: p.skill && typeof p.skill === 'object' ? { name: p.skill.name, tier: p.skill.tier } : null,
+                resolvedAt: new Date().toISOString(),
+              });
               writeKnowledgeCandidates(teamId, list);
             }
           }

@@ -241,23 +241,23 @@ test('knowledgeReviewEnabled defaults off and is tolerant', () => {
 // --- knowledgeConvergenceConfig ---------------------------------------------
 
 test('knowledgeConvergenceConfig defaults for legacy env', () => {
-  assert.deepEqual(knowledgeConvergenceConfig(undefined), { simThreshold: 0.6, convergenceThreshold: 2 });
-  assert.deepEqual(knowledgeConvergenceConfig({}), { simThreshold: 0.6, convergenceThreshold: 2 });
+  assert.deepEqual(knowledgeConvergenceConfig(undefined), { simThreshold: 0.6, convergenceThreshold: 2, relatedThreshold: 0.3 });
+  assert.deepEqual(knowledgeConvergenceConfig({}), { simThreshold: 0.6, convergenceThreshold: 2, relatedThreshold: 0.3 });
 });
 
 test('knowledgeConvergenceConfig honours + clamps overrides', () => {
   assert.deepEqual(
-    knowledgeConvergenceConfig({ knowledgeConvergence: { simThreshold: 0.8, convergenceThreshold: 3 } }),
-    { simThreshold: 0.8, convergenceThreshold: 3 },
+    knowledgeConvergenceConfig({ knowledgeConvergence: { simThreshold: 0.8, convergenceThreshold: 3, relatedThreshold: 0.4 } }),
+    { simThreshold: 0.8, convergenceThreshold: 3, relatedThreshold: 0.4 },
   );
   // clamp: sim out of range, threshold below 2 / non-int
   assert.deepEqual(
-    knowledgeConvergenceConfig({ knowledgeConvergence: { simThreshold: 5, convergenceThreshold: 1 } }),
-    { simThreshold: 1, convergenceThreshold: 2 },
+    knowledgeConvergenceConfig({ knowledgeConvergence: { simThreshold: 5, convergenceThreshold: 1, relatedThreshold: 5 } }),
+    { simThreshold: 1, convergenceThreshold: 2, relatedThreshold: 1 },
   );
   assert.deepEqual(
-    knowledgeConvergenceConfig({ knowledgeConvergence: { simThreshold: -1, convergenceThreshold: 2.5 } }),
-    { simThreshold: 0, convergenceThreshold: 2 },
+    knowledgeConvergenceConfig({ knowledgeConvergence: { simThreshold: -1, convergenceThreshold: 2.5, relatedThreshold: -1 } }),
+    { simThreshold: 0, convergenceThreshold: 2, relatedThreshold: 0 },
   );
 });
 

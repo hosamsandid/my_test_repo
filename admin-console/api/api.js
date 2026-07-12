@@ -3174,6 +3174,55 @@ app.post('/api/knowledge/promotion-suggestions/:id/draft', heavyLimiter, async (
   res.json({ draft: { name: heuristic.name, skillMd, llmDrafted: true }, source: 'llm', model: target.model });
 });
 
+// Resolve an operator-selected set of KB entry ids into an ad-hoc candidate
+// (manual "combine into skill" — no stored candidate exists). Prefers live
+// entries over merge tombstones, exactly like /api/knowledge/item/:id.
+function adHocCandidate(teamId, entryIds) {
+  const ids = [...new Set((Array.isArray(entryIds) ? entryIds : [])
+    .filter(x => typeof x === 'string' && /^[0-9a-f]{12}$/.test(x)))];
+  if (ids.length === 0) return null;
+  const { entries } = gatherTeamEntries(teamId);
+  const picked = [];
+  for (const id of ids) {
+    const e = entries.find(x => x && x.id === id && x.status !== 'merged')
+      || entries.find(x => x && x.id === id);
+    if (e) picked.push(e);
+  }
+  if (picked.length === 0) return null;
+  return knowledgeSuggestions.candidateFromEntries(picked, { teamId, source: 'manual' });
+}
+
+// Ad-hoc SKILL.md draft over an operator-selected entry set (manual combine —
+// there is no stored candidate to draft from). Same LLM-with-heuristic-fallback
+// contract as the suggestion draft; `heuristicOnly: true` skips the LLM so the
+// dialog can prefill instantly.
+app.post('/api/knowledge/draft', heavyLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.body?.team === 'string' ? req.body.team : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  const cand = adHocCandidate(teamId, req.body?.entryIds);
+  if (!cand) return res.status(404).json({ error: 'no matching KB entries' });
+
+  const heuristic = knowledgeSuggestions.buildHeuristicSkillDraft(cand);
+  const fallback = () => res.json({ draft: heuristic, source: 'heuristic', entryIds: cand.entryIds });
+  if (req.body?.heuristicOnly) return fallback();
+
+  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  if (target.error) return fallback();
+  const url = buildMessagesUrl(target.baseUrl);
+  const headers = {
+    'anthropic-version': '2023-06-01',
+    ...(target.token ? { Authorization: `Bearer ${target.token}`, 'x-api-key': target.token } : {}),
+  };
+  const payload = { model: target.model, ...knowledgeSuggestions.buildSkillDraftRequest(cand) };
+  const result = await httpPostJson(url, headers, payload);
+  if (result.error || result.status < 200 || result.status >= 300) return fallback();
+  const skillMd = extractMessageText(result.body);
+  if (!skillMd) return fallback();
+  res.json({ draft: { name: heuristic.name, skillMd, llmDrafted: true }, source: 'llm', model: target.model, entryIds: cand.entryIds });
+});
+
 app.post('/api/knowledge/promotion-suggestions/:id/dismiss', apiLimiter, async (req, res) => {
   const scope = getScope(req);
   const teamId = typeof req.body?.team === 'string' ? req.body.team : '';
@@ -3221,9 +3270,13 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
   const v = knowledgeSuggestions.validatePromotion(req.body);
   if (!v.ok) return res.status(400).json({ error: v.error });
 
-  const cand = req.body.suggestionId
+  // Provenance source: the stored candidate when the promotion came from a
+  // suggestion card, else an ad-hoc candidate rebuilt from the selected entries
+  // (manual combine) — so originAgents/sessions/sourceRefs are never lost.
+  const cand = (req.body.suggestionId
     ? readCandidateStore(teamId).find(c => c && c.id === req.body.suggestionId) || null
-    : null;
+    : null)
+    || (v.from === 'team' ? adHocCandidate(teamId, v.entryIds) : null);
 
   // Destination dir by target tier (same containment guards as promote-to-global).
   let dstDir;

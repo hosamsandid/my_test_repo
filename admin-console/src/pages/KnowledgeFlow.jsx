@@ -3,8 +3,10 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   Brain, RefreshCw, X, ExternalLink, GitBranch, Sparkles, Check, Wand2,
   Archive, Share2, ShieldCheck, Ban, MessageSquare, Search, ArrowRight, Users,
+  HelpCircle, BookOpen,
 } from 'lucide-react';
 import KnowledgeFeed from '../components/KnowledgeFeed';
+import InfoTip from '../components/InfoTip';
 
 /*
  * Knowledge Flow — content-first redesign.
@@ -29,11 +31,35 @@ const KIND_COLORS = {
 };
 
 const AUTONOMY_LEVELS = [
-  { level: 0, label: 'Off', desc: 'Private memory only — nothing is shared between agents.' },
-  { level: 1, label: 'Share', desc: 'Agents pool durable lessons into the shared team KB. No promotion.' },
-  { level: 2, label: 'Suggest', desc: 'Converged facts raise promotion cards; you confirm each.' },
-  { level: 3, label: 'Auto-curate', desc: 'Converged facts auto-promote to team skills within the gates.' },
+  {
+    level: 0, label: 'Off',
+    desc: 'Agents keep lessons to themselves — nothing is shared.',
+    tip: 'Each agent keeps what it learns in its own private memory. Nothing enters the shared team knowledge base.',
+  },
+  {
+    level: 1, label: 'Share',
+    desc: 'Agents pool their lessons into the shared team knowledge.',
+    tip: 'Every lesson an agent records is shared with the whole team, so all agents benefit from it. Nothing is turned into a skill automatically.',
+  },
+  {
+    level: 2, label: 'Suggest',
+    desc: 'Like Share — plus suggestions when knowledge converges. You confirm each.',
+    tip: 'Like Share — and when several agents learn the same thing independently, you get a suggestion to turn it into a reusable skill. Nothing happens without your confirmation.',
+  },
+  {
+    level: 3, label: 'Auto-curate',
+    desc: 'The team promotes converged knowledge to skills on its own, within the gates.',
+    tip: 'The team curates itself: knowledge several agents converged on becomes a team skill automatically — but only where the promotion gates allow it. Promotion to the global pool always waits for your review.',
+  },
 ];
+
+// Plain-language explanations of the three knowledge kinds — used by the
+// intro panel, the filter chips, and the item cards.
+const KIND_EXPLAIN = {
+  fact: 'Fact — something an agent found to be true about the project or its tools (e.g. “the build needs Node 22”).',
+  entity: 'Entity — a named thing (a system, repo, service, person) and what the team knows about it.',
+  convention: 'Convention — how the team does things (processes, labels, rituals — e.g. “PRs need the ready-for-review label”).',
+};
 
 // The knowledge team ("squad") an agent belongs to — mirrors the backend's
 // agentKnowledgeTeam: member → its parent team, team agent → itself,
@@ -70,6 +96,14 @@ export default function KnowledgeFlow() {
   const [pulseId, setPulseId] = useState(null);
   const [promoting, setPromoting] = useState(null); // { suggestion, teamId }
   const [sharing, setSharing] = useState(null); // { node, teamId }
+  // "How it works" intro: open on first visit, dismissible, reopenable anytime.
+  const [showIntro, setShowIntro] = useState(() => {
+    try { return localStorage.getItem('kf.introSeen') !== '1'; } catch { return true; }
+  });
+  const dismissIntro = useCallback(() => {
+    setShowIntro(false);
+    try { localStorage.setItem('kf.introSeen', '1'); } catch { /* ignore */ }
+  }, []);
 
   const sectionRefs = useRef({});
 
@@ -208,19 +242,34 @@ export default function KnowledgeFlow() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       {/* ── Header ─────────────────────────────────────────────────────────── */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', padding: 'var(--eb-space-4) var(--eb-space-4) var(--eb-space-2)', flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', padding: 'var(--eb-space-4) var(--eb-space-4) 0', flexWrap: 'wrap' }}>
         <Brain size={20} style={{ color: 'var(--eb-accent-primary)' }} />
         <h1 style={{ margin: 0, fontSize: 'var(--eb-text-xl)', fontFamily: 'var(--eb-font-display)', color: 'var(--eb-text-primary)' }}>
           Knowledge Flow
         </h1>
         <span style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
-          {totals.items} learned{totals.today ? <span style={{ color: 'var(--eb-status-success)' }}> (+{totals.today} today)</span> : null} · {totals.converged} converged · {totals.skills} skills
+          <span title="Lessons agents have recorded so far">{totals.items} learned</span>
+          {totals.today ? <span style={{ color: 'var(--eb-status-success)' }} title="Recorded in the last 24 hours"> (+{totals.today} today)</span> : null}
+          {' · '}
+          <span title="Learned independently by more than one agent — a strong signal it’s true and important">{totals.converged} converged</span>
+          {' · '}
+          <span title="Knowledge promoted into reusable skills that agents load automatically">{totals.skills} skills</span>
         </span>
-        <FlowLegend />
-        <button onClick={loadAll} title="Refresh" style={{ ...btn, marginLeft: 'auto' }}>
+        <button
+          onClick={() => (showIntro ? dismissIntro() : setShowIntro(true))}
+          title="A short explanation of how the knowledge system works"
+          style={{ ...btn, borderStyle: 'dashed' }}>
+          <HelpCircle size={13} /> How it works
+        </button>
+        <button onClick={loadAll} title="Reload all teams and their knowledge" style={{ ...btn, marginLeft: 'auto' }}>
           <RefreshCw size={14} className={loading ? 'kf-spin' : undefined} /> Refresh
         </button>
       </div>
+      <div style={{ padding: '2px var(--eb-space-4) var(--eb-space-2)', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
+        Your agents write down what they learn while working. Watch those lessons become shared team knowledge — and decide what turns into reusable skills.
+      </div>
+
+      {showIntro && <HowItWorks onDismiss={dismissIntro} />}
 
       {/* ── Filter bar (refines in place — never a precondition to see data) ── */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: '0 var(--eb-space-4) var(--eb-space-3)', flexWrap: 'wrap' }}>
@@ -236,15 +285,29 @@ export default function KnowledgeFlow() {
             <X size={12} style={{ cursor: 'pointer', color: 'var(--eb-text-muted)' }} onClick={() => setFilters(f => ({ ...f, q: '' }))} />
           )}
         </div>
-        {[['all', 'All kinds'], ['fact', 'Facts'], ['entity', 'Entities'], ['convention', 'Conventions']].map(([k, label]) => (
-          <Chip key={k} active={filters.kind === k} onClick={() => setFilters(f => ({ ...f, kind: k }))}>
+        {[
+          ['all', 'All kinds', 'Show every kind of learned knowledge'],
+          ['fact', 'Facts', KIND_EXPLAIN.fact],
+          ['entity', 'Entities', KIND_EXPLAIN.entity],
+          ['convention', 'Conventions', KIND_EXPLAIN.convention],
+        ].map(([k, label, tip]) => (
+          <Chip key={k} active={filters.kind === k} title={tip} onClick={() => setFilters(f => ({ ...f, kind: k }))}>
             {label}
           </Chip>
         ))}
         <div style={{ width: 1, height: 20, background: 'var(--eb-border-default)' }} />
-        <Chip active={filters.convergedOnly} onClick={() => setFilters(f => ({ ...f, convergedOnly: !f.convergedOnly }))}>Converged only</Chip>
-        <Chip active={filters.today} onClick={() => setFilters(f => ({ ...f, today: !f.today }))}>Today</Chip>
-        <Chip active={filters.showArchived} onClick={() => setFilters(f => ({ ...f, showArchived: !f.showArchived }))}>Show archived</Chip>
+        <Chip
+          active={filters.convergedOnly}
+          title="Show only knowledge that several agents learned independently of each other"
+          onClick={() => setFilters(f => ({ ...f, convergedOnly: !f.convergedOnly }))}>Converged only</Chip>
+        <Chip
+          active={filters.today}
+          title="Show only lessons recorded in the last 24 hours"
+          onClick={() => setFilters(f => ({ ...f, today: !f.today }))}>Today</Chip>
+        <Chip
+          active={filters.showArchived}
+          title="Also show retired knowledge — it’s hidden by default but kept for audit"
+          onClick={() => setFilters(f => ({ ...f, showArchived: !f.showArchived }))}>Show archived</Chip>
       </div>
 
       {/* ── Body ───────────────────────────────────────────────────────────── */}
@@ -321,20 +384,76 @@ export default function KnowledgeFlow() {
   );
 }
 
-/* ── The flow legend in the header ──────────────────────────────────────────── */
+/* ── "How it works" intro — the page explains itself to a first-time user ──── */
 
-function FlowLegend() {
-  const step = (label) => (
-    <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{label}</span>
+function HowItWorks({ onDismiss }) {
+  const stepStyle = { flex: '1 1 220px', minWidth: 200 };
+  const stepTitle = { display: 'flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)', marginBottom: 4 };
+  const stepBody = { fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.55, margin: 0 };
+  const num = (n) => (
+    <span style={{
+      width: 18, height: 18, borderRadius: 'var(--eb-radius-full)', flexShrink: 0,
+      background: 'var(--eb-accent-muted)', color: 'var(--eb-accent-primary)',
+      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+      fontSize: 11, fontWeight: 700,
+    }}>{n}</span>
+  );
+  const dot = (kind) => (
+    <span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: 'var(--eb-radius-full)', background: KIND_COLORS[kind], marginRight: 4, verticalAlign: 'baseline' }} />
   );
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 'var(--eb-space-2)', padding: '2px var(--eb-space-2)', border: '1px dashed var(--eb-border-default)', borderRadius: 'var(--eb-radius-full)' }}>
-      {step('Agents learn')}
-      <ArrowRight size={11} style={{ color: 'var(--eb-text-muted)' }} />
-      {step('Team knowledge converges')}
-      <ArrowRight size={11} style={{ color: 'var(--eb-text-muted)' }} />
-      {step('Skills promoted')}
-    </span>
+    <div style={{
+      margin: '0 var(--eb-space-4) var(--eb-space-3)', padding: 'var(--eb-space-3) var(--eb-space-4)',
+      border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-lg)',
+      background: 'var(--eb-bg-surface)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 'var(--eb-space-2)' }}>
+        <BookOpen size={15} style={{ color: 'var(--eb-accent-primary)' }} />
+        <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
+          How the knowledge system works
+        </span>
+        <button onClick={onDismiss} style={{ ...btn, marginLeft: 'auto', padding: '2px 10px', fontSize: 'var(--eb-text-xs)' }}>
+          Got it — hide this
+        </button>
+      </div>
+
+      <div style={{ display: 'flex', gap: 'var(--eb-space-4)', flexWrap: 'wrap' }}>
+        <div style={stepStyle}>
+          <div style={stepTitle}>{num(1)} Agents learn while they work</div>
+          <p style={stepBody}>
+            At the end of a work session, each agent writes down the durable lessons it learned.
+            Every lesson is a {dot('fact')}<strong>fact</strong> (something true about the project),
+            an {dot('entity')}<strong>entity</strong> (a named thing and what’s known about it),
+            or a {dot('convention')}<strong>convention</strong> (how the team does things).
+          </p>
+        </div>
+        <div style={stepStyle}>
+          <div style={stepTitle}>{num(2)} Lessons become team knowledge</div>
+          <p style={stepBody}>
+            Lessons flow into the team’s shared knowledge base, where every agent can use them.
+            When several agents learn the same thing <em>independently</em>, it’s marked
+            {' '}<strong>converged</strong> — a strong signal that it’s both true and important.
+          </p>
+        </div>
+        <div style={stepStyle}>
+          <div style={stepTitle}>{num(3)} The best knowledge becomes skills</div>
+          <p style={stepBody}>
+            Converged knowledge can be <strong>promoted to a skill</strong>: a reusable instruction
+            file that agents load automatically at the start of their work. You review each
+            promotion — unless you raise the team’s autonomy and let it curate itself.
+          </p>
+        </div>
+      </div>
+
+      <div style={{ marginTop: 'var(--eb-space-3)', paddingTop: 'var(--eb-space-2)', borderTop: '1px dashed var(--eb-border-default)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.55 }}>
+        <ShieldCheck size={12} style={{ verticalAlign: -2, marginRight: 4, color: 'var(--eb-accent-primary)' }} />
+        <strong style={{ color: 'var(--eb-text-secondary)' }}>You stay in control.</strong>{' '}
+        Each team has an <strong>Autonomy</strong> dial (how much happens without you), an optional
+        {' '}<strong>Review</strong> mode (you approve every new lesson first), and <strong>promotion
+        gates</strong> (which promotion steps may run automatically). Nothing is deleted silently —
+        retired knowledge is kept in git for audit.
+      </div>
+    </div>
   );
 }
 
@@ -424,7 +543,14 @@ const TeamSection = React.forwardRef(function TeamSection({
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(180px, 220px) 20px minmax(0, 1fr) 20px minmax(200px, 260px)', gap: 0, padding: 'var(--eb-space-3) var(--eb-space-4) var(--eb-space-4)' }}>
         {/* Agents */}
         <div>
-          <ColHeader label="Agents" hint="record lessons" />
+          <ColHeader
+            label="Agents"
+            hint="learn"
+            tip={{
+              title: 'Where knowledge starts',
+              text: 'The team’s agents. Each one records the durable lessons it learned at the end of a work session. Click an agent to see only its contributions; the speech bubble opens a chat with it.',
+            }}
+          />
           {agents.map(a => (
             <AgentRow
               key={a.id}
@@ -441,9 +567,17 @@ const TeamSection = React.forwardRef(function TeamSection({
 
         {/* Team knowledge */}
         <div style={{ minWidth: 0 }}>
-          <ColHeader label="Team knowledge" hint="shared facts, entities & conventions" trailing={agentFilter && (
-            <Chip active onClick={() => setAgentFilter(null)}>only {agentFilter} ✕</Chip>
-          )} />
+          <ColHeader
+            label="Team knowledge"
+            hint="what the whole team knows"
+            tip={{
+              title: 'The shared knowledge base',
+              text: 'Everything this team’s agents have learned, pooled so every agent can use it. Click a card to see where it came from — which agent, which session, which PR. “N× independent” means several agents learned it on their own.',
+            }}
+            trailing={agentFilter && (
+              <Chip active title="Clear this filter" onClick={() => setAgentFilter(null)}>only {agentFilter} ✕</Chip>
+            )}
+          />
           {reviewQueue.length > 0 && (
             <ReviewQueueBlock teamId={team.id} items={reviewQueue} onChanged={onControlsChanged} />
           )}
@@ -469,7 +603,14 @@ const TeamSection = React.forwardRef(function TeamSection({
 
         {/* Skills */}
         <div>
-          <ColHeader label="Skills" hint="promoted, reusable" />
+          <ColHeader
+            label="Skills"
+            hint="proven & reusable"
+            tip={{
+              title: 'Promoted knowledge',
+              text: 'Knowledge that proved important, packaged as a reusable instruction file agents load automatically when they work. Team skills serve this team; a skill can also be shared with other teams.',
+            }}
+          />
           {suggestions.map(s => (
             <SuggestionCard key={s.id} suggestion={s} onReview={() => onReviewSuggestion(s)} />
           ))}
@@ -485,7 +626,9 @@ const TeamSection = React.forwardRef(function TeamSection({
           })}
           {skills.length === 0 && suggestions.length === 0 && pending.length === 0 && (
             <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', padding: 'var(--eb-space-2) 0' }}>
-              No skills yet. {autonomy >= 2 ? 'Converged facts will raise promotion cards here.' : 'At autonomy 2+, converged facts raise promotion cards here.'}
+              No skills yet. {autonomy >= 2
+                ? 'When several agents learn the same thing, a suggestion appears here to turn it into a reusable skill.'
+                : 'Set Autonomy to “2 Suggest” and you’ll get a suggestion here whenever several agents learn the same thing.'}
             </div>
           )}
           {skills.map(sk => (
@@ -500,11 +643,12 @@ const TeamSection = React.forwardRef(function TeamSection({
   );
 });
 
-function ColHeader({ label, hint, trailing }) {
+function ColHeader({ label, hint, tip, trailing }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 'var(--eb-space-2)', minHeight: 24 }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 'var(--eb-space-2)', minHeight: 24 }}>
       <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--eb-text-secondary)' }}>{label}</span>
       <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{hint}</span>
+      {tip && <InfoTip size={12} title={tip.title} text={tip.text} />}
       {trailing}
     </div>
   );
@@ -549,9 +693,9 @@ function AgentRow({ agent, active, highlighted, onToggle, onOpenChat }) {
 
 function EmptyKnowledge({ autonomy, counts, filtered }) {
   let msg;
-  if (filtered) msg = 'Nothing matches the current filters.';
-  else if (autonomy === 0) msg = 'Learning is off for this team (autonomy 0). Set it to 1 · Share and the agents will pool the lessons they learn.';
-  else if (counts.items === 0) msg = 'Nothing shared yet. Agents record durable lessons at the end of their sessions — they will appear here.';
+  if (filtered) msg = 'Nothing matches the current filters — clear them above to see everything again.';
+  else if (autonomy === 0) msg = 'Sharing is switched off for this team (Autonomy 0). Set it to “1 Share” above and the agents will pool the lessons they learn here.';
+  else if (counts.items === 0) msg = 'Nothing here yet. Agents write down what they learned at the end of each work session — as soon as the first one finishes, its lessons show up here.';
   else msg = 'No entries.';
   return (
     <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', padding: 'var(--eb-space-3) 0' }}>{msg}</div>
@@ -575,12 +719,14 @@ function ItemCard({ item, pulsing, selected, onClick, onHover, onRetire, onUnarc
       }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
         <span style={{ width: 7, height: 7, borderRadius: 'var(--eb-radius-full)', background: KIND_COLORS[item.entryKind] || 'var(--eb-accent-primary)', flexShrink: 0 }} />
-        <span style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.03em', color: 'var(--eb-text-muted)' }}>{item.entryKind}</span>
+        <span title={KIND_EXPLAIN[item.entryKind]} style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.03em', color: 'var(--eb-text-muted)', cursor: 'help' }}>{item.entryKind}</span>
         {item.archived && (
-          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', border: '1px solid var(--eb-border-default)', padding: '0 5px', borderRadius: 'var(--eb-radius-full)' }}>archived</span>
+          <span title="Retired from the active knowledge base — kept in git for audit" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', border: '1px solid var(--eb-border-default)', padding: '0 5px', borderRadius: 'var(--eb-radius-full)' }}>retired</span>
         )}
         {item.converged && (
-          <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-accent-primary)', background: 'var(--eb-accent-muted)', padding: '0 6px', borderRadius: 'var(--eb-radius-full)' }}>
+          <span
+            title={`${item.convergenceCount} agents learned this independently of each other — a strong signal it’s true and important. Converged knowledge is what gets suggested as a skill.`}
+            style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-accent-primary)', background: 'var(--eb-accent-muted)', padding: '0 6px', borderRadius: 'var(--eb-radius-full)', cursor: 'help' }}>
             {item.convergenceCount}× independent
           </span>
         )}
@@ -621,7 +767,11 @@ function SkillCard({ skill, onShare }) {
       <GitBranch size={13} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
       <div style={{ minWidth: 0, flex: 1 }}>
         <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{skill.label}</div>
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{skill.tier} skill{auto ? ' · auto-promoted' : ''}</div>
+        <div
+          style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', cursor: 'help' }}
+          title={`${skill.tier === 'global' ? 'Global skill — agents in every team load it' : 'Team skill — only this team’s agents load it'}${auto ? '. Promoted automatically by the team’s curator (autonomy 3).' : ''}`}>
+          {skill.tier} skill{auto ? ' · auto-promoted' : ''}
+        </div>
       </div>
       <span
         title="Share this skill into another team"
@@ -645,15 +795,21 @@ function SuggestionCard({ suggestion, onReview }) {
     <div style={{ ...amberCard, flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         <Sparkles size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
-        <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-status-warning)' }}>
-          Promotion suggestion
+        <span
+          title="This knowledge looks important enough to become a reusable skill. Review it to promote — or dismiss it."
+          style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-status-warning)', cursor: 'help' }}>
+          Suggested skill
         </span>
-        <span style={{ marginLeft: 'auto', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-          {suggestion.convergenceCount}×{suggestion.source === 'agent-nominated' ? ' · nominated' : ''}
+        <span
+          style={{ marginLeft: 'auto', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', cursor: 'help' }}
+          title={suggestion.source === 'agent-nominated'
+            ? 'An agent itself nominated this as worth promoting'
+            : `${suggestion.convergenceCount} agents learned this independently`}>
+          {suggestion.convergenceCount}× learned{suggestion.source === 'agent-nominated' ? ' · nominated' : ''}
         </span>
       </div>
       <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)', wordBreak: 'break-word' }}>{suggestion.text}</div>
-      <button onClick={onReview} style={{ ...primaryBtn, alignSelf: 'flex-end' }}>Review & promote</button>
+      <button onClick={onReview} title="Open the review dialog — nothing is promoted until you confirm" style={{ ...primaryBtn, alignSelf: 'flex-end' }}>Review & promote</button>
     </div>
   );
 }
@@ -674,7 +830,14 @@ function PrivateSkillsBlock({ teamId, skills, onLifted }) {
   };
   return (
     <div style={{ marginTop: 'var(--eb-space-3)' }}>
-      <ColHeader label="Private skills" hint="one agent only — lift to share" />
+      <ColHeader
+        label="Private skills"
+        hint="one agent only"
+        tip={{
+          title: 'Skills a single agent made for itself',
+          text: 'These exist only in one agent’s workspace — teammates can’t use them. “Lift to team” copies a skill into the team pool so every agent on the team loads it.',
+        }}
+      />
       {skills.map(sk => {
         const st = state[sk.name];
         return (
@@ -687,7 +850,11 @@ function PrivateSkillsBlock({ teamId, skills, onLifted }) {
               <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{sk.name}</div>
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{sk.agentId}</div>
             </div>
-            <button onClick={() => lift(sk)} disabled={st === 'lifting' || st === 'done'} style={miniBtn}>
+            <button
+              onClick={() => lift(sk)}
+              disabled={st === 'lifting' || st === 'done'}
+              title="Copy this skill into the team pool so every agent on the team can use it"
+              style={miniBtn}>
               {st === 'lifting' ? 'Lifting…' : st === 'done' ? 'Lifted ✓' : st === 'exists' ? 'Name taken' : 'Lift to team'}
             </button>
           </div>
@@ -713,10 +880,15 @@ function ReviewQueueBlock({ teamId, items, onChanged }) {
   };
   return (
     <div style={{ border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)', marginBottom: 'var(--eb-space-3)', overflow: 'hidden' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px var(--eb-space-3)', borderBottom: '1px solid var(--eb-status-warning)' }}>
-        <ShieldCheck size={13} style={{ color: 'var(--eb-status-warning)' }} />
-        <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-status-warning)' }}>Awaiting your review</span>
-        <span style={{ marginLeft: 'auto', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{items.length}</span>
+      <div style={{ padding: '5px var(--eb-space-3)', borderBottom: '1px solid var(--eb-status-warning)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <ShieldCheck size={13} style={{ color: 'var(--eb-status-warning)' }} />
+          <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-status-warning)' }}>Awaiting your review</span>
+          <span style={{ marginLeft: 'auto', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{items.length}</span>
+        </div>
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 2 }}>
+          Review is on for this team: new lessons enter the shared knowledge only after you approve them.
+        </div>
       </div>
       <div style={{ padding: 'var(--eb-space-2) var(--eb-space-3)' }}>
         {items.map(it => (
@@ -772,20 +944,36 @@ function ControlStrip({ teamId, gates, onChanged }) {
   const review = !!gates.review;
   const g = gates.gates || {};
   const current = AUTONOMY_LEVELS.find(l => l.level === autonomy) || AUTONOMY_LEVELS[1];
-  const GATE_LABELS = { 'team>team': 'KB → team skill', 'agent>team': 'agent → team', 'team>global': 'team → global' };
+  const GATE_LABELS = {
+    'team>team': 'Knowledge → team skill',
+    'agent>team': 'Agent skill → team skill',
+    'team>global': 'Team skill → all teams',
+  };
+  const GATE_TIPS = {
+    'team>team': 'Converged team knowledge becoming a team skill.',
+    'agent>team': 'A skill one agent authored for itself becoming a team skill.',
+    'team>global': 'A team skill becoming available to every team. This step always waits for your review — it can’t be set to automatic.',
+  };
 
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', padding: 'var(--eb-space-2) var(--eb-space-4)', borderBottom: '1px solid var(--eb-border-default)', background: 'var(--eb-bg-app)', flexWrap: 'wrap' }}>
       <ShieldCheck size={13} style={{ color: 'var(--eb-accent-primary)' }} />
-      <span style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--eb-text-muted)' }}>Autonomy</span>
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        <span style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--eb-text-muted)' }}>Autonomy</span>
+        <InfoTip
+          size={12}
+          title="How much may this team do on its own?"
+          text="From 0 (agents keep everything private) to 3 (the team promotes its own skills). Hover each step for details — you can change this at any time, and higher levels never bypass the gates."
+        />
+      </span>
       <div style={{ display: 'inline-flex', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', overflow: 'hidden' }}>
-        {AUTONOMY_LEVELS.map(({ level, label, desc }) => {
+        {AUTONOMY_LEVELS.map(({ level, label, tip }) => {
           const active = level === autonomy;
           return (
             <button
               key={level}
               disabled={busy === 'autonomy'}
-              title={desc}
+              title={tip}
               onClick={() => !active && call('autonomy', '/api/knowledge/autonomy', { teamId, level })}
               style={{
                 padding: '3px 10px', border: 'none', cursor: 'pointer', fontSize: 'var(--eb-text-xs)', fontWeight: 600,
@@ -801,10 +989,19 @@ function ControlStrip({ teamId, gates, onChanged }) {
 
       <div style={{ width: 1, height: 18, background: 'var(--eb-border-default)' }} />
 
-      <span style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--eb-text-muted)' }}>Review</span>
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        <span style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--eb-text-muted)' }}>Review</span>
+        <InfoTip
+          size={12}
+          title="Approve lessons before they’re shared?"
+          text="When on, every new lesson waits for your approval before entering the shared team knowledge. When off, lessons are shared immediately — you can still retire any of them later. (Needs autonomy 1 or higher.)"
+        />
+      </span>
       <button
         disabled={busy === 'review' || autonomy < 1}
-        title="Hold newly-learned facts for your approval before they enter the shared KB"
+        title={autonomy < 1
+          ? 'Review needs autonomy 1 or higher — at 0, nothing is shared in the first place'
+          : (review ? 'Click to share new lessons immediately, without approval' : 'Click to hold every new lesson for your approval first')}
         onClick={() => call('review', '/api/knowledge/review-mode', { teamId, enabled: !review })}
         style={{
           fontSize: 'var(--eb-text-xs)', fontWeight: 600, cursor: autonomy < 1 ? 'not-allowed' : 'pointer',
@@ -812,26 +1009,34 @@ function ControlStrip({ teamId, gates, onChanged }) {
           border: `1px solid ${review ? 'var(--eb-status-warning)' : 'var(--eb-border-default)'}`,
           color: review ? 'var(--eb-status-warning)' : 'var(--eb-text-muted)', background: 'transparent',
         }}>
-        {review ? 'on — approve first' : 'off — auto-share'}
+        {review ? 'on — you approve each lesson' : 'off — shared immediately'}
       </button>
 
       <div style={{ width: 1, height: 18, background: 'var(--eb-border-default)' }} />
 
-      <span style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--eb-text-muted)' }}
-        title="Gates apply to auto-promotion (autonomy 3)">Gates</span>
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        <span style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--eb-text-muted)' }}>Promotion gates</span>
+        <InfoTip
+          size={12}
+          title="Checkpoints for automatic promotion"
+          text="Only relevant at autonomy 3 (Auto-curate): each gate decides whether that promotion step may run on its own (“automatic”) or waits for you (“needs review”). At lower autonomy levels everything waits for you anyway."
+        />
+      </span>
       {['team>team', 'agent>team', 'team>global'].map(tr => {
         const mode = g[tr] || 'review';
         const locked = tr === 'team>global';
         return (
-          <span key={tr} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <span key={tr} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }} title={GATE_TIPS[tr]}>
             <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{GATE_LABELS[tr]}</span>
             {locked ? (
-              <span style={{ fontSize: 10, color: 'var(--eb-text-muted)' }}>review (locked)</span>
+              <span style={{ fontSize: 10, color: 'var(--eb-text-muted)' }}>always reviewed</span>
             ) : (
               <button
                 disabled={busy === tr}
                 onClick={() => call(tr, '/api/knowledge/gates', { teamId, transition: tr, mode: mode === 'auto' ? 'review' : 'auto' })}
-                title="Toggle automatic / needs review (takes effect at autonomy 3)"
+                title={mode === 'auto'
+                  ? 'Runs on its own at autonomy 3 — click to require your review instead'
+                  : 'Waits for your review — click to let it run on its own at autonomy 3'}
                 style={{
                   fontSize: 10, fontWeight: 600, cursor: 'pointer', borderRadius: 4, padding: '1px 6px',
                   border: `1px solid ${mode === 'auto' ? 'var(--eb-status-success)' : 'var(--eb-status-warning)'}`,
@@ -982,12 +1187,19 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
       <div onClick={e => e.stopPropagation()} style={{ ...dialog, width: 640, display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
           <Sparkles size={18} style={{ color: 'var(--eb-status-warning)' }} />
-          <h2 style={{ margin: 0, fontSize: 'var(--eb-text-lg)', color: 'var(--eb-text-primary)' }}>Promote to a skill</h2>
+          <h2 style={{ margin: 0, fontSize: 'var(--eb-text-lg)', color: 'var(--eb-text-primary)' }}>Turn this knowledge into a skill</h2>
           <button onClick={onClose} style={{ ...btn, marginLeft: 'auto' }}><X size={14} /></button>
         </div>
 
-        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-          {suggestion.convergenceCount}× independent · {(suggestion.convergence || []).join(', ')}
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
+          A skill is a reusable instruction file (SKILL.md) that agents load automatically at the
+          start of their work. Give it a name, check the instructions — “Draft with AI” writes them
+          from the learned knowledge — and choose who should get it.
+        </div>
+
+        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}
+          title="Which agents learned this, independently of each other">
+          Learned {suggestion.convergenceCount}× independently · by {(suggestion.convergence || []).join(', ')}
         </div>
         <div style={{
           fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', background: 'var(--eb-bg-app)',
@@ -999,15 +1211,15 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
         <label style={lbl}>Skill name</label>
         <input value={name} onChange={e => setName(e.target.value)} style={inp} />
 
-        <label style={lbl}>Target tier</label>
+        <label style={lbl}>Who gets this skill?</label>
         <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
-          <Chip active={tier === 'team'} onClick={() => setTier('team')}>Team skill</Chip>
-          <Chip active={tier === 'global'} onClick={() => setTier('global')}>Global skill</Chip>
+          <Chip active={tier === 'team'} title="Only this team’s agents load it" onClick={() => setTier('team')}>Team skill — this team only</Chip>
+          <Chip active={tier === 'global'} title="Agents in every team load it" onClick={() => setTier('global')}>Global skill — all teams</Chip>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-          <label style={lbl}>SKILL.md</label>
-          <button onClick={draftWithAI} disabled={!!busy} style={{ ...btn, marginLeft: 'auto' }}>
+          <label style={lbl}>Skill instructions (SKILL.md)</label>
+          <button onClick={draftWithAI} disabled={!!busy} title="Let AI write the instructions from the learned knowledge — you can edit the result" style={{ ...btn, marginLeft: 'auto' }}>
             <Wand2 size={13} /> {busy === 'draft' ? 'Drafting…' : 'Draft with AI'}
           </button>
         </div>
@@ -1017,7 +1229,7 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
         {error && <div style={{ color: 'var(--eb-status-error, #d33)', fontSize: 'var(--eb-text-xs)' }}>{error}</div>}
 
         <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end' }}>
-          <button onClick={dismiss} disabled={!!busy} style={btn}>Dismiss</button>
+          <button onClick={dismiss} disabled={!!busy} title="Don’t promote — the suggestion goes away, the knowledge itself stays in the team KB" style={btn}>Dismiss</button>
           <button onClick={promote} disabled={!!busy || !name.trim() || !skillMd.trim()} style={primaryBtn}>
             <Check size={14} /> {busy === 'promote' ? 'Promoting…' : `Promote to ${tier}`}
           </button>
@@ -1078,9 +1290,9 @@ function ShareDialog({ node, teams, onClose, onDone }) {
 
 /* ── Shared bits ─────────────────────────────────────────────────────────────── */
 
-function Chip({ active, onClick, children }) {
+function Chip({ active, onClick, title, children }) {
   return (
-    <button onClick={onClick} style={{
+    <button onClick={onClick} title={title} style={{
       padding: '3px var(--eb-space-3)', borderRadius: 'var(--eb-radius-full)', cursor: 'pointer',
       border: `1px solid ${active ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
       background: active ? 'var(--eb-accent-muted)' : 'var(--eb-bg-surface)',

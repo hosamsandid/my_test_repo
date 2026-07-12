@@ -394,6 +394,27 @@ select option:disabled {
   background-color: var(--shiki-dark-bg);
 }
 
+/* ─── InfoTip: rich multi-line explanation popover ───────────────────
+   Pairs with admin-console/src/components/InfoTip.jsx. Same portal +
+   position:fixed approach as .eb-icon-btn-tooltip, but sized for
+   sentences: wraps, readable max width, soft shadow. */
+.eb-infotip-pop {
+  position: fixed;
+  transform: translateX(-50%);
+  max-width: 300px;
+  background: var(--eb-bg-elevated);
+  color: var(--eb-text-secondary);
+  border: 1px solid var(--eb-border-default);
+  padding: 8px 10px;
+  border-radius: var(--eb-radius-md);
+  font-size: var(--eb-text-xs);
+  line-height: 1.5;
+  white-space: normal;
+  pointer-events: none;
+  z-index: 1000;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+}
+
 /* ── Knowledge Flow (Shared Agent Learning, Phase 2) ─────────────────────── */
 @keyframes kf-fade-in {
   from { opacity: 0; transform: translateY(-4px); }

@@ -527,7 +527,14 @@ const TeamSection = React.forwardRef(function TeamSection({
           <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{team.id}</span>
         )}
         <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-          {agents.length} agents · {counts.items} learned{counts.today ? <span style={{ color: 'var(--eb-status-success)' }}> (+{counts.today} today)</span> : null} · {counts.converged} converged · {skills.length} skills
+          {agents.length} agents
+          {' · '}
+          <span title="Lessons this team’s agents have recorded">{counts.items} learned</span>
+          {counts.today ? <span style={{ color: 'var(--eb-status-success)' }} title="Recorded in the last 24 hours"> (+{counts.today} today)</span> : null}
+          {' · '}
+          <span title="Learned independently by more than one agent">{counts.converged} converged</span>
+          {' · '}
+          <span title="Reusable skills promoted from this team’s knowledge">{skills.length} skills</span>
         </span>
         {warnings.length > 0 && (
           <span title={warnings.join('\n')} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)' }}>
@@ -617,10 +624,10 @@ const TeamSection = React.forwardRef(function TeamSection({
           {pending.map(p => {
             const s = suggestions.find(x => x.id === p.suggestionId);
             return s ? null : (
-              <div key={p.id} style={amberCard}>
+              <div key={p.id} style={amberCard} title="This promotion stopped at a gate that requires your review — it won’t proceed on its own.">
                 <Sparkles size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
                 <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)' }}>{p.label}</span>
-                <span style={{ fontSize: 10, color: 'var(--eb-status-warning)', marginLeft: 'auto' }}>needs review</span>
+                <span style={{ fontSize: 10, color: 'var(--eb-status-warning)', marginLeft: 'auto' }}>waiting for your review</span>
               </div>
             );
           })}
@@ -1076,9 +1083,14 @@ function Provenance({ detail, onClose, onOpenAgent, onArchive }) {
   const promoted = entry.status === 'promoted';
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      <div style={{ display: 'flex', alignItems: 'center', padding: 'var(--eb-space-3)', borderBottom: '1px solid var(--eb-border-default)' }}>
-        <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>Provenance</span>
-        <button onClick={onClose} style={{ ...btn, marginLeft: 'auto', padding: 4 }}><X size={14} /></button>
+      <div style={{ padding: 'var(--eb-space-3)', borderBottom: '1px solid var(--eb-border-default)' }}>
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>Provenance</span>
+          <button onClick={onClose} style={{ ...btn, marginLeft: 'auto', padding: 4 }}><X size={14} /></button>
+        </div>
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 2 }}>
+          Where this knowledge came from: the agent that learned it, the session it happened in, and any linked PR or issue.
+        </div>
       </div>
       <div style={{ flex: 1, overflowY: 'auto', padding: 'var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
         <div>
@@ -1104,8 +1116,9 @@ function Provenance({ detail, onClose, onOpenAgent, onArchive }) {
                 </a>))
             : <Muted>no PR/issue/commit linked</Muted>}
         </Lineage>
-        <Lineage label="Convergence">
-          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+        <Lineage label="Independently learned by">
+          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}
+            title="Agents that learned this on their own, without seeing each other’s notes — the more, the stronger the signal">
             {entry.convergence?.length || 1}× — {(entry.convergence || []).join(', ') || entry.originAgent}
           </div>
         </Lineage>

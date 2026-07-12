@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useRef } from 'react';
 import { Brain, Sparkles } from 'lucide-react';
 import useSSE from '../hooks/useSSE';
+import InfoTip from './InfoTip';
 
 /**
  * Live feed of recent knowledge harvests / promotions (Shared Agent Learning,
@@ -45,7 +46,12 @@ export default function KnowledgeFeed({ scope, max = 40, onHarvest, onEvent, emp
       }}>
         <Brain size={13} style={{ color: 'var(--eb-accent-primary)' }} />
         <span>Live learning</span>
-        <span title={`feed ${status}`} style={{
+        <InfoTip
+          size={12}
+          title="What agents learn, as it happens"
+          text="Every lesson an agent records appears here in real time — including suggestions and promoted skills. The green dot means the live connection is up."
+        />
+        <span title={status === 'open' ? 'Live connection is up' : `Live connection: ${status}`} style={{
           marginLeft: 'auto', width: 7, height: 7, borderRadius: 'var(--eb-radius-full)',
           background: status === 'open' ? 'var(--eb-status-success)' : 'var(--eb-text-muted)',
         }} />
@@ -53,7 +59,7 @@ export default function KnowledgeFeed({ scope, max = 40, onHarvest, onEvent, emp
       <div style={{ flex: 1, overflowY: 'auto', padding: 'var(--eb-space-2)' }}>
         {events.length === 0 ? (
           <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)', padding: 'var(--eb-space-3)' }}>
-            {emptyHint || 'Waiting for harvests… durable lessons agents record will appear here in real time.'}
+            {emptyHint || 'Quiet right now. As soon as an agent finishes a work session and writes down what it learned, it appears here live.'}
           </div>
         ) : (
           events.map((ev, i) => <FeedRow key={`${ev.entry?.id || ev.ts}-${i}`} ev={ev} />)

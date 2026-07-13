@@ -29,6 +29,7 @@ const {
 } = require("./knowledge-store");
 const knowledgeSync = require("./knowledge-sync");
 const knowledgeFeed = require("./knowledge-feed");
+const { buildKnowledgeDigest, DIGEST_FILENAME: KNOWLEDGE_DIGEST_FILENAME } = require("./knowledge-digest");
 const knowledgeConvergence = require("./knowledge-convergence");
 const knowledgeCurator = require("./knowledge-curator");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
@@ -743,10 +744,17 @@ function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
   // the agent's own config (saved before every saveAgentPrompt call in all
   // paths), so no caller can forget to thread it through.
   const skills = effectiveSkills(loadAgentConfig(id), loadAgentConfig);
+  // Team-knowledge digest gate (Memory/Knowledge unification, Phase 1): the
+  // `@knowledge-digest.md` import is emitted only when this agent actually has
+  // a provisioned KB checkout — seeding runs before every saveAgentPrompt call
+  // in all paths, so the on-disk checkout is the live truth here.
+  const knowledgeDigestRef = fs.existsSync(path.join(dir, "knowledge", ".git"))
+    ? KNOWLEDGE_DIGEST_FILENAME
+    : null;
   // Reference mode: CLAUDE.md points at AGENT-PROMPT.md instead of inlining it.
   fs.writeFileSync(
     path.join(dir, "CLAUDE.md"),
-    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, promptRef: AGENT_PROMPT_FILENAME }),
+    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef }),
   );
 }
 
@@ -899,6 +907,9 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null, opts = {
     // Seeding passes promptRef so CLAUDE.md references AGENT-PROMPT.md; the
     // prompt-preview endpoint omits it to render the fully-resolved prompt.
     promptRef: opts.promptRef || null,
+    // Set only when the agent has a provisioned KB checkout (see
+    // saveAgentPrompt) — gates the Team Knowledge digest `@`-import.
+    knowledgeDigestRef: opts.knowledgeDigestRef || null,
   });
 }
 
@@ -1026,6 +1037,19 @@ function seedAgentWorkspace(id, env, opts = {}) {
   //    Only when the autonomy dial is on (>= 1); best-effort, never fails the seed.
   if (knowledgeAutonomyLevel(env) >= 1) {
     provisionKnowledgeCheckout(id, dest, env, warnings);
+    // Initial knowledge digest (Memory/Knowledge unification, Phase 1): the
+    // seeded CLAUDE.md `@`-imports knowledge-digest.md whenever a checkout is
+    // provisioned, so write the first digest here — the import never dangles.
+    // The runtime (pre-invocation) and the post-KB-change fan-out keep it
+    // current afterwards.
+    if (fs.existsSync(path.join(dest, "knowledge", ".git"))) {
+      try {
+        const teamId = agentKnowledgeTeamId(loadAgentConfig(id) || { teamId: opts.teamId });
+        writeAgentKnowledgeDigest(id, teamId, path.join(dest, "knowledge", _kbStoreRel(env)));
+      } catch (err) {
+        warnings.push(`knowledge digest: ${err.message}`);
+      }
+    }
   }
 
   const cloneSummary = clones.length > 0 ? `, repos=${clones.map(c => c.repoName).join(",")}` : "";
@@ -1813,6 +1837,51 @@ function bootstrapKbTemplate(kbDir, storePath) {
   fs.cpSync(templateDir, storeFull, { recursive: true, force: false, errorOnExist: false });
 }
 
+// Read every raw KB entry from a store root (shards before canonical per kind,
+// so the digest fold's last-writer tie-break keeps the curated canonical copy).
+// Mirrors _read_kb_entries() in agent-image/scripts/agent-entrypoint.py.
+function readKbStoreEntries(storeRoot) {
+  const manifest = _loadCloneManifest(storeRoot);
+  const out = [];
+  for (const kind of KNOWLEDGE_KINDS) {
+    let rel;
+    try { rel = kindFilePath(manifest, kind); } catch { continue; }
+    const dir = path.dirname(rel);
+    const shardsDir = path.join(storeRoot, dir, "shards");
+    let names = [];
+    try { names = fs.readdirSync(shardsDir).filter((n) => n.endsWith(".jsonl")).sort(); } catch { /* none */ }
+    const files = names.map((n) => path.join(shardsDir, n));
+    const canonical = path.join(storeRoot, rel);
+    if (fs.existsSync(canonical)) files.push(canonical);
+    for (const f of files) {
+      let raw;
+      try { raw = fs.readFileSync(f, "utf8"); } catch { continue; }
+      for (const line of raw.split("\n")) {
+        const e = parseKnowledgeEntry(line);
+        if (e) out.push(e);
+      }
+    }
+  }
+  return out;
+}
+
+// Render + atomically write an agent's knowledge-digest.md (workspace root)
+// from the given KB store root — the orchestrator half of the digest writer
+// contract (the runtime's pre-invocation rebuild is the other; both go through
+// the same pure builder, so they can't disagree). Best-effort: throws never
+// leave a torn file (tmp+rename); callers catch.
+function writeAgentKnowledgeDigest(id, teamId, storeRoot) {
+  const { markdown } = buildKnowledgeDigest({
+    teamId,
+    generatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+    entries: readKbStoreEntries(storeRoot),
+  });
+  const target = path.join(agentDir(id), KNOWLEDGE_DIGEST_FILENAME);
+  const tmp = target + ".tmp";
+  fs.writeFileSync(tmp, markdown);
+  fs.renameSync(tmp, target);
+}
+
 // Self-heal a knowledge working copy that has shard content but no git checkout.
 // This is the state of every agent seeded BEFORE the knowledge feature (or whose
 // seed-time clone failed): the `knowledge` CLI kept appending shard lines locally
@@ -2094,6 +2163,13 @@ function refreshKnowledgeClone(teamId, { force = false, repoRef = null, env = nu
     }
     const now = Date.now();
     _kbRefreshThrottles.set(teamId, now);
+    // Post-KB-change digest fan-out (Memory/Knowledge unification, Phase 1):
+    // every KB change funnels through this refresh, so regenerating here keeps
+    // knowledge-digest.md current in every materialized agent workspace — the
+    // transparency guarantee for a human browsing between invocations. Cheap +
+    // content-diffed, so read-triggered refreshes cost nothing.
+    try { fanOutKnowledgeDigests(teamId, kbEnv); }
+    catch (err) { warnings.push(`knowledge: digest fan-out failed: ${err.message}`); }
     return { refreshedAt: now, warnings };
   } catch (err) {
     const detail = agentGitOps
@@ -2101,6 +2177,46 @@ function refreshKnowledgeClone(teamId, { force = false, repoRef = null, env = nu
       .slice(0, 200);
     warnings.push(`knowledge: canonical clone refresh failed for '${teamId}': ${detail}`);
     return { refreshedAt: null, warnings };
+  }
+}
+
+// Regenerate knowledge-digest.md for every materialized agent of a team from
+// the freshly-refreshed canonical clone. The banner timestamp changes on every
+// build, so the comparison strips the `> Generated:` line — only a real content
+// change rewrites the file (and mirrors it into an isolated agent's volume).
+// Best-effort per agent: one broken workspace never blocks the rest.
+function _digestComparable(md) {
+  return String(md).split("\n").filter((l) => !l.startsWith("> Generated:")).join("\n");
+}
+
+function fanOutKnowledgeDigests(teamId, env) {
+  const clonePath = knowledgeFeed.canonicalClonePath(KNOWLEDGE_CLONE_ROOT, teamId);
+  if (!clonePath || !fs.existsSync(path.join(clonePath, ".git"))) return;
+  const storeRoot = path.join(clonePath, _kbStoreRel(env));
+  const { markdown } = buildKnowledgeDigest({
+    teamId,
+    generatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+    entries: readKbStoreEntries(storeRoot),
+  });
+  for (const id of listAgentIds()) {
+    try {
+      const cfg = loadAgentConfig(id);
+      if (!cfg || agentKnowledgeTeamId(cfg) !== teamId) continue;
+      // Materialized, KB-provisioned agents only — a stub has no workspace,
+      // and an agent without a checkout has no digest import in its CLAUDE.md.
+      if (!fs.existsSync(path.join(agentDir(id), "knowledge", ".git"))) continue;
+      const target = path.join(agentDir(id), KNOWLEDGE_DIGEST_FILENAME);
+      let prev = null;
+      try { prev = fs.readFileSync(target, "utf8"); } catch { /* first write */ }
+      if (prev !== null && _digestComparable(prev) === _digestComparable(markdown)) continue;
+      const tmp = target + ".tmp";
+      fs.writeFileSync(tmp, markdown);
+      fs.renameSync(tmp, target);
+      // Mirror into a per-agent dedicated volume (no-op unless isolated + running).
+      reseedAgent(id, [KNOWLEDGE_DIGEST_FILENAME]).catch(() => { /* best effort */ });
+    } catch (err) {
+      console.warn(`[Orchestrator] knowledge digest fan-out for ${id}: ${err.message}`);
+    }
   }
 }
 
@@ -5772,7 +5888,12 @@ async function main() {
         // Team-owned skills: resolve the same grant the seed path uses, so the
         // preview's Skills gate is byte-identical to what gets seeded.
         const skills = effectiveSkills(cfg, loadAgentConfig);
-        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous, skills });
+        // Same live gate as saveAgentPrompt: the digest import shows up in the
+        // preview exactly when the agent's KB checkout exists on disk.
+        const knowledgeDigestRef = fs.existsSync(path.join(agentDir(id), 'knowledge', '.git'))
+          ? KNOWLEDGE_DIGEST_FILENAME
+          : null;
+        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous, skills, knowledgeDigestRef });
         const appendSystemPrompt = buildMemoryHint(blueprintId);
         return sendJson(res, 200, {
           agentId: id,
@@ -5786,6 +5907,7 @@ async function main() {
             blueprintInstance: !!blueprintId,
             hasRepository: !!(env && Array.isArray(env.repositories) && env.repositories.length > 0),
             hasSkills: skills.length > 0,
+            hasKnowledgeDigest: !!knowledgeDigestRef,
             environmentId: cfg.environmentId || null,
             environmentName: (env && env.name) || null,
           },

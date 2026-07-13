@@ -100,6 +100,27 @@ test('without promptRef the prompt is still inlined (preview / AC7)', () => {
   assert.ok(!md.includes('@AGENT-PROMPT.md'));
 });
 
+// ---- Team Knowledge digest import (Memory/Knowledge unification, Phase 1) ---
+
+test('knowledgeDigestRef emits the Team Knowledge section with the @-import', () => {
+  const md = assembleClaudeMd({
+    base: BASE, agentPrompt: 'x', role: 'agent', env: null,
+    knowledgeDigestRef: 'knowledge-digest.md',
+  });
+  const order = headings(md);
+  assert.ok(order.includes('Team Knowledge (digest)'));
+  // Sits between Memory System and Skills-adjacent blocks.
+  assert.ok(order.indexOf('Memory System') < order.indexOf('Team Knowledge (digest)'));
+  assert.match(md, /## Team Knowledge \(digest\)\n\n@knowledge-digest\.md/);
+  assert.ok(md.includes('knowledge search'));
+});
+
+test('without knowledgeDigestRef no digest import appears (autonomy 0 / no KB)', () => {
+  const md = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null });
+  assert.ok(!md.includes('@knowledge-digest.md'));
+  assert.ok(!md.includes('Team Knowledge (digest)'));
+});
+
 // ---- conditional gating (fix C) --------------------------------------------
 
 test('Git section is injected only when the env has a repository', () => {

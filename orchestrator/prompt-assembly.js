@@ -210,6 +210,26 @@ function workingEnvironmentSection(env, skills = []) {
   return `## Working Environment\n\n${parts.join("\n\n")}`;
 }
 
+// Team-knowledge digest section (Memory/Knowledge unification, Phase 1).
+// Emits the native `@`-import of the generated knowledge-digest.md — the
+// guaranteed "knowledge is there at session start" injection path. Injected
+// only when the agent actually has a provisioned KB checkout (the caller
+// gates), so an autonomy-0 / KB-less agent never sees a dangling import.
+// Transparency (concept §4): the import line is visible in the seeded
+// CLAUDE.md, and the digest itself is a real, browsable workspace file.
+function knowledgeDigestSection(digestRef) {
+  if (!digestRef) return "";
+  return (
+    `## Team Knowledge (digest)\n\n` +
+    `@${digestRef}\n\n` +
+    "The import above inlines the generated digest of your team's shared knowledge base, " +
+    "so it is part of your context from the start of every session (regenerated before every " +
+    "run and whenever the team's knowledge changes — never edit the file itself). Anything " +
+    'beyond the digest budget is reachable with `knowledge search "<topic>"`; record new ' +
+    "durable lessons with `knowledge add`."
+  );
+}
+
 function blueprintSection(blueprintId) {
   if (!blueprintId) return "";
   const bpBase = `http://localhost:4002/internal/blueprints/${blueprintId}/memory`;
@@ -261,12 +281,13 @@ function hasSkillGrant(skills) {
 //   4. ## Workspace             (single home for the path-translation rule)
 //   5. ## Response Formatting   (from base)
 //   6. ## Memory System         (from base)
-//   7. ## Skills                (from base) — only if the agent's resolved skill grant is non-empty
-//   8. ## GitHub Actions        (relocated) — only if the env has a repository
-//   9. ## Trigger management    (relocated) — only if the agent is autonomous
-//  10. ## Important Notes       (from base)
-//  11. any other base sections an operator added (preserved verbatim)
-//  12. ## Memory System (Shared — Blueprint Instance) (if a blueprint instance)
+//   7. ## Team Knowledge        (digest `@`-import) — only if a KB checkout is provisioned
+//   8. ## Skills                (from base) — only if the agent's resolved skill grant is non-empty
+//   9. ## GitHub Actions        (relocated) — only if the env has a repository
+//  10. ## Trigger management    (relocated) — only if the agent is autonomous
+//  11. ## Important Notes       (from base)
+//  12. any other base sections an operator added (preserved verbatim)
+//  13. ## Memory System (Shared — Blueprint Instance) (if a blueprint instance)
 //
 // `promptRef` (e.g. "AGENT-PROMPT.md"): when set, the Agent Role block emits a
 // native Claude Code `@`-import that references the prompt file instead of
@@ -276,7 +297,11 @@ function hasSkillGrant(skills) {
 // Left null (the default) the prompt is inlined — the form the prompt-preview
 // endpoint uses so the operator sees the fully-resolved text.
 // `skills`: the agent's resolved skill grant (team-owned — skill-grants.js).
-function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], blueprintId = null, autonomous = false, promptRef = null } = {}) {
+// `knowledgeDigestRef` (e.g. "knowledge-digest.md"): when set, a Team
+// Knowledge section `@`-imports the generated digest (Memory/Knowledge
+// unification, Phase 1). Callers pass it only when the agent's KB checkout is
+// actually provisioned, so the import never dangles.
+function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], blueprintId = null, autonomous = false, promptRef = null, knowledgeDigestRef = null } = {}) {
   const { preamble, sections } = splitSections(base);
   const byHeading = new Map(sections.map((s) => [s.heading, s.text]));
   const consumed = new Set();
@@ -314,21 +339,25 @@ function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], blueprint
   const mem = take("Memory System");
   if (mem) blocks.push(mem);
 
-  // 7. Skills — only when the agent's resolved grant actually contains skills
+  // 7. Team Knowledge digest — only when a KB checkout is provisioned
+  const kd = knowledgeDigestSection(knowledgeDigestRef);
+  if (kd) blocks.push(kd);
+
+  // 8. Skills — only when the agent's resolved grant actually contains skills
   const skillsBlock = take("Skills");
   if (skillsBlock && hasSkillGrant(skills)) blocks.push(skillsBlock);
 
-  // 8. Git — only when the env has a repository
+  // 9. Git — only when the env has a repository
   if (envHasRepository(env)) blocks.push(GIT_SECTION);
 
-  // 9. Trigger management — only for autonomous agents
+  // 10. Trigger management — only for autonomous agents
   if (autonomous) blocks.push(TRIGGER_SECTION);
 
-  // 10. Important Notes
+  // 11. Important Notes
   const notes = take("Important Notes");
   if (notes) blocks.push(notes);
 
-  // 11. Preserve any operator-added sections we don't reorder explicitly —
+  // 12. Preserve any operator-added sections we don't reorder explicitly —
   //     but drop stale copies of the now-code-owned relocated sections.
   for (const s of sections) {
     if (consumed.has(s.heading)) continue;
@@ -337,7 +366,7 @@ function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], blueprint
     blocks.push(s.text);
   }
 
-  // 12. Blueprint shared-memory workflow
+  // 13. Blueprint shared-memory workflow
   const bp = blueprintSection(blueprintId);
   if (bp) blocks.push(bp);
 

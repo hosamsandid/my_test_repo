@@ -37,7 +37,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -1101,6 +1101,287 @@ def build_harvest_hint(autonomy_level: int) -> str:
     )
 
 
+# ---- Knowledge digest (Memory/Knowledge unification, Phase 1) ----
+#
+# Byte-for-byte mirror of orchestrator/knowledge-digest.js — the same
+# two-sided contract as the memory hint (_build_memory_hint <->
+# buildMemoryHint): given the same entries/teamId/generatedAt/budget, the JS
+# builder (post-KB-change fan-out) and this port (pre-invocation rebuild) MUST
+# produce the identical markdown, so the two writers of knowledge-digest.md
+# can never disagree about what the agent sees. If you change one side, change
+# the other in the same commit; the shared golden fixture
+# orchestrator/knowledge-digest.fixture.json is asserted by both test suites.
+
+DIGEST_FILENAME = "knowledge-digest.md"
+DEFAULT_DIGEST_TOKEN_BUDGET = 3000
+# Mirrors HIDDEN_STATUSES in the `knowledge` CLI / knowledge-digest.js.
+_DIGEST_HIDDEN_STATUSES = frozenset(("merged", "archived", "pending", "rejected"))
+
+
+def _digest_entry_time(e) -> str:
+    """Sort key for last-writer-wins: updatedAt, else createdAt, else ''."""
+    if not isinstance(e, dict):
+        return ""
+    return e.get("updatedAt") or e.get("createdAt") or ""
+
+
+def _digest_convergence_count(e) -> int:
+    c = e.get("convergence") if isinstance(e, dict) else None
+    return len(c) if isinstance(c, list) and c else 1
+
+
+def fold_visible_entries(entries) -> list:
+    """Collapse copies by id (last writer wins; ties keep the last seen, which
+    is the canonical file since callers read shards before canonical), drop
+    hidden statuses. Mirrors foldVisibleEntries() in knowledge-digest.js."""
+    latest: dict = {}
+    order: list = []
+    for e in entries if isinstance(entries, list) else []:
+        eid = e.get("id") if isinstance(e, dict) else None
+        if not isinstance(eid, str) or eid == "":
+            continue
+        if eid not in latest:
+            order.append(eid)
+            latest[eid] = e
+        elif _digest_entry_time(e) >= _digest_entry_time(latest[eid]):
+            latest[eid] = e
+    out = [latest[eid] for eid in order
+           if latest[eid].get("status") not in _DIGEST_HIDDEN_STATUSES]
+    # Same concatenated-string sort key as the JS comparator.
+    out.sort(key=lambda e: f"{e.get('createdAt') or ''} {e.get('id') or ''}")
+    return out
+
+
+def _digest_entry_date(e) -> str:
+    c = e.get("createdAt") if isinstance(e, dict) else ""
+    return (c if isinstance(c, str) else "")[:10]
+
+
+def _digest_one_line(text) -> str:
+    return re.sub(r"\s*\n\s*", " ", "" if text is None else str(text)).strip()
+
+
+def _digest_convention_line(e) -> str:
+    n = _digest_convergence_count(e)
+    conf = f", {n}× confirmed" if n > 1 else ""
+    return f"- {_digest_one_line(e.get('text'))} ({_digest_entry_date(e)}{conf})"
+
+
+def _digest_converged_line(e) -> str:
+    return (f"- {e.get('kind')}: {_digest_one_line(e.get('text'))} "
+            f"({_digest_convergence_count(e)}×, {_digest_entry_date(e)})")
+
+
+def _digest_recent_line(e) -> str:
+    return f"- {e.get('kind')}: {_digest_one_line(e.get('text'))} ({_digest_entry_date(e)})"
+
+
+def _utf16_len(s: str) -> int:
+    """JS String.length counts UTF-16 code units — mirror it for budget parity."""
+    return len(s.encode("utf-16-le")) // 2
+
+
+def build_knowledge_digest(*, team_id="", generated_at="", entries=None,
+                           budget_tokens=DEFAULT_DIGEST_TOKEN_BUDGET) -> dict:
+    """Compose the digest markdown. Pure; mirrors buildKnowledgeDigest() (JS)."""
+    budget = (budget_tokens
+              if isinstance(budget_tokens, int) and not isinstance(budget_tokens, bool)
+              and budget_tokens > 0 else DEFAULT_DIGEST_TOKEN_BUDGET)
+    visible = fold_visible_entries(entries if entries is not None else [])
+
+    # Tier 1: all conventions, chronological (fold order is (createdAt, id)).
+    conventions = [e for e in visible if e.get("kind") == "convention"]
+    # Tier 2: converged non-conventions, strongest first. Stable multi-pass
+    # sorts == the JS comparator (count desc, then createdAt desc, then id asc).
+    converged = [e for e in visible
+                 if e.get("kind") != "convention" and _digest_convergence_count(e) >= 2]
+    converged.sort(key=lambda e: e.get("id") or "")
+    converged.sort(key=lambda e: e.get("createdAt") or "", reverse=True)
+    converged.sort(key=lambda e: -_digest_convergence_count(e))
+    # Tier 3: the rest, newest first.
+    recent = [e for e in visible
+              if e.get("kind") != "convention" and _digest_convergence_count(e) < 2]
+    recent.sort(key=lambda e: e.get("id") or "")
+    recent.sort(key=lambda e: e.get("createdAt") or "", reverse=True)
+
+    budget_chars = budget * 4
+    used = {"chars": 0, "full": False}
+
+    def take(lst, render):
+        lines = []
+        for e in lst:
+            if used["full"]:
+                break
+            line = render(e)
+            if used["chars"] + _utf16_len(line) + 1 > budget_chars:
+                used["full"] = True
+                break
+            used["chars"] += _utf16_len(line) + 1
+            lines.append((e, line))
+        return lines
+
+    conv_lines = take(conventions, _digest_convention_line)
+    converged_lines = take(converged, _digest_converged_line)
+    recent_lines = take(recent, _digest_recent_line)
+
+    included = len(conv_lines) + len(converged_lines) + len(recent_lines)
+    total = len(visible)
+    omitted = total - included
+    tokens_used = (used["chars"] + 3) // 4
+
+    def count_by_kind(kind):
+        return sum(1 for e in visible if e.get("kind") == kind)
+
+    def included_by_kind(kind):
+        return sum(1 for e, _ in conv_lines + converged_lines + recent_lines
+                   if e.get("kind") == kind)
+
+    blocks = ["# Team Knowledge Digest"]
+    team_part = f" (team `{team_id}`)" if team_id else ""
+    blocks.append(
+        "> GENERATED — do not edit. Auto-built from the team knowledge base"
+        + team_part + ";\n"
+        "> regenerated before every run and whenever the team's knowledge changes.\n"
+        '> Contribute with `knowledge add fact|entity|convention "<one-line statement>"`;\n'
+        '> everything beyond this digest is searchable with `knowledge search "<topic>"`.\n'
+        ">\n"
+        f"> Generated: {generated_at} · Included: {included} of {total} entries "
+        f"(conventions {included_by_kind('convention')}/{count_by_kind('convention')}, "
+        f"facts {included_by_kind('fact')}/{count_by_kind('fact')}, "
+        f"entities {included_by_kind('entity')}/{count_by_kind('entity')}) "
+        f"· ~{tokens_used} of {budget} tokens"
+    )
+
+    if total == 0:
+        blocks.append("_No team knowledge recorded yet. Lessons recorded with "
+                      "`knowledge add` will appear here automatically._")
+    else:
+        if conv_lines:
+            blocks.append("## Conventions — how we do things here\n\n"
+                          + "\n".join(line for _, line in conv_lines))
+        if converged_lines:
+            blocks.append("## Validated lessons — independently learned by several agents\n\n"
+                          + "\n".join(line for _, line in converged_lines))
+        if recent_lines:
+            blocks.append("## Recent lessons\n\n"
+                          + "\n".join(line for _, line in recent_lines))
+        if omitted > 0:
+            blocks.append(f"_…and {omitted} more entries beyond the digest budget "
+                          f'— find them with `knowledge search "<topic>"`._')
+
+    return {
+        "markdown": "\n\n".join(blocks) + "\n",
+        "includedCount": included,
+        "totalCount": total,
+        "omittedCount": omitted,
+        "tokensUsed": tokens_used,
+    }
+
+
+# ---- Knowledge digest IO (pre-invocation rebuild) ----
+
+def _knowledge_checkout_root() -> Path:
+    explicit = os.environ.get("KNOWLEDGE_DIR")
+    return Path(explicit) if explicit else _agent_workdir() / "knowledge"
+
+
+def _knowledge_store_root() -> Path:
+    rel = os.environ.get("KNOWLEDGE_STORE_PATH", "docs/agent-knowledge/").strip("/")
+    root = _knowledge_checkout_root()
+    return root / rel if rel else root
+
+
+def _read_kb_entries() -> list:
+    """All raw KB lines from the local checkout, shards before canonical (so
+    the fold's last-writer tie-break keeps the curated canonical copy)."""
+    root = _knowledge_store_root()
+    kinds = {
+        "fact": {"dir": "facts", "file": "facts.jsonl"},
+        "entity": {"dir": "entities", "file": "entities.jsonl"},
+        "convention": {"dir": "conventions", "file": "conventions.jsonl"},
+    }
+    mp = root / "knowledge.manifest.json"
+    if mp.exists():
+        try:
+            m = json.loads(mp.read_text(encoding="utf-8"))
+            if isinstance(m, dict) and isinstance(m.get("kinds"), dict):
+                kinds = m["kinds"]
+        except (OSError, ValueError):
+            pass
+    out = []
+    for spec in kinds.values():
+        if not isinstance(spec, dict):
+            continue
+        kdir = str(spec.get("dir") or "").rstrip("/")
+        if not kdir:
+            continue
+        files = sorted((root / kdir / "shards").glob("*.jsonl"))
+        fname = spec.get("file")
+        if isinstance(fname, str) and fname and (root / kdir / fname).exists():
+            files.append(root / kdir / fname)
+        for fpath in files:
+            try:
+                text = fpath.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for line in text.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(e, dict):
+                    out.append(e)
+    return out
+
+
+# Best-effort checkout freshness before a rebuild: fetch + ff-only merge (NEVER
+# a reset — un-pushed local shard commits must survive), throttled so DM
+# traffic doesn't hammer the remote. A failed/slow fetch just means the digest
+# reflects the local view — self-consistent with `knowledge search`, and
+# self-healing on the next successful sync.
+_DIGEST_FETCH_THROTTLE_SEC = 300
+_digest_last_fetch = 0.0
+
+
+def _rebuild_knowledge_digest() -> None:
+    """Regenerate knowledge-digest.md in the workspace root from the local KB
+    checkout — the pre-invocation half of the digest writer contract (the
+    orchestrator's post-KB-change fan-out is the other). Best-effort: any
+    failure leaves the previous digest in place and never blocks the run."""
+    global _digest_last_fetch
+    try:
+        if _knowledge_autonomy_level() < 1:
+            return
+        root = _knowledge_checkout_root()
+        if not (root / ".git").is_dir():
+            return
+        now_mono = time.monotonic()
+        if now_mono - _digest_last_fetch > _DIGEST_FETCH_THROTTLE_SEC:
+            _digest_last_fetch = now_mono
+            branch = os.environ.get("KNOWLEDGE_BRANCH", "agent-knowledge")
+            try:
+                subprocess.run(["git", "-C", str(root), "fetch", "origin", branch],
+                               capture_output=True, timeout=10)
+                subprocess.run(["git", "-C", str(root), "merge", "--ff-only",
+                                f"origin/{branch}"], capture_output=True, timeout=10)
+            except (subprocess.SubprocessError, OSError):
+                pass
+        res = build_knowledge_digest(
+            team_id=os.environ.get("KNOWLEDGE_TEAM_ID", ""),
+            generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            entries=_read_kb_entries(),
+        )
+        target = _agent_workdir() / DIGEST_FILENAME
+        tmp = target.with_suffix(".md.tmp")
+        tmp.write_text(res["markdown"], encoding="utf-8")
+        tmp.replace(target)
+    except Exception as exc:  # noqa: BLE001 — never break an invocation
+        print(f"[Runner] knowledge digest rebuild failed: {exc}", file=sys.stderr)
+
+
 # ---- Memory hint (port from agent-runner.js) ----
 
 def _build_memory_hint(blueprint_id: str | None) -> str:
@@ -1300,6 +1581,9 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
 def _call_claude(prompt: str, room_id: str, correlation_id: str,
                  blueprint_id: str | None, timeout_sec: int = CLAUDE_TIMEOUT_SEC) -> str:
     """Drive _call_claude_once with --resume retry-on-stale-session logic."""
+    # Pyramid level 1 guarantee: the digest CLAUDE.md @-imports is current for
+    # this run (per-invocation agents see the team state on every run).
+    _rebuild_knowledge_digest()
     resume_id = _read_session_pointer(room_id)
     if resume_id:
         try:

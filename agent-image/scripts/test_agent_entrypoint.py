@@ -335,5 +335,54 @@ class ResultEventContextTokens(unittest.TestCase):
         self.assertEqual(sink, {"input": 1, "output": 1, "cacheCreationInput": 0, "cacheReadInput": 1})
 
 
+class BuildKnowledgeDigest(unittest.TestCase):
+    """Two-sided contract with orchestrator/knowledge-digest.js: both test
+    suites assert byte-identical markdown against the SAME golden fixture
+    (orchestrator/knowledge-digest.fixture.json), so the JS builder (post-KB-
+    change fan-out) and this port (pre-invocation rebuild) cannot drift."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        fixture_path = (Path(__file__).resolve().parents[2]
+                        / "orchestrator" / "knowledge-digest.fixture.json")
+        cls.fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    def test_golden_fixture_cases(self):
+        for case in self.fixture["cases"]:
+            with self.subTest(case=case["name"]):
+                kwargs = {
+                    "team_id": case["teamId"],
+                    "generated_at": case["generatedAt"],
+                    "entries": self.fixture["entries"] if case["useEntries"] else [],
+                }
+                if case["budgetTokens"] is not None:
+                    kwargs["budget_tokens"] = case["budgetTokens"]
+                res = entrypoint.build_knowledge_digest(**kwargs)
+                self.assertEqual(res["markdown"], case["expectedMarkdown"])
+                self.assertEqual(res["includedCount"], case["expectedIncluded"])
+                self.assertEqual(res["totalCount"], case["expectedTotal"])
+                self.assertEqual(res["omittedCount"], case["expectedOmitted"])
+                self.assertEqual(res["tokensUsed"], case["expectedTokensUsed"])
+
+    def test_fold_last_writer_wins_and_hides_statuses(self):
+        folded = entrypoint.fold_visible_entries(self.fixture["entries"])
+        self.assertEqual(
+            [e["id"] for e in folded],
+            ["ddd000000004", "aaa000000001", "bbb000000002", "ccc000000003"],
+        )
+        conv = next(e for e in folded if e["id"] == "aaa000000001")
+        self.assertEqual(entrypoint._digest_convergence_count(conv), 3)
+
+    def test_multiline_text_flattened(self):
+        res = entrypoint.build_knowledge_digest(
+            team_id="t", generated_at="2026-07-13T09:00:00Z",
+            entries=[{"id": "abc000000001", "kind": "fact", "text": "line one\nline two",
+                      "createdAt": "2026-07-01T00:00:00Z", "convergence": ["a"],
+                      "status": "active"}],
+        )
+        self.assertIn("- fact: line one line two (2026-07-01)", res["markdown"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -335,6 +335,56 @@ class ResultEventContextTokens(unittest.TestCase):
         self.assertEqual(sink, {"input": 1, "output": 1, "cacheCreationInput": 0, "cacheReadInput": 1})
 
 
+class BuildMemoryHint(unittest.TestCase):
+    """Variant selection of the two-sided memory-hint contract (unification
+    Phase 2). Byte-identity with buildMemoryHint() in prompt-assembly.js is
+    guarded from the JS side (source-scan on the literals); here we pin the
+    gating behaviour: unified drops the fact/entity write instructions AND the
+    separate harvest hint (absorbed into the text), legacy stays byte-stable."""
+
+    def setUp(self):
+        self._orig_unified = entrypoint._memory_model_unified
+        self._orig_level = entrypoint._knowledge_autonomy_level
+
+    def tearDown(self):
+        entrypoint._memory_model_unified = self._orig_unified
+        entrypoint._knowledge_autonomy_level = self._orig_level
+
+    def test_unified_hint_routes_semantic_learning_to_the_kb(self):
+        entrypoint._memory_model_unified = lambda: True
+        entrypoint._knowledge_autonomy_level = lambda: 2
+        hint = entrypoint._build_memory_hint(None)
+        self.assertIn("episodic memory files: memory/context.md and memory/log.md", hint)
+        self.assertIn("knowledge-digest.md", hint)
+        self.assertIn("knowledge add fact|entity|convention", hint)
+        # No fact/entity write targets, and no duplicated harvest sentence.
+        self.assertNotIn("memory/facts.md", hint)
+        self.assertNotIn("memory/entities.md", hint)
+        self.assertNotIn("In addition to your memory files", hint)
+
+    def test_legacy_hint_unchanged_with_harvest(self):
+        entrypoint._memory_model_unified = lambda: False
+        entrypoint._knowledge_autonomy_level = lambda: 1
+        hint = entrypoint._build_memory_hint(None)
+        self.assertIn("memory/facts.md, memory/entities.md and memory/users.md", hint)
+        self.assertIn("In addition to your memory files", hint)  # harvest hint appended
+        self.assertNotIn("knowledge-digest.md", hint)
+
+    def test_legacy_hint_autonomy0_is_todays_text(self):
+        entrypoint._memory_model_unified = lambda: False
+        entrypoint._knowledge_autonomy_level = lambda: 0
+        hint = entrypoint._build_memory_hint(None)
+        self.assertIn("memory/facts.md, memory/entities.md and memory/users.md", hint)
+        self.assertNotIn("In addition to your memory files", hint)
+
+    def test_blueprint_hint_ignores_unified(self):
+        entrypoint._memory_model_unified = lambda: True
+        entrypoint._knowledge_autonomy_level = lambda: 2
+        hint = entrypoint._build_memory_hint("bp-x")
+        self.assertIn("instance of blueprint 'bp-x'", hint)
+        self.assertNotIn("knowledge-digest.md", hint)
+
+
 class BuildKnowledgeDigest(unittest.TestCase):
     """Two-sided contract with orchestrator/knowledge-digest.js: both test
     suites assert byte-identical markdown against the SAME golden fixture

@@ -735,6 +735,22 @@ function agentIsAutonomous(id, role) {
   return false;
 }
 
+// Unified-memory / digest gate (Memory/Knowledge unification, Phases 1+2):
+// the `@knowledge-digest.md` import AND the unified Memory System section are
+// emitted iff the team KB is on (autonomy >= 1) and this agent's checkout was
+// actually provisioned. This mirrors _memory_model_unified() in
+// agent-image/scripts/agent-entrypoint.py (the runtime resolves the same two
+// conditions from KNOWLEDGE_AUTONOMY + the on-disk checkout), so the seeded
+// CLAUDE.md, the prompt preview and the runtime hint always agree — including
+// when an operator later turns a team's dial back to 0 (checkout still on
+// disk, but every surface falls back to the legacy model).
+function agentKnowledgeDigestRef(id, env) {
+  return knowledgeAutonomyLevel(env) >= 1 &&
+    fs.existsSync(path.join(agentDir(id), "knowledge", ".git"))
+    ? KNOWLEDGE_DIGEST_FILENAME
+    : null;
+}
+
 function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
   const dir = agentDir(id);
   fs.mkdirSync(dir, { recursive: true });
@@ -744,13 +760,9 @@ function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
   // the agent's own config (saved before every saveAgentPrompt call in all
   // paths), so no caller can forget to thread it through.
   const skills = effectiveSkills(loadAgentConfig(id), loadAgentConfig);
-  // Team-knowledge digest gate (Memory/Knowledge unification, Phase 1): the
-  // `@knowledge-digest.md` import is emitted only when this agent actually has
-  // a provisioned KB checkout — seeding runs before every saveAgentPrompt call
-  // in all paths, so the on-disk checkout is the live truth here.
-  const knowledgeDigestRef = fs.existsSync(path.join(dir, "knowledge", ".git"))
-    ? KNOWLEDGE_DIGEST_FILENAME
-    : null;
+  // Seeding runs before every saveAgentPrompt call in all paths, so the
+  // on-disk checkout the gate reads is the live truth here.
+  const knowledgeDigestRef = agentKnowledgeDigestRef(id, env);
   // Reference mode: CLAUDE.md points at AGENT-PROMPT.md instead of inlining it.
   fs.writeFileSync(
     path.join(dir, "CLAUDE.md"),
@@ -5888,13 +5900,13 @@ async function main() {
         // Team-owned skills: resolve the same grant the seed path uses, so the
         // preview's Skills gate is byte-identical to what gets seeded.
         const skills = effectiveSkills(cfg, loadAgentConfig);
-        // Same live gate as saveAgentPrompt: the digest import shows up in the
-        // preview exactly when the agent's KB checkout exists on disk.
-        const knowledgeDigestRef = fs.existsSync(path.join(agentDir(id), 'knowledge', '.git'))
-          ? KNOWLEDGE_DIGEST_FILENAME
-          : null;
+        // Same live gate as saveAgentPrompt (autonomy >= 1 + provisioned
+        // checkout): digest import, unified Memory System section AND the
+        // unified memory hint all flip together — byte-identical to what the
+        // runtime resolves via _memory_model_unified().
+        const knowledgeDigestRef = agentKnowledgeDigestRef(id, env);
         const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous, skills, knowledgeDigestRef });
-        const appendSystemPrompt = buildMemoryHint(blueprintId);
+        const appendSystemPrompt = buildMemoryHint(blueprintId, { unified: !!knowledgeDigestRef });
         return sendJson(res, 200, {
           agentId: id,
           role: cfg.role || null,

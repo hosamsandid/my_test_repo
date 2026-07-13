@@ -111,6 +111,31 @@ const TRIGGER_SECTION =
   "- `timeoutSeconds` — max execution time (default: 3600)\n\n" +
   "If a scheduled run has nothing to report, reply with `[PASS]`.";
 
+// Unified Memory System variant (Memory/Knowledge unification, Phase 2).
+// Replaces the base template's five-file Memory System section for agents on
+// the unified semantic/episodic model — the SAME gate as the knowledge-digest
+// `@`-import (knowledgeDigestRef), so the seeded instructions and the digest
+// always flip together. Semantic knowledge (facts, entities, conventions) is
+// routed to the team KB; only the episodic files stay private. The legacy
+// five-file section in the base template remains the autonomy-0 / KB-less
+// fallback. users.md is personal data — never shared, never migrated.
+const MEMORY_SECTION_UNIFIED =
+  "## Memory System\n\n" +
+  "You maintain three episodic files in `memory/` — your private notebook. Durable team " +
+  "knowledge (facts, entities, conventions) does NOT live here: it belongs to the shared " +
+  "team knowledge base (see Team Knowledge below).\n\n" +
+  "| File | Purpose |\n" +
+  "|---|---|\n" +
+  "| `context.md` | Active session state — what's currently happening. Keep slim. |\n" +
+  "| `log.md` | One conversation summary per entry (date + 1–2 sentences). |\n" +
+  "| `users.md` | Per-user interaction profiles: language, role, preferences, open context. Personal data — never shared, never written to the team knowledge base. |\n\n" +
+  "### Rules\n\n" +
+  "1. **Session start:** Read `context.md` and `log.md`; consult `users.md` when the interaction involves a specific person.\n" +
+  "2. **During conversation:** Session state goes to `context.md`; new user signals to `users.md`. A durable fact, entity or convention is NOT memory — record it with `knowledge add fact|entity|convention \"<one-line statement>\"`.\n" +
+  "3. **Wrap-up / \"remember this\":** Update the relevant episodic files; share durable team-relevant lessons via `knowledge add`.\n" +
+  "4. **No duplicates.** Update existing entries instead of appending.\n" +
+  "5. **Legacy files:** If `memory/facts.md` or `memory/entities.md` still exist, treat them as read-only legacy — consult them when the topic calls for it, but write new semantic knowledge to the knowledge base, never to these files.";
+
 // Canonical section headings the assembler pulls out of the base template and
 // re-orders. Anything else in the template is preserved verbatim (see below).
 const KNOWN_BASE_HEADINGS = [
@@ -335,9 +360,16 @@ function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], blueprint
   const fmt = take("Response Formatting");
   if (fmt) blocks.push(fmt);
 
-  // 6. Memory System
+  // 6. Memory System — the base template carries the legacy five-file model;
+  //    agents on the unified semantic/episodic model (same gate as the digest
+  //    import) get the code-owned three-file variant instead. take() still
+  //    consumes the base section so it can't leak through the pass-through.
   const mem = take("Memory System");
-  if (mem) blocks.push(mem);
+  if (knowledgeDigestRef) {
+    blocks.push(MEMORY_SECTION_UNIFIED);
+  } else if (mem) {
+    blocks.push(mem);
+  }
 
   // 7. Team Knowledge digest — only when a KB checkout is provisioned
   const kd = knowledgeDigestSection(knowledgeDigestRef);
@@ -383,7 +415,14 @@ function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], blueprint
 // once in the CLAUDE.md Workspace section) and no longer names a 2-file subset
 // that contradicts the 5-file Memory System — it points at the same files the
 // Memory System section describes.
-function buildMemoryHint(blueprintId) {
+//
+// `unified` (Memory/Knowledge unification, Phase 2) selects the semantic/
+// episodic variant — same gate as the knowledge-digest `@`-import (the runtime
+// resolves it via _memory_model_unified(): autonomy >= 1 AND a provisioned KB
+// checkout). The unified text absorbs the knowledge-add routing, so the
+// runtime appends NO separate harvest hint to it; the legacy and blueprint
+// variants keep today's text (+ harvest hint on the Python side).
+function buildMemoryHint(blueprintId, { unified = false } = {}) {
   if (blueprintId) {
     return (
       `This agent is an instance of blueprint '${blueprintId}'. ` +
@@ -398,6 +437,23 @@ function buildMemoryHint(blueprintId) {
       `curl -s -X PUT -H 'Content-Type: text/plain' --data-binary @memory/context.md http://localhost:4002/internal/blueprints/${blueprintId}/memory/context.md; ` +
       `curl -s -X PUT -H 'Content-Type: text/plain' --data-binary @memory/log.md http://localhost:4002/internal/blueprints/${blueprintId}/memory/log.md. ` +
       `IMPORTANT: Your workspace root is the current working directory.`
+    );
+  }
+  if (unified) {
+    return (
+      "Before responding, read your episodic memory files: memory/context.md and memory/log.md, " +
+      "and consult memory/users.md when the interaction involves a specific person. " +
+      "Semantic team knowledge (facts, entities, conventions) does not live in private memory files: " +
+      "the current team digest is already in your context via knowledge-digest.md, and anything " +
+      'beyond it is found with knowledge search "<topic>". ' +
+      "When you learn something durable that would help ANY teammate (a project convention, an " +
+      'environment fact, a key entity), record it with: knowledge add fact|entity|convention ' +
+      '"<one-line statement>". Provenance is attached automatically — record only lessons that hold ' +
+      "beyond this one run, no PR/issue-specific detail. " +
+      "If the user asks you to remember something, route it: session state and personal or " +
+      "user-specific details go to your memory files; durable team-relevant lessons go to " +
+      "knowledge add. " +
+      "IMPORTANT: Your workspace root is the current working directory."
     );
   }
   return (
@@ -420,5 +476,6 @@ module.exports = {
   WORKSPACE_SECTION,
   GIT_SECTION,
   TRIGGER_SECTION,
+  MEMORY_SECTION_UNIFIED,
   KNOWN_BASE_HEADINGS,
 };

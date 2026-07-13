@@ -1384,6 +1384,17 @@ def _rebuild_knowledge_digest() -> None:
 
 # ---- Memory hint (port from agent-runner.js) ----
 
+def _memory_model_unified() -> bool:
+    """Is the unified semantic/episodic memory model active for this agent?
+
+    True iff the team KB is on (autonomy >= 1) AND the local checkout was
+    provisioned — the SAME gate that drives the knowledge-digest @-import in
+    the seeded CLAUDE.md (saveAgentPrompt/knowledgeDigestRef on the
+    orchestrator side), so the runtime hint and the seeded instructions can
+    never disagree about which memory model the agent is on."""
+    return _knowledge_autonomy_level() >= 1 and (_knowledge_checkout_root() / ".git").is_dir()
+
+
 def _build_memory_hint(blueprint_id: str | None) -> str:
     harvest = build_harvest_hint(_knowledge_autonomy_level())
     if blueprint_id:
@@ -1402,11 +1413,29 @@ def _build_memory_hint(blueprint_id: str | None) -> str:
             f"IMPORTANT: Your workspace root is the current working directory."
             + harvest
         )
-    # NOTE: kept byte-identical to buildMemoryHint() in
-    # orchestrator/prompt-assembly.js (used by the prompt-preview endpoint). The
-    # /workspace path-translation example now lives ONCE in the CLAUDE.md
-    # Workspace section, and this no longer names a 2-file subset that
-    # contradicts the 5-file Memory System.
+    # NOTE: both non-blueprint variants are kept byte-identical to
+    # buildMemoryHint() in orchestrator/prompt-assembly.js (used by the
+    # prompt-preview endpoint). The /workspace path-translation example lives
+    # ONCE in the CLAUDE.md Workspace section.
+    if _memory_model_unified():
+        # Unified semantic/episodic model (Memory/Knowledge unification,
+        # Phase 2): the knowledge-add routing is part of the text itself, so
+        # NO separate harvest hint is appended — it would duplicate it.
+        return (
+            "Before responding, read your episodic memory files: memory/context.md and memory/log.md, "
+            "and consult memory/users.md when the interaction involves a specific person. "
+            "Semantic team knowledge (facts, entities, conventions) does not live in private memory files: "
+            "the current team digest is already in your context via knowledge-digest.md, and anything "
+            'beyond it is found with knowledge search "<topic>". '
+            "When you learn something durable that would help ANY teammate (a project convention, an "
+            "environment fact, a key entity), record it with: knowledge add fact|entity|convention "
+            '"<one-line statement>". Provenance is attached automatically — record only lessons that hold '
+            "beyond this one run, no PR/issue-specific detail. "
+            "If the user asks you to remember something, route it: session state and personal or "
+            "user-specific details go to your memory files; durable team-relevant lessons go to "
+            "knowledge add. "
+            "IMPORTANT: Your workspace root is the current working directory."
+        )
     return (
         "Before responding, read your memory files: start with memory/context.md and memory/log.md, "
         "and consult memory/facts.md, memory/entities.md and memory/users.md when the topic calls for it. "

@@ -23,9 +23,10 @@ const LEARN_PROMPT =
   'and update your memory/ files accordingly, routing each piece to the right file:\n' +
   '- memory/context.md — current session state (keep slim)\n' +
   '- memory/log.md — one summary entry for this conversation\n' +
-  '- memory/facts.md — atomic, deduplicated facts (one per line, with date)\n' +
-  '- memory/entities.md — rich knowledge about projects, systems, frameworks\n' +
   '- memory/users.md — per-user interaction profiles\n' +
+  '- memory/facts.md / memory/entities.md — only if your Memory System instructions still use ' +
+  'these files (legacy model); on the unified model semantic knowledge goes to the team ' +
+  'knowledge base instead, never to these files\n' +
   'In addition to your memory files, share durable lessons with your teammates ' +
   'through the team knowledge base: for each insight that would help ANY teammate ' +
   'on this repo (a project convention, an environment fact, a key entity) run: ' +

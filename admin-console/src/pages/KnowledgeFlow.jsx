@@ -265,7 +265,7 @@ export default function KnowledgeFlow() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       {/* ── Header ─────────────────────────────────────────────────────────── */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', padding: 'var(--eb-space-4) var(--eb-space-4) 0', flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', padding: 'var(--eb-space-4) 0 0', flexWrap: 'wrap' }}>
         <Brain size={20} style={{ color: 'var(--eb-accent-primary)' }} />
         <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
           Knowledge Flow
@@ -288,14 +288,14 @@ export default function KnowledgeFlow() {
           <RefreshCw size={14} className={loading ? 'kf-spin' : undefined} /> Refresh
         </button>
       </div>
-      <div style={{ padding: '2px var(--eb-space-4) var(--eb-space-2)', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
+      <div style={{ padding: '2px 0 var(--eb-space-2)', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
         Your agents write down what they learn while working. Watch those lessons become shared team knowledge — and decide what turns into reusable skills.
       </div>
 
       {showIntro && <HowItWorks onDismiss={dismissIntro} />}
 
       {/* ── Filter bar (refines in place — never a precondition to see data) ── */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: '0 var(--eb-space-4) var(--eb-space-3)', flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: '0 0 var(--eb-space-3)', flexWrap: 'wrap' }}>
         <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: '3px var(--eb-space-2)', background: 'var(--eb-bg-surface)' }}>
           <Search size={13} style={{ color: 'var(--eb-text-muted)' }} />
           <input
@@ -335,7 +335,7 @@ export default function KnowledgeFlow() {
 
       {/* ── Body ───────────────────────────────────────────────────────────── */}
       <div style={{ display: 'flex', flex: 1, minHeight: 0, borderTop: '1px solid var(--eb-border-default)' }}>
-        <div style={{ flex: 1, overflowY: 'auto', background: 'var(--eb-bg-app)', padding: 'var(--eb-space-4)' }}>
+        <div style={{ flex: 1, overflowY: 'auto', background: 'var(--eb-bg-app)', padding: 'var(--eb-space-4) 0' }}>
           {teams === null ? (
             <div style={{ color: 'var(--eb-text-muted)' }}>Loading…</div>
           ) : orderedTeams.length === 0 ? (
@@ -427,7 +427,7 @@ function HowItWorks({ onDismiss }) {
   );
   return (
     <div style={{
-      margin: '0 var(--eb-space-4) var(--eb-space-3)', padding: 'var(--eb-space-3) var(--eb-space-4)',
+      margin: '0 0 var(--eb-space-3)', padding: 'var(--eb-space-3) var(--eb-space-4)',
       border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-lg)',
       background: 'var(--eb-bg-surface)',
     }}>

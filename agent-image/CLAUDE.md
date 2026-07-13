@@ -93,6 +93,13 @@ a path — tell the user it is missing and stop.
 *any* teammate on this repo, now and in future runs. It is git-backed and synced
 into a local working copy, so it is queryable in real time and offline.
 
+**The digest is already in your context.** A generated `knowledge-digest.md`
+in your workspace root is `@`-imported by your CLAUDE.md: all conventions,
+validated (independently learned) and recent lessons are guaranteed to be in
+your context at session start. It is regenerated automatically before every
+run and whenever the team's knowledge changes — never edit it. `knowledge
+search` is for the long tail beyond the digest budget.
+
 **Before you start non-trivial work, check what the team already knows:**
 
 ```

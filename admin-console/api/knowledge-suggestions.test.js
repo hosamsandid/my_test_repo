@@ -172,3 +172,69 @@ test('buildShareProvenance: preserves origin, records the lateral share', () => 
   assert.equal(p.sharedBy, 'alice');
   assert.equal(p.sharedAt, NOW);
 });
+
+// ─── aggregation: candidateFromEntries + synthesis drafts ────────────────────
+
+const { candidateFromEntries, buildSkillDraftRequest } = require('./knowledge-suggestions');
+
+function kbEntry(over = {}) {
+  return {
+    v: 1,
+    id: over.id || 'aaaaaaaaaaaa',
+    kind: over.kind || 'fact',
+    text: over.text || 'a durable statement',
+    originAgent: over.originAgent || 'acme-dev-1',
+    teamId: over.teamId || 'acme',
+    createdAt: over.createdAt || '2026-07-08T09:00:00Z',
+    correlationId: over.correlationId || '$evt1',
+    convergence: over.convergence || [over.originAgent || 'acme-dev-1'],
+    status: over.status || 'active',
+    ...over,
+  };
+}
+
+test('candidateFromEntries: builds an ad-hoc manual candidate with full provenance', () => {
+  const cand = candidateFromEntries([
+    kbEntry({ id: 'aaaaaaaaaaaa', originAgent: 'dev-1', kind: 'fact', text: 'labels drive the review flow', sourceRefs: [{ kind: 'pr', ref: '42' }] }),
+    kbEntry({ id: 'bbbbbbbbbbbb', originAgent: 'dev-2', kind: 'convention', text: 'set ready-for-review after opening a PR', createdAt: '2026-07-08T10:00:00Z' }),
+    kbEntry({ id: 'aaaaaaaaaaaa', originAgent: 'dev-1', text: 'duplicate id must be ignored' }),
+  ], { teamId: 'acme', now: NOW });
+
+  assert.equal(cand.id, null); // ad-hoc, not a stored candidate
+  assert.equal(cand.source, 'manual');
+  assert.equal(cand.teamId, 'acme');
+  assert.deepEqual(cand.entryIds, ['aaaaaaaaaaaa', 'bbbbbbbbbbbb']); // deduped
+  assert.equal(cand.lessonCount, 2);
+  assert.deepEqual(cand.convergence, ['dev-1', 'dev-2']);
+  assert.equal(cand.kind, 'fact'); // dominant on tie → lexicographic-stable pick, 1 fact vs 1 convention: first sorted kind with max count
+  assert.deepEqual(cand.kinds, ['convention', 'fact']);
+  assert.equal(cand.text, 'labels drive the review flow'); // lead entry
+  assert.deepEqual(cand.members[0].id, 'aaaaaaaaaaaa');
+  assert.ok(cand.members[0].sourceRefs); // provenance carried for buildSkillProvenance
+});
+
+test('buildHeuristicSkillDraft: aggregated candidates get the synthesis rationale', () => {
+  const agg = buildHeuristicSkillDraft(candidate({ source: 'related', lessonCount: 2 }));
+  assert.match(agg.skillMd, /Combines 2 related lesson/);
+  const manual = buildHeuristicSkillDraft(candidate({ source: 'manual', lessonCount: 2 }));
+  assert.match(manual.skillMd, /Combined by the operator/);
+  const single = buildHeuristicSkillDraft(candidate());
+  assert.match(single.skillMd, /recorded this independently/);
+});
+
+test('buildSkillDraftRequest: aggregated candidates ask for a synthesis, not a listing', () => {
+  const agg = buildSkillDraftRequest(candidate({ source: 'related' }));
+  assert.match(agg.messages[0].content, /Synthesise them into ONE coherent/);
+  const single = buildSkillDraftRequest(candidate());
+  assert.match(single.messages[0].content, /same durable lesson/);
+});
+
+test('promotionSuggestionView: passes kinds + lessonCount through', () => {
+  const view = promotionSuggestionView(candidate({ source: 'related', kinds: ['convention', 'fact'], lessonCount: 3 }));
+  assert.deepEqual(view.kinds, ['convention', 'fact']);
+  assert.equal(view.lessonCount, 3);
+  assert.equal(view.source, 'related');
+  const plain = promotionSuggestionView(candidate());
+  assert.deepEqual(plain.kinds, ['fact']);
+  assert.equal(plain.lessonCount, null);
+});

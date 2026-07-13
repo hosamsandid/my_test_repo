@@ -3,7 +3,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   Brain, RefreshCw, X, ExternalLink, GitBranch, Sparkles, Check, Wand2,
   Archive, Share2, ShieldCheck, Ban, MessageSquare, Search, ArrowRight, Users,
-  HelpCircle, BookOpen,
+  HelpCircle, BookOpen, Combine,
 } from 'lucide-react';
 import KnowledgeFeed from '../components/KnowledgeFeed';
 import InfoTip from '../components/InfoTip';
@@ -60,6 +60,29 @@ const KIND_EXPLAIN = {
   entity: 'Entity — a named thing (a system, repo, service, person) and what the team knows about it.',
   convention: 'Convention — how the team does things (processes, labels, rituals — e.g. “PRs need the ready-for-review label”).',
 };
+
+// Shape an operator's multi-select into the candidate shape PromotionDialog
+// renders — id: null marks it as ad-hoc (no stored suggestion; the server
+// rebuilds provenance from the entry ids).
+function manualSuggestionFrom(items) {
+  const list = Array.isArray(items) ? items : [];
+  const agents = [...new Set(list.flatMap(i => (i.convergence && i.convergence.length ? i.convergence : [i.provenance?.originAgent]).filter(Boolean)))].sort();
+  return {
+    id: null,
+    source: 'manual',
+    text: (list[0] && list[0].text) || '',
+    entryIds: list.map(i => i.id),
+    members: list.map(i => ({
+      id: i.id,
+      originAgent: i.provenance?.originAgent || (i.convergence || [])[0] || null,
+      text: i.text,
+      createdAt: i.createdAt,
+    })),
+    convergence: agents,
+    convergenceCount: agents.length,
+    lessonCount: list.length,
+  };
+}
 
 // The knowledge team ("squad") an agent belongs to — mirrors the backend's
 // agentKnowledgeTeam: member → its parent team, team agent → itself,
@@ -336,6 +359,7 @@ export default function KnowledgeFlow() {
                 onUnarchiveItem={(item) => archiveItem(item.id, t.id, false)}
                 onOpenChat={(agentId) => navigate(`/chats/${encodeURIComponent(agentId)}`)}
                 onReviewSuggestion={(s) => setPromoting({ suggestion: s, teamId: t.id })}
+                onCombineItems={(sel) => setPromoting({ suggestion: manualSuggestionFrom(sel), teamId: t.id })}
                 onShareSkill={(node) => setSharing({ node, teamId: t.id })}
                 onControlsChanged={() => loadTeamData(t.id, t.members, { withPrivate: false })}
                 onLifted={() => loadTeamData(t.id, t.members)}
@@ -438,9 +462,10 @@ function HowItWorks({ onDismiss }) {
         <div style={stepStyle}>
           <div style={stepTitle}>{num(3)} The best knowledge becomes skills</div>
           <p style={stepBody}>
-            Converged knowledge can be <strong>promoted to a skill</strong>: a reusable instruction
-            file that agents load automatically at the start of their work. You review each
-            promotion — unless you raise the team’s autonomy and let it curate itself.
+            Knowledge can be <strong>promoted to a skill</strong>: a reusable instruction file
+            agents load automatically. A skill is often a <em>combination</em> of related lessons —
+            the system suggests such bundles, and you can also tick several lessons yourself and
+            combine them. You review every promotion, unless you let the team curate itself.
           </p>
         </div>
       </div>
@@ -462,10 +487,18 @@ function HowItWorks({ onDismiss }) {
 const TeamSection = React.forwardRef(function TeamSection({
   team, data, filters, pulseId, selectedId,
   onOpenItem, onRetireItem, onUnarchiveItem, onOpenChat,
-  onReviewSuggestion, onShareSkill, onControlsChanged, onLifted,
+  onReviewSuggestion, onShareSkill, onCombineItems, onControlsChanged, onLifted,
 }, ref) {
   const [agentFilter, setAgentFilter] = useState(null); // agentId | null
   const [hoverConv, setHoverConv] = useState(null); // Set<agentId> | null
+  const [picked, setPicked] = useState(() => new Set()); // entry ids ticked for combining
+  const togglePick = useCallback((id) => {
+    setPicked(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
 
   const graph = data?.graph;
   const counts = graph?.counts || { items: 0, today: 0, converged: 0, skills: 0 };
@@ -507,6 +540,23 @@ const TeamSection = React.forwardRef(function TeamSection({
 
   const skills = useMemo(() => (graph?.nodes || []).filter(n => n.kind === 'skill'), [graph]);
   const pending = useMemo(() => (graph?.nodes || []).filter(n => n.kind === 'pending'), [graph]);
+  // Names already in the team's active set — used to hide them from the
+  // "Add global skill…" picker.
+  const activeSkillNames = useMemo(() => new Set(
+    skills.filter(sk => sk.activation && sk.activation.active).map(sk => sk.label)
+  ), [skills]);
+
+  // The picked entries, resolved against ALL of the team's items (not the
+  // filtered view — a tick must survive a filter change).
+  const allItems = useMemo(() => (graph?.nodes || [])
+    .filter(n => n.kind === 'item')
+    .map(n => ({ ...n, id: n.id.slice(5) })), [graph]);
+  const pickedItems = useMemo(() => allItems.filter(n => picked.has(n.id)), [allItems, picked]);
+  const combine = useCallback(() => {
+    if (pickedItems.length < 2) return;
+    onCombineItems(pickedItems);
+    setPicked(new Set());
+  }, [pickedItems, onCombineItems]);
   const suggestions = data?.suggestions || [];
   const reviewQueue = data?.reviewQueue || [];
   const privateSkills = data?.privateSkills || [];
@@ -579,7 +629,7 @@ const TeamSection = React.forwardRef(function TeamSection({
             hint="what the whole team knows"
             tip={{
               title: 'The shared knowledge base',
-              text: 'Everything this team’s agents have learned, pooled so every agent can use it. Click a card to see where it came from — which agent, which session, which PR. “N× independent” means several agents learned it on their own.',
+              text: 'Everything this team’s agents have learned, pooled so every agent can use it. Click a card to see where it came from — which agent, which session, which PR. Tick the checkboxes to combine several related lessons into one skill.',
             }}
             trailing={agentFilter && (
               <Chip active title="Clear this filter" onClick={() => setAgentFilter(null)}>only {agentFilter} ✕</Chip>
@@ -587,6 +637,32 @@ const TeamSection = React.forwardRef(function TeamSection({
           />
           {reviewQueue.length > 0 && (
             <ReviewQueueBlock teamId={team.id} items={reviewQueue} onChanged={onControlsChanged} />
+          )}
+          {picked.size > 0 && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8, marginBottom: 'var(--eb-space-2)',
+              border: '1px solid var(--eb-accent-primary)', borderRadius: 'var(--eb-radius-md)',
+              background: 'var(--eb-accent-muted)', padding: 'var(--eb-space-2) var(--eb-space-3)',
+            }}>
+              <Combine size={13} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)' }}>
+                {picked.size} lesson{picked.size === 1 ? '' : 's'} selected
+                {picked.size < 2 ? ' — pick at least one more to combine' : ''}
+              </span>
+              <InfoTip
+                size={12}
+                title="Combine related lessons into one skill"
+                text="Tick the lessons that belong to one topic — a skill is usually a synthesis of several related lessons, not a single fact. You review and edit the combined draft before anything is created."
+              />
+              <button
+                onClick={combine}
+                disabled={picked.size < 2}
+                title={picked.size < 2 ? 'Select at least two lessons' : 'Open the review dialog with these lessons combined'}
+                style={{ ...primaryBtn, marginLeft: 'auto', padding: '2px 10px', fontSize: 'var(--eb-text-xs)', opacity: picked.size < 2 ? 0.5 : 1 }}>
+                Combine into one skill
+              </button>
+              <button onClick={() => setPicked(new Set())} style={{ ...miniBtn }}>Clear</button>
+            </div>
           )}
           {items.length === 0 ? (
             <EmptyKnowledge autonomy={autonomy} counts={counts} filtered={!!(filters.q || filters.kind !== 'all' || filters.convergedOnly || filters.today || agentFilter)} />
@@ -597,6 +673,9 @@ const TeamSection = React.forwardRef(function TeamSection({
                 item={n}
                 pulsing={pulseId === n.id}
                 selected={selectedId === n.id}
+                picked={picked.has(n.id)}
+                anyPicked={picked.size > 0}
+                onPick={() => togglePick(n.id)}
                 onClick={() => onOpenItem(n.id, team.id)}
                 onHover={(on) => setHoverConv(on ? new Set(n.convergence || []) : null)}
                 onRetire={() => onRetireItem(n)}
@@ -639,11 +718,12 @@ const TeamSection = React.forwardRef(function TeamSection({
             </div>
           )}
           {skills.map(sk => (
-            <SkillCard key={sk.id} skill={sk} onShare={() => onShareSkill(sk)} />
+            <SkillCard key={sk.id} skill={sk} teamId={team.id} onShare={() => onShareSkill(sk)} onReload={onControlsChanged} />
           ))}
           {privateSkills.length > 0 && (
             <PrivateSkillsBlock teamId={team.id} skills={privateSkills} onLifted={onLifted} />
           )}
+          <GlobalSkillPicker teamId={team.id} activeNames={activeSkillNames} onReload={onControlsChanged} />
         </div>
       </div>
     </section>
@@ -709,8 +789,9 @@ function EmptyKnowledge({ autonomy, counts, filtered }) {
   );
 }
 
-function ItemCard({ item, pulsing, selected, onClick, onHover, onRetire, onUnarchive }) {
+function ItemCard({ item, pulsing, selected, picked, anyPicked, onPick, onClick, onHover, onRetire, onUnarchive }) {
   const canRetire = !item.archived && item.status !== 'promoted';
+  const pickable = !item.archived && item.status !== 'promoted' && !!onPick;
   return (
     <div
       className={`kf-item${pulsing ? ' kf-node-pulse' : ''}`}
@@ -718,13 +799,24 @@ function ItemCard({ item, pulsing, selected, onClick, onHover, onRetire, onUnarc
       onMouseEnter={() => onHover && onHover(true)}
       onMouseLeave={() => onHover && onHover(false)}
       style={{
-        position: 'relative', border: `1px solid ${selected ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+        position: 'relative', border: `1px solid ${selected || picked ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
         boxShadow: selected ? '0 0 0 2px var(--eb-accent-muted)' : 'none',
-        borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-app)',
+        borderRadius: 'var(--eb-radius-md)', background: picked ? 'var(--eb-accent-muted)' : 'var(--eb-bg-app)',
         padding: 'var(--eb-space-2) var(--eb-space-3)', marginBottom: 'var(--eb-space-2)',
         cursor: 'pointer', opacity: item.archived ? 0.55 : 1,
       }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+        {pickable && (
+          <input
+            type="checkbox"
+            className={anyPicked || picked ? undefined : 'kf-pick'}
+            checked={!!picked}
+            onChange={onPick}
+            onClick={(e) => e.stopPropagation()}
+            title="Select this lesson to combine it with others into one skill"
+            style={{ margin: 0, cursor: 'pointer', accentColor: 'var(--eb-accent-primary)', flexShrink: 0 }}
+          />
+        )}
         <span style={{ width: 7, height: 7, borderRadius: 'var(--eb-radius-full)', background: KIND_COLORS[item.entryKind] || 'var(--eb-accent-primary)', flexShrink: 0 }} />
         <span title={KIND_EXPLAIN[item.entryKind]} style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.03em', color: 'var(--eb-text-muted)', cursor: 'help' }}>{item.entryKind}</span>
         {item.archived && (
@@ -763,29 +855,274 @@ function ItemCard({ item, pulsing, selected, onClick, onHover, onRetire, onUnarc
   );
 }
 
-function SkillCard({ skill, onShare }) {
+/* ── Skill card with activation state (team scope) ──────────────────────────── */
+
+// Plain-language chip per member state — what the badge expands into.
+const MEMBER_STATE_CHIPS = {
+  active: { label: '✓ active', color: 'var(--eb-status-success)', tip: 'This member has the skill in its workspace and loads it when it works.' },
+  pending: { label: 'pending', color: 'var(--eb-status-warning)', tip: 'The skill is in the team’s active set but hasn’t reached this member’s workspace yet.' },
+  'excluded-override': { label: 'excluded — own skill list', color: 'var(--eb-text-muted)', tip: 'This member manages its own skill list, so team activations don’t apply automatically.' },
+  stub: { label: 'not materialized', color: 'var(--eb-text-muted)', tip: 'This member has no workspace yet — it gets the skill when it’s materialized.' },
+  inactive: { label: 'inactive', color: 'var(--eb-text-muted)', tip: 'This member doesn’t have the skill in its workspace.' },
+};
+
+function SkillCard({ skill, teamId, onShare, onReload }) {
   const auto = skill.promotedBy === 'curator';
+  const act = skill.activation || null;
+  const [expanded, setExpanded] = useState(false);
+  const [busy, setBusy] = useState(null); // 'activate' | 'deactivate' | <agentId>
+  const [flash, setFlash] = useState(null); // { kind: 'ok' | 'error', text }
+  const flashTimer = useRef(null);
+
+  const feedback = (kind, text) => {
+    setFlash({ kind, text });
+    clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => setFlash(null), kind === 'error' ? 8000 : 4000);
+  };
+
+  const activate = (busyKey, includeMembers) => {
+    setBusy(busyKey);
+    fetch('/api/knowledge/activate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, skillName: skill.label, ...(includeMembers ? { includeMembers } : {}) }),
+    })
+      .then(async r => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        const ms = Array.isArray(d.members) ? d.members : [];
+        const ok = ms.filter(m => !/error|fail|excluded|stub|skip/i.test(String(m.status || ''))).length;
+        feedback('ok', ms.length ? `active for ${ok}/${ms.length} member${ms.length === 1 ? '' : 's'}` : 'activated');
+        onReload && onReload();
+      })
+      .catch(e => feedback('error', `Action failed: ${e.message}`))
+      .finally(() => setBusy(null));
+  };
+
+  const deactivate = () => {
+    if (!window.confirm(`Remove "${skill.label}" from the team's active skills? The skill file stays in the pool and can be reactivated.`)) return;
+    setBusy('deactivate');
+    fetch('/api/knowledge/deactivate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, skillName: skill.label }),
+    })
+      .then(async r => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        onReload && onReload();
+      })
+      .catch(e => feedback('error', `Action failed: ${e.message}`))
+      .finally(() => setBusy(null));
+  };
+
+  const members = act ? (act.members || []) : [];
+  const activeCount = members.filter(m => m.state === 'active').length;
+  const badge = !act ? null : !act.active
+    ? { text: 'not active', color: 'var(--eb-text-muted)', border: 'var(--eb-border-default)' }
+    : { text: `active · ${activeCount}/${members.length}`,
+        color: activeCount === members.length ? 'var(--eb-status-success)' : 'var(--eb-status-warning)',
+        border: activeCount === members.length ? 'var(--eb-status-success)' : 'var(--eb-status-warning)' };
+
   return (
     <div style={{
-      display: 'flex', alignItems: 'center', gap: 8, border: '1px solid var(--eb-border-default)',
+      border: '1px solid var(--eb-border-default)',
       borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-elevated)',
       padding: 'var(--eb-space-2) var(--eb-space-3)', marginBottom: 'var(--eb-space-2)',
     }}>
-      <GitBranch size={13} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
-      <div style={{ minWidth: 0, flex: 1 }}>
-        <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{skill.label}</div>
-        <div
-          style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', cursor: 'help' }}
-          title={`${skill.tier === 'global' ? 'Global skill — agents in every team load it' : 'Team skill — only this team’s agents load it'}${auto ? '. Promoted automatically by the team’s curator (autonomy 3).' : ''}`}>
-          {skill.tier} skill{auto ? ' · auto-promoted' : ''}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <GitBranch size={13} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{skill.label}</div>
+          <div
+            style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', cursor: 'help' }}
+            title={`${skill.tier === 'global' ? 'Global skill — agents in every team load it' : 'Team skill — only this team’s agents load it'}${auto ? '. Promoted automatically by the team’s curator (autonomy 3).' : ''}${skill.adopted ? '. Adopted from the global pool into this team’s active set.' : ''}`}>
+            {skill.tier} skill{auto ? ' · auto-promoted' : ''}{skill.adopted ? ' · adopted' : ''}
+          </div>
         </div>
+        {badge && (
+          <span
+            onClick={() => members.length > 0 && setExpanded(x => !x)}
+            title="Whether this skill is in the team's active set and which members actually have it in their workspace."
+            style={{
+              flexShrink: 0, fontSize: 10, fontWeight: 600, padding: '1px 7px',
+              borderRadius: 'var(--eb-radius-full)', border: `1px solid ${badge.border}`,
+              color: badge.color, cursor: members.length > 0 ? 'pointer' : 'help', whiteSpace: 'nowrap',
+            }}>
+            {badge.text}
+          </span>
+        )}
+        {act && act.active && (
+          <span
+            title="Deactivate — remove this skill from the team's active set (the file stays in the pool)"
+            onClick={deactivate}
+            style={{ display: 'inline-flex', flexShrink: 0, cursor: 'pointer', color: 'var(--eb-text-muted)' }}>
+            <X size={13} />
+          </span>
+        )}
+        <span
+          title="Share this skill into another team"
+          onClick={onShare}
+          style={{ display: 'inline-flex', flexShrink: 0, cursor: 'pointer', color: 'var(--eb-text-muted)' }}>
+          <Share2 size={13} />
+        </span>
       </div>
-      <span
-        title="Share this skill into another team"
-        onClick={onShare}
-        style={{ display: 'inline-flex', flexShrink: 0, cursor: 'pointer', color: 'var(--eb-text-muted)' }}>
-        <Share2 size={13} />
-      </span>
+
+      {act && !act.active && (
+        <div style={{ marginTop: 6 }}>
+          <button
+            disabled={busy === 'activate'}
+            onClick={() => activate('activate')}
+            title="Add this skill to the team's active set and sync it into every member's workspace"
+            style={{ ...primaryBtn, padding: '2px 10px', fontSize: 'var(--eb-text-xs)' }}>
+            {busy === 'activate' ? 'Activating…' : 'Activate'}
+          </button>
+        </div>
+      )}
+
+      {expanded && members.length > 0 && (
+        <div style={{ marginTop: 6, borderTop: '1px dashed var(--eb-border-default)', paddingTop: 6 }}>
+          {members.map(m => {
+            const chip = MEMBER_STATE_CHIPS[m.state] || { label: m.state, color: 'var(--eb-text-muted)', tip: '' };
+            return (
+              <div key={m.agentId} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0' }}>
+                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)', flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {m.displayName || m.agentId}
+                </span>
+                <span
+                  title={chip.tip}
+                  style={{
+                    flexShrink: 0, fontSize: 10, fontWeight: 600, padding: '0 6px',
+                    borderRadius: 'var(--eb-radius-full)', border: `1px solid ${chip.color}`,
+                    color: chip.color, cursor: 'help', whiteSpace: 'nowrap',
+                  }}>
+                  {chip.label}
+                </span>
+                {m.state === 'excluded-override' && (
+                  <button
+                    disabled={!!busy}
+                    onClick={() => activate(m.agentId, [m.agentId])}
+                    title="This member manages its own skill list — opt it into this skill anyway"
+                    style={linkBtn}>
+                    {busy === m.agentId ? 'Adding…' : 'Add for this member'}
+                  </button>
+                )}
+                {m.state === 'pending' && (
+                  <button
+                    disabled={!!busy}
+                    onClick={() => activate(m.agentId)}
+                    title="Re-run the workspace sync so this member gets the skill now"
+                    style={linkBtn}>
+                    {busy === m.agentId ? 'Syncing…' : 'Sync now'}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {flash && (
+        <div style={{
+          marginTop: 4, fontSize: 'var(--eb-text-xs)', fontWeight: 600,
+          color: flash.kind === 'ok' ? 'var(--eb-status-success)' : 'var(--eb-status-error, #d33)',
+        }}>
+          {flash.kind === 'ok' ? '✓ ' : '⚠ '}{flash.text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── "Add global skill…" — activate a pool skill for this team ───────────────── */
+
+function GlobalSkillPicker({ teamId, activeNames, onReload }) {
+  const [open, setOpen] = useState(false);
+  const [pool, setPool] = useState(null); // null = loading, [] = loaded
+  const [busy, setBusy] = useState(null); // skill name being activated
+  const [flash, setFlash] = useState(null); // { kind: 'ok' | 'error', text }
+  const flashTimer = useRef(null);
+
+  const feedback = (kind, text) => {
+    setFlash({ kind, text });
+    clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => setFlash(null), kind === 'error' ? 8000 : 4000);
+  };
+
+  const toggle = () => {
+    if (open) { setOpen(false); return; }
+    setOpen(true);
+    setPool(null);
+    fetch('/api/skills')
+      .then(r => (r.ok ? r.json() : []))
+      .then(list => setPool((Array.isArray(list) ? list : [])
+        .filter(s => s.source === 'pool')
+        .map(s => s.name)))
+      .catch(() => setPool([]));
+  };
+
+  const activate = (name) => {
+    setBusy(name);
+    fetch('/api/knowledge/activate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, skillName: name }),
+    })
+      .then(async r => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        const ms = Array.isArray(d.members) ? d.members : [];
+        const ok = ms.filter(m => !/error|fail|excluded|stub|skip/i.test(String(m.status || ''))).length;
+        feedback('ok', ms.length ? `${name}: active for ${ok}/${ms.length} member${ms.length === 1 ? '' : 's'}` : `${name} activated`);
+        onReload && onReload();
+      })
+      .catch(e => feedback('error', `Action failed: ${e.message}`))
+      .finally(() => setBusy(null));
+  };
+
+  const candidates = pool === null ? null : pool.filter(nm => !activeNames.has(nm));
+
+  return (
+    <div style={{ marginTop: 'var(--eb-space-3)' }}>
+      <button
+        onClick={toggle}
+        title="Activate a skill from the global pool for this team — it gets synced into every member's workspace"
+        style={{ ...miniBtn, borderStyle: 'dashed' }}>
+        {open ? '− Add global skill…' : '+ Add global skill…'}
+      </button>
+      {open && (
+        <div style={{ marginTop: 6 }}>
+          {candidates === null ? (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Loading…</div>
+          ) : candidates.length === 0 ? (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>No further global skills available.</div>
+          ) : (
+            candidates.map(nm => (
+              <div key={nm} style={{
+                display: 'flex', alignItems: 'center', gap: 8, border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-app)',
+                padding: '4px var(--eb-space-3)', marginBottom: 4,
+              }}>
+                <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {nm}
+                </span>
+                <button
+                  disabled={!!busy}
+                  onClick={() => activate(nm)}
+                  title="Add this global skill to the team's active set"
+                  style={miniBtn}>
+                  {busy === nm ? 'Activating…' : 'Activate'}
+                </button>
+              </div>
+            ))
+          )}
+          {flash && (
+            <div style={{
+              marginTop: 2, fontSize: 'var(--eb-text-xs)', fontWeight: 600,
+              color: flash.kind === 'ok' ? 'var(--eb-status-success)' : 'var(--eb-status-error, #d33)',
+            }}>
+              {flash.kind === 'ok' ? '✓ ' : '⚠ '}{flash.text}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -798,31 +1135,45 @@ const amberCard = {
 };
 
 function SuggestionCard({ suggestion, onReview }) {
+  const related = suggestion.source === 'related';
   return (
     <div style={{ ...amberCard, flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        <Sparkles size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
+        {related
+          ? <Combine size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
+          : <Sparkles size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />}
         <span
-          title="This knowledge looks important enough to become a reusable skill. Review it to promote — or dismiss it."
+          title={related
+            ? 'Several distinct but related lessons about one topic — review to combine them into a single reusable skill.'
+            : 'This knowledge looks important enough to become a reusable skill. Review it to promote — or dismiss it.'}
           style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-status-warning)', cursor: 'help' }}>
-          Suggested skill
+          {related ? 'Related lessons — suggested skill' : 'Suggested skill'}
         </span>
         <span
           style={{ marginLeft: 'auto', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', cursor: 'help' }}
-          title={suggestion.source === 'agent-nominated'
-            ? 'An agent itself nominated this as worth promoting'
-            : `${suggestion.convergenceCount} agents learned this independently`}>
-          {suggestion.convergenceCount}× learned{suggestion.source === 'agent-nominated' ? ' · nominated' : ''}
+          title={related
+            ? `${suggestion.lessonCount} related lessons from ${suggestion.convergenceCount} agent(s) — they belong to one topic`
+            : suggestion.source === 'agent-nominated'
+              ? 'An agent itself nominated this as worth promoting'
+              : `${suggestion.convergenceCount} agents learned this independently`}>
+          {related
+            ? `${suggestion.lessonCount} lessons · ${suggestion.convergenceCount} agent${suggestion.convergenceCount === 1 ? '' : 's'}`
+            : `${suggestion.convergenceCount}× learned${suggestion.source === 'agent-nominated' ? ' · nominated' : ''}`}
         </span>
       </div>
-      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)', wordBreak: 'break-word' }}>{suggestion.text}</div>
+      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)', wordBreak: 'break-word' }}>
+        {suggestion.text}
+        {related && suggestion.lessonCount > 1 && (
+          <span style={{ color: 'var(--eb-text-muted)' }}> + {suggestion.lessonCount - 1} related lesson{suggestion.lessonCount === 2 ? '' : 's'}</span>
+        )}
+      </div>
       <button onClick={onReview} title="Open the review dialog — nothing is promoted until you confirm" style={{ ...primaryBtn, alignSelf: 'flex-end' }}>Review & promote</button>
     </div>
   );
 }
 
 function PrivateSkillsBlock({ teamId, skills, onLifted }) {
-  const [state, setState] = useState({}); // name -> 'lifting' | 'done' | 'exists' | 'error'
+  const [state, setState] = useState({}); // name -> 'lifting' | 'activating' | 'done' | 'done-noact' | 'exists' | 'error'
   const lift = (sk) => {
     setState(s => ({ ...s, [sk.name]: 'lifting' }));
     fetch('/api/knowledge/promote', {
@@ -830,7 +1181,15 @@ function PrivateSkillsBlock({ teamId, skills, onLifted }) {
       body: JSON.stringify({ from: 'agent', to: 'team', teamId, agentId: sk.agentId, name: sk.name }),
     })
       .then(r => {
-        if (r.status === 201) { setState(s => ({ ...s, [sk.name]: 'done' })); onLifted && onLifted(); return; }
+        if (r.status === 201) {
+          // Lift succeeded — activation is the point of lifting, so it runs
+          // without a checkbox. A failure never rolls the lift back.
+          setState(s => ({ ...s, [sk.name]: 'activating' }));
+          return activateSkill(teamId, sk.name)
+            .then(() => setState(s => ({ ...s, [sk.name]: 'done' })))
+            .catch(() => setState(s => ({ ...s, [sk.name]: 'done-noact' })))
+            .finally(() => { onLifted && onLifted(); });
+        }
         setState(s => ({ ...s, [sk.name]: r.status === 409 ? 'exists' : 'error' }));
       })
       .catch(() => setState(s => ({ ...s, [sk.name]: 'error' })));
@@ -859,10 +1218,15 @@ function PrivateSkillsBlock({ teamId, skills, onLifted }) {
             </div>
             <button
               onClick={() => lift(sk)}
-              disabled={st === 'lifting' || st === 'done'}
-              title="Copy this skill into the team pool so every agent on the team can use it"
+              disabled={st === 'lifting' || st === 'activating' || st === 'done' || st === 'done-noact'}
+              title="Copy this skill into the team pool and activate it so every agent on the team loads it"
               style={miniBtn}>
-              {st === 'lifting' ? 'Lifting…' : st === 'done' ? 'Lifted ✓' : st === 'exists' ? 'Name taken' : 'Lift to team'}
+              {st === 'lifting' ? 'Lifting…'
+                : st === 'activating' ? 'Activating…'
+                : st === 'done' ? 'Lifted & active ✓'
+                : st === 'done-noact' ? 'Lifted ✓ (activation failed — use the skill card)'
+                : st === 'exists' ? 'Name taken'
+                : 'Lift to team'}
             </button>
           </div>
         );
@@ -1152,6 +1516,55 @@ const LinkRow = ({ onClick, children }) => (
 );
 const Muted = ({ children }) => <span style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>{children}</span>;
 
+/* ── Activation as the default last step (Phase 3) ─────────────────────────────
+ * Every flow that puts a skill into a pool (promote / share / lift) offers to
+ * activate it right away. Activation failures NEVER roll back or fail the
+ * primary action — callers surface them as a warning with a pointer to the
+ * Activate button on the skill card. */
+
+function activateSkill(teamId, skillName) {
+  return fetch('/api/knowledge/activate', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ teamId, skillName }),
+  }).then(async r => {
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    return d;
+  });
+}
+
+// "active for k/n members" (k = seeded), or plain "activated" for standalone.
+function activationSummary(d) {
+  const ms = Array.isArray(d?.members) ? d.members : [];
+  if (!ms.length) return 'activated';
+  const k = ms.filter(m => m.status === 'seeded').length;
+  return `active for ${k}/${ms.length} member${ms.length === 1 ? '' : 's'}`;
+}
+
+function ActivateNowCheckbox({ id, checked, onChange, label }) {
+  return (
+    <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+      <input type="checkbox" id={id} checked={checked} onChange={e => onChange(e.target.checked)} style={{ marginTop: 3, flexShrink: 0 }} />
+      <div>
+        <label htmlFor={id} style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', cursor: 'pointer' }}>{label}</label>
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 2, lineHeight: 1.5 }}>
+          Copies the skill into every member's workspace and adds it to the team's active skills.
+          Members with their own skill list are excluded — add them afterwards from the skill card.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const resultNotice = (result) => (
+  <div style={{
+    fontSize: 'var(--eb-text-sm)', fontWeight: 600,
+    color: result.kind === 'ok' ? 'var(--eb-status-success)' : 'var(--eb-status-warning)',
+  }}>
+    {result.kind === 'ok' ? '✓ ' : '⚠ '}{result.text}
+  </div>
+);
+
 /* ── Promotion dialog (unchanged mechanics: draft → confirm → promote) ────────── */
 
 function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
@@ -1160,13 +1573,57 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
   const [tier, setTier] = useState('team');
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
+  const [activateNow, setActivateNow] = useState(true);
+  const [result, setResult] = useState(null); // combined promote+activate outcome
+
+  // manual = operator multi-select (no stored suggestion); aggregated = the
+  // lessons are distinct and the skill is their synthesis (manual OR the
+  // collector's related-theme card).
+  const manual = !suggestion.id;
+  const aggregated = manual || suggestion.source === 'related';
+  const memberTexts = useMemo(() => {
+    const seen = new Set();
+    const out = [];
+    for (const m of suggestion.members || []) {
+      const t = (m && typeof m.text === 'string' ? m.text.trim() : '');
+      if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); out.push(t); }
+    }
+    return out;
+  }, [suggestion.members]);
+
+  // Manual combine opens without a draft — prefill instantly with the cheap
+  // heuristic one so the operator never faces an empty SKILL.md.
+  useEffect(() => {
+    if (!manual) return;
+    setBusy('draft');
+    fetch('/api/knowledge/draft', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ team: teamId, entryIds: suggestion.entryIds, heuristicOnly: true }),
+    })
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => {
+        if (d?.draft) {
+          setSkillMd(md => md || d.draft.skillMd || '');
+          setName(n => n || d.draft.name || '');
+        }
+      })
+      .catch(() => {})
+      .finally(() => setBusy(''));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const draftWithAI = () => {
     setBusy('draft'); setError('');
-    fetch(`/api/knowledge/promotion-suggestions/${encodeURIComponent(suggestion.id)}/draft`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ team: teamId }),
-    })
+    const req = manual
+      ? fetch('/api/knowledge/draft', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ team: teamId, entryIds: suggestion.entryIds }),
+        })
+      : fetch(`/api/knowledge/promotion-suggestions/${encodeURIComponent(suggestion.id)}/draft`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ team: teamId }),
+        });
+    req
       .then(r => (r.ok ? r.json() : null))
       .then(d => { if (d?.draft?.skillMd) { setSkillMd(d.draft.skillMd); if (d.draft.name) setName(d.draft.name); } })
       .catch(() => setError('Draft failed'))
@@ -1179,11 +1636,19 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         from: 'team', to: tier, teamId, name, skillMd,
-        entryIds: suggestion.entryIds, suggestionId: suggestion.id,
+        entryIds: suggestion.entryIds,
+        ...(suggestion.id ? { suggestionId: suggestion.id } : {}),
       }),
     })
       .then(async r => { if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`); return r.json(); })
-      .then(() => onDone())
+      .then(() => {
+        // Promotion succeeded — never rolled back or reported failed from here on.
+        if (!activateNow) { onDone(); return; }
+        return activateSkill(teamId, name.trim())
+          .then(d => setResult({ kind: 'ok', text: `Promoted and ${activationSummary(d)}.` }))
+          .catch(e => setResult({ kind: 'warn', text: `Promoted — but activation failed: ${e.message}. Use the Activate button on the skill card.` }))
+          .finally(() => setBusy(''));
+      })
       .catch(e => { setError(e.message); setBusy(''); });
   };
 
@@ -1195,30 +1660,50 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
     }).catch(() => {}).finally(() => onDone());
   };
 
+  // After a successful promote (result set) any close path must run onDone so
+  // the parent reloads — the promotion happened even if the dialog is dismissed.
+  const close = result ? onDone : onClose;
+
   return (
-    <div onClick={onClose} style={overlay}>
+    <div onClick={close} style={overlay}>
       <div onClick={e => e.stopPropagation()} style={{ ...dialog, width: 640, display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-          <Sparkles size={18} style={{ color: 'var(--eb-status-warning)' }} />
-          <h2 style={{ margin: 0, fontSize: 'var(--eb-text-lg)', color: 'var(--eb-text-primary)' }}>Turn this knowledge into a skill</h2>
-          <button onClick={onClose} style={{ ...btn, marginLeft: 'auto' }}><X size={14} /></button>
+          {aggregated
+            ? <Combine size={18} style={{ color: 'var(--eb-status-warning)' }} />
+            : <Sparkles size={18} style={{ color: 'var(--eb-status-warning)' }} />}
+          <h2 style={{ margin: 0, fontSize: 'var(--eb-text-lg)', color: 'var(--eb-text-primary)' }}>
+            {aggregated
+              ? `Combine ${suggestion.lessonCount || memberTexts.length} lessons into a skill`
+              : 'Turn this knowledge into a skill'}
+          </h2>
+          <button onClick={close} style={{ ...btn, marginLeft: 'auto' }}><X size={14} /></button>
         </div>
 
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
           A skill is a reusable instruction file (SKILL.md) that agents load automatically at the
-          start of their work. Give it a name, check the instructions — “Draft with AI” writes them
-          from the learned knowledge — and choose who should get it.
+          start of their work. {aggregated
+            ? 'The selected lessons are synthesised into one coherent instruction — “Draft with AI” organises and generalises them for you.'
+            : 'Give it a name, check the instructions — “Draft with AI” writes them from the learned knowledge — and choose who should get it.'}
         </div>
 
         <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}
-          title="Which agents learned this, independently of each other">
-          Learned {suggestion.convergenceCount}× independently · by {(suggestion.convergence || []).join(', ')}
+          title={aggregated ? 'The agents whose lessons are being combined' : 'Which agents learned this, independently of each other'}>
+          {aggregated
+            ? <>Combining {suggestion.lessonCount || memberTexts.length} lessons · from {(suggestion.convergence || []).join(', ') || 'unknown'}</>
+            : <>Learned {suggestion.convergenceCount}× independently · by {(suggestion.convergence || []).join(', ')}</>}
         </div>
         <div style={{
           fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', background: 'var(--eb-bg-app)',
           border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)',
+          maxHeight: 180, overflowY: 'auto',
         }}>
-          {suggestion.text}
+          {aggregated && memberTexts.length > 1 ? (
+            <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {memberTexts.map((t, i) => <li key={i} style={{ wordBreak: 'break-word' }}>{t}</li>)}
+            </ul>
+          ) : (
+            suggestion.text
+          )}
         </div>
 
         <label style={lbl}>Skill name</label>
@@ -1239,13 +1724,36 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
         <textarea value={skillMd} onChange={e => setSkillMd(e.target.value)} rows={12}
           style={{ ...inp, fontFamily: 'var(--eb-font-mono, monospace)', fontSize: 'var(--eb-text-xs)', resize: 'vertical' }} />
 
+        {/* Activation is the default last step. For a global promotion the
+            activation still targets the SOURCE team (same teamId). */}
+        {(tier === 'team' || tier === 'global') && !result && (
+          <ActivateNowCheckbox
+            id="kf-promote-activate"
+            checked={activateNow}
+            onChange={setActivateNow}
+            label="Activate for the team immediately"
+          />
+        )}
+
         {error && <div style={{ color: 'var(--eb-status-error, #d33)', fontSize: 'var(--eb-text-xs)' }}>{error}</div>}
+        {result && resultNotice(result)}
 
         <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end' }}>
-          <button onClick={dismiss} disabled={!!busy} title="Don’t promote — the suggestion goes away, the knowledge itself stays in the team KB" style={btn}>Dismiss</button>
-          <button onClick={promote} disabled={!!busy || !name.trim() || !skillMd.trim()} style={primaryBtn}>
-            <Check size={14} /> {busy === 'promote' ? 'Promoting…' : `Promote to ${tier}`}
-          </button>
+          {result ? (
+            <button onClick={onDone} style={primaryBtn}>Close</button>
+          ) : (
+            <>
+              {!manual && (
+                <button onClick={dismiss} disabled={!!busy} title="Don’t promote — the suggestion goes away, the knowledge itself stays in the team KB" style={btn}>Dismiss</button>
+              )}
+              {manual && (
+                <button onClick={onClose} disabled={!!busy} style={btn}>Cancel</button>
+              )}
+              <button onClick={promote} disabled={!!busy || !name.trim() || !skillMd.trim()} style={primaryBtn}>
+                <Check size={14} /> {busy === 'promote' ? 'Promoting…' : aggregated ? `Create combined ${tier} skill` : `Promote to ${tier}`}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -1262,6 +1770,8 @@ function ShareDialog({ node, teams, onClose, onDone }) {
   const [target, setTarget] = useState(options[0] || '');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+  const [activateNow, setActivateNow] = useState(true);
+  const [result, setResult] = useState(null); // combined share+activate outcome
 
   const share = () => {
     setBusy(true); setErr('');
@@ -1270,31 +1780,58 @@ function ShareDialog({ node, teams, onClose, onDone }) {
       body: JSON.stringify({ from: sourceIsTeam ? 'team' : 'global', name, sourceTeamId, targetTeamId: target }),
     })
       .then(async r => { const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || 'share failed'); return d; })
-      .then(() => onDone())
+      .then(() => {
+        // Share succeeded — never rolled back or reported failed from here on.
+        if (!activateNow) { onDone(); return; }
+        return activateSkill(target, name)
+          .then(d => setResult({ kind: 'ok', text: `Shared and ${activationSummary(d)}.` }))
+          .catch(e => setResult({ kind: 'warn', text: `Shared — but activation failed: ${e.message}. Use the Activate button on the skill card.` }))
+          .finally(() => setBusy(false));
+      })
       .catch(e => { setErr(e.message); setBusy(false); });
   };
 
+  // After a successful share, any close path must run onDone so the parent reloads.
+  const close = result ? onDone : onClose;
+
   return (
-    <div onClick={onClose} style={overlay}>
+    <div onClick={close} style={overlay}>
       <div onClick={(e) => e.stopPropagation()} style={{ ...dialog, width: 420 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 'var(--eb-space-3)' }}>
           <Share2 size={16} style={{ color: 'var(--eb-accent-primary)' }} />
           <span style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>Share skill to a team</span>
-          <button onClick={onClose} style={{ marginLeft: 'auto', ...btn, padding: 4 }}><X size={14} /></button>
+          <button onClick={close} style={{ marginLeft: 'auto', ...btn, padding: 4 }}><X size={14} /></button>
         </div>
         <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-3)' }}>
           Copy <strong>{name}</strong> ({node.tier} skill) into another team’s pool. Provenance is preserved and the share is stamped.
         </div>
         <label style={lbl}>Target team</label>
-        <select value={target} onChange={e => setTarget(e.target.value)} style={{ ...inp, marginTop: 4 }}>
+        <select value={target} onChange={e => setTarget(e.target.value)} disabled={!!result} style={{ ...inp, marginTop: 4 }}>
           {options.map(t => <option key={t} value={t}>{t}</option>)}
         </select>
+        {!result && (
+          <div style={{ marginTop: 'var(--eb-space-3)' }}>
+            <ActivateNowCheckbox
+              id="kf-share-activate"
+              checked={activateNow}
+              onChange={setActivateNow}
+              label="Activate for the target team immediately"
+            />
+          </div>
+        )}
         {err && <div style={{ color: 'var(--eb-status-error, #d33)', fontSize: 'var(--eb-text-xs)', marginTop: 'var(--eb-space-2)' }}>{err}</div>}
+        {result && <div style={{ marginTop: 'var(--eb-space-2)' }}>{resultNotice(result)}</div>}
         <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end', marginTop: 'var(--eb-space-3)' }}>
-          <button onClick={onClose} disabled={busy} style={btn}>Cancel</button>
-          <button onClick={share} disabled={busy || !target} style={primaryBtn}>
-            <Share2 size={13} /> {busy ? 'Sharing…' : 'Share'}
-          </button>
+          {result ? (
+            <button onClick={onDone} style={primaryBtn}>Close</button>
+          ) : (
+            <>
+              <button onClick={onClose} disabled={busy} style={btn}>Cancel</button>
+              <button onClick={share} disabled={busy || !target} style={primaryBtn}>
+                <Share2 size={13} /> {busy ? 'Sharing…' : 'Share'}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -1326,6 +1863,12 @@ const miniBtn = {
   fontSize: 'var(--eb-text-xs)', padding: '2px 8px', borderRadius: 'var(--eb-radius-md)',
   border: '1px solid var(--eb-border-default)', background: 'var(--eb-bg-surface)',
   color: 'var(--eb-text-secondary)', cursor: 'pointer',
+};
+
+const linkBtn = {
+  flexShrink: 0, background: 'none', border: 'none', padding: 0,
+  color: 'var(--eb-accent-primary)', fontSize: 'var(--eb-text-xs)',
+  cursor: 'pointer', whiteSpace: 'nowrap',
 };
 
 const primaryBtn = {

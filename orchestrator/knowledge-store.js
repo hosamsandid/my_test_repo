@@ -45,6 +45,10 @@ const DEFAULT_AUTONOMY = 1;
 // resolved). Both are per-team-overridable via the env `knowledgeConvergence`.
 const DEFAULT_SIM_THRESHOLD = 0.6;
 const DEFAULT_CONVERGENCE_THRESHOLD = 2;
+// Related-theme grouping (thematic aggregation) is deliberately looser than
+// same-lesson convergence: distinct lessons about one topic share some
+// vocabulary but are not near-duplicates.
+const DEFAULT_RELATED_THRESHOLD = 0.3;
 
 // Curation / full-autonomy defaults (Phase 4). The promotion transitions the
 // gate policy covers, the two gate modes, and their conservative defaults:
@@ -396,7 +400,11 @@ function knowledgeConvergenceConfig(env) {
   if (sim > 1) sim = 1;
   let conv = Number(raw.convergenceThreshold);
   if (!Number.isInteger(conv) || conv < 2) conv = DEFAULT_CONVERGENCE_THRESHOLD;
-  return { simThreshold: sim, convergenceThreshold: conv };
+  let rel = Number(raw.relatedThreshold);
+  if (!Number.isFinite(rel)) rel = DEFAULT_RELATED_THRESHOLD;
+  if (rel < 0) rel = 0;
+  if (rel > 1) rel = 1;
+  return { simThreshold: sim, convergenceThreshold: conv, relatedThreshold: rel };
 }
 
 // Resolve the per-team, per-transition promotion gate policy (Phase 4), read off

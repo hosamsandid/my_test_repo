@@ -297,6 +297,14 @@ export default function AgentChat() {
     setWorkspaceRefreshKey(k => k + 1);
   }, []);
 
+  // Bumped by ChatPanel after the agent replied to a Full-Learn prompt (which
+  // may have added entries to the team KB), so the right rail's Knowledge tab
+  // refreshes without a manual reload.
+  const [knowledgeRefreshKey, setKnowledgeRefreshKey] = useState(0);
+  const handleKnowledgeChanged = useCallback(() => {
+    setKnowledgeRefreshKey(k => k + 1);
+  }, []);
+
   // Aggregated cost for the current agent+room, fed by SessionLogPanel via onCostUpdate.
   const [sessionCost, setSessionCost] = useState(null); // null = no data yet
   const handleCostUpdate = useCallback((usd, tokIn, tokOut) => {
@@ -550,6 +558,7 @@ export default function AgentChat() {
             onWorkspaceChanged={handleWorkspaceChanged}
             onTodoBoundary={handleTodoBoundary}
             onOpenKnowledge={handleOpenKnowledge}
+            onKnowledgeChanged={handleKnowledgeChanged}
           />
         ) : (
           <EmptyState />
@@ -580,6 +589,7 @@ export default function AgentChat() {
             onContextUpdate={handleContextUpdate}
             todoCloseSignal={todoCloseSignal}
             workspaceRefreshKey={workspaceRefreshKey}
+            knowledgeRefreshKey={knowledgeRefreshKey}
             openTabRequest={railTabRequest}
           />
         </div>

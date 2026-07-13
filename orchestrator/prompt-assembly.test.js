@@ -13,10 +13,11 @@ const {
   workingEnvironmentSection,
   blueprintSection,
   envHasRepository,
-  envHasSkills,
+  hasSkillGrant,
   GIT_SECTION,
   TRIGGER_SECTION,
   WORKSPACE_SECTION,
+  MEMORY_SECTION_UNIFIED,
 } = require('./prompt-assembly');
 
 // A minimal base template mirroring the real one's H2 structure.
@@ -100,6 +101,52 @@ test('without promptRef the prompt is still inlined (preview / AC7)', () => {
   assert.ok(!md.includes('@AGENT-PROMPT.md'));
 });
 
+// ---- Team Knowledge digest import (Memory/Knowledge unification, Phase 1) ---
+
+test('knowledgeDigestRef emits the Team Knowledge section with the @-import', () => {
+  const md = assembleClaudeMd({
+    base: BASE, agentPrompt: 'x', role: 'agent', env: null,
+    knowledgeDigestRef: 'knowledge-digest.md',
+  });
+  const order = headings(md);
+  assert.ok(order.includes('Team Knowledge (digest)'));
+  // Sits between Memory System and Skills-adjacent blocks.
+  assert.ok(order.indexOf('Memory System') < order.indexOf('Team Knowledge (digest)'));
+  assert.match(md, /## Team Knowledge \(digest\)\n\n@knowledge-digest\.md/);
+  assert.ok(md.includes('knowledge search'));
+});
+
+test('without knowledgeDigestRef no digest import appears (autonomy 0 / no KB)', () => {
+  const md = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null });
+  assert.ok(!md.includes('@knowledge-digest.md'));
+  assert.ok(!md.includes('Team Knowledge (digest)'));
+});
+
+// ---- unified Memory System variant (unification Phase 2) --------------------
+
+test('knowledgeDigestRef swaps the Memory System section to the unified variant', () => {
+  const md = assembleClaudeMd({
+    base: BASE, agentPrompt: 'x', role: 'agent', env: null,
+    knowledgeDigestRef: 'knowledge-digest.md',
+  });
+  // The code-owned unified section replaces the base template's legacy one.
+  assert.ok(md.includes(MEMORY_SECTION_UNIFIED));
+  assert.ok(!md.includes('You maintain five files'));
+  // Exactly one Memory System heading — the base copy must not leak through.
+  const memHeadings = headings(md).filter((h) => h === 'Memory System');
+  assert.equal(memHeadings.length, 1);
+  // Semantic rerouting: facts/entities writes go to the KB, users.md stays private.
+  assert.ok(md.includes('knowledge add fact|entity|convention'));
+  assert.ok(md.includes('never shared'));
+  assert.ok(md.includes('read-only legacy'));
+});
+
+test('without knowledgeDigestRef the base (legacy five-file) Memory System stays', () => {
+  const md = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null });
+  assert.ok(md.includes('You maintain five files'));
+  assert.ok(!md.includes(MEMORY_SECTION_UNIFIED));
+});
+
 // ---- conditional gating (fix C) --------------------------------------------
 
 test('Git section is injected only when the env has a repository', () => {
@@ -128,11 +175,14 @@ test('interaction note gains the unattended-run framing only when autonomous', (
   assert.ok(auto.includes('unattended on triggers'));
 });
 
-test('Skills section is injected only when the env grants skills', () => {
-  const withSkills = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: { skills: ['cobol'] } });
-  const noSkills = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: { skills: [] } });
+test('Skills section is injected only when the resolved grant contains skills (team-owned, not env)', () => {
+  const withSkills = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: {}, skills: ['cobol'] });
+  const noSkills = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: {}, skills: [] });
   assert.ok(withSkills.includes('## Skills'));
   assert.ok(!noSkills.includes('## Skills'));
+  // A legacy env.skills field no longer gates anything — the grant param does.
+  const envOnly = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: { skills: ['cobol'] } });
+  assert.ok(!envOnly.includes('## Skills'));
 });
 
 // ---- de-duplication (fix A) ------------------------------------------------
@@ -140,7 +190,7 @@ test('Skills section is injected only when the env grants skills', () => {
 test('the /workspace path-translation rule appears exactly once (only in the CLAUDE.md Workspace section)', () => {
   const md = assembleClaudeMd({
     base: BASE, agentPrompt: 'x', role: 'agent',
-    env: { repositories: [{ url: 'git@github.com:acme/x.git' }], skills: ['s'] }, autonomous: true,
+    env: { repositories: [{ url: 'git@github.com:acme/x.git' }] }, skills: ['s'], autonomous: true,
   });
   const occurrences = md.split('translate these to relative paths').length - 1;
   assert.equal(occurrences, 1, 'path rule should live once in the Workspace section');
@@ -199,21 +249,28 @@ test('a stale base template with the old Git/Trigger/Workspace sections does not
 
 // ---- helpers ---------------------------------------------------------------
 
-test('workingEnvironmentSection renders repo/skills and is empty for a bare env', () => {
+test('workingEnvironmentSection renders repo + the granted skills and is empty for a bare env', () => {
   assert.equal(workingEnvironmentSection(null), '');
   assert.equal(workingEnvironmentSection({}), '');
-  const s = workingEnvironmentSection({ name: 'E', repositories: [{ url: 'git@github.com:a/b.git' }], skills: ['x'] });
+  const s = workingEnvironmentSection({ name: 'E', repositories: [{ url: 'git@github.com:a/b.git' }] }, ['x']);
   assert.match(s, /## Working Environment/);
   assert.match(s, /cloned to `\.\/b\/`/);
   assert.match(s, /\*\*Skills:\*\* `x`/);
+  // Skills come from the resolved grant, never from a legacy env.skills field.
+  const legacy = workingEnvironmentSection({ name: 'E', skills: ['x'] });
+  assert.ok(!/\*\*Skills:\*\*/.test(legacy));
+  // A grant with no env still renders its skills.
+  const grantOnly = workingEnvironmentSection(null, ['y']);
+  assert.match(grantOnly, /\*\*Skills:\*\* `y`/);
 });
 
-test('envHasRepository / envHasSkills', () => {
+test('envHasRepository / hasSkillGrant', () => {
   assert.equal(envHasRepository({ repositories: [{ url: 'x' }] }), true);
   assert.equal(envHasRepository({ repositories: [] }), false);
   assert.equal(envHasRepository(null), false);
-  assert.equal(envHasSkills({ skills: ['a'] }), true);
-  assert.equal(envHasSkills({ skills: [] }), false);
+  assert.equal(hasSkillGrant(['a']), true);
+  assert.equal(hasSkillGrant([]), false);
+  assert.equal(hasSkillGrant(null), false);
 });
 
 // ---- cross-language drift guard --------------------------------------------
@@ -239,6 +296,34 @@ test('non-blueprint memory hint matches the Python runtime source', () => {
     assert.ok(hint.includes(frag), `JS hint should contain: ${frag}`);
     assert.ok(py.includes(frag), `Python runtime should contain: ${frag}`);
   }
+});
+
+test('unified memory hint matches the Python runtime source (unification Phase 2)', () => {
+  const py = fs.readFileSync(path.join(__dirname, '..', 'agent-image', 'scripts', 'agent-entrypoint.py'), 'utf8');
+  const hint = buildMemoryHint(null, { unified: true });
+  const fragments = [
+    'Before responding, read your episodic memory files: memory/context.md and memory/log.md,',
+    'and consult memory/users.md when the interaction involves a specific person.',
+    'Semantic team knowledge (facts, entities, conventions) does not live in private memory files:',
+    'the current team digest is already in your context via knowledge-digest.md, and anything',
+    'When you learn something durable that would help ANY teammate (a project convention, an',
+    'If the user asks you to remember something, route it: session state and personal or',
+    'IMPORTANT: Your workspace root is the current working directory.',
+  ];
+  for (const frag of fragments) {
+    assert.ok(hint.includes(frag), `JS unified hint should contain: ${frag}`);
+    assert.ok(py.includes(frag), `Python runtime should contain: ${frag}`);
+  }
+  // The unified variant absorbs the knowledge-add routing — it must never name
+  // facts.md/entities.md as write targets.
+  assert.ok(!hint.includes('memory/facts.md'));
+  assert.ok(!hint.includes('memory/entities.md'));
+});
+
+test('unified flag is ignored for blueprint instances', () => {
+  const bpHint = buildMemoryHint('bp-x', { unified: true });
+  assert.ok(bpHint.includes("instance of blueprint 'bp-x'"));
+  assert.ok(!bpHint.includes('knowledge-digest.md'));
 });
 
 test('relocated sections are non-empty constants', () => {

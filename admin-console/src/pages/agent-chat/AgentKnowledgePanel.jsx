@@ -26,7 +26,7 @@ function fmtWhen(iso) {
   return sameDay ? `today ${hm}` : `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}. ${hm}`;
 }
 
-export default function AgentKnowledgePanel({ agentId, active = false }) {
+export default function AgentKnowledgePanel({ agentId, active = false, refreshKey = 0 }) {
   const navigate = useNavigate();
   const [items, setItems] = useState(null); // null = loading
   const [teamId, setTeamId] = useState(null);
@@ -56,6 +56,9 @@ export default function AgentKnowledgePanel({ agentId, active = false }) {
   // Refetch when the tab becomes visible again — cheaper and more predictable
   // than keeping an SSE feed open for events that land a few times a day.
   useEffect(() => { if (active) load(); }, [active, load]);
+  // Refetch when the parent signals a probable KB change (e.g. the agent just
+  // replied to a Full-Learn prompt), so new entries appear without a reload.
+  useEffect(() => { if (refreshKey) load(); }, [refreshKey, load]);
 
   const nominate = useCallback((item) => {
     setAction(a => ({ ...a, [item.id]: { state: 'busy' } }));
@@ -137,6 +140,13 @@ export default function AgentKnowledgePanel({ agentId, active = false }) {
                   {it.converged && (
                     <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-accent-primary)', background: 'var(--eb-accent-muted)', padding: '0 6px', borderRadius: 'var(--eb-radius-full)' }}>
                       {it.convergenceCount}×
+                    </span>
+                  )}
+                  {it.inDigest && (
+                    <span
+                      title="Inside the team knowledge digest — guaranteed in the agent's context at session start (everything else is reachable via knowledge search)"
+                      style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-status-success, #16a34a)', border: '1px solid currentColor', padding: '0 6px', borderRadius: 'var(--eb-radius-full)' }}>
+                      digest
                     </span>
                   )}
                   <span style={{ marginLeft: 'auto', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', flexShrink: 0 }}>{fmtWhen(it.createdAt)}</span>

@@ -437,3 +437,8 @@ select option:disabled {
    clutters the card, but is one click away. */
 .kf-item .kf-retire { opacity: 0; transition: opacity 120ms ease; }
 .kf-item:hover .kf-retire { opacity: 1; }
+/* Combine-selection checkbox: hidden until hover while nothing is selected
+   (same pattern as .kf-retire); once a selection exists, every checkbox stays
+   visible so the operator sees what else can be ticked. */
+.kf-item .kf-pick { opacity: 0; transition: opacity 120ms ease; }
+.kf-item:hover .kf-pick { opacity: 1; }

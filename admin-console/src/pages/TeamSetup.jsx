@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import ScriptViewerPanel from '../components/ScriptViewerPanel';
+import SkillPicker from '../components/SkillPicker';
 import StepProcess, { BundleRolesSummary, BundleFlowPreview, LintBadges } from './team-setup/StepProcess';
 
 function scriptNameFromPath(scriptPath) {
@@ -352,7 +353,6 @@ function envRepositories(env) {
 
 function EnvironmentCard({ env, selected, onSelect }) {
   const repos = envRepositories(env);
-  const skills = Array.isArray(env.skills) ? env.skills : [];
   const selectable = repos.length > 0;
   return (
     <div
@@ -416,12 +416,6 @@ function EnvironmentCard({ env, selected, onSelect }) {
               No repository configured — a team needs one. Add it under Working Environments.
             </div>
           )}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-            <Tag size={12} style={{ flexShrink: 0, color: 'var(--eb-text-muted)' }} />
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {skills.length > 0 ? skills.join(', ') : 'No skills'}
-            </span>
-          </div>
           {repos.length > 0 && !env.githubTokenId && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', color: 'var(--eb-status-warning)' }}>
               <AlertCircle size={12} style={{ flexShrink: 0 }} />
@@ -455,7 +449,7 @@ function StepEnvironmentSelect({ form, environments, envsLoading, refetchEnvs, o
           </p>
           <p style={{ margin: 0, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
             Pick the <strong style={{ color: 'var(--eb-text-secondary)' }}>Working Environment</strong> the team
-            works in — it already bundles the repository, credentials, skills and knowledge sources.
+            works in — it already bundles the repository, credentials and knowledge sources.
           </p>
         </div>
 
@@ -472,7 +466,7 @@ function StepEnvironmentSelect({ form, environments, envsLoading, refetchEnvs, o
           }}>
             <div>
               No working environment exists yet. Create one first — with the repository the team should work
-              on and any skills it needs — then come back here.
+              on — then come back here.
             </div>
             <div style={{ display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'center' }}>
               <Link to="/environments" target="_blank" style={{ ...diagramLinkButtonStyle, textDecoration: 'none' }}>
@@ -496,7 +490,7 @@ function StepEnvironmentSelect({ form, environments, envsLoading, refetchEnvs, o
               ))}
             </div>
             <div style={{ ...hintStyle, marginTop: 0 }}>
-              Missing one, or need to adjust repositories / skills? Manage them at{' '}
+              Missing one, or need to adjust repositories? Manage them at{' '}
               <Link to="/environments" target="_blank" style={{ color: 'var(--eb-accent-primary)' }}>Working Environments →</Link>
               {' '}<button
                 type="button"
@@ -523,12 +517,24 @@ function StepEnvironmentSelect({ form, environments, envsLoading, refetchEnvs, o
 // editable selection here would be silently ignored. Show the inherited
 // set read-only and point to the environment editor for changes. The step
 // is optional — nothing here blocks continuing to Review.
-function StepKnowledgeSummary({ form, environments, mcpServers, mcpCredentials, error }) {
+function StepKnowledgeSummary({ form, setForm, poolSkills, environments, mcpServers, mcpCredentials, error }) {
   const env = (environments || []).find(e => e.id === form.environmentId);
   const knowledge = (form.mcpSelections || []).filter(s => s.serverId);
   return (
     <Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <div>
+          <div style={labelStyle}>Initial team skills ({(form.skills || []).length})</div>
+          <div style={{ ...hintStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
+            Skills from the pool the whole team starts with — placed on the team agent, so every member
+            inherits them unless it overrides. You can adjust them later on the team's card on the Agents page.
+          </div>
+          <SkillPicker
+            allSkills={poolSkills || []}
+            selected={form.skills || []}
+            onChange={v => setForm(f => ({ ...f, skills: v }))}
+          />
+        </div>
         <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
           Knowledge sources are MCP servers the team can query at runtime — wiki, vector store, graph DB, etc.
           They are inherited from the working environment{env ? <> <strong style={{ color: 'var(--eb-text-primary)' }}>{env.name}</strong></> : null}.
@@ -1184,6 +1190,7 @@ function StepReview({ form, templates, environments, sshKeys, githubTokens, mcpS
             )}
             <ReviewRow label="SSH Key" value={sshKey ? sshKey.name : '—'} />
             <ReviewRow label="GitHub Token" value={ghToken ? ghToken.name : '—'} />
+            <ReviewRow label="Initial team skills" value={(form.skills || []).length ? form.skills.join(', ') : '—'} />
             <div>
               <div style={labelStyle}>Knowledge sources ({knowledge.length})</div>
               {knowledge.length === 0 ? (
@@ -1482,6 +1489,7 @@ export default function TeamSetup() {
     githubTokenId: '',
     roleConfig: [],  // Array<{ id: string, count: number }> — extend mode only
     mcpSelections: [],
+    skills: [],      // initial team skill set (placed on the team agent)
     // Process step (#422): the selected/woven process-template bundle drives
     // team creation in create mode; roleConfig stays for extend mode.
     processMode: null,        // null | 'template' | 'compose'
@@ -1499,6 +1507,11 @@ export default function TeamSetup() {
   const { data: githubTokens } = useApi('/api/github-tokens');
   const { data: mcpServers } = useApi('/api/mcp-servers');
   const { data: mcpCredentials } = useApi('/api/mcp-credentials');
+  const { data: skillsData } = useApi('/api/skills');
+  const poolSkills = useMemo(
+    () => (Array.isArray(skillsData) ? skillsData : []).filter(s => s.source === 'pool').map(s => s.name),
+    [skillsData],
+  );
 
   const templates = templatesResp?.templates || null;
   const takenAgentIds = useMemo(
@@ -1717,6 +1730,8 @@ export default function TeamSetup() {
       maxParallel: Number.isInteger(form.maxParallel) ? form.maxParallel : 1,
       mode: effectiveMode,
     };
+    // Initial team skill set (create mode) — placed on the team agent.
+    if (!extendMode) body.skills = form.skills || [];
     // Create mode ships the Process step's bundle (#422); extend mode keeps the
     // catalog-role delta (instance counts are a roles-array concept).
     if (!extendMode && form.processBundle) {
@@ -1942,6 +1957,8 @@ export default function TeamSetup() {
         : (
           <StepKnowledgeSummary
             form={form}
+            setForm={setForm}
+            poolSkills={poolSkills}
             environments={environments}
             mcpServers={mcpServers}
             mcpCredentials={mcpCredentials}

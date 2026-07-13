@@ -13,6 +13,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import IconButton from '../components/IconButton';
+import SkillPicker from '../components/SkillPicker';
 import useAutoDerivedId, { sanitizeId } from '../hooks/useAutoDerivedId';
 
 // Mirrors AGENT_ID_RE in admin-console/api/api.js — used only to give inline
@@ -741,7 +742,7 @@ function MissionDirectoryField({ value, onChange, repoDirs }) {
 function AgentCreateForm({ onSave, onCancel, saving, error }) {
   const [form, setForm] = useState({
     id: '', displayName: '', role: 'agent', environmentId: '', systemPrompt: '',
-    briefingsPath: '',
+    briefingsPath: '', skills: [],
   });
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
   const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
@@ -751,6 +752,8 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
   });
   const { data: environments } = useApi('/api/environments');
   const envs = environments || [];
+  const { data: skillsData } = useApi('/api/skills');
+  const poolSkills = (skillsData || []).filter(s => s.source === 'pool').map(s => s.name);
 
   const repoDirs = useMemo(() => {
     const env = envs.find(e => e.id === form.environmentId);
@@ -812,12 +815,11 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
             <option key={env.id} value={env.id}>
               {env.name} ({env.id})
               {hasRepos(env) ? ' · Git' : ''}
-              {Array.isArray(env.skills) && env.skills.length > 0 ? ` · ${env.skills.length} Skills` : ''}
             </option>
           ))}
         </select>
         <div style={helpTextStyle}>
-          Defines the skills, repositories, GitHub token and model provider the agent receives at creation time.
+          Defines the repositories, GitHub token and model provider the agent receives at creation time.
           Manage these on the <em>Working Environments</em> page. Each agent gets its own isolated workspace,
           but the recipe is shared.
         </div>
@@ -896,6 +898,18 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           repoDirs={repoDirs}
         />
       )}
+
+      <div>
+        <div style={labelStyle}>Skills</div>
+        <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
+          The agent's active skills, copied into its workspace at (re)seed time. For team agents this is the whole team's set — members inherit it unless they override.
+        </div>
+        <SkillPicker
+          allSkills={poolSkills}
+          selected={form.skills}
+          onChange={v => update('skills', v)}
+        />
+      </div>
 
       {form.role !== 'orchestrator' && (
       <div>
@@ -1148,6 +1162,8 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
   const [form, setForm] = useState({
     displayName: agent.displayName || '',
     briefingsPath: agent.briefingsPath || '',
+    // non-member roles: the agent's own skill grant
+    skills: Array.isArray(agent.skills) ? agent.skills : [],
     // team-only field
     systemPromptTemplate: agent.systemPromptTemplate || '',
     // team-member override fields
@@ -1162,6 +1178,11 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
   });
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
   const canSubmit = !!form.displayName;
+
+  // Skills live on the agent construct itself for non-member roles.
+  const hasOwnSkills = agent.role === 'team' || agent.role === 'agent' || agent.role === 'orchestrator';
+  const { data: skillsData } = useApi('/api/skills');
+  const poolSkills = (skillsData || []).filter(s => s.source === 'pool').map(s => s.name);
 
   const { data: environments } = useApi('/api/environments');
   const repoDirs = useMemo(() => {
@@ -1189,6 +1210,9 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
       displayName: form.displayName,
       briefingsPath: form.briefingsPath,
     };
+    if (hasOwnSkills) {
+      submit.skills = form.skills;
+    }
     if (agent.role === 'team') {
       submit.systemPromptTemplate = form.systemPromptTemplate;
     }
@@ -1249,6 +1273,20 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
       </div>
 
       <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} />
+
+      {hasOwnSkills && (
+        <div>
+          <div style={labelStyle}>Skills</div>
+          <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
+            The agent's active skills, copied into its workspace at (re)seed time. For team agents this is the whole team's set — members inherit it unless they override.
+          </div>
+          <SkillPicker
+            allSkills={poolSkills}
+            selected={form.skills}
+            onChange={v => update('skills', v)}
+          />
+        </div>
+      )}
 
       {agent.role === 'orchestrator' && (
         <MissionDirectoryField
@@ -1331,11 +1369,11 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
             inherit={form.inheritSkills}
             onToggle={v => update('inheritSkills', v)}
             inheritedPreview={
-              parentTeam && parentTeam.environmentId
-                ? `(team env: ${parentTeam.environmentId})`
-                : ''
+              parentTeam && Array.isArray(parentTeam.skills) && parentTeam.skills.length
+                ? `(team skills: ${parentTeam.skills.join(', ')})`
+                : '(team has no skills yet)'
             }
-            inheritedLabel="Inherited from team's environment"
+            inheritedLabel="Inherited from the team"
             customValue={form.skillsOverrideText}
             onCustomChange={v => update('skillsOverrideText', v)}
             customPlaceholder="comma-separated skill names, e.g. cobol-analysis, jcl-converter"

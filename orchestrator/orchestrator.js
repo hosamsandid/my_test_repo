@@ -29,12 +29,15 @@ const {
 } = require("./knowledge-store");
 const knowledgeSync = require("./knowledge-sync");
 const knowledgeFeed = require("./knowledge-feed");
+const { buildKnowledgeDigest, DIGEST_FILENAME: KNOWLEDGE_DIGEST_FILENAME } = require("./knowledge-digest");
+const memoryMigration = require("./memory-migration");
 const knowledgeConvergence = require("./knowledge-convergence");
 const knowledgeCurator = require("./knowledge-curator");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const { resolveCloneTarget } = require("./clone-target");
 const { assembleClaudeMd, buildMemoryHint } = require("./prompt-assembly");
+const { effectiveSkills, migrateSkillGrant, planSkillSync } = require("./skill-grants");
 
 // ============================================================
 // Config
@@ -478,6 +481,31 @@ function migrateLegacyAgentConfigs() {
   }
 }
 
+// One-time migration (team-owned skills): copy each environment's legacy
+// `skills[]` grant onto every team / standalone / orchestrator agent config
+// that doesn't carry a `skills` field yet. Team-members keep the
+// inherit/override model; bp-instances inherit from their parent orchestrator.
+// After this the Working Environment no longer contributes skills — it is a
+// pure infrastructure template (docs/knowledge-skill-activation-concept.md).
+// Idempotent — an existing `skills` field always wins; safe on every start.
+function migrateSkillGrantsToAgents() {
+  if (!fs.existsSync(AGENTS_DIR)) return;
+  let migrated = 0;
+  for (const id of listAgentIds()) {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) continue;
+    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+    const next = migrateSkillGrant(cfg, env);
+    if (next) {
+      saveAgentConfig(id, next);
+      migrated++;
+    }
+  }
+  if (migrated > 0) {
+    console.log(`[Orchestrator] Migrated ${migrated} agent config(s) to team-owned skill grants (env.skills → config.skills)`);
+  }
+}
+
 // One-time migration (#510): rewrite existing agents' CLAUDE.md so the Agent
 // Role block references AGENT-PROMPT.md (`@AGENT-PROMPT.md`) instead of inlining
 // the prompt text. Older CLAUDE.md files carry a stale inlined copy that never
@@ -708,15 +736,38 @@ function agentIsAutonomous(id, role) {
   return false;
 }
 
+// Unified-memory / digest gate (Memory/Knowledge unification, Phases 1+2):
+// the `@knowledge-digest.md` import AND the unified Memory System section are
+// emitted iff the team KB is on (autonomy >= 1) and this agent's checkout was
+// actually provisioned. This mirrors _memory_model_unified() in
+// agent-image/scripts/agent-entrypoint.py (the runtime resolves the same two
+// conditions from KNOWLEDGE_AUTONOMY + the on-disk checkout), so the seeded
+// CLAUDE.md, the prompt preview and the runtime hint always agree — including
+// when an operator later turns a team's dial back to 0 (checkout still on
+// disk, but every surface falls back to the legacy model).
+function agentKnowledgeDigestRef(id, env) {
+  return knowledgeAutonomyLevel(env) >= 1 &&
+    fs.existsSync(path.join(agentDir(id), "knowledge", ".git"))
+    ? KNOWLEDGE_DIGEST_FILENAME
+    : null;
+}
+
 function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
   const dir = agentDir(id);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, AGENT_PROMPT_FILENAME), prompt);
   const autonomous = agentIsAutonomous(id, role);
+  // Skills are team-owned (skill-grants.js): resolve the effective grant from
+  // the agent's own config (saved before every saveAgentPrompt call in all
+  // paths), so no caller can forget to thread it through.
+  const skills = effectiveSkills(loadAgentConfig(id), loadAgentConfig);
+  // Seeding runs before every saveAgentPrompt call in all paths, so the
+  // on-disk checkout the gate reads is the live truth here.
+  const knowledgeDigestRef = agentKnowledgeDigestRef(id, env);
   // Reference mode: CLAUDE.md points at AGENT-PROMPT.md instead of inlining it.
   fs.writeFileSync(
     path.join(dir, "CLAUDE.md"),
-    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, promptRef: AGENT_PROMPT_FILENAME }),
+    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef }),
   );
 }
 
@@ -863,12 +914,47 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null, opts = {
     agentPrompt,
     role,
     env,
+    skills: Array.isArray(opts.skills) ? opts.skills : [],
     blueprintId,
     autonomous: !!opts.autonomous,
     // Seeding passes promptRef so CLAUDE.md references AGENT-PROMPT.md; the
     // prompt-preview endpoint omits it to render the fully-resolved prompt.
     promptRef: opts.promptRef || null,
+    // Set only when the agent has a provisioned KB checkout (see
+    // saveAgentPrompt) — gates the Team Knowledge digest `@`-import.
+    knowledgeDigestRef: opts.knowledgeDigestRef || null,
   });
+}
+
+// ── Seeded-skills manifest ──────────────────────────────────────────────────
+// Records which skills actually landed in an agent's workspace, with tier and
+// timestamp: /workspace/agents/<id>/.aee/seeded-skills.json →
+//   { "<skillName>": { "tier": "agent"|"team"|"global", "seededAt": "<ISO>" } }
+// This is THE truth for "is this skill active for this member" — the grant
+// list alone can't tell whether a running member was seeded before or after a
+// name was added (docs/knowledge-skill-activation-concept.md §4.1). Written by
+// every seed and by the activation sync; read by the admin console's
+// knowledge-graph activation block.
+const SEEDED_SKILLS_REL = path.join(".aee", "seeded-skills.json");
+
+function readSeededSkills(id) {
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(agentDir(id), SEEDED_SKILLS_REL), "utf8"));
+    return m && typeof m === "object" ? m : {};
+  } catch { return {}; }
+}
+
+function writeSeededSkills(id, manifest) {
+  const p = path.join(agentDir(id), SEEDED_SKILLS_REL);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(manifest, null, 2));
+}
+
+// Tier of a resolved skill source dir (skill-source.js resolution order).
+function skillTierForSource(src) {
+  if (!src) return null;
+  if (src.startsWith(TEMPLATE_WORKSPACE)) return "global";
+  return src.includes(`${path.sep}teams${path.sep}`) ? "team" : "agent";
 }
 
 function seedAgentWorkspace(id, env, opts = {}) {
@@ -895,14 +981,17 @@ function seedAgentWorkspace(id, env, opts = {}) {
   }
 
   // 2. Copy selected skills, resolving each name team-first then global (#306).
-  // Team-members may override the team-env's skill list — pass `opts.skillsOverride`
-  // (an array) to use it instead of `env.skills`. The override is verbatim, no merge.
-  // The owning team's pool (/workspace/teams/<teamId>/skills) takes precedence over
-  // the global pool (/template-workspace/skills); when a team has no skill of that
-  // name this falls back to global, so the global-only behaviour is unchanged.
+  // The GRANT is team-owned (skill-grants.js): callers pass the resolved list
+  // via `opts.skills` (team agent's `skills[]`, standalone agent's own list, …);
+  // `opts.skillsOverride` (team-member override) wins verbatim, no merge. The
+  // environment no longer contributes skills — it is a pure infrastructure
+  // template. The owning team's POOL (/workspace/teams/<teamId>/skills) still
+  // takes precedence over the global pool (/template-workspace/skills); when a
+  // team has no skill of that name this falls back to global, so the
+  // global-only behaviour is unchanged.
   const selectedSkills = Array.isArray(opts.skillsOverride)
     ? opts.skillsOverride
-    : ((env && Array.isArray(env.skills)) ? env.skills : []);
+    : (Array.isArray(opts.skills) ? opts.skills : []);
   // Materialise the on-disk AGENT skill pool (Phase 4, concept open question #4):
   // the bottom rung of the Agent → Team → Global ladder is now a real, writable
   // tier. The dir exists even with no seeded skills, so an agent can author a
@@ -910,8 +999,10 @@ function seedAgentWorkspace(id, env, opts = {}) {
   // already prefers it (agent-first), and the self-copy is skipped below.
   const skillsDst = path.join(dest, "skills");
   fs.mkdirSync(skillsDst, { recursive: true });
+  const seededManifest = {};
   if (selectedSkills.length > 0) {
     const ownerTeamId = opts.teamId || DEFAULT_TEAM_ID;
+    const seededAt = new Date().toISOString();
     for (const skillName of selectedSkills) {
       // Resolve agent-first (Phase 0): an agent's own skill pool
       // (/workspace/agents/<id>/skills) shadows the team's and the global one.
@@ -923,15 +1014,22 @@ function seedAgentWorkspace(id, env, opts = {}) {
       }
       // The agent-tier pool IS this destination dir, so an agent-private skill
       // resolves to itself — it is already in place, and cpSync(src === dst)
-      // throws. Skip the self-copy.
-      if (path.resolve(src) === path.resolve(dst)) continue;
-      try {
-        fs.cpSync(src, dst, { recursive: true });
-      } catch (err) {
-        warnings.push(`skill ${skillName}: ${err.message}`);
+      // throws. Skip the self-copy (but still record it in the manifest).
+      if (path.resolve(src) !== path.resolve(dst)) {
+        try {
+          fs.cpSync(src, dst, { recursive: true });
+        } catch (err) {
+          warnings.push(`skill ${skillName}: ${err.message}`);
+          continue;
+        }
       }
+      seededManifest[skillName] = { tier: skillTierForSource(src), seededAt };
     }
   }
+  // Always write the manifest (even empty): its absence means "pre-manifest
+  // workspace", its presence is the activation truth for this agent.
+  try { writeSeededSkills(id, seededManifest); }
+  catch (err) { warnings.push(`seeded-skills manifest: ${err.message}`); }
 
   // 3. Patch absolute /workspace/ paths in seeded memory
   patchSeededPaths(dest);
@@ -952,6 +1050,28 @@ function seedAgentWorkspace(id, env, opts = {}) {
   //    Only when the autonomy dial is on (>= 1); best-effort, never fails the seed.
   if (knowledgeAutonomyLevel(env) >= 1) {
     provisionKnowledgeCheckout(id, dest, env, warnings);
+    // Initial knowledge digest (Memory/Knowledge unification, Phase 1): the
+    // seeded CLAUDE.md `@`-imports knowledge-digest.md whenever a checkout is
+    // provisioned, so write the first digest here — the import never dangles.
+    // The runtime (pre-invocation) and the post-KB-change fan-out keep it
+    // current afterwards.
+    if (fs.existsSync(path.join(dest, "knowledge", ".git"))) {
+      try {
+        const teamId = agentKnowledgeTeamId(loadAgentConfig(id) || { teamId: opts.teamId });
+        writeAgentKnowledgeDigest(id, teamId, path.join(dest, "knowledge", _kbStoreRel(env)));
+      } catch (err) {
+        warnings.push(`knowledge digest: ${err.message}`);
+      }
+      // Unified agents start on the three-file episodic model: the template
+      // facts.md/entities.md just copied in step 1 are headings-only
+      // boilerplate, which the migration deletes (a workspace with real
+      // legacy content gets parsed + archived instead — see Phase 3).
+      try {
+        migrateAgentMemoryToKb(id, loadAgentConfig(id) || { teamId: opts.teamId }, env);
+      } catch (err) {
+        warnings.push(`legacy-memory migration: ${err.message}`);
+      }
+    }
   }
 
   const cloneSummary = clones.length > 0 ? `, repos=${clones.map(c => c.repoName).join(",")}` : "";
@@ -1263,6 +1383,12 @@ function ensureEngineeringSkill(agentId) {
   try {
     fs.mkdirSync(path.dirname(dst), { recursive: true });
     fs.cpSync(src, dst, { recursive: true });
+    // Keep the seeded-skills manifest truthful for this out-of-band copy.
+    try {
+      const manifest = readSeededSkills(agentId);
+      manifest.engineering = { tier: "global", seededAt: new Date().toISOString() };
+      writeSeededSkills(agentId, manifest);
+    } catch { /* best effort */ }
     return { copied: true };
   } catch (err) {
     console.error(`[Orchestrator] Failed to copy engineering skill into ${agentId}: ${err.message}`);
@@ -1289,8 +1415,11 @@ function patchSeededPaths(dir) {
   }
 }
 
-// Workspace seeding for blueprint instances: no memory copy (shared via API)
-function seedAgentWorkspaceForInstance(id, env, blueprintId) {
+// Workspace seeding for blueprint instances: no memory copy (shared via API).
+// `skills` is the instance's grant (team-owned skills): the blueprint paths
+// have no operator UI, so callers copy the env's legacy skill list once at
+// instance creation as the initial grant and record it on the config.
+function seedAgentWorkspaceForInstance(id, env, blueprintId, skills = []) {
   const dest = agentDir(id);
   fs.mkdirSync(dest, { recursive: true });
 
@@ -1310,19 +1439,24 @@ function seedAgentWorkspaceForInstance(id, env, blueprintId) {
   }
 
   // Copy selected skills
-  const selectedSkills = (env && Array.isArray(env.skills)) ? env.skills : [];
+  const selectedSkills = Array.isArray(skills) ? skills : [];
+  const seededManifest = {};
   if (selectedSkills.length > 0) {
     const skillsSrc = path.join(TEMPLATE_WORKSPACE, "skills");
     const skillsDst = path.join(dest, "skills");
     fs.mkdirSync(skillsDst, { recursive: true });
+    const seededAt = new Date().toISOString();
     for (const skillName of selectedSkills) {
       const skillSrc = path.join(skillsSrc, skillName);
       const skillDst = path.join(skillsDst, skillName);
       if (!fs.existsSync(skillSrc)) { warnings.push(`skill not found: ${skillName}`); continue; }
       try { fs.cpSync(skillSrc, skillDst, { recursive: true }); }
-      catch (err) { warnings.push(`skill ${skillName}: ${err.message}`); }
+      catch (err) { warnings.push(`skill ${skillName}: ${err.message}`); continue; }
+      seededManifest[skillName] = { tier: "global", seededAt };
     }
   }
+  try { writeSeededSkills(id, seededManifest); }
+  catch (err) { warnings.push(`seeded-skills manifest: ${err.message}`); }
 
   // Create local memory dir (used as staging area; content synced from blueprint API at session start)
   fs.mkdirSync(path.join(dest, "memory"), { recursive: true });
@@ -1725,6 +1859,190 @@ function bootstrapKbTemplate(kbDir, storePath) {
   fs.cpSync(templateDir, storeFull, { recursive: true, force: false, errorOnExist: false });
 }
 
+// Read every raw KB entry from a store root (shards before canonical per kind,
+// so the digest fold's last-writer tie-break keeps the curated canonical copy).
+// Mirrors _read_kb_entries() in agent-image/scripts/agent-entrypoint.py.
+function readKbStoreEntries(storeRoot) {
+  const manifest = _loadCloneManifest(storeRoot);
+  const out = [];
+  for (const kind of KNOWLEDGE_KINDS) {
+    let rel;
+    try { rel = kindFilePath(manifest, kind); } catch { continue; }
+    const dir = path.dirname(rel);
+    const shardsDir = path.join(storeRoot, dir, "shards");
+    let names = [];
+    try { names = fs.readdirSync(shardsDir).filter((n) => n.endsWith(".jsonl")).sort(); } catch { /* none */ }
+    const files = names.map((n) => path.join(shardsDir, n));
+    const canonical = path.join(storeRoot, rel);
+    if (fs.existsSync(canonical)) files.push(canonical);
+    for (const f of files) {
+      let raw;
+      try { raw = fs.readFileSync(f, "utf8"); } catch { continue; }
+      for (const line of raw.split("\n")) {
+        const e = parseKnowledgeEntry(line);
+        if (e) out.push(e);
+      }
+    }
+  }
+  return out;
+}
+
+// Render + atomically write an agent's knowledge-digest.md (workspace root)
+// from the given KB store root — the orchestrator half of the digest writer
+// contract (the runtime's pre-invocation rebuild is the other; both go through
+// the same pure builder, so they can't disagree). Best-effort: throws never
+// leave a torn file (tmp+rename); callers catch.
+function writeAgentKnowledgeDigest(id, teamId, storeRoot) {
+  const { markdown } = buildKnowledgeDigest({
+    teamId,
+    generatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+    entries: readKbStoreEntries(storeRoot),
+  });
+  const target = path.join(agentDir(id), KNOWLEDGE_DIGEST_FILENAME);
+  const tmp = target + ".tmp";
+  fs.writeFileSync(tmp, markdown);
+  fs.renameSync(tmp, target);
+}
+
+// ── Legacy-memory migration (Memory/Knowledge unification, Phase 3) ─────────
+// One-shot per agent, at the flip to the unified model (concept §6): parse
+// legacy memory/facts.md + entities.md into KB entries (provenance
+// migration:<agentId>), push them to the shared agent-knowledge branch via the
+// team's canonical clone, archive the files to memory/_archive/ (visible, not
+// deleted). Template boilerplate (headings only) is deleted instead — a fresh
+// unified agent simply starts on the three-file episodic model. users.md is
+// NEVER touched (personal data, locked decision). Best-effort: a failed push
+// leaves the files in place, so the next startup pass retries.
+
+// Append the migrated entries to a dedicated per-agent shard
+// (<kind>/shards/<agentId>.migrated.jsonl — both the CLI and the collector
+// glob shards/*.jsonl, so it is picked up everywhere) in the canonical clone,
+// then commit + push. A separate file, NOT the agent's own shard: the agent
+// appends to its shard concurrently from its container, and two writers on
+// one append-only file would race at rebase time. Throws on failure.
+function pushMigrationEntries(id, teamId, env, entries) {
+  const repoRef = env?.knowledgeStore?.repoRef || null;
+  if (!repoRef || !repoRef.url) throw new Error("no KB repo resolvable from the environment");
+  const refresh = refreshKnowledgeClone(teamId, { force: true, repoRef, env });
+  const clonePath = knowledgeFeed.canonicalClonePath(KNOWLEDGE_CLONE_ROOT, teamId);
+  if (!clonePath || !fs.existsSync(path.join(clonePath, ".git"))) {
+    throw new Error(`canonical clone unavailable: ${refresh.warnings.join("; ") || "clone failed"}`);
+  }
+  const storeRoot = path.join(clonePath, _kbStoreRel(env));
+  const manifest = _loadCloneManifest(storeRoot);
+
+  const byKind = new Map();
+  for (const e of entries) {
+    if (!byKind.has(e.kind)) byKind.set(e.kind, []);
+    byKind.get(e.kind).push(e);
+  }
+  for (const [kind, list] of byKind) {
+    let rel;
+    try { rel = kindFilePath(manifest, kind); } catch { continue; }
+    const shard = path.join(storeRoot, path.dirname(rel), "shards", `${id}.migrated.jsonl`);
+    fs.mkdirSync(path.dirname(shard), { recursive: true });
+    const have = new Set();
+    if (fs.existsSync(shard)) {
+      for (const line of fs.readFileSync(shard, "utf8").split("\n")) {
+        const e = parseKnowledgeEntry(line);
+        if (e && e.id) have.add(e.id);
+      }
+    }
+    const add = list.filter((e) => !have.has(e.id));
+    if (add.length > 0) {
+      fs.appendFileSync(shard, add.map(serializeKnowledgeEntry).join("\n") + "\n");
+    }
+  }
+
+  const gitEnv = _buildKbGitEnv(repoRef, env);
+  const runIn = (args, timeout = 60_000) =>
+    execFileSync("git", args, { cwd: clonePath, env: gitEnv, stdio: "pipe", timeout }).toString();
+  runIn(["add", "-A"]);
+  if (runIn(["status", "--porcelain"]).trim() === "") return; // idempotent re-run
+  runIn([
+    "-c", "user.name=Agent Studio", "-c", `user.email=${id}@agents.local`,
+    "commit", "-m", `chore(knowledge): migrate legacy memory of ${id} (unification phase 3)`,
+  ]);
+  const branch = knowledgeSync.KNOWLEDGE_BRANCH;
+  try {
+    runIn(["push", "origin", branch]);
+  } catch (err) {
+    // Lost the fast-forward race against a concurrent agent push — rebase our
+    // (own-file-only) commit on top and push once more.
+    if (!knowledgeSync.isRetryablePushError((err.stderr || err.message || "").toString())) throw err;
+    runIn(["fetch", "origin", branch], 30_000);
+    runIn(["rebase", `origin/${branch}`], 30_000);
+    runIn(["push", "origin", branch]);
+  }
+}
+
+function migrateAgentMemoryToKb(id, cfg, env) {
+  if (!agentKnowledgeDigestRef(id, env)) return { migrated: 0, skipped: "not-unified" };
+  const memDir = path.join(agentDir(id), "memory");
+  const files = [
+    { name: "facts.md", parse: memoryMigration.parseLegacyFacts, key: "facts" },
+    { name: "entities.md", parse: memoryMigration.parseLegacyEntities, key: "entities" },
+  ];
+  const toArchive = [];
+  const parsed = { facts: [], entities: [] };
+  let present = 0;
+  for (const f of files) {
+    const p = path.join(memDir, f.name);
+    if (!fs.existsSync(p)) continue;
+    present += 1;
+    const text = fs.readFileSync(p, "utf8");
+    if (!memoryMigration.hasLegacyContent(text)) {
+      // Template boilerplate (`# Facts` / `# Entities`) — delete, no archive noise.
+      fs.rmSync(p, { force: true });
+      continue;
+    }
+    parsed[f.key] = f.parse(text);
+    toArchive.push(p);
+  }
+  if (toArchive.length === 0) {
+    return { migrated: 0, skipped: present === 0 ? "already-migrated" : "boilerplate-only" };
+  }
+
+  const teamId = agentKnowledgeTeamId(cfg);
+  const entries = memoryMigration.buildMigrationEntries({
+    agentId: id, teamId, facts: parsed.facts, entities: parsed.entities,
+  });
+  if (entries.length > 0) pushMigrationEntries(id, teamId, env, entries); // throws → files stay, retried next pass
+
+  // Archive only after the entries are durably in the KB.
+  const archiveDir = path.join(memDir, "_archive");
+  fs.mkdirSync(archiveDir, { recursive: true });
+  for (const p of toArchive) fs.renameSync(p, path.join(archiveDir, path.basename(p)));
+
+  if (entries.length > 0) {
+    const ts = new Date().toISOString();
+    appendKnowledgeEvents(entries.map((entry) => knowledgeFeed.buildHarvestEvent({ teamId, agentId: id, entry, ts })));
+    try { runConvergenceCollector(teamId, env); }
+    catch (err) { console.warn(`[Orchestrator] convergence after migration of ${id}: ${err.message}`); }
+    try { fanOutKnowledgeDigests(teamId, env); }
+    catch (err) { console.warn(`[Orchestrator] digest fan-out after migration of ${id}: ${err.message}`); }
+  }
+  return { migrated: entries.length, archived: toArchive.map((p) => path.basename(p)) };
+}
+
+// Startup pass: migrate every unified agent that still carries legacy files.
+// Idempotent — migrated agents return `already-migrated` on every later boot.
+function migrateUnifiedAgentsMemory() {
+  for (const id of listAgentIds()) {
+    try {
+      const cfg = loadAgentConfig(id);
+      if (!cfg) continue;
+      const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+      const r = migrateAgentMemoryToKb(id, cfg, env);
+      if (r.migrated > 0) {
+        console.log(`[Orchestrator] Migrated ${r.migrated} legacy memory entries of ${id} to the team KB (archived: ${r.archived.join(", ")})`);
+      }
+    } catch (err) {
+      console.warn(`[Orchestrator] legacy-memory migration for ${id} failed (will retry next start): ${err.message}`);
+    }
+  }
+}
+
 // Self-heal a knowledge working copy that has shard content but no git checkout.
 // This is the state of every agent seeded BEFORE the knowledge feature (or whose
 // seed-time clone failed): the `knowledge` CLI kept appending shard lines locally
@@ -2006,6 +2324,13 @@ function refreshKnowledgeClone(teamId, { force = false, repoRef = null, env = nu
     }
     const now = Date.now();
     _kbRefreshThrottles.set(teamId, now);
+    // Post-KB-change digest fan-out (Memory/Knowledge unification, Phase 1):
+    // every KB change funnels through this refresh, so regenerating here keeps
+    // knowledge-digest.md current in every materialized agent workspace — the
+    // transparency guarantee for a human browsing between invocations. Cheap +
+    // content-diffed, so read-triggered refreshes cost nothing.
+    try { fanOutKnowledgeDigests(teamId, kbEnv); }
+    catch (err) { warnings.push(`knowledge: digest fan-out failed: ${err.message}`); }
     return { refreshedAt: now, warnings };
   } catch (err) {
     const detail = agentGitOps
@@ -2013,6 +2338,46 @@ function refreshKnowledgeClone(teamId, { force = false, repoRef = null, env = nu
       .slice(0, 200);
     warnings.push(`knowledge: canonical clone refresh failed for '${teamId}': ${detail}`);
     return { refreshedAt: null, warnings };
+  }
+}
+
+// Regenerate knowledge-digest.md for every materialized agent of a team from
+// the freshly-refreshed canonical clone. The banner timestamp changes on every
+// build, so the comparison strips the `> Generated:` line — only a real content
+// change rewrites the file (and mirrors it into an isolated agent's volume).
+// Best-effort per agent: one broken workspace never blocks the rest.
+function _digestComparable(md) {
+  return String(md).split("\n").filter((l) => !l.startsWith("> Generated:")).join("\n");
+}
+
+function fanOutKnowledgeDigests(teamId, env) {
+  const clonePath = knowledgeFeed.canonicalClonePath(KNOWLEDGE_CLONE_ROOT, teamId);
+  if (!clonePath || !fs.existsSync(path.join(clonePath, ".git"))) return;
+  const storeRoot = path.join(clonePath, _kbStoreRel(env));
+  const { markdown } = buildKnowledgeDigest({
+    teamId,
+    generatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+    entries: readKbStoreEntries(storeRoot),
+  });
+  for (const id of listAgentIds()) {
+    try {
+      const cfg = loadAgentConfig(id);
+      if (!cfg || agentKnowledgeTeamId(cfg) !== teamId) continue;
+      // Materialized, KB-provisioned agents only — a stub has no workspace,
+      // and an agent without a checkout has no digest import in its CLAUDE.md.
+      if (!fs.existsSync(path.join(agentDir(id), "knowledge", ".git"))) continue;
+      const target = path.join(agentDir(id), KNOWLEDGE_DIGEST_FILENAME);
+      let prev = null;
+      try { prev = fs.readFileSync(target, "utf8"); } catch { /* first write */ }
+      if (prev !== null && _digestComparable(prev) === _digestComparable(markdown)) continue;
+      const tmp = target + ".tmp";
+      fs.writeFileSync(tmp, markdown);
+      fs.renameSync(tmp, target);
+      // Mirror into a per-agent dedicated volume (no-op unless isolated + running).
+      reseedAgent(id, [KNOWLEDGE_DIGEST_FILENAME]).catch(() => { /* best effort */ });
+    } catch (err) {
+      console.warn(`[Orchestrator] knowledge digest fan-out for ${id}: ${err.message}`);
+    }
   }
 }
 
@@ -2299,7 +2664,7 @@ function runConvergenceCollector(teamId, envArg) {
   const shardEntries = _readCloneShards(storeRoot, manifest);
   if (shardEntries.length === 0) return;
 
-  const { simThreshold, convergenceThreshold } = knowledgeConvergenceConfig(env);
+  const { simThreshold, convergenceThreshold, relatedThreshold } = knowledgeConvergenceConfig(env);
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   const proj = knowledgeConvergence.buildCanonicalProjection(shardEntries, { simThreshold, now });
 
@@ -2311,8 +2676,15 @@ function runConvergenceCollector(teamId, envArg) {
   // prior pass) marked promoted. Overlaid onto the freshly-projected canonical
   // entries so status:"promoted" is durable in git across re-projections
   // (buildCanonicalProjection reads shards, which always carry status "active").
+  // A multi-lesson (related-theme / manual-combine) candidate spans SEVERAL
+  // canonical entries — its entryIds, not just the lead canonicalId — so the
+  // overlay unions both. Extra member ids that only exist as tombstones are
+  // harmless: the overlay below matches canonical entries by id.
   const promotedCanonicalIds = new Set(
-    candidates.filter((c) => c && c.status === "promoted" && c.canonicalId).map((c) => c.canonicalId),
+    candidates
+      .filter((c) => c && c.status === "promoted")
+      .flatMap((c) => [c.canonicalId, ...(Array.isArray(c.entryIds) ? c.entryIds : [])])
+      .filter(Boolean),
   );
   // Canonical ids the operator archived (Phase 4 non-destructive curation) — the
   // same durable-overlay pattern as promoted, so an archive survives re-projection.
@@ -2399,21 +2771,51 @@ function runConvergenceCollector(teamId, envArg) {
     } catch (err) {
       console.warn(`[Orchestrator] auto-promotion for '${teamId}' failed: ${err.message}`);
     }
+    // Related themes are review cards even at level 3 — synthesising distinct
+    // lessons into one skill needs judgment, so the curator never auto-promotes
+    // them. Re-read the store: autoPromoteStep just rewrote it.
+    try {
+      raiseRelatedSuggestions(teamId, eligibleClusters, readKnowledgeCandidates(teamId), { relatedThreshold, now });
+    } catch (err) {
+      console.warn(`[Orchestrator] related-theme suggestions for '${teamId}' failed: ${err.message}`);
+    }
   } else if (level >= 2) {
     try {
-      const { raise, batch } = knowledgeConvergence.planNewSuggestions(eligibleClusters, candidates, {
+      // Themes first: a lesson bundled into a raised theme card must not also
+      // raise its own single-lesson convergence card (one decision, not two).
+      const afterThemes = raiseRelatedSuggestions(teamId, eligibleClusters, candidates, { relatedThreshold, now });
+      const covered = knowledgeConvergence.clustersCoveredByThemes(eligibleClusters, afterThemes);
+      const singles = covered.size === 0
+        ? eligibleClusters
+        : eligibleClusters.filter((c) => c && !covered.has(c.canonicalId));
+      const { raise, batch } = knowledgeConvergence.planNewSuggestions(singles, afterThemes, {
         threshold: convergenceThreshold,
         teamId,
         now,
       });
       if (raise.length > 0) {
-        writeKnowledgeCandidates(teamId, [...candidates, ...raise]);
+        writeKnowledgeCandidates(teamId, [...afterThemes, ...raise]);
         if (batch) appendKnowledgeEvents([batch]);
       }
     } catch (err) {
       console.warn(`[Orchestrator] convergence suggestions for '${teamId}' failed: ${err.message}`);
     }
   }
+}
+
+// Raise related-theme (thematic aggregation) suggestion cards for a team and
+// return the up-to-date candidate list (written when anything new was raised).
+function raiseRelatedSuggestions(teamId, clusters, candidates, { relatedThreshold, now }) {
+  const { raise, batch } = knowledgeConvergence.planRelatedSuggestions(clusters, candidates, {
+    relatedThreshold,
+    teamId,
+    now,
+  });
+  if (raise.length === 0) return candidates;
+  const next = [...candidates, ...raise];
+  writeKnowledgeCandidates(teamId, next);
+  if (batch) appendKnowledgeEvents([batch]);
+  return next;
 }
 
 // Serialize one kind's canonical bucket (canonical entries first, then merge
@@ -2462,8 +2864,11 @@ function archiveKnowledgeEntry(teamId, id, archived) {
   const resolved = resolveTeamKbRepo(teamId);
   if (resolved) env = resolved.env;
   if (archived) {
+    // Every entry a promoted candidate bundles backs the skill — not just the
+    // lead canonicalId (multi-lesson related/manual candidates span several).
     const promoted = readKnowledgeCandidates(teamId).some(
-      (c) => c && c.status === "promoted" && c.canonicalId === id,
+      (c) => c && c.status === "promoted"
+        && (c.canonicalId === id || (Array.isArray(c.entryIds) && c.entryIds.includes(id))),
     );
     if (promoted) throw new Error("cannot archive a promoted entry (it backs a skill) — remove the skill first");
   }
@@ -2503,6 +2908,9 @@ function _teamSkillDir(teamId, name) {
 // Best-effort: a per-skill failure logs and continues. The promoted-status git
 // stamp lands on the NEXT collector pass via the candidate-store overlay above
 // (or within a day via the backstop), so this step performs no git op itself.
+// Set in main(); lets free functions (this one) reach instance methods.
+let orchestratorSingleton = null;
+
 function autoPromoteStep(teamId, env, clusters, candidates, { convergenceThreshold, now }) {
   const gates = resolvePromotionGates(env);
   const { maxAutoPromotionsPerPass } = knowledgeCurationConfig(env);
@@ -2560,6 +2968,24 @@ function autoPromoteStep(teamId, env, clusters, candidates, { convergenceThresho
     appendKnowledgeEvents(promotedSkills.map((s) => ({
       type: "promotion", ts: now, teamId, skill: { name: s.name, tier: "team" }, entryIds: s.entryIds, auto: true,
     })));
+    // Phase 4 (full autonomy): at level 3 an auto-promoted skill is also
+    // auto-ACTIVATED — learn → bundle → promote → activate closes without a
+    // human. This step only ever runs at autonomy 3 (the curator plan is gated
+    // on it), so no extra dial check is needed here. Fire-and-forget,
+    // best-effort: an activation failure surfaces as a ⚪ not-active card the
+    // operator can repair from the Knowledge page; the feed gets its own
+    // `activation` event (auto: true) from setTeamSkillActive.
+    if (orchestratorSingleton) {
+      (async () => {
+        for (const s of promotedSkills) {
+          try {
+            await orchestratorSingleton.setTeamSkillActive(teamId, s.name, { active: true, auto: true });
+          } catch (err) {
+            console.warn(`[Orchestrator] auto-activate '${s.name}' for team ${teamId} failed: ${err.message}`);
+          }
+        }
+      })();
+    }
   }
   if (raisedCards.length > 0) {
     appendKnowledgeEvents([{
@@ -3235,6 +3661,12 @@ class Orchestrator {
     // an existing team.
     const ownerTeamId = resolveOwnerTeamId(extra.teamId);
 
+    // Skill grant is team-owned (skill-grants.js): the caller passes the
+    // initial `skills` list explicitly; the environment no longer contributes.
+    const grantedSkills = Array.isArray(extra.skills)
+      ? extra.skills.filter((s) => typeof s === "string" && s.trim()).map((s) => s.trim())
+      : [];
+
     if (role === "team") {
       const teamConfig = {
         id,
@@ -3243,6 +3675,9 @@ class Orchestrator {
         environmentId: env.id,
         teamId: ownerTeamId,
         systemPromptTemplate: systemPrompt || "",
+        // The team's ACTIVE skill set — inherited by every member without a
+        // `skillsOverride`; the lever the Knowledge activation flow writes.
+        skills: grantedSkills,
         // Ordered stage names for the process graph's layered layout (#stage-order).
         // Members carry their own `stage`; the team holds the column *order* so the
         // live graph reproduces a materialised draft's stage layout.
@@ -3269,8 +3704,9 @@ class Orchestrator {
     const token = await loginMatrixUser(id, password);
     await setDisplayName(token, userId, displayName);
 
-    // Seed agent workspace using the chosen environment
-    const seedResult = seedAgentWorkspace(id, env, { teamId: ownerTeamId });
+    // Seed agent workspace using the chosen environment (infrastructure) and
+    // the explicitly granted skills (team-owned grant).
+    const seedResult = seedAgentWorkspace(id, env, { teamId: ownerTeamId, skills: grantedSkills });
 
     // For orchestrators the briefings repo is load-bearing: without the clone
     // the BP discovery pipeline silently returns zero stubs and the user sees
@@ -3303,6 +3739,9 @@ class Orchestrator {
       role,
       environmentId: env.id,
       teamId: ownerTeamId,
+      // The agent's own skill grant (team-owned skills; standalone agents
+      // carry their list directly).
+      skills: grantedSkills,
       ...(role === "orchestrator" && extra.briefingsPath && { briefingsPath: extra.briefingsPath }),
       // Optional fields written by the Team-Setup wizard. `team` ties the
       // agent to its sibling team-mates (used by the Layer-2 `from: team`
@@ -3363,7 +3802,8 @@ class Orchestrator {
   // materialized (Matrix user + workspace + agent process).
   //
   // Without opts: member id auto-numbered (`{teamId}-1`, `{teamId}-2`, …),
-  // prompt + skills inherited from the team / its env.
+  // prompt + skills inherited from the team (skills are team-owned:
+  // `teamCfg.skills`, not the env — skill-grants.js).
   //
   // With opts (used by the Team-Setup wizard):
   //   - id                  — pin the member id (`<teamId>-developer`, etc.)
@@ -3371,8 +3811,8 @@ class Orchestrator {
   //   - systemPromptOverride — role-specific prompt; member config records
   //                            it in `systemPrompt`. Absent = inherit team's
   //                            `systemPromptTemplate`.
-  //   - skillsOverride      — replace env.skills for this member's workspace.
-  //                            Absent = inherit env.skills.
+  //   - skillsOverride      — replace the team's `skills[]` for this member's
+  //                            workspace. Absent = inherit `teamCfg.skills`.
   //   - mcpServersOverride  — replace env.mcpServers for this member. Same
   //                            shape as env.mcpServers ([{serverId, credentialId}]).
   //                            Absent = inherit env.mcpServers.
@@ -3472,6 +3912,8 @@ class Orchestrator {
 
     const seedResult = seedAgentWorkspace(memberId, env, {
       teamId: ownerTeamId,
+      // Inherit the parent team's active skill set unless the member overrides.
+      skills: Array.isArray(teamCfg.skills) ? teamCfg.skills : [],
       skillsOverride: Array.isArray(opts.skillsOverride) ? opts.skillsOverride : undefined,
       mcpServersOverride: Array.isArray(opts.mcpServersOverride) ? opts.mcpServersOverride : undefined,
     });
@@ -3583,6 +4025,162 @@ class Orchestrator {
       `[Orchestrator] Team ${teamId} prompt updated; pushed to ${propagated} inheriting member(s)`
     );
     return { teamId, propagated };
+  }
+
+  // ── Skill activation (team-owned skills, phase 2) ─────────────────────────
+  // Additive file sync, NOT a respawn: skills are static files the Claude CLI
+  // reads per invocation, so copying into the live workspace is enough — no
+  // container restart, no session loss (docs/knowledge-skill-activation-concept.md §4).
+  // Copy the resolved skill into one agent's workspace, update its manifest,
+  // rebuild its CLAUDE.md (the Skills gate may have flipped), and mirror the
+  // touched files into an isolated agent's dedicated volume.
+  async _syncSkillIntoWorkspace(id, cfg, skillName, { remove = false } = {}) {
+    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+    const dst = path.join(agentDir(id), "skills", skillName);
+    const manifest = readSeededSkills(id);
+    if (remove) {
+      // Never remove an agent-authored (agent-tier) skill: the workspace dir
+      // IS the agent pool — deactivation only withdraws the grant.
+      if ((manifest[skillName] || {}).tier !== "agent") {
+        try { fs.rmSync(dst, { recursive: true, force: true }); }
+        catch (err) { return { agentId: id, status: "error", error: err.message }; }
+      }
+      delete manifest[skillName];
+    } else {
+      const src = resolveSkillSourceDir(skillName, cfg.teamId || DEFAULT_TEAM_ID, { agentId: id });
+      if (!src) return { agentId: id, status: "error", error: `skill not found in pool: ${skillName}` };
+      if (path.resolve(src) !== path.resolve(dst)) {
+        try { fs.cpSync(src, dst, { recursive: true, force: true }); }
+        catch (err) { return { agentId: id, status: "error", error: err.message }; }
+      }
+      manifest[skillName] = { tier: skillTierForSource(src), seededAt: new Date().toISOString() };
+    }
+    try { writeSeededSkills(id, manifest); } catch { /* best effort */ }
+    // Rebuild CLAUDE.md from the (already saved) config so the Skills section
+    // gate + list reflect the new grant. AGENT-PROMPT.md is left untouched.
+    try {
+      const promptPath = path.join(agentDir(id), AGENT_PROMPT_FILENAME);
+      const prompt = fs.existsSync(promptPath)
+        ? fs.readFileSync(promptPath, "utf8")
+        : (cfg.systemPrompt || cfg.systemPromptTemplate || "");
+      saveAgentPrompt(id, prompt, cfg.role, env, cfg.blueprintId || null);
+    } catch (err) {
+      console.warn(`[Orchestrator] skill sync ${id}: CLAUDE.md rebuild failed: ${err.message}`);
+    }
+    // Mirror into the dedicated volume (no-op unless isolated + running).
+    // Removal can't be mirrored file-wise — the stale copy disappears at the
+    // next respawn; the rebuilt CLAUDE.md (which no longer lists the skill) IS
+    // mirrored, so the agent stops being told about it immediately.
+    await reseedAgent(id, remove ? ["CLAUDE.md"] : ["skills/" + skillName, "CLAUDE.md"]);
+    return { agentId: id, status: remove ? "removed" : "seeded" };
+  }
+
+  // (De)activate a skill for a whole team: idempotent set-insert/-remove on the
+  // team agent's `skills[]`, then fan the file sync out to every materialized
+  // member per planSkillSync (override members are skipped unless explicitly
+  // opted in via includeMembers — opting in also records the name on their
+  // skillsOverride so the grant survives the next full re-seed).
+  async setTeamSkillActive(teamId, skillName, { active = true, includeMembers = [], auto = false } = {}) {
+    const teamCfg = loadAgentConfig(teamId);
+    if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
+    if (teamCfg.role !== "team") throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
+    if (typeof skillName !== "string" || !skillName.trim()) throw new Error("skillName required");
+    const name = skillName.trim();
+
+    const list = Array.isArray(teamCfg.skills) ? teamCfg.skills : [];
+    teamCfg.skills = active
+      ? (list.includes(name) ? list : [...list, name])
+      : list.filter((s) => s !== name);
+    saveAgentConfig(teamId, teamCfg);
+    this.agentConfigs.set(teamId, { config: teamCfg });
+
+    const members = listAgentIds()
+      .map((id) => loadAgentConfig(id))
+      .filter((c) => c && c.role === "team-member" && c.parentTeamId === teamId);
+    const plan = planSkillSync({ members, skillName: name, includeMembers: active ? includeMembers : [] });
+
+    const results = [];
+    for (const step of plan) {
+      const cfg = members.find((m) => m.id === step.agentId);
+      if (step.action === "stub") {
+        // Consistent by construction: the team list already carries (or no
+        // longer carries) the name; the normal seed path applies it at enable.
+        results.push({ agentId: step.agentId, status: "stub" });
+        continue;
+      }
+      if (step.action === "skip-override") {
+        // On deactivation an override member that carries the name keeps it —
+        // its own list is its grant; on activation it is surfaced for opt-in.
+        results.push({ agentId: step.agentId, status: "skipped-override" });
+        continue;
+      }
+      if (step.action === "sync-override") {
+        // Explicit opt-in: persist the name on the member's own list so the
+        // grant survives the next full re-seed, then sync like an inheritor.
+        if (!cfg.skillsOverride.includes(name)) {
+          cfg.skillsOverride = [...cfg.skillsOverride, name];
+          saveAgentConfig(step.agentId, cfg);
+          this.agentConfigs.set(step.agentId, { config: cfg });
+        }
+      }
+      results.push(await this._syncSkillIntoWorkspace(step.agentId, cfg, name, { remove: !active }));
+    }
+    console.log(
+      `[Orchestrator] Team ${teamId}: skill '${name}' ${active ? "activated" : "deactivated"} — ` +
+      results.map((r) => `${r.agentId}:${r.status}`).join(", ") || "no members"
+    );
+    // Live-feed transparency (phase 3): one lean event per (de)activation so
+    // the Knowledge page's feed shows the loop closing. Best-effort.
+    appendKnowledgeEvents([{
+      type: "activation",
+      ts: new Date().toISOString(),
+      teamId,
+      skillName: name,
+      active,
+      auto: !!auto,
+      synced: results.filter((r) => r.status === "seeded" || r.status === "removed").length,
+      skipped: results.filter((r) => r.status === "skipped-override").length,
+      total: results.length,
+    }]);
+    return { teamId, skillName: name, active, members: results };
+  }
+
+  // (De)activate a skill on a single non-member agent (standalone /
+  // orchestrator): same idempotent list edit + file sync, one workspace.
+  async setAgentSkillActive(id, skillName, { active = true } = {}) {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) throw new Error(`Agent '${id}' not found`);
+    if (cfg.role === "team-member") {
+      throw new Error(`Agent '${id}' is a team-member — (de)activate on its team, or opt it in via includeMembers`);
+    }
+    if (cfg.role === "team") throw new Error(`Agent '${id}' is a team — use the team route`);
+    if (typeof skillName !== "string" || !skillName.trim()) throw new Error("skillName required");
+    const name = skillName.trim();
+
+    const list = Array.isArray(cfg.skills) ? cfg.skills : [];
+    cfg.skills = active
+      ? (list.includes(name) ? list : [...list, name])
+      : list.filter((s) => s !== name);
+    saveAgentConfig(id, cfg);
+    this.agentConfigs.set(id, { config: cfg });
+
+    // A stub (no token) has no workspace to sync — the list edit is enough.
+    const result = cfg.token
+      ? await this._syncSkillIntoWorkspace(id, cfg, name, { remove: !active })
+      : { agentId: id, status: "stub" };
+    console.log(`[Orchestrator] Agent ${id}: skill '${name}' ${active ? "activated" : "deactivated"} (${result.status})`);
+    appendKnowledgeEvents([{
+      type: "activation",
+      ts: new Date().toISOString(),
+      teamId: agentKnowledgeTeamId(cfg),
+      agentId: id,
+      skillName: name,
+      active,
+      synced: result.status === "seeded" || result.status === "removed" ? 1 : 0,
+      skipped: 0,
+      total: 1,
+    }]);
+    return { agentId: id, skillName: name, active, result };
   }
 
   // Scan an orchestrator agent's briefings directory and ensure a disabled
@@ -4196,7 +4794,9 @@ class Orchestrator {
 
     const seedResult = seedAgentWorkspace(id, env, {
       teamId: cfg.teamId || DEFAULT_TEAM_ID,
-      skillsOverride: Array.isArray(cfg.skillsOverride) ? cfg.skillsOverride : undefined,
+      // Resolved team-owned grant: member override wins, else the parent
+      // construct's (team / orchestrator) skills[], else the stub's own list.
+      skills: effectiveSkills(cfg, loadAgentConfig),
       mcpServersOverride: Array.isArray(cfg.mcpServersOverride) ? cfg.mcpServersOverride : undefined,
     });
 
@@ -4621,7 +5221,11 @@ class Orchestrator {
     const token = await loginMatrixUser(instanceId, password);
     await setDisplayName(token, userId, instanceDisplayName);
 
-    const seedResult = seedAgentWorkspaceForInstance(instanceId, env, blueprintId);
+    // Initial grant for a blueprint instance: one-time copy of the env's
+    // legacy skill list (no operator UI on this path), recorded on the config —
+    // team-owned skills from then on.
+    const instanceSkills = Array.isArray(env.skills) ? [...env.skills] : [];
+    const seedResult = seedAgentWorkspaceForInstance(instanceId, env, blueprintId, instanceSkills);
 
     const config = {
       id: instanceId,
@@ -4630,6 +5234,7 @@ class Orchestrator {
       token,
       role: blueprint.role,
       environmentId: env.id,
+      skills: instanceSkills,
       blueprintId,
       // Preserve the owning Team of the stub being activated (#299); fall back
       // to the default team for a fresh instance.
@@ -5025,13 +5630,23 @@ async function main() {
     process.exit(1);
   }
   migrateLegacyAgentConfigs();
+  migrateSkillGrantsToAgents();
   await migrateAgentClaudeMdToReference();
   bootstrapTeams();
   backfillResourceOwnership();
   backfillTriggerHorizonStamps();
 
   const orchestrator = new Orchestrator();
+  // Module-level handle for free-function callers that need instance methods
+  // (today: the level-3 curator's auto-activation in autoPromoteStep).
+  orchestratorSingleton = orchestrator;
   await orchestrator.init();
+
+  // Legacy-memory migration (unification Phase 3) — one-shot per unified
+  // agent, retried on every start until it succeeds. Needs git/network, so it
+  // runs after init and must never block or break the boot.
+  try { migrateUnifiedAgentsMemory(); }
+  catch (err) { console.warn(`[Orchestrator] legacy-memory migration pass failed: ${err.message}`); }
 
   // Internal API — used by admin-console to manage agents
   const internalApi = http.createServer((req, res) => {
@@ -5437,8 +6052,16 @@ async function main() {
         const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
         const blueprintId = cfg.blueprintId || null;
         const autonomous = agentIsAutonomous(id, cfg.role);
-        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous });
-        const appendSystemPrompt = buildMemoryHint(blueprintId);
+        // Team-owned skills: resolve the same grant the seed path uses, so the
+        // preview's Skills gate is byte-identical to what gets seeded.
+        const skills = effectiveSkills(cfg, loadAgentConfig);
+        // Same live gate as saveAgentPrompt (autonomy >= 1 + provisioned
+        // checkout): digest import, unified Memory System section AND the
+        // unified memory hint all flip together — byte-identical to what the
+        // runtime resolves via _memory_model_unified().
+        const knowledgeDigestRef = agentKnowledgeDigestRef(id, env);
+        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous, skills, knowledgeDigestRef });
+        const appendSystemPrompt = buildMemoryHint(blueprintId, { unified: !!knowledgeDigestRef });
         return sendJson(res, 200, {
           agentId: id,
           role: cfg.role || null,
@@ -5450,7 +6073,8 @@ async function main() {
             sessionPolicy: cfg.sessionPolicy || 'persistent',
             blueprintInstance: !!blueprintId,
             hasRepository: !!(env && Array.isArray(env.repositories) && env.repositories.length > 0),
-            hasSkills: !!(env && Array.isArray(env.skills) && env.skills.length > 0),
+            hasSkills: skills.length > 0,
+            hasKnowledgeDigest: !!knowledgeDigestRef,
             environmentId: cfg.environmentId || null,
             environmentName: (env && env.name) || null,
           },
@@ -5624,9 +6248,12 @@ async function main() {
           const token = await loginMatrixUser(agentId, password);
           await setDisplayName(token, userId, displayName);
 
+          // Initial grant for an ephemeral agent: one-time copy of the env's
+          // legacy skill list (no operator UI on this path).
+          const ephemeralSkills = Array.isArray(env.skills) ? [...env.skills] : [];
           const seedResult = blueprintId
-            ? seedAgentWorkspaceForInstance(agentId, env, blueprintId)
-            : seedAgentWorkspace(agentId, env);
+            ? seedAgentWorkspaceForInstance(agentId, env, blueprintId, ephemeralSkills)
+            : seedAgentWorkspace(agentId, env, { skills: ephemeralSkills });
 
           const systemPrompt = blueprintId
             ? (loadBlueprint(blueprintId)?.systemPrompt || displayName)
@@ -5640,6 +6267,7 @@ async function main() {
             role: 'agent',
             environmentId: env.id,
             teamId: DEFAULT_TEAM_ID,
+            skills: ephemeralSkills,
             ephemeral: true,
             enabled: true,
             ...(blueprintId && { blueprintId }),
@@ -6453,11 +7081,35 @@ async function main() {
         try {
           const p = JSON.parse(body || '{}');
           const teamId = String(p.teamId || DEFAULT_TEAM_ID);
+          const entryIds = Array.isArray(p.entryIds)
+            ? p.entryIds.filter((x) => typeof x === 'string' && /^[0-9a-f]{12}$/.test(x))
+            : [];
           if (p.suggestionId) {
             const list = readKnowledgeCandidates(teamId);
             const i = list.findIndex((c) => c && c.id === p.suggestionId);
             if (i >= 0) {
               list[i] = { ...list[i], status: dismiss ? 'dismissed' : 'promoted', resolvedAt: new Date().toISOString() };
+              writeKnowledgeCandidates(teamId, list);
+            }
+          } else if (!dismiss && entryIds.length > 0) {
+            // Promotion without a stored suggestion (manual combine, agent→team
+            // lift): record a synthetic promoted row so the collector's promoted
+            // overlay, the archive guard, and the planners' promoted-entry
+            // filters all see these entries as skill-backing.
+            const list = readKnowledgeCandidates(teamId);
+            const already = list.some((c) => c && c.status === 'promoted'
+              && Array.isArray(c.entryIds) && entryIds.every((id) => c.entryIds.includes(id)));
+            if (!already) {
+              list.push({
+                id: crypto.randomBytes(6).toString('hex'),
+                teamId,
+                source: 'manual',
+                status: 'promoted',
+                canonicalId: entryIds[0],
+                entryIds,
+                skill: p.skill && typeof p.skill === 'object' ? { name: p.skill.name, tier: p.skill.tier } : null,
+                resolvedAt: new Date().toISOString(),
+              });
               writeKnowledgeCandidates(teamId, list);
             }
           }
@@ -6833,6 +7485,113 @@ async function main() {
       return;
     }
 
+    // GET /internal/teams/:teamId/knowledge/digest-status — which KB entries
+    // are currently inside the team's digest budget (unification Phase 3).
+    // Computed live from the canonical clone with the same pure builder that
+    // writes knowledge-digest.md, so the "in digest" indicator in the admin
+    // console can never disagree with the file the agents actually import.
+    const digestStatusMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/knowledge\/digest-status$/);
+    if (digestStatusMatch) {
+      const teamId = decodeURIComponent(digestStatusMatch[1]);
+      try {
+        const clonePath = knowledgeFeed.canonicalClonePath(KNOWLEDGE_CLONE_ROOT, teamId);
+        if (!clonePath || !fs.existsSync(path.join(clonePath, '.git'))) {
+          return sendJson(res, 404, { error: 'no canonical KB clone for this team' });
+        }
+        const resolved = resolveTeamKbRepo(teamId);
+        const storeRoot = path.join(clonePath, _kbStoreRel(resolved?.env || null));
+        const digest = buildKnowledgeDigest({
+          teamId,
+          generatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+          entries: readKbStoreEntries(storeRoot),
+        });
+        return sendJson(res, 200, {
+          teamId,
+          includedIds: digest.includedIds,
+          includedCount: digest.includedCount,
+          totalCount: digest.totalCount,
+          omittedCount: digest.omittedCount,
+          tokensUsed: digest.tokensUsed,
+        });
+      } catch (err) {
+        console.error(`[Orchestrator] digest-status error for ${teamId}: ${err.message}`);
+        return sendJson(res, 500, { error: err.message });
+      }
+    }
+
+    // POST /internal/teams/:teamId/skills/{activate,deactivate} — team-owned
+    // skill (de)activation (phase 2): idempotent list edit on the team agent's
+    // skills[] + additive file sync into every materialized member workspace.
+    // Body: { skillName, includeMembers? } (includeMembers: override members
+    // to opt in explicitly).
+    const teamSkillMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/skills\/(activate|deactivate)$/);
+    if (teamSkillMatch) {
+      const teamId = decodeURIComponent(teamSkillMatch[1]);
+      const active = teamSkillMatch[2] === 'activate';
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        let payload;
+        try { payload = JSON.parse(body || '{}'); }
+        catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `Invalid JSON body: ${err.message}` }));
+          return;
+        }
+        try {
+          const result = await orchestrator.setTeamSkillActive(teamId, payload?.skillName, {
+            active,
+            includeMembers: Array.isArray(payload?.includeMembers) ? payload.includeMembers : [],
+          });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] setTeamSkillActive error for ${teamId}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404
+            : /not a team|required/i.test(err.message) ? 400
+            : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // POST /internal/agents/:id/skills/{activate,deactivate} — same for a
+    // single non-member agent (standalone / orchestrator).
+    const agentSkillMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/agents\/([^/]+)\/skills\/(activate|deactivate)$/);
+    if (agentSkillMatch) {
+      const agentId = decodeURIComponent(agentSkillMatch[1]);
+      const active = agentSkillMatch[2] === 'activate';
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        let payload;
+        try { payload = JSON.parse(body || '{}'); }
+        catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `Invalid JSON body: ${err.message}` }));
+          return;
+        }
+        try {
+          const result = await orchestrator.setAgentSkillActive(agentId, payload?.skillName, { active });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] setAgentSkillActive error for ${agentId}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404
+            : /team-member|is a team|required/i.test(err.message) ? 400
+            : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
     // POST /internal/teams/:teamId/prompt — update team's systemPromptTemplate
     // and push it to all inheriting members.
     const teamPromptMatch = req.method === 'POST' && req.url.match(/^\/internal\/teams\/([^/]+)\/prompt$/);
@@ -6888,6 +7647,10 @@ async function main() {
           skipFirstMember,
           // For role: 'team' — ordered stage names for the process graph layout.
           stages,
+          // Initial skill grant (team-owned skills, skill-grants.js): the
+          // team's active set / the standalone agent's own list. The
+          // environment no longer contributes skills.
+          skills,
         } = JSON.parse(body);
         if (!id || !displayName || !role || !environmentId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -6922,6 +7685,7 @@ async function main() {
         if (skipFirstMember) extra.skipFirstMember = true;
         if (teamId) extra.teamId = teamId;
         if (Array.isArray(stages)) extra.stages = stages;
+        if (Array.isArray(skills)) extra.skills = skills;
         const result = await orchestrator.createAgent(id, displayName, role, systemPrompt, environmentId, extra);
         res.writeHead(201, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));

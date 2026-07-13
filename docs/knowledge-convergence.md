@@ -155,6 +155,50 @@ recording twice does not grow convergence.
 (behind a model provider, opt-in) drops in there without touching clustering,
 projection, thresholds or callers.
 
+### 3b. Related-theme aggregation (thematic bundling)
+
+Convergence answers "did several agents learn the **same** lesson?". A skill,
+however, is typically a **synthesis**: several *distinct-but-related* lessons
+about one topic ("how we handle GitHub labels") that only together make a
+coherent, reusable instruction. A second, looser stage in the same pure module
+groups the already-converged clusters into topic **themes** and raises ONE
+combined suggestion card per qualifying theme:
+
+```js
+topicTokens(text)          // normalized tokens with length >= 4 (drops the/for/a…)
+relatedness(a, b)          // overlap coefficient |∩| / min(|A|,|B|) over topic tokens
+                           // (Jaccard punishes length differences; for topical
+                           //  relatedness the smaller lesson's coverage is the signal)
+groupRelatedClusters(clusters, { relatedThreshold })
+//   single-link over cluster texts, CROSS-KIND on purpose (a convention + the
+//   facts around it belong in one skill); only groups of >= 2 clusters
+themeQualifies(group, { minLessons: 2, minAgents: 2, strongLessons: 3 })
+//   broad (>= 3 lessons, even single-agent) OR cross-agent (>= 2 lessons from
+//   >= 2 agents) — the theme-level analogue of "2× independent"
+themeToCandidate(group)    // candidate row: source "related", kinds[], lessonCount,
+                           // entryIds = all member entries, convergence = agent union;
+                           // id hashes the member set under pseudo-kind "related"
+planRelatedSuggestions(clusters, existing, { relatedThreshold })
+//   idempotent against open/promoted/dismissed candidates; skips clusters whose
+//   knowledge already backs a promoted skill; one batched feed event
+clustersCoveredByThemes(clusters, candidates)
+//   canonical ids fully contained in an open/promoted theme card — the collector
+//   excludes them from single-lesson suggestion cards (one decision, not two)
+```
+
+`relatedThreshold` rides on the same env block (`knowledgeConvergence.relatedThreshold`,
+clamp [0,1], default **0.3**). Collector wiring: at level 2 the theme cards are
+raised **first** and covered clusters don't also raise singles; at level 3 themes
+are raised as **review cards only** — the curator never auto-promotes a synthesis
+(judgment required), while single-cluster auto-promotion stays untouched.
+
+The operator can also aggregate **manually**: the Knowledge Flow page lets you
+tick several lessons and *Combine into one skill* — `POST /api/knowledge/draft`
+builds the (heuristic or LLM) synthesis draft from the ad-hoc entry set, and
+`POST /api/knowledge/promote` rebuilds full provenance from the entry ids via
+`candidateFromEntries` (admin-console `knowledge-suggestions.js`) when no stored
+suggestion is referenced.
+
 ---
 
 ## 4. Merge in JSONL, without breaking anything (decision c)

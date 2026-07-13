@@ -45,7 +45,6 @@ const pageStyle = {
   display: 'flex',
   flexDirection: 'column',
   height: '100%',
-  padding: 'var(--eb-space-6)',
   gap: 'var(--eb-space-4)',
   boxSizing: 'border-box',
 };

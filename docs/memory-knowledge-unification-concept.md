@@ -1,6 +1,6 @@
 # Concept: Memory ↔ Knowledge Unification (semantic vs. episodic)
 
-**Status:** Draft v1 (decisions inline)
+**Status:** Phases 0 + 1 implemented (Full-Learn fix `4749720`, knowledge digest `95b9028`); phases 2–4 open
 **Relates to:** Knowledge pipeline (harvest → convergence → promotion → activation, see `docs/knowledge-skill-activation-concept.md`), agent memory system (`memory/*.md`), Full-Learn button, Workspace Browser
 
 ## 1. Problem

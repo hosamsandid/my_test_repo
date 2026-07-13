@@ -48,6 +48,26 @@ Claude CLI, so they work in unattended runs. On a multi-repo environment add
 surface it to the user — do not retry with a raw `git push`, which will just hit
 the policy block.
 
+### `gh-as-agent commit` is self-sufficient — no git identity setup needed
+
+`commit` sets **both** the author and the committer inline
+(`git -c user.name="agent-<AGENT_ID>" -c user.email="agent-<AGENT_ID>@ace.local"
+commit --author="<AGENT_ID> <<AGENT_ID>@agents.local>"`). It therefore works in
+a fresh context with no configured git identity (a manual shell, the Claude Code
+harness) — you do **not** need to set `GIT_COMMITTER_*` or run `git config`. The
+author email keeps the `@agents.local` marker the poller reads for loop
+protection; the committer mirrors the orchestrator's own identity.
+
+### `gh-as-agent pr` when the environment has no GitHub token
+
+Opening a PR needs a GitHub PAT. If this environment has none, `gh-as-agent pr`
+first **pushes your branch over SSH** (that part still succeeds with only an SSH
+key), then fails the PR step with a **distinct** error prefixed `no-github-token:`
+(orchestrator HTTP `424`), naming the environment — it is *not* a git conflict.
+When you see it, the branch is already on the remote: surface the message to the
+user (the environment needs a PAT attached) or open the PR yourself with plain
+`gh pr create --head <branch>`. Do **not** retry with a raw `git push`.
+
 ## Task Management
 
 Tasks and Briefing Packs are tracked on GitHub Issues. Use `gh issue view <number>` to read context.

@@ -9,11 +9,14 @@ import MessageInput from './MessageInput';
 import LearningBadge from '../../components/LearningBadge';
 import { resolveContextWindowTokens, computeContextFillLevel, formatTokenCountK } from './context-window';
 
-// Default prompt sent when the user clicks "Reset & learn". The agent
+// Default prompt sent when the user clicks "Full Learn". The agent
 // continues in its current Claude session (so it has full conversational
-// context), is asked to consolidate that context into the memory files,
-// and replies with a short summary. After the reply lands, the UI clears
-// the session pointer so the next message starts fresh.
+// context), is asked to consolidate that context into the memory files
+// AND to share durable, team-useful lessons via the knowledge CLI, then
+// replies with a short summary. The knowledge paragraph's wording is kept
+// aligned with build_harvest_hint() in agent-image/scripts/agent-entrypoint.py
+// so the two instructions can't drift apart; "skip if the team knowledge
+// base is not available" covers autonomy-0 agents without a KB checkout.
 const LEARN_PROMPT =
   'Before we end this conversation: please summarize the key insights, ' +
   'decisions and open points from our discussion so far ' +
@@ -23,7 +26,14 @@ const LEARN_PROMPT =
   '- memory/facts.md — atomic, deduplicated facts (one per line, with date)\n' +
   '- memory/entities.md — rich knowledge about projects, systems, frameworks\n' +
   '- memory/users.md — per-user interaction profiles\n' +
-  'Then briefly reply with what you have saved.';
+  'In addition to your memory files, share durable lessons with your teammates ' +
+  'through the team knowledge base: for each insight that would help ANY teammate ' +
+  'on this repo (a project convention, an environment fact, a key entity) run: ' +
+  'knowledge add fact|entity|convention "<one-line statement>". ' +
+  'First run knowledge search "<topic>" to avoid restating something already recorded; ' +
+  'record only lessons that hold beyond this one conversation. ' +
+  'Skip this step if the team knowledge base is not available.\n' +
+  'Then briefly reply with what you have saved and what you shared with the team.';
 
 /**
  * The middle column: header + scrollable message list + input.
@@ -56,10 +66,14 @@ const LEARN_PROMPT =
  *        pinned To-Do panel from a previous session gets dismissed (#273).
  * @param {()=>void} [onOpenKnowledge] Open the right rail on its Knowledge tab
  *        (wired to the "N learned" badge in the header).
+ * @param {()=>void} [onKnowledgeChanged] Notify parent after the agent replied
+ *        to the Full-Learn prompt (which may have added KB entries), so the
+ *        right rail's Knowledge tab refreshes and the user sees the button
+ *        feeding the pipeline.
  */
 export default function ChatPanel({
   agent, roomId, onRoomCreated, hoveredCorrelationId, onHoverCorrelation, sessionCost, contextFill,
-  onWorkspaceChanged, onTodoBoundary, onOpenKnowledge,
+  onWorkspaceChanged, onTodoBoundary, onOpenKnowledge, onKnowledgeChanged,
 }) {
   const [messages, setMessages]      = useState([]);
   const [loading, setLoading]        = useState(false);
@@ -538,7 +552,9 @@ export default function ChatPanel({
     }
   }
 
-  // Clear learnPending once the agent has replied to the learn prompt.
+  // Clear learnPending once the agent has replied to the learn prompt, and
+  // let the parent refresh the Knowledge tab — the learn run may have added
+  // entries to the team KB.
   useEffect(() => {
     if (!learnPending) return;
     if (!messages.length || !agent?.userId) return;
@@ -547,7 +563,8 @@ export default function ChatPanel({
     if (last?.isOptimistic) return;
     if ((last?.ts || 0) < learnTriggeredAtRef.current) return;
     setLearnPending(false);
-  }, [messages, learnPending, agent?.userId]);
+    onKnowledgeChanged?.();
+  }, [messages, learnPending, agent?.userId, onKnowledgeChanged]);
 
   /* ─── 5. Send ────────────────────────────────────────────────────── */
   async function handleSend(text) {
@@ -777,7 +794,7 @@ export default function ChatPanel({
           type="button"
           onClick={handleFullLearn}
           disabled={!sessionId || learnPending || disabled}
-          title="Agent summarizes this conversation and saves key insights to its memory files — the session stays open afterwards"
+          title="Agent summarizes this conversation, saves session state to its memory files and shares durable lessons with the team knowledge base — the session stays open afterwards"
           style={sessionBtnStyle(!sessionId || learnPending || disabled)}
         >
           {learnPending

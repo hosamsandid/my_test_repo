@@ -41,7 +41,7 @@ const TAB_KEYS = ['log', 'workspace', 'triggers', 'sessions', 'prompt', 'knowled
  */
 export default function RightRail({
   agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate,
-  todoCloseSignal = 0, workspaceRefreshKey = 0, openTabRequest = null,
+  todoCloseSignal = 0, workspaceRefreshKey = 0, knowledgeRefreshKey = 0, openTabRequest = null,
 }) {
   const [tab, setTab] = useState(() => {
     try {
@@ -335,7 +335,7 @@ export default function RightRail({
           <PromptPreviewPanel agentId={agentId} embedded />
         </div>
         <div style={{ display: tab === 'knowledge' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
-          <AgentKnowledgePanel agentId={agentId} active={tab === 'knowledge'} />
+          <AgentKnowledgePanel agentId={agentId} active={tab === 'knowledge'} refreshKey={knowledgeRefreshKey} />
         </div>
       </div>
     </div>

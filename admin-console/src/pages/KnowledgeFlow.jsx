@@ -1173,7 +1173,7 @@ function SuggestionCard({ suggestion, onReview }) {
 }
 
 function PrivateSkillsBlock({ teamId, skills, onLifted }) {
-  const [state, setState] = useState({}); // name -> 'lifting' | 'done' | 'exists' | 'error'
+  const [state, setState] = useState({}); // name -> 'lifting' | 'activating' | 'done' | 'done-noact' | 'exists' | 'error'
   const lift = (sk) => {
     setState(s => ({ ...s, [sk.name]: 'lifting' }));
     fetch('/api/knowledge/promote', {
@@ -1181,7 +1181,15 @@ function PrivateSkillsBlock({ teamId, skills, onLifted }) {
       body: JSON.stringify({ from: 'agent', to: 'team', teamId, agentId: sk.agentId, name: sk.name }),
     })
       .then(r => {
-        if (r.status === 201) { setState(s => ({ ...s, [sk.name]: 'done' })); onLifted && onLifted(); return; }
+        if (r.status === 201) {
+          // Lift succeeded — activation is the point of lifting, so it runs
+          // without a checkbox. A failure never rolls the lift back.
+          setState(s => ({ ...s, [sk.name]: 'activating' }));
+          return activateSkill(teamId, sk.name)
+            .then(() => setState(s => ({ ...s, [sk.name]: 'done' })))
+            .catch(() => setState(s => ({ ...s, [sk.name]: 'done-noact' })))
+            .finally(() => { onLifted && onLifted(); });
+        }
         setState(s => ({ ...s, [sk.name]: r.status === 409 ? 'exists' : 'error' }));
       })
       .catch(() => setState(s => ({ ...s, [sk.name]: 'error' })));
@@ -1210,10 +1218,15 @@ function PrivateSkillsBlock({ teamId, skills, onLifted }) {
             </div>
             <button
               onClick={() => lift(sk)}
-              disabled={st === 'lifting' || st === 'done'}
-              title="Copy this skill into the team pool so every agent on the team can use it"
+              disabled={st === 'lifting' || st === 'activating' || st === 'done' || st === 'done-noact'}
+              title="Copy this skill into the team pool and activate it so every agent on the team loads it"
               style={miniBtn}>
-              {st === 'lifting' ? 'Lifting…' : st === 'done' ? 'Lifted ✓' : st === 'exists' ? 'Name taken' : 'Lift to team'}
+              {st === 'lifting' ? 'Lifting…'
+                : st === 'activating' ? 'Activating…'
+                : st === 'done' ? 'Lifted & active ✓'
+                : st === 'done-noact' ? 'Lifted ✓ (activation failed — use the skill card)'
+                : st === 'exists' ? 'Name taken'
+                : 'Lift to team'}
             </button>
           </div>
         );
@@ -1503,6 +1516,55 @@ const LinkRow = ({ onClick, children }) => (
 );
 const Muted = ({ children }) => <span style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>{children}</span>;
 
+/* ── Activation as the default last step (Phase 3) ─────────────────────────────
+ * Every flow that puts a skill into a pool (promote / share / lift) offers to
+ * activate it right away. Activation failures NEVER roll back or fail the
+ * primary action — callers surface them as a warning with a pointer to the
+ * Activate button on the skill card. */
+
+function activateSkill(teamId, skillName) {
+  return fetch('/api/knowledge/activate', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ teamId, skillName }),
+  }).then(async r => {
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    return d;
+  });
+}
+
+// "active for k/n members" (k = seeded), or plain "activated" for standalone.
+function activationSummary(d) {
+  const ms = Array.isArray(d?.members) ? d.members : [];
+  if (!ms.length) return 'activated';
+  const k = ms.filter(m => m.status === 'seeded').length;
+  return `active for ${k}/${ms.length} member${ms.length === 1 ? '' : 's'}`;
+}
+
+function ActivateNowCheckbox({ id, checked, onChange, label }) {
+  return (
+    <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+      <input type="checkbox" id={id} checked={checked} onChange={e => onChange(e.target.checked)} style={{ marginTop: 3, flexShrink: 0 }} />
+      <div>
+        <label htmlFor={id} style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', cursor: 'pointer' }}>{label}</label>
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 2, lineHeight: 1.5 }}>
+          Copies the skill into every member's workspace and adds it to the team's active skills.
+          Members with their own skill list are excluded — add them afterwards from the skill card.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const resultNotice = (result) => (
+  <div style={{
+    fontSize: 'var(--eb-text-sm)', fontWeight: 600,
+    color: result.kind === 'ok' ? 'var(--eb-status-success)' : 'var(--eb-status-warning)',
+  }}>
+    {result.kind === 'ok' ? '✓ ' : '⚠ '}{result.text}
+  </div>
+);
+
 /* ── Promotion dialog (unchanged mechanics: draft → confirm → promote) ────────── */
 
 function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
@@ -1511,6 +1573,8 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
   const [tier, setTier] = useState('team');
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
+  const [activateNow, setActivateNow] = useState(true);
+  const [result, setResult] = useState(null); // combined promote+activate outcome
 
   // manual = operator multi-select (no stored suggestion); aggregated = the
   // lessons are distinct and the skill is their synthesis (manual OR the
@@ -1577,7 +1641,14 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
       }),
     })
       .then(async r => { if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`); return r.json(); })
-      .then(() => onDone())
+      .then(() => {
+        // Promotion succeeded — never rolled back or reported failed from here on.
+        if (!activateNow) { onDone(); return; }
+        return activateSkill(teamId, name.trim())
+          .then(d => setResult({ kind: 'ok', text: `Promoted and ${activationSummary(d)}.` }))
+          .catch(e => setResult({ kind: 'warn', text: `Promoted — but activation failed: ${e.message}. Use the Activate button on the skill card.` }))
+          .finally(() => setBusy(''));
+      })
       .catch(e => { setError(e.message); setBusy(''); });
   };
 
@@ -1589,8 +1660,12 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
     }).catch(() => {}).finally(() => onDone());
   };
 
+  // After a successful promote (result set) any close path must run onDone so
+  // the parent reloads — the promotion happened even if the dialog is dismissed.
+  const close = result ? onDone : onClose;
+
   return (
-    <div onClick={onClose} style={overlay}>
+    <div onClick={close} style={overlay}>
       <div onClick={e => e.stopPropagation()} style={{ ...dialog, width: 640, display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
           {aggregated
@@ -1601,7 +1676,7 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
               ? `Combine ${suggestion.lessonCount || memberTexts.length} lessons into a skill`
               : 'Turn this knowledge into a skill'}
           </h2>
-          <button onClick={onClose} style={{ ...btn, marginLeft: 'auto' }}><X size={14} /></button>
+          <button onClick={close} style={{ ...btn, marginLeft: 'auto' }}><X size={14} /></button>
         </div>
 
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
@@ -1649,18 +1724,36 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
         <textarea value={skillMd} onChange={e => setSkillMd(e.target.value)} rows={12}
           style={{ ...inp, fontFamily: 'var(--eb-font-mono, monospace)', fontSize: 'var(--eb-text-xs)', resize: 'vertical' }} />
 
+        {/* Activation is the default last step. For a global promotion the
+            activation still targets the SOURCE team (same teamId). */}
+        {(tier === 'team' || tier === 'global') && !result && (
+          <ActivateNowCheckbox
+            id="kf-promote-activate"
+            checked={activateNow}
+            onChange={setActivateNow}
+            label="Activate for the team immediately"
+          />
+        )}
+
         {error && <div style={{ color: 'var(--eb-status-error, #d33)', fontSize: 'var(--eb-text-xs)' }}>{error}</div>}
+        {result && resultNotice(result)}
 
         <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end' }}>
-          {!manual && (
-            <button onClick={dismiss} disabled={!!busy} title="Don’t promote — the suggestion goes away, the knowledge itself stays in the team KB" style={btn}>Dismiss</button>
+          {result ? (
+            <button onClick={onDone} style={primaryBtn}>Close</button>
+          ) : (
+            <>
+              {!manual && (
+                <button onClick={dismiss} disabled={!!busy} title="Don’t promote — the suggestion goes away, the knowledge itself stays in the team KB" style={btn}>Dismiss</button>
+              )}
+              {manual && (
+                <button onClick={onClose} disabled={!!busy} style={btn}>Cancel</button>
+              )}
+              <button onClick={promote} disabled={!!busy || !name.trim() || !skillMd.trim()} style={primaryBtn}>
+                <Check size={14} /> {busy === 'promote' ? 'Promoting…' : aggregated ? `Create combined ${tier} skill` : `Promote to ${tier}`}
+              </button>
+            </>
           )}
-          {manual && (
-            <button onClick={onClose} disabled={!!busy} style={btn}>Cancel</button>
-          )}
-          <button onClick={promote} disabled={!!busy || !name.trim() || !skillMd.trim()} style={primaryBtn}>
-            <Check size={14} /> {busy === 'promote' ? 'Promoting…' : aggregated ? `Create combined ${tier} skill` : `Promote to ${tier}`}
-          </button>
         </div>
       </div>
     </div>
@@ -1677,6 +1770,8 @@ function ShareDialog({ node, teams, onClose, onDone }) {
   const [target, setTarget] = useState(options[0] || '');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+  const [activateNow, setActivateNow] = useState(true);
+  const [result, setResult] = useState(null); // combined share+activate outcome
 
   const share = () => {
     setBusy(true); setErr('');
@@ -1685,31 +1780,58 @@ function ShareDialog({ node, teams, onClose, onDone }) {
       body: JSON.stringify({ from: sourceIsTeam ? 'team' : 'global', name, sourceTeamId, targetTeamId: target }),
     })
       .then(async r => { const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || 'share failed'); return d; })
-      .then(() => onDone())
+      .then(() => {
+        // Share succeeded — never rolled back or reported failed from here on.
+        if (!activateNow) { onDone(); return; }
+        return activateSkill(target, name)
+          .then(d => setResult({ kind: 'ok', text: `Shared and ${activationSummary(d)}.` }))
+          .catch(e => setResult({ kind: 'warn', text: `Shared — but activation failed: ${e.message}. Use the Activate button on the skill card.` }))
+          .finally(() => setBusy(false));
+      })
       .catch(e => { setErr(e.message); setBusy(false); });
   };
 
+  // After a successful share, any close path must run onDone so the parent reloads.
+  const close = result ? onDone : onClose;
+
   return (
-    <div onClick={onClose} style={overlay}>
+    <div onClick={close} style={overlay}>
       <div onClick={(e) => e.stopPropagation()} style={{ ...dialog, width: 420 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 'var(--eb-space-3)' }}>
           <Share2 size={16} style={{ color: 'var(--eb-accent-primary)' }} />
           <span style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>Share skill to a team</span>
-          <button onClick={onClose} style={{ marginLeft: 'auto', ...btn, padding: 4 }}><X size={14} /></button>
+          <button onClick={close} style={{ marginLeft: 'auto', ...btn, padding: 4 }}><X size={14} /></button>
         </div>
         <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-3)' }}>
           Copy <strong>{name}</strong> ({node.tier} skill) into another team’s pool. Provenance is preserved and the share is stamped.
         </div>
         <label style={lbl}>Target team</label>
-        <select value={target} onChange={e => setTarget(e.target.value)} style={{ ...inp, marginTop: 4 }}>
+        <select value={target} onChange={e => setTarget(e.target.value)} disabled={!!result} style={{ ...inp, marginTop: 4 }}>
           {options.map(t => <option key={t} value={t}>{t}</option>)}
         </select>
+        {!result && (
+          <div style={{ marginTop: 'var(--eb-space-3)' }}>
+            <ActivateNowCheckbox
+              id="kf-share-activate"
+              checked={activateNow}
+              onChange={setActivateNow}
+              label="Activate for the target team immediately"
+            />
+          </div>
+        )}
         {err && <div style={{ color: 'var(--eb-status-error, #d33)', fontSize: 'var(--eb-text-xs)', marginTop: 'var(--eb-space-2)' }}>{err}</div>}
+        {result && <div style={{ marginTop: 'var(--eb-space-2)' }}>{resultNotice(result)}</div>}
         <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end', marginTop: 'var(--eb-space-3)' }}>
-          <button onClick={onClose} disabled={busy} style={btn}>Cancel</button>
-          <button onClick={share} disabled={busy || !target} style={primaryBtn}>
-            <Share2 size={13} /> {busy ? 'Sharing…' : 'Share'}
-          </button>
+          {result ? (
+            <button onClick={onDone} style={primaryBtn}>Close</button>
+          ) : (
+            <>
+              <button onClick={onClose} disabled={busy} style={btn}>Cancel</button>
+              <button onClick={share} disabled={busy || !target} style={primaryBtn}>
+                <Share2 size={13} /> {busy ? 'Sharing…' : 'Share'}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>

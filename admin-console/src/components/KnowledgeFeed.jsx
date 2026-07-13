@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef } from 'react';
-import { Brain, Sparkles } from 'lucide-react';
+import { Brain, Sparkles, Zap } from 'lucide-react';
 import useSSE from '../hooks/useSSE';
 import InfoTip from './InfoTip';
 
@@ -74,6 +74,33 @@ function FeedRow({ ev }) {
   const isSuggestion = ev.type === 'suggestion';
   const entry = ev.entry || null;
   const kind = entry?.kind || 'fact';
+  if (ev.type === 'activation') {
+    return (
+      <div style={{
+        display: 'flex', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2)',
+        borderRadius: 'var(--eb-radius-md)', marginBottom: 'var(--eb-space-1)',
+        background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
+        animation: 'kf-fade-in 260ms ease-out',
+      }}>
+        <div style={{ flexShrink: 0, marginTop: 2 }}>
+          <Zap size={13} style={{ color: ev.active ? 'var(--eb-status-success)' : 'var(--eb-text-muted)' }} />
+        </div>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', wordBreak: 'break-word' }}>
+            {ev.active
+              ? <>Skill <strong>{ev.skillName}</strong> activated for team <strong>{ev.teamId}</strong>
+                  {' '}({ev.synced ?? 0} synced{ev.skipped > 0 ? `, ${ev.skipped} excluded` : ''})</>
+              : <>Skill <strong>{ev.skillName}</strong> deactivated for team <strong>{ev.teamId}</strong></>}
+          </div>
+          {ev.agentId && (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 2 }}>
+              {ev.agentId}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
   if (isSuggestion) {
     const n = ev.count || (Array.isArray(ev.samples) ? ev.samples.length : 1);
     const sample = Array.isArray(ev.samples) && ev.samples[0];

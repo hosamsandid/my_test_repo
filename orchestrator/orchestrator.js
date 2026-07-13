@@ -2631,6 +2631,9 @@ function _teamSkillDir(teamId, name) {
 // Best-effort: a per-skill failure logs and continues. The promoted-status git
 // stamp lands on the NEXT collector pass via the candidate-store overlay above
 // (or within a day via the backstop), so this step performs no git op itself.
+// Set in main(); lets free functions (this one) reach instance methods.
+let orchestratorSingleton = null;
+
 function autoPromoteStep(teamId, env, clusters, candidates, { convergenceThreshold, now }) {
   const gates = resolvePromotionGates(env);
   const { maxAutoPromotionsPerPass } = knowledgeCurationConfig(env);
@@ -2688,6 +2691,24 @@ function autoPromoteStep(teamId, env, clusters, candidates, { convergenceThresho
     appendKnowledgeEvents(promotedSkills.map((s) => ({
       type: "promotion", ts: now, teamId, skill: { name: s.name, tier: "team" }, entryIds: s.entryIds, auto: true,
     })));
+    // Phase 4 (full autonomy): at level 3 an auto-promoted skill is also
+    // auto-ACTIVATED — learn → bundle → promote → activate closes without a
+    // human. This step only ever runs at autonomy 3 (the curator plan is gated
+    // on it), so no extra dial check is needed here. Fire-and-forget,
+    // best-effort: an activation failure surfaces as a ⚪ not-active card the
+    // operator can repair from the Knowledge page; the feed gets its own
+    // `activation` event (auto: true) from setTeamSkillActive.
+    if (orchestratorSingleton) {
+      (async () => {
+        for (const s of promotedSkills) {
+          try {
+            await orchestratorSingleton.setTeamSkillActive(teamId, s.name, { active: true, auto: true });
+          } catch (err) {
+            console.warn(`[Orchestrator] auto-activate '${s.name}' for team ${teamId} failed: ${err.message}`);
+          }
+        }
+      })();
+    }
   }
   if (raisedCards.length > 0) {
     appendKnowledgeEvents([{
@@ -3782,7 +3803,7 @@ class Orchestrator {
   // member per planSkillSync (override members are skipped unless explicitly
   // opted in via includeMembers — opting in also records the name on their
   // skillsOverride so the grant survives the next full re-seed).
-  async setTeamSkillActive(teamId, skillName, { active = true, includeMembers = [] } = {}) {
+  async setTeamSkillActive(teamId, skillName, { active = true, includeMembers = [], auto = false } = {}) {
     const teamCfg = loadAgentConfig(teamId);
     if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
     if (teamCfg.role !== "team") throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
@@ -3831,6 +3852,19 @@ class Orchestrator {
       `[Orchestrator] Team ${teamId}: skill '${name}' ${active ? "activated" : "deactivated"} — ` +
       results.map((r) => `${r.agentId}:${r.status}`).join(", ") || "no members"
     );
+    // Live-feed transparency (phase 3): one lean event per (de)activation so
+    // the Knowledge page's feed shows the loop closing. Best-effort.
+    appendKnowledgeEvents([{
+      type: "activation",
+      ts: new Date().toISOString(),
+      teamId,
+      skillName: name,
+      active,
+      auto: !!auto,
+      synced: results.filter((r) => r.status === "seeded" || r.status === "removed").length,
+      skipped: results.filter((r) => r.status === "skipped-override").length,
+      total: results.length,
+    }]);
     return { teamId, skillName: name, active, members: results };
   }
 
@@ -3858,6 +3892,17 @@ class Orchestrator {
       ? await this._syncSkillIntoWorkspace(id, cfg, name, { remove: !active })
       : { agentId: id, status: "stub" };
     console.log(`[Orchestrator] Agent ${id}: skill '${name}' ${active ? "activated" : "deactivated"} (${result.status})`);
+    appendKnowledgeEvents([{
+      type: "activation",
+      ts: new Date().toISOString(),
+      teamId: agentKnowledgeTeamId(cfg),
+      agentId: id,
+      skillName: name,
+      active,
+      synced: result.status === "seeded" || result.status === "removed" ? 1 : 0,
+      skipped: 0,
+      total: 1,
+    }]);
     return { agentId: id, skillName: name, active, result };
   }
 
@@ -5315,6 +5360,9 @@ async function main() {
   backfillTriggerHorizonStamps();
 
   const orchestrator = new Orchestrator();
+  // Module-level handle for free-function callers that need instance methods
+  // (today: the level-3 curator's auto-activation in autoPromoteStep).
+  orchestratorSingleton = orchestrator;
   await orchestrator.init();
 
   // Internal API — used by admin-console to manage agents

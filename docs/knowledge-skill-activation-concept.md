@@ -1,6 +1,6 @@
 # Concept: Team-owned Skills & Activation from the Knowledge UI
 
-**Status:** v2 — Phases 1 (ownership move) + 2 (truth & repair: manifest, activation endpoints, Knowledge-page badges/Activate/Deactivate/global-picker) implemented; phases 3–4 open
+**Status:** v2 — fully implemented (phases 1–4): ownership move, truth & repair (manifest, activation endpoints, Knowledge-page badges), flow integration (default-on activation in promote/share/lift, feed `activation` events), and autonomy-3 auto-activation
 **Relates to:** Knowledge Flow page (`/knowledge`), two-tier skill pool (#306), promotion pipeline, Working Environments, Team-Setup wizard
 
 ## 1. Problem

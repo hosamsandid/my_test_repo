@@ -246,6 +246,20 @@ function buildProcessGraph(agents) {
     }
   }
 
+  // Labels a node already listens on through an explicit `labelFilter` trigger.
+  // The trigger loop above draws an edge from *every* emitter of such a label, so
+  // the channel-label loop below must not redraw those emitters (#537).
+  const triggerLabelListens = new Map(); // nodeId -> Set(label)
+  for (const n of nodes) {
+    const set = new Set();
+    for (const t of n.triggers) {
+      if (t.channel) continue; // derived channel triggers wire no label edges
+      const lk = labelListenKey(t);
+      if (lk) set.add(lk);
+    }
+    triggerLabelListens.set(n.id, set);
+  }
+
   // Channel-label hand-offs (#401). A GitHub channel with a routing label makes
   // its consumer a label listener. The pinned `from` producer is already drawn
   // as the on:'github' edge (built in unified-graph from the port), so here we
@@ -254,9 +268,16 @@ function buildProcessGraph(agents) {
   // that a single-producer channel cannot express. Without this they collapse to
   // dead-ends and the renderer drops them.
   for (const n of nodes) {
+    const wiredByTrigger = triggerLabelListens.get(n.id) || new Set();
     for (const ch of (n.channels || [])) {
       const label = (ch && typeof ch.label === 'string') ? ch.label.trim() : '';
       if (!label) continue;
+      // The consumer also listens on this label via an explicit `labelFilter`
+      // trigger — the trigger loop already wired every emitter of it, so drawing
+      // them again here yields a spurious duplicate edge (#537). The two survive
+      // de-duplication because edgeId() suffixes the trigger-backed edge with
+      // #<triggerId> while this one has none; skip at the source instead.
+      if (wiredByTrigger.has(label)) continue;
       const kind = classifyKind(label);
       if (kind === 'gate' || kind === 'brake') continue; // human-set, edge comes from null
       for (const s of (emitIndex.get(label) || [])) {

@@ -177,6 +177,28 @@ test('github channel edges: PR and issue channels between the same pair are dist
   assert.equal(g.edges.filter(e => e.on === 'github' && e.to === 'dev').length, 2);
 });
 
+test('label hand-off + same-label PR channel: exactly one label edge, github edge intact (#537)', () => {
+  // Core-SDLC repro: reworker emits `ready-for-review`; code-reviewer both
+  // consumes developer's PR on that label AND has an explicit labelFilter
+  // trigger. Previously this drew TWO reworker→code-reviewer label edges (the
+  // trigger-backed one + a trigger-less channel duplicate) that survived dedup
+  // because only the former carries a #<triggerId> in its edge id.
+  const g = buildUnifiedGraph([
+    { id: 'developer', triggers: [], github: { producesPr: true } },
+    { id: 'reworker', triggers: [], emits: ['ready-for-review'] },
+    { id: 'code-reviewer', channels: [{ artifact: 'pr', from: 'developer', label: 'ready-for-review' }], triggers: [
+      { id: 't1783952055673966', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review', emits: [] },
+    ] },
+  ]);
+  const labelEdges = g.edges.filter(e => e.on === 'label' && e.from === 'reworker' && e.to === 'code-reviewer');
+  assert.equal(labelEdges.length, 1, 'exactly one reworker → code-reviewer label edge');
+  assert.equal(labelEdges[0].triggerId, 't1783952055673966');
+  // The developer → code-reviewer PR-channel edge is untouched.
+  const ghEdges = g.edges.filter(e => e.on === 'github' && e.from === 'developer' && e.to === 'code-reviewer');
+  assert.equal(ghEdges.length, 1);
+  assert.equal(ghEdges[0].artifact, 'pr');
+});
+
 // ── dependency / artifact edges (BP mechanism) ───────────────────────────────
 
 test('dependency edge: depends_on becomes an on:dependency hand-off', () => {

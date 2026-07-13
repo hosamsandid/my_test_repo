@@ -312,6 +312,46 @@ test('channel-label listener: extra emitters wire feedback edges, pinned produce
   assert.ok(!g.lints.some(l => l.code === 'dead-end-emitter' && l.label === 'go'));
 });
 
+test('channel-label + labelFilter trigger on the same label draws ONE edge, not two (#537)', () => {
+  // The Core-SDLC shape: reworker emits `ready-for-review`; code-reviewer both
+  // consumes developer's PR channel on that label AND has an explicit
+  // `pull_request.labeled` labelFilter trigger for it. The trigger loop already
+  // wires reworker→code-reviewer, so the #401 channel back-emitter loop must not
+  // draw a second, trigger-less duplicate.
+  const g = buildProcessGraph([
+    { id: 'developer', triggers: [], github: { producesPr: true } },
+    { id: 'reworker', triggers: [], emits: ['ready-for-review'] },
+    { id: 'code-reviewer', channels: [{ artifact: 'pr', from: 'developer', label: 'ready-for-review' }], triggers: [
+      { id: 't1783952055673966', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review' },
+    ] },
+  ]);
+  const edges = edgesBetween(g, 'reworker', 'code-reviewer').filter(e => e.kind === 'agent');
+  assert.equal(edges.length, 1);
+  // The surviving edge is the trigger-backed one (carries the triggerId + events),
+  // not the trigger-less channel duplicate.
+  assert.equal(edges[0].triggerId, 't1783952055673966');
+  assert.deepEqual(edges[0].events, ['pull_request.labeled']);
+  // The channel back-emitter loop drew nothing trigger-less for this pair.
+  assert.ok(!edges.some(e => e.triggerId == null));
+});
+
+test('#401 still holds when the same consumer has an unrelated labelFilter trigger (#537 regression guard)', () => {
+  // code-reviewer listens on `go` ONLY via a channel (no labelFilter trigger for
+  // it), while also carrying a labelFilter trigger for a DIFFERENT label. The
+  // #537 guard must be per-label: the `go` feedback edge from a third emitter
+  // must still be drawn.
+  const g = buildProcessGraph([
+    { id: 'intake', triggers: [], github: { producesIssue: true }, emits: ['go'] },
+    { id: 'router', triggers: [], emits: ['go'] },
+    { id: 'code-reviewer', channels: [{ artifact: 'issue', from: 'intake', label: 'go' }], triggers: [
+      { id: 't', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review' },
+    ] },
+  ]);
+  const goEdges = g.edges.filter(e => e.label === 'go' && e.kind === 'agent');
+  assert.deepEqual(goEdges.map(e => `${e.from}->${e.to}`).sort(), ['router->code-reviewer']);
+  assert.ok(!g.lints.some(l => l.code === 'dead-end-emitter' && l.label === 'go'));
+});
+
 test('channel without a routing label contributes no label-listen key', () => {
   // A bare PR channel (open, not labelled) must not turn arbitrary emits into edges.
   const g = buildProcessGraph([

@@ -767,9 +767,9 @@ export default function ChatPanel({
         <button
           type="button"
           onClick={handleFullLearn}
-          disabled={!sessionId || learnPending || disabled}
+          disabled={!sessionId || learnPending || disabled || maintenance.active}
           title="Agent summarizes this conversation and saves key insights to its memory files — the session stays open afterwards"
-          style={sessionBtnStyle(!sessionId || learnPending || disabled)}
+          style={sessionBtnStyle(!sessionId || learnPending || disabled || maintenance.active)}
         >
           {learnPending
             ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />

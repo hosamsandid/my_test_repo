@@ -10,23 +10,37 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 const MaintenanceModeContext = createContext(null);
 
 const POLL_MS = 5_000;
+const TICK_MS = 1_000;
 
 const INACTIVE = { active: false, remainingSec: 0, graceEndsAt: null };
 
 export function MaintenanceModeProvider({ children }) {
+  // Starts INACTIVE until the first poll resolves, so a page load landing
+  // mid-maintenance has a brief (one round-trip) unlocked window. Accepted
+  // for this client-only, non-security-boundary lock — intentional, not a
+  // bug to "fix" with an extra loading state.
   const [status, setStatus] = useState(INACTIVE);
 
   useEffect(() => {
     let cancelled = false;
     const poll = () => {
       fetch('/api/maintenance-mode')
-        .then(r => (r.ok ? r.json() : INACTIVE))
+        .then(r => (r.ok ? r.json() : Promise.reject(r.status)))
         .then(data => { if (!cancelled) setStatus(data); })
         .catch(() => {});
     };
     poll();
     const timer = setInterval(poll, POLL_MS);
     return () => { cancelled = true; clearInterval(timer); };
+  }, []);
+
+  // Ticks the displayed countdown down between polls so it doesn't sit
+  // frozen for up to POLL_MS; each poll resync overwrites any drift.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setStatus(s => (s.active && s.remainingSec > 0 ? { ...s, remainingSec: s.remainingSec - 1 } : s));
+    }, TICK_MS);
+    return () => clearInterval(timer);
   }, []);
 
   return (

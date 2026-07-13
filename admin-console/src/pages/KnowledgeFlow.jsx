@@ -5,8 +5,8 @@ import {
   Archive, Share2, ShieldCheck, Ban, MessageSquare, Search, ArrowRight, Users,
   HelpCircle, BookOpen, Combine,
 } from 'lucide-react';
-import KnowledgeFeed from '../components/KnowledgeFeed';
 import InfoTip from '../components/InfoTip';
+import useSSE from '../hooks/useSSE';
 
 /*
  * Knowledge Flow — content-first redesign.
@@ -218,6 +218,8 @@ export default function KnowledgeFlow() {
     scheduleTeamReload(ev.teamId);
   }, [scheduleTeamReload]);
 
+  useSSE('/api/knowledge/stream?scope=global', { onEvent: onFeedEvent });
+
   const openItem = useCallback((id, teamId) => {
     setSelected({ id, teamId });
     setDetail(null);
@@ -368,19 +370,17 @@ export default function KnowledgeFlow() {
           )}
         </div>
 
-        {/* Right rail: provenance of the selected fact, else the live feed. */}
-        <div style={{ width: 340, flexShrink: 0, borderLeft: '1px solid var(--eb-border-default)', display: 'flex', flexDirection: 'column', minHeight: 0, background: 'var(--eb-bg-surface)' }}>
-          {selected && detail ? (
+        {/* Right rail: provenance of the selected fact. Collapsed when nothing is selected. */}
+        {selected && detail && (
+          <div style={{ width: 340, flexShrink: 0, borderLeft: '1px solid var(--eb-border-default)', display: 'flex', flexDirection: 'column', minHeight: 0, background: 'var(--eb-bg-surface)' }}>
             <Provenance
               detail={detail}
               onClose={() => { setSelected(null); setDetail(null); }}
               onOpenAgent={(id) => navigate(`/chats/${encodeURIComponent(id)}`)}
               onArchive={(id, teamId, archived) => archiveItem(id, teamId ?? selected.teamId, archived)}
             />
-          ) : (
-            <KnowledgeFeed scope="global" onEvent={onFeedEvent} />
-          )}
-        </div>
+          </div>
+        )}
       </div>
 
       {promoting && (

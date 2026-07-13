@@ -1501,6 +1501,9 @@ class TriggerScheduler:
         await self._pull_config_dm()
         triggers = _load_triggers()
         active_ids: set[str] = set()
+        # Checked once per tick (not per overdue once-trigger) — a single
+        # HTTP round-trip to the orchestrator covers the whole batch.
+        maintenance_active = await self._maintenance_active()
 
         for trigger in triggers:
             if not isinstance(trigger, dict):
@@ -1557,7 +1560,7 @@ class TriggerScheduler:
                     # place (overdue), so the next 60 s sync tick fires it as
                     # soon as maintenance ends, same self-healing path this
                     # already relies on across container restarts.
-                    if await self._maintenance_active():
+                    if maintenance_active:
                         continue
                     # Guard against a re-fire if a pull re-introduces this once
                     # (e.g. the consumed-report below lagged or failed). #185

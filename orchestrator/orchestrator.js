@@ -37,6 +37,7 @@ const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const { resolveCloneTarget } = require("./clone-target");
 const { assembleClaudeMd, buildMemoryHint } = require("./prompt-assembly");
+const { readMaintenanceState } = require("./maintenance-state-reader");
 const { effectiveSkills, migrateSkillGrant, planSkillSync } = require("./skill-grants");
 
 // ============================================================
@@ -6648,6 +6649,17 @@ async function main() {
           res.end(JSON.stringify({ ok: false, error: err.message }));
         }
       });
+      return;
+    }
+
+    // ── Maintenance mode: agent pull (#504) ───────────────────────────────
+    // The state file lives outside any agent's own workspace subtree, which
+    // the default SubPath / per-agent-volume isolation doesn't mount — every
+    // agent (isolated or not) asks us instead of reading it directly.
+    if (req.method === 'GET' && req.url === '/internal/maintenance-mode') {
+      const state = readMaintenanceState();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, active: !!state.active }));
       return;
     }
 

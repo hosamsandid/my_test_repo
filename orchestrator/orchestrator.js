@@ -30,6 +30,7 @@ const {
 const knowledgeSync = require("./knowledge-sync");
 const knowledgeFeed = require("./knowledge-feed");
 const { buildKnowledgeDigest, DIGEST_FILENAME: KNOWLEDGE_DIGEST_FILENAME } = require("./knowledge-digest");
+const memoryMigration = require("./memory-migration");
 const knowledgeConvergence = require("./knowledge-convergence");
 const knowledgeCurator = require("./knowledge-curator");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
@@ -1061,6 +1062,15 @@ function seedAgentWorkspace(id, env, opts = {}) {
       } catch (err) {
         warnings.push(`knowledge digest: ${err.message}`);
       }
+      // Unified agents start on the three-file episodic model: the template
+      // facts.md/entities.md just copied in step 1 are headings-only
+      // boilerplate, which the migration deletes (a workspace with real
+      // legacy content gets parsed + archived instead — see Phase 3).
+      try {
+        migrateAgentMemoryToKb(id, loadAgentConfig(id) || { teamId: opts.teamId }, env);
+      } catch (err) {
+        warnings.push(`legacy-memory migration: ${err.message}`);
+      }
     }
   }
 
@@ -1892,6 +1902,145 @@ function writeAgentKnowledgeDigest(id, teamId, storeRoot) {
   const tmp = target + ".tmp";
   fs.writeFileSync(tmp, markdown);
   fs.renameSync(tmp, target);
+}
+
+// ── Legacy-memory migration (Memory/Knowledge unification, Phase 3) ─────────
+// One-shot per agent, at the flip to the unified model (concept §6): parse
+// legacy memory/facts.md + entities.md into KB entries (provenance
+// migration:<agentId>), push them to the shared agent-knowledge branch via the
+// team's canonical clone, archive the files to memory/_archive/ (visible, not
+// deleted). Template boilerplate (headings only) is deleted instead — a fresh
+// unified agent simply starts on the three-file episodic model. users.md is
+// NEVER touched (personal data, locked decision). Best-effort: a failed push
+// leaves the files in place, so the next startup pass retries.
+
+// Append the migrated entries to a dedicated per-agent shard
+// (<kind>/shards/<agentId>.migrated.jsonl — both the CLI and the collector
+// glob shards/*.jsonl, so it is picked up everywhere) in the canonical clone,
+// then commit + push. A separate file, NOT the agent's own shard: the agent
+// appends to its shard concurrently from its container, and two writers on
+// one append-only file would race at rebase time. Throws on failure.
+function pushMigrationEntries(id, teamId, env, entries) {
+  const repoRef = env?.knowledgeStore?.repoRef || null;
+  if (!repoRef || !repoRef.url) throw new Error("no KB repo resolvable from the environment");
+  const refresh = refreshKnowledgeClone(teamId, { force: true, repoRef, env });
+  const clonePath = knowledgeFeed.canonicalClonePath(KNOWLEDGE_CLONE_ROOT, teamId);
+  if (!clonePath || !fs.existsSync(path.join(clonePath, ".git"))) {
+    throw new Error(`canonical clone unavailable: ${refresh.warnings.join("; ") || "clone failed"}`);
+  }
+  const storeRoot = path.join(clonePath, _kbStoreRel(env));
+  const manifest = _loadCloneManifest(storeRoot);
+
+  const byKind = new Map();
+  for (const e of entries) {
+    if (!byKind.has(e.kind)) byKind.set(e.kind, []);
+    byKind.get(e.kind).push(e);
+  }
+  for (const [kind, list] of byKind) {
+    let rel;
+    try { rel = kindFilePath(manifest, kind); } catch { continue; }
+    const shard = path.join(storeRoot, path.dirname(rel), "shards", `${id}.migrated.jsonl`);
+    fs.mkdirSync(path.dirname(shard), { recursive: true });
+    const have = new Set();
+    if (fs.existsSync(shard)) {
+      for (const line of fs.readFileSync(shard, "utf8").split("\n")) {
+        const e = parseKnowledgeEntry(line);
+        if (e && e.id) have.add(e.id);
+      }
+    }
+    const add = list.filter((e) => !have.has(e.id));
+    if (add.length > 0) {
+      fs.appendFileSync(shard, add.map(serializeKnowledgeEntry).join("\n") + "\n");
+    }
+  }
+
+  const gitEnv = _buildKbGitEnv(repoRef, env);
+  const runIn = (args, timeout = 60_000) =>
+    execFileSync("git", args, { cwd: clonePath, env: gitEnv, stdio: "pipe", timeout }).toString();
+  runIn(["add", "-A"]);
+  if (runIn(["status", "--porcelain"]).trim() === "") return; // idempotent re-run
+  runIn([
+    "-c", "user.name=Agent Studio", "-c", `user.email=${id}@agents.local`,
+    "commit", "-m", `chore(knowledge): migrate legacy memory of ${id} (unification phase 3)`,
+  ]);
+  const branch = knowledgeSync.KNOWLEDGE_BRANCH;
+  try {
+    runIn(["push", "origin", branch]);
+  } catch (err) {
+    // Lost the fast-forward race against a concurrent agent push — rebase our
+    // (own-file-only) commit on top and push once more.
+    if (!knowledgeSync.isRetryablePushError((err.stderr || err.message || "").toString())) throw err;
+    runIn(["fetch", "origin", branch], 30_000);
+    runIn(["rebase", `origin/${branch}`], 30_000);
+    runIn(["push", "origin", branch]);
+  }
+}
+
+function migrateAgentMemoryToKb(id, cfg, env) {
+  if (!agentKnowledgeDigestRef(id, env)) return { migrated: 0, skipped: "not-unified" };
+  const memDir = path.join(agentDir(id), "memory");
+  const files = [
+    { name: "facts.md", parse: memoryMigration.parseLegacyFacts, key: "facts" },
+    { name: "entities.md", parse: memoryMigration.parseLegacyEntities, key: "entities" },
+  ];
+  const toArchive = [];
+  const parsed = { facts: [], entities: [] };
+  let present = 0;
+  for (const f of files) {
+    const p = path.join(memDir, f.name);
+    if (!fs.existsSync(p)) continue;
+    present += 1;
+    const text = fs.readFileSync(p, "utf8");
+    if (!memoryMigration.hasLegacyContent(text)) {
+      // Template boilerplate (`# Facts` / `# Entities`) — delete, no archive noise.
+      fs.rmSync(p, { force: true });
+      continue;
+    }
+    parsed[f.key] = f.parse(text);
+    toArchive.push(p);
+  }
+  if (toArchive.length === 0) {
+    return { migrated: 0, skipped: present === 0 ? "already-migrated" : "boilerplate-only" };
+  }
+
+  const teamId = agentKnowledgeTeamId(cfg);
+  const entries = memoryMigration.buildMigrationEntries({
+    agentId: id, teamId, facts: parsed.facts, entities: parsed.entities,
+  });
+  if (entries.length > 0) pushMigrationEntries(id, teamId, env, entries); // throws → files stay, retried next pass
+
+  // Archive only after the entries are durably in the KB.
+  const archiveDir = path.join(memDir, "_archive");
+  fs.mkdirSync(archiveDir, { recursive: true });
+  for (const p of toArchive) fs.renameSync(p, path.join(archiveDir, path.basename(p)));
+
+  if (entries.length > 0) {
+    const ts = new Date().toISOString();
+    appendKnowledgeEvents(entries.map((entry) => knowledgeFeed.buildHarvestEvent({ teamId, agentId: id, entry, ts })));
+    try { runConvergenceCollector(teamId, env); }
+    catch (err) { console.warn(`[Orchestrator] convergence after migration of ${id}: ${err.message}`); }
+    try { fanOutKnowledgeDigests(teamId, env); }
+    catch (err) { console.warn(`[Orchestrator] digest fan-out after migration of ${id}: ${err.message}`); }
+  }
+  return { migrated: entries.length, archived: toArchive.map((p) => path.basename(p)) };
+}
+
+// Startup pass: migrate every unified agent that still carries legacy files.
+// Idempotent — migrated agents return `already-migrated` on every later boot.
+function migrateUnifiedAgentsMemory() {
+  for (const id of listAgentIds()) {
+    try {
+      const cfg = loadAgentConfig(id);
+      if (!cfg) continue;
+      const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+      const r = migrateAgentMemoryToKb(id, cfg, env);
+      if (r.migrated > 0) {
+        console.log(`[Orchestrator] Migrated ${r.migrated} legacy memory entries of ${id} to the team KB (archived: ${r.archived.join(", ")})`);
+      }
+    } catch (err) {
+      console.warn(`[Orchestrator] legacy-memory migration for ${id} failed (will retry next start): ${err.message}`);
+    }
+  }
 }
 
 // Self-heal a knowledge working copy that has shard content but no git checkout.
@@ -5493,6 +5642,12 @@ async function main() {
   orchestratorSingleton = orchestrator;
   await orchestrator.init();
 
+  // Legacy-memory migration (unification Phase 3) — one-shot per unified
+  // agent, retried on every start until it succeeds. Needs git/network, so it
+  // runs after init and must never block or break the boot.
+  try { migrateUnifiedAgentsMemory(); }
+  catch (err) { console.warn(`[Orchestrator] legacy-memory migration pass failed: ${err.message}`); }
+
   // Internal API — used by admin-console to manage agents
   const internalApi = http.createServer((req, res) => {
     // Teams data model (#299) — CRUD for the human Team / users / memberships.
@@ -7328,6 +7483,41 @@ async function main() {
         }
       });
       return;
+    }
+
+    // GET /internal/teams/:teamId/knowledge/digest-status — which KB entries
+    // are currently inside the team's digest budget (unification Phase 3).
+    // Computed live from the canonical clone with the same pure builder that
+    // writes knowledge-digest.md, so the "in digest" indicator in the admin
+    // console can never disagree with the file the agents actually import.
+    const digestStatusMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/knowledge\/digest-status$/);
+    if (digestStatusMatch) {
+      const teamId = decodeURIComponent(digestStatusMatch[1]);
+      try {
+        const clonePath = knowledgeFeed.canonicalClonePath(KNOWLEDGE_CLONE_ROOT, teamId);
+        if (!clonePath || !fs.existsSync(path.join(clonePath, '.git'))) {
+          return sendJson(res, 404, { error: 'no canonical KB clone for this team' });
+        }
+        const resolved = resolveTeamKbRepo(teamId);
+        const storeRoot = path.join(clonePath, _kbStoreRel(resolved?.env || null));
+        const digest = buildKnowledgeDigest({
+          teamId,
+          generatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+          entries: readKbStoreEntries(storeRoot),
+        });
+        return sendJson(res, 200, {
+          teamId,
+          includedIds: digest.includedIds,
+          includedCount: digest.includedCount,
+          totalCount: digest.totalCount,
+          omittedCount: digest.omittedCount,
+          tokensUsed: digest.tokensUsed,
+        });
+      } catch (err) {
+        console.error(`[Orchestrator] digest-status error for ${teamId}: ${err.message}`);
+        return sendJson(res, 500, { error: err.message });
+      }
     }
 
     // POST /internal/teams/:teamId/skills/{activate,deactivate} — team-owned

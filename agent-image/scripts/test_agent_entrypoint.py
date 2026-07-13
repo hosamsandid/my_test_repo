@@ -424,6 +424,15 @@ class BuildKnowledgeDigest(unittest.TestCase):
         conv = next(e for e in folded if e["id"] == "aaa000000001")
         self.assertEqual(entrypoint._digest_convergence_count(conv), 3)
 
+    def test_included_ids_render_order(self):
+        res = entrypoint.build_knowledge_digest(
+            team_id="demo-team", generated_at="2026-07-13T09:00:00Z",
+            entries=self.fixture["entries"],
+        )
+        self.assertEqual(res["includedIds"], [
+            "aaa000000001", "bbb000000002", "ccc000000003", "ddd000000004",
+        ])
+
     def test_multiline_text_flattened(self):
         res = entrypoint.build_knowledge_digest(
             team_id="t", generated_at="2026-07-13T09:00:00Z",

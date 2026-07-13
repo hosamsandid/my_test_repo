@@ -142,6 +142,13 @@ export default function AgentKnowledgePanel({ agentId, active = false, refreshKe
                       {it.convergenceCount}×
                     </span>
                   )}
+                  {it.inDigest && (
+                    <span
+                      title="Inside the team knowledge digest — guaranteed in the agent's context at session start (everything else is reachable via knowledge search)"
+                      style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-status-success, #16a34a)', border: '1px solid currentColor', padding: '0 6px', borderRadius: 'var(--eb-radius-full)' }}>
+                      digest
+                    </span>
+                  )}
                   <span style={{ marginLeft: 'auto', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', flexShrink: 0 }}>{fmtWhen(it.createdAt)}</span>
                 </div>
                 <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', lineHeight: 1.35, wordBreak: 'break-word' }}>

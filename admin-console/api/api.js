@@ -2890,8 +2890,33 @@ app.get('/api/knowledge/graph', async (req, res) => {
   const graph = buildKnowledgeGraph({ scope: parsed.scope, entries, skills, agents, now: Date.now(), warnings, includeArchived });
   augmentPendingPromotions(graph, teamIds);
   augmentSkillActivation(graph, parsed);
+  await augmentDigestInclusion(graph, teamIds);
   res.json(graph);
 });
+
+// Overlay the digest-inclusion truth (memory/knowledge unification, Phase 3):
+// mark every item node that currently sits inside its team's knowledge digest
+// — guaranteed in the agents' context at session start — as opposed to the
+// search-only long tail. Asked live from the orchestrator, which computes it
+// with the same pure builder that writes knowledge-digest.md, so the badge can
+// never disagree with the file the agents import. Best-effort: an unreachable
+// orchestrator just means no badges.
+async function augmentDigestInclusion(graph, teamIds) {
+  if (!graph || !Array.isArray(graph.nodes)) return;
+  const included = new Set();
+  await Promise.all((teamIds || []).map(async (teamId) => {
+    try {
+      const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/knowledge/digest-status`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      for (const id of (Array.isArray(data.includedIds) ? data.includedIds : [])) included.add(id);
+    } catch { /* best effort */ }
+  }));
+  if (included.size === 0) return;
+  for (const node of graph.nodes) {
+    if (node.kind === 'item' && included.has(String(node.id).slice(5))) node.inDigest = true;
+  }
+}
 
 // Overlay the ACTIVATION truth on every skill node of a team-scoped graph
 // (team-owned skills, phase 2): is the skill in the team agent's `skills[]`,

@@ -59,6 +59,18 @@ for (const c of FIXTURE.cases) {
   });
 }
 
+test('includedIds lists the selected entries in render order', () => {
+  const res = buildKnowledgeDigest({
+    teamId: 'demo-team',
+    generatedAt: '2026-07-13T09:00:00Z',
+    entries: FIXTURE.entries,
+  });
+  // Conventions first, then converged, then recent (newest first).
+  assert.deepEqual(res.includedIds, [
+    'aaa000000001', 'bbb000000002', 'ccc000000003', 'ddd000000004',
+  ]);
+});
+
 test('budget: conventions fill first, cutoff is deterministic and reported', () => {
   const small = FIXTURE.cases.find((c) => c.name === 'small-budget');
   assert.ok(small.expectedIncluded < small.expectedTotal);

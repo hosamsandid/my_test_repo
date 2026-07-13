@@ -1275,6 +1275,9 @@ def build_knowledge_digest(*, team_id="", generated_at="", entries=None,
         "totalCount": total,
         "omittedCount": omitted,
         "tokensUsed": tokens_used,
+        # Entry ids inside the digest budget, render order — mirrors the JS
+        # builder ("in digest" indicator in the Knowledge views).
+        "includedIds": [e.get("id") for e, _ in conv_lines + converged_lines + recent_lines],
     }
 
 

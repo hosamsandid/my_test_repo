@@ -1,6 +1,6 @@
 # Concept: Memory ↔ Knowledge Unification (semantic vs. episodic)
 
-**Status:** Phases 0–2 implemented (Full-Learn fix `4749720`, knowledge digest `95b9028`, semantic rerouting — see git log); phases 3–4 open
+**Status:** Phases 0–3 implemented (Full-Learn fix `4749720`, knowledge digest `95b9028`, semantic rerouting `7c8893d`, migration + digest indicator — see git log); phase 4 (curator-refined digest) optional/open
 **Relates to:** Knowledge pipeline (harvest → convergence → promotion → activation, see `docs/knowledge-skill-activation-concept.md`), agent memory system (`memory/*.md`), Full-Learn button, Workspace Browser
 
 ## 1. Problem

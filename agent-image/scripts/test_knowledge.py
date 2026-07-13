@@ -311,5 +311,73 @@ class TestVisibleEntries(unittest.TestCase):
         self.assertEqual([e["id"] for e in kn.visible_entries(entries)], ["a" * 12])
 
 
+class ResolveTeamId(unittest.TestCase):
+    """resolve_team_id_from_config mirrors the orchestrator's agentKnowledgeTeamId
+    precedence so the CLI scopes writes to the same team the orchestrator injects
+    (issue #538). Battery: parentTeamId / role=='team' id / plain teamId / none."""
+
+    def test_parent_team_id_wins(self):
+        cfg = {"parentTeamId": "agent-studio", "teamId": "default", "role": "team", "id": "x"}
+        self.assertEqual(kn.resolve_team_id_from_config(cfg), "agent-studio")
+
+    def test_role_team_uses_id(self):
+        cfg = {"role": "team", "id": "squad-a", "teamId": "default"}
+        self.assertEqual(kn.resolve_team_id_from_config(cfg), "squad-a")
+
+    def test_plain_team_id(self):
+        self.assertEqual(kn.resolve_team_id_from_config({"teamId": "acme"}), "acme")
+
+    def test_role_non_team_ignores_id(self):
+        # a normal agent's id is NOT its team — only role=="team" promotes id
+        cfg = {"role": "team-member", "id": "acme-dev-1", "teamId": "acme"}
+        self.assertEqual(kn.resolve_team_id_from_config(cfg), "acme")
+
+    def test_empty_or_missing_falls_back_to_default(self):
+        for cfg in ({}, {"teamId": "  "}, {"parentTeamId": ""}, None, "nope", {"role": "team", "id": ""}):
+            self.assertEqual(kn.resolve_team_id_from_config(cfg), "default")
+
+
+class TeamIdResolution(unittest.TestCase):
+    """_team_id(): explicit env override wins, else config fallback, else default.
+    Covers issue #538 acceptance criteria 1–3."""
+
+    def setUp(self):
+        self._saved = kn._load_agent_config
+        self._env = dict(kn.os.environ)
+
+    def tearDown(self):
+        kn._load_agent_config = self._saved
+        kn.os.environ.clear()
+        kn.os.environ.update(self._env)
+
+    def test_env_override_wins(self):
+        kn.os.environ["KNOWLEDGE_TEAM_ID"] = "explicit"
+        kn._load_agent_config = lambda: {"parentTeamId": "agent-studio"}
+        self.assertEqual(kn._team_id(), "explicit")
+
+    def test_config_fallback_when_env_empty(self):
+        kn.os.environ.pop("KNOWLEDGE_TEAM_ID", None)
+        kn._load_agent_config = lambda: {"parentTeamId": "agent-studio", "teamId": "default"}
+        self.assertEqual(kn._team_id(), "agent-studio")
+
+    def test_blank_env_is_ignored(self):
+        kn.os.environ["KNOWLEDGE_TEAM_ID"] = "   "
+        kn._load_agent_config = lambda: {"teamId": "acme"}
+        self.assertEqual(kn._team_id(), "acme")
+
+    def test_no_env_no_config_is_default_not_error(self):
+        kn.os.environ.pop("KNOWLEDGE_TEAM_ID", None)
+        kn._load_agent_config = lambda: {}
+        self.assertEqual(kn._team_id(), "default")
+
+    def test_config_derived_team_builds_valid_entry(self):
+        # end-to-end: a config-derived team feeds build_entry without hard-failing
+        kn.os.environ.pop("KNOWLEDGE_TEAM_ID", None)
+        kn._load_agent_config = lambda: {"parentTeamId": "agent-studio"}
+        e = kn.build_entry("fact", "x", origin_agent="a", team_id=kn._team_id(),
+                           correlation_id="c1")
+        self.assertEqual(e["teamId"], "agent-studio")
+
+
 if __name__ == "__main__":
     unittest.main()

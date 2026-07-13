@@ -41,6 +41,16 @@ concurrent writes from N agents never conflict; `knowledge add` commits it with
 your agent identity and pushes it to the shared `agent-knowledge` branch via the
 orchestrator, so teammates see it on their next `knowledge search`.
 
+Team scope (KNOWLEDGE_TEAM_ID):
+
+    Every entry is scoped to a team. The team is resolved as: an explicit
+    KNOWLEDGE_TEAM_ID environment variable (injected by the orchestrator at spawn)
+    wins; otherwise it falls back to this agent's config.json using the same
+    precedence as the orchestrator — parentTeamId, then id (when role is "team"),
+    then teamId, then "default". So `knowledge` works outside the orchestrator
+    runtime too (e.g. a manual shell), and never mis-scopes: set KNOWLEDGE_TEAM_ID
+    by hand only to deliberately override the config-derived team.
+
 Exit codes: 0 ok · 1 nothing found (search/path/promote) · 2 usage/validation
 error.
 """
@@ -72,6 +82,7 @@ HIDDEN_STATUSES = frozenset(("merged", "archived", "pending", "rejected"))
 SCHEMA_VERSION = 1
 MANIFEST_VERSION = 1
 DEFAULT_KB_PATH = "docs/agent-knowledge/"
+DEFAULT_TEAM_ID = "default"
 
 # Stable key order so git diffs are minimal and the serialized line is
 # byte-identical to knowledge-store.js `serializeEntry` (cross-runtime guard).
@@ -80,6 +91,28 @@ KEY_ORDER = (
     "correlationId", "sessionId", "sourceRefs", "convergence", "tags",
     "status", "updatedAt",
 )
+
+
+def resolve_team_id_from_config(cfg):
+    """Resolve the KB team from an agent's config — a Python mirror of the
+    orchestrator's agentKnowledgeTeamId (orchestrator/orchestrator.js). Precedence:
+    parentTeamId → (id when role == "team") → teamId → DEFAULT_TEAM_ID. Kept in
+    lock-step with the JS so a `knowledge` invocation outside the orchestrator-
+    spawned runtime scopes writes to the SAME team the orchestrator would inject.
+    """
+    if not isinstance(cfg, dict):
+        return DEFAULT_TEAM_ID
+    parent = cfg.get("parentTeamId")
+    if isinstance(parent, str) and parent.strip():
+        return parent
+    if cfg.get("role") == "team":
+        cid = cfg.get("id")
+        if isinstance(cid, str) and cid.strip():
+            return cid
+    team = cfg.get("teamId")
+    if isinstance(team, str) and team.strip():
+        return team
+    return DEFAULT_TEAM_ID
 
 
 def _default_id_gen():
@@ -451,6 +484,34 @@ def _agent_id():
     return os.environ.get("AGENT_ID", "unknown")
 
 
+def _load_agent_config():
+    """Best-effort read of this agent's config.json (…/agents/<AGENT_ID>/). Never
+    raises — a missing/mangled config just yields {} so team resolution falls back
+    to DEFAULT_TEAM_ID rather than hard-failing the command."""
+    p = os.path.join("/workspace/agents", _agent_id(), "config.json")
+    try:
+        with open(p, "r", encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _team_id():
+    """The KB team for this invocation.
+
+    An explicit KNOWLEDGE_TEAM_ID wins (the orchestrator injects it at spawn), so
+    orchestrator-spawned runs behave exactly as before. When it is unset/empty —
+    any other context (Claude Code harness, a manual shell, a re-exec'd process) —
+    fall back to the agent's config.json with the orchestrator's own precedence,
+    so `knowledge add` still records under the correct team instead of hard-failing
+    on the missing env var or being mis-scoped by a hand-set guess."""
+    env = os.environ.get("KNOWLEDGE_TEAM_ID", "")
+    if isinstance(env, str) and env.strip():
+        return env
+    return resolve_team_id_from_config(_load_agent_config())
+
+
 def _checkout_root():
     """The KB working copy (a git checkout of the agent-knowledge branch)."""
     explicit = os.environ.get("KNOWLEDGE_DIR")
@@ -610,7 +671,7 @@ def cmd_add(argv):
         entry = build_entry(
             kind, text,
             origin_agent=_agent_id(),
-            team_id=os.environ.get("KNOWLEDGE_TEAM_ID", ""),
+            team_id=_team_id(),
             correlation_id=os.environ.get("KNOWLEDGE_CORRELATION_ID"),
             session_id=os.environ.get("KNOWLEDGE_SESSION_ID"),
             source_refs=source_refs,
@@ -851,7 +912,7 @@ def cmd_promote(argv):
         try:
             skill = build_agent_skill(
                 entry, name=name, agent_id=_agent_id(),
-                team_id=os.environ.get("KNOWLEDGE_TEAM_ID", ""),
+                team_id=_team_id(),
             )
         except ValueError as exc:
             _die(str(exc))

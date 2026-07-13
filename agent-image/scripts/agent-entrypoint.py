@@ -460,6 +460,29 @@ def _load_dm_agent_config() -> dict:
         return {}
 
 
+def _knowledge_team_id() -> str:
+    """The KB team for knowledge writes from this runtime. An explicit
+    KNOWLEDGE_TEAM_ID (orchestrator spawn injection) wins; otherwise fall back to
+    config.json with the orchestrator's agentKnowledgeTeamId precedence
+    (parentTeamId → id when role=='team' → teamId → 'default'), mirroring the
+    `knowledge` CLI so the digest and CLI agree on scope outside the spawn env."""
+    env = os.environ.get("KNOWLEDGE_TEAM_ID", "")
+    if isinstance(env, str) and env.strip():
+        return env
+    cfg = _load_dm_agent_config()
+    parent = cfg.get("parentTeamId")
+    if isinstance(parent, str) and parent.strip():
+        return parent
+    if cfg.get("role") == "team":
+        cid = cfg.get("id")
+        if isinstance(cid, str) and cid.strip():
+            return cid
+    team = cfg.get("teamId")
+    if isinstance(team, str) and team.strip():
+        return team
+    return "default"
+
+
 # ---- per-room session pointer (drop-in compat with agent-runner.js) ----
 
 def _session_pointer_file(room_id: str) -> Path:
@@ -1373,7 +1396,7 @@ def _rebuild_knowledge_digest() -> None:
             except (subprocess.SubprocessError, OSError):
                 pass
         res = build_knowledge_digest(
-            team_id=os.environ.get("KNOWLEDGE_TEAM_ID", ""),
+            team_id=_knowledge_team_id(),
             generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
             entries=_read_kb_entries(),
         )

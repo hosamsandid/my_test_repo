@@ -553,5 +553,33 @@ class BuildKnowledgeDigest(unittest.TestCase):
         self.assertIn("- fact: line one line two (2026-07-01)", res["markdown"])
 
 
+class KnowledgeTeamId(unittest.TestCase):
+    """_knowledge_team_id mirrors the `knowledge` CLI / orchestrator precedence so
+    the runtime digest is scoped to the same team even without the spawn-time env
+    var (issue #538): KNOWLEDGE_TEAM_ID → parentTeamId → id (role team) → teamId →
+    default."""
+
+    def test_env_override_wins(self):
+        with patch.dict(entrypoint.os.environ, {"KNOWLEDGE_TEAM_ID": "explicit"}), \
+             patch.object(entrypoint, "_load_dm_agent_config",
+                          return_value={"parentTeamId": "agent-studio"}):
+            self.assertEqual(entrypoint._knowledge_team_id(), "explicit")
+
+    def test_config_fallback_precedence(self):
+        cases = [
+            ({"parentTeamId": "agent-studio", "teamId": "default"}, "agent-studio"),
+            ({"role": "team", "id": "squad-a", "teamId": "default"}, "squad-a"),
+            ({"role": "team-member", "id": "acme-dev-1", "teamId": "acme"}, "acme"),
+            ({"teamId": "acme"}, "acme"),
+            ({}, "default"),
+        ]
+        env = dict(entrypoint.os.environ)
+        env.pop("KNOWLEDGE_TEAM_ID", None)
+        for cfg, expected in cases:
+            with patch.dict(entrypoint.os.environ, env, clear=True), \
+                 patch.object(entrypoint, "_load_dm_agent_config", return_value=cfg):
+                self.assertEqual(entrypoint._knowledge_team_id(), expected)
+
+
 if __name__ == "__main__":
     unittest.main()

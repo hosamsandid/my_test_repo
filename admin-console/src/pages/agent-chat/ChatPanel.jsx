@@ -2,12 +2,14 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
+import { useMaintenanceMode } from '../../context/MaintenanceModeContext';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import HandoffDialog from './HandoffDialog';
 import Message from './Message';
 import MessageInput from './MessageInput';
 import LearningBadge from '../../components/LearningBadge';
 import { resolveContextWindowTokens, computeContextFillLevel, formatTokenCountK } from './context-window';
+import { maintenanceBannerText } from './maintenance-banner';
 
 // Default prompt sent when the user clicks "Full Learn". The agent
 // continues in its current Claude session (so it has full conversational
@@ -680,6 +682,8 @@ export default function ChatPanel({
 
   /* ─── Render ─────────────────────────────────────────────────────── */
   const disabled = agent.enabled === false;
+  const maintenance = useMaintenanceMode();
+  const maintenanceBanner = maintenanceBannerText(maintenance);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, position: 'relative' }}>
@@ -794,9 +798,9 @@ export default function ChatPanel({
         <button
           type="button"
           onClick={handleFullLearn}
-          disabled={!sessionId || learnPending || disabled}
+          disabled={!sessionId || learnPending || disabled || maintenance.active}
           title="Agent summarizes this conversation, saves session state to its memory files and shares durable lessons with the team knowledge base — the session stays open afterwards"
-          style={sessionBtnStyle(!sessionId || learnPending || disabled)}
+          style={sessionBtnStyle(!sessionId || learnPending || disabled || maintenance.active)}
         >
           {learnPending
             ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
@@ -914,6 +918,19 @@ export default function ChatPanel({
           flexShrink: 0,
         }}>
           This agent is disabled. Enable it in Agent Manager to chat.
+        </div>
+      )}
+
+      {maintenanceBanner && (
+        <div style={{
+          padding: 'var(--eb-space-3) var(--eb-space-4)',
+          background: 'var(--eb-status-warning-bg)',
+          borderBottom: '1px solid var(--eb-status-warning)',
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-primary)',
+          flexShrink: 0,
+        }}>
+          {maintenanceBanner}
         </div>
       )}
 
@@ -1095,7 +1112,7 @@ export default function ChatPanel({
       {/* Input */}
       <MessageInput
         onSend={handleSend}
-        disabled={disabled || !roomId || sending}
+        disabled={disabled || !roomId || sending || maintenance.active}
         agentDisplayName={agent.displayName || agent.id}
         onUpload={handleUpload}
         uploading={uploading}

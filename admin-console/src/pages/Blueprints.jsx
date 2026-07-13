@@ -97,7 +97,6 @@ function BlueprintCreateForm({ onSave, onCancel, saving, error }) {
             <option key={env.id} value={env.id}>
               {env.name} ({env.id})
               {hasRepos(env) ? ' · Git' : ''}
-              {Array.isArray(env.skills) && env.skills.length > 0 ? ` · ${env.skills.length} Skills` : ''}
             </option>
           ))}
         </select>

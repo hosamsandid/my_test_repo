@@ -8,6 +8,7 @@ import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
+import LearningBadge from '../components/LearningBadge';
 
 const DEFAULT_TEAM_ID = 'default';
 const ROLE_LABELS = { 'team-admin': 'Team Admin', 'team-member': 'Team Member' };
@@ -159,7 +160,7 @@ function ManageTeamPanel({ team, users, memberships, onRefresh, onError }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-6)' }}>
-      <Section title="Team details">
+      <Section title="Team details" right={<LearningBadge scope={`team:${team.id}`} showZero title="Team knowledge learned" />}>
         <FormInput label="Name" value={name} onChange={setName} />
         <FormInput label="Description" value={description} onChange={setDescription} multiline rows={3} />
         <div>

@@ -297,6 +297,14 @@ export default function AgentChat() {
     setWorkspaceRefreshKey(k => k + 1);
   }, []);
 
+  // Bumped by ChatPanel after the agent replied to a Full-Learn prompt (which
+  // may have added entries to the team KB), so the right rail's Knowledge tab
+  // refreshes without a manual reload.
+  const [knowledgeRefreshKey, setKnowledgeRefreshKey] = useState(0);
+  const handleKnowledgeChanged = useCallback(() => {
+    setKnowledgeRefreshKey(k => k + 1);
+  }, []);
+
   // Aggregated cost for the current agent+room, fed by SessionLogPanel via onCostUpdate.
   const [sessionCost, setSessionCost] = useState(null); // null = no data yet
   const handleCostUpdate = useCallback((usd, tokIn, tokOut) => {
@@ -317,6 +325,14 @@ export default function AgentChat() {
   // from a previous session even before any new TodoWrite call lands (#273).
   const [todoCloseSignal, setTodoCloseSignal] = useState(0);
   const handleTodoBoundary = useCallback(() => setTodoCloseSignal(s => s + 1), []);
+
+  // Clicking the "N learned" badge in the chat header opens the right rail on
+  // its Knowledge tab. `ts` makes repeat clicks re-fire the effect in RightRail.
+  const [railTabRequest, setRailTabRequest] = useState(null);
+  const handleOpenKnowledge = useCallback(() => {
+    setLogOpen(true);
+    setRailTabRequest({ tab: 'knowledge', ts: Date.now() });
+  }, []);
 
   const selectedAgent = (agents ?? []).find(a => a.id === agentId) || null;
   const effectiveRoomId =
@@ -541,6 +557,8 @@ export default function AgentChat() {
             contextFill={contextFill}
             onWorkspaceChanged={handleWorkspaceChanged}
             onTodoBoundary={handleTodoBoundary}
+            onOpenKnowledge={handleOpenKnowledge}
+            onKnowledgeChanged={handleKnowledgeChanged}
           />
         ) : (
           <EmptyState />
@@ -571,6 +589,8 @@ export default function AgentChat() {
             onContextUpdate={handleContextUpdate}
             todoCloseSignal={todoCloseSignal}
             workspaceRefreshKey={workspaceRefreshKey}
+            knowledgeRefreshKey={knowledgeRefreshKey}
+            openTabRequest={railTabRequest}
           />
         </div>
         </>

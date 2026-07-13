@@ -26,6 +26,7 @@ const McpServers          = lazy(() => import('./pages/McpServers'));
 const MaintenanceMode     = lazy(() => import('./pages/MaintenanceMode'));
 const Teams               = lazy(() => import('./pages/Teams'));
 const Briefings           = lazy(() => import('./pages/Briefings'));
+const KnowledgeFlow       = lazy(() => import('./pages/KnowledgeFlow'));
 const OrchestratorWizard  = lazy(() => import('./pages/OrchestratorWizard'));
 const PatternsCatalog     = lazy(() => import('./pages/PatternsCatalog'));
 const SdlcCatalogPage     = lazy(() => import('./pages/SdlcCatalogPage'));
@@ -102,6 +103,7 @@ export default function App() {
           <Route path="/maintenance-mode" element={<MaintenanceMode />} />
           <Route path="/teams"        element={<Teams />} />
           <Route path="/flows"         element={<Briefings />} />
+          <Route path="/knowledge"     element={<KnowledgeFlow />} />
           <Route path="/briefings"    element={<Navigate to="/flows" replace />} />
           <Route path="/process"      element={<Navigate to="/flows" replace />} />
           <Route path="/process/:teamId" element={<ProcessTeamRedirect />} />

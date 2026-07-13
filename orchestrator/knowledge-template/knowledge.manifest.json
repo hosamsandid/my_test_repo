@@ -1,0 +1,18 @@
+{
+  "manifestVersion": 1,
+  "schemaVersion": 1,
+  "kinds": {
+    "fact": {
+      "dir": "facts",
+      "file": "facts.jsonl"
+    },
+    "entity": {
+      "dir": "entities",
+      "file": "entities.jsonl"
+    },
+    "convention": {
+      "dir": "conventions",
+      "file": "conventions.jsonl"
+    }
+  }
+}

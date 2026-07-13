@@ -75,6 +75,14 @@ RUN chmod +x /opt/ace/scripts/aee-artifact \
 RUN chmod +x /opt/ace/scripts/gh-as-agent \
     && ln -sf /opt/ace/scripts/gh-as-agent /usr/local/bin/gh-as-agent
 
+# `knowledge` — record + query the shared team Knowledge Base (Shared Agent
+# Learning). On PATH so agents call it directly: `knowledge search` (offline
+# search over the synced working copy) and `knowledge add` (append a durable,
+# provenance-stamped fact to the agent's own shard, commit, and push via the
+# orchestrator to the shared agent-knowledge branch).
+RUN chmod +x /opt/ace/scripts/knowledge \
+    && ln -sf /opt/ace/scripts/knowledge /usr/local/bin/knowledge
+
 ENV NODE_ENV=production
 
 ENTRYPOINT ["python3", "/opt/ace/scripts/agent-entrypoint.py"]

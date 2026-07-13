@@ -13,7 +13,7 @@ const {
   workingEnvironmentSection,
   blueprintSection,
   envHasRepository,
-  envHasSkills,
+  hasSkillGrant,
   GIT_SECTION,
   TRIGGER_SECTION,
   WORKSPACE_SECTION,
@@ -128,11 +128,14 @@ test('interaction note gains the unattended-run framing only when autonomous', (
   assert.ok(auto.includes('unattended on triggers'));
 });
 
-test('Skills section is injected only when the env grants skills', () => {
-  const withSkills = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: { skills: ['cobol'] } });
-  const noSkills = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: { skills: [] } });
+test('Skills section is injected only when the resolved grant contains skills (team-owned, not env)', () => {
+  const withSkills = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: {}, skills: ['cobol'] });
+  const noSkills = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: {}, skills: [] });
   assert.ok(withSkills.includes('## Skills'));
   assert.ok(!noSkills.includes('## Skills'));
+  // A legacy env.skills field no longer gates anything — the grant param does.
+  const envOnly = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: { skills: ['cobol'] } });
+  assert.ok(!envOnly.includes('## Skills'));
 });
 
 // ---- de-duplication (fix A) ------------------------------------------------
@@ -140,7 +143,7 @@ test('Skills section is injected only when the env grants skills', () => {
 test('the /workspace path-translation rule appears exactly once (only in the CLAUDE.md Workspace section)', () => {
   const md = assembleClaudeMd({
     base: BASE, agentPrompt: 'x', role: 'agent',
-    env: { repositories: [{ url: 'git@github.com:acme/x.git' }], skills: ['s'] }, autonomous: true,
+    env: { repositories: [{ url: 'git@github.com:acme/x.git' }] }, skills: ['s'], autonomous: true,
   });
   const occurrences = md.split('translate these to relative paths').length - 1;
   assert.equal(occurrences, 1, 'path rule should live once in the Workspace section');
@@ -199,21 +202,28 @@ test('a stale base template with the old Git/Trigger/Workspace sections does not
 
 // ---- helpers ---------------------------------------------------------------
 
-test('workingEnvironmentSection renders repo/skills and is empty for a bare env', () => {
+test('workingEnvironmentSection renders repo + the granted skills and is empty for a bare env', () => {
   assert.equal(workingEnvironmentSection(null), '');
   assert.equal(workingEnvironmentSection({}), '');
-  const s = workingEnvironmentSection({ name: 'E', repositories: [{ url: 'git@github.com:a/b.git' }], skills: ['x'] });
+  const s = workingEnvironmentSection({ name: 'E', repositories: [{ url: 'git@github.com:a/b.git' }] }, ['x']);
   assert.match(s, /## Working Environment/);
   assert.match(s, /cloned to `\.\/b\/`/);
   assert.match(s, /\*\*Skills:\*\* `x`/);
+  // Skills come from the resolved grant, never from a legacy env.skills field.
+  const legacy = workingEnvironmentSection({ name: 'E', skills: ['x'] });
+  assert.ok(!/\*\*Skills:\*\*/.test(legacy));
+  // A grant with no env still renders its skills.
+  const grantOnly = workingEnvironmentSection(null, ['y']);
+  assert.match(grantOnly, /\*\*Skills:\*\* `y`/);
 });
 
-test('envHasRepository / envHasSkills', () => {
+test('envHasRepository / hasSkillGrant', () => {
   assert.equal(envHasRepository({ repositories: [{ url: 'x' }] }), true);
   assert.equal(envHasRepository({ repositories: [] }), false);
   assert.equal(envHasRepository(null), false);
-  assert.equal(envHasSkills({ skills: ['a'] }), true);
-  assert.equal(envHasSkills({ skills: [] }), false);
+  assert.equal(hasSkillGrant(['a']), true);
+  assert.equal(hasSkillGrant([]), false);
+  assert.equal(hasSkillGrant(null), false);
 });
 
 // ---- cross-language drift guard --------------------------------------------

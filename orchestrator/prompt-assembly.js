@@ -183,12 +183,15 @@ function interactionNote(autonomous) {
   );
 }
 
-function workingEnvironmentSection(env) {
-  if (!env) return "";
+// `skills` is the agent's RESOLVED grant (team-owned skills — see
+// skill-grants.js), not an environment field: the env is a pure infrastructure
+// template and no longer carries skills.
+function workingEnvironmentSection(env, skills = []) {
+  if (!env && !(Array.isArray(skills) && skills.length > 0)) return "";
   const parts = [];
-  if (env.name) parts.push(`**Working Environment:** ${env.name}`);
-  if (env.description) parts.push(env.description);
-  const repos = Array.isArray(env.repositories) ? env.repositories : [];
+  if (env && env.name) parts.push(`**Working Environment:** ${env.name}`);
+  if (env && env.description) parts.push(env.description);
+  const repos = env && Array.isArray(env.repositories) ? env.repositories : [];
   if (repos.length === 1) {
     const repoName = (repos[0].url.split("/").pop() || "repo").replace(/\.git$/, "");
     parts.push(`**Repository:** \`${repos[0].url}\` — cloned to \`./${repoName}/\``);
@@ -199,10 +202,10 @@ function workingEnvironmentSection(env) {
     });
     parts.push(`**Repositories:**\n${lines.join("\n")}`);
   }
-  if (Array.isArray(env.skills) && env.skills.length > 0) {
-    parts.push(`**Skills:** ${env.skills.map((s) => `\`${s}\``).join(", ")}`);
+  if (Array.isArray(skills) && skills.length > 0) {
+    parts.push(`**Skills:** ${skills.map((s) => `\`${s}\``).join(", ")}`);
   }
-  if (env.additionalContext) parts.push(env.additionalContext);
+  if (env && env.additionalContext) parts.push(env.additionalContext);
   if (parts.length === 0) return "";
   return `## Working Environment\n\n${parts.join("\n\n")}`;
 }
@@ -242,9 +245,11 @@ function envHasRepository(env) {
   return !!(env && Array.isArray(env.repositories) && env.repositories.length > 0);
 }
 
-// Does this environment grant skills? Drives the Skills section gate.
-function envHasSkills(env) {
-  return !!(env && Array.isArray(env.skills) && env.skills.length > 0);
+// Does this agent's resolved grant contain skills? Drives the Skills section
+// gate. Skills are team-owned (skill-grants.js) — the caller passes the
+// resolved list; the environment no longer carries a skill grant.
+function hasSkillGrant(skills) {
+  return Array.isArray(skills) && skills.length > 0;
 }
 
 // Compose the full CLAUDE.md from the base template + per-agent inputs.
@@ -256,7 +261,7 @@ function envHasSkills(env) {
 //   4. ## Workspace             (single home for the path-translation rule)
 //   5. ## Response Formatting   (from base)
 //   6. ## Memory System         (from base)
-//   7. ## Skills                (from base) — only if the env grants skills
+//   7. ## Skills                (from base) — only if the agent's resolved skill grant is non-empty
 //   8. ## GitHub Actions        (relocated) — only if the env has a repository
 //   9. ## Trigger management    (relocated) — only if the agent is autonomous
 //  10. ## Important Notes       (from base)
@@ -270,7 +275,8 @@ function envHasSkills(env) {
 // next session with no CLAUDE.md rebuild and no duplicated copy to drift (#510).
 // Left null (the default) the prompt is inlined — the form the prompt-preview
 // endpoint uses so the operator sees the fully-resolved text.
-function assembleClaudeMd({ base, agentPrompt, role, env, blueprintId = null, autonomous = false, promptRef = null } = {}) {
+// `skills`: the agent's resolved skill grant (team-owned — skill-grants.js).
+function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], blueprintId = null, autonomous = false, promptRef = null } = {}) {
   const { preamble, sections } = splitSections(base);
   const byHeading = new Map(sections.map((s) => [s.heading, s.text]));
   const consumed = new Set();
@@ -294,7 +300,7 @@ function assembleClaudeMd({ base, agentPrompt, role, env, blueprintId = null, au
   }
 
   // 3. Working Environment
-  const envBlock = workingEnvironmentSection(env);
+  const envBlock = workingEnvironmentSection(env, skills);
   if (envBlock) blocks.push(envBlock);
 
   // 4. Workspace (single home for the path rule)
@@ -308,9 +314,9 @@ function assembleClaudeMd({ base, agentPrompt, role, env, blueprintId = null, au
   const mem = take("Memory System");
   if (mem) blocks.push(mem);
 
-  // 7. Skills — only when the env actually grants skills
-  const skills = take("Skills");
-  if (skills && envHasSkills(env)) blocks.push(skills);
+  // 7. Skills — only when the agent's resolved grant actually contains skills
+  const skillsBlock = take("Skills");
+  if (skillsBlock && hasSkillGrant(skills)) blocks.push(skillsBlock);
 
   // 8. Git — only when the env has a repository
   if (envHasRepository(env)) blocks.push(GIT_SECTION);
@@ -381,7 +387,7 @@ module.exports = {
   workingEnvironmentSection,
   blueprintSection,
   envHasRepository,
-  envHasSkills,
+  hasSkillGrant,
   WORKSPACE_SECTION,
   GIT_SECTION,
   TRIGGER_SECTION,

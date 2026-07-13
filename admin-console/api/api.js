@@ -1138,7 +1138,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skillsOverride, mcpServersOverride, disableMode, teamId, emits, dataFlow, parentMemberId, stage, github, channels } = req.body;
+  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, dataFlow, parentMemberId, stage, github, channels } = req.body;
 
   // Enable/disable goes through the orchestrator so stubs (no token yet)
   // get fully materialized — Matrix user, workspace seeding, agent-runner
@@ -1197,6 +1197,18 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   if (displayName !== undefined) fresh.displayName = displayName;
   if (role !== undefined) fresh.role = role;
   if (briefingsPath !== undefined) fresh.briefingsPath = briefingsPath;
+  // ── Team-owned skill grant (skill-grants.js) ──────────────────────────────
+  // `skills` lives on the construct itself: a team agent carries the team's
+  // ACTIVE skill set (inherited by every member without a skillsOverride), a
+  // standalone/orchestrator agent its own list. The Working Environment no
+  // longer carries skills. Propagation to already-materialized workspaces is
+  // lazy (next re-seed/enable) — the Knowledge activation flow adds the eager
+  // sync in a later phase. Members use skillsOverride below instead.
+  if (skills !== undefined && fresh.role !== 'team-member') {
+    fresh.skills = Array.isArray(skills)
+      ? skills.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim())
+      : [];
+  }
   // Agent-level emitted labels (label hand-offs wired from the process editor).
   // `null` / [] clears the set.
   if (emits !== undefined) {
@@ -3347,13 +3359,20 @@ app.get('/api/agents/:id/private-skills', (req, res) => {
   // The lift target is the agent's SQUAD pool (/workspace/teams/<squad>/skills).
   const teamId = agentKnowledgeTeam({ ...cfg, id: cfg.id || id });
   if (!visibleAgent(scope, cfg)) return res.status(403).json({ error: 'forbidden' });
-  // Seed-time skill grants (env skills / member skillsOverride) land in the same
-  // per-agent skills dir — they are copies of pool skills, not agent-authored
-  // knowledge, so they are not "private" and must not surface as lift candidates.
-  const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-  const granted = new Set(Array.isArray(cfg.skillsOverride)
-    ? cfg.skillsOverride
-    : (env && Array.isArray(env.skills) ? env.skills : []));
+  // Seed-time skill grants land in the same per-agent skills dir — they are
+  // copies of pool skills, not agent-authored knowledge, so they are not
+  // "private" and must not surface as lift candidates. The grant is team-owned
+  // (orchestrator/skill-grants.js): member override wins, else the construct's
+  // own skills[], else the parent construct's (team / orchestrator) list.
+  const parentId = cfg.role === 'team-member' ? cfg.parentTeamId
+    : cfg.role === 'bp-instance' ? cfg.parentOrchestratorId
+    : null;
+  const parentCfg = parentId ? readJsonFile(path.join(AGENTS_DIR, parentId, 'config.json'), null) : null;
+  const granted = new Set(
+    Array.isArray(cfg.skillsOverride) ? cfg.skillsOverride
+    : Array.isArray(cfg.skills) ? cfg.skills
+    : (parentCfg && Array.isArray(parentCfg.skills)) ? parentCfg.skills
+    : []);
   const skillsDir = path.join(AGENTS_DIR, id, 'skills');
   const skills = [];
   try {
@@ -4534,12 +4553,21 @@ app.delete('/api/skills/:name', (req, res) => {
   const skillPath = path.join(skillDir, 'SKILL.md');
   if (!fs.existsSync(skillPath)) return res.status(404).json({ error: 'Skill not found' });
 
-  const blocking = listEnvironmentIds()
-    .map(loadEnvironment)
-    .filter(env => env && Array.isArray(env.skills) && env.skills.includes(name))
-    .map(env => env.id);
+  // In-use check against the team-owned grants: the skill name may be listed
+  // on any agent construct's skills[] (team / standalone / orchestrator) or a
+  // member's skillsOverride — the Working Environment no longer grants skills.
+  let blocking = [];
+  try {
+    blocking = fs.readdirSync(AGENTS_DIR)
+      .map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null))
+      .filter(cfg => cfg && (
+        (Array.isArray(cfg.skills) && cfg.skills.includes(name)) ||
+        (Array.isArray(cfg.skillsOverride) && cfg.skillsOverride.includes(name))
+      ))
+      .map(cfg => cfg.id);
+  } catch { /* no agents dir yet */ }
   if (blocking.length > 0) {
-    return res.status(409).json({ error: 'Skill is in use', environments: blocking });
+    return res.status(409).json({ error: 'Skill is in use', agents: blocking });
   }
 
   fs.rmSync(skillDir, { recursive: true, force: true });
@@ -5597,7 +5625,11 @@ function resolveLlmBinding(llmEndpointId, defaultModelId) {
 }
 
 app.post('/api/environments', heavyLimiter, (req, res) => {
-  const { name, description, skills, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers, teamId } = req.body || {};
+  // `skills` is accepted-and-discarded: the skill grant is team-owned
+  // (orchestrator/skill-grants.js) and lives on the agent constructs — the
+  // Working Environment is a pure infrastructure template. Old clients may
+  // still send the field; it is ignored so it can't silently grant anything.
+  const { name, description, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers, teamId } = req.body || {};
   const id = normalizeEnvId(req.body?.id);
   if (!id) return res.status(400).json({ error: 'id is required (a-z, 0-9, -)' });
   if (!name) return res.status(400).json({ error: 'name is required' });
@@ -5637,7 +5669,6 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
     name,
     description: description || '',
     teamId: ownerTeamId,
-    skills: Array.isArray(skills) ? skills : [],
     repositories: normalizedRepos,
     githubTokenId: githubTokenId || null,
     mcpServers: normalizedMcp,
@@ -5654,7 +5685,10 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
   const prevGithubTokenId = env.githubTokenId || null;
-  const { name, description, skills, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers, teamId } = req.body || {};
+  // `skills` from old clients is accepted-and-discarded — the grant is
+  // team-owned (see POST above); a legacy env.skills field on disk is left
+  // untouched (dead after the orchestrator's startup migration).
+  const { name, description, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers, teamId } = req.body || {};
 
   if (githubTokenId) {
     const tokens = listGithubTokens();
@@ -5680,7 +5714,6 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
 
   if (name !== undefined) env.name = name;
   if (description !== undefined) env.description = description;
-  if (skills !== undefined) env.skills = Array.isArray(skills) ? skills : [];
   if (repositories !== undefined || repository !== undefined) {
     try {
       env.repositories = normalizeRepositoriesInput(repositories, repository);
@@ -5945,7 +5978,6 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
       id: envId,
       name: `${org}/${repo}`,
       description: `Quick-start environment for ${org}/${repo}`,
-      skills: [],
       repositories: [{ url: sshUrl, branch: resolvedBranch, sshKeyId: chosenSshKeyId }],
       githubTokenId: chosenTokenId,
       ...llmBinding,
@@ -6212,6 +6244,13 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   const environmentId = (typeof body.environmentId === 'string' && body.environmentId.trim())
     ? normalizeEnvId(body.environmentId)
     : null;
+  // Initial team skill set (team-owned grant, orchestrator/skill-grants.js):
+  // lands on the TEAM AGENT's `skills[]`, never on the environment — members
+  // inherit it unless they carry a skillsOverride. Supplied by the wizard's
+  // Knowledge step.
+  const initialSkills = Array.isArray(body.skills)
+    ? body.skills.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim())
+    : [];
   const mode = body.mode === 'extend' ? 'extend' : 'create';
   // Deferred materialization: when false, members are created as stubs (config
   // + triggers only, no Matrix user / clone / process), shown in the UI and
@@ -6516,15 +6555,13 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   };
 
   try {
-    // Phase A — single shared environment. Carries the repo, SSH key, PAT,
-    // and the team-default skill set (empty in v1; the wizard's first
-    // shipped Skill packs go here later).
+    // Phase A — single shared environment: pure infrastructure (repo, SSH
+    // key, PAT, MCP). Skills are team-owned and live on the team agent below.
     if (!envExists || adoptOrphanEnv) {
       const env = {
         id: envId,
         name: teamName,
         description: `Working environment for team '${teamName}'.`,
-        skills: [],
         repositories: [{ url: parsed.httpsUrl, branch, sshKeyId: repository.sshKeyId }],
         githubTokenId,
         mcpServers: normalizedMcpServers,
@@ -6551,6 +6588,9 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           systemPrompt: teamPrompt,
           environmentId: envId,
           skipFirstMember: true,
+          // The team's ACTIVE skill set (team-owned grant) — inherited by
+          // every member without a skillsOverride.
+          skills: initialSkills,
           // Ordered stage names for the process graph's layered layout (#stage-order).
           ...(bundleStages.length ? { stages: bundleStages } : {}),
         }),
@@ -6637,9 +6677,9 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           id: p.memberId,
           displayName: memberDisplayName,
           systemPromptOverride: promptText,
-          // skillsOverride deliberately omitted in v1 — members inherit the
-          // team-env's empty skill list. Once we ship role-specific Skill
-          // packs they'll plug in here.
+          // skillsOverride deliberately omitted — members inherit the TEAM
+          // AGENT's `skills[]` (team-owned grant). Role-specific Skill packs
+          // will plug in here as overrides.
           sessionPolicy: p.template.sessionPolicy === 'per-invocation' ? 'per-invocation' : undefined,
           triggers: triggersOut,
           // BP data-flow ports (#379), recorded on the member config so the live
@@ -6772,6 +6812,13 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   const environmentId = (typeof body.environmentId === 'string' && body.environmentId.trim())
     ? normalizeEnvId(body.environmentId)
     : null;
+  // Initial team skill set (team-owned grant, orchestrator/skill-grants.js):
+  // lands on the TEAM AGENT's `skills[]`, never on the environment — members
+  // inherit it unless they carry a skillsOverride. Supplied by the wizard's
+  // Knowledge step.
+  const initialSkills = Array.isArray(body.skills)
+    ? body.skills.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim())
+    : [];
   const mode = body.mode === 'extend' ? 'extend' : 'create';
   const readyLabel = (typeof body.readyLabel === 'string' && body.readyLabel.trim())
     ? body.readyLabel.trim()
@@ -7061,7 +7108,6 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
         id: envId,
         name: teamName,
         description: `Working environment for team '${teamName}'.`,
-        skills: [],
         repositories: [{ url: parsed.httpsUrl, branch, sshKeyId: repository.sshKeyId }],
         githubTokenId,
         mcpServers: normalizedMcpServers,
@@ -7087,6 +7133,9 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           systemPrompt: teamPrompt,
           environmentId: envId,
           skipFirstMember: true,
+          // The team's ACTIVE skill set (team-owned grant) — inherited by
+          // every member without a skillsOverride.
+          skills: initialSkills,
           // Ordered stage names for the process graph's layered layout.
           ...(bundleStages.length ? { stages: bundleStages } : {}),
         }),

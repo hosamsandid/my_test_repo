@@ -35,6 +35,7 @@ const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const { resolveCloneTarget } = require("./clone-target");
 const { assembleClaudeMd, buildMemoryHint } = require("./prompt-assembly");
+const { effectiveSkills, migrateSkillGrant } = require("./skill-grants");
 
 // ============================================================
 // Config
@@ -478,6 +479,31 @@ function migrateLegacyAgentConfigs() {
   }
 }
 
+// One-time migration (team-owned skills): copy each environment's legacy
+// `skills[]` grant onto every team / standalone / orchestrator agent config
+// that doesn't carry a `skills` field yet. Team-members keep the
+// inherit/override model; bp-instances inherit from their parent orchestrator.
+// After this the Working Environment no longer contributes skills — it is a
+// pure infrastructure template (docs/knowledge-skill-activation-concept.md).
+// Idempotent — an existing `skills` field always wins; safe on every start.
+function migrateSkillGrantsToAgents() {
+  if (!fs.existsSync(AGENTS_DIR)) return;
+  let migrated = 0;
+  for (const id of listAgentIds()) {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) continue;
+    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+    const next = migrateSkillGrant(cfg, env);
+    if (next) {
+      saveAgentConfig(id, next);
+      migrated++;
+    }
+  }
+  if (migrated > 0) {
+    console.log(`[Orchestrator] Migrated ${migrated} agent config(s) to team-owned skill grants (env.skills → config.skills)`);
+  }
+}
+
 // One-time migration (#510): rewrite existing agents' CLAUDE.md so the Agent
 // Role block references AGENT-PROMPT.md (`@AGENT-PROMPT.md`) instead of inlining
 // the prompt text. Older CLAUDE.md files carry a stale inlined copy that never
@@ -713,10 +739,14 @@ function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, AGENT_PROMPT_FILENAME), prompt);
   const autonomous = agentIsAutonomous(id, role);
+  // Skills are team-owned (skill-grants.js): resolve the effective grant from
+  // the agent's own config (saved before every saveAgentPrompt call in all
+  // paths), so no caller can forget to thread it through.
+  const skills = effectiveSkills(loadAgentConfig(id), loadAgentConfig);
   // Reference mode: CLAUDE.md points at AGENT-PROMPT.md instead of inlining it.
   fs.writeFileSync(
     path.join(dir, "CLAUDE.md"),
-    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, promptRef: AGENT_PROMPT_FILENAME }),
+    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, promptRef: AGENT_PROMPT_FILENAME }),
   );
 }
 
@@ -863,6 +893,7 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null, opts = {
     agentPrompt,
     role,
     env,
+    skills: Array.isArray(opts.skills) ? opts.skills : [],
     blueprintId,
     autonomous: !!opts.autonomous,
     // Seeding passes promptRef so CLAUDE.md references AGENT-PROMPT.md; the
@@ -895,14 +926,17 @@ function seedAgentWorkspace(id, env, opts = {}) {
   }
 
   // 2. Copy selected skills, resolving each name team-first then global (#306).
-  // Team-members may override the team-env's skill list — pass `opts.skillsOverride`
-  // (an array) to use it instead of `env.skills`. The override is verbatim, no merge.
-  // The owning team's pool (/workspace/teams/<teamId>/skills) takes precedence over
-  // the global pool (/template-workspace/skills); when a team has no skill of that
-  // name this falls back to global, so the global-only behaviour is unchanged.
+  // The GRANT is team-owned (skill-grants.js): callers pass the resolved list
+  // via `opts.skills` (team agent's `skills[]`, standalone agent's own list, …);
+  // `opts.skillsOverride` (team-member override) wins verbatim, no merge. The
+  // environment no longer contributes skills — it is a pure infrastructure
+  // template. The owning team's POOL (/workspace/teams/<teamId>/skills) still
+  // takes precedence over the global pool (/template-workspace/skills); when a
+  // team has no skill of that name this falls back to global, so the
+  // global-only behaviour is unchanged.
   const selectedSkills = Array.isArray(opts.skillsOverride)
     ? opts.skillsOverride
-    : ((env && Array.isArray(env.skills)) ? env.skills : []);
+    : (Array.isArray(opts.skills) ? opts.skills : []);
   // Materialise the on-disk AGENT skill pool (Phase 4, concept open question #4):
   // the bottom rung of the Agent → Team → Global ladder is now a real, writable
   // tier. The dir exists even with no seeded skills, so an agent can author a
@@ -1289,8 +1323,11 @@ function patchSeededPaths(dir) {
   }
 }
 
-// Workspace seeding for blueprint instances: no memory copy (shared via API)
-function seedAgentWorkspaceForInstance(id, env, blueprintId) {
+// Workspace seeding for blueprint instances: no memory copy (shared via API).
+// `skills` is the instance's grant (team-owned skills): the blueprint paths
+// have no operator UI, so callers copy the env's legacy skill list once at
+// instance creation as the initial grant and record it on the config.
+function seedAgentWorkspaceForInstance(id, env, blueprintId, skills = []) {
   const dest = agentDir(id);
   fs.mkdirSync(dest, { recursive: true });
 
@@ -1310,7 +1347,7 @@ function seedAgentWorkspaceForInstance(id, env, blueprintId) {
   }
 
   // Copy selected skills
-  const selectedSkills = (env && Array.isArray(env.skills)) ? env.skills : [];
+  const selectedSkills = Array.isArray(skills) ? skills : [];
   if (selectedSkills.length > 0) {
     const skillsSrc = path.join(TEMPLATE_WORKSPACE, "skills");
     const skillsDst = path.join(dest, "skills");
@@ -3275,6 +3312,12 @@ class Orchestrator {
     // an existing team.
     const ownerTeamId = resolveOwnerTeamId(extra.teamId);
 
+    // Skill grant is team-owned (skill-grants.js): the caller passes the
+    // initial `skills` list explicitly; the environment no longer contributes.
+    const grantedSkills = Array.isArray(extra.skills)
+      ? extra.skills.filter((s) => typeof s === "string" && s.trim()).map((s) => s.trim())
+      : [];
+
     if (role === "team") {
       const teamConfig = {
         id,
@@ -3283,6 +3326,9 @@ class Orchestrator {
         environmentId: env.id,
         teamId: ownerTeamId,
         systemPromptTemplate: systemPrompt || "",
+        // The team's ACTIVE skill set — inherited by every member without a
+        // `skillsOverride`; the lever the Knowledge activation flow writes.
+        skills: grantedSkills,
         // Ordered stage names for the process graph's layered layout (#stage-order).
         // Members carry their own `stage`; the team holds the column *order* so the
         // live graph reproduces a materialised draft's stage layout.
@@ -3309,8 +3355,9 @@ class Orchestrator {
     const token = await loginMatrixUser(id, password);
     await setDisplayName(token, userId, displayName);
 
-    // Seed agent workspace using the chosen environment
-    const seedResult = seedAgentWorkspace(id, env, { teamId: ownerTeamId });
+    // Seed agent workspace using the chosen environment (infrastructure) and
+    // the explicitly granted skills (team-owned grant).
+    const seedResult = seedAgentWorkspace(id, env, { teamId: ownerTeamId, skills: grantedSkills });
 
     // For orchestrators the briefings repo is load-bearing: without the clone
     // the BP discovery pipeline silently returns zero stubs and the user sees
@@ -3343,6 +3390,9 @@ class Orchestrator {
       role,
       environmentId: env.id,
       teamId: ownerTeamId,
+      // The agent's own skill grant (team-owned skills; standalone agents
+      // carry their list directly).
+      skills: grantedSkills,
       ...(role === "orchestrator" && extra.briefingsPath && { briefingsPath: extra.briefingsPath }),
       // Optional fields written by the Team-Setup wizard. `team` ties the
       // agent to its sibling team-mates (used by the Layer-2 `from: team`
@@ -3403,7 +3453,8 @@ class Orchestrator {
   // materialized (Matrix user + workspace + agent process).
   //
   // Without opts: member id auto-numbered (`{teamId}-1`, `{teamId}-2`, …),
-  // prompt + skills inherited from the team / its env.
+  // prompt + skills inherited from the team (skills are team-owned:
+  // `teamCfg.skills`, not the env — skill-grants.js).
   //
   // With opts (used by the Team-Setup wizard):
   //   - id                  — pin the member id (`<teamId>-developer`, etc.)
@@ -3411,8 +3462,8 @@ class Orchestrator {
   //   - systemPromptOverride — role-specific prompt; member config records
   //                            it in `systemPrompt`. Absent = inherit team's
   //                            `systemPromptTemplate`.
-  //   - skillsOverride      — replace env.skills for this member's workspace.
-  //                            Absent = inherit env.skills.
+  //   - skillsOverride      — replace the team's `skills[]` for this member's
+  //                            workspace. Absent = inherit `teamCfg.skills`.
   //   - mcpServersOverride  — replace env.mcpServers for this member. Same
   //                            shape as env.mcpServers ([{serverId, credentialId}]).
   //                            Absent = inherit env.mcpServers.
@@ -3512,6 +3563,8 @@ class Orchestrator {
 
     const seedResult = seedAgentWorkspace(memberId, env, {
       teamId: ownerTeamId,
+      // Inherit the parent team's active skill set unless the member overrides.
+      skills: Array.isArray(teamCfg.skills) ? teamCfg.skills : [],
       skillsOverride: Array.isArray(opts.skillsOverride) ? opts.skillsOverride : undefined,
       mcpServersOverride: Array.isArray(opts.mcpServersOverride) ? opts.mcpServersOverride : undefined,
     });
@@ -4236,7 +4289,9 @@ class Orchestrator {
 
     const seedResult = seedAgentWorkspace(id, env, {
       teamId: cfg.teamId || DEFAULT_TEAM_ID,
-      skillsOverride: Array.isArray(cfg.skillsOverride) ? cfg.skillsOverride : undefined,
+      // Resolved team-owned grant: member override wins, else the parent
+      // construct's (team / orchestrator) skills[], else the stub's own list.
+      skills: effectiveSkills(cfg, loadAgentConfig),
       mcpServersOverride: Array.isArray(cfg.mcpServersOverride) ? cfg.mcpServersOverride : undefined,
     });
 
@@ -4661,7 +4716,11 @@ class Orchestrator {
     const token = await loginMatrixUser(instanceId, password);
     await setDisplayName(token, userId, instanceDisplayName);
 
-    const seedResult = seedAgentWorkspaceForInstance(instanceId, env, blueprintId);
+    // Initial grant for a blueprint instance: one-time copy of the env's
+    // legacy skill list (no operator UI on this path), recorded on the config —
+    // team-owned skills from then on.
+    const instanceSkills = Array.isArray(env.skills) ? [...env.skills] : [];
+    const seedResult = seedAgentWorkspaceForInstance(instanceId, env, blueprintId, instanceSkills);
 
     const config = {
       id: instanceId,
@@ -4670,6 +4729,7 @@ class Orchestrator {
       token,
       role: blueprint.role,
       environmentId: env.id,
+      skills: instanceSkills,
       blueprintId,
       // Preserve the owning Team of the stub being activated (#299); fall back
       // to the default team for a fresh instance.
@@ -5065,6 +5125,7 @@ async function main() {
     process.exit(1);
   }
   migrateLegacyAgentConfigs();
+  migrateSkillGrantsToAgents();
   await migrateAgentClaudeMdToReference();
   bootstrapTeams();
   backfillResourceOwnership();
@@ -5477,7 +5538,10 @@ async function main() {
         const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
         const blueprintId = cfg.blueprintId || null;
         const autonomous = agentIsAutonomous(id, cfg.role);
-        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous });
+        // Team-owned skills: resolve the same grant the seed path uses, so the
+        // preview's Skills gate is byte-identical to what gets seeded.
+        const skills = effectiveSkills(cfg, loadAgentConfig);
+        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous, skills });
         const appendSystemPrompt = buildMemoryHint(blueprintId);
         return sendJson(res, 200, {
           agentId: id,
@@ -5490,7 +5554,7 @@ async function main() {
             sessionPolicy: cfg.sessionPolicy || 'persistent',
             blueprintInstance: !!blueprintId,
             hasRepository: !!(env && Array.isArray(env.repositories) && env.repositories.length > 0),
-            hasSkills: !!(env && Array.isArray(env.skills) && env.skills.length > 0),
+            hasSkills: skills.length > 0,
             environmentId: cfg.environmentId || null,
             environmentName: (env && env.name) || null,
           },
@@ -5664,9 +5728,12 @@ async function main() {
           const token = await loginMatrixUser(agentId, password);
           await setDisplayName(token, userId, displayName);
 
+          // Initial grant for an ephemeral agent: one-time copy of the env's
+          // legacy skill list (no operator UI on this path).
+          const ephemeralSkills = Array.isArray(env.skills) ? [...env.skills] : [];
           const seedResult = blueprintId
-            ? seedAgentWorkspaceForInstance(agentId, env, blueprintId)
-            : seedAgentWorkspace(agentId, env);
+            ? seedAgentWorkspaceForInstance(agentId, env, blueprintId, ephemeralSkills)
+            : seedAgentWorkspace(agentId, env, { skills: ephemeralSkills });
 
           const systemPrompt = blueprintId
             ? (loadBlueprint(blueprintId)?.systemPrompt || displayName)
@@ -5680,6 +5747,7 @@ async function main() {
             role: 'agent',
             environmentId: env.id,
             teamId: DEFAULT_TEAM_ID,
+            skills: ephemeralSkills,
             ephemeral: true,
             enabled: true,
             ...(blueprintId && { blueprintId }),
@@ -6952,6 +7020,10 @@ async function main() {
           skipFirstMember,
           // For role: 'team' — ordered stage names for the process graph layout.
           stages,
+          // Initial skill grant (team-owned skills, skill-grants.js): the
+          // team's active set / the standalone agent's own list. The
+          // environment no longer contributes skills.
+          skills,
         } = JSON.parse(body);
         if (!id || !displayName || !role || !environmentId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -6986,6 +7058,7 @@ async function main() {
         if (skipFirstMember) extra.skipFirstMember = true;
         if (teamId) extra.teamId = teamId;
         if (Array.isArray(stages)) extra.stages = stages;
+        if (Array.isArray(skills)) extra.skills = skills;
         const result = await orchestrator.createAgent(id, displayName, role, systemPrompt, environmentId, extra);
         res.writeHead(201, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));

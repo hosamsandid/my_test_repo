@@ -36,59 +36,6 @@ const inputStyle = {
   boxSizing: 'border-box',
 };
 
-function SkillPicker({ allSkills, selected, onChange }) {
-  const toggle = (name) => {
-    if (selected.includes(name)) onChange(selected.filter(s => s !== name));
-    else onChange([...selected, name]);
-  };
-
-  if (allSkills.length === 0) {
-    return (
-      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
-        No skills in the central pool. Place skills in the pool volume under <code>skills/&lt;name&gt;/SKILL.md</code>.
-      </div>
-    );
-  }
-
-  return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 'var(--eb-space-1)',
-      maxHeight: 240,
-      overflowY: 'auto',
-      border: '1px solid var(--eb-border-default)',
-      borderRadius: 'var(--eb-radius-md)',
-      padding: 'var(--eb-space-2)',
-      background: 'var(--eb-bg-elevated)',
-    }}>
-      {allSkills.map(name => (
-        <label key={name} style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 'var(--eb-space-2)',
-          padding: 'var(--eb-space-1) var(--eb-space-2)',
-          borderRadius: 'var(--eb-radius-sm)',
-          cursor: 'pointer',
-          fontSize: 'var(--eb-text-sm)',
-        }}
-        onMouseEnter={e => e.currentTarget.style.background = 'var(--eb-bg-hover)'}
-        onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-        >
-          <input
-            type="checkbox"
-            checked={selected.includes(name)}
-            onChange={() => toggle(name)}
-          />
-          <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
-            {name}
-          </span>
-        </label>
-      ))}
-    </div>
-  );
-}
-
 function useRepoCheck(url, sshKeyId, githubTokenId) {
   const [state, setState] = useState({ status: 'idle', error: null });
   const reqIdRef = useRef(0);
@@ -259,7 +206,6 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
     id: initial?.id || '',
     name: initial?.name || '',
     description: initial?.description || '',
-    skills: initial?.skills || [],
     additionalContext: initial?.additionalContext || '',
     repositories: initialRepositories(initial),
     githubTokenId: initial?.githubTokenId || '',
@@ -267,12 +213,10 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
     defaultModelId: initial?.defaultModelId || '',
   }));
 
-  const { data: skillsData } = useApi('/api/skills');
   const { data: keysData } = useApi('/api/ssh-keys');
   const { data: tokensData } = useApi('/api/github-tokens');
   const { data: endpointsData } = useApi('/api/llm-endpoints');
 
-  const poolSkills = (skillsData || []).filter(s => s.source === 'pool').map(s => s.name);
   const sshKeys = keysData || [];
   const ghTokens = tokensData || [];
   const llmEndpoints = endpointsData || [];
@@ -327,7 +271,6 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
       id: form.id,
       name: form.name,
       description: form.description,
-      skills: form.skills,
       additionalContext: form.additionalContext,
       repositories: form.repositories
         .filter(r => r.url.trim())
@@ -435,21 +378,9 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
         </div>
       </div>
 
-      <div>
-        <div style={{ ...labelStyle, marginBottom: 'var(--eb-space-1)' }}>
-          Skills
-          <span style={{ fontWeight: 'normal', marginLeft: 'var(--eb-space-2)' }}>
-            — {form.skills.length > 0 ? `${form.skills.length} selected` : 'none selected'}
-          </span>
-        </div>
-        <div style={{ ...helpTextStyle, marginBottom: 'var(--eb-space-2)', marginTop: 0 }}>
-          Skills are pre-built instruction sets (SKILL.md files) from the central pool. The selected skills are copied into the agent's workspace at creation time, giving it domain-specific knowledge and capabilities.
-        </div>
-        <SkillPicker
-          allSkills={poolSkills}
-          selected={form.skills}
-          onChange={v => update('skills', v)}
-        />
+      <div style={{ ...helpTextStyle, marginTop: 0 }}>
+        Skills are managed on the team (or agent) itself — see the Agents page, the Team-Setup wizard, or the Knowledge page.
+        Working Environments carry only infrastructure: repository, credentials, MCP servers, context.
       </div>
 
       <div style={{
@@ -655,14 +586,6 @@ export default function WorkingEnvironments() {
     { key: 'id', label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
     { key: 'name', label: 'Name' },
     {
-      key: 'skills',
-      label: 'Skills',
-      sortable: false,
-      render: v => Array.isArray(v) && v.length > 0 ? (
-        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{v.length} Skill{v.length === 1 ? '' : 's'}</span>
-      ) : <span style={{ color: 'var(--eb-text-muted)' }}>—</span>,
-    },
-    {
       key: 'repositories',
       label: 'Repositories',
       sortable: false,
@@ -783,7 +706,6 @@ export default function WorkingEnvironments() {
           A <strong>Working Environment</strong> is a reusable workspace recipe that defines what every agent created from it receives:
         </p>
         <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
-          <li><strong>Skills</strong> — pre-built instruction sets (SKILL.md files) that give the agent domain knowledge, such as COBOL analysis or Java migration patterns.</li>
           <li><strong>Git repositories</strong> — one or more repos that are automatically cloned into the agent's workspace when it is created. Private repos use SSH keys you manage on the SSH Keys page.</li>
           <li><strong>GitHub token</strong> — optional access token for the <code>gh</code> CLI and HTTPS pushes.</li>
           <li><strong>Additional instructions</strong> — custom text appended to the agent's CLAUDE.md, giving it project-specific context or constraints.</li>

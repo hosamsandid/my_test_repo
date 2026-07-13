@@ -540,6 +540,11 @@ const TeamSection = React.forwardRef(function TeamSection({
 
   const skills = useMemo(() => (graph?.nodes || []).filter(n => n.kind === 'skill'), [graph]);
   const pending = useMemo(() => (graph?.nodes || []).filter(n => n.kind === 'pending'), [graph]);
+  // Names already in the team's active set — used to hide them from the
+  // "Add global skill…" picker.
+  const activeSkillNames = useMemo(() => new Set(
+    skills.filter(sk => sk.activation && sk.activation.active).map(sk => sk.label)
+  ), [skills]);
 
   // The picked entries, resolved against ALL of the team's items (not the
   // filtered view — a tick must survive a filter change).
@@ -713,11 +718,12 @@ const TeamSection = React.forwardRef(function TeamSection({
             </div>
           )}
           {skills.map(sk => (
-            <SkillCard key={sk.id} skill={sk} onShare={() => onShareSkill(sk)} />
+            <SkillCard key={sk.id} skill={sk} teamId={team.id} onShare={() => onShareSkill(sk)} onReload={onControlsChanged} />
           ))}
           {privateSkills.length > 0 && (
             <PrivateSkillsBlock teamId={team.id} skills={privateSkills} onLifted={onLifted} />
           )}
+          <GlobalSkillPicker teamId={team.id} activeNames={activeSkillNames} onReload={onControlsChanged} />
         </div>
       </div>
     </section>
@@ -849,29 +855,274 @@ function ItemCard({ item, pulsing, selected, picked, anyPicked, onPick, onClick,
   );
 }
 
-function SkillCard({ skill, onShare }) {
+/* ── Skill card with activation state (team scope) ──────────────────────────── */
+
+// Plain-language chip per member state — what the badge expands into.
+const MEMBER_STATE_CHIPS = {
+  active: { label: '✓ active', color: 'var(--eb-status-success)', tip: 'This member has the skill in its workspace and loads it when it works.' },
+  pending: { label: 'pending', color: 'var(--eb-status-warning)', tip: 'The skill is in the team’s active set but hasn’t reached this member’s workspace yet.' },
+  'excluded-override': { label: 'excluded — own skill list', color: 'var(--eb-text-muted)', tip: 'This member manages its own skill list, so team activations don’t apply automatically.' },
+  stub: { label: 'not materialized', color: 'var(--eb-text-muted)', tip: 'This member has no workspace yet — it gets the skill when it’s materialized.' },
+  inactive: { label: 'inactive', color: 'var(--eb-text-muted)', tip: 'This member doesn’t have the skill in its workspace.' },
+};
+
+function SkillCard({ skill, teamId, onShare, onReload }) {
   const auto = skill.promotedBy === 'curator';
+  const act = skill.activation || null;
+  const [expanded, setExpanded] = useState(false);
+  const [busy, setBusy] = useState(null); // 'activate' | 'deactivate' | <agentId>
+  const [flash, setFlash] = useState(null); // { kind: 'ok' | 'error', text }
+  const flashTimer = useRef(null);
+
+  const feedback = (kind, text) => {
+    setFlash({ kind, text });
+    clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => setFlash(null), kind === 'error' ? 8000 : 4000);
+  };
+
+  const activate = (busyKey, includeMembers) => {
+    setBusy(busyKey);
+    fetch('/api/knowledge/activate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, skillName: skill.label, ...(includeMembers ? { includeMembers } : {}) }),
+    })
+      .then(async r => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        const ms = Array.isArray(d.members) ? d.members : [];
+        const ok = ms.filter(m => !/error|fail|excluded|stub|skip/i.test(String(m.status || ''))).length;
+        feedback('ok', ms.length ? `active for ${ok}/${ms.length} member${ms.length === 1 ? '' : 's'}` : 'activated');
+        onReload && onReload();
+      })
+      .catch(e => feedback('error', `Action failed: ${e.message}`))
+      .finally(() => setBusy(null));
+  };
+
+  const deactivate = () => {
+    if (!window.confirm(`Remove "${skill.label}" from the team's active skills? The skill file stays in the pool and can be reactivated.`)) return;
+    setBusy('deactivate');
+    fetch('/api/knowledge/deactivate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, skillName: skill.label }),
+    })
+      .then(async r => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        onReload && onReload();
+      })
+      .catch(e => feedback('error', `Action failed: ${e.message}`))
+      .finally(() => setBusy(null));
+  };
+
+  const members = act ? (act.members || []) : [];
+  const activeCount = members.filter(m => m.state === 'active').length;
+  const badge = !act ? null : !act.active
+    ? { text: 'not active', color: 'var(--eb-text-muted)', border: 'var(--eb-border-default)' }
+    : { text: `active · ${activeCount}/${members.length}`,
+        color: activeCount === members.length ? 'var(--eb-status-success)' : 'var(--eb-status-warning)',
+        border: activeCount === members.length ? 'var(--eb-status-success)' : 'var(--eb-status-warning)' };
+
   return (
     <div style={{
-      display: 'flex', alignItems: 'center', gap: 8, border: '1px solid var(--eb-border-default)',
+      border: '1px solid var(--eb-border-default)',
       borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-elevated)',
       padding: 'var(--eb-space-2) var(--eb-space-3)', marginBottom: 'var(--eb-space-2)',
     }}>
-      <GitBranch size={13} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
-      <div style={{ minWidth: 0, flex: 1 }}>
-        <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{skill.label}</div>
-        <div
-          style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', cursor: 'help' }}
-          title={`${skill.tier === 'global' ? 'Global skill — agents in every team load it' : 'Team skill — only this team’s agents load it'}${auto ? '. Promoted automatically by the team’s curator (autonomy 3).' : ''}`}>
-          {skill.tier} skill{auto ? ' · auto-promoted' : ''}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <GitBranch size={13} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{skill.label}</div>
+          <div
+            style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', cursor: 'help' }}
+            title={`${skill.tier === 'global' ? 'Global skill — agents in every team load it' : 'Team skill — only this team’s agents load it'}${auto ? '. Promoted automatically by the team’s curator (autonomy 3).' : ''}${skill.adopted ? '. Adopted from the global pool into this team’s active set.' : ''}`}>
+            {skill.tier} skill{auto ? ' · auto-promoted' : ''}{skill.adopted ? ' · adopted' : ''}
+          </div>
         </div>
+        {badge && (
+          <span
+            onClick={() => members.length > 0 && setExpanded(x => !x)}
+            title="Whether this skill is in the team's active set and which members actually have it in their workspace."
+            style={{
+              flexShrink: 0, fontSize: 10, fontWeight: 600, padding: '1px 7px',
+              borderRadius: 'var(--eb-radius-full)', border: `1px solid ${badge.border}`,
+              color: badge.color, cursor: members.length > 0 ? 'pointer' : 'help', whiteSpace: 'nowrap',
+            }}>
+            {badge.text}
+          </span>
+        )}
+        {act && act.active && (
+          <span
+            title="Deactivate — remove this skill from the team's active set (the file stays in the pool)"
+            onClick={deactivate}
+            style={{ display: 'inline-flex', flexShrink: 0, cursor: 'pointer', color: 'var(--eb-text-muted)' }}>
+            <X size={13} />
+          </span>
+        )}
+        <span
+          title="Share this skill into another team"
+          onClick={onShare}
+          style={{ display: 'inline-flex', flexShrink: 0, cursor: 'pointer', color: 'var(--eb-text-muted)' }}>
+          <Share2 size={13} />
+        </span>
       </div>
-      <span
-        title="Share this skill into another team"
-        onClick={onShare}
-        style={{ display: 'inline-flex', flexShrink: 0, cursor: 'pointer', color: 'var(--eb-text-muted)' }}>
-        <Share2 size={13} />
-      </span>
+
+      {act && !act.active && (
+        <div style={{ marginTop: 6 }}>
+          <button
+            disabled={busy === 'activate'}
+            onClick={() => activate('activate')}
+            title="Add this skill to the team's active set and sync it into every member's workspace"
+            style={{ ...primaryBtn, padding: '2px 10px', fontSize: 'var(--eb-text-xs)' }}>
+            {busy === 'activate' ? 'Activating…' : 'Activate'}
+          </button>
+        </div>
+      )}
+
+      {expanded && members.length > 0 && (
+        <div style={{ marginTop: 6, borderTop: '1px dashed var(--eb-border-default)', paddingTop: 6 }}>
+          {members.map(m => {
+            const chip = MEMBER_STATE_CHIPS[m.state] || { label: m.state, color: 'var(--eb-text-muted)', tip: '' };
+            return (
+              <div key={m.agentId} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0' }}>
+                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)', flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {m.displayName || m.agentId}
+                </span>
+                <span
+                  title={chip.tip}
+                  style={{
+                    flexShrink: 0, fontSize: 10, fontWeight: 600, padding: '0 6px',
+                    borderRadius: 'var(--eb-radius-full)', border: `1px solid ${chip.color}`,
+                    color: chip.color, cursor: 'help', whiteSpace: 'nowrap',
+                  }}>
+                  {chip.label}
+                </span>
+                {m.state === 'excluded-override' && (
+                  <button
+                    disabled={!!busy}
+                    onClick={() => activate(m.agentId, [m.agentId])}
+                    title="This member manages its own skill list — opt it into this skill anyway"
+                    style={linkBtn}>
+                    {busy === m.agentId ? 'Adding…' : 'Add for this member'}
+                  </button>
+                )}
+                {m.state === 'pending' && (
+                  <button
+                    disabled={!!busy}
+                    onClick={() => activate(m.agentId)}
+                    title="Re-run the workspace sync so this member gets the skill now"
+                    style={linkBtn}>
+                    {busy === m.agentId ? 'Syncing…' : 'Sync now'}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {flash && (
+        <div style={{
+          marginTop: 4, fontSize: 'var(--eb-text-xs)', fontWeight: 600,
+          color: flash.kind === 'ok' ? 'var(--eb-status-success)' : 'var(--eb-status-error, #d33)',
+        }}>
+          {flash.kind === 'ok' ? '✓ ' : '⚠ '}{flash.text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── "Add global skill…" — activate a pool skill for this team ───────────────── */
+
+function GlobalSkillPicker({ teamId, activeNames, onReload }) {
+  const [open, setOpen] = useState(false);
+  const [pool, setPool] = useState(null); // null = loading, [] = loaded
+  const [busy, setBusy] = useState(null); // skill name being activated
+  const [flash, setFlash] = useState(null); // { kind: 'ok' | 'error', text }
+  const flashTimer = useRef(null);
+
+  const feedback = (kind, text) => {
+    setFlash({ kind, text });
+    clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => setFlash(null), kind === 'error' ? 8000 : 4000);
+  };
+
+  const toggle = () => {
+    if (open) { setOpen(false); return; }
+    setOpen(true);
+    setPool(null);
+    fetch('/api/skills')
+      .then(r => (r.ok ? r.json() : []))
+      .then(list => setPool((Array.isArray(list) ? list : [])
+        .filter(s => s.source === 'pool')
+        .map(s => s.name)))
+      .catch(() => setPool([]));
+  };
+
+  const activate = (name) => {
+    setBusy(name);
+    fetch('/api/knowledge/activate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, skillName: name }),
+    })
+      .then(async r => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        const ms = Array.isArray(d.members) ? d.members : [];
+        const ok = ms.filter(m => !/error|fail|excluded|stub|skip/i.test(String(m.status || ''))).length;
+        feedback('ok', ms.length ? `${name}: active for ${ok}/${ms.length} member${ms.length === 1 ? '' : 's'}` : `${name} activated`);
+        onReload && onReload();
+      })
+      .catch(e => feedback('error', `Action failed: ${e.message}`))
+      .finally(() => setBusy(null));
+  };
+
+  const candidates = pool === null ? null : pool.filter(nm => !activeNames.has(nm));
+
+  return (
+    <div style={{ marginTop: 'var(--eb-space-3)' }}>
+      <button
+        onClick={toggle}
+        title="Activate a skill from the global pool for this team — it gets synced into every member's workspace"
+        style={{ ...miniBtn, borderStyle: 'dashed' }}>
+        {open ? '− Add global skill…' : '+ Add global skill…'}
+      </button>
+      {open && (
+        <div style={{ marginTop: 6 }}>
+          {candidates === null ? (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Loading…</div>
+          ) : candidates.length === 0 ? (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>No further global skills available.</div>
+          ) : (
+            candidates.map(nm => (
+              <div key={nm} style={{
+                display: 'flex', alignItems: 'center', gap: 8, border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-app)',
+                padding: '4px var(--eb-space-3)', marginBottom: 4,
+              }}>
+                <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {nm}
+                </span>
+                <button
+                  disabled={!!busy}
+                  onClick={() => activate(nm)}
+                  title="Add this global skill to the team's active set"
+                  style={miniBtn}>
+                  {busy === nm ? 'Activating…' : 'Activate'}
+                </button>
+              </div>
+            ))
+          )}
+          {flash && (
+            <div style={{
+              marginTop: 2, fontSize: 'var(--eb-text-xs)', fontWeight: 600,
+              color: flash.kind === 'ok' ? 'var(--eb-status-success)' : 'var(--eb-status-error, #d33)',
+            }}>
+              {flash.kind === 'ok' ? '✓ ' : '⚠ '}{flash.text}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1490,6 +1741,12 @@ const miniBtn = {
   fontSize: 'var(--eb-text-xs)', padding: '2px 8px', borderRadius: 'var(--eb-radius-md)',
   border: '1px solid var(--eb-border-default)', background: 'var(--eb-bg-surface)',
   color: 'var(--eb-text-secondary)', cursor: 'pointer',
+};
+
+const linkBtn = {
+  flexShrink: 0, background: 'none', border: 'none', padding: 0,
+  color: 'var(--eb-accent-primary)', fontSize: 'var(--eb-text-xs)',
+  cursor: 'pointer', whiteSpace: 'nowrap',
 };
 
 const primaryBtn = {

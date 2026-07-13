@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 
-const { effectiveSkills, hasSkillGrant, migrateSkillGrant } = require("./skill-grants");
+const { effectiveSkills, hasSkillGrant, migrateSkillGrant, planSkillSync } = require("./skill-grants");
 
 // ---- effectiveSkills --------------------------------------------------------
 
@@ -91,4 +91,33 @@ test("migration skips team-members and bp-instances (they inherit)", () => {
 test("migration with no env / no env.skills writes an empty grant", () => {
   assert.deepEqual(migrateSkillGrant({ role: "agent" }, null).skills, []);
   assert.deepEqual(migrateSkillGrant({ role: "agent" }, {}).skills, []);
+});
+
+// ---- planSkillSync ----------------------------------------------------------
+
+test("planSkillSync: inheriting materialized members sync, stubs skip, overrides surface", () => {
+  const members = [
+    { id: "t-dev", token: "x" },                                   // inherit
+    { id: "t-rev", token: "x", skillsOverride: ["own"] },          // override
+    { id: "t-doc" },                                               // stub
+  ];
+  assert.deepEqual(planSkillSync({ members, skillName: "s" }), [
+    { agentId: "t-dev", action: "sync" },
+    { agentId: "t-rev", action: "skip-override" },
+    { agentId: "t-doc", action: "stub" },
+  ]);
+});
+
+test("planSkillSync: explicit opt-in turns an override member into sync-override", () => {
+  const members = [{ id: "t-rev", token: "x", skillsOverride: ["own"] }];
+  assert.deepEqual(planSkillSync({ members, skillName: "s", includeMembers: ["t-rev"] }), [
+    { agentId: "t-rev", action: "sync-override" },
+  ]);
+});
+
+test("planSkillSync: an override that already carries the name syncs like an inheritor", () => {
+  const members = [{ id: "t-rev", token: "x", skillsOverride: ["s"] }];
+  assert.deepEqual(planSkillSync({ members, skillName: "s" }), [
+    { agentId: "t-rev", action: "sync" },
+  ]);
 });

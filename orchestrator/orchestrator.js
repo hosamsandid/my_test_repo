@@ -35,7 +35,7 @@ const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const { resolveCloneTarget } = require("./clone-target");
 const { assembleClaudeMd, buildMemoryHint } = require("./prompt-assembly");
-const { effectiveSkills, migrateSkillGrant } = require("./skill-grants");
+const { effectiveSkills, migrateSkillGrant, planSkillSync } = require("./skill-grants");
 
 // ============================================================
 // Config
@@ -902,6 +902,37 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null, opts = {
   });
 }
 
+// ── Seeded-skills manifest ──────────────────────────────────────────────────
+// Records which skills actually landed in an agent's workspace, with tier and
+// timestamp: /workspace/agents/<id>/.aee/seeded-skills.json →
+//   { "<skillName>": { "tier": "agent"|"team"|"global", "seededAt": "<ISO>" } }
+// This is THE truth for "is this skill active for this member" — the grant
+// list alone can't tell whether a running member was seeded before or after a
+// name was added (docs/knowledge-skill-activation-concept.md §4.1). Written by
+// every seed and by the activation sync; read by the admin console's
+// knowledge-graph activation block.
+const SEEDED_SKILLS_REL = path.join(".aee", "seeded-skills.json");
+
+function readSeededSkills(id) {
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(agentDir(id), SEEDED_SKILLS_REL), "utf8"));
+    return m && typeof m === "object" ? m : {};
+  } catch { return {}; }
+}
+
+function writeSeededSkills(id, manifest) {
+  const p = path.join(agentDir(id), SEEDED_SKILLS_REL);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(manifest, null, 2));
+}
+
+// Tier of a resolved skill source dir (skill-source.js resolution order).
+function skillTierForSource(src) {
+  if (!src) return null;
+  if (src.startsWith(TEMPLATE_WORKSPACE)) return "global";
+  return src.includes(`${path.sep}teams${path.sep}`) ? "team" : "agent";
+}
+
 function seedAgentWorkspace(id, env, opts = {}) {
   const dest = agentDir(id);
   fs.mkdirSync(dest, { recursive: true });
@@ -944,8 +975,10 @@ function seedAgentWorkspace(id, env, opts = {}) {
   // already prefers it (agent-first), and the self-copy is skipped below.
   const skillsDst = path.join(dest, "skills");
   fs.mkdirSync(skillsDst, { recursive: true });
+  const seededManifest = {};
   if (selectedSkills.length > 0) {
     const ownerTeamId = opts.teamId || DEFAULT_TEAM_ID;
+    const seededAt = new Date().toISOString();
     for (const skillName of selectedSkills) {
       // Resolve agent-first (Phase 0): an agent's own skill pool
       // (/workspace/agents/<id>/skills) shadows the team's and the global one.
@@ -957,15 +990,22 @@ function seedAgentWorkspace(id, env, opts = {}) {
       }
       // The agent-tier pool IS this destination dir, so an agent-private skill
       // resolves to itself — it is already in place, and cpSync(src === dst)
-      // throws. Skip the self-copy.
-      if (path.resolve(src) === path.resolve(dst)) continue;
-      try {
-        fs.cpSync(src, dst, { recursive: true });
-      } catch (err) {
-        warnings.push(`skill ${skillName}: ${err.message}`);
+      // throws. Skip the self-copy (but still record it in the manifest).
+      if (path.resolve(src) !== path.resolve(dst)) {
+        try {
+          fs.cpSync(src, dst, { recursive: true });
+        } catch (err) {
+          warnings.push(`skill ${skillName}: ${err.message}`);
+          continue;
+        }
       }
+      seededManifest[skillName] = { tier: skillTierForSource(src), seededAt };
     }
   }
+  // Always write the manifest (even empty): its absence means "pre-manifest
+  // workspace", its presence is the activation truth for this agent.
+  try { writeSeededSkills(id, seededManifest); }
+  catch (err) { warnings.push(`seeded-skills manifest: ${err.message}`); }
 
   // 3. Patch absolute /workspace/ paths in seeded memory
   patchSeededPaths(dest);
@@ -1297,6 +1337,12 @@ function ensureEngineeringSkill(agentId) {
   try {
     fs.mkdirSync(path.dirname(dst), { recursive: true });
     fs.cpSync(src, dst, { recursive: true });
+    // Keep the seeded-skills manifest truthful for this out-of-band copy.
+    try {
+      const manifest = readSeededSkills(agentId);
+      manifest.engineering = { tier: "global", seededAt: new Date().toISOString() };
+      writeSeededSkills(agentId, manifest);
+    } catch { /* best effort */ }
     return { copied: true };
   } catch (err) {
     console.error(`[Orchestrator] Failed to copy engineering skill into ${agentId}: ${err.message}`);
@@ -1348,18 +1394,23 @@ function seedAgentWorkspaceForInstance(id, env, blueprintId, skills = []) {
 
   // Copy selected skills
   const selectedSkills = Array.isArray(skills) ? skills : [];
+  const seededManifest = {};
   if (selectedSkills.length > 0) {
     const skillsSrc = path.join(TEMPLATE_WORKSPACE, "skills");
     const skillsDst = path.join(dest, "skills");
     fs.mkdirSync(skillsDst, { recursive: true });
+    const seededAt = new Date().toISOString();
     for (const skillName of selectedSkills) {
       const skillSrc = path.join(skillsSrc, skillName);
       const skillDst = path.join(skillsDst, skillName);
       if (!fs.existsSync(skillSrc)) { warnings.push(`skill not found: ${skillName}`); continue; }
       try { fs.cpSync(skillSrc, skillDst, { recursive: true }); }
-      catch (err) { warnings.push(`skill ${skillName}: ${err.message}`); }
+      catch (err) { warnings.push(`skill ${skillName}: ${err.message}`); continue; }
+      seededManifest[skillName] = { tier: "global", seededAt };
     }
   }
+  try { writeSeededSkills(id, seededManifest); }
+  catch (err) { warnings.push(`seeded-skills manifest: ${err.message}`); }
 
   // Create local memory dir (used as staging area; content synced from blueprint API at session start)
   fs.mkdirSync(path.join(dest, "memory"), { recursive: true });
@@ -3676,6 +3727,138 @@ class Orchestrator {
       `[Orchestrator] Team ${teamId} prompt updated; pushed to ${propagated} inheriting member(s)`
     );
     return { teamId, propagated };
+  }
+
+  // ── Skill activation (team-owned skills, phase 2) ─────────────────────────
+  // Additive file sync, NOT a respawn: skills are static files the Claude CLI
+  // reads per invocation, so copying into the live workspace is enough — no
+  // container restart, no session loss (docs/knowledge-skill-activation-concept.md §4).
+  // Copy the resolved skill into one agent's workspace, update its manifest,
+  // rebuild its CLAUDE.md (the Skills gate may have flipped), and mirror the
+  // touched files into an isolated agent's dedicated volume.
+  async _syncSkillIntoWorkspace(id, cfg, skillName, { remove = false } = {}) {
+    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+    const dst = path.join(agentDir(id), "skills", skillName);
+    const manifest = readSeededSkills(id);
+    if (remove) {
+      // Never remove an agent-authored (agent-tier) skill: the workspace dir
+      // IS the agent pool — deactivation only withdraws the grant.
+      if ((manifest[skillName] || {}).tier !== "agent") {
+        try { fs.rmSync(dst, { recursive: true, force: true }); }
+        catch (err) { return { agentId: id, status: "error", error: err.message }; }
+      }
+      delete manifest[skillName];
+    } else {
+      const src = resolveSkillSourceDir(skillName, cfg.teamId || DEFAULT_TEAM_ID, { agentId: id });
+      if (!src) return { agentId: id, status: "error", error: `skill not found in pool: ${skillName}` };
+      if (path.resolve(src) !== path.resolve(dst)) {
+        try { fs.cpSync(src, dst, { recursive: true, force: true }); }
+        catch (err) { return { agentId: id, status: "error", error: err.message }; }
+      }
+      manifest[skillName] = { tier: skillTierForSource(src), seededAt: new Date().toISOString() };
+    }
+    try { writeSeededSkills(id, manifest); } catch { /* best effort */ }
+    // Rebuild CLAUDE.md from the (already saved) config so the Skills section
+    // gate + list reflect the new grant. AGENT-PROMPT.md is left untouched.
+    try {
+      const promptPath = path.join(agentDir(id), AGENT_PROMPT_FILENAME);
+      const prompt = fs.existsSync(promptPath)
+        ? fs.readFileSync(promptPath, "utf8")
+        : (cfg.systemPrompt || cfg.systemPromptTemplate || "");
+      saveAgentPrompt(id, prompt, cfg.role, env, cfg.blueprintId || null);
+    } catch (err) {
+      console.warn(`[Orchestrator] skill sync ${id}: CLAUDE.md rebuild failed: ${err.message}`);
+    }
+    // Mirror into the dedicated volume (no-op unless isolated + running).
+    // Removal can't be mirrored file-wise — the stale copy disappears at the
+    // next respawn; the rebuilt CLAUDE.md (which no longer lists the skill) IS
+    // mirrored, so the agent stops being told about it immediately.
+    await reseedAgent(id, remove ? ["CLAUDE.md"] : ["skills/" + skillName, "CLAUDE.md"]);
+    return { agentId: id, status: remove ? "removed" : "seeded" };
+  }
+
+  // (De)activate a skill for a whole team: idempotent set-insert/-remove on the
+  // team agent's `skills[]`, then fan the file sync out to every materialized
+  // member per planSkillSync (override members are skipped unless explicitly
+  // opted in via includeMembers — opting in also records the name on their
+  // skillsOverride so the grant survives the next full re-seed).
+  async setTeamSkillActive(teamId, skillName, { active = true, includeMembers = [] } = {}) {
+    const teamCfg = loadAgentConfig(teamId);
+    if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
+    if (teamCfg.role !== "team") throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
+    if (typeof skillName !== "string" || !skillName.trim()) throw new Error("skillName required");
+    const name = skillName.trim();
+
+    const list = Array.isArray(teamCfg.skills) ? teamCfg.skills : [];
+    teamCfg.skills = active
+      ? (list.includes(name) ? list : [...list, name])
+      : list.filter((s) => s !== name);
+    saveAgentConfig(teamId, teamCfg);
+    this.agentConfigs.set(teamId, { config: teamCfg });
+
+    const members = listAgentIds()
+      .map((id) => loadAgentConfig(id))
+      .filter((c) => c && c.role === "team-member" && c.parentTeamId === teamId);
+    const plan = planSkillSync({ members, skillName: name, includeMembers: active ? includeMembers : [] });
+
+    const results = [];
+    for (const step of plan) {
+      const cfg = members.find((m) => m.id === step.agentId);
+      if (step.action === "stub") {
+        // Consistent by construction: the team list already carries (or no
+        // longer carries) the name; the normal seed path applies it at enable.
+        results.push({ agentId: step.agentId, status: "stub" });
+        continue;
+      }
+      if (step.action === "skip-override") {
+        // On deactivation an override member that carries the name keeps it —
+        // its own list is its grant; on activation it is surfaced for opt-in.
+        results.push({ agentId: step.agentId, status: "skipped-override" });
+        continue;
+      }
+      if (step.action === "sync-override") {
+        // Explicit opt-in: persist the name on the member's own list so the
+        // grant survives the next full re-seed, then sync like an inheritor.
+        if (!cfg.skillsOverride.includes(name)) {
+          cfg.skillsOverride = [...cfg.skillsOverride, name];
+          saveAgentConfig(step.agentId, cfg);
+          this.agentConfigs.set(step.agentId, { config: cfg });
+        }
+      }
+      results.push(await this._syncSkillIntoWorkspace(step.agentId, cfg, name, { remove: !active }));
+    }
+    console.log(
+      `[Orchestrator] Team ${teamId}: skill '${name}' ${active ? "activated" : "deactivated"} — ` +
+      results.map((r) => `${r.agentId}:${r.status}`).join(", ") || "no members"
+    );
+    return { teamId, skillName: name, active, members: results };
+  }
+
+  // (De)activate a skill on a single non-member agent (standalone /
+  // orchestrator): same idempotent list edit + file sync, one workspace.
+  async setAgentSkillActive(id, skillName, { active = true } = {}) {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) throw new Error(`Agent '${id}' not found`);
+    if (cfg.role === "team-member") {
+      throw new Error(`Agent '${id}' is a team-member — (de)activate on its team, or opt it in via includeMembers`);
+    }
+    if (cfg.role === "team") throw new Error(`Agent '${id}' is a team — use the team route`);
+    if (typeof skillName !== "string" || !skillName.trim()) throw new Error("skillName required");
+    const name = skillName.trim();
+
+    const list = Array.isArray(cfg.skills) ? cfg.skills : [];
+    cfg.skills = active
+      ? (list.includes(name) ? list : [...list, name])
+      : list.filter((s) => s !== name);
+    saveAgentConfig(id, cfg);
+    this.agentConfigs.set(id, { config: cfg });
+
+    // A stub (no token) has no workspace to sync — the list edit is enough.
+    const result = cfg.token
+      ? await this._syncSkillIntoWorkspace(id, cfg, name, { remove: !active })
+      : { agentId: id, status: "stub" };
+    console.log(`[Orchestrator] Agent ${id}: skill '${name}' ${active ? "activated" : "deactivated"} (${result.status})`);
+    return { agentId: id, skillName: name, active, result };
   }
 
   // Scan an orchestrator agent's briefings directory and ensure a disabled
@@ -6957,6 +7140,78 @@ async function main() {
           const status = /not found/i.test(err.message) ? 404
             : /not a team/i.test(err.message) ? 400
             : /already exists/i.test(err.message) ? 409
+            : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // POST /internal/teams/:teamId/skills/{activate,deactivate} — team-owned
+    // skill (de)activation (phase 2): idempotent list edit on the team agent's
+    // skills[] + additive file sync into every materialized member workspace.
+    // Body: { skillName, includeMembers? } (includeMembers: override members
+    // to opt in explicitly).
+    const teamSkillMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/skills\/(activate|deactivate)$/);
+    if (teamSkillMatch) {
+      const teamId = decodeURIComponent(teamSkillMatch[1]);
+      const active = teamSkillMatch[2] === 'activate';
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        let payload;
+        try { payload = JSON.parse(body || '{}'); }
+        catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `Invalid JSON body: ${err.message}` }));
+          return;
+        }
+        try {
+          const result = await orchestrator.setTeamSkillActive(teamId, payload?.skillName, {
+            active,
+            includeMembers: Array.isArray(payload?.includeMembers) ? payload.includeMembers : [],
+          });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] setTeamSkillActive error for ${teamId}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404
+            : /not a team|required/i.test(err.message) ? 400
+            : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // POST /internal/agents/:id/skills/{activate,deactivate} — same for a
+    // single non-member agent (standalone / orchestrator).
+    const agentSkillMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/agents\/([^/]+)\/skills\/(activate|deactivate)$/);
+    if (agentSkillMatch) {
+      const agentId = decodeURIComponent(agentSkillMatch[1]);
+      const active = agentSkillMatch[2] === 'activate';
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        let payload;
+        try { payload = JSON.parse(body || '{}'); }
+        catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `Invalid JSON body: ${err.message}` }));
+          return;
+        }
+        try {
+          const result = await orchestrator.setAgentSkillActive(agentId, payload?.skillName, { active });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] setAgentSkillActive error for ${agentId}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404
+            : /team-member|is a team|required/i.test(err.message) ? 400
             : 500;
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));

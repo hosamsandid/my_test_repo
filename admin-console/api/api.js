@@ -2889,8 +2889,67 @@ app.get('/api/knowledge/graph', async (req, res) => {
   const includeArchived = req.query.includeArchived === '1' || req.query.includeArchived === 'true';
   const graph = buildKnowledgeGraph({ scope: parsed.scope, entries, skills, agents, now: Date.now(), warnings, includeArchived });
   augmentPendingPromotions(graph, teamIds);
+  augmentSkillActivation(graph, parsed);
   res.json(graph);
 });
+
+// Overlay the ACTIVATION truth on every skill node of a team-scoped graph
+// (team-owned skills, phase 2): is the skill in the team agent's `skills[]`,
+// and which members actually carry it in their workspace? Member state is read
+// from the seeded-skills manifest the orchestrator maintains
+// (/workspace/agents/<id>/.aee/seeded-skills.json) — the grant list alone
+// can't tell whether a running member was seeded before or after a name was
+// added. Also adds ghost nodes for adopted global skills that the lane filter
+// wouldn't render (active list ∌ origin team). Mutates `graph` in place; no-op
+// outside team scope or when the squad has no team agent.
+function augmentSkillActivation(graph, parsed) {
+  if (!graph || !Array.isArray(graph.nodes) || parsed.kind !== 'team') return;
+  const teamId = parsed.id;
+  const teamCfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null);
+  if (!teamCfg || teamCfg.role !== 'team') return;
+  const teamSkills = Array.isArray(teamCfg.skills) ? teamCfg.skills : [];
+
+  let members = [];
+  try {
+    members = fs.readdirSync(AGENTS_DIR)
+      .map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null))
+      .filter(c => c && c.role === 'team-member' && c.parentTeamId === teamId);
+  } catch { /* no agents dir */ }
+  const manifests = new Map(members.map(m => [
+    m.id,
+    readJsonFile(path.join(AGENTS_DIR, m.id, '.aee', 'seeded-skills.json'), {}) || {},
+  ]));
+
+  // Ghost nodes for active-list skills the lane filter didn't render
+  // (adopted global skills with a foreign/no origin team).
+  const skillNodes = graph.nodes.filter(n => n.kind === 'skill');
+  const rendered = new Set(skillNodes.map(n => n.label));
+  for (const name of teamSkills) {
+    if (rendered.has(name)) continue;
+    const node = { id: `skill:${name}`, lane: 'global', kind: 'skill', label: name, tier: 'global', adopted: true };
+    graph.nodes.push(node);
+    skillNodes.push(node);
+  }
+
+  for (const node of skillNodes) {
+    const name = node.label;
+    const inList = teamSkills.includes(name);
+    node.activation = {
+      active: inList,
+      members: members.map(m => {
+        const hasOverride = Array.isArray(m.skillsOverride);
+        const granted = hasOverride ? m.skillsOverride.includes(name) : inList;
+        const seeded = !!(manifests.get(m.id) || {})[name];
+        const state = !m.token ? 'stub'
+          : (hasOverride && !granted) ? 'excluded-override'
+          : seeded ? 'active'
+          : granted ? 'pending'
+          : 'inactive';
+        return { agentId: m.id, displayName: m.displayName || m.id, state };
+      }),
+    };
+  }
+}
 
 // Overlay "needs review" edges + ghost skill nodes (Phase 4) for open promotion
 // candidates whose converged fact is a node in this graph — the pending promotion
@@ -3387,6 +3446,47 @@ app.get('/api/agents/:id/private-skills', (req, res) => {
   skills.sort((a, b) => a.name.localeCompare(b.name));
   res.json({ agentId: id, teamId, skills });
 });
+
+// ── Skill (de)activation (team-owned skills, phase 2) ───────────────────────
+// One-click activation from the Knowledge page: proxies the orchestrator's
+// idempotent list-edit + additive workspace file sync. `teamId` is the SQUAD
+// (team agent id) the Knowledge page is scoped to; when the target turns out
+// to be a standalone agent the per-agent route is used instead. Covered by the
+// audit trail (#305) like every /api mutation.
+async function proxySkillActivation(req, res, active) {
+  const { teamId, skillName, includeMembers } = req.body || {};
+  if (typeof teamId !== 'string' || !AGENT_ID_RE.test(teamId)) {
+    return res.status(400).json({ error: 'teamId (agent id of the team) required' });
+  }
+  if (typeof skillName !== 'string' || !SKILL_NAME_RE.test(skillName)) {
+    return res.status(400).json({ error: 'skillName required (letters, digits, -, _)' });
+  }
+  const cfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null);
+  if (!cfg) return res.status(404).json({ error: 'team not found' });
+  const scope = getScope(req);
+  if (!visibleAgent(scope, cfg)) return res.status(403).json({ error: 'forbidden' });
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  const route = cfg.role === 'team'
+    ? `/internal/teams/${encodeURIComponent(teamId)}/skills/${active ? 'activate' : 'deactivate'}`
+    : `/internal/agents/${encodeURIComponent(teamId)}/skills/${active ? 'activate' : 'deactivate'}`;
+  try {
+    const resp = await fetch(`${orchestratorUrl}${route}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        skillName,
+        ...(Array.isArray(includeMembers) ? { includeMembers } : {}),
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+}
+
+app.post('/api/knowledge/activate', apiLimiter, (req, res) => proxySkillActivation(req, res, true));
+app.post('/api/knowledge/deactivate', apiLimiter, (req, res) => proxySkillActivation(req, res, false));
 
 // The environment a team shares (from any of its agents' configs). Mirrors the
 // orchestrator's resolveTeamEnvId; used only to read/display config here.
@@ -4505,6 +4605,16 @@ app.post('/api/skills/install', (req, res) => {
   } catch (err) {
     return res.status(500).json({ error: `Failed to install skill: ${err.message}` });
   }
+  // Keep the seeded-skills manifest truthful (activation status reads it).
+  // NOTE: install is an ad-hoc workspace copy — it does not touch the agent's
+  // grant, so a full re-seed drops it unless the operator activates it too.
+  try {
+    const manifestPath = path.join(agentDirPath, '.aee', 'seeded-skills.json');
+    const manifest = readJsonFile(manifestPath, {}) || {};
+    manifest[name] = { tier: 'global', seededAt: new Date().toISOString() };
+    fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
+    writeJsonAtomic(manifestPath, manifest);
+  } catch { /* best effort */ }
   // Mirror the installed skill into an isolated agent's dedicated volume so the
   // running agent picks it up on its next message (#185 item 5).
   notifyAgentReseed(agentId, ['skills/' + name]);

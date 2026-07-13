@@ -58,4 +58,31 @@ function migrateSkillGrant(cfg, env) {
   return { ...cfg, skills: inherited };
 }
 
-module.exports = { effectiveSkills, hasSkillGrant, migrateSkillGrant };
+// Plan the per-member fan-out of a team skill (de)activation. Pure: takes the
+// member configs, returns one action per member — the orchestrator executes.
+//
+//   sync           — copy/remove the skill in this member's workspace
+//   sync-override  — member has a skillsOverride but was explicitly opted in
+//                    (activate: also append to the override; deactivate: remove)
+//   skip-override  — member keeps its own list; surfaced to the UI, opt-in later
+//   stub           — not materialized; consistent by construction (the team
+//                    list already carries the name, the normal seed path
+//                    delivers it at enable)
+function planSkillSync({ members = [], skillName, includeMembers = [] } = {}) {
+  const optIn = new Set(includeMembers);
+  return members
+    .filter((m) => m && m.id)
+    .map((m) => {
+      if (!m.token) return { agentId: m.id, action: "stub" };
+      if (Array.isArray(m.skillsOverride)) {
+        // An override member already carrying the name is treated like an
+        // inheriting member (its grant contains the skill either way).
+        if (m.skillsOverride.includes(skillName)) return { agentId: m.id, action: "sync" };
+        if (optIn.has(m.id)) return { agentId: m.id, action: "sync-override" };
+        return { agentId: m.id, action: "skip-override" };
+      }
+      return { agentId: m.id, action: "sync" };
+    });
+}
+
+module.exports = { effectiveSkills, hasSkillGrant, migrateSkillGrant, planSkillSync };

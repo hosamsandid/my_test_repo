@@ -3127,6 +3127,24 @@ function agentCreatePr(id, env, body = {}) {
     throw e;
   }
 
+  // The branch is now on the remote (SSH or PAT — whichever the env carries).
+  // `gh pr create` additionally needs a GitHub PAT. Pre-check it here so a
+  // missing/unresolvable token surfaces as a distinct, actionable error rather
+  // than an opaque `gh` auth failure indistinguishable from a real git reject.
+  // Note this gate is only on the PR step — SSH `push` never reaches here.
+  const tokenStatus = agentGitOps.githubTokenStatus({ env, ghTokensDir: GH_TOKENS_DIR });
+  if (!tokenStatus.resolvable) {
+    const e = new Error(
+      `no GitHub token available to open a PR for agent '${id}' ` +
+      `(environment '${env?.id || "none"}', reason: ${tokenStatus.reason}). ` +
+      `The branch '${head}' was pushed successfully — attach a GitHub PAT to the ` +
+      `environment, or open the PR manually with 'gh pr create --head ${head}'.`,
+    );
+    e.noGithubToken = true;
+    e.branchPushed = head;
+    throw e;
+  }
+
   const marker = `<!-- agent: ${id} -->`;
   let prBody = typeof body.body === "string" ? body.body : "";
   if (!prBody.includes(marker)) prBody = `${prBody.trimEnd()}\n\n${marker}\n`;
@@ -6980,12 +6998,23 @@ async function main() {
           res.end(JSON.stringify(result));
         } catch (err) {
           const msg = (err && err.message) ? err.message : String(err);
+          // 424 (Failed Dependency) + stable code for a missing GitHub token —
+          // distinct from a real git failure so the agent can tell "no PAT in
+          // this environment" apart from a non-fast-forward reject;
           // 409 for git/gh failures the agent can act on (non-fast-forward,
           // auth, etc.); 400 for request/config problems.
-          const status = err && err.gitFailed ? 409 : 400;
+          const payload = { ok: false, error: msg };
+          let status = 400;
+          if (err && err.noGithubToken) {
+            status = 424;
+            payload.code = 'no-github-token';
+            if (err.branchPushed) payload.branchPushed = err.branchPushed;
+          } else if (err && err.gitFailed) {
+            status = 409;
+          }
           console.warn(`[Orchestrator] git ${gitPushMatch ? 'push' : 'pr'} for ${id}: ${msg}`);
           res.writeHead(status, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: msg }));
+          res.end(JSON.stringify(payload));
         }
       });
       return;

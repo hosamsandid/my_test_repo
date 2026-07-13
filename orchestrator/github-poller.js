@@ -172,6 +172,27 @@ function effectiveHorizon(trigger, triggersMtime) {
   return (trigger && (trigger.activatedAt || trigger.createdAt)) || triggersMtime || null;
 }
 
+// #525: one-time history-horizon backfill for legacy github-event triggers. A
+// trigger authored before the #320/#446 activation stamps has neither `createdAt`
+// nor `activatedAt`, so `effectiveHorizon` falls back to the triggers.json mtime —
+// a volatile value that any unrelated rewrite (member rebuild, reconcile, edit)
+// bumps to "now", silently dropping events that arrived just before the rewrite.
+// Stamping both fields once with a STABLE value (the caller passes the file's
+// current mtime, which is exactly what the horizon resolves to right now, so no
+// backlog is replayed) pins the horizon so a later rewrite can no longer move it.
+// Pure and idempotent: only github-event triggers that lack `createdAt` are
+// touched; an already-stamped set returns `changed: false` so re-runs write nothing.
+function backfillHorizonStamps(triggers, stampIso) {
+  if (!Array.isArray(triggers) || !stampIso) return { triggers, changed: false };
+  let changed = false;
+  const out = triggers.map((t) => {
+    if (!t || t.type !== 'github-event' || t.createdAt) return t;
+    changed = true;
+    return { ...t, createdAt: stampIso, activatedAt: t.activatedAt || stampIso };
+  });
+  return { triggers: changed ? out : triggers, changed };
+}
+
 // #320-B: is `eventCreatedAt` recent enough to reach a subscriber whose horizon
 // is `horizonIso`? The horizon is widened by `graceMs` to absorb late/out-of-
 // order delivery. Missing horizon or timestamp fails open (deliver) — the same
@@ -997,6 +1018,7 @@ module.exports = {
   eventKey,
   conversationKey,
   effectiveHorizon,
+  backfillHorizonStamps,
   passesHorizon,
   selectFreshEvents,
   planBurstHandoffs,

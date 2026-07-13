@@ -1,11 +1,12 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { PanelRightClose, ScrollText, FolderTree, CalendarClock, Activity, FileText, MoreHorizontal } from 'lucide-react';
+import { PanelRightClose, ScrollText, FolderTree, CalendarClock, Activity, FileText, MoreHorizontal, Brain } from 'lucide-react';
 import SessionLogPanel from './SessionLogPanel';
 import WorkspaceBrowser from './WorkspaceBrowser';
 import TriggersPanel from './TriggersPanel';
 import RunningSessionsPanel from './RunningSessionsPanel';
 import PromptPreviewPanel from './PromptPreviewPanel';
+import AgentKnowledgePanel from './AgentKnowledgePanel';
 import { apiCall } from '../../hooks/useApi';
 
 const TAB_KEY = 'agentChat.rightRailTab';
@@ -14,7 +15,7 @@ const SESSION_POLL_MS = 3_000;
 // as a layout budget in the fit computation; the button sizes itself.
 const OVERFLOW_BTN_WIDTH = 40;
 
-const TAB_KEYS = ['log', 'workspace', 'triggers', 'sessions', 'prompt'];
+const TAB_KEYS = ['log', 'workspace', 'triggers', 'sessions', 'prompt', 'knowledge'];
 
 /**
  * Tabbed right rail for the agent chat page.
@@ -40,7 +41,7 @@ const TAB_KEYS = ['log', 'workspace', 'triggers', 'sessions', 'prompt'];
  */
 export default function RightRail({
   agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate,
-  todoCloseSignal = 0, workspaceRefreshKey = 0,
+  todoCloseSignal = 0, workspaceRefreshKey = 0, knowledgeRefreshKey = 0, openTabRequest = null,
 }) {
   const [tab, setTab] = useState(() => {
     try {
@@ -52,6 +53,12 @@ export default function RightRail({
   useEffect(() => {
     try { localStorage.setItem(TAB_KEY, tab); } catch { /* ignore */ }
   }, [tab]);
+
+  // External tab request (e.g. clicking the "N learned" badge in the chat
+  // header switches to the Knowledge tab). `ts` disambiguates repeat clicks.
+  useEffect(() => {
+    if (openTabRequest && TAB_KEYS.includes(openTabRequest.tab)) setTab(openTabRequest.tab);
+  }, [openTabRequest]);
 
   // Lightweight poll of just the session COUNT — so the "Sessions" tab
   // can show a badge regardless of which tab is currently visible. The
@@ -82,6 +89,7 @@ export default function RightRail({
     { key: 'triggers', icon: <CalendarClock size={13} />, label: 'Triggers' },
     { key: 'sessions', icon: <Activity size={13} />, label: 'Sessions', badge: sessionCount > 0 ? sessionCount : null },
     { key: 'prompt', icon: <FileText size={13} />, label: 'Prompt' },
+    { key: 'knowledge', icon: <Brain size={13} />, label: 'Knowledge' },
   ], [sessionCount]);
 
   // --- Overflow measurement ---------------------------------------------
@@ -325,6 +333,9 @@ export default function RightRail({
         </div>
         <div style={{ display: tab === 'prompt' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           <PromptPreviewPanel agentId={agentId} embedded />
+        </div>
+        <div style={{ display: tab === 'knowledge' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+          <AgentKnowledgePanel agentId={agentId} active={tab === 'knowledge'} refreshKey={knowledgeRefreshKey} />
         </div>
       </div>
     </div>

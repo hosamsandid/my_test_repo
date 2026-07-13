@@ -70,7 +70,6 @@ export default function PatternsCatalog() {
 }
 
 const pageStyle = {
-  padding: 'var(--eb-space-8)',
   maxWidth: 960,
   margin: '0 auto',
 };

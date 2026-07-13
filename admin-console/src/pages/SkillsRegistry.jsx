@@ -497,8 +497,8 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
       const res = await fetch(`/api/skills/${encodeURIComponent(skill.name)}?${params}`, { method: 'DELETE' });
       const data = await res.json();
       if (!res.ok) {
-        if (res.status === 409 && data.environments) {
-          setDeleteError(`Skill is in use by: ${data.environments.join(', ')}`);
+        if (res.status === 409 && data.agents) {
+          setDeleteError(`Skill is in use by agents: ${data.agents.join(', ')}`);
           setDeleting(false);
           return;
         }
@@ -621,7 +621,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
             </span>
           )}
           <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
-            Copies the whole skill directory (scripts included) into the agent. It picks the skill up on its next message. Note: a later workspace reset re-seeds only the skills listed in the agent's environment.
+            Copies the whole skill directory (scripts included) into the agent. It picks the skill up on its next message. Note: a later workspace reset re-seeds only the skills granted to the agent (or its team).
           </span>
           {installError && (
             <span role="alert" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>{installError}</span>
@@ -883,8 +883,8 @@ export default function SkillsRegistry() {
       const res = await fetch(`/api/skills/${encodeURIComponent(rowDeleteTarget.name)}?${params}`, { method: 'DELETE' });
       const data = await res.json();
       if (!res.ok) {
-        if (res.status === 409 && data.environments) {
-          setRowDeleteError(`Skill is in use by: ${data.environments.join(', ')}`);
+        if (res.status === 409 && data.agents) {
+          setRowDeleteError(`Skill is in use by agents: ${data.agents.join(', ')}`);
           setRowDeleting(false);
           return;
         }

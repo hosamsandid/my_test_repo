@@ -146,7 +146,7 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
 function emptyDraftBundle(name) {
   return {
     processTemplateVersion: VERSION,
-    name: name || 'Untitled process',
+    name: name || 'Untitled flow',
     level: 'template',
     roles: [],
     gates: [],

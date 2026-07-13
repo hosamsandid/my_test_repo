@@ -4,7 +4,7 @@ import {
   Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight,
   Boxes, Key, MessageCircle, Github, Layers, GitBranch,
-  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2, History,
+  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2, Brain, History, Wrench,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
@@ -52,6 +52,7 @@ const NAV = [
     { path: '/team-setup',   label: 'Team Wizard',         Icon: Users2 },
     { path: '/agents',       label: 'Agents',              Icon: Layers },
     { path: '/flows',         label: 'Flows',               Icon: GitBranch },
+    { path: '/knowledge',    label: 'Knowledge',           Icon: Brain },
     // { path: '/orchestrator-wizard', label: 'Orchestrator Wizard', Icon: Wand2 },
   ]},
   { section: 'WORKSPACES', items: [
@@ -67,6 +68,7 @@ const NAV = [
     { path: '/models',       label: 'Model Providers',     Icon: Sparkles },
     { path: '/mcp',          label: 'MCP Servers',         Icon: Server },
     { path: '/patterns',     label: 'Patterns Catalog',    Icon: BookOpen },
+    { path: '/maintenance-mode', label: 'Maintenance Mode', Icon: Wrench },
   ]},
 ];
 
@@ -75,6 +77,7 @@ const BREADCRUMBS = {
   '/team-setup':   'Team Wizard',
   '/agents':       'Agents',
   '/flows':        'Flows',
+  '/knowledge':    'Knowledge',
   '/chats':        'Agent Chat',
   '/environments': 'Working Environments',
   '/ssh-keys':     'SSH Keys',
@@ -89,6 +92,7 @@ const BREADCRUMBS = {
   '/patterns/sdlc':          'Patterns Catalog / SDLC',
   '/patterns/mainframe':     'Patterns Catalog / Mainframe Modernization',
   '/orchestrator-wizard': 'Orchestrator Wizard',
+  '/maintenance-mode': 'Maintenance Mode',
 };
 
 function breadcrumbFor(pathname) {

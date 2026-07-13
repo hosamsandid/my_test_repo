@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
-import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, Boxes, FileText, Plus, Trash2, Pencil, Check } from 'lucide-react';
+import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, Boxes, FileText, Plus, Trash2, Pencil, Check, Upload } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { FlowGraph } from './process/FlowGraph';
 
@@ -68,7 +68,7 @@ function HelpPanel({ onClose }) {
               Flows hosts two kinds of orchestration, selectable in the left list:
             </p>
             <ul style={{ paddingLeft: 'var(--eb-space-4)', margin: 0 }}>
-              <li><strong>Process graphs</strong> — for each <strong>Team</strong> (and editable <strong>Drafts</strong>),
+              <li><strong>Flow graphs</strong> — for each <strong>Team</strong> (and editable <strong>Drafts</strong>),
                 a label-driven graph of which agent reacts to which event, in what order.</li>
               <li><strong>BriefingPack flows</strong> — an <strong>Orchestrator</strong> agent that monitors a
                 directory of BriefingPacks and renders their dependency graph.</li>
@@ -77,7 +77,7 @@ function HelpPanel({ onClose }) {
 
           <section style={{ marginBottom: 'var(--eb-space-5)' }}>
             <h3 style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-md)' }}>
-              Process graphs (Teams &amp; Drafts)
+              Flow graphs (Teams &amp; Drafts)
             </h3>
             <p style={{ margin: '0 0 var(--eb-space-2)' }}>
               Selecting a <strong>Team</strong> shows its live orchestration graph. Agents don't call each other
@@ -85,7 +85,7 @@ function HelpPanel({ onClose }) {
               <em> listens</em> on it, and that wiring is the graph.
             </p>
             <p style={{ margin: 0 }}>
-              Click <strong>New process</strong> to author a <strong>Draft</strong> from scratch (add roles, then
+              Click <strong>New flow</strong> to author a <strong>Draft</strong> from scratch (add roles, then
               wire hand-offs — GitHub PR/Issue channels, labels, data flows, human-approval gates on the
               edges), then <strong>Materialize</strong> it into a real team. The read-only <strong>Role templates</strong> blueprint shows the catalog wiring before any
               team exists.
@@ -122,7 +122,7 @@ function HelpPanel({ onClose }) {
               red dashed edges are <em>dependencies</em> (a BP can only start once its
               upstream BPs are done) and green edges are <em>data flow</em> (one BP's
               output artifact is another's input). It is the same unified viewer used
-              for process graphs.
+              for flow graphs.
             </p>
           </section>
 
@@ -130,9 +130,9 @@ function HelpPanel({ onClose }) {
             <h3 style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-md)' }}>
               How do you create one?
             </h3>
-            <p style={{ margin: '0 0 var(--eb-space-1)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>Process graph</p>
+            <p style={{ margin: '0 0 var(--eb-space-1)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>Flow graph</p>
             <ol style={{ paddingLeft: 'var(--eb-space-4)', margin: '0 0 var(--eb-space-3)' }}>
-              <li>Click <strong>New process</strong> to start a draft, or pick an existing <strong>Team</strong>.</li>
+              <li>Click <strong>New flow</strong> to start a draft, or pick an existing <strong>Team</strong>.</li>
               <li>Add roles and wire hand-offs, then <strong>Materialize</strong> the draft into a team.</li>
             </ol>
             <p style={{ margin: '0 0 var(--eb-space-1)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>BriefingPack flow</p>
@@ -202,8 +202,8 @@ function InfoBanner({ onDismiss }) {
         Flows hosts two kinds of orchestration, selectable on the left:
       </p>
       <p style={{ margin: '0 0 var(--eb-space-2)' }}>
-        <strong>Process graphs</strong> — pick a <strong>Team</strong> to see its label-driven orchestration graph
-        (which agent reacts to which event, in what order), or click <strong>New process</strong> to author a
+        <strong>Flow graphs</strong> — pick a <strong>Team</strong> to see its label-driven orchestration graph
+        (which agent reacts to which event, in what order), or click <strong>New flow</strong> to author a
         <strong> Draft</strong> from scratch and materialize it into a team.
       </p>
       <p style={{ margin: '0 0 var(--eb-space-2)' }}>
@@ -456,10 +456,50 @@ export default function Briefings() {
 
   async function newProcess() {
     try {
-      const d = await apiCall('POST', '/api/process/drafts', { name: 'Untitled process' });
+      const d = await apiCall('POST', '/api/process/drafts', { name: 'Untitled flow' });
       refetchDrafts();
       setSearchParams({ proc: `draft:${d.id}` });
     } catch { /* surfaced elsewhere; keep the list usable */ }
+  }
+
+  // Import a previously-exported process-template JSON (#512) — the entry
+  // point lives here, next to "New process", rather than inside an
+  // already-open flow (importing always creates a brand-new flow, so the
+  // previously-open one was irrelevant context). Validation/preview logic is
+  // unchanged from the former in-editor flow, just moved up a level: on
+  // success, `ProcessGraphPanel` is mounted with scope 'import' to render the
+  // read-only preview from `pendingImport`.
+  const importInputRef = useRef(null);
+  const [pendingImport, setPendingImport] = useState(null); // { bundle, graph }
+  const [importError, setImportError] = useState(null);
+  const [importBusy, setImportBusy] = useState(false);
+
+  const clearPendingImport = useCallback(() => setPendingImport(null), []);
+  const closeImportPreview = useCallback(() => setSearchParams({}), [setSearchParams]);
+
+  async function onImportFile(e) {
+    setImportError(null);
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-importing the same file
+    if (!file) return;
+    let bundle;
+    try { bundle = JSON.parse(await file.text()); }
+    catch { setImportError('Not valid JSON.'); return; }
+    setImportBusy(true);
+    try {
+      const res = await fetch('/api/flows/graph', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ processTemplate: bundle }),
+      });
+      const g = await res.json();
+      if (!res.ok) { setImportError(g.error || `HTTP ${res.status}`); return; }
+      setPendingImport({ bundle, graph: g });
+      setSearchParams({ proc: 'import' });
+    } catch (err) {
+      setImportError(err.message);
+    } finally {
+      setImportBusy(false);
+    }
   }
 
   async function deleteDraft(d) {
@@ -625,20 +665,47 @@ export default function Briefings() {
             </div>
 
             <div style={{ flex: 1, overflowY: 'auto' }}>
-              {/* Start a new process (a draft) from scratch */}
-              <div style={{ padding: 'var(--eb-space-3) var(--eb-space-3) var(--eb-space-1)' }}>
+              {/* Start a new process (a draft) from scratch, or import a
+                  previously-exported one (#512) — both create flows, so both
+                  live here, side by side, rather than Import being reachable
+                  only from inside an already-open flow. */}
+              <div style={{ padding: 'var(--eb-space-3) var(--eb-space-3) var(--eb-space-1)', display: 'flex', gap: 'var(--eb-space-2)' }}>
                 <button
                   onClick={newProcess}
                   style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, width: '100%',
-                    padding: 'var(--eb-space-2)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+                    flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                    padding: 'var(--eb-space-2) var(--eb-space-1)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
                     border: 'none', borderRadius: 'var(--eb-radius-md)', cursor: 'pointer',
                     fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+                    whiteSpace: 'nowrap',
                   }}
                 >
-                  <Plus size={15} /> New process
+                  <Plus size={15} /> New flow
+                </button>
+                <input
+                  ref={importInputRef} type="file" accept="application/json,.json"
+                  onChange={onImportFile} style={{ display: 'none' }}
+                />
+                <button
+                  onClick={() => importInputRef.current?.click()}
+                  disabled={importBusy}
+                  style={{
+                    flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                    padding: 'var(--eb-space-2) var(--eb-space-1)', background: 'var(--eb-bg-surface)', color: 'var(--eb-text-secondary)',
+                    border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+                    cursor: importBusy ? 'not-allowed' : 'pointer', opacity: importBusy ? 0.6 : 1,
+                    fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  <Upload size={15} /> {importBusy ? 'Importing…' : 'Import'}
                 </button>
               </div>
+              {importError && (
+                <div style={{ padding: '0 var(--eb-space-3) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>
+                  {importError}
+                </div>
+              )}
 
               {/* Teams — each team is a process (live orchestration graph) */}
               <SectionHeader>Teams</SectionHeader>
@@ -663,7 +730,7 @@ export default function Briefings() {
               <SectionHeader>Drafts</SectionHeader>
               {drafts.length === 0 ? (
                 <div style={{ padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-                  No drafts. Use “New process”.
+                  No drafts. Use “New flow”.
                 </div>
               ) : (
                 drafts.map(d => (
@@ -735,6 +802,9 @@ export default function Briefings() {
                 scope={proc}
                 onNavigate={selectProc}
                 onDraftsChanged={refetchDrafts}
+                pendingImport={pendingImport}
+                onImportConsumed={clearPendingImport}
+                onImportClosed={closeImportPreview}
               />
             </Suspense>
           ) : !selectedAgent ? (
@@ -751,7 +821,7 @@ export default function Briefings() {
               <button
                 onClick={importBriefings}
                 disabled={importing}
-                title="Import this BriefingPack hierarchy as an editable process draft"
+                title="Import this BriefingPack hierarchy as an editable flow draft"
                 style={{
                   position: 'absolute', top: 'var(--eb-space-3)', right: 'var(--eb-space-3)', zIndex: 5,
                   display: 'inline-flex', alignItems: 'center', gap: 6,

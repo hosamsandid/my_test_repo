@@ -9,7 +9,7 @@ const { makeSkillSourceResolver } = require('./skill-source');
 
 const WS = '/workspace';
 const TW = '/template-workspace';
-const { teamSkillsDir, resolveSkillSourceDir } = makeSkillSourceResolver({
+const { agentSkillsDir, teamSkillsDir, resolveSkillSourceDir } = makeSkillSourceResolver({
   workspace: WS, templateWorkspace: TW, defaultTeamId: 'default',
 });
 
@@ -56,4 +56,49 @@ test('default team resolves against /workspace/teams/default then global', () =>
   const globalPath = path.join(TW, 'skills', 'engineering');
   const r = resolveSkillSourceDir('engineering', 'default', { existsSync: fakeExists(new Set([globalPath])) });
   assert.equal(r, globalPath);
+});
+
+// --- Agent tier (Knowledge Flow, Phase 0) -----------------------------------
+
+test('agentSkillsDir builds the per-agent pool path', () => {
+  assert.equal(agentSkillsDir('cobol-agent'), path.join(WS, 'agents', 'cobol-agent', 'skills'));
+});
+
+test('agent pool wins over both team and global', () => {
+  const agentPath = path.join(WS, 'agents', 'dev-1', 'skills', 'cobol');
+  const teamPath = path.join(WS, 'teams', 'payments', 'skills', 'cobol');
+  const globalPath = path.join(TW, 'skills', 'cobol');
+  const r = resolveSkillSourceDir('cobol', 'payments', {
+    agentId: 'dev-1',
+    existsSync: fakeExists(new Set([agentPath, teamPath, globalPath])),
+  });
+  assert.equal(r, agentPath);
+});
+
+test('with agentId set but no agent copy, falls through to team then global', () => {
+  const teamPath = path.join(WS, 'teams', 'payments', 'skills', 'cobol');
+  const r = resolveSkillSourceDir('cobol', 'payments', {
+    agentId: 'dev-1',
+    existsSync: fakeExists(new Set([teamPath])),
+  });
+  assert.equal(r, teamPath);
+});
+
+test('an agent-private skill is invisible to another agent', () => {
+  const agentPath = path.join(WS, 'agents', 'dev-1', 'skills', 'private');
+  const r = resolveSkillSourceDir('private', 'payments', {
+    agentId: 'dev-2',
+    existsSync: fakeExists(new Set([agentPath])),
+  });
+  assert.equal(r, null);
+});
+
+test('omitting agentId reproduces the pre-Phase-0 two-tier behaviour', () => {
+  const agentPath = path.join(WS, 'agents', 'dev-1', 'skills', 'cobol');
+  const teamPath = path.join(WS, 'teams', 'payments', 'skills', 'cobol');
+  // Even though an agent copy exists, without agentId it must not be considered.
+  const r = resolveSkillSourceDir('cobol', 'payments', {
+    existsSync: fakeExists(new Set([agentPath, teamPath])),
+  });
+  assert.equal(r, teamPath);
 });

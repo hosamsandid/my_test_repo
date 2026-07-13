@@ -97,6 +97,27 @@ class FormatAskUserQuestion(unittest.TestCase):
         self.assertNotIn("no label", out)
 
 
+class BuildHarvestHint(unittest.TestCase):
+    fn = staticmethod(entrypoint.build_harvest_hint)
+
+    def test_level_0_is_empty(self):
+        self.assertEqual(self.fn(0), "")
+
+    def test_negative_or_noninteger_is_empty(self):
+        self.assertEqual(self.fn(-1), "")
+        self.assertEqual(self.fn("1"), "")  # not an int -> today's behaviour
+        self.assertEqual(self.fn(None), "")
+
+    def test_level_1_mentions_knowledge_add(self):
+        out = self.fn(1)
+        self.assertIn("knowledge add", out)
+        self.assertIn("knowledge search", out)
+
+    def test_higher_levels_still_harvest(self):
+        for lvl in (2, 3):
+            self.assertIn("knowledge add", self.fn(lvl))
+
+
 class GithubEventDetail(unittest.TestCase):
     def test_issues_event_includes_number_title_url(self):
         detail = github_event_detail("issues.labeled", {
@@ -351,6 +372,185 @@ class MaintenanceModeGating(unittest.IsolatedAsyncioTestCase):
             await scheduler._cron_runner({"id": "c1", "type": "cron"}, "* * * * *")
         execute_mock.assert_called_once()
         self.assertEqual(len(maintenance_calls), 2)
+
+
+class ResultEventContextTokens(unittest.TestCase):
+    """#509: `result.usage` is a turn-wide aggregate across every internal
+    API round-trip in the agentic tool-call loop (confirmed against a live
+    `claude --output-format stream-json` invocation of this repo's pinned CLI
+    version, matching anthropics/claude-code #6805) — it can be a large
+    multiple of the model's actual context size once a turn makes several
+    tool calls. `result.contextTokens` must instead reflect only the *last*
+    individual assistant-message's usage, threaded via the `usage_sink`
+    argument shared across every line of one `claude` invocation."""
+
+    def _assistant_line(self, usage):
+        import json
+        return json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}],
+                        "usage": usage},
+        })
+
+    def _result_line(self, usage):
+        import json
+        return json.dumps({"type": "result", "usage": usage})
+
+    def test_context_tokens_reflects_last_assistant_call_not_the_sum(self):
+        sink = {}
+        # Three internal round-trips within one turn, each reporting a growing
+        # cache-read count (as prompt caching would for a stable, resumed
+        # session) — the turn-wide `result.usage` sums all of them, but
+        # `contextTokens` must land on only the last one.
+        map_stream_json_line(self._assistant_line({
+            "input_tokens": 10, "output_tokens": 5,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 50_000,
+        }), "corr-1", sink)
+        map_stream_json_line(self._assistant_line({
+            "input_tokens": 10, "output_tokens": 5,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 60_000,
+        }), "corr-1", sink)
+        map_stream_json_line(self._assistant_line({
+            "input_tokens": 10, "output_tokens": 5,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 70_000,
+        }), "corr-1", sink)
+        events = map_stream_json_line(self._result_line({
+            # Simulates the CLI's turn-wide aggregate: ~3x a single call.
+            "input_tokens": 30, "output_tokens": 15,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 180_000,
+        }), "corr-1", sink)
+        result = next(e for e in events if e["type"] == "result")
+        self.assertEqual(result["tokens"]["cacheReadInput"], 180_000)  # aggregate, unchanged
+        self.assertEqual(result["contextTokens"], {
+            "input": 10, "output": 5, "cacheCreationInput": 0, "cacheReadInput": 70_000,
+        })
+
+    def test_context_tokens_none_when_no_sink_provided(self):
+        events = map_stream_json_line(self._result_line({"input_tokens": 10, "output_tokens": 5}), "corr-1")
+        result = next(e for e in events if e["type"] == "result")
+        self.assertIsNone(result["contextTokens"])
+
+    def test_context_tokens_none_when_no_assistant_message_seen(self):
+        sink = {}
+        events = map_stream_json_line(self._result_line({"input_tokens": 10, "output_tokens": 5}), "corr-1", sink)
+        result = next(e for e in events if e["type"] == "result")
+        self.assertIsNone(result["contextTokens"])
+
+    def test_assistant_message_without_usage_does_not_touch_sink(self):
+        import json
+        sink = {"input": 1, "output": 1, "cacheCreationInput": 0, "cacheReadInput": 1}
+        line = json.dumps({"type": "assistant",
+                            "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}})
+        map_stream_json_line(line, "corr-1", sink)
+        self.assertEqual(sink, {"input": 1, "output": 1, "cacheCreationInput": 0, "cacheReadInput": 1})
+
+
+class BuildMemoryHint(unittest.TestCase):
+    """Variant selection of the two-sided memory-hint contract (unification
+    Phase 2). Byte-identity with buildMemoryHint() in prompt-assembly.js is
+    guarded from the JS side (source-scan on the literals); here we pin the
+    gating behaviour: unified drops the fact/entity write instructions AND the
+    separate harvest hint (absorbed into the text), legacy stays byte-stable."""
+
+    def setUp(self):
+        self._orig_unified = entrypoint._memory_model_unified
+        self._orig_level = entrypoint._knowledge_autonomy_level
+
+    def tearDown(self):
+        entrypoint._memory_model_unified = self._orig_unified
+        entrypoint._knowledge_autonomy_level = self._orig_level
+
+    def test_unified_hint_routes_semantic_learning_to_the_kb(self):
+        entrypoint._memory_model_unified = lambda: True
+        entrypoint._knowledge_autonomy_level = lambda: 2
+        hint = entrypoint._build_memory_hint(None)
+        self.assertIn("episodic memory files: memory/context.md and memory/log.md", hint)
+        self.assertIn("knowledge-digest.md", hint)
+        self.assertIn("knowledge add fact|entity|convention", hint)
+        # No fact/entity write targets, and no duplicated harvest sentence.
+        self.assertNotIn("memory/facts.md", hint)
+        self.assertNotIn("memory/entities.md", hint)
+        self.assertNotIn("In addition to your memory files", hint)
+
+    def test_legacy_hint_unchanged_with_harvest(self):
+        entrypoint._memory_model_unified = lambda: False
+        entrypoint._knowledge_autonomy_level = lambda: 1
+        hint = entrypoint._build_memory_hint(None)
+        self.assertIn("memory/facts.md, memory/entities.md and memory/users.md", hint)
+        self.assertIn("In addition to your memory files", hint)  # harvest hint appended
+        self.assertNotIn("knowledge-digest.md", hint)
+
+    def test_legacy_hint_autonomy0_is_todays_text(self):
+        entrypoint._memory_model_unified = lambda: False
+        entrypoint._knowledge_autonomy_level = lambda: 0
+        hint = entrypoint._build_memory_hint(None)
+        self.assertIn("memory/facts.md, memory/entities.md and memory/users.md", hint)
+        self.assertNotIn("In addition to your memory files", hint)
+
+    def test_blueprint_hint_ignores_unified(self):
+        entrypoint._memory_model_unified = lambda: True
+        entrypoint._knowledge_autonomy_level = lambda: 2
+        hint = entrypoint._build_memory_hint("bp-x")
+        self.assertIn("instance of blueprint 'bp-x'", hint)
+        self.assertNotIn("knowledge-digest.md", hint)
+
+
+class BuildKnowledgeDigest(unittest.TestCase):
+    """Two-sided contract with orchestrator/knowledge-digest.js: both test
+    suites assert byte-identical markdown against the SAME golden fixture
+    (orchestrator/knowledge-digest.fixture.json), so the JS builder (post-KB-
+    change fan-out) and this port (pre-invocation rebuild) cannot drift."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        fixture_path = (Path(__file__).resolve().parents[2]
+                        / "orchestrator" / "knowledge-digest.fixture.json")
+        cls.fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    def test_golden_fixture_cases(self):
+        for case in self.fixture["cases"]:
+            with self.subTest(case=case["name"]):
+                kwargs = {
+                    "team_id": case["teamId"],
+                    "generated_at": case["generatedAt"],
+                    "entries": self.fixture["entries"] if case["useEntries"] else [],
+                }
+                if case["budgetTokens"] is not None:
+                    kwargs["budget_tokens"] = case["budgetTokens"]
+                res = entrypoint.build_knowledge_digest(**kwargs)
+                self.assertEqual(res["markdown"], case["expectedMarkdown"])
+                self.assertEqual(res["includedCount"], case["expectedIncluded"])
+                self.assertEqual(res["totalCount"], case["expectedTotal"])
+                self.assertEqual(res["omittedCount"], case["expectedOmitted"])
+                self.assertEqual(res["tokensUsed"], case["expectedTokensUsed"])
+
+    def test_fold_last_writer_wins_and_hides_statuses(self):
+        folded = entrypoint.fold_visible_entries(self.fixture["entries"])
+        self.assertEqual(
+            [e["id"] for e in folded],
+            ["ddd000000004", "aaa000000001", "bbb000000002", "ccc000000003"],
+        )
+        conv = next(e for e in folded if e["id"] == "aaa000000001")
+        self.assertEqual(entrypoint._digest_convergence_count(conv), 3)
+
+    def test_included_ids_render_order(self):
+        res = entrypoint.build_knowledge_digest(
+            team_id="demo-team", generated_at="2026-07-13T09:00:00Z",
+            entries=self.fixture["entries"],
+        )
+        self.assertEqual(res["includedIds"], [
+            "aaa000000001", "bbb000000002", "ccc000000003", "ddd000000004",
+        ])
+
+    def test_multiline_text_flattened(self):
+        res = entrypoint.build_knowledge_digest(
+            team_id="t", generated_at="2026-07-13T09:00:00Z",
+            entries=[{"id": "abc000000001", "kind": "fact", "text": "line one\nline two",
+                      "createdAt": "2026-07-01T00:00:00Z", "convergence": ["a"],
+                      "status": "active"}],
+        )
+        self.assertIn("- fact: line one line two (2026-07-01)", res["markdown"])
 
 
 if __name__ == "__main__":

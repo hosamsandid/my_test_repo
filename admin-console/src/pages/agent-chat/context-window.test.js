@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   resolveContextWindowTokens, computeContextFillLevel, sumContextTokens, formatTokenCountK,
+  resolveContextTokensForResult,
 } from './context-window.js';
 
 test('resolveContextWindowTokens: explicit contextWindow wins over the known-model table', () => {
@@ -92,4 +93,30 @@ test('formatTokenCountK: no "M" abbreviation, even at six-figure-plus limits', (
 test('formatTokenCountK: invalid input returns null', () => {
   assert.equal(formatTokenCountK(null), null);
   assert.equal(formatTokenCountK(-1), null);
+});
+
+test('resolveContextTokensForResult: prefers contextTokens over the turn-wide tokens aggregate (#509)', () => {
+  // Simulates the reported bug: a turn with several internal tool-call
+  // round-trips reports a `tokens` aggregate ~3x the real context size, but
+  // `contextTokens` (the last individual call's usage) reflects reality.
+  const ev = {
+    tokens: { input: 30, cacheCreationInput: 0, cacheReadInput: 540_000 },
+    contextTokens: { input: 10, cacheCreationInput: 0, cacheReadInput: 180_000 },
+  };
+  assert.equal(resolveContextTokensForResult(ev), 180_010);
+});
+
+test('resolveContextTokensForResult: falls back to tokens for pre-#509 log entries with no contextTokens', () => {
+  const ev = { tokens: { input: 100, cacheCreationInput: 20, cacheReadInput: 3000 } };
+  assert.equal(resolveContextTokensForResult(ev), 3120);
+});
+
+test('resolveContextTokensForResult: null contextTokens (no assistant usage observed) falls back to tokens', () => {
+  const ev = { tokens: { input: 50 }, contextTokens: null };
+  assert.equal(resolveContextTokensForResult(ev), 50);
+});
+
+test('resolveContextTokensForResult: missing/malformed event returns null', () => {
+  assert.equal(resolveContextTokensForResult(null), null);
+  assert.equal(resolveContextTokensForResult({}), null);
 });

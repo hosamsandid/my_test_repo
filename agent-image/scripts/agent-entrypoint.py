@@ -956,7 +956,10 @@ _active_invocations_lock = threading.Lock()
 # the admin-console can't read the agent's own volume.
 #
 # Persisted entry shape (matches the legacy Node writer + RunningSessionsPanel):
-#   { id, type, triggerType, triggerId, label, roomId, startedAt }
+#   { id, type, triggerType, triggerId, label, roomId, startedAt, correlationId }
+# `correlationId` ties the session to its own rows in the room's session-log
+# JSONL, so the admin console can render one session's log in isolation even
+# when several sessions share a room (#543).
 _running_sessions: dict[str, dict] = {}
 _running_sessions_lock = threading.Lock()
 
@@ -977,9 +980,14 @@ def _persist_running_sessions() -> None:
 
 
 def _new_session(session_type: str, *, room_id: str | None = None, label: str = "",
-                 trigger_type: str | None = None, trigger_id: str | None = None) -> dict:
+                 trigger_type: str | None = None, trigger_id: str | None = None,
+                 correlation_id: str | None = None) -> dict:
     """Build a running-session descriptor for _bump_active. Fields mirror the
-    legacy Node writer so RunningSessionsPanel renders them unchanged."""
+    legacy Node writer so RunningSessionsPanel renders them unchanged.
+
+    `correlation_id` is the id stamped on this run's session-log rows, letting
+    the admin console scope one session's log even when sessions share a room
+    (#543)."""
     return {
         "id": uuid.uuid4().hex,
         "type": session_type,
@@ -988,6 +996,7 @@ def _new_session(session_type: str, *, room_id: str | None = None, label: str = 
         "label": label,
         "roomId": room_id,
         "startedAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+        "correlationId": correlation_id,
     }
 
 
@@ -2345,7 +2354,8 @@ class TriggerScheduler:
             print(f"[Runner:{self._agent_id}] session-log warning: {exc}",
                   file=sys.stderr)
 
-        session = _new_session("handover", room_id=room_id, label="Hand-off")
+        session = _new_session("handover", room_id=room_id, label="Hand-off",
+                               correlation_id=correlation_id)
         _bump_active(+1, session)
         try:
             result = await asyncio.to_thread(
@@ -2661,6 +2671,7 @@ class TriggerScheduler:
         session = _new_session(
             "trigger", room_id=room_id, label=str(tid),
             trigger_type=trigger.get("type"), trigger_id=tid,
+            correlation_id=correlation_id,
         )
         _bump_active(+1, session)
         try:
@@ -3118,7 +3129,8 @@ async def run_dm_listener() -> None:
                 "promptChars": len(body),
             })
 
-            session = _new_session("dm", room_id=room_id, label="Direct message")
+            session = _new_session("dm", room_id=room_id, label="Direct message",
+                                   correlation_id=correlation_id)
             _bump_active(+1, session)
             try:
                 # claude invocation is blocking — run it off the event loop so

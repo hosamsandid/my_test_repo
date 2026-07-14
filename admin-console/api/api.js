@@ -1611,7 +1611,7 @@ app.post('/api/agents/:id/handover/nudge', handoverLimiter, async (req, res) => 
     const dm = await ensureAgentDmRoom(id);
     roomId = dm.roomId;
   } catch (err) {
-    return res.status(502).json({ error: `Could not open DM room: ${err.message}` });
+    return res.status(502).json({ error: `Could not open conversation: ${err.message}` });
   }
 
   const txnId = crypto.randomUUID();
@@ -1620,11 +1620,11 @@ app.post('/api/agents/:id/handover/nudge', handoverLimiter, async (req, res) => 
       `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(txnId)}`,
       { method: 'PUT', body: { msgtype: 'm.text', body } });
     if (sendResp.status >= 400) {
-      return res.status(502).json({ error: sendResp.data?.error || `Matrix ${sendResp.status}` });
+      return res.status(502).json({ error: sendResp.data?.error || `Chat service error ${sendResp.status}` });
     }
     res.json({ ok: true, kind, roomId, eventId: sendResp.data?.event_id || null });
   } catch (err) {
-    res.status(502).json({ error: `Matrix unreachable: ${err.message}` });
+    res.status(502).json({ error: `Chat service unreachable: ${err.message}` });
   }
 });
 
@@ -1730,7 +1730,7 @@ app.post('/api/agents/:id/handover', handoverLimiter, async (req, res) => {
     // token, so re-read before checking matrix readiness.
     const refreshedCfg = readJsonFile(targetCfgPath, null);
     if (!refreshedCfg?.token) {
-      results.push({ agentId: targetId, ok: false, stage: 'enable', error: 'agent has no Matrix token after enable' });
+      results.push({ agentId: targetId, ok: false, stage: 'enable', error: 'agent could not be activated (no chat account)' });
       continue;
     }
     let roomId;
@@ -7205,7 +7205,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   for (const p of toCreate) {
     plan.push({ id: `member:${p.memberId}`, label: `Create member: ${p.template.displayName}` });
   }
-  if (toCreate.length > 0) plan.push({ id: 'dms', label: 'Pre-create DM rooms' });
+  if (toCreate.length > 0) plan.push({ id: 'dms', label: 'Prepare agent conversations' });
   emit({ type: 'plan', steps: plan });
 
   // ── 5. Atomic create with rollback ────────────────────────────────
@@ -8263,7 +8263,7 @@ app.post('/api/matrix/agents/:agentId/dm', heavyLimiter, async (req, res) => {
       const body = err.upstream ? { error: err.message, upstream: err.upstream } : { error: err.message };
       return res.status(err.status).json(body);
     }
-    res.status(502).json({ error: `Matrix unreachable: ${err.message}` });
+    res.status(502).json({ error: `Chat service unreachable: ${err.message}` });
   }
 });
 
@@ -8284,7 +8284,7 @@ app.get('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
       { query });
     res.status(resp.status).json(resp.data);
   } catch (err) {
-    res.status(502).json({ error: `Matrix unreachable: ${err.message}` });
+    res.status(502).json({ error: `Chat service unreachable: ${err.message}` });
   }
 });
 
@@ -8310,7 +8310,7 @@ app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
     }
     res.json({ event_id: resp.data?.event_id });
   } catch (err) {
-    res.status(502).json({ error: `Matrix unreachable: ${err.message}` });
+    res.status(502).json({ error: `Chat service unreachable: ${err.message}` });
   }
 });
 
@@ -8335,7 +8335,7 @@ app.delete('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) =>
         `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages`,
         { query });
       if (resp.status >= 400) {
-        return res.status(resp.status).json(resp.data ?? { error: `Matrix returned ${resp.status}` });
+        return res.status(resp.status).json(resp.data ?? { error: `Chat service returned ${resp.status}` });
       }
       const chunk = Array.isArray(resp.data?.chunk) ? resp.data.chunk : [];
       for (const ev of chunk) {
@@ -8346,7 +8346,7 @@ app.delete('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) =>
       from = next;
     }
   } catch (err) {
-    return res.status(502).json({ error: `Matrix unreachable: ${err.message}` });
+    return res.status(502).json({ error: `Chat service unreachable: ${err.message}` });
   }
 
   // Redact each event. Failures per event are non-fatal (may already be redacted).

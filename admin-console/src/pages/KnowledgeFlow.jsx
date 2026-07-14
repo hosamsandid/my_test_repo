@@ -1287,9 +1287,19 @@ function ReviewQueueBlock({ teamId, items, onChanged }) {
 
 /* ── Learning controls: autonomy dial · review toggle · gates — with feedback ── */
 
+// Well-known protected branches — mirrors orchestrator knowledge-sync
+// PROTECTED_BRANCHES. Advisory only: the UI warns, it never blocks (#558 AC-3).
+const PROTECTED_BRANCHES = ['main', 'master', 'develop', 'trunk'];
+function isProtectedBranchName(branch) {
+  return PROTECTED_BRANCHES.includes(String(branch || '').trim().toLowerCase());
+}
+const KB_DEFAULT_BRANCH = 'agent-knowledge';
+const KB_DEFAULT_PATH = 'docs/agent-knowledge/';
+
 function ControlStrip({ teamId, gates, onChanged }) {
   const [busy, setBusy] = useState(null); // which control is writing
   const [flash, setFlash] = useState(null); // { kind: 'ok' | 'error', text }
+  const [storeOpen, setStoreOpen] = useState(false); // storage-location dialog
   const flashTimer = useRef(null);
 
   const feedback = (kind, text) => {
@@ -1420,6 +1430,39 @@ function ControlStrip({ teamId, gates, onChanged }) {
         );
       })}
 
+      <div style={{ width: 1, height: 18, background: 'var(--eb-border-default)' }} />
+
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        <span style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--eb-text-muted)' }}>Storage</span>
+        <InfoTip
+          size={12}
+          title="Where this team’s knowledge is kept"
+          text="By default the shared knowledge lives in this team’s repository on a dedicated branch. You can point it at any branch, or at a separate knowledge repository. Changing the location does not move knowledge already stored at the old one."
+        />
+      </span>
+      <button
+        onClick={() => setStoreOpen(true)}
+        title="Configure where this team’s knowledge is stored (repo · branch · path)"
+        style={{
+          fontSize: 'var(--eb-text-xs)', fontWeight: 600, cursor: 'pointer',
+          borderRadius: 'var(--eb-radius-md)', padding: '3px 10px', background: 'transparent',
+          border: '1px solid var(--eb-border-default)', color: 'var(--eb-text-secondary)',
+          display: 'inline-flex', alignItems: 'center', gap: 5,
+        }}>
+        <GitBranch size={12} />
+        {gates.store?.mode === 'own-repo' ? 'separate repo' : 'in team repo'} · {gates.store?.branch || 'agent-knowledge'}
+        {isProtectedBranchName(gates.store?.branch) && <span title="This is a protected branch — pushes may be rejected." style={{ color: 'var(--eb-status-warning)' }}>⚠</span>}
+      </button>
+
+      {storeOpen && (
+        <StorageDialog
+          teamId={teamId}
+          gates={gates}
+          onClose={() => setStoreOpen(false)}
+          onSaved={() => { setStoreOpen(false); feedback('ok', 'Storage location saved. Existing knowledge stays where it was.'); onChanged && onChanged(); }}
+        />
+      )}
+
       {gates.sharedWith && gates.sharedWith.length > 0 && (
         <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}
           title={`These controls live on the shared environment '${gates.environment?.name || ''}' — changing them here also changes them for the listed team(s).`}>
@@ -1435,6 +1478,174 @@ function ControlStrip({ teamId, gates, onChanged }) {
           {flash.kind === 'ok' ? '✓ ' : '⚠ '}{flash.text}
         </span>
       )}
+    </div>
+  );
+}
+
+/* ── Storage-location dialog (#558) ─────────────────────────────────────────── */
+
+// Configure where a team's knowledge is stored: in the team's own repo (default,
+// on a dedicated branch) or a separate knowledge repo, plus branch + path. The
+// probe (reachability + access) and the persist both happen server-side on Save;
+// this dialog only collects + validates shape and makes the AC-5 "existing
+// knowledge stays put" contract explicit before it writes.
+function StorageDialog({ teamId, gates, onClose, onSaved }) {
+  const initial = gates.store || {};
+  const repositories = Array.isArray(gates.repositories) ? gates.repositories : [];
+  const [mode, setMode] = useState(initial.mode === 'own-repo' ? 'own-repo' : 'in-repo');
+  const [branch, setBranch] = useState(initial.branch || KB_DEFAULT_BRANCH);
+  const [kbPath, setKbPath] = useState(initial.path || KB_DEFAULT_PATH);
+  // in-repo repo selection (only matters when the env has more than one repo).
+  const [inRepoUrl, setInRepoUrl] = useState(
+    (initial.repoRef && initial.repoRef.url) || (repositories[0] && repositories[0].url) || '',
+  );
+  // own-repo target + credentials.
+  const [ownUrl, setOwnUrl] = useState(initial.mode === 'own-repo' && initial.repoRef ? initial.repoRef.url : '');
+  const [sshKeyId, setSshKeyId] = useState((initial.repoRef && initial.repoRef.sshKeyId) || '');
+  const [githubTokenId, setGithubTokenId] = useState((initial.repoRef && initial.repoRef.githubTokenId) || '');
+  const [sshKeys, setSshKeys] = useState([]);
+  const [tokens, setTokens] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [ack, setAck] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    Promise.all([
+      fetch('/api/ssh-keys').then(r => r.ok ? r.json() : []).catch(() => []),
+      fetch('/api/github-tokens').then(r => r.ok ? r.json() : []).catch(() => []),
+    ]).then(([keys, toks]) => {
+      if (!alive) return;
+      setSshKeys(Array.isArray(keys) ? keys : []);
+      setTokens(Array.isArray(toks) ? toks : []);
+    });
+    return () => { alive = false; };
+  }, []);
+
+  // Did the effective location actually change? (drives the AC-5 confirmation.)
+  const origBranch = initial.branch || KB_DEFAULT_BRANCH;
+  const origPath = initial.path || KB_DEFAULT_PATH;
+  const normPath = (p) => { let v = String(p || '').trim(); if (v && !v.endsWith('/')) v += '/'; return v; };
+  const targetUrl = mode === 'own-repo' ? ownUrl.trim() : inRepoUrl.trim();
+  const origUrl = (initial.repoRef && initial.repoRef.url) || '';
+  const locationChanged =
+    mode !== (initial.mode === 'own-repo' ? 'own-repo' : 'in-repo') ||
+    branch.trim() !== origBranch ||
+    normPath(kbPath) !== normPath(origPath) ||
+    (mode === 'own-repo' && targetUrl !== origUrl) ||
+    (mode === 'in-repo' && repositories.length > 1 && targetUrl !== origUrl);
+
+  const canSave = !busy
+    && (mode === 'in-repo' || ownUrl.trim() !== '')
+    && branch.trim() !== ''
+    && (!locationChanged || ack);
+
+  const save = () => {
+    setBusy(true); setError('');
+    const repoRef = mode === 'own-repo'
+      ? { url: ownUrl.trim(), sshKeyId: sshKeyId || '', githubTokenId: githubTokenId || '' }
+      : { url: repositories.length > 1 ? inRepoUrl.trim() : '', sshKeyId: '', githubTokenId: '' };
+    const body = { teamId, store: { mode, branch: branch.trim(), path: normPath(kbPath), repoRef } };
+    fetch('/api/knowledge/store', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then(async r => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        onSaved && onSaved();
+      })
+      .catch(e => setError(e.message))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <div onClick={onClose} style={overlay}>
+      <div onClick={e => e.stopPropagation()} style={{ ...dialog, width: 560, display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+          <GitBranch size={18} style={{ color: 'var(--eb-accent-primary)' }} />
+          <h2 style={{ margin: 0, fontSize: 'var(--eb-text-lg)', color: 'var(--eb-text-primary)' }}>Knowledge storage location</h2>
+          <button onClick={onClose} style={{ ...btn, marginLeft: 'auto' }}><X size={14} /></button>
+        </div>
+
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
+          Choose where this team’s shared knowledge base is kept. All knowledge operations —
+          the agents, the digest, and every push — follow this setting.
+        </div>
+
+        <label style={lbl}>Where</label>
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+          <Chip active={mode === 'in-repo'} title="Keep knowledge in the repository this team already uses" onClick={() => setMode('in-repo')}>In the team’s repo</Chip>
+          <Chip active={mode === 'own-repo'} title="Keep knowledge in a separate, dedicated repository" onClick={() => setMode('own-repo')}>Separate knowledge repo</Chip>
+        </div>
+
+        {mode === 'in-repo' ? (
+          repositories.length === 0 ? (
+            <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-warning)' }}>
+              This team’s environment has no repository — pick “Separate knowledge repo”, or add a repository to the environment first.
+            </div>
+          ) : repositories.length > 1 ? (
+            <>
+              <label style={lbl}>Repository</label>
+              <select value={inRepoUrl} onChange={e => setInRepoUrl(e.target.value)} style={inp}>
+                {repositories.map(r => <option key={r.url} value={r.url}>{r.url}</option>)}
+              </select>
+            </>
+          ) : (
+            <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+              Uses <code>{repositories[0].url}</code> — the repository this team already clones.
+            </div>
+          )
+        ) : (
+          <>
+            <label style={lbl}>Knowledge repository URL</label>
+            <input value={ownUrl} onChange={e => setOwnUrl(e.target.value)} placeholder="git@github.com:org/knowledge.git" style={inp} />
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+              <div style={{ flex: 1 }}>
+                <label style={lbl}>SSH key</label>
+                <select value={sshKeyId} onChange={e => setSshKeyId(e.target.value)} style={inp}>
+                  <option value="">None</option>
+                  {sshKeys.map(k => <option key={k.id} value={k.id}>{k.name || k.id}</option>)}
+                </select>
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={lbl}>GitHub token</label>
+                <select value={githubTokenId} onChange={e => setGithubTokenId(e.target.value)} style={inp}>
+                  <option value="">None</option>
+                  {tokens.map(t => <option key={t.id} value={t.id}>{t.name || t.id}</option>)}
+                </select>
+              </div>
+            </div>
+          </>
+        )}
+
+        <label style={lbl}>Branch</label>
+        <input value={branch} onChange={e => setBranch(e.target.value)} placeholder={KB_DEFAULT_BRANCH} style={inp} />
+        {isProtectedBranchName(branch) && (
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', lineHeight: 1.4 }}>
+            ⚠ <strong>{branch.trim()}</strong> is a protected branch. Agents push knowledge directly and often, so a
+            protected branch may reject those pushes. You can still choose it — just make sure pushes are allowed.
+          </div>
+        )}
+
+        <label style={lbl}>Path within the repo</label>
+        <input value={kbPath} onChange={e => setKbPath(e.target.value)} placeholder={KB_DEFAULT_PATH} style={inp} />
+
+        {locationChanged && (
+          <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+            <input type="checkbox" checked={ack} onChange={e => setAck(e.target.checked)} style={{ marginTop: 2 }} />
+            <span>I understand that knowledge already stored at the current location <strong>stays there</strong> — changing this setting does not move or copy it. The team starts building knowledge fresh at the new location.</span>
+          </label>
+        )}
+
+        {error && (
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error, #d33)', fontWeight: 600 }}>⚠ Not saved: {error}</div>
+        )}
+
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end' }}>
+          <button onClick={onClose} style={btn}>Cancel</button>
+          <button onClick={save} disabled={!canSave} style={{ ...primaryBtn, opacity: canSave ? 1 : 0.5, cursor: canSave ? 'pointer' : 'not-allowed' }}>
+            {busy ? 'Checking & saving…' : 'Save location'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

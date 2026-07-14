@@ -259,7 +259,7 @@ function startAgentProcess(config) {
     if (kbAvailable) {
       childEnv.KNOWLEDGE_TEAM_ID = agentKnowledgeTeamId(config);
       childEnv.KNOWLEDGE_STORE_PATH = env.knowledgeStore.path;
-      childEnv.KNOWLEDGE_BRANCH = knowledgeSync.KNOWLEDGE_BRANCH;
+      childEnv.KNOWLEDGE_BRANCH = knowledgeSync.resolveKnowledgeBranch(env);
       childEnv.KNOWLEDGE_DIR = path.join("/workspace/agents", id, "knowledge");
     }
   }
@@ -1811,7 +1811,7 @@ function provisionKnowledgeCheckout(id, dest, env, warnings) {
   const kbDir = path.join(dest, "knowledge");
   if (fs.existsSync(path.join(kbDir, ".git"))) return; // already provisioned
 
-  const branch = knowledgeSync.KNOWLEDGE_BRANCH;
+  const branch = knowledgeSync.resolveKnowledgeBranch(env);
   const gitEnv = _buildKbGitEnv(repoRef, env);
   const runIn = (cwd, args, timeout = 120_000) =>
     execFileSync("git", args, { cwd, env: gitEnv, stdio: "pipe", timeout }).toString();
@@ -1964,7 +1964,7 @@ function pushMigrationEntries(id, teamId, env, entries) {
     "-c", "user.name=Agent Studio", "-c", `user.email=${id}@agents.local`,
     "commit", "-m", `chore(knowledge): migrate legacy memory of ${id} (unification phase 3)`,
   ]);
-  const branch = knowledgeSync.KNOWLEDGE_BRANCH;
+  const branch = knowledgeSync.resolveKnowledgeBranch(env);
   try {
     runIn(["push", "origin", branch]);
   } catch (err) {
@@ -2154,13 +2154,13 @@ function agentKnowledgePush(id) {
     healKnowledgeCheckout(id, kbDir, env, []);
   }
 
-  const branch = knowledgeSync.KNOWLEDGE_BRANCH;
+  const branch = knowledgeSync.resolveKnowledgeBranch(env);
   const gitEnv = _buildKbGitEnv(repoRef, env);
   const run = (args, timeout = 30_000) =>
     execFileSync("git", args, { cwd: kbDir, env: gitEnv, stdio: "pipe", timeout }).toString();
 
   const current = run(["rev-parse", "--abbrev-ref", "HEAD"]).trim();
-  if (!knowledgeSync.knowledgeBranchAllowed(current)) {
+  if (!knowledgeSync.knowledgeBranchAllowed(current, branch)) {
     throw new Error(`knowledge push refused: checkout is on '${current}', not ${branch}`);
   }
 
@@ -2280,6 +2280,80 @@ function writeTeamReview(teamId, enabled) {
     (raw) => ({ review: knowledgeReviewEnabled(raw) }));
 }
 
+// Persist the per-team knowledge storage location — repo, branch, path (#558) —
+// onto the team's shared environment. Reachability of the repo/branch + write
+// access is validated by the admin-console layer (it owns the ls-remote probe)
+// BEFORE this writer is called, so here we normalize + persist, then force-
+// refresh the canonical clone at the NEW location so the digest and every
+// downstream read/write follow the change immediately (AC-4, AC-7). Knowledge
+// already stored at the OLD location is deliberately left untouched (AC-5).
+function writeTeamKnowledgeStore(teamId, input) {
+  const inMode = input && input.mode === "own-repo" ? "own-repo" : "in-repo";
+  const inPath = input && typeof input.path === "string" ? input.path.trim() : "";
+  const inBranch = input && typeof input.branch === "string" ? input.branch.trim() : "";
+  const inRef = input && input.repoRef && typeof input.repoRef === "object" ? input.repoRef : {};
+  let url = typeof inRef.url === "string" ? inRef.url.trim() : "";
+
+  const envId = resolveTeamEnvId(teamId);
+  if (!envId) throw new Error(`no environment resolvable for team '${teamId}'`);
+  const currentEnv = loadEnvironment(envId);
+  const repositories = currentEnv && Array.isArray(currentEnv.repositories) ? currentEnv.repositories : [];
+
+  if (inMode === "own-repo" && !url) {
+    throw new Error("a separate knowledge repository requires a repo URL");
+  }
+  // in-repo: the UI omits the url when the team has a single repo, so pin it to
+  // that repo here. Without a real url, normalizeRepoRef drops the whole repoRef
+  // (empty-url → null) and the configured branch/path would be silently lost —
+  // the in-repo fallback would re-resolve repoRef from repositories[0] with the
+  // repo's DEFAULT branch, not the operator's choice (AC-4).
+  if (inMode === "in-repo" && !url && repositories.length) {
+    const first = repositories[0];
+    if (first && typeof first.url === "string" && first.url.trim()) url = first.url.trim();
+  }
+
+  // Build the raw repoRef we will persist (branch rides on it, per the schema).
+  let repoRef = null;
+  if (url || inBranch || inRef.sshKeyId || inRef.githubTokenId) {
+    repoRef = { url };
+    if (inBranch) repoRef.branch = inBranch;
+    if (typeof inRef.sshKeyId === "string" && inRef.sshKeyId.trim()) repoRef.sshKeyId = inRef.sshKeyId.trim();
+    if (typeof inRef.githubTokenId === "string" && inRef.githubTokenId.trim()) repoRef.githubTokenId = inRef.githubTokenId.trim();
+  }
+  // in-repo: inherit the matching env repository's SSH key when the operator
+  // didn't pick one, so KB git ops authenticate exactly like the repo clone
+  // (the GitHub token already falls back to env.githubTokenId in _buildKbGitEnv).
+  if (inMode === "in-repo" && repoRef && repoRef.url && !repoRef.sshKeyId) {
+    const match = repositories.find((r) => r && r.url === repoRef.url);
+    if (match && match.sshKeyId) repoRef.sshKeyId = match.sshKeyId;
+  }
+
+  const rawStore = { mode: inMode };
+  if (inPath) rawStore.path = inPath;
+  if (repoRef) rawStore.repoRef = repoRef;
+  // MCP knowledge sources are a separate track (#464) — preserve them verbatim.
+  const existingSources = currentEnv && currentEnv.knowledgeStore && Array.isArray(currentEnv.knowledgeStore.sources)
+    ? currentEnv.knowledgeStore.sources : [];
+  if (existingSources.length) rawStore.sources = existingSources;
+
+  // Normalize + surface any hard error (e.g. own-repo without a resolvable repo)
+  // before persisting so an invalid config is rejected, never saved (AC-2).
+  const { store, warnings } = normalizeKnowledgeStore({ ...currentEnv, knowledgeStore: rawStore, repositories });
+  const hardError = warnings.find((w) => w.includes("requires a repoRef"));
+  if (hardError) throw new Error(hardError);
+
+  const result = patchTeamEnv(teamId, (raw) => { raw.knowledgeStore = store; }, () => ({ store }));
+
+  const refreshEnv = { ...currentEnv, knowledgeStore: store, repositories };
+  const refRepo = store.repoRef && store.repoRef.url ? store.repoRef : null;
+  try {
+    refreshKnowledgeClone(teamId, { force: true, repoRef: refRepo, env: refreshEnv });
+  } catch (err) {
+    console.warn(`[Orchestrator] KB store refresh for '${teamId}' failed: ${err.message}`);
+  }
+  return { ...result, store, warnings: warnings.filter((w) => w !== hardError) };
+}
+
 // Ensure/refresh the canonical clone for a team. Best-effort, throttled per team
 // (force bypasses the throttle). Never throws — a missing/failing clone just
 // means the admin-console reads whatever is on disk (agent-checkout fallback).
@@ -2309,7 +2383,7 @@ function refreshKnowledgeClone(teamId, { force = false, repoRef = null, env = nu
     kbEnv = resolved.env;
   }
 
-  const branch = knowledgeSync.KNOWLEDGE_BRANCH;
+  const branch = knowledgeSync.resolveKnowledgeBranch(kbEnv);
   const gitEnv = _buildKbGitEnv(ref, kbEnv);
   const runIn = (cwd, args, timeout = 60_000) =>
     execFileSync("git", args, { cwd, env: gitEnv, stdio: "pipe", timeout }).toString();
@@ -2619,10 +2693,9 @@ function reviewKnowledgeEntry(teamId, id, decision) {
   return { id, decision };
 }
 
-// Push the canonical-file commit to agent-knowledge, fetch-rebase-retry (clean —
-// the orchestrator only ever writes canonical files, never a shard).
-function _pushKnowledgeClone(clonePath, gitEnv) {
-  const branch = knowledgeSync.KNOWLEDGE_BRANCH;
+// Push the canonical-file commit to the team's KB branch, fetch-rebase-retry
+// (clean — the orchestrator only ever writes canonical files, never a shard).
+function _pushKnowledgeClone(clonePath, gitEnv, branch = knowledgeSync.KNOWLEDGE_BRANCH) {
   const run = (args, timeout = 30_000) =>
     execFileSync("git", args, { cwd: clonePath, env: gitEnv, stdio: "pipe", timeout }).toString();
   let lastErr = "";
@@ -2748,7 +2821,7 @@ function runConvergenceCollector(teamId, envArg) {
         "-c", "user.name=Agent Studio", "-c", "user.email=knowledge@agents.local",
         "commit", "-m", `chore(knowledge): converge canonical facts for ${teamId}`,
       ]);
-      _pushKnowledgeClone(clonePath, gitEnv);
+      _pushKnowledgeClone(clonePath, gitEnv, knowledgeSync.resolveKnowledgeBranch(env));
     }
   } catch (err) {
     console.warn(`[Orchestrator] convergence commit/push for '${teamId}' failed: ${err.message}`);
@@ -7254,6 +7327,29 @@ async function main() {
           if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
           if (!Number.isInteger(level) || level < 0 || level > 3) throw new Error('level must be an integer 0..3');
           const result = writeTeamAutonomy(teamId, level);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+        }
+      });
+      return;
+    }
+
+    // ── Set the per-team knowledge storage location (repo/branch/path) (#558) ────
+    // The admin-console PUT /api/knowledge/store proxies here after it has
+    // validated + probed the target (reachability + write access). This handler
+    // normalizes, persists onto the team's environment, and refreshes the clone.
+    if (req.method === 'POST' && req.url === '/internal/knowledge/store') {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const p = JSON.parse(body || '{}');
+          const teamId = String(p.teamId || '');
+          if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
+          const result = writeTeamKnowledgeStore(teamId, p.store || {});
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {

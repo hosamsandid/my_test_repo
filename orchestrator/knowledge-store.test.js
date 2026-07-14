@@ -176,10 +176,29 @@ test('normalizeKnowledgeStore ensures a trailing slash on a custom path', () => 
   assert.equal(store.path, 'kb/team/');
 });
 
-test('normalizeKnowledgeStore in-repo single repo adopts that repo', () => {
-  const env = { repositories: [{ url: 'git@x:acme/app.git', branch: 'main' }] };
+test('normalizeKnowledgeStore in-repo single repo adopts that repo but NOT its code branch', () => {
+  // #558 AC-6: the adopted repoRef must carry only url + credentials, never the
+  // repo's own code branch (main) — the KB lives on the separate default branch.
+  const env = { repositories: [{ url: 'git@x:acme/app.git', branch: 'main', sshKeyId: 'k1' }] };
   const { store, warnings } = normalizeKnowledgeStore(env);
   assert.equal(store.repoRef.url, 'git@x:acme/app.git');
+  assert.equal(store.repoRef.branch, undefined);
+  assert.equal(store.repoRef.sshKeyId, 'k1');
+  assert.deepEqual(warnings, []);
+});
+
+test('normalizeKnowledgeStore in-repo keeps a configured branch when repoRef.url matches an env repo', () => {
+  // Regression (#558): the UI omits the url for a single-repo in-repo store, so
+  // writeTeamKnowledgeStore pins it to the env repo before calling here. The
+  // configured KB branch rides on that repoRef and must survive normalization —
+  // otherwise it would be silently replaced by the repo's default branch.
+  const env = {
+    knowledgeStore: { mode: 'in-repo', repoRef: { url: 'git@x:acme/app.git', branch: 'agent-knowledge' } },
+    repositories: [{ url: 'git@x:acme/app.git', branch: 'main' }],
+  };
+  const { store, warnings } = normalizeKnowledgeStore(env);
+  assert.equal(store.repoRef.url, 'git@x:acme/app.git');
+  assert.equal(store.repoRef.branch, 'agent-knowledge');
   assert.deepEqual(warnings, []);
 });
 

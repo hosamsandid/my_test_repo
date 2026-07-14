@@ -7,9 +7,12 @@ const assert = require('node:assert/strict');
 
 const {
   KNOWLEDGE_BRANCH,
+  PROTECTED_BRANCHES,
   MAX_PUSH_RETRIES,
   isRetryablePushError,
   knowledgeBranchAllowed,
+  resolveKnowledgeBranch,
+  isProtectedBranch,
 } = require('./knowledge-sync');
 
 test('KNOWLEDGE_BRANCH is a non-protected dedicated branch', () => {
@@ -19,12 +22,51 @@ test('KNOWLEDGE_BRANCH is a non-protected dedicated branch', () => {
   assert.equal(PROTECTED_BRANCHES.has(KNOWLEDGE_BRANCH), false);
 });
 
-test('knowledgeBranchAllowed only permits the shared KB branch', () => {
+test('knowledgeBranchAllowed defaults to only the shared KB branch', () => {
   assert.equal(knowledgeBranchAllowed('agent-knowledge'), true);
   assert.equal(knowledgeBranchAllowed('main'), false);
   assert.equal(knowledgeBranchAllowed('feature/x'), false);
   assert.equal(knowledgeBranchAllowed(''), false);
   assert.equal(knowledgeBranchAllowed(undefined), false);
+});
+
+test('knowledgeBranchAllowed follows a configured branch (#558 AC-3)', () => {
+  // The guardrail must no longer hard-reject a configured branch: pass the
+  // resolved branch and it permits exactly that one, incl. a protected branch.
+  assert.equal(knowledgeBranchAllowed('main', 'main'), true);
+  assert.equal(knowledgeBranchAllowed('team-kb', 'team-kb'), true);
+  assert.equal(knowledgeBranchAllowed('agent-knowledge', 'main'), false);
+  assert.equal(knowledgeBranchAllowed('', 'main'), false);
+});
+
+test('resolveKnowledgeBranch returns the configured branch or the default', () => {
+  assert.equal(resolveKnowledgeBranch(undefined), KNOWLEDGE_BRANCH);
+  assert.equal(resolveKnowledgeBranch({}), KNOWLEDGE_BRANCH);
+  assert.equal(resolveKnowledgeBranch({ knowledgeStore: {} }), KNOWLEDGE_BRANCH);
+  assert.equal(resolveKnowledgeBranch({ knowledgeStore: { repoRef: {} } }), KNOWLEDGE_BRANCH);
+  assert.equal(
+    resolveKnowledgeBranch({ knowledgeStore: { repoRef: { branch: '  ' } } }),
+    KNOWLEDGE_BRANCH,
+  );
+  assert.equal(
+    resolveKnowledgeBranch({ knowledgeStore: { repoRef: { branch: 'main' } } }),
+    'main',
+  );
+  assert.equal(
+    resolveKnowledgeBranch({ knowledgeStore: { repoRef: { branch: '  team-kb  ' } } }),
+    'team-kb',
+  );
+});
+
+test('isProtectedBranch flags well-known protected branches (case-insensitive)', () => {
+  assert.deepEqual(PROTECTED_BRANCHES, ['main', 'master', 'develop', 'trunk']);
+  assert.equal(isProtectedBranch('main'), true);
+  assert.equal(isProtectedBranch('MAIN'), true);
+  assert.equal(isProtectedBranch(' master '), true);
+  assert.equal(isProtectedBranch('agent-knowledge'), false);
+  assert.equal(isProtectedBranch('team-kb'), false);
+  assert.equal(isProtectedBranch(''), false);
+  assert.equal(isProtectedBranch(undefined), false);
 });
 
 test('isRetryablePushError detects lost fast-forward races', () => {

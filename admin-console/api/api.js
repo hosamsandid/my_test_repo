@@ -3659,6 +3659,44 @@ function knowledgeReviewOn(env) {
   return false;
 }
 
+// Knowledge storage location (repo/branch/path) for a team, for the Knowledge
+// Flow storage control (#558). Local read mirror — api.js does not cross-require
+// the orchestrator's knowledge-store. Secrets are never present on the stored
+// shape (repoRef carries only credential *ids*, never the secret), so this is
+// safe to return as-is. Defaults mirror KNOWLEDGE_BRANCH / DEFAULT_KB_PATH so an
+// unconfigured team reports today's in-repo behaviour (AC-6).
+const KB_DEFAULT_BRANCH = 'agent-knowledge';
+const KB_DEFAULT_PATH = 'docs/agent-knowledge/';
+function knowledgeStoreView(env) {
+  const raw = env && typeof env.knowledgeStore === 'object' && env.knowledgeStore ? env.knowledgeStore : {};
+  const mode = raw.mode === 'own-repo' ? 'own-repo' : 'in-repo';
+  let pathVal = typeof raw.path === 'string' && raw.path.trim() !== '' ? raw.path.trim() : KB_DEFAULT_PATH;
+  if (!pathVal.endsWith('/')) pathVal += '/';
+  const ref = raw.repoRef && typeof raw.repoRef === 'object' ? raw.repoRef : null;
+  const repoRef = ref && typeof ref.url === 'string' && ref.url.trim() !== '' ? {
+    url: ref.url.trim(),
+    branch: typeof ref.branch === 'string' ? ref.branch.trim() : '',
+    sshKeyId: typeof ref.sshKeyId === 'string' ? ref.sshKeyId.trim() : '',
+    githubTokenId: typeof ref.githubTokenId === 'string' ? ref.githubTokenId.trim() : '',
+  } : null;
+  const branch = (repoRef && repoRef.branch) || KB_DEFAULT_BRANCH;
+  return { mode, path: pathVal, branch, repoRef };
+}
+
+// The team env's own repositories (url + branch + credential ids, no secrets),
+// so the storage control can offer "the repo already used by this team" as the
+// in-repo target and pre-fill its credentials.
+function teamRepositories(env) {
+  const repos = env && Array.isArray(env.repositories) ? env.repositories : [];
+  return repos
+    .filter((r) => r && typeof r.url === 'string' && r.url.trim() !== '')
+    .map((r) => ({
+      url: r.url.trim(),
+      branch: typeof r.branch === 'string' ? r.branch.trim() : '',
+      sshKeyId: typeof r.sshKeyId === 'string' ? r.sshKeyId.trim() : '',
+    }));
+}
+
 // Promotion gate policy for a team (Phase 4) + its autonomy level, for the
 // Knowledge Flow gate switches.
 app.get('/api/knowledge/gates', (req, res) => {
@@ -3687,6 +3725,9 @@ app.get('/api/knowledge/gates', (req, res) => {
     gates: knowledgeSuggestions.resolvePromotionGates(env),
     environment: env ? { id: env.id, name: env.name || env.id } : null,
     sharedWith,
+    store: knowledgeStoreView(env),
+    repositories: teamRepositories(env),
+    githubTokenId: env && typeof env.githubTokenId === 'string' ? env.githubTokenId : '',
   });
 });
 
@@ -3733,6 +3774,74 @@ app.put('/api/knowledge/autonomy', apiLimiter, async (req, res) => {
     const out = await r.json().catch(() => ({}));
     if (!r.ok || !out.ok) return res.status(502).json({ error: (out && out.error) || 'autonomy update failed' });
     res.json({ ok: true, autonomy: out.autonomy });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// ── Knowledge storage location (repo/branch/path), per team (#558) ──────────
+// The Knowledge Flow storage control drives this. For a separate knowledge repo
+// (own-repo) we first run the existing ls-remote probe (reachability + access)
+// and REJECT an unreachable/unauthorized target before persisting (AC-2); in-repo
+// only re-points branch/path within the team's already-validated env repo, so it
+// needs no probe. Then proxies to the orchestrator, which normalizes, persists
+// onto the shared env, and refreshes the canonical clone at the NEW location
+// (AC-4/AC-7). Knowledge already stored at the old location is left in place
+// (AC-5 — the UI confirms this before calling).
+app.put('/api/knowledge/store', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+
+  const input = req.body?.store && typeof req.body.store === 'object' ? req.body.store : {};
+  const mode = input.mode === 'own-repo' ? 'own-repo' : 'in-repo';
+  const ref = input.repoRef && typeof input.repoRef === 'object' ? input.repoRef : {};
+  const url = typeof ref.url === 'string' ? ref.url.trim() : '';
+  const branch = typeof input.branch === 'string' ? input.branch.trim() : '';
+  const kbPath = typeof input.path === 'string' ? input.path.trim() : '';
+  const sshKeyId = typeof ref.sshKeyId === 'string' ? ref.sshKeyId.trim() : '';
+  const githubTokenId = typeof ref.githubTokenId === 'string' ? ref.githubTokenId.trim() : '';
+
+  if (mode === 'own-repo' && !url) {
+    return res.status(400).json({ error: 'a separate knowledge repository requires a repo URL' });
+  }
+  if (sshKeyId) {
+    if (!SSH_KEY_ID_RE.test(sshKeyId)) return res.status(400).json({ error: 'invalid SSH key id' });
+    if (!listSshKeys().some((k) => k.id === sshKeyId)) return res.status(400).json({ error: `SSH key '${sshKeyId}' not found` });
+  }
+  if (githubTokenId) {
+    if (!GH_TOKEN_ID_RE.test(githubTokenId)) return res.status(400).json({ error: 'invalid GitHub token id' });
+    if (!listGithubTokens().some((t) => t.id === githubTokenId)) return res.status(400).json({ error: `GitHub token '${githubTokenId}' not found` });
+  }
+
+  // AC-2: reachability + access probe for a separate knowledge repo.
+  if (mode === 'own-repo') {
+    try {
+      const probe = await fetch(`${ORCH_URL()}/internal/repository-check`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, sshKeyId: sshKeyId || null, githubTokenId: githubTokenId || null }),
+      });
+      const pr = await probe.json().catch(() => ({}));
+      if (!probe.ok || !pr.ok) {
+        return res.status(400).json({ error: (pr && pr.error) || 'knowledge repository is not reachable', probe: pr });
+      }
+    } catch (err) {
+      return res.status(502).json({ error: `repository probe failed: ${err.message}` });
+    }
+  }
+
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/store`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        teamId,
+        store: { mode, path: kbPath, branch, repoRef: { url, sshKeyId, githubTokenId } },
+      }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) return res.status(502).json({ error: (out && out.error) || 'store update failed' });
+    res.json({ ok: true, store: out.store, warnings: out.warnings || [] });
   } catch (err) {
     res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
   }

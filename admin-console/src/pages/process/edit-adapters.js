@@ -221,6 +221,51 @@ function slugRole(name, taken) {
   return id;
 }
 
+// Map a raw role TEMPLATE (from GET /api/agent-templates/:id) into a draft
+// bundle role (#586). The bundle role shape mirrors the template almost 1:1 —
+// both express triggers with `promptTemplate` — so this is a verbatim field
+// copy that deliberately KEEPS `{{vars}}` raw (E2): a draft has no team/repo
+// bound yet, so substitution is deferred to materialise time (parity with the
+// wizard path). `id`/`displayName` come from the user's (possibly edited) input.
+function templateToDraftRole(t, { id, displayName }) {
+  const role = {
+    id,
+    displayName: displayName || t.displayName || id,
+    role: 'team-member',
+    sessionPolicy: t.sessionPolicy === 'per-invocation' ? 'per-invocation' : 'persistent',
+    systemPrompt: t.promptTemplate || '',
+    triggers: (Array.isArray(t.triggers) ? t.triggers : []).map(tr => ({
+      id: tr.id,
+      type: tr.type,
+      enabled: tr.enabled !== false,
+      ...(tr.events ? { events: tr.events } : {}),
+      ...(tr.labelFilter ? { labelFilter: tr.labelFilter } : {}),
+      ...(tr.cron ? { cron: tr.cron } : {}),
+      ...(tr.at ? { at: tr.at } : {}),
+      ...(Array.isArray(tr.emits) ? { emits: tr.emits } : {}),
+      ...(tr.dataFlow ? { dataFlow: tr.dataFlow } : {}),
+      ...(tr.channel ? { channel: tr.channel } : {}),
+      ...(tr.description ? { description: tr.description } : {}),
+      // Bundle triggers store the prompt under `promptTemplate` (see
+      // templateToCustomRoles) — the template already uses that key.
+      promptTemplate: tr.promptTemplate || '',
+      ...(tr.preCheckScript ? { preCheckScript: tr.preCheckScript } : {}),
+      ...(tr.preCheckEnv ? { preCheckEnv: tr.preCheckEnv } : {}),
+    })),
+  };
+  // Declarative ports — carried verbatim so the draft graph renders the
+  // template's wiring and materialise reproduces it (parity with the wizard).
+  if (Array.isArray(t.inputs) && t.inputs.length) role.inputs = t.inputs;
+  if (Array.isArray(t.outputs) && t.outputs.length) role.outputs = t.outputs;
+  if (Array.isArray(t.dependsOn) && t.dependsOn.length) role.dependsOn = t.dependsOn;
+  if (typeof t.parent === 'string' && t.parent) role.parent = t.parent;
+  if (typeof t.stage === 'string' && t.stage) role.stage = t.stage;
+  if (Array.isArray(t.emits) && t.emits.length) role.emits = t.emits;
+  if (t.github && (t.github.producesPr || t.github.producesIssue)) role.github = t.github;
+  if (Array.isArray(t.channels) && t.channels.length) role.channels = t.channels;
+  return role;
+}
+
 /**
  * Draft mode — every op mutates the bundle and persists it.
  * @param {() => object} getBundle  returns the *current* bundle (use a ref to avoid staleness)
@@ -292,18 +337,30 @@ export function makeDraftOps(getBundle, persist) {
     },
 
     // ── roles (draft-only; no live equivalent) ──
-    addRole: async ({ displayName, systemPrompt, sessionPolicy, github }) => {
+    // Free-form OR template-based (#586). When `template` (a full role template
+    // fetched from GET /api/agent-templates/:id) is supplied, its prompt,
+    // session policy, triggers and declarative ports are copied into the bundle
+    // role VERBATIM — `{{vars}}` (repoFullName/agentId/readyLabel/…) are kept
+    // RAW (E2), resolved per-member only at materialise time (the same point the
+    // wizard resolves them). The user-edited `displayName` still drives identity
+    // (AC-6): the id is slugged from it and uniqueness-resolved within the
+    // bundle (AC-7).
+    addRole: async ({ displayName, systemPrompt, sessionPolicy, github, template }) => {
       const b = clone(getBundle());
       b.roles = b.roles || [];
       const id = slugRole(displayName, new Set(b.roles.map(r => r.id)));
-      b.roles.push({
-        id, displayName: displayName || id, role: 'team-member',
-        sessionPolicy: sessionPolicy || 'persistent',
-        // A PR-reviewer role (#380) is a plain per-invocation agent that consumes a
-        // PR channel — the caller wires the channel after creation.
-        ...(github && (github.producesPr || github.producesIssue) ? { github } : {}),
-        systemPrompt: systemPrompt || '', triggers: [],
-      });
+      if (template && typeof template === 'object') {
+        b.roles.push(templateToDraftRole(template, { id, displayName }));
+      } else {
+        b.roles.push({
+          id, displayName: displayName || id, role: 'team-member',
+          sessionPolicy: sessionPolicy || 'persistent',
+          // A PR-reviewer role (#380) is a plain per-invocation agent that consumes a
+          // PR channel — the caller wires the channel after creation.
+          ...(github && (github.producesPr || github.producesIssue) ? { github } : {}),
+          systemPrompt: systemPrompt || '', triggers: [],
+        });
+      }
       await persist(b);
       return id;
     },

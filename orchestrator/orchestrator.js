@@ -4164,6 +4164,36 @@ class Orchestrator {
     return { teamId, skillName: name, active, members: results };
   }
 
+  // Refresh an ALREADY-ACTIVE team skill's files on every member that currently
+  // carries it (#553, AC10/E1): re-copy the (re-synthesised) SKILL.md into each
+  // seeded member's workspace and rebuild its CLAUDE.md, WITHOUT touching the
+  // grant or emitting an activation event. No-op when the skill is not in the
+  // team's active list, or for members that never had it seeded (a content
+  // refresh must not newly seed a member). Reuses the additive activation sync.
+  async resyncTeamSkill(teamId, skillName) {
+    const teamCfg = loadAgentConfig(teamId);
+    if (!teamCfg || teamCfg.role !== "team") return { teamId, skillName, resynced: false, members: [] };
+    const name = typeof skillName === "string" ? skillName.trim() : "";
+    if (!name) return { teamId, skillName, resynced: false, members: [] };
+    const list = Array.isArray(teamCfg.skills) ? teamCfg.skills : [];
+    if (!list.includes(name)) return { teamId, skillName: name, resynced: false, members: [] };
+
+    const members = listAgentIds()
+      .map((id) => loadAgentConfig(id))
+      .filter((c) => c && c.role === "team-member" && c.parentTeamId === teamId);
+    const plan = planSkillSync({ members, skillName: name, includeMembers: [] });
+
+    const results = [];
+    for (const step of plan) {
+      if (step.action !== "sync" && step.action !== "sync-override") continue;
+      if (!readSeededSkills(step.agentId)[name]) continue; // only members that already have it
+      const cfg = members.find((m) => m.id === step.agentId);
+      results.push(await this._syncSkillIntoWorkspace(step.agentId, cfg, name, { remove: false }));
+    }
+    console.log(`[Orchestrator] Team ${teamId}: skill '${name}' content re-synced to ${results.length} member(s)`);
+    return { teamId, skillName: name, resynced: true, members: results };
+  }
+
   // (De)activate a skill on a single non-member agent (standalone /
   // orchestrator): same idempotent list edit + file sync, one workspace.
   async setAgentSkillActive(id, skillName, { active = true } = {}) {
@@ -7118,10 +7148,11 @@ async function main() {
       const dismiss = req.url.endsWith('/dismiss');
       let body = '';
       req.on('data', (d) => { body += d; });
-      req.on('end', () => {
+      req.on('end', async () => {
         try {
           const p = JSON.parse(body || '{}');
           const teamId = String(p.teamId || DEFAULT_TEAM_ID);
+          const isExtend = !dismiss && !!p.extend;
           const entryIds = Array.isArray(p.entryIds)
             ? p.entryIds.filter((x) => typeof x === 'string' && /^[0-9a-f]{12}$/.test(x))
             : [];
@@ -7157,13 +7188,21 @@ async function main() {
           if (!dismiss) {
             const skill = p.skill && typeof p.skill === 'object'
               ? { name: p.skill.name, tier: p.skill.tier } : null;
+            // Distinguishable feed event (#553, AC9): "extension" (skill X gained
+            // N entries) vs the "promotion" of a brand-new skill.
             appendKnowledgeEvents([{
-              type: 'promotion',
+              type: isExtend ? 'extension' : 'promotion',
               ts: new Date().toISOString(),
               teamId,
               skill,
               entryIds: Array.isArray(p.entryIds) ? p.entryIds : [],
             }]);
+            // Auto-sync the refreshed content to every agent that already has this
+            // team skill active (#553, AC10). Best-effort — never fails the write.
+            if (isExtend && skill && skill.tier === 'team' && skill.name) {
+              try { await orchestrator.resyncTeamSkill(teamId, skill.name); }
+              catch (err) { console.warn(`[Orchestrator] resyncTeamSkill(${teamId}, ${skill.name}) failed: ${err.message}`); }
+            }
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true }));

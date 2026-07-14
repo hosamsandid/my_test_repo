@@ -3238,7 +3238,15 @@ app.get('/api/knowledge/promotion-suggestions', (req, res) => {
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
   if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
   const open = readCandidateStore(teamId).filter(c => c && c.status === 'open');
-  const suggestions = open.map(c => knowledgeSuggestions.promotionSuggestionView(c, c.draft));
+  // Auto-match (#553, AC4): pre-compute whether each converged cluster fits an
+  // existing team-tier skill (the default promotion home), so the dialog can
+  // pre-select "extend" with that target. Default stays "create new" (null).
+  const eligible = eligibleExtendSkills(scope, teamId, 'team');
+  const suggestions = open.map(c => {
+    const view = knowledgeSuggestions.promotionSuggestionView(c, c.draft);
+    view.matchedSkill = knowledgeSuggestions.matchExistingSkill(c, eligible);
+    return view;
+  });
   res.json({ team: teamId, suggestions });
 });
 
@@ -3320,6 +3328,52 @@ app.post('/api/knowledge/draft', heavyLimiter, async (req, res) => {
   res.json({ draft: { name: heuristic.name, skillMd, llmDrafted: true }, source: 'llm', model: target.model, entryIds: cand.entryIds });
 });
 
+// Re-synthesise an EXISTING skill together with the converged knowledge (#553,
+// AC5) into one coherent, editable document. Mirrors /api/knowledge/draft's
+// LLM-with-heuristic-fallback contract; `heuristicOnly: true` skips the LLM so the
+// dialog can prefill instantly. Purely a preview — nothing is written here; the
+// operator submits the (edited) result to /api/knowledge/promote { mode: 'extend' }.
+app.post('/api/knowledge/extend-draft', heavyLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.body?.team === 'string' ? req.body.team
+    : (typeof req.body?.teamId === 'string' ? req.body.teamId : '');
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  const tier = req.body?.tier === 'global' ? 'global' : 'team';
+  const targetName = typeof req.body?.targetName === 'string' ? req.body.targetName : '';
+  if (!knowledgeSuggestions.SKILL_NAME_RE.test(targetName)) return res.status(400).json({ error: 'invalid target skill name' });
+
+  const target = resolveExtendTarget(teamId, tier, targetName);
+  if (target.error) return res.status(target.notFound ? 404 : 400).json({ error: target.error });
+
+  const cand = (req.body?.suggestionId
+    ? readCandidateStore(teamId).find(c => c && c.id === req.body.suggestionId) || null
+    : null)
+    || adHocCandidate(teamId, req.body?.entryIds);
+  if (!cand) return res.status(404).json({ error: 'no matching KB entries' });
+
+  const heuristic = knowledgeSuggestions.buildHeuristicSkillExtension(target.existingSkillMd, cand);
+  const fallback = () => res.json({
+    draft: { skillMd: heuristic.skillMd, llmDrafted: false }, source: 'heuristic',
+    added: heuristic.added, entryIds: cand.entryIds,
+  });
+  if (req.body?.heuristicOnly) return fallback();
+
+  const gen = resolveGenerationTarget(req.body?.llmEndpointId);
+  if (gen.error) return fallback();
+  const url = buildMessagesUrl(gen.baseUrl);
+  const headers = {
+    'anthropic-version': '2023-06-01',
+    ...(gen.token ? { Authorization: `Bearer ${gen.token}`, 'x-api-key': gen.token } : {}),
+  };
+  const payload = { model: gen.model, ...knowledgeSuggestions.buildSkillExtensionRequest(target.existingSkillMd, cand) };
+  const result = await httpPostJson(url, headers, payload);
+  if (result.error || result.status < 200 || result.status >= 300) return fallback();
+  const skillMd = extractMessageText(result.body);
+  if (!skillMd) return fallback();
+  res.json({ draft: { skillMd, llmDrafted: true }, source: 'llm', model: gen.model, entryIds: cand.entryIds });
+});
+
 app.post('/api/knowledge/promotion-suggestions/:id/dismiss', apiLimiter, async (req, res) => {
   const scope = getScope(req);
   const teamId = typeof req.body?.team === 'string' ? req.body.team : '';
@@ -3341,6 +3395,59 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
   const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
   if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+
+  // extend (issue #553): fold the converged knowledge into an EXISTING skill
+  // instead of creating a new one. The operator-approved (re-synthesised) SKILL.md
+  // replaces the target's content and its provenance UNIONS the new entry ids onto
+  // the existing record. Tier is symmetric to a promotion target (team→team /
+  // team→global). SKILL.md is only ever written here, on submit, so a failed LLM
+  // re-synthesis (which happens earlier in /extend-draft) never touches the skill.
+  if (req.body?.mode === 'extend') {
+    const v = knowledgeSuggestions.validateExtension(req.body);
+    if (!v.ok) return res.status(400).json({ error: v.error });
+
+    const target = resolveExtendTarget(teamId, v.to, v.targetName);
+    if (target.error) return res.status(target.notFound ? 404 : 400).json({ error: target.error });
+
+    // E5: reject an empty / identical (no-op) submit.
+    if (v.skillMd.replace(/\s+$/, '') === target.existingSkillMd.replace(/\s+$/, '')) {
+      return res.status(400).json({ error: 'no changes: submitted content is identical to the existing skill' });
+    }
+
+    // Provenance source (same as create): stored candidate for a suggestion card,
+    // else an ad-hoc candidate rebuilt from the selected entries (manual combine).
+    const cand = (req.body.suggestionId
+      ? readCandidateStore(teamId).find(c => c && c.id === req.body.suggestionId) || null
+      : null)
+      || adHocCandidate(teamId, v.entryIds);
+
+    const existingProv = readSkillProvenance(target.dir) || {};
+    const extendedBy = (req.user && (req.user.sub || req.user.username)) || 'operator';
+    const prov = knowledgeSuggestions.extendSkillProvenance({
+      existingProv, from: v.from, to: v.to, teamId, entryIds: v.entryIds, candidate: cand, extendedBy,
+    });
+    try {
+      fs.writeFileSync(path.join(target.dir, 'SKILL.md'), v.skillMd.endsWith('\n') ? v.skillMd : v.skillMd + '\n');
+      fs.writeFileSync(path.join(target.dir, 'provenance.json'), JSON.stringify(prov, null, 2));
+    } catch (err) {
+      return res.status(500).json({ error: `Failed to write skill: ${err.message}` });
+    }
+
+    // Best-effort: orchestrator flips the candidate lifecycle, emits a distinct
+    // "extension" feed event, and (team tier) re-syncs the refreshed content to
+    // every agent that already has the skill active (AC9/AC10).
+    try {
+      await fetch(`${ORCH_URL()}/internal/knowledge/promoted`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          teamId, suggestionId: req.body.suggestionId || null,
+          skill: { name: v.targetName, tier: v.to }, entryIds: v.entryIds, extend: true,
+        }),
+      });
+    } catch { /* best-effort */ }
+
+    return res.status(200).json({ name: v.targetName, tier: v.to, teamId, provenance: prov, extended: true });
+  }
 
   // agent→team lift (Phase 4): the source is a private AGENT skill. Resolve it and
   // pre-fill skillMd + entryIds from its SKILL.md / provenance.json, so the caller
@@ -4171,6 +4278,55 @@ function listTeamSkills(filterTeamId) {
       const skillMd = path.join(dir, name, 'SKILL.md');
       if (fs.existsSync(skillMd)) out.push({ name, source: 'team', teamId, path: skillMd });
     }
+  }
+  return out;
+}
+
+// Resolve the on-disk target of an "extend an existing skill" (#553) at the given
+// tier, with the same containment guards as the promote destination. Returns
+// { dir, skillMdPath, existingSkillMd } or { error, notFound? }.
+function resolveExtendTarget(teamId, tier, name) {
+  let dir;
+  if (tier === 'team') {
+    dir = safeTeamSkillDir(teamId, name);
+    if (!dir) return { error: 'Invalid team id or skill name' };
+  } else if (tier === 'global') {
+    const poolSkillsBaseDir = path.resolve(POOL_DIR, 'skills');
+    dir = path.resolve(poolSkillsBaseDir, name);
+    const rel = path.relative(poolSkillsBaseDir, dir);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return { error: 'Invalid skill name' };
+  } else {
+    return { error: 'invalid tier' };
+  }
+  const skillMdPath = path.join(dir, 'SKILL.md');
+  if (!fs.existsSync(skillMdPath)) return { error: `Skill '${name}' does not exist`, notFound: true };
+  let existingSkillMd = '';
+  try { existingSkillMd = fs.readFileSync(skillMdPath, 'utf8'); } catch { /* treated as empty */ }
+  return { dir, skillMdPath, existingSkillMd };
+}
+
+// The skills eligible as an extend target for a given promotion tier (#553, AC2):
+// team-tier skills of `teamId` for a team→team extend, the global pool for
+// team→global. Each carries its provenance entryIds so the auto-matcher (AC4) can
+// score entry-id lineage.
+function eligibleExtendSkills(scope, teamId, tier) {
+  const out = [];
+  if (tier === 'team') {
+    for (const s of listTeamSkills(teamId)) {
+      if (!visibleTeam(scope, s.teamId)) continue;
+      const prov = readSkillProvenance(path.dirname(s.path));
+      out.push({ name: s.name, tier: 'team', teamId: s.teamId, entryIds: Array.isArray(prov && prov.entryIds) ? prov.entryIds : [] });
+    }
+  } else if (tier === 'global') {
+    const poolSkillsDir = path.join(POOL_DIR, 'skills');
+    try {
+      for (const name of fs.readdirSync(poolSkillsDir)) {
+        const dir = path.join(poolSkillsDir, name);
+        if (!fs.existsSync(path.join(dir, 'SKILL.md'))) continue;
+        const prov = readSkillProvenance(dir);
+        out.push({ name, tier: 'global', entryIds: Array.isArray(prov && prov.entryIds) ? prov.entryIds : [] });
+      }
+    } catch { /* no pool skills dir */ }
   }
   return out;
 }

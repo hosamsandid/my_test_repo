@@ -12,6 +12,11 @@ const {
   buildShareProvenance,
   promotionSuggestionView,
   resolvePromotionGates,
+  validateExtension,
+  buildSkillExtensionRequest,
+  buildHeuristicSkillExtension,
+  extendSkillProvenance,
+  matchExistingSkill,
 } = require('./knowledge-suggestions');
 
 const NOW = '2026-07-08T12:00:00Z';
@@ -237,4 +242,89 @@ test('promotionSuggestionView: passes kinds + lessonCount through', () => {
   const plain = promotionSuggestionView(candidate());
   assert.deepEqual(plain.kinds, ['fact']);
   assert.equal(plain.lessonCount, null);
+});
+
+// ─── extend an existing skill (issue #553) ───────────────────────────────────
+
+test('validateExtension: allows team→team / team→global, rejects the rest', () => {
+  const base = { targetName: 'poller', skillMd: '# x', entryIds: ['aaaaaaaaaaaa'] };
+  assert.equal(validateExtension({ ...base, from: 'team', to: 'team' }).ok, true);
+  assert.equal(validateExtension({ ...base, from: 'team', to: 'global' }).ok, true);
+  assert.equal(validateExtension({ ...base, from: 'agent', to: 'team' }).ok, false); // lift stays create-only
+  assert.equal(validateExtension({ ...base, from: 'team', to: 'agent' }).ok, false);
+});
+
+test('validateExtension: requires target name, provenance, non-empty skillMd', () => {
+  assert.equal(validateExtension({ from: 'team', to: 'team', targetName: 'bad name!', skillMd: '# x', entryIds: ['aaaaaaaaaaaa'] }).ok, false);
+  assert.equal(validateExtension({ from: 'team', to: 'team', targetName: 'poller', skillMd: '# x', entryIds: [] }).ok, false);
+  assert.equal(validateExtension({ from: 'team', to: 'team', targetName: 'poller', skillMd: '', entryIds: ['aaaaaaaaaaaa'] }).ok, false);
+  const ok = validateExtension({ from: 'team', to: 'team', targetName: 'poller', skillMd: '# x', entryIds: ['aaaaaaaaaaaa', 'not-hex'] });
+  assert.equal(ok.ok, true);
+  assert.deepEqual(ok.entryIds, ['aaaaaaaaaaaa']); // non-hex filtered out
+});
+
+test('buildSkillExtensionRequest: keeps existing content authoritative, folds new lessons', () => {
+  const req = buildSkillExtensionRequest('# Poller\n\nExisting durable knowledge.', candidate());
+  assert.match(req.messages[0].content, /EXISTING SKILL\.md/);
+  assert.match(req.messages[0].content, /Existing durable knowledge\./);
+  assert.match(req.messages[0].content, /Preserve all durable knowledge already in the existing document/);
+  assert.match(req.messages[0].content, /This repo unit-tests pure helper cores only/);
+});
+
+test('buildHeuristicSkillExtension: appends only genuinely-new lessons, dedupes against prior', () => {
+  const prior = '# Poller\n\n- This repo unit-tests pure helper cores only\n';
+  const ext = buildHeuristicSkillExtension(prior, candidate());
+  assert.equal(ext.llmDrafted, false);
+  assert.equal(ext.added, 1); // the first member already appears in prior → only the second is new
+  assert.ok(ext.skillMd.includes('## Added knowledge'));
+  assert.ok(ext.skillMd.includes('IO verified manually'));
+  // no-op when every member text is already covered verbatim (E3/E5)
+  const noop = buildHeuristicSkillExtension(
+    'This repo unit-tests pure helper cores only\nRepo tests pure cores only; IO verified manually',
+    candidate(),
+  );
+  assert.equal(noop.added, 0);
+});
+
+test('extendSkillProvenance: unions new ids onto existing, preserves origin, records extension', () => {
+  const existing = buildSkillProvenance({
+    from: 'team', to: 'team', teamId: 'acme',
+    entryIds: ['aaaaaaaaaaaa'],
+    candidate: candidate({ members: [{ id: 'aaaaaaaaaaaa', originAgent: 'acme-dev-1', text: 'x', createdAt: NOW }] }),
+    promotedBy: 'thorsten', now: '2026-07-01T00:00:00Z',
+  });
+  const merged = extendSkillProvenance({
+    existingProv: existing, from: 'team', to: 'team', teamId: 'acme',
+    entryIds: ['aaaaaaaaaaaa', 'bbbbbbbbbbbb'], // aaaa already present
+    candidate: candidate(), extendedBy: 'alice', now: NOW,
+  });
+  assert.deepEqual(merged.entryIds, ['aaaaaaaaaaaa', 'bbbbbbbbbbbb']); // union, no dup
+  assert.equal(merged.promotedAt, '2026-07-01T00:00:00Z'); // original promotion preserved
+  assert.equal(merged.promotedBy, 'thorsten');
+  assert.equal(merged.lastExtendedBy, 'alice');
+  assert.equal(merged.lastExtendedAt, NOW);
+  assert.equal(merged.extensions.length, 1);
+  assert.deepEqual(merged.extensions[0].entryIds, ['bbbbbbbbbbbb']); // only the newly-added id
+  assert.equal(merged.extensions[0].extendedBy, 'alice');
+  assert.ok(merged.originAgents.includes('acme-dev-1'));
+  assert.ok(merged.originAgents.includes('acme-dev-2'));
+});
+
+test('matchExistingSkill: entry-id lineage beats name overlap; null when no signal', () => {
+  const skills = [
+    { name: 'unrelated', tier: 'team', entryIds: ['cccccccccccc'] },
+    { name: 'pure-helper-cores', tier: 'team', entryIds: [] }, // name-token overlap only
+    { name: 'lineage-hit', tier: 'team', entryIds: ['bbbbbbbbbbbb'] }, // shares an entry id
+  ];
+  const m = matchExistingSkill(candidate(), skills);
+  assert.equal(m.name, 'lineage-hit'); // id overlap wins
+  assert.equal(m.idOverlap, 1);
+
+  // name-only match when no id overlap exists
+  const nameOnly = matchExistingSkill(candidate(), [{ name: 'pure-helper-cores', tier: 'team', entryIds: [] }]);
+  assert.equal(nameOnly.name, 'pure-helper-cores');
+  assert.ok(nameOnly.nameOverlap > 0);
+
+  assert.equal(matchExistingSkill(candidate(), []), null);
+  assert.equal(matchExistingSkill(candidate(), [{ name: 'totally-different', entryIds: ['zzzzzzzzzzzz'] }]), null);
 });

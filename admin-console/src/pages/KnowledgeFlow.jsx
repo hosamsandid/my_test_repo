@@ -1575,6 +1575,12 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
   const [error, setError] = useState('');
   const [activateNow, setActivateNow] = useState(true);
   const [result, setResult] = useState(null); // combined promote+activate outcome
+  // Create a NEW skill (default) vs extend an EXISTING one (issue #553). When the
+  // converged cluster auto-matches a skill (AC4) we open straight in extend mode
+  // with that skill pre-selected — the operator can always switch back.
+  const [mode, setMode] = useState(suggestion.matchedSkill ? 'extend' : 'create');
+  const [targetName, setTargetName] = useState(suggestion.matchedSkill?.name || '');
+  const [skills, setSkills] = useState([]); // all eligible skills (every source/tier)
 
   // manual = operator multi-select (no stored suggestion); aggregated = the
   // lessons are distinct and the skill is their synthesis (manual OR the
@@ -1591,10 +1597,57 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
     return out;
   }, [suggestion.members]);
 
-  // Manual combine opens without a draft — prefill instantly with the cheap
-  // heuristic one so the operator never faces an empty SKILL.md.
+  // Skills eligible as an extend target, scoped to the chosen tier (AC2): the
+  // team's own skills for a team-tier extend, the global pool for a global one.
+  const eligible = useMemo(() => (
+    tier === 'team'
+      ? skills.filter(s => s.source === 'team' && s.teamId === teamId)
+      : skills.filter(s => s.source === 'pool')
+  ), [skills, tier, teamId]);
+  const canExtend = eligible.length > 0;
+
+  // Load the tier-scoped skill catalogue once so the picker + AC8 fallback know
+  // whether any extend target exists.
   useEffect(() => {
-    if (!manual) return;
+    fetch(`/api/skills?teamId=${encodeURIComponent(teamId)}`)
+      .then(r => (r.ok ? r.json() : []))
+      .then(list => setSkills(Array.isArray(list) ? list : []))
+      .catch(() => {});
+  }, [teamId]);
+
+  // AC8: extend is only offered when a target exists for the tier — fall back to
+  // create cleanly if the current tier has none (e.g. after switching tiers).
+  useEffect(() => {
+    if (mode === 'extend' && !canExtend) setMode('create');
+  }, [mode, canExtend]);
+  // A tier switch can invalidate the selected target — drop it if it no longer fits.
+  useEffect(() => {
+    setTargetName(t => (eligible.some(s => s.name === t) ? t : ''));
+  }, [eligible]);
+
+  // Re-synthesise the chosen existing skill + the new knowledge into an editable
+  // preview (AC5). Heuristic by default (instant); `useLLM` runs the LLM merge.
+  const loadExtendDraft = (useLLM) => {
+    if (!targetName) return;
+    setBusy('draft'); setError('');
+    fetch('/api/knowledge/extend-draft', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        team: teamId, tier, targetName,
+        ...(suggestion.id ? { suggestionId: suggestion.id } : { entryIds: suggestion.entryIds }),
+        ...(useLLM ? {} : { heuristicOnly: true }),
+      }),
+    })
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (d?.draft?.skillMd) setSkillMd(d.draft.skillMd); })
+      .catch(() => setError('Draft failed'))
+      .finally(() => setBusy(''));
+  };
+
+  // Manual combine opens without a draft — prefill instantly with the cheap
+  // heuristic one so the operator never faces an empty SKILL.md (create mode only).
+  useEffect(() => {
+    if (!manual || mode !== 'create') return;
     setBusy('draft');
     fetch('/api/knowledge/draft', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1612,7 +1665,14 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // When extending, (re)load the merged preview as the target or tier changes.
+  useEffect(() => {
+    if (mode === 'extend' && targetName) loadExtendDraft(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, targetName, tier]);
+
   const draftWithAI = () => {
+    if (mode === 'extend') { loadExtendDraft(true); return; }
     setBusy('draft'); setError('');
     const req = manual
       ? fetch('/api/knowledge/draft', {
@@ -1632,6 +1692,24 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
 
   const promote = () => {
     setBusy('promote'); setError('');
+    // Extend an existing skill: the backend re-synthesises provenance (union) and
+    // auto-syncs the refreshed content to agents that already have it (AC10), so
+    // there is no separate activation step here.
+    if (mode === 'extend') {
+      fetch('/api/knowledge/promote', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode: 'extend', from: 'team', to: tier, teamId, targetName, skillMd,
+          entryIds: suggestion.entryIds,
+          ...(suggestion.id ? { suggestionId: suggestion.id } : {}),
+        }),
+      })
+        .then(async r => { if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`); return r.json(); })
+        .then(() => setResult({ kind: 'ok', text: `Extended “${targetName}” — active agents pick up the update automatically.` }))
+        .catch(e => setError(e.message))
+        .finally(() => setBusy(''));
+      return;
+    }
     fetch('/api/knowledge/promote', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1706,14 +1784,38 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
           )}
         </div>
 
-        <label style={lbl}>Skill name</label>
-        <input value={name} onChange={e => setName(e.target.value)} style={inp} />
+        <label style={lbl}>Add this knowledge to</label>
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+          <Chip active={mode === 'create'} title="Create a brand-new skill from this knowledge" onClick={() => setMode('create')}>Create a new skill</Chip>
+          {canExtend && (
+            <Chip active={mode === 'extend'} title="Fold this knowledge into a skill that already exists" onClick={() => setMode('extend')}>Add to an existing skill</Chip>
+          )}
+        </div>
 
         <label style={lbl}>Who gets this skill?</label>
         <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
           <Chip active={tier === 'team'} title="Only this team’s agents load it" onClick={() => setTier('team')}>Team skill — this team only</Chip>
           <Chip active={tier === 'global'} title="Agents in every team load it" onClick={() => setTier('global')}>Global skill — all teams</Chip>
         </div>
+
+        {mode === 'create' ? (
+          <>
+            <label style={lbl}>Skill name</label>
+            <input value={name} onChange={e => setName(e.target.value)} style={inp} />
+          </>
+        ) : (
+          <>
+            <label style={lbl}>Existing skill to extend</label>
+            <select value={targetName} onChange={e => setTargetName(e.target.value)} style={inp}>
+              <option value="">Select a skill…</option>
+              {eligible.map(s => (
+                <option key={s.name} value={s.name}>
+                  {s.name}{suggestion.matchedSkill?.name === s.name ? ' — suggested' : ''}
+                </option>
+              ))}
+            </select>
+          </>
+        )}
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
           <label style={lbl}>Skill instructions (SKILL.md)</label>
@@ -1724,15 +1826,22 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
         <textarea value={skillMd} onChange={e => setSkillMd(e.target.value)} rows={12}
           style={{ ...inp, fontFamily: 'var(--eb-font-mono, monospace)', fontSize: 'var(--eb-text-xs)', resize: 'vertical' }} />
 
-        {/* Activation is the default last step. For a global promotion the
-            activation still targets the SOURCE team (same teamId). */}
-        {(tier === 'team' || tier === 'global') && !result && (
+        {/* Activation is the default last step of a CREATE promotion. An extend
+            re-synthesises an already-pooled skill; its refreshed content is
+            auto-synced to every agent that currently has it active (AC10), so
+            there is no activation choice to make. */}
+        {mode === 'create' && (tier === 'team' || tier === 'global') && !result && (
           <ActivateNowCheckbox
             id="kf-promote-activate"
             checked={activateNow}
             onChange={setActivateNow}
             label="Activate for the team immediately"
           />
+        )}
+        {mode === 'extend' && !result && (
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
+            The refreshed skill is synced automatically to agents that already have “{targetName || 'this skill'}” active.
+          </div>
         )}
 
         {error && <div style={{ color: 'var(--eb-status-error, #d33)', fontSize: 'var(--eb-text-xs)' }}>{error}</div>}
@@ -1749,8 +1858,18 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
               {manual && (
                 <button onClick={onClose} disabled={!!busy} style={btn}>Cancel</button>
               )}
-              <button onClick={promote} disabled={!!busy || !name.trim() || !skillMd.trim()} style={primaryBtn}>
-                <Check size={14} /> {busy === 'promote' ? 'Promoting…' : aggregated ? `Create combined ${tier} skill` : `Promote to ${tier}`}
+              <button
+                onClick={promote}
+                disabled={!!busy || !skillMd.trim() || (mode === 'extend' ? !targetName : !name.trim())}
+                style={primaryBtn}
+              >
+                <Check size={14} /> {
+                  busy === 'promote'
+                    ? (mode === 'extend' ? 'Adding…' : 'Promoting…')
+                    : mode === 'extend'
+                      ? `Add to ${targetName || 'skill'}`
+                      : aggregated ? `Create combined ${tier} skill` : `Promote to ${tier}`
+                }
               </button>
             </>
           )}

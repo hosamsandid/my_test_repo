@@ -17,6 +17,8 @@ const {
   buildHeuristicSkillExtension,
   extendSkillProvenance,
   matchExistingSkill,
+  TEAM_KNOWLEDGE_KEYS,
+  mergeTeamKnowledgeConfig,
 } = require('./knowledge-suggestions');
 
 const NOW = '2026-07-08T12:00:00Z';
@@ -327,4 +329,65 @@ test('matchExistingSkill: entry-id lineage beats name overlap; null when no sign
 
   assert.equal(matchExistingSkill(candidate(), []), null);
   assert.equal(matchExistingSkill(candidate(), [{ name: 'totally-different', entryIds: ['zzzzzzzzzzzz'] }]), null);
+});
+
+// --- mergeTeamKnowledgeConfig (#570) ----------------------------------------
+// Verbatim mirror of orchestrator/knowledge-store.js's overlay (the two runtimes
+// never cross-require). These assertions mirror knowledge-store.test.js so the
+// two copies can't silently drift — the read path (api.js) consumes THIS one.
+
+test('TEAM_KNOWLEDGE_KEYS covers exactly the four per-team groups', () => {
+  assert.deepEqual(
+    [...TEAM_KNOWLEDGE_KEYS].sort(),
+    ['knowledgeAutonomy', 'knowledgePromotionGates', 'knowledgeReview', 'knowledgeStore'],
+  );
+});
+
+test('mergeTeamKnowledgeConfig: no overrides returns the base env unchanged (migration byte-identity, AC-2)', () => {
+  const env = { knowledgeAutonomy: 2, knowledgeReview: true, repositories: [{ url: 'x' }] };
+  // absent/empty overrides doc → same reference, so a read is byte-identical to before the upgrade
+  assert.equal(mergeTeamKnowledgeConfig(env, undefined), env);
+  assert.equal(mergeTeamKnowledgeConfig(env, {}), env);
+  assert.equal(mergeTeamKnowledgeConfig(env, { unrelated: 1 }), env);
+});
+
+test('mergeTeamKnowledgeConfig: overlays only the four team keys, other env fields pass through', () => {
+  const env = {
+    knowledgeAutonomy: 1,
+    knowledgeReview: false,
+    knowledgePromotionGates: { 'team>team': 'auto' },
+    knowledgeStore: { mode: 'in-repo', path: 'env/' },
+    knowledgeConvergence: { convergenceThreshold: 3 },
+    repositories: [{ url: 'repo-a' }],
+  };
+  const merged = mergeTeamKnowledgeConfig(env, {
+    knowledgeAutonomy: 3,
+    knowledgeStore: { mode: 'own-repo', path: 'team/' },
+  });
+  // overridden keys take the team value
+  assert.equal(merged.knowledgeAutonomy, 3);
+  assert.deepEqual(merged.knowledgeStore, { mode: 'own-repo', path: 'team/' });
+  // non-overridden team keys fall back to the env value
+  assert.equal(merged.knowledgeReview, false);
+  assert.deepEqual(merged.knowledgePromotionGates, { 'team>team': 'auto' });
+  // non-team env fields pass through untouched, base env not mutated
+  assert.deepEqual(merged.knowledgeConvergence, { convergenceThreshold: 3 });
+  assert.deepEqual(merged.repositories, [{ url: 'repo-a' }]);
+  assert.equal(env.knowledgeAutonomy, 1);
+});
+
+test('mergeTeamKnowledgeConfig: two teams on one env resolve independently (AC-1)', () => {
+  const sharedEnv = { knowledgeAutonomy: 1, knowledgeReview: false };
+  const teamA = mergeTeamKnowledgeConfig(sharedEnv, { knowledgeAutonomy: 3 });
+  const teamB = mergeTeamKnowledgeConfig(sharedEnv, { knowledgeReview: true });
+  assert.equal(teamA.knowledgeAutonomy, 3);
+  assert.equal(teamA.knowledgeReview, false); // A never touched review
+  assert.equal(teamB.knowledgeAutonomy, 1); // B never touched autonomy
+  assert.equal(teamB.knowledgeReview, true);
+});
+
+test('mergeTeamKnowledgeConfig: an override key set to a falsy value still wins over the env', () => {
+  // explicit 0 must override the env's 2 (hasOwnProperty, not truthiness)
+  const merged = mergeTeamKnowledgeConfig({ knowledgeAutonomy: 2 }, { knowledgeAutonomy: 0 });
+  assert.equal(merged.knowledgeAutonomy, 0);
 });

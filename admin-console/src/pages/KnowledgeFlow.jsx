@@ -1478,7 +1478,6 @@ function ControlStrip({ teamId, gates, onChanged }) {
   const current = AUTONOMY_LEVELS.find(l => l.level === autonomy) || AUTONOMY_LEVELS[1];
   const store = gates.store || {};
   const storeBranch = store.branch || KB_DEFAULT_BRANCH;
-  const shared = Array.isArray(gates.sharedWith) ? gates.sharedWith : [];
 
   return (
     <div style={{ borderBottom: '1px solid var(--eb-border-default)', background: 'var(--eb-bg-app)' }}>
@@ -1519,13 +1518,6 @@ function ControlStrip({ teamId, gates, onChanged }) {
           <Wand2 size={12} /> Configure knowledge
         </button>
       </div>
-
-      {shared.length > 0 && (
-        <div style={{ padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}
-          title={`These controls live on the shared environment '${gates.environment?.name || ''}' — changing them here also changes them for the listed team(s).`}>
-          ⚠ These settings are shared with {shared.join(', ')} — changing them here changes them for those team(s) too.
-        </div>
-      )}
 
       {panelOpen && (
         <ConfigurePanel
@@ -1575,7 +1567,6 @@ function ConfigurePanel({ teamId, gates, onClose, onChanged }) {
   const review = !!gates.review;
   const g = gates.gates || {};
   const current = AUTONOMY_LEVELS.find(l => l.level === autonomy) || AUTONOMY_LEVELS[1];
-  const shared = Array.isArray(gates.sharedWith) ? gates.sharedWith : [];
 
   /* ── Storage section state (consolidated from the former StorageDialog) ── */
   const initial = gates.store || {};
@@ -1650,17 +1641,6 @@ function ConfigurePanel({ teamId, gates, onClose, onChanged }) {
         Control how this team turns what its agents learn into shared knowledge and reusable skills, and where that
         knowledge is kept. Changes save immediately; running agents pick them up at their next rebuild.
       </p>
-
-      {shared.length > 0 && (
-        <div style={{
-          padding: 'var(--eb-space-2) var(--eb-space-3)', borderRadius: 'var(--eb-radius-md)',
-          border: '1px solid var(--eb-status-warning)', color: 'var(--eb-status-warning)',
-          fontSize: 'var(--eb-text-xs)', lineHeight: 1.5,
-        }}>
-          ⚠ These settings live on the shared environment{gates.environment?.name ? ` “${gates.environment.name}”` : ''} —
-          changing them here also changes them for {shared.join(', ')}.
-        </div>
-      )}
 
       {/* Autonomy */}
       <PanelSection

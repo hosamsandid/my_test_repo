@@ -2680,7 +2680,8 @@ function resolveTeamStorePath(teamId) {
   for (const id of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
     if (agentKnowledgeTeam(cfg) !== teamId || !cfg.environmentId) continue;
-    const env = loadEnvironment(cfg.environmentId);
+    // #570: the KB store path is keyed per team — overlay the team's overrides.
+    const env = knowledgeSuggestions.mergeTeamKnowledgeConfig(loadEnvironment(cfg.environmentId), loadTeamKnowledgeOverrides(teamId));
     const p = env && env.knowledgeStore && typeof env.knowledgeStore.path === 'string'
       ? env.knowledgeStore.path : null;
     if (p) return p.replace(/^\/+|\/+$/g, '') + '/';
@@ -2693,7 +2694,8 @@ function resolveTeamRepoUrl(teamId) {
   for (const id of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
     if (agentKnowledgeTeam(cfg) !== teamId || !cfg.environmentId) continue;
-    const env = loadEnvironment(cfg.environmentId);
+    // #570: the KB repoRef is keyed per team — overlay the team's overrides.
+    const env = knowledgeSuggestions.mergeTeamKnowledgeConfig(loadEnvironment(cfg.environmentId), loadTeamKnowledgeOverrides(teamId));
     const ref = env && env.knowledgeStore && env.knowledgeStore.repoRef;
     if (ref && ref.url) return ref.url;
     const repos = (env && env.repositories) || [];
@@ -2819,7 +2821,7 @@ function gatherTeamEntries(teamId) {
       if (!(k in decisions)) decisions[k] = v;
     }
   }
-  const reviewOn = knowledgeReviewOn(teamEnvironment(teamId));
+  const reviewOn = knowledgeReviewOn(teamKnowledgeEnv(teamId)); // #570: per-team config
   entries = overlayStatuses(entries, { archivedIds: archived, decisions, reviewOn });
   return { entries, warnings };
 }
@@ -3719,6 +3721,22 @@ function teamEnvironment(teamId) {
   return null;
 }
 
+// Per-team knowledge-config overrides (#570). The orchestrator persists the four
+// knowledge-config groups per team at /workspace/teams/<teamId>/knowledge-config.json;
+// this is the read-only mirror (api.js never cross-requires the orchestrator).
+function loadTeamKnowledgeOverrides(teamId) {
+  if (!AGENT_ID_RE.test(String(teamId || ''))) return {};
+  const raw = readJsonFile(path.join(WORKSPACE, 'teams', teamId, 'knowledge-config.json'), null);
+  return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+}
+
+// The team's effective knowledge env: the shared environment overlaid with the
+// team's per-team overrides (#570). Every knowledge read path resolves config
+// through this so two teams sharing one env report independent settings.
+function teamKnowledgeEnv(teamId) {
+  return knowledgeSuggestions.mergeTeamKnowledgeConfig(teamEnvironment(teamId), loadTeamKnowledgeOverrides(teamId));
+}
+
 // Team autonomy level (0..3, default 1). Local read — api.js does not import the
 // orchestrator's knowledge-store; the clamp mirrors knowledgeAutonomyLevel.
 // NOTE the `env ? … : undefined` shape: `Number(null)` is 0, so the previous
@@ -3786,27 +3804,18 @@ app.get('/api/knowledge/gates', (req, res) => {
   const teamId = typeof req.query.team === 'string' ? req.query.team : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
   if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
-  const env = teamEnvironment(teamId);
-  // Squads sharing one environment share one dial — name the env + siblings so
-  // the UI can say "this setting also applies to <other team>".
-  let sharedWith = [];
-  if (env && env.id) {
-    const siblings = new Set();
-    for (const id of listAgentDirs()) {
-      const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-      if (cfg.environmentId !== env.id) continue;
-      const t = agentKnowledgeTeam({ ...cfg, id: cfg.id || id });
-      if (t !== teamId) siblings.add(t);
-    }
-    sharedWith = [...siblings].sort();
-  }
+  // #570: knowledge config (autonomy / review / gates / storage) is keyed PER
+  // TEAM, so overlay the team's own overrides onto its shared environment. Two
+  // teams reusing one environment therefore report independent settings, and the
+  // config is no longer "shared with" sibling teams (sharedWith is always empty).
+  const env = teamKnowledgeEnv(teamId);
   res.json({
     team: teamId,
     autonomy: teamAutonomyLevel(env),
     review: knowledgeReviewOn(env),
     gates: knowledgeSuggestions.resolvePromotionGates(env),
-    environment: env ? { id: env.id, name: env.name || env.id } : null,
-    sharedWith,
+    environment: env && env.id ? { id: env.id, name: env.name || env.id } : null,
+    sharedWith: [],
     store: knowledgeStoreView(env),
     repositories: teamRepositories(env),
     githubTokenId: env && typeof env.githubTokenId === 'string' ? env.githubTokenId : '',
@@ -3965,7 +3974,7 @@ app.get('/api/knowledge/review-queue', async (req, res) => {
   const { entries, warnings } = gatherTeamEntries(teamId);
   const only = req.query.include === 'rejected' ? null : 'pending';
   const items = selectReviewQueue(entries, { only });
-  res.json({ team: teamId, review: knowledgeReviewOn(teamEnvironment(teamId)), items, warnings });
+  res.json({ team: teamId, review: knowledgeReviewOn(teamKnowledgeEnv(teamId)), items, warnings }); // #570: per-team config
 });
 
 // ── Approve / reject / reset a held KB entry ────────────────────────────────

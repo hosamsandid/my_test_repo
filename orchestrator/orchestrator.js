@@ -19,6 +19,7 @@ const {
   knowledgeConvergenceConfig,
   resolvePromotionGates,
   knowledgeCurationConfig,
+  mergeTeamKnowledgeConfig,
   buildDefaultManifest,
   kindFilePath,
   parseEntry: parseKnowledgeEntry,
@@ -252,14 +253,16 @@ function startAgentProcess(config) {
   // gets nudged to use a KB it doesn't have. Level >= 1 with a resolvable KB
   // repo turns harvesting on and points the CLI at the synced working copy.
   {
-    const level = knowledgeAutonomyLevel(env);
-    const kbRepoRef = env?.knowledgeStore?.repoRef || null;
+    const teamId = agentKnowledgeTeamId(config);
+    const kEnv = teamKnowledgeEnv(teamId, env);
+    const level = knowledgeAutonomyLevel(kEnv);
+    const kbRepoRef = kEnv?.knowledgeStore?.repoRef || null;
     const kbAvailable = level >= 1 && !!kbRepoRef;
     childEnv.KNOWLEDGE_AUTONOMY = String(kbAvailable ? level : 0);
     if (kbAvailable) {
-      childEnv.KNOWLEDGE_TEAM_ID = agentKnowledgeTeamId(config);
-      childEnv.KNOWLEDGE_STORE_PATH = env.knowledgeStore.path;
-      childEnv.KNOWLEDGE_BRANCH = knowledgeSync.resolveKnowledgeBranch(env);
+      childEnv.KNOWLEDGE_TEAM_ID = teamId;
+      childEnv.KNOWLEDGE_STORE_PATH = kEnv.knowledgeStore.path;
+      childEnv.KNOWLEDGE_BRANCH = knowledgeSync.resolveKnowledgeBranch(kEnv);
       childEnv.KNOWLEDGE_DIR = path.join("/workspace/agents", id, "knowledge");
     }
   }
@@ -747,7 +750,8 @@ function agentIsAutonomous(id, role) {
 // when an operator later turns a team's dial back to 0 (checkout still on
 // disk, but every surface falls back to the legacy model).
 function agentKnowledgeDigestRef(id, env) {
-  return knowledgeAutonomyLevel(env) >= 1 &&
+  const teamId = agentKnowledgeTeamId(loadAgentConfig(id) || {});
+  return knowledgeAutonomyLevel(teamKnowledgeEnv(teamId, env)) >= 1 &&
     fs.existsSync(path.join(agentDir(id), "knowledge", ".git"))
     ? KNOWLEDGE_DIGEST_FILENAME
     : null;
@@ -1049,8 +1053,12 @@ function seedAgentWorkspace(id, env, opts = {}) {
 
   // 6. Shared team Knowledge Base working copy (Shared Agent Learning, Phase 1).
   //    Only when the autonomy dial is on (>= 1); best-effort, never fails the seed.
-  if (knowledgeAutonomyLevel(env) >= 1) {
-    provisionKnowledgeCheckout(id, dest, env, warnings);
+  //    Knowledge config is keyed per team (#570), so overlay the team's overrides
+  //    onto the shared env before any knowledge consumer reads it.
+  const kbTeamId = agentKnowledgeTeamId(loadAgentConfig(id) || { teamId: opts.teamId });
+  const kbEnv = teamKnowledgeEnv(kbTeamId, env);
+  if (knowledgeAutonomyLevel(kbEnv) >= 1) {
+    provisionKnowledgeCheckout(id, dest, kbEnv, warnings);
     // Initial knowledge digest (Memory/Knowledge unification, Phase 1): the
     // seeded CLAUDE.md `@`-imports knowledge-digest.md whenever a checkout is
     // provisioned, so write the first digest here — the import never dangles.
@@ -1058,8 +1066,7 @@ function seedAgentWorkspace(id, env, opts = {}) {
     // current afterwards.
     if (fs.existsSync(path.join(dest, "knowledge", ".git"))) {
       try {
-        const teamId = agentKnowledgeTeamId(loadAgentConfig(id) || { teamId: opts.teamId });
-        writeAgentKnowledgeDigest(id, teamId, path.join(dest, "knowledge", _kbStoreRel(env)));
+        writeAgentKnowledgeDigest(id, kbTeamId, path.join(dest, "knowledge", _kbStoreRel(kbEnv)));
       } catch (err) {
         warnings.push(`knowledge digest: ${err.message}`);
       }
@@ -1068,7 +1075,7 @@ function seedAgentWorkspace(id, env, opts = {}) {
       // boilerplate, which the migration deletes (a workspace with real
       // legacy content gets parsed + archived instead — see Phase 3).
       try {
-        migrateAgentMemoryToKb(id, loadAgentConfig(id) || { teamId: opts.teamId }, env);
+        migrateAgentMemoryToKb(id, loadAgentConfig(id) || { teamId: opts.teamId }, kbEnv);
       } catch (err) {
         warnings.push(`legacy-memory migration: ${err.message}`);
       }
@@ -1803,6 +1810,9 @@ function _buildKbGitEnv(repoRef, env) {
 // the agent without a KB (it degrades to level-0 behaviour) and is surfaced as a
 // warning. First agent on a team bootstraps the branch from the shipped template.
 function provisionKnowledgeCheckout(id, dest, env, warnings) {
+  // #570: knowledge config is per team — overlay the agent's team overrides
+  // (idempotent even when a caller already overlaid the same env).
+  env = teamKnowledgeEnv(agentKnowledgeTeamId(loadAgentConfig(id) || {}), env);
   const repoRef = env?.knowledgeStore?.repoRef || null;
   if (!repoRef || !repoRef.url) {
     warnings.push("knowledge: no KB repo could be resolved from the environment — skipping KB provisioning");
@@ -1922,6 +1932,7 @@ function writeAgentKnowledgeDigest(id, teamId, storeRoot) {
 // appends to its shard concurrently from its container, and two writers on
 // one append-only file would race at rebase time. Throws on failure.
 function pushMigrationEntries(id, teamId, env, entries) {
+  env = teamKnowledgeEnv(teamId, env); // #570: per-team knowledge config
   const repoRef = env?.knowledgeStore?.repoRef || null;
   if (!repoRef || !repoRef.url) throw new Error("no KB repo resolvable from the environment");
   const refresh = refreshKnowledgeClone(teamId, { force: true, repoRef, env });
@@ -2005,6 +2016,7 @@ function migrateAgentMemoryToKb(id, cfg, env) {
   }
 
   const teamId = agentKnowledgeTeamId(cfg);
+  env = teamKnowledgeEnv(teamId, env); // #570: per-team knowledge config
   const entries = memoryMigration.buildMigrationEntries({
     agentId: id, teamId, facts: parsed.facts, entities: parsed.entities,
   });
@@ -2052,6 +2064,7 @@ function migrateUnifiedAgentsMemory() {
 // checkout, merge the local shard lines back in (append-only, dedup by entry id),
 // and commit — after which the caller's normal rebase+push flow takes over.
 function healKnowledgeCheckout(id, kbDir, env, warnings) {
+  env = teamKnowledgeEnv(agentKnowledgeTeamId(loadAgentConfig(id) || {}), env); // #570: per-team knowledge config
   const dest = agentDir(id);
   const sources = [];
   // A previous heal that died between rename and merge leaves *.unsynced-* dirs.
@@ -2145,7 +2158,7 @@ function _walkShardFiles(root) {
 // Throws caller-facing Errors (safe to return over the internal API).
 function agentKnowledgePush(id) {
   const cfg = loadAgentConfig(id);
-  const env = cfg && cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+  const env = teamKnowledgeEnv(agentKnowledgeTeamId(cfg || {}), cfg && cfg.environmentId ? loadEnvironment(cfg.environmentId) : null); // #570: per-team knowledge config
   const repoRef = env?.knowledgeStore?.repoRef || null;
   if (!repoRef || !repoRef.url) throw new Error("no knowledge repo is configured for this agent");
 
@@ -2213,15 +2226,63 @@ function agentKnowledgeTeamId(cfg) {
   return cfg.teamId || DEFAULT_TEAM_ID;
 }
 
+// Per-team knowledge-config overrides (#570). The four knowledge-config groups
+// (autonomy / review / promotion gates / storage) are keyed PER TEAM here, not on
+// the shared environment record, so two teams reusing one environment hold
+// independent settings. Stored at /workspace/teams/<teamId>/knowledge-config.json
+// (traversal-guarded via knowledge-feed's safeTeamSegment, the same guard the KB
+// clone + team-skill dirs use). A team with no file (or an unset key) falls back
+// to the environment's value via mergeTeamKnowledgeConfig — so a read immediately
+// after the upgrade is byte-identical to before (migration, AC-2); a write records
+// only that team's own key, from then on resolved independently (AC-1/AC-4).
+function _teamKnowledgeConfigPath(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  return path.join(WORKSPACE, "teams", seg, "knowledge-config.json");
+}
+
+function loadTeamKnowledgeOverrides(teamId) {
+  const p = _teamKnowledgeConfigPath(teamId);
+  if (!p || !fs.existsSync(p)) return {};
+  try {
+    const raw = JSON.parse(fs.readFileSync(p, "utf8"));
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+// Merge a patch into the team's overrides file and persist it. Only the four
+// TEAM_KNOWLEDGE_KEYS are meaningful; the patch keys are written verbatim.
+// Returns the full overrides object after the write.
+function writeTeamKnowledgeOverrides(teamId, patch) {
+  const p = _teamKnowledgeConfigPath(teamId);
+  if (!p) throw new Error(`knowledge: refusing unsafe team id '${teamId}'`);
+  const next = { ...loadTeamKnowledgeOverrides(teamId), ...patch };
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(next, null, 2));
+  return next;
+}
+
+// Overlay a team's persisted knowledge-config overrides onto a base environment,
+// producing the env-shaped object the pure knowledge readers consume. Applied
+// defensively at every knowledge consumer keyed by the teamId it already knows,
+// so no single missed call site can leak an env-keyed value.
+function teamKnowledgeEnv(teamId, baseEnv) {
+  return mergeTeamKnowledgeConfig(baseEnv, loadTeamKnowledgeOverrides(teamId));
+}
+
 // Resolve the KB repo for a team from any of its agents' environments (a team
-// shares one env → one KB repo). Returns { repoRef, env } or null.
+// shares one env → one KB repo), overlaid with the team's per-team knowledge
+// config (#570) so the repoRef + branch reflect the TEAM's storage, not the
+// environment's. Returns { repoRef, env } (env already overlaid) or null.
 function resolveTeamKbRepo(teamId) {
   for (const id of listAgentIds()) {
     const cfg = loadAgentConfig(id);
     if (!cfg) continue;
     if (agentKnowledgeTeamId(cfg) !== teamId) continue;
     if (!cfg.environmentId) continue;
-    const env = loadEnvironment(cfg.environmentId);
+    const env = teamKnowledgeEnv(teamId, loadEnvironment(cfg.environmentId));
     const repoRef = env?.knowledgeStore?.repoRef || null;
     if (repoRef && repoRef.url) return { repoRef, env };
   }
@@ -2240,53 +2301,43 @@ function resolveTeamEnvId(teamId) {
   return null;
 }
 
-// Read the team's shared environment.json RAW (not the normalized view, so
-// unrelated fields round-trip untouched), apply `mutate(raw)`, write it back, and
-// return `project(raw)`. The one place the three knowledge env-config writers
-// (gate / autonomy / review) share, so the round-trip can't drift between them.
-function patchTeamEnv(teamId, mutate, project) {
-  const envId = resolveTeamEnvId(teamId);
-  if (!envId) throw new Error(`no environment resolvable for team '${teamId}'`);
-  const p = path.join(ENVIRONMENTS_DIR, envId, "environment.json");
-  let raw;
-  try { raw = JSON.parse(fs.readFileSync(p, "utf8")); } catch { throw new Error(`cannot read environment '${envId}'`); }
-  mutate(raw);
-  fs.writeFileSync(p, JSON.stringify(raw, null, 2));
-  return { envId, ...project(raw) };
-}
-
-// Persist one per-transition promotion gate onto the team's shared environment.
+// Persist one per-transition promotion gate PER TEAM (#570). The gates map is
+// seeded from the team's current effective gates (per-team override overlaid on
+// the env, plus defaults + the forced team>global review) so setting one
+// transition never silently resets the others; only that team's own file is
+// touched, leaving sibling teams on the shared env untouched (AC-1/AC-4).
 function writeTeamPromotionGate(teamId, transition, mode) {
-  return patchTeamEnv(teamId, (raw) => {
-    const gates = raw.knowledgePromotionGates && typeof raw.knowledgePromotionGates === "object"
-      ? { ...raw.knowledgePromotionGates } : {};
-    gates[transition] = mode;
-    raw.knowledgePromotionGates = gates;
-  }, (raw) => ({ gates: resolvePromotionGates(raw) }));
+  const effEnv = teamKnowledgeEnv(teamId, loadEnvironment(resolveTeamEnvId(teamId)));
+  const gates = { ...resolvePromotionGates(effEnv) };
+  gates[transition] = mode;
+  writeTeamKnowledgeOverrides(teamId, { knowledgePromotionGates: gates });
+  return { gates: resolvePromotionGates({ knowledgePromotionGates: gates }) };
 }
 
-// Persist the 0..3 autonomy dial. Takes effect immediately for the orchestrator-
-// side convergence/suggestion/curation steps (they read the env fresh each pass);
-// the agent-side harvest hint + KB provisioning are read at spawn/seed, so a
-// running agent picks a level change up on its next rebuild (the UI says so).
+// Persist the 0..3 autonomy dial PER TEAM (#570). Takes effect immediately for the
+// orchestrator-side convergence/suggestion/curation steps (they overlay the team's
+// config fresh each pass); the agent-side harvest hint + KB provisioning are read
+// at spawn/seed, so a running agent picks a level change up on its next rebuild.
 function writeTeamAutonomy(teamId, level) {
-  return patchTeamEnv(teamId, (raw) => { raw.knowledgeAutonomy = level; },
-    (raw) => ({ autonomy: knowledgeAutonomyLevel(raw) }));
+  writeTeamKnowledgeOverrides(teamId, { knowledgeAutonomy: level });
+  return { autonomy: knowledgeAutonomyLevel({ knowledgeAutonomy: level }) };
 }
 
-// Persist the supervised-review toggle onto the team's shared environment.
+// Persist the supervised-review toggle PER TEAM (#570).
 function writeTeamReview(teamId, enabled) {
-  return patchTeamEnv(teamId, (raw) => { raw.knowledgeReview = !!enabled; },
-    (raw) => ({ review: knowledgeReviewEnabled(raw) }));
+  writeTeamKnowledgeOverrides(teamId, { knowledgeReview: !!enabled });
+  return { review: knowledgeReviewEnabled({ knowledgeReview: !!enabled }) };
 }
 
-// Persist the per-team knowledge storage location — repo, branch, path (#558) —
-// onto the team's shared environment. Reachability of the repo/branch + write
-// access is validated by the admin-console layer (it owns the ls-remote probe)
-// BEFORE this writer is called, so here we normalize + persist, then force-
-// refresh the canonical clone at the NEW location so the digest and every
-// downstream read/write follow the change immediately (AC-4, AC-7). Knowledge
-// already stored at the OLD location is deliberately left untouched (AC-5).
+// Persist the knowledge storage location — repo, branch, path (#558) — PER TEAM
+// (#570), on the team's own knowledge-config file, not the shared environment.
+// The env is still consulted (read-only) for the code-repository list, so an
+// in-repo store can pin to / inherit the SSH key of a real repo. Reachability of
+// the repo/branch + write access is validated by the admin-console layer (it owns
+// the ls-remote probe) BEFORE this writer is called, so here we normalize +
+// persist, then force-refresh the canonical clone at the NEW location so the
+// digest and every downstream read/write follow the change immediately (AC-4).
+// Knowledge already stored at the OLD location is deliberately left untouched.
 function writeTeamKnowledgeStore(teamId, input) {
   const inMode = input && input.mode === "own-repo" ? "own-repo" : "in-repo";
   const inPath = input && typeof input.path === "string" ? input.path.trim() : "";
@@ -2294,10 +2345,15 @@ function writeTeamKnowledgeStore(teamId, input) {
   const inRef = input && input.repoRef && typeof input.repoRef === "object" ? input.repoRef : {};
   let url = typeof inRef.url === "string" ? inRef.url.trim() : "";
 
+  // A team may have no dedicated environment (standalone / envless); the store is
+  // still keyed per team, so a missing env is not fatal — we just have no code
+  // repositories to pin an in-repo store to.
   const envId = resolveTeamEnvId(teamId);
-  if (!envId) throw new Error(`no environment resolvable for team '${teamId}'`);
-  const currentEnv = loadEnvironment(envId);
+  const currentEnv = envId ? loadEnvironment(envId) : null;
   const repositories = currentEnv && Array.isArray(currentEnv.repositories) ? currentEnv.repositories : [];
+  // The team's current effective store (per-team override overlaid on the env),
+  // so MCP knowledge sources round-trip from wherever they currently live.
+  const currentStore = teamKnowledgeEnv(teamId, currentEnv)?.knowledgeStore || null;
 
   if (inMode === "own-repo" && !url) {
     throw new Error("a separate knowledge repository requires a repo URL");
@@ -2332,26 +2388,25 @@ function writeTeamKnowledgeStore(teamId, input) {
   if (inPath) rawStore.path = inPath;
   if (repoRef) rawStore.repoRef = repoRef;
   // MCP knowledge sources are a separate track (#464) — preserve them verbatim.
-  const existingSources = currentEnv && currentEnv.knowledgeStore && Array.isArray(currentEnv.knowledgeStore.sources)
-    ? currentEnv.knowledgeStore.sources : [];
+  const existingSources = currentStore && Array.isArray(currentStore.sources) ? currentStore.sources : [];
   if (existingSources.length) rawStore.sources = existingSources;
 
   // Normalize + surface any hard error (e.g. own-repo without a resolvable repo)
   // before persisting so an invalid config is rejected, never saved (AC-2).
-  const { store, warnings } = normalizeKnowledgeStore({ ...currentEnv, knowledgeStore: rawStore, repositories });
+  const { store, warnings } = normalizeKnowledgeStore({ ...(currentEnv || {}), knowledgeStore: rawStore, repositories });
   const hardError = warnings.find((w) => w.includes("requires a repoRef"));
   if (hardError) throw new Error(hardError);
 
-  const result = patchTeamEnv(teamId, (raw) => { raw.knowledgeStore = store; }, () => ({ store }));
+  writeTeamKnowledgeOverrides(teamId, { knowledgeStore: store });
 
-  const refreshEnv = { ...currentEnv, knowledgeStore: store, repositories };
+  const refreshEnv = { ...(currentEnv || {}), knowledgeStore: store, repositories };
   const refRepo = store.repoRef && store.repoRef.url ? store.repoRef : null;
   try {
     refreshKnowledgeClone(teamId, { force: true, repoRef: refRepo, env: refreshEnv });
   } catch (err) {
     console.warn(`[Orchestrator] KB store refresh for '${teamId}' failed: ${err.message}`);
   }
-  return { ...result, store, warnings: warnings.filter((w) => w !== hardError) };
+  return { store, warnings: warnings.filter((w) => w !== hardError) };
 }
 
 // Ensure/refresh the canonical clone for a team. Best-effort, throttled per team
@@ -2382,6 +2437,11 @@ function refreshKnowledgeClone(teamId, { force = false, repoRef = null, env = nu
     ref = resolved.repoRef;
     kbEnv = resolved.env;
   }
+  // #570: knowledge config is keyed per team — overlay the team's overrides onto
+  // whatever env we ended up with (idempotent when already overlaid). This is the
+  // central hub for the KB branch + digest fan-out, so a per-team KB branch/store
+  // resolves correctly here regardless of which caller supplied the env.
+  kbEnv = teamKnowledgeEnv(teamId, kbEnv);
 
   const branch = knowledgeSync.resolveKnowledgeBranch(kbEnv);
   const gitEnv = _buildKbGitEnv(ref, kbEnv);
@@ -2426,6 +2486,7 @@ function _digestComparable(md) {
 }
 
 function fanOutKnowledgeDigests(teamId, env) {
+  env = teamKnowledgeEnv(teamId, env); // #570: per-team knowledge config
   const clonePath = knowledgeFeed.canonicalClonePath(KNOWLEDGE_CLONE_ROOT, teamId);
   if (!clonePath || !fs.existsSync(path.join(clonePath, ".git"))) return;
   const storeRoot = path.join(clonePath, _kbStoreRel(env));
@@ -2474,6 +2535,7 @@ function appendKnowledgeEvents(events) {
 // (count-only if the CLI sent no summary). Resolves teamId from the agent config.
 function emitKnowledgeHarvest(id, cfg, env, rawBody) {
   const teamId = agentKnowledgeTeamId(cfg);
+  env = teamKnowledgeEnv(teamId, env); // #570: per-team knowledge config
   const repoRef = env?.knowledgeStore?.repoRef || null;
   try {
     refreshKnowledgeClone(teamId, { force: true, repoRef, env });
@@ -2623,6 +2685,7 @@ function writeReviewDecisions(teamId, decisions) {
 // re-baselines, no flood" discipline. Best-effort — a failure just means the next
 // collector pass treats existing entries as pending (safe, if noisier).
 function baselineReviewApprovals(teamId, env) {
+  env = teamKnowledgeEnv(teamId, env); // #570: per-team knowledge config
   try {
     refreshKnowledgeClone(teamId, { force: true, env });
     const clonePath = knowledgeFeed.canonicalClonePath(KNOWLEDGE_CLONE_ROOT, teamId);
@@ -2718,13 +2781,17 @@ function _pushKnowledgeClone(clonePath, gitEnv, branch = knowledgeSync.KNOWLEDGE
 }
 
 function runConvergenceCollector(teamId, envArg) {
-  let env = envArg || null;
+  // #570: overlay the team's per-team knowledge config BEFORE reading repoRef, so
+  // the repoRef used to build the push credentials and the branch resolved below
+  // both come from the team's store — never a mix of the env's repoRef and the
+  // team's branch when a team points its storage at its own repo.
+  let env = teamKnowledgeEnv(teamId, envArg || null);
   let repoRef = env?.knowledgeStore?.repoRef || null;
   if (!repoRef) {
     const resolved = resolveTeamKbRepo(teamId);
     if (!resolved) return; // no KB repo → nothing to collect
     repoRef = resolved.repoRef;
-    env = resolved.env;
+    env = resolved.env; // resolveTeamKbRepo already overlaid the team's config
   }
   // Level 0 has no KB at all; convergence-grow is a level >= 1 behaviour.
   if (knowledgeAutonomyLevel(env) < 1) return;
@@ -3023,6 +3090,7 @@ function _teamSkillDir(teamId, name) {
 let orchestratorSingleton = null;
 
 function autoPromoteStep(teamId, env, clusters, candidates, { convergenceThreshold, now }) {
+  env = teamKnowledgeEnv(teamId, env); // #570: per-team knowledge config
   const gates = resolvePromotionGates(env);
   const { maxAutoPromotionsPerPass } = knowledgeCurationConfig(env);
   const plan = knowledgeCurator.planAutoPromotions(clusters, candidates, gates, {
@@ -3127,7 +3195,7 @@ function nominateKnowledgeEntry(agentId, entryId, note) {
   const cfg = loadAgentConfig(agentId);
   if (!cfg) throw new Error(`Agent '${agentId}' not found`);
   const teamId = agentKnowledgeTeamId(cfg);
-  const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+  const env = teamKnowledgeEnv(teamId, cfg.environmentId ? loadEnvironment(cfg.environmentId) : null); // #570: per-team knowledge config
   if (knowledgeAutonomyLevel(env) < 1) throw new Error("knowledge sharing is off for this team");
 
   // Refresh so the nomination sees the freshest shards, then cluster.
@@ -7338,8 +7406,9 @@ async function main() {
 
     // ── Set a team's promotion gate policy (Phase 4) ────────────────────────────
     // The admin-console PUT /api/knowledge/gates proxies here. Writes one
-    // per-transition mode onto the team's shared environment.json. team>global is
-    // never persisted as auto (resolvePromotionGates forces it to review anyway).
+    // per-transition mode onto the team's own knowledge-config.json (#570), not
+    // the shared environment. team>global is never persisted as auto
+    // (resolvePromotionGates forces it to review anyway).
     if (req.method === 'POST' && req.url === '/internal/knowledge/gates') {
       let body = '';
       req.on('data', (d) => { body += d; });
@@ -7389,7 +7458,8 @@ async function main() {
     // ── Set the per-team knowledge storage location (repo/branch/path) (#558) ────
     // The admin-console PUT /api/knowledge/store proxies here after it has
     // validated + probed the target (reachability + write access). This handler
-    // normalizes, persists onto the team's environment, and refreshes the clone.
+    // normalizes, persists onto the team's own knowledge-config.json (#570), and
+    // refreshes the clone.
     if (req.method === 'POST' && req.url === '/internal/knowledge/store') {
       let body = '';
       req.on('data', (d) => { body += d; });

@@ -9748,16 +9748,20 @@ app.get('/api/agents/:agentId/session/:roomId', (req, res) => {
 
   const since = Math.max(0, parseInt(req.query.since, 10) || 0);
   const limit = Math.max(1, parseInt(req.query.limit, 10) || 1000);
-  // Optional server-side scope to one session (#544). A specific session's
-  // rows may lie anywhere in a busy room's log — before `since` or past the
-  // last-`limit` tail — so when scoping we scan the whole file and filter by
+  // Optional server-side scope to one session (#544, #555). A session's rows
+  // may lie anywhere in a busy room's log — before `since` or past the last-
+  // `limit` tail — so when scoping we scan the whole file and filter by
   // correlationId, keeping the whole session regardless of its position. Used
   // for historical-session viewing and for reliably backfilling a long-running
-  // session in a chatty room. The id is only ever string-compared, never used
-  // in a path/query, so an opaque value is safe; cap the length defensively.
+  // session in a chatty room. A finished session groups several runs (#555),
+  // so the param may repeat (`?correlationId=a&correlationId=b`) to scope to
+  // the combined log of every run in that Claude session; a single value stays
+  // backward-compatible. Ids are only ever string-compared, never used in a
+  // path/query, so opaque values are safe; cap each length defensively.
   const rawCid = req.query.correlationId;
-  const correlationId = (typeof rawCid === 'string' && rawCid && rawCid.length <= 512)
-    ? rawCid : null;
+  const cidList = (Array.isArray(rawCid) ? rawCid : (rawCid == null ? [] : [rawCid]))
+    .filter(c => typeof c === 'string' && c && c.length <= 512);
+  const correlationIds = cidList.length ? new Set(cidList) : null;
 
   let size;
   try {
@@ -9768,7 +9772,7 @@ app.get('/api/agents/:agentId/session/:roomId', (req, res) => {
 
   // If `since` is past EOF (e.g. file was truncated), read from start. When
   // scoping to a correlationId we always read the whole file (start 0).
-  const start = correlationId ? 0 : (since > size ? 0 : since);
+  const start = correlationIds ? 0 : (since > size ? 0 : since);
   if (start >= size) {
     return res.json({ events: [], cursor: size });
   }
@@ -9793,8 +9797,8 @@ app.get('/api/agents/:agentId/session/:roomId', (req, res) => {
 
   stream.on('end', () => {
     if (buf.trim()) events.push(parseJsonlLine(buf));
-    if (correlationId) {
-      events = events.filter(ev => ev && ev.correlationId === correlationId);
+    if (correlationIds) {
+      events = events.filter(ev => ev && correlationIds.has(ev.correlationId));
     }
     let truncated = false;
     if (events.length > limit) {

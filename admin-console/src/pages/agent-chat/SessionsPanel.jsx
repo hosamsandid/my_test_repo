@@ -13,12 +13,16 @@ import SessionLogPanel from './SessionLogPanel';
  * log (scoped to its correlationId via SessionLogPanel) plus an in-tab Stop
  * button.
  *
- * Historical sessions (#544): a footer control — hidden/collapsed by default —
- * expands into a dropdown of *finished* sessions (those no longer running).
- * Selecting one renders its full log in the same per-session log view used for
- * active sub-tabs (read-only, no live tail). Because finished-session logs are
+ * Historical sessions (#544, regrouped in #555): a footer control —
+ * hidden/collapsed by default — expands into a dropdown of *finished* sessions
+ * (those no longer running). Entries are grouped by Claude **session-ID**, so
+ * the several manual messages of one ongoing conversation appear as a single
+ * entry (its start/end timestamps + run count shown), while a reset or a fresh
+ * externally-triggered run starts a new entry. Selecting one renders the
+ * combined log of every run in that session, in the same per-session log view
+ * used for active sub-tabs (read-only, no live tail). Because the logs are
  * already durable in the room's JSONL, this needs no new persistence — the
- * backend just enumerates correlationId groups that aren't currently active
+ * backend enumerates session-ID groups that aren't currently active
  * (`GET .../sessions/history`). A session stopped/ended while the tab is open
  * drops out of the active sub-tabs and, once the dropdown refreshes, becomes
  * reachable here (closing the loop left open in #543).
@@ -72,11 +76,32 @@ function sourceLabel(session) {
   return (session.type || 'unknown').toUpperCase();
 }
 
+// A session spans its first run's start to its last run's end (#555). Collapse
+// to a single timestamp when the two coincide (a one-run session).
+function formatRange(startIso, endIso) {
+  const start = formatAbsolute(startIso);
+  const end = formatAbsolute(endIso);
+  if (!start) return end || '';
+  if (!end || end === start) return start;
+  return `${start} – ${end}`;
+}
+
+// Run/message count so a multi-message session is recognisable as such (#555
+// AC3). DM sessions count messages; everything else counts runs.
+function countLabel(session) {
+  const n = session.runCount || 1;
+  const noun = session.type === 'dm' ? 'message' : 'run';
+  return `${n} ${noun}${n === 1 ? '' : 's'}`;
+}
+
 function historyOptionLabel(session) {
-  const when = formatAbsolute(session.endedAt || session.startedAt);
-  const parts = [sourceLabel(session), session.label || '(session)'];
-  if (when) parts.push(when);
-  return parts.join(' · ');
+  const parts = [
+    sourceLabel(session),
+    session.label || '(session)',
+    formatRange(session.startedAt, session.endedAt),
+    countLabel(session),
+  ];
+  return parts.filter(Boolean).join(' · ');
 }
 
 export default function SessionsPanel({
@@ -99,7 +124,8 @@ export default function SessionsPanel({
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState(null);
   const [historyTruncated, setHistoryTruncated] = useState(false);
-  // correlationId of the finished session currently being viewed (or null).
+  // session id (Claude session-ID, or a correlationId fallback) of the
+  // finished session currently being viewed (or null) — #555.
   const [historicalId, setHistoricalId] = useState(null);
 
   const fetchSessions = useCallback(async () => {
@@ -193,7 +219,7 @@ export default function SessionsPanel({
   );
 
   const historical = useMemo(
-    () => (historicalId ? history.find(s => s.correlationId === historicalId) || null : null),
+    () => (historicalId ? history.find(s => s.id === historicalId) || null : null),
     [historicalId, history],
   );
 
@@ -328,7 +354,10 @@ export default function SessionsPanel({
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 · {historical.label || '(session)'}
               </span>
-              <span title={historical.startedAt}>· {formatAbsolute(historical.startedAt)}</span>
+              <span title={`${historical.startedAt || ''} – ${historical.endedAt || ''}`}>
+                · {formatRange(historical.startedAt, historical.endedAt)}
+              </span>
+              <span>· {countLabel(historical)}</span>
               <div style={{ flex: 1 }} />
               <button
                 type="button"
@@ -355,10 +384,10 @@ export default function SessionsPanel({
             </div>
             <div style={{ flex: 1, minHeight: 0 }}>
               <SessionLogPanel
-                key={`hist-${historical.correlationId}`}
+                key={`hist-${historical.id}`}
                 agentId={agentId}
                 roomId={roomId}
-                scopeCorrelationId={historical.correlationId}
+                scopeCorrelationId={historical.correlationIds}
                 staticOnly
                 embedded
                 onCostUpdate={onCostUpdate}
@@ -528,7 +557,7 @@ export default function SessionsPanel({
                     : 'Select a finished session…'}
                 </option>
                 {history.map(s => (
-                  <option key={s.correlationId} value={s.correlationId}>
+                  <option key={s.id} value={s.id}>
                     {historyOptionLabel(s)}
                   </option>
                 ))}

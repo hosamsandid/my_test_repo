@@ -23,12 +23,14 @@ import { sumContextTokens, resolveContextTokensForResult } from './context-windo
  * LogEvent → ToolBlock. Orphan results (result without a prior use) and
  * pending uses (use without a result yet) render as single-sided blocks.
  *
- * When `scopeCorrelationId` is set the panel renders only that one session's
- * rows (its correlationId) — used by the merged Sessions tab (#543), where
- * each sub-tab is one running session. In that mode the per-correlation left
- * border is dropped (a single session needs no colour to tell it apart), and
- * the backfill is filtered server-side by correlationId so the full session is
- * returned even when its rows sit outside the last-`limit` tail of a busy room.
+ * When `scopeCorrelationId` is set the panel renders only that session's rows
+ * — used by the merged Sessions tab (#543). It may be a single correlationId
+ * (one running sub-tab) or, for a finished session that groups several runs
+ * (#555), an array of every correlationId in that Claude session; the combined
+ * log then reads oldest-first across runs. In scoped mode the per-correlation
+ * left border is dropped (the rows are one logical session), and the backfill
+ * is filtered server-side by correlationId so the full session is returned even
+ * when its rows sit outside the last-`limit` tail of a busy room.
  *
  * When `staticOnly` is set (historical/finished session viewing, #544) the
  * panel does a one-shot backfill and skips the live SSE tail — a finished
@@ -70,6 +72,17 @@ export default function SessionLogPanel({
   const scrollerRef = useRef(null);
   const [atBottom, setAtBottom]   = useState(true);
 
+  // `scopeCorrelationId` may be a single id (a running sub-tab) or an array of
+  // every run in a finished Claude session (#555). Normalise to an array (or
+  // null when unscoped) so the backfill query, event filter and accent colour
+  // all treat the two shapes the same.
+  const scopeCids = useMemo(() => {
+    if (scopeCorrelationId == null) return null;
+    const arr = Array.isArray(scopeCorrelationId) ? scopeCorrelationId : [scopeCorrelationId];
+    const clean = arr.filter(c => typeof c === 'string' && c);
+    return clean.length ? clean : null;
+  }, [scopeCorrelationId]);
+
   // Backfill bumps a generation counter so a slow response from the previous
   // (agent, room) can't clobber the current state.
   const reqIdRef = useRef(0);
@@ -87,8 +100,8 @@ export default function SessionLogPanel({
     setEvents([]);
     setCursor(0);
 
-    const scopeQuery = scopeCorrelationId
-      ? `&correlationId=${encodeURIComponent(scopeCorrelationId)}`
+    const scopeQuery = scopeCids
+      ? scopeCids.map(c => `&correlationId=${encodeURIComponent(c)}`).join('')
       : '';
     fetch(`/api/agents/${encodeURIComponent(agentId)}/session/${encodeURIComponent(roomId)}?limit=500${scopeQuery}`)
       .then(r => {
@@ -111,7 +124,7 @@ export default function SessionLogPanel({
       .finally(() => {
         if (reqId === reqIdRef.current) setLoading(false);
       });
-  }, [agentId, roomId, scopeCorrelationId]);
+  }, [agentId, roomId, scopeCids]);
 
   useEffect(() => { loadBackfill(); }, [loadBackfill]);
 
@@ -190,17 +203,16 @@ export default function SessionLogPanel({
   }
 
   /* ─── 4. Scope to a single session + tool-pair merging ─────────────────
-   * When `scopeCorrelationId` is set (merged Sessions tab, #543) only this
-   * session's rows are shown; internal `_truncated` markers carry no
+   * When `scopeCids` is set (merged Sessions tab, #543/#555) only the runs of
+   * the viewed session are shown; internal `_truncated` markers carry no
    * correlationId, so they're kept so the truncation banner still renders.
    * `scopedEvents` also feeds the cost/context/todo aggregations below so the
    * chat toolbar reflects the viewed session rather than the whole room. */
-  const scopedEvents = useMemo(() => (
-    scopeCorrelationId
-      ? events.filter(ev => ev?.correlationId === scopeCorrelationId
-          || ev?.type === '_truncated')
-      : events
-  ), [events, scopeCorrelationId]);
+  const scopedEvents = useMemo(() => {
+    if (!scopeCids) return events;
+    const set = new Set(scopeCids);
+    return events.filter(ev => set.has(ev?.correlationId) || ev?.type === '_truncated');
+  }, [events, scopeCids]);
 
   const renderable = useMemo(() => mergeToolPairs(scopedEvents), [scopedEvents]);
 
@@ -437,7 +449,7 @@ export default function SessionLogPanel({
           const dimmed = !!hoveredCorrelationId && cid !== hoveredCorrelationId;
           // In single-session (scoped) mode every row is the same session, so
           // the per-correlation colour adds no information — drop the border.
-          const accentColor = (!scopeCorrelationId && cid) ? colorForCorrelation(cid) : 'transparent';
+          const accentColor = (!scopeCids && cid) ? colorForCorrelation(cid) : 'transparent';
           return (
             <div
               key={ev._key ?? i}

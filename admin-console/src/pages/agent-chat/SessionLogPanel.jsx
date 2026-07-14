@@ -23,7 +23,10 @@ import { sumContextTokens, resolveContextTokensForResult } from './context-windo
  * LogEvent → ToolBlock. Orphan results (result without a prior use) and
  * pending uses (use without a result yet) render as single-sided blocks.
  *
- * Filter chips: All | Tool Calls | Errors | Posted.
+ * When `scopeCorrelationId` is set the panel renders only that one session's
+ * rows (its correlationId) — used by the merged Sessions tab (#543), where
+ * each sub-tab is one running session. In that mode the per-correlation left
+ * border is dropped (a single session needs no colour to tell it apart).
  *
  * Cross-panel hover correlation: `hoveredCorrelationId` (from parent) dims
  * non-matching rows; mouseEnter/Leave on a row calls
@@ -51,11 +54,10 @@ import { sumContextTokens, resolveContextTokensForResult } from './context-windo
  */
 export default function SessionLogPanel({
   agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate,
-  todoCloseSignal = 0, embedded = false,
+  todoCloseSignal = 0, embedded = false, scopeCorrelationId = null,
 }) {
   const [events, setEvents]       = useState([]);
   const [cursor, setCursor]       = useState(0);
-  const [filter, setFilter]       = useState('all'); // all | tools | errors | posted
   const [loading, setLoading]     = useState(false);
   const [error, setError]         = useState(null);
 
@@ -176,17 +178,25 @@ export default function SessionLogPanel({
     setAtBottom(distance < 100);
   }
 
-  /* ─── 4. Tool-pair merging + filtering ─────────────────────────────── */
-  const renderable = useMemo(() => {
-    const merged = mergeToolPairs(events);
-    if (filter === 'all') return merged;
-    return merged.filter(ev => matchesFilter(ev, filter));
-  }, [events, filter]);
+  /* ─── 4. Scope to a single session + tool-pair merging ─────────────────
+   * When `scopeCorrelationId` is set (merged Sessions tab, #543) only this
+   * session's rows are shown; internal `_truncated` markers carry no
+   * correlationId, so they're kept so the truncation banner still renders.
+   * `scopedEvents` also feeds the cost/context/todo aggregations below so the
+   * chat toolbar reflects the viewed session rather than the whole room. */
+  const scopedEvents = useMemo(() => (
+    scopeCorrelationId
+      ? events.filter(ev => ev?.correlationId === scopeCorrelationId
+          || ev?.type === '_truncated')
+      : events
+  ), [events, scopeCorrelationId]);
+
+  const renderable = useMemo(() => mergeToolPairs(scopedEvents), [scopedEvents]);
 
   /* ─── 5. Session cost aggregation ──────────────────────────────────── */
   const costTotals = useMemo(() => {
     let usd = 0, tokIn = 0, tokOut = 0;
-    for (const ev of events) {
+    for (const ev of scopedEvents) {
       if (ev.type === 'result' && typeof ev.costUsd === 'number') {
         usd += ev.costUsd;
         // #494: same undercount as #490 (context-window fill) — "tokens in"
@@ -196,7 +206,7 @@ export default function SessionLogPanel({
       }
     }
     return { usd, tokIn, tokOut };
-  }, [events]);
+  }, [scopedEvents]);
 
   useEffect(() => {
     if (onCostUpdate) onCostUpdate(costTotals.usd, costTotals.tokIn, costTotals.tokOut);
@@ -221,7 +231,7 @@ export default function SessionLogPanel({
   const lastContext = useMemo(() => {
     let model = null;
     let tokensIn = null;
-    for (const ev of events) {
+    for (const ev of scopedEvents) {
       if (ev.type === 'system_init' && ev.model) model = ev.model;
       if (ev.type === 'result') {
         const summed = resolveContextTokensForResult(ev);
@@ -229,7 +239,7 @@ export default function SessionLogPanel({
       }
     }
     return tokensIn == null ? null : { tokensIn, model };
-  }, [events]);
+  }, [scopedEvents]);
 
   useEffect(() => {
     if (onContextUpdate) onContextUpdate(lastContext);
@@ -241,8 +251,8 @@ export default function SessionLogPanel({
    * panel re-renders in place as new TodoWrites arrive.
    */
   const latestTodoWrite = useMemo(() => {
-    for (let i = events.length - 1; i >= 0; i--) {
-      const ev = events[i];
+    for (let i = scopedEvents.length - 1; i >= 0; i--) {
+      const ev = scopedEvents[i];
       if (
         ev?.type === 'tool_use' &&
         ev?.tool === 'TodoWrite' &&
@@ -252,7 +262,7 @@ export default function SessionLogPanel({
       }
     }
     return null;
-  }, [events]);
+  }, [scopedEvents]);
 
   /* User-controlled dismissal. The panel is hidden only after the user
    * clicks ×; it re-appears automatically when the next TodoWrite arrives
@@ -332,22 +342,6 @@ export default function SessionLogPanel({
         </div>
       )}
 
-      {/* Filter chips */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 4,
-        padding: 'var(--eb-space-2) var(--eb-space-3)',
-        borderBottom: '1px solid var(--eb-border-default)',
-        background: 'var(--eb-bg-surface)',
-        flexShrink: 0,
-      }}>
-        <Chip label="All"        active={filter === 'all'}     onClick={() => setFilter('all')} />
-        <Chip label="Tool Calls" active={filter === 'tools'}   onClick={() => setFilter('tools')} />
-        <Chip label="Errors"     active={filter === 'errors'}  onClick={() => setFilter('errors')} />
-        <Chip label="Posted"     active={filter === 'posted'}  onClick={() => setFilter('posted')} />
-      </div>
-
       {error && (
         <div role="alert" style={{
           padding: 'var(--eb-space-2) var(--eb-space-3)',
@@ -423,16 +417,16 @@ export default function SessionLogPanel({
             textAlign: 'center',
             lineHeight: 1.5,
           }}>
-            {events.length === 0
-              ? 'No agent activity yet. Send a message to see what’s happening.'
-              : 'No entries match the current filter.'}
+            No agent activity yet.
           </div>
         )}
 
         {renderable.map((ev, i) => {
           const cid = ev.correlationId || null;
           const dimmed = !!hoveredCorrelationId && cid !== hoveredCorrelationId;
-          const accentColor = cid ? colorForCorrelation(cid) : 'transparent';
+          // In single-session (scoped) mode every row is the same session, so
+          // the per-correlation colour adds no information — drop the border.
+          const accentColor = (!scopeCorrelationId && cid) ? colorForCorrelation(cid) : 'transparent';
           return (
             <div
               key={ev._key ?? i}
@@ -469,37 +463,6 @@ export default function SessionLogPanel({
 }
 
 /* ─── Helpers ─────────────────────────────────────────────────────────── */
-
-function Chip({ label, active, onClick }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      style={{
-        padding: '3px 10px',
-        fontSize: 'var(--eb-text-xs)',
-        fontWeight: 'var(--eb-font-medium)',
-        background: active ? 'var(--eb-accent-muted)' : 'transparent',
-        color: active ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)',
-        border: `1px solid ${active ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
-        borderRadius: 'var(--eb-radius-full)',
-        cursor: 'pointer',
-        fontFamily: 'inherit',
-        transition: 'background var(--eb-transition-fast), color var(--eb-transition-fast)',
-      }}
-    >
-      {label}
-    </button>
-  );
-}
-
-function matchesFilter(ev, filter) {
-  if (filter === 'all') return true;
-  if (filter === 'tools')  return ev.kind === 'tool' || ev.type === 'tool_use' || ev.type === 'tool_result';
-  if (filter === 'errors') return ev.type === 'error' || ev.type === 'parse_error';
-  if (filter === 'posted') return ev.type === 'message.posted';
-  return true;
-}
 
 /**
  * Walk the event list once and pair each `tool_use` with its matching

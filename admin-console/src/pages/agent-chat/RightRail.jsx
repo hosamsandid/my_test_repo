@@ -1,10 +1,9 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { PanelRightClose, ScrollText, FolderTree, CalendarClock, Activity, FileText, MoreHorizontal, Brain } from 'lucide-react';
-import SessionLogPanel from './SessionLogPanel';
+import { PanelRightClose, FolderTree, CalendarClock, Activity, FileText, MoreHorizontal, Brain } from 'lucide-react';
+import SessionsPanel from './SessionsPanel';
 import WorkspaceBrowser from './WorkspaceBrowser';
 import TriggersPanel from './TriggersPanel';
-import RunningSessionsPanel from './RunningSessionsPanel';
 import PromptPreviewPanel from './PromptPreviewPanel';
 import AgentKnowledgePanel from './AgentKnowledgePanel';
 import { apiCall } from '../../hooks/useApi';
@@ -15,29 +14,27 @@ const SESSION_POLL_MS = 3_000;
 // as a layout budget in the fit computation; the button sizes itself.
 const OVERFLOW_BTN_WIDTH = 40;
 
-const TAB_KEYS = ['log', 'workspace', 'triggers', 'sessions', 'prompt', 'knowledge'];
+const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'prompt', 'knowledge'];
 
 /**
  * Tabbed right rail for the agent chat page.
  *
  * Tabs:
- *   - "Log"       — structured session timeline (existing SessionLogPanel)
+ *   - "Sessions"  — one sub-tab per active Claude session; the selected one
+ *     shows that session's log + an in-tab Stop (merged Log+Sessions, #543)
  *   - "Workspace" — read-only file tree of /workspace/agents/<id>/
  *   - "Triggers"  — the agent's triggers.json
- *   - "Sessions"  — running Claude sessions (with a live count badge)
  *   - "Prompt"    — read-only preview of the composed system prompt
+ *   - "Knowledge" — the agent's knowledge base
  *
- * The active tab is persisted in localStorage so it survives reloads. The
- * close button lifts state up to the page-level `logOpen` toggle.
+ * The active tab is persisted in localStorage so it survives reloads; an old
+ * stored 'log' value silently falls back to the default 'sessions' tab (it is
+ * no longer a member of TAB_KEYS), which is where Log used to live.
  *
  * The rail is independently resizable, so the tab strip measures itself: tabs
  * always render icon + label, and whichever ones no longer fit spill into an
  * overflow "⋯" menu. This adapts to any rail width and any number of tabs
  * (rather than a single hard-coded icons-only breakpoint).
- *
- * SessionLogPanel keeps its own header/filter chrome — we intentionally
- * mount it without an `onClose` prop so its close button doesn't appear
- * twice; the close action moves up to the tab strip.
  */
 export default function RightRail({
   agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate,
@@ -48,7 +45,7 @@ export default function RightRail({
       const v = localStorage.getItem(TAB_KEY);
       if (TAB_KEYS.includes(v)) return v;
     } catch { /* ignore */ }
-    return 'log';
+    return 'sessions';
   });
   useEffect(() => {
     try { localStorage.setItem(TAB_KEY, tab); } catch { /* ignore */ }
@@ -62,7 +59,7 @@ export default function RightRail({
 
   // Lightweight poll of just the session COUNT — so the "Sessions" tab
   // can show a badge regardless of which tab is currently visible. The
-  // RunningSessionsPanel itself owns the full list when it's active.
+  // SessionsPanel itself owns the full list when it's active.
   const [sessionCount, setSessionCount] = useState(0);
   useEffect(() => {
     if (!agentId) { setSessionCount(0); return undefined; }
@@ -84,10 +81,9 @@ export default function RightRail({
   }, [agentId]);
 
   const tabs = useMemo(() => [
-    { key: 'log', icon: <ScrollText size={13} />, label: 'Log' },
+    { key: 'sessions', icon: <Activity size={13} />, label: 'Sessions', badge: sessionCount > 0 ? sessionCount : null },
     { key: 'workspace', icon: <FolderTree size={13} />, label: 'Workspace' },
     { key: 'triggers', icon: <CalendarClock size={13} />, label: 'Triggers' },
-    { key: 'sessions', icon: <Activity size={13} />, label: 'Sessions', badge: sessionCount > 0 ? sessionCount : null },
     { key: 'prompt', icon: <FileText size={13} />, label: 'Prompt' },
     { key: 'knowledge', icon: <Brain size={13} />, label: 'Knowledge' },
   ], [sessionCount]);
@@ -310,16 +306,16 @@ export default function RightRail({
       {/* Body — keep both subtrees mounted via display:none so the user
           doesn't lose log scroll position / expanded folders when toggling. */}
       <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-        <div style={{ display: tab === 'log' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
-          <SessionLogPanel
+        <div style={{ display: tab === 'sessions' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+          <SessionsPanel
             agentId={agentId}
             roomId={roomId}
+            active={tab === 'sessions'}
             hoveredCorrelationId={hoveredCorrelationId}
             onHoverCorrelation={onHoverCorrelation}
             onCostUpdate={onCostUpdate}
             onContextUpdate={onContextUpdate}
             todoCloseSignal={todoCloseSignal}
-            embedded
           />
         </div>
         <div style={{ display: tab === 'workspace' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
@@ -327,9 +323,6 @@ export default function RightRail({
         </div>
         <div style={{ display: tab === 'triggers' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           <TriggersPanel agentId={agentId} active={tab === 'triggers'} />
-        </div>
-        <div style={{ display: tab === 'sessions' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
-          <RunningSessionsPanel agentId={agentId} active={tab === 'sessions'} />
         </div>
         <div style={{ display: tab === 'prompt' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           <PromptPreviewPanel agentId={agentId} embedded />

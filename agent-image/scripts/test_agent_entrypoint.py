@@ -581,5 +581,24 @@ class KnowledgeTeamId(unittest.TestCase):
                 self.assertEqual(entrypoint._knowledge_team_id(), expected)
 
 
+class NewSession(unittest.TestCase):
+    """The running-session descriptor must carry the correlationId so the admin
+    console can scope one session's log even when sessions share a room (#543)."""
+
+    def test_correlation_id_recorded(self):
+        s = entrypoint._new_session("trigger", room_id="!r:local", label="t1",
+                                    trigger_type="github-event", trigger_id="t1",
+                                    correlation_id="trigger:t1:gh:42")
+        self.assertEqual(s["correlationId"], "trigger:t1:gh:42")
+        self.assertEqual(s["type"], "trigger")
+        self.assertEqual(s["roomId"], "!r:local")
+        self.assertIn("id", s)
+        self.assertIn("startedAt", s)
+
+    def test_correlation_id_defaults_to_none(self):
+        s = entrypoint._new_session("dm", room_id="!r:local")
+        self.assertIsNone(s["correlationId"])
+
+
 if __name__ == "__main__":
     unittest.main()

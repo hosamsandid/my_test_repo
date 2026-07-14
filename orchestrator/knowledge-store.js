@@ -318,6 +318,17 @@ function normalizeRepoRef(repoRef) {
   return out;
 }
 
+// Adopt an environment *code* repository as the in-repo KB target when the team
+// hasn't configured its own repoRef. We take only the url + credentials — never
+// the repo's own `branch`, which is the CODE branch (e.g. main): the KB lives on
+// a SEPARATE branch (the configurable default `agent-knowledge`), so leaving the
+// branch unset lets resolveKnowledgeBranch fall back to that default. Copying the
+// code branch here would silently push knowledge onto the code branch (#558 AC-6).
+function adoptRepoForKnowledge(repo) {
+  if (!repo || typeof repo !== 'object') return null;
+  return normalizeRepoRef({ url: repo.url, sshKeyId: repo.sshKeyId, githubTokenId: repo.githubTokenId });
+}
+
 // Normalize the `knowledgeStore` block on an environment into a stable shape.
 // Absent/legacy ⇒ safe defaults (in-repo, docs/agent-knowledge/, no repoRef,
 // no MCP sources) so behaviour is unchanged for envs that never heard of it.
@@ -344,10 +355,10 @@ function normalizeKnowledgeStore(env, { defaultPath = DEFAULT_KB_PATH } = {}) {
       const match = repositories.find((r) => r && r.url === repoRef.url);
       if (!match) warnings.push(`knowledgeStore.repoRef.url "${repoRef.url}" is not among the environment's repositories`);
     } else if (repositories.length > 1) {
-      repoRef = normalizeRepoRef(repositories[0]);
+      repoRef = adoptRepoForKnowledge(repositories[0]);
       warnings.push('knowledgeStore has no repoRef but the environment has multiple repositories — defaulting to the first');
     } else if (repositories.length === 1) {
-      repoRef = normalizeRepoRef(repositories[0]);
+      repoRef = adoptRepoForKnowledge(repositories[0]);
     }
   }
 

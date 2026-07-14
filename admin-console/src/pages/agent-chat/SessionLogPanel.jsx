@@ -26,7 +26,13 @@ import { sumContextTokens, resolveContextTokensForResult } from './context-windo
  * When `scopeCorrelationId` is set the panel renders only that one session's
  * rows (its correlationId) — used by the merged Sessions tab (#543), where
  * each sub-tab is one running session. In that mode the per-correlation left
- * border is dropped (a single session needs no colour to tell it apart).
+ * border is dropped (a single session needs no colour to tell it apart), and
+ * the backfill is filtered server-side by correlationId so the full session is
+ * returned even when its rows sit outside the last-`limit` tail of a busy room.
+ *
+ * When `staticOnly` is set (historical/finished session viewing, #544) the
+ * panel does a one-shot backfill and skips the live SSE tail — a finished
+ * session receives no new rows, so there is nothing to stream.
  *
  * Cross-panel hover correlation: `hoveredCorrelationId` (from parent) dims
  * non-matching rows; mouseEnter/Leave on a row calls
@@ -54,7 +60,7 @@ import { sumContextTokens, resolveContextTokensForResult } from './context-windo
  */
 export default function SessionLogPanel({
   agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate,
-  todoCloseSignal = 0, embedded = false, scopeCorrelationId = null,
+  todoCloseSignal = 0, embedded = false, scopeCorrelationId = null, staticOnly = false,
 }) {
   const [events, setEvents]       = useState([]);
   const [cursor, setCursor]       = useState(0);
@@ -81,7 +87,10 @@ export default function SessionLogPanel({
     setEvents([]);
     setCursor(0);
 
-    fetch(`/api/agents/${encodeURIComponent(agentId)}/session/${encodeURIComponent(roomId)}?limit=500`)
+    const scopeQuery = scopeCorrelationId
+      ? `&correlationId=${encodeURIComponent(scopeCorrelationId)}`
+      : '';
+    fetch(`/api/agents/${encodeURIComponent(agentId)}/session/${encodeURIComponent(roomId)}?limit=500${scopeQuery}`)
       .then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
@@ -102,7 +111,7 @@ export default function SessionLogPanel({
       .finally(() => {
         if (reqId === reqIdRef.current) setLoading(false);
       });
-  }, [agentId, roomId]);
+  }, [agentId, roomId, scopeCorrelationId]);
 
   useEffect(() => { loadBackfill(); }, [loadBackfill]);
 
@@ -124,7 +133,9 @@ export default function SessionLogPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, agentId, roomId]);
 
-  const sseUrl = (agentId && roomId && sseSince !== null)
+  // A finished session receives no new rows, so skip the live tail entirely
+  // (#544) — one-shot backfill is enough and avoids a dangling SSE connection.
+  const sseUrl = (!staticOnly && agentId && roomId && sseSince !== null)
     ? `/api/agents/${encodeURIComponent(agentId)}/session/${encodeURIComponent(roomId)}/stream?since=${sseSince}`
     : null;
 

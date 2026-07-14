@@ -15,6 +15,7 @@ const audit = require('./audit');
 const githubEventLog = require('./github-event-log');
 const maintenanceMode = require('./maintenance-mode');
 const { computeScope, visibleTeam, visibleAgent } = require('./scope');
+const { buildSessionHistory } = require('./session-history');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses } = require('./knowledge-graph');
@@ -8648,6 +8649,56 @@ app.post('/api/agents/:agentId/sessions/:sessionId/stop', apiLimiter, async (req
   }
 });
 
+// List *finished* sessions for an agent within one room (#544). Sessions are
+// already durable in the per-room JSONL — every event carries the run's
+// correlationId — so a finished session is one correlationId group that is no
+// longer in running-sessions.json. Returns descriptors shaped like the active
+// ones (type/triggerType/label/correlationId + started/endedAt) so the UI can
+// render the same source labels and open each in the per-session log view.
+// Query: roomId (required), limit (default 50, max 500), offset (default 0).
+const SESSION_HISTORY_MAX_LIMIT = 500;
+app.get('/api/agents/:agentId/sessions/history', apiLimiter, (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'invalid agent id' });
+  const roomId = typeof req.query.roomId === 'string' ? req.query.roomId : '';
+  if (!ROOM_ID_RE.test(roomId)) return res.status(400).json({ error: 'invalid roomId' });
+
+  const limit = Math.min(
+    SESSION_HISTORY_MAX_LIMIT,
+    Math.max(1, parseInt(req.query.limit, 10) || 50),
+  );
+  const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+
+  // correlationIds of currently-running sessions — excluded so active runs
+  // stay as sub-tabs and never also appear in the history dropdown (#544 AC2).
+  let activeCorrelationIds = [];
+  try {
+    const rf = controlOrAgentPath(agentId, 'running-sessions.json');
+    if (fs.existsSync(rf)) {
+      const arr = JSON.parse(fs.readFileSync(rf, 'utf8'));
+      if (Array.isArray(arr)) {
+        activeCorrelationIds = arr.map(s => s && s.correlationId).filter(Boolean);
+      }
+    }
+  } catch { /* best-effort: a missing/corrupt registry just means nothing active */ }
+
+  const filepath = controlOrAgentPath(agentId, 'sessions', roomId + '.jsonl'); // pushed copy preferred (#185)
+  if (!fs.existsSync(filepath)) return res.json({ sessions: [], total: 0, truncated: false });
+
+  let raw;
+  try {
+    raw = fs.readFileSync(filepath, 'utf8');
+  } catch (err) {
+    return res.status(500).json({ error: 'read failed: ' + err.message });
+  }
+
+  const events = [];
+  for (const line of raw.split('\n')) {
+    if (line.trim()) events.push(parseJsonlLine(line));
+  }
+  res.json(buildSessionHistory(events, activeCorrelationIds, { limit, offset }));
+});
+
 /* ─── Workspace browser (read-only) ────────────────────────────────── */
 
 const WORKSPACE_FILE_MAX_BYTES = 512 * 1024; // 512 KB read cap per file
@@ -9697,6 +9748,16 @@ app.get('/api/agents/:agentId/session/:roomId', (req, res) => {
 
   const since = Math.max(0, parseInt(req.query.since, 10) || 0);
   const limit = Math.max(1, parseInt(req.query.limit, 10) || 1000);
+  // Optional server-side scope to one session (#544). A specific session's
+  // rows may lie anywhere in a busy room's log — before `since` or past the
+  // last-`limit` tail — so when scoping we scan the whole file and filter by
+  // correlationId, keeping the whole session regardless of its position. Used
+  // for historical-session viewing and for reliably backfilling a long-running
+  // session in a chatty room. The id is only ever string-compared, never used
+  // in a path/query, so an opaque value is safe; cap the length defensively.
+  const rawCid = req.query.correlationId;
+  const correlationId = (typeof rawCid === 'string' && rawCid && rawCid.length <= 512)
+    ? rawCid : null;
 
   let size;
   try {
@@ -9705,8 +9766,9 @@ app.get('/api/agents/:agentId/session/:roomId', (req, res) => {
     return res.status(500).json({ error: 'stat failed: ' + err.message });
   }
 
-  // If `since` is past EOF (e.g. file was truncated), read from start.
-  const start = since > size ? 0 : since;
+  // If `since` is past EOF (e.g. file was truncated), read from start. When
+  // scoping to a correlationId we always read the whole file (start 0).
+  const start = correlationId ? 0 : (since > size ? 0 : since);
   if (start >= size) {
     return res.json({ events: [], cursor: size });
   }
@@ -9731,6 +9793,9 @@ app.get('/api/agents/:agentId/session/:roomId', (req, res) => {
 
   stream.on('end', () => {
     if (buf.trim()) events.push(parseJsonlLine(buf));
+    if (correlationId) {
+      events = events.filter(ev => ev && ev.correlationId === correlationId);
+    }
     let truncated = false;
     if (events.length > limit) {
       events = events.slice(events.length - limit);

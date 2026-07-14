@@ -1,25 +1,36 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { Activity, Loader2, Square, MessageCircle, Clock, Zap, Github, Terminal } from 'lucide-react';
+import {
+  Activity, Loader2, Square, MessageCircle, Clock, Zap, Github, Terminal,
+  History, ChevronDown, ChevronUp, ArrowLeft, RefreshCw,
+} from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SessionLogPanel from './SessionLogPanel';
 
 /**
- * Merged "Sessions" tab (#543). Replaces the old standalone Log tab and the
- * standalone running-Sessions tab with a single tab that shows one sub-tab per
- * active session; the selected sub-tab renders that session's log (scoped to
- * its correlationId via SessionLogPanel) plus an in-tab Stop button.
+ * Merged "Sessions" tab (#543, extended in #544). Replaces the old standalone
+ * Log tab and the standalone running-Sessions tab with a single tab that shows
+ * one sub-tab per active session; the selected sub-tab renders that session's
+ * log (scoped to its correlationId via SessionLogPanel) plus an in-tab Stop
+ * button.
  *
- * Only currently-running sessions are listed — historical/finished sessions
- * are #544 (out of scope here). When the agent has no active session the panel
- * shows an explicit empty state.
+ * Historical sessions (#544): a footer control — hidden/collapsed by default —
+ * expands into a dropdown of *finished* sessions (those no longer running).
+ * Selecting one renders its full log in the same per-session log view used for
+ * active sub-tabs (read-only, no live tail). Because finished-session logs are
+ * already durable in the room's JSONL, this needs no new persistence — the
+ * backend just enumerates correlationId groups that aren't currently active
+ * (`GET .../sessions/history`). A session stopped/ended while the tab is open
+ * drops out of the active sub-tabs and, once the dropdown refreshes, becomes
+ * reachable here (closing the loop left open in #543).
  *
- * Cost/context: because the whole-room interleaved log tab is gone, the chat
- * toolbar's cost + context-window indicators now derive from the *selected*
- * session (forwarded up from the embedded SessionLogPanel). They go empty when
- * there is no active session — restoring idle-time viewing is #544.
+ * Cost/context: the chat toolbar's cost + context-window indicators derive from
+ * the *viewed* session (active sub-tab or selected historical session),
+ * forwarded up from the embedded SessionLogPanel. They go empty only when
+ * nothing is being viewed.
  */
 
 const POLL_MS = 3_000;
+const HISTORY_LIMIT = 100;
 
 function formatElapsed(startedAtIso) {
   const start = new Date(startedAtIso).getTime();
@@ -31,6 +42,14 @@ function formatElapsed(startedAtIso) {
   if (min < 60) return `${min}m ${sec % 60}s`;
   const hr = Math.floor(min / 60);
   return `${hr}h ${min % 60}m`;
+}
+
+function formatAbsolute(iso) {
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return '';
+  return new Date(t).toLocaleString(undefined, {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
 }
 
 function typeIcon(session) {
@@ -53,6 +72,13 @@ function sourceLabel(session) {
   return (session.type || 'unknown').toUpperCase();
 }
 
+function historyOptionLabel(session) {
+  const when = formatAbsolute(session.endedAt || session.startedAt);
+  const parts = [sourceLabel(session), session.label || '(session)'];
+  if (when) parts.push(when);
+  return parts.join(' · ');
+}
+
 export default function SessionsPanel({
   agentId, roomId, active,
   onCostUpdate, onContextUpdate, todoCloseSignal = 0,
@@ -65,6 +91,16 @@ export default function SessionsPanel({
   const [stoppingId, setStoppingId] = useState(null);
   // Force a re-render every second so elapsed-time labels tick between polls.
   const [, setTick] = useState(0);
+
+  // Historical sessions (#544). Collapsed by default — only fetched/rendered
+  // once the user expands the control.
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [history, setHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState(null);
+  const [historyTruncated, setHistoryTruncated] = useState(false);
+  // correlationId of the finished session currently being viewed (or null).
+  const [historicalId, setHistoricalId] = useState(null);
 
   const fetchSessions = useCallback(async () => {
     if (!agentId) return;
@@ -99,6 +135,47 @@ export default function SessionsPanel({
     };
   }, [active, agentId, fetchSessions]);
 
+  const fetchHistory = useCallback(async () => {
+    if (!agentId || !roomId) {
+      setHistory([]);
+      return;
+    }
+    setHistoryLoading(true);
+    try {
+      const data = await apiCall(
+        'GET',
+        `/api/agents/${encodeURIComponent(agentId)}/sessions/history`
+          + `?roomId=${encodeURIComponent(roomId)}&limit=${HISTORY_LIMIT}`,
+      );
+      setHistory(Array.isArray(data?.sessions) ? data.sessions : []);
+      setHistoryTruncated(!!data?.truncated);
+      setHistoryError(null);
+    } catch (err) {
+      setHistoryError(err.message || 'failed to load history');
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [agentId, roomId]);
+
+  // Fetch history when the control is open, and refresh it whenever the set of
+  // active sessions changes — so a run that just ended (dropped from the active
+  // poll) shows up as a finished session without a manual refresh (AC4).
+  const activeCidKey = useMemo(
+    () => sessions.map(s => s.correlationId || s.id).join(','),
+    [sessions],
+  );
+  useEffect(() => {
+    if (!historyOpen) return;
+    fetchHistory();
+  }, [historyOpen, activeCidKey, fetchHistory]);
+
+  // Switching agent/room invalidates the historical selection and list.
+  useEffect(() => {
+    setHistoricalId(null);
+    setHistory([]);
+    setHistoryOpen(false);
+  }, [agentId, roomId]);
+
   // Keep the selection stable across polls: hold the selected id while it is
   // still running; fall back to the first session when it disappears (a
   // stopped/finished session), and null when there are none. New sessions
@@ -115,14 +192,20 @@ export default function SessionsPanel({
     [sessions, selectedId],
   );
 
-  // With no session selected the embedded log unmounts and stops feeding the
+  const historical = useMemo(
+    () => (historicalId ? history.find(s => s.correlationId === historicalId) || null : null),
+    [historicalId, history],
+  );
+
+  // With nothing selected the embedded log unmounts and stops feeding the
   // toolbar, so clear the cost/context indicators ourselves — otherwise the
-  // last session's numbers would linger after every session ends.
+  // last session's numbers would linger. A historical selection counts as
+  // "being viewed" and keeps feeding the toolbar, so don't clear then.
   useEffect(() => {
-    if (selected) return;
+    if (selected || historical) return;
     if (onCostUpdate) onCostUpdate(0, 0, 0);
     if (onContextUpdate) onContextUpdate(null);
-  }, [selected, onCostUpdate, onContextUpdate]);
+  }, [selected, historical, onCostUpdate, onContextUpdate]);
 
   const handleStop = useCallback(async (sessionId) => {
     if (!agentId || !sessionId || stoppingId) return;
@@ -139,6 +222,13 @@ export default function SessionsPanel({
     }
   }, [agentId, stoppingId]);
 
+  const selectActive = useCallback((id) => {
+    setHistoricalId(null);
+    setSelectedId(id);
+  }, []);
+
+  const hasActive = sessions.length > 0;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       {error && (
@@ -154,93 +244,134 @@ export default function SessionsPanel({
         </div>
       )}
 
-      {sessions.length === 0 ? (
-        <div style={{
-          flex: 1,
-          minHeight: 0,
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 'var(--eb-space-2)',
-          padding: 'var(--eb-space-6)',
-          color: 'var(--eb-text-muted)',
-          fontSize: 'var(--eb-text-xs)',
-          textAlign: 'center',
-        }}>
-          {loading
-            ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
-            : <Activity size={16} style={{ opacity: 0.5 }} />}
-          <span>{loading ? 'Loading sessions…' : 'No active sessions.'}</span>
-          {!loading && (
-            <span style={{ maxWidth: 240, lineHeight: 1.5 }}>
-              Send a message or wait for a trigger to fire — running sessions
-              appear here as sub-tabs.
-            </span>
-          )}
+      {/* Sub-tab strip: one per active session. Hidden while viewing history so
+          the finished-session log gets the full height; still shown so the user
+          can jump back to a live session by clicking its tab. */}
+      {hasActive && (
+        <div
+          role="tablist"
+          aria-label="Active sessions"
+          style={{
+            display: 'flex',
+            gap: 'var(--eb-space-1)',
+            padding: 'var(--eb-space-2) var(--eb-space-2)',
+            borderBottom: '1px solid var(--eb-border-default)',
+            background: 'var(--eb-bg-surface)',
+            overflowX: 'auto',
+            flexShrink: 0,
+          }}
+        >
+          {sessions.map(session => {
+            const isSel = !historical && session.id === selectedId;
+            return (
+              <button
+                key={session.id}
+                role="tab"
+                aria-selected={isSel}
+                type="button"
+                onClick={() => selectActive(session.id)}
+                title={`${sourceLabel(session)} · ${session.label || '(no label)'}`}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 5,
+                  padding: '4px 10px',
+                  maxWidth: 220,
+                  background: isSel ? 'var(--eb-accent-muted)' : 'transparent',
+                  color: isSel ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)',
+                  border: `1px solid ${isSel ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+                  borderRadius: 'var(--eb-radius-full)',
+                  cursor: 'pointer',
+                  fontFamily: 'inherit',
+                  fontSize: 'var(--eb-text-xs)',
+                  whiteSpace: 'nowrap',
+                  flexShrink: 0,
+                }}
+              >
+                {typeIcon(session)}
+                <span style={{ fontWeight: 'var(--eb-font-medium)', letterSpacing: 0.3 }}>
+                  {sourceLabel(session)}
+                </span>
+                <span style={{
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  opacity: 0.85,
+                }}>
+                  · {session.label || '(no label)'}
+                </span>
+              </button>
+            );
+          })}
         </div>
-      ) : (
-        <>
-          {/* Sub-tab strip: one per active session. Horizontally scrollable so
-              many concurrent sessions stay reachable without a nested menu. */}
-          <div
-            role="tablist"
-            aria-label="Active sessions"
-            style={{
-              display: 'flex',
-              gap: 'var(--eb-space-1)',
-              padding: 'var(--eb-space-2) var(--eb-space-2)',
-              borderBottom: '1px solid var(--eb-border-default)',
-              background: 'var(--eb-bg-surface)',
-              overflowX: 'auto',
-              flexShrink: 0,
-            }}
-          >
-            {sessions.map(session => {
-              const isSel = session.id === selectedId;
-              return (
-                <button
-                  key={session.id}
-                  role="tab"
-                  aria-selected={isSel}
-                  type="button"
-                  onClick={() => setSelectedId(session.id)}
-                  title={`${sourceLabel(session)} · ${session.label || '(no label)'}`}
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 5,
-                    padding: '4px 10px',
-                    maxWidth: 220,
-                    background: isSel ? 'var(--eb-accent-muted)' : 'transparent',
-                    color: isSel ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)',
-                    border: `1px solid ${isSel ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
-                    borderRadius: 'var(--eb-radius-full)',
-                    cursor: 'pointer',
-                    fontFamily: 'inherit',
-                    fontSize: 'var(--eb-text-xs)',
-                    whiteSpace: 'nowrap',
-                    flexShrink: 0,
-                  }}
-                >
-                  {typeIcon(session)}
-                  <span style={{ fontWeight: 'var(--eb-font-medium)', letterSpacing: 0.3 }}>
-                    {sourceLabel(session)}
-                  </span>
-                  <span style={{
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    opacity: 0.85,
-                  }}>
-                    · {session.label || '(no label)'}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
+      )}
 
-          {/* Selected-session toolbar: meta + Stop. */}
-          {selected && (
+      {/* Main area: historical view takes precedence, else the active session,
+          else the idle empty state. */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+        {historical ? (
+          <>
+            {/* Historical-session toolbar: read-only meta + return-to-live. */}
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 'var(--eb-space-2)',
+              padding: 'var(--eb-space-2) var(--eb-space-4)',
+              borderBottom: '1px solid var(--eb-border-default)',
+              fontSize: 'var(--eb-text-xs)',
+              color: 'var(--eb-text-muted)',
+              flexShrink: 0,
+            }}>
+              <History size={12} />
+              <span style={{ fontWeight: 'var(--eb-font-medium)', letterSpacing: 0.3, color: 'var(--eb-text-secondary)' }}>
+                {sourceLabel(historical)}
+              </span>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                · {historical.label || '(session)'}
+              </span>
+              <span title={historical.startedAt}>· {formatAbsolute(historical.startedAt)}</span>
+              <div style={{ flex: 1 }} />
+              <button
+                type="button"
+                onClick={() => setHistoricalId(null)}
+                title="Return to live sessions"
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  padding: '4px 8px',
+                  background: 'none',
+                  border: '1px solid var(--eb-border-default)',
+                  borderRadius: 'var(--eb-radius-sm)',
+                  color: 'var(--eb-text-secondary)',
+                  cursor: 'pointer',
+                  fontSize: 'var(--eb-text-xs)',
+                  fontFamily: 'inherit',
+                  flexShrink: 0,
+                }}
+              >
+                <ArrowLeft size={11} />
+                Live
+              </button>
+            </div>
+            <div style={{ flex: 1, minHeight: 0 }}>
+              <SessionLogPanel
+                key={`hist-${historical.correlationId}`}
+                agentId={agentId}
+                roomId={roomId}
+                scopeCorrelationId={historical.correlationId}
+                staticOnly
+                embedded
+                onCostUpdate={onCostUpdate}
+                onContextUpdate={onContextUpdate}
+                todoCloseSignal={todoCloseSignal}
+                hoveredCorrelationId={hoveredCorrelationId}
+                onHoverCorrelation={onHoverCorrelation}
+              />
+            </div>
+          </>
+        ) : selected ? (
+          <>
+            {/* Selected-session toolbar: meta + Stop. */}
             <div style={{
               display: 'flex',
               alignItems: 'center',
@@ -284,12 +415,7 @@ export default function SessionsPanel({
                 Stop
               </button>
             </div>
-          )}
-
-          {/* Selected-session log, scoped to its correlationId. Keyed by id so
-              switching sub-tabs remounts a clean log stream for the session. */}
-          <div style={{ flex: 1, minHeight: 0 }}>
-            {selected && (
+            <div style={{ flex: 1, minHeight: 0 }}>
               <SessionLogPanel
                 key={selected.id}
                 agentId={agentId}
@@ -302,10 +428,141 @@ export default function SessionsPanel({
                 hoveredCorrelationId={hoveredCorrelationId}
                 onHoverCorrelation={onHoverCorrelation}
               />
+            </div>
+          </>
+        ) : (
+          <div style={{
+            flex: 1,
+            minHeight: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 'var(--eb-space-2)',
+            padding: 'var(--eb-space-6)',
+            color: 'var(--eb-text-muted)',
+            fontSize: 'var(--eb-text-xs)',
+            textAlign: 'center',
+          }}>
+            {loading
+              ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
+              : <Activity size={16} style={{ opacity: 0.5 }} />}
+            <span>{loading ? 'Loading sessions…' : 'No active sessions.'}</span>
+            {!loading && (
+              <span style={{ maxWidth: 240, lineHeight: 1.5 }}>
+                Send a message or wait for a trigger to fire — running sessions
+                appear here as sub-tabs. Finished sessions are available below.
+              </span>
             )}
           </div>
-        </>
-      )}
+        )}
+      </div>
+
+      {/* Historical-sessions control (#544). Collapsed by default so it doesn't
+          clutter the view — the dropdown only renders once expanded. */}
+      <div style={{
+        borderTop: '1px solid var(--eb-border-default)',
+        background: 'var(--eb-bg-surface)',
+        flexShrink: 0,
+      }}>
+        <button
+          type="button"
+          onClick={() => setHistoryOpen(o => !o)}
+          aria-expanded={historyOpen}
+          title="Browse finished sessions"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            width: '100%',
+            padding: 'var(--eb-space-2) var(--eb-space-4)',
+            background: 'none',
+            border: 'none',
+            color: 'var(--eb-text-secondary)',
+            cursor: 'pointer',
+            fontFamily: 'inherit',
+            fontSize: 'var(--eb-text-xs)',
+            textAlign: 'left',
+          }}
+        >
+          <History size={13} />
+          <span style={{ fontWeight: 'var(--eb-font-medium)' }}>Finished sessions</span>
+          <div style={{ flex: 1 }} />
+          {historyOpen ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+        </button>
+
+        {historyOpen && (
+          <div style={{
+            padding: '0 var(--eb-space-4) var(--eb-space-3)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 'var(--eb-space-2)',
+          }}>
+            {historyError && (
+              <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-xs)' }}>
+                {historyError}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+              <select
+                aria-label="Select a finished session"
+                value={historicalId || ''}
+                disabled={historyLoading || history.length === 0}
+                onChange={(e) => setHistoricalId(e.target.value || null)}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  padding: '5px 8px',
+                  background: 'var(--eb-bg-app)',
+                  border: '1px solid var(--eb-border-default)',
+                  borderRadius: 'var(--eb-radius-sm)',
+                  color: 'var(--eb-text-primary)',
+                  fontFamily: 'inherit',
+                  fontSize: 'var(--eb-text-xs)',
+                }}
+              >
+                <option value="">
+                  {history.length === 0
+                    ? (historyLoading ? 'Loading…' : 'No finished sessions yet')
+                    : 'Select a finished session…'}
+                </option>
+                {history.map(s => (
+                  <option key={s.correlationId} value={s.correlationId}>
+                    {historyOptionLabel(s)}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={fetchHistory}
+                disabled={historyLoading}
+                title="Refresh finished sessions"
+                aria-label="Refresh finished sessions"
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  padding: 5,
+                  background: 'none',
+                  border: '1px solid var(--eb-border-default)',
+                  borderRadius: 'var(--eb-radius-sm)',
+                  color: 'var(--eb-text-secondary)',
+                  cursor: historyLoading ? 'wait' : 'pointer',
+                  flexShrink: 0,
+                }}
+              >
+                <RefreshCw size={12} style={historyLoading ? { animation: 'spin 1s linear infinite' } : undefined} />
+              </button>
+            </div>
+
+            {historyTruncated && (
+              <span style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)' }}>
+                Showing the {HISTORY_LIMIT} most recent finished sessions.
+              </span>
+            )}
+          </div>
+        )}
+      </div>
 
       <style>{`
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }

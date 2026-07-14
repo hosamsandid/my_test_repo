@@ -8,6 +8,7 @@ import StageManager from './process/StageManager';
 import { EditHandoffDialog, CreateEdgeDialog } from './process/EdgeDialogs';
 import MaterializeDialog from './process/MaterializeDialog';
 import SidePanel from '../components/SidePanel';
+import { roleIcon } from '../components/role-icons';
 import { liveOps, makeDraftOps } from './process/edit-adapters';
 import { capabilitiesFor, processMode, createTypesFor, sourceKindOf } from './process/connection-capabilities';
 
@@ -641,13 +642,14 @@ function AddRoleDialog({ onClose, onCreate }) {
           </div>
         )}
 
-        {/* Template picker (AC-1): id, name, description, category. */}
+        {/* Template picker (AC-1): icon, name, description, category. */}
         {mode === 'template' && hasTemplates && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Role template</span>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 220, overflowY: 'auto' }}>
               {templates.map(t => {
                 const sel = t.id === selectedTemplateId;
+                const Icon = roleIcon(t.icon);
                 return (
                   <button key={t.id} type="button" onClick={() => selectTemplate(t.id)} style={{
                     textAlign: 'left', display: 'flex', flexDirection: 'column', gap: 2, cursor: 'pointer',
@@ -656,6 +658,7 @@ function AddRoleDialog({ onClose, onCreate }) {
                     borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)',
                   }}>
                     <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <Icon size={16} style={{ color: 'var(--eb-text-secondary)', flexShrink: 0 }} />
                       <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>{t.displayName}</span>
                       {t.category && (
                         <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',

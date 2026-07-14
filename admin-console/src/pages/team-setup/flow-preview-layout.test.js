@@ -45,9 +45,10 @@ test('bundleEdges: channels + label hand-offs, deduped, no self-edges', () => {
     ['author→reviewer:PR', 'author→reviewer:done']);
 });
 
-// Two rework loops within one stage column: each back edge gets its own lane
-// below the grid, so each label sits on its own line.
-test('back edges get one label line per edge', () => {
+// Two rework loops within one stage column route as brackets in that column's
+// right gutter (local to the stage, not dragged into a band below the whole
+// grid), each with its own staggered label line.
+test('intra-column loops route in the column gutter with one label line each', () => {
   const bundle = {
     stages: ['Build'],
     roles: [
@@ -58,13 +59,16 @@ test('back edges get one label line per edge', () => {
   const layout = computePreviewLayout(bundle);
   assert.equal(layout.back.length, 2);
   assert.equal(layout.forward.length, 0);
+  // labels sit in the gutter to the right of the single column's boxes, not in
+  // a lane band below the grid
+  const boxRight = PAD + NODE_W;
+  for (const e of layout.back) {
+    assert.ok(e.labelX > boxRight, `label ${e.labelText} not in the gutter`);
+    assert.ok(typeof e.d === 'string' && e.d.startsWith('M'), 'edge has a bracket path');
+  }
+  // each loop gets its own staggered label line
   const ys = layout.back.map(e => e.labelY).sort((a, b) => a - b);
-  assert.equal(ys[1] - ys[0], LANE_STEP);
-  // lanes live below the node grid
-  const gridBottom = PAD + HEADER + ROW_H + NODE_H;
-  assert.ok(ys[0] > gridBottom);
-  // svg is tall enough to hold both lanes
-  assert.ok(layout.height >= ys[1] + 4);
+  assert.ok(ys[1] - ys[0] >= LABEL_GAP, `labels ${ys[0]}/${ys[1]} not staggered`);
 });
 
 // Two hand-offs sharing the corridor between the same two columns are

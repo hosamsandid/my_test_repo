@@ -7,21 +7,29 @@ import {
 } from 'lucide-react';
 import InfoTip from '../components/InfoTip';
 import useSSE from '../hooks/useSSE';
+import { parseTeamParam, resolveSelectedTeam, teamTotals, streamScopeUrl } from './knowledge-scope';
 
 /*
- * Knowledge Flow — content-first redesign.
+ * Knowledge Flow — team-scoped (#560).
  *
- * One page, zero scope gymnastics: EVERY team is a section, immediately showing
- * what its agents learned (the aggregated team knowledge), who learned it, and
- * what got promoted — laid out as the actual flow, left to right:
+ * Picking a team is a mandatory first step: the page opens on a "choose a team"
+ * screen and loads NO team knowledge until one is selected. Once a team is
+ * chosen it shows exactly that team's knowledge — the same content-first flow,
+ * left to right, for the single team in view:
  *
  *   Agents (learn)  →  Team knowledge (converges)  →  Skills (promoted)
+ *
+ * Only the cheap team list is fetched on mount (to populate the selector); a
+ * team's expensive knowledge slice (graph/gates/suggestions/review-queue +
+ * per-member private-skills) is fetched only after selection, and switching
+ * teams replaces the view. Header counts, the live SSE feed and Refresh are all
+ * scoped to the selected team — there is no all-teams view.
  *
  * The learning controls (autonomy dial / supervised review / promotion gates)
  * sit ON the team section they govern and give explicit success/error feedback —
  * a failed write surfaces its server error instead of silently doing nothing.
  * Filters refine in place; they never hide the structure. The right rail keeps
- * the global live feed, or the provenance drill-down of a selected fact.
+ * the team's live feed, or the provenance drill-down of a selected fact.
  */
 
 const KIND_COLORS = {
@@ -110,7 +118,11 @@ export default function KnowledgeFlow() {
 
   // teams: [{ id, displayName, members: [{id, displayName, role}] }]
   const [teams, setTeams] = useState(null);
-  // data: teamId -> { graph, gates, suggestions, reviewQueue, privateSkills }
+  // The one team currently in view. null → the "choose a team" screen. Never
+  // auto-selected: every fresh load starts empty (no last-team memory).
+  const [selectedTeam, setSelectedTeam] = useState(null);
+  // data: teamId -> { graph, gates, suggestions, reviewQueue, privateSkills }.
+  // At most one team's slice is loaded/shown at a time.
   const [data, setData] = useState({});
   const [loading, setLoading] = useState(false);
   const [filters, setFilters] = useState({ q: '', kind: 'all', convergedOnly: false, today: false, showArchived: false });
@@ -128,7 +140,15 @@ export default function KnowledgeFlow() {
     try { localStorage.setItem('kf.introSeen', '1'); } catch { /* ignore */ }
   }, []);
 
-  const sectionRefs = useRef({});
+  // Mirrors selectedTeam for async guards: a slow in-flight response for a team
+  // that is no longer selected must not flip the shared loading spinner or its
+  // dialogs. Team data itself is keyed by teamId, so a stale response only ever
+  // fills its own (unshown) slice — never the team currently in view.
+  const activeTeamRef = useRef(null);
+  useEffect(() => { activeTeamRef.current = selectedTeam; }, [selectedTeam]);
+  // The deep link is applied once, on the first team-list load only — after
+  // that the selector drives selection (no forced re-select on refresh).
+  const deepLinkAppliedRef = useRef(false);
 
   const loadTeams = useCallback(() => {
     return fetch('/api/matrix/agents')
@@ -180,25 +200,62 @@ export default function KnowledgeFlow() {
     }).catch(() => {});
   }, [filters.showArchived]);
 
-  const loadAll = useCallback(() => {
+  // Load a single team's slice, guarding against out-of-order responses when
+  // the user switches teams quickly.
+  const loadSelectedTeam = useCallback((teamId, { withPrivate = true } = {}) => {
+    if (!teamId) return Promise.resolve();
+    const t = (teams || []).find(x => x.id === teamId);
+    if (!t) return Promise.resolve();
     setLoading(true);
-    loadTeams()
-      .then(list => Promise.all(list.map(t => loadTeamData(t.id, t.members))))
-      .finally(() => setLoading(false));
-  }, [loadTeams, loadTeamData]);
+    return loadTeamData(teamId, t.members, { withPrivate }).finally(() => {
+      // Only clear the spinner if this is still the team in view.
+      if (activeTeamRef.current === teamId) setLoading(false);
+    });
+  }, [teams, loadTeamData]);
 
-  useEffect(() => { loadAll(); }, [loadAll]);
+  // On mount fetch ONLY the cheap team list — no team knowledge is loaded
+  // until a team is selected (AC1).
+  useEffect(() => { loadTeams(); }, [loadTeams]);
 
   // Deep link: /knowledge?team=<id> (also accepts the legacy ?scope=team:<id>).
+  // Applied once, when the team list first arrives; an unknown/absent id leaves
+  // the empty selection screen in place (AC8).
   useEffect(() => {
-    const scope = params.get('scope') || '';
-    const want = params.get('team') || (scope.startsWith('team:') ? scope.slice(5) : null);
-    if (want && teams && sectionRefs.current[want]) {
-      sectionRefs.current[want].scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
+    if (!teams || deepLinkAppliedRef.current) return;
+    deepLinkAppliedRef.current = true;
+    const want = resolveSelectedTeam(parseTeamParam(params), teams);
+    if (want) setSelectedTeam(want);
   }, [teams, params]);
 
-  // Live feed → pulse the matching card + refresh that team's slice.
+  // Reset any per-team UI (provenance rail / dialogs) opened for a team we're
+  // leaving behind.
+  const resetTeamUi = useCallback(() => {
+    setSelected(null); setDetail(null); setPromoting(null); setSharing(null);
+  }, []);
+
+  // A team selected but no longer present (deleted/renamed between loads) →
+  // fall back to the empty selection screen instead of erroring (AC/edge case).
+  useEffect(() => {
+    if (selectedTeam && teams && !teams.some(t => t.id === selectedTeam)) {
+      setSelectedTeam(null);
+      resetTeamUi();
+    }
+  }, [teams, selectedTeam, resetTeamUi]);
+
+  // Selecting a team loads its (and only its) knowledge; switching resets any
+  // provenance rail / dialogs opened for the previous team.
+  const onSelectTeam = useCallback((teamId) => {
+    const next = teamId || null;
+    setSelectedTeam(prev => (prev === next ? prev : next));
+    resetTeamUi();
+  }, [resetTeamUi]);
+
+  useEffect(() => {
+    if (selectedTeam) loadSelectedTeam(selectedTeam);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTeam, loadSelectedTeam]);
+
+  // Live feed → pulse the matching card + refresh the selected team's slice.
   const reloadTimers = useRef({});
   const scheduleTeamReload = useCallback((teamId) => {
     if (!teamId) return;
@@ -211,14 +268,18 @@ export default function KnowledgeFlow() {
 
   const onFeedEvent = useCallback((ev) => {
     if (!ev || !ev.teamId) return;
+    // The stream is already scoped to the selected team, but ignore anything
+    // that isn't the team currently in view as belt-and-braces.
+    if (ev.teamId !== selectedTeam) return;
     if (ev.type === 'harvest' && ev.entry?.id) {
       setPulseId(ev.entry.id);
       setTimeout(() => setPulseId(p => (p === ev.entry.id ? null : p)), 1000);
     }
     scheduleTeamReload(ev.teamId);
-  }, [scheduleTeamReload]);
+  }, [scheduleTeamReload, selectedTeam]);
 
-  useSSE('/api/knowledge/stream?scope=global', { onEvent: onFeedEvent });
+  // SSE scoped to the selected team; no connection until a team is chosen (AC6).
+  useSSE(streamScopeUrl(selectedTeam), { onEvent: onFeedEvent });
 
   const openItem = useCallback((id, teamId) => {
     setSelected({ id, teamId });
@@ -243,26 +304,23 @@ export default function KnowledgeFlow() {
       .catch(() => {});
   }, [teams, loadTeamData]);
 
-  // Aggregate header counts over every team graph.
-  const totals = useMemo(() => {
-    const t = { items: 0, today: 0, converged: 0, skills: 0, agents: 0 };
-    for (const d of Object.values(data)) {
-      const c = d.graph?.counts;
-      if (!c) continue;
-      t.items += c.items || 0; t.today += c.today || 0; t.converged += c.converged || 0;
-      t.skills += c.skills || 0; t.agents += c.agents || 0;
-    }
-    return t;
-  }, [data]);
+  // Header counts scoped to the selected team only — never a cross-team sum.
+  const totals = useMemo(
+    () => teamTotals(selectedTeam ? data[selectedTeam] : null),
+    [data, selectedTeam],
+  );
 
-  const orderedTeams = useMemo(() => {
-    if (!teams) return [];
-    return [...teams].sort((a, b) => {
-      const ia = data[a.id]?.graph?.counts?.items || 0;
-      const ib = data[b.id]?.graph?.counts?.items || 0;
-      return ib - ia || a.id.localeCompare(b.id);
-    });
-  }, [teams, data]);
+  // Refresh reloads only the currently selected team; with no team selected it
+  // just refreshes the team list behind the selector.
+  const onRefresh = useCallback(() => {
+    if (selectedTeam) loadSelectedTeam(selectedTeam);
+    else loadTeams();
+  }, [selectedTeam, loadSelectedTeam, loadTeams]);
+
+  const selectedTeamObj = useMemo(
+    () => (teams || []).find(t => t.id === selectedTeam) || null,
+    [teams, selectedTeam],
+  );
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
@@ -272,21 +330,26 @@ export default function KnowledgeFlow() {
         <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
           Knowledge Flow
         </h1>
-        <span style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
-          <span title="Lessons agents have recorded so far">{totals.items} learned</span>
-          {totals.today ? <span style={{ color: 'var(--eb-status-success)' }} title="Recorded in the last 24 hours"> (+{totals.today} today)</span> : null}
-          {' · '}
-          <span title="Learned independently by more than one agent — a strong signal it’s true and important">{totals.converged} converged</span>
-          {' · '}
-          <span title="Knowledge promoted into reusable skills that agents load automatically">{totals.skills} skills</span>
-        </span>
+        {selectedTeam && (
+          <span style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
+            <span title="Lessons this team's agents have recorded so far">{totals.items} learned</span>
+            {totals.today ? <span style={{ color: 'var(--eb-status-success)' }} title="Recorded in the last 24 hours"> (+{totals.today} today)</span> : null}
+            {' · '}
+            <span title="Learned independently by more than one agent — a strong signal it’s true and important">{totals.converged} converged</span>
+            {' · '}
+            <span title="Knowledge promoted into reusable skills that agents load automatically">{totals.skills} skills</span>
+          </span>
+        )}
         <button
           onClick={() => (showIntro ? dismissIntro() : setShowIntro(true))}
           title="A short explanation of how the knowledge system works"
           style={{ ...btn, borderStyle: 'dashed' }}>
           <HelpCircle size={13} /> How it works
         </button>
-        <button onClick={loadAll} title="Reload all teams and their knowledge" style={{ ...btn, marginLeft: 'auto' }}>
+        <button
+          onClick={onRefresh}
+          title={selectedTeam ? 'Reload this team’s knowledge' : 'Reload the team list'}
+          style={{ ...btn, marginLeft: 'auto' }}>
           <RefreshCw size={14} className={loading ? 'kf-spin' : undefined} /> Refresh
         </button>
       </div>
@@ -296,7 +359,17 @@ export default function KnowledgeFlow() {
 
       {showIntro && <HowItWorks onDismiss={dismissIntro} />}
 
-      {/* ── Filter bar (refines in place — never a precondition to see data) ── */}
+      {/* ── Team selector (mandatory first step — governs the whole page) ────── */}
+      {teams && teams.length > 0 && (
+        <TeamSelector
+          teams={teams}
+          selected={selectedTeam}
+          onSelect={onSelectTeam}
+        />
+      )}
+
+      {/* ── Filter bar (refines the selected team in place) ─────────────────── */}
+      {selectedTeam && (
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: '0 0 var(--eb-space-3)', flexWrap: 'wrap' }}>
         <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: '3px var(--eb-space-2)', background: 'var(--eb-bg-surface)' }}>
           <Search size={13} style={{ color: 'var(--eb-text-muted)' }} />
@@ -334,39 +407,39 @@ export default function KnowledgeFlow() {
           title="Also show retired knowledge — it’s hidden by default but kept for audit"
           onClick={() => setFilters(f => ({ ...f, showArchived: !f.showArchived }))}>Show archived</Chip>
       </div>
+      )}
 
       {/* ── Body ───────────────────────────────────────────────────────────── */}
       <div style={{ display: 'flex', flex: 1, minHeight: 0, borderTop: '1px solid var(--eb-border-default)' }}>
         <div style={{ flex: 1, overflowY: 'auto', background: 'var(--eb-bg-app)', padding: 'var(--eb-space-4) 0' }}>
           {teams === null ? (
             <div style={{ color: 'var(--eb-text-muted)' }}>Loading…</div>
-          ) : orderedTeams.length === 0 ? (
+          ) : teams.length === 0 ? (
             <div style={{ color: 'var(--eb-text-muted)' }}>No agents yet — create a team and its agents will start learning.</div>
+          ) : !selectedTeamObj ? (
+            <ChooseTeam />
           ) : (
-            orderedTeams.map(t => (
-              <TeamSection
-                key={t.id}
-                ref={el => { sectionRefs.current[t.id] = el; }}
-                team={t}
-                data={data[t.id]}
-                filters={filters}
-                pulseId={pulseId}
-                selectedId={selected?.teamId === t.id ? selected.id : null}
-                onOpenItem={openItem}
-                onRetireItem={(item) => {
-                  if (window.confirm(`Retire this learning from the shared KB?\n\n“${item.text}”\n\nIt stays in git for audit and can be un-retired.`)) {
-                    archiveItem(item.id, t.id, true);
-                  }
-                }}
-                onUnarchiveItem={(item) => archiveItem(item.id, t.id, false)}
-                onOpenChat={(agentId) => navigate(`/chats/${encodeURIComponent(agentId)}`)}
-                onReviewSuggestion={(s) => setPromoting({ suggestion: s, teamId: t.id })}
-                onCombineItems={(sel) => setPromoting({ suggestion: manualSuggestionFrom(sel), teamId: t.id })}
-                onShareSkill={(node) => setSharing({ node, teamId: t.id })}
-                onControlsChanged={() => loadTeamData(t.id, t.members, { withPrivate: false })}
-                onLifted={() => loadTeamData(t.id, t.members)}
-              />
-            ))
+            <TeamSection
+              key={selectedTeamObj.id}
+              team={selectedTeamObj}
+              data={data[selectedTeamObj.id]}
+              filters={filters}
+              pulseId={pulseId}
+              selectedId={selected?.teamId === selectedTeamObj.id ? selected.id : null}
+              onOpenItem={openItem}
+              onRetireItem={(item) => {
+                if (window.confirm(`Retire this learning from the shared KB?\n\n“${item.text}”\n\nIt stays in git for audit and can be un-retired.`)) {
+                  archiveItem(item.id, selectedTeamObj.id, true);
+                }
+              }}
+              onUnarchiveItem={(item) => archiveItem(item.id, selectedTeamObj.id, false)}
+              onOpenChat={(agentId) => navigate(`/chats/${encodeURIComponent(agentId)}`)}
+              onReviewSuggestion={(s) => setPromoting({ suggestion: s, teamId: selectedTeamObj.id })}
+              onCombineItems={(sel) => setPromoting({ suggestion: manualSuggestionFrom(sel), teamId: selectedTeamObj.id })}
+              onShareSkill={(node) => setSharing({ node, teamId: selectedTeamObj.id })}
+              onControlsChanged={() => loadTeamData(selectedTeamObj.id, selectedTeamObj.members, { withPrivate: false })}
+              onLifted={() => loadTeamData(selectedTeamObj.id, selectedTeamObj.members)}
+            />
           )}
         </div>
 
@@ -401,7 +474,11 @@ export default function KnowledgeFlow() {
           node={sharing.node}
           teams={(teams || []).map(t => t.id)}
           onClose={() => setSharing(null)}
-          onDone={() => { setSharing(null); loadAll(); }}
+          onDone={() => {
+            setSharing(null);
+            // Sharing may activate a skill on the source team — reload only it.
+            if (selectedTeam) loadSelectedTeam(selectedTeam, { withPrivate: false });
+          }}
         />
       )}
     </div>
@@ -477,6 +554,63 @@ function HowItWorks({ onDismiss }) {
         {' '}<strong>Review</strong> mode (you approve every new lesson first), and <strong>promotion
         gates</strong> (which promotion steps may run automatically). Nothing is deleted silently —
         retired knowledge is kept in git for audit.
+      </div>
+    </div>
+  );
+}
+
+/* ── Team selector — the page's mandatory first step (#560) ─────────────────── */
+
+function TeamSelector({ teams, selected, onSelect }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap',
+      padding: 'var(--eb-space-3) var(--eb-space-3)', margin: '0 0 var(--eb-space-3)',
+      background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
+      borderRadius: 'var(--eb-radius-md)',
+    }}>
+      <Users size={16} style={{ color: 'var(--eb-accent-primary)' }} />
+      <label htmlFor="kf-team-select" style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
+        Team
+      </label>
+      <select
+        id="kf-team-select"
+        value={selected || ''}
+        onChange={e => onSelect(e.target.value || null)}
+        style={{
+          minWidth: 220, padding: 'var(--eb-space-2) var(--eb-space-3)',
+          border: `1px solid ${selected ? 'var(--eb-border-default)' : 'var(--eb-accent-primary)'}`,
+          borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-app)',
+          color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer',
+        }}>
+        <option value="">Choose a team…</option>
+        {teams.map(t => (
+          <option key={t.id} value={t.id}>{t.displayName || t.id}</option>
+        ))}
+      </select>
+      <span style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)' }}>
+        {selected ? 'Showing this team’s knowledge only.' : 'Pick a team to load its knowledge.'}
+      </span>
+    </div>
+  );
+}
+
+/* ── Empty state shown until a team is chosen ───────────────────────────────── */
+
+function ChooseTeam() {
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+      textAlign: 'center', gap: 'var(--eb-space-3)', padding: 'var(--eb-space-8) var(--eb-space-4)',
+      color: 'var(--eb-text-muted)',
+    }}>
+      <Users size={40} style={{ color: 'var(--eb-accent-primary)', opacity: 0.7 }} />
+      <div style={{ fontSize: 'var(--eb-text-lg)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
+        Choose a team to view its knowledge
+      </div>
+      <div style={{ maxWidth: 420, fontSize: 'var(--eb-text-sm)', lineHeight: 1.55 }}>
+        Use the <strong>Team</strong> selector above to pick a team. Its agents’ shared
+        knowledge, converged lessons and promoted skills load once you select it.
       </div>
     </div>
   );

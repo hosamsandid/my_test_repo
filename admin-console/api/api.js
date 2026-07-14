@@ -21,7 +21,7 @@ const { buildProcessGraph } = require('./process-graph');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId } = require('./process-template');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { normalizeTemplatePorts } = require('./catalog-ports');
 const { weaveProcess } = require('./flow-weaver');
@@ -4257,10 +4257,9 @@ function draftPath(id) {
   if (!p.startsWith(root + path.sep)) return null;
   return p;
 }
-function slugifyDraft(name) {
-  const base = String(name || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
-  return base || 'process';
-}
+// deriveUniqueDraftId is the shared pure slug helper imported from
+// process-template.js (single source of truth for id derivation, #581).
+const draftExists = (id) => fs.existsSync(draftPath(id));
 function readDraft(id) {
   const p = draftPath(id);
   if (!p || !fs.existsSync(p)) return null;
@@ -4282,11 +4281,8 @@ app.get('/api/process/drafts', (req, res) => {
 
 app.post('/api/process/drafts', apiLimiter, (req, res) => {
   const name = typeof req.body?.name === 'string' && req.body.name.trim() ? req.body.name.trim() : 'Untitled flow';
-  // Derive a unique slug id.
-  let base = slugifyDraft(name);
-  if (!DRAFT_ID_RE.test(base)) base = 'process';
-  let id = base, n = 2;
-  while (fs.existsSync(draftPath(id))) { id = `${base}-${n++}`; }
+  // Derive a unique slug id from the name (#581 shared helper).
+  const id = deriveUniqueDraftId(name, { exists: draftExists });
   const now = new Date().toISOString();
   // Seed from an imported bundle if provided, else an empty skeleton.
   let bundle = emptyDraftBundle(name);
@@ -4319,14 +4315,30 @@ app.put('/api/process/drafts/:id', apiLimiter, (req, res) => {
   // materialisation requires a non-empty set).
   const v = validateProcessTemplate(body, { allowEmptyRoles: true });
   if (!v.ok) return res.status(400).json({ error: v.error });
+  // Empty/whitespace names are rejected: keep the previous name (and thus id).
+  const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : existing.name;
+  // Re-derive the storage id from the plain-text name whenever the name changes
+  // (#581), so the id always reflects the current name. The draft's own id is
+  // treated as free (no spurious `-2` when the slug is unchanged), and a
+  // collision with another draft reuses the creation-time suffix behaviour.
+  const newId = name === existing.name
+    ? id
+    : deriveUniqueDraftId(name, { currentId: id, exists: draftExists });
   const draft = {
     ...body,
-    id,
-    name: typeof body.name === 'string' && body.name.trim() ? body.name.trim() : existing.name,
+    id: newId,
+    name,
     createdAt: existing.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
-  writeJsonAtomic(draftPath(id), draft);
+  // Write the new-id entry first, then remove the old one, so a crash mid-rename
+  // leaves the old record rather than losing the draft. No orphan/duplicate
+  // remains once both steps complete (AC7).
+  writeJsonAtomic(draftPath(newId), draft);
+  if (newId !== id) {
+    const oldPath = draftPath(id);
+    try { if (oldPath && fs.existsSync(oldPath)) fs.rmSync(oldPath); } catch { /* best-effort */ }
+  }
   res.json(draft);
 });
 
@@ -4369,10 +4381,7 @@ app.post('/api/process/drafts/import-briefings', apiLimiter, async (req, res) =>
   const bundle = { ...unifiedToProcessTemplate(briefingsToUnified(bps, { name })), name };
 
   // Persist as a new draft (same id derivation as POST /api/process/drafts).
-  let base = slugifyDraft(name);
-  if (!DRAFT_ID_RE.test(base)) base = 'process';
-  let id = base, n = 2;
-  while (fs.existsSync(draftPath(id))) { id = `${base}-${n++}`; }
+  const id = deriveUniqueDraftId(name, { exists: draftExists });
   const now = new Date().toISOString();
   const draft = { ...bundle, id, sourceBriefings: workspace, createdAt: now, updatedAt: now };
   fs.mkdirSync(PROCESS_DRAFTS_DIR, { recursive: true });

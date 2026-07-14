@@ -234,7 +234,8 @@ export function makeDraftOps(getBundle, persist) {
 
     // ── the draft itself ──
     // Rename the whole process (the bundle's top-level `name`). The backend
-    // slug/id is fixed at creation, so this only changes the display name.
+    // re-derives the draft's storage id from the new name (#581); the caller
+    // (persistDraft) follows the re-keyed id.
     renameDraft: async (name) => {
       const trimmed = String(name || '').trim();
       if (!trimmed) return;

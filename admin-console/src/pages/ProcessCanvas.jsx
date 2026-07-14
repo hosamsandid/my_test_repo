@@ -17,9 +17,10 @@ import { capabilitiesFor, processMode, createTypesFor, sourceKindOf } from './pr
 // render inside the agent card.)
 const ACTOR_NAMES = { '@github': 'GitHub', '@external': 'External system', '@timer': 'Schedule' };
 
-// Inline-editable process name for the draft toolbar. Click to edit; Enter or
-// blur commits, Escape reverts. Renaming only touches the bundle's display
-// `name` — the storage id is fixed at creation.
+// Inline-editable process name for the draft toolbar — the single rename
+// control for a draft (#581). Click to edit; Enter or blur commits, Escape
+// reverts. The backend re-derives the draft's storage id from the new name, and
+// the panel follows the re-keyed id (see persistDraft).
 function EditableDraftTitle({ name, onRename }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(name || '');
@@ -163,7 +164,10 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     draftBundleRef.current = saved;
     setDraftBundle(saved);
     if (onDraftsChanged) onDraftsChanged();
-  }, [draftId, onDraftsChanged]);
+    // A rename re-keys the draft (#581): follow the new id so the open selection,
+    // the URL scope param and every subsequent save target the live id (AC6).
+    if (saved.id && saved.id !== draftId) navigate(`draft:${saved.id}`);
+  }, [draftId, onDraftsChanged, navigate]);
 
   const draftOps = useMemo(
     () => makeDraftOps(() => draftBundleRef.current, persistDraft),

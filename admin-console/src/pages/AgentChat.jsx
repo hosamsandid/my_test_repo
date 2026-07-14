@@ -334,6 +334,16 @@ export default function AgentChat() {
     setRailTabRequest({ tab: 'knowledge', ts: Date.now() });
   }, []);
 
+  // Resuming a finished session (#574) lives in the Sessions tab (RightRail) but
+  // must set the room pointer + send the predefined message from ChatPanel — so
+  // route it through here, mirroring railTabRequest. `ts` re-fires the effect on
+  // repeat activations. ChatPanel owns the pointer PUT + message send.
+  const [resumeRequest, setResumeRequest] = useState(null);
+  const handleResumeSession = useCallback((sessionId) => {
+    if (!sessionId) return;
+    setResumeRequest({ sessionId, ts: Date.now() });
+  }, []);
+
   const selectedAgent = (agents ?? []).find(a => a.id === agentId) || null;
   const effectiveRoomId =
     (selectedAgent && createdRooms[selectedAgent.id]) ||
@@ -559,6 +569,7 @@ export default function AgentChat() {
             onTodoBoundary={handleTodoBoundary}
             onOpenKnowledge={handleOpenKnowledge}
             onKnowledgeChanged={handleKnowledgeChanged}
+            resumeRequest={resumeRequest}
           />
         ) : (
           <EmptyState />
@@ -591,6 +602,7 @@ export default function AgentChat() {
             workspaceRefreshKey={workspaceRefreshKey}
             knowledgeRefreshKey={knowledgeRefreshKey}
             openTabRequest={railTabRequest}
+            onResumeSession={handleResumeSession}
           />
         </div>
         </>

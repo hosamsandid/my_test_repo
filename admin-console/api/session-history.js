@@ -215,4 +215,36 @@ function buildSessionHistory(events, activeCorrelationIds = [], opts = {}) {
   return { sessions: paged, total, truncated: offset + paged.length < total };
 }
 
-module.exports = { buildSessionHistory, deriveFromCorrelationId };
+/**
+ * Resolve a finished session that may be re-opened via `--resume` (#574).
+ *
+ * The set-pointer endpoint must not trust a client-supplied session-ID blindly:
+ * a resumable session has to (a) actually exist in this room's finished-session
+ * history, (b) not be one of the currently-running sessions (Decision A / AC7 —
+ * an active run already owns the room), and (c) be a **DM** session (Open
+ * Question A → DM only; triggered per-invocation runs never persist a pointer,
+ * so they carry no resumable id). Returns the matching session descriptor when
+ * all hold, else `null` — the caller maps `null` to a clear "not resumable"
+ * error and MUST NOT start a fresh empty session in its place (AC6).
+ *
+ * @param {Array<object>} events               Parsed JSONL events for the room.
+ * @param {Iterable<string>} activeCorrelationIds  currently-running correlationIds.
+ * @param {string} sessionId                    the Claude session-ID to resume.
+ * @returns {object|null} the finished DM session descriptor, or null.
+ */
+function findResumableSession(events, activeCorrelationIds, sessionId) {
+  if (typeof sessionId !== 'string' || !sessionId) return null;
+  // Enumerate every finished session (unpaged) so a resumable one that would
+  // sit past the default page is still found; buildSessionHistory already
+  // excludes active sessions.
+  const { sessions } = buildSessionHistory(events, activeCorrelationIds, {
+    limit: Number.MAX_SAFE_INTEGER,
+    offset: 0,
+  });
+  const match = sessions.find(s => s && s.sessionId === sessionId);
+  if (!match) return null;
+  if (match.type !== 'dm') return null;
+  return match;
+}
+
+module.exports = { buildSessionHistory, deriveFromCorrelationId, findResumableSession };

@@ -485,34 +485,61 @@ def _knowledge_team_id() -> str:
 
 # ---- per-room session pointer (drop-in compat with agent-runner.js) ----
 
+# Shown to the user when an explicit resume (#574) can't be honoured because the
+# Claude snapshot is gone (pruned / incompatible after a CLI upgrade / lost with
+# the container). AC6: never silently start a fresh empty session in its place.
+RESUME_UNAVAILABLE_NOTICE = (
+    "This session can't be resumed: the saved conversation snapshot is no "
+    "longer available (it may have been pruned, become incompatible after an "
+    "update, or been lost with the container). No new, empty session was "
+    "started in its place — please start a new conversation if you need one."
+)
+
+
 def _session_pointer_file(room_id: str) -> Path:
     return _agent_workdir() / "sessions" / f"{room_id}.current.json"
 
 
 def _read_session_pointer(room_id: str) -> str | None:
+    return _read_session_pointer_full(room_id)[0]
+
+
+def _read_session_pointer_full(room_id: str) -> tuple[str | None, bool]:
+    """Return (sessionId, resumeRequested) from the pointer.
+
+    `resumeRequested` (#574) is the one-shot flag set by the Sessions-tab resume
+    action: when True and `--resume` fails, the caller must surface an error
+    rather than silently start a fresh session (AC6). It defaults False for the
+    normal run-end pointer the runner writes, so ordinary DM continuity is
+    unaffected.
+    """
     p = _session_pointer_file(room_id)
     if not p.exists():
-        return None
+        return None, False
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
         sid = data.get("sessionId")
-        return sid if isinstance(sid, str) and sid else None
+        sid = sid if isinstance(sid, str) and sid else None
+        return sid, bool(data.get("resumeRequested"))
     except Exception as exc:
         print(f"[Runner] readSessionPointer {room_id}: {exc}", file=sys.stderr)
-        return None
+        return None, False
 
 
-def _write_session_pointer(room_id: str, session_id: str) -> None:
+def _write_session_pointer(room_id: str, session_id: str,
+                           resume_requested: bool = False) -> None:
     if not session_id:
         return
     p = _session_pointer_file(room_id)
     updated_at = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    record = {"sessionId": session_id, "updatedAt": updated_at}
+    # Persist the flag only while it's set; a normal run-end write omits it,
+    # which naturally clears a prior resume-intent once the resume has landed.
+    if resume_requested:
+        record["resumeRequested"] = True
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(
-            json.dumps({"sessionId": session_id, "updatedAt": updated_at}, indent=2),
-            encoding="utf-8",
-        )
+        p.write_text(json.dumps(record, indent=2), encoding="utf-8")
     except Exception as exc:
         print(f"[Runner] writeSessionPointer: {exc}", file=sys.stderr)
     # Mirror to the control plane (#185) so the admin reads it under per-agent
@@ -1648,7 +1675,7 @@ def _call_claude(prompt: str, room_id: str, correlation_id: str,
     # Pyramid level 1 guarantee: the digest CLAUDE.md @-imports is current for
     # this run (per-invocation agents see the team state on every run).
     _rebuild_knowledge_digest()
-    resume_id = _read_session_pointer(room_id)
+    resume_id, resume_requested = _read_session_pointer_full(room_id)
     if resume_id:
         try:
             text, observed = _call_claude_once(
@@ -1662,11 +1689,22 @@ def _call_claude(prompt: str, room_id: str, correlation_id: str,
                 raise
             blob = (str(err.stderr or "") + " " + str(err)).lower()
             if "session" in blob or "resume" in blob or "not found" in blob:
+                _clear_session_pointer(room_id)
+                # An explicit resume (#574) must NOT silently fall back to a
+                # fresh empty session (AC6) — the user chose *this* snapshot, so
+                # tell them it's gone and let them decide, rather than answering
+                # a resume request from a blank context.
+                if resume_requested:
+                    print(
+                        f"[Runner] --resume {resume_id} failed on an explicit resume; "
+                        "surfacing to user (no silent fresh session)",
+                        file=sys.stderr,
+                    )
+                    return RESUME_UNAVAILABLE_NOTICE
                 print(
                     f"[Runner] --resume {resume_id} failed; retrying without resume",
                     file=sys.stderr,
                 )
-                _clear_session_pointer(room_id)
                 text, observed = _call_claude_once(
                     prompt, room_id, correlation_id, None, blueprint_id, timeout_sec
                 )
@@ -2250,6 +2288,19 @@ class TriggerScheduler:
                 if rid:
                     _clear_session_pointer(rid)
                     print(f"[Runner:{self._agent_id}] session-reset for {rid}",
+                          file=sys.stderr)
+                continue
+            if kind == "session-set":
+                # Control→agent resume command (#574): the admin can't write our
+                # pointer on an isolated volume, so it asks us to re-point the
+                # room at a chosen finished session. resumeRequested is persisted
+                # so a failed resume surfaces an error instead of a fresh session.
+                rid = entry.get("roomId")
+                sid = entry.get("sessionId")
+                if rid and isinstance(sid, str) and sid:
+                    _write_session_pointer(
+                        rid, sid, resume_requested=bool(entry.get("resumeRequested")))
+                    print(f"[Runner:{self._agent_id}] session-set {rid} -> {sid}",
                           file=sys.stderr)
                 continue
             if kind == "handover-dm":

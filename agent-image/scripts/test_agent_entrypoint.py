@@ -600,5 +600,57 @@ class NewSession(unittest.TestCase):
         self.assertIsNone(s["correlationId"])
 
 
+class SessionPointerResumeFlag(unittest.TestCase):
+    """The one-shot resumeRequested flag (#574) round-trips through the pointer
+    and is cleared by a normal run-end write, so ordinary DM continuity is
+    unaffected."""
+
+    def _run(self, body):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            ptr = Path(d) / "!room:local.current.json"
+            with patch.object(entrypoint, "_session_pointer_file", return_value=ptr), \
+                 patch.object(entrypoint, "_get_push_client", return_value=None):
+                return body(ptr)
+
+    def test_normal_write_has_no_flag_and_reads_false(self):
+        def body(ptr):
+            entrypoint._write_session_pointer("!room:local", "sess-A")
+            sid, requested = entrypoint._read_session_pointer_full("!room:local")
+            self.assertEqual(sid, "sess-A")
+            self.assertFalse(requested)
+        self._run(body)
+
+    def test_resume_write_sets_flag_and_reads_true(self):
+        def body(ptr):
+            entrypoint._write_session_pointer("!room:local", "sess-A", resume_requested=True)
+            sid, requested = entrypoint._read_session_pointer_full("!room:local")
+            self.assertEqual(sid, "sess-A")
+            self.assertTrue(requested)
+        self._run(body)
+
+    def test_run_end_write_clears_a_prior_resume_flag(self):
+        def body(ptr):
+            entrypoint._write_session_pointer("!room:local", "sess-A", resume_requested=True)
+            # A successful resume writes the observed id with the default flag.
+            entrypoint._write_session_pointer("!room:local", "sess-A")
+            _, requested = entrypoint._read_session_pointer_full("!room:local")
+            self.assertFalse(requested)
+        self._run(body)
+
+    def test_missing_pointer_reads_none_false(self):
+        def body(ptr):
+            sid, requested = entrypoint._read_session_pointer_full("!room:local")
+            self.assertIsNone(sid)
+            self.assertFalse(requested)
+        self._run(body)
+
+    def test_simple_reader_still_returns_session_id(self):
+        def body(ptr):
+            entrypoint._write_session_pointer("!room:local", "sess-A", resume_requested=True)
+            self.assertEqual(entrypoint._read_session_pointer("!room:local"), "sess-A")
+        self._run(body)
+
+
 if __name__ == "__main__":
     unittest.main()

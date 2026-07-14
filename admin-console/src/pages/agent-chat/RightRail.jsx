@@ -39,6 +39,7 @@ const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'prompt', 'knowledge'];
 export default function RightRail({
   agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate,
   todoCloseSignal = 0, workspaceRefreshKey = 0, knowledgeRefreshKey = 0, openTabRequest = null,
+  onResumeSession,
 }) {
   const [tab, setTab] = useState(() => {
     try {
@@ -316,6 +317,7 @@ export default function RightRail({
             onCostUpdate={onCostUpdate}
             onContextUpdate={onContextUpdate}
             todoCloseSignal={todoCloseSignal}
+            onResumeSession={onResumeSession}
           />
         </div>
         <div style={{ display: tab === 'workspace' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>

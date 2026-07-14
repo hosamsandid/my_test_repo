@@ -10,6 +10,7 @@ import MessageInput from './MessageInput';
 import LearningBadge from '../../components/LearningBadge';
 import { resolveContextWindowTokens, computeContextFillLevel, formatTokenCountK } from './context-window';
 import { maintenanceBannerText } from './maintenance-banner';
+import { RESUME_MESSAGE } from './resume-session';
 
 // Default prompt sent when the user clicks "Full Learn". The agent
 // continues in its current Claude session (so it has full conversational
@@ -76,7 +77,7 @@ const LEARN_PROMPT =
  */
 export default function ChatPanel({
   agent, roomId, onRoomCreated, hoveredCorrelationId, onHoverCorrelation, sessionCost, contextFill,
-  onWorkspaceChanged, onTodoBoundary, onOpenKnowledge, onKnowledgeChanged,
+  onWorkspaceChanged, onTodoBoundary, onOpenKnowledge, onKnowledgeChanged, resumeRequest,
 }) {
   const [messages, setMessages]      = useState([]);
   const [loading, setLoading]        = useState(false);
@@ -105,6 +106,7 @@ export default function ChatPanel({
   const [sessionId, setSessionId]     = useState(null);
   const [sessionUpdatedAt, setSessionUpdatedAt] = useState(null);
   const [resetting, setResetting]     = useState(false);
+  const [resuming, setResuming]       = useState(false);
   const [learnPending, setLearnPending] = useState(false);
   const [clearingHistory, setClearingHistory] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
@@ -495,6 +497,42 @@ export default function ChatPanel({
       setResetting(false);
     }
   }
+
+  // Resume a finished session (#574): re-point the room at the chosen Claude
+  // session-ID (PUT the pointer with `resumeRequested`), then send the fixed
+  // predefined message down the normal DM path so the agent runs with --resume
+  // and the message is visible in history (AC2/AC3/AC5). The message-send is
+  // what makes the resumed session show as active (AC4). The `resuming` guard
+  // + ts dedup below stop rapid double-activation from spawning duplicate runs.
+  const handleResumeSession = useCallback(async (resumeSessionId) => {
+    if (!sessionApiBase || !resumeSessionId || resuming) return;
+    onTodoBoundary?.();
+    setResuming(true);
+    setError(null);
+    try {
+      await apiCall('POST', sessionApiBase, { sessionId: resumeSessionId });
+      // Optimistically reflect the re-pointed session so the badge updates
+      // without waiting for the post-run refetch.
+      setSessionId(resumeSessionId);
+      setSessionUpdatedAt(new Date().toISOString());
+      await handleSend(RESUME_MESSAGE);
+    } catch (err) {
+      setError(`Resume failed: ${err.message}`);
+    } finally {
+      setResuming(false);
+    }
+  }, [sessionApiBase, resuming, onTodoBoundary]);
+
+  // Fire when the parent (AgentChat) signals a resume from the Sessions tab.
+  // `ts` disambiguates repeat activations; the ref guards against re-firing on
+  // unrelated re-renders.
+  const lastResumeTsRef = useRef(0);
+  useEffect(() => {
+    if (!resumeRequest || !resumeRequest.ts) return;
+    if (resumeRequest.ts === lastResumeTsRef.current) return;
+    lastResumeTsRef.current = resumeRequest.ts;
+    handleResumeSession(resumeRequest.sessionId);
+  }, [resumeRequest, handleResumeSession]);
 
   async function handleClearHistory() {
     if (!roomId || clearingHistory) return;

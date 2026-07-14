@@ -80,6 +80,26 @@ function parsePushEntries(body) {
   return arr.map(leanEntry).filter(Boolean);
 }
 
+// One distinguishable `promotion-cleanup` feed event (#559 AC9): the source KB
+// entries a freshly-written skill now supersedes were removed (archived) from the
+// active team KB. Kept separate from the `promotion`/`extension` event so the
+// trace stays legible — "removed N source entries after promoting to skill X".
+// `auto: true` marks the autonomy-3 auto-promote path (E6).
+function buildPromotionCleanupEvent({ teamId, skill, entryIds, auto, ts } = {}) {
+  const ids = Array.isArray(entryIds)
+    ? entryIds.filter((x) => typeof x === 'string' && x.trim())
+    : [];
+  return {
+    type: 'promotion-cleanup',
+    ts: typeof ts === 'string' && ts.trim() ? ts.trim() : new Date().toISOString(),
+    teamId: typeof teamId === 'string' ? teamId : null,
+    skill: skill && typeof skill === 'object' ? { name: skill.name || null, tier: skill.tier || null } : null,
+    entryIds: ids,
+    count: ids.length,
+    auto: !!auto,
+  };
+}
+
 function serializeEvent(event) {
   return JSON.stringify(event);
 }
@@ -89,6 +109,7 @@ module.exports = {
   canonicalClonePath,
   shouldRefresh,
   buildHarvestEvent,
+  buildPromotionCleanupEvent,
   leanEntry,
   parsePushEntries,
   serializeEvent,

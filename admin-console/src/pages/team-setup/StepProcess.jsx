@@ -134,11 +134,11 @@ export function BundleFlowPreview({ bundle }) {
     <div style={{ overflowX: 'auto', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-elevated)' }}>
       <svg width={width} height={height} style={{ display: 'block', minWidth: '100%' }}>
         <defs>
-          <marker id="proc-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
-            <path d="M0,0 L7,3.5 L0,7 z" fill="var(--eb-text-muted)" />
+          <marker id="proc-arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--eb-text-muted)" />
           </marker>
-          <marker id="proc-arrow-gate" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
-            <path d="M0,0 L7,3.5 L0,7 z" fill="var(--eb-status-error)" />
+          <marker id="proc-arrow-gate" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--eb-status-error)" />
           </marker>
         </defs>
         {stages.map((s, i) => (

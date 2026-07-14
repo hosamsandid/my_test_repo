@@ -6689,6 +6689,14 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     ? body.skills.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim())
     : [];
   const mode = body.mode === 'extend' ? 'extend' : 'create';
+  // Initial knowledge-*learning* config (autonomy / review / gates, #567) from the
+  // wizard's Knowledge step. Reduced to a minimal non-default patch; null when the
+  // operator left every control on its default, so a defaulted wizard persists
+  // nothing and the team reads byte-identically to a pre-#567 team (AC-4). Only
+  // honoured in create mode — extend keeps the existing team's config.
+  const knowledgeConfigPatch = mode === 'create'
+    ? knowledgeSuggestions.normalizeWizardKnowledgeConfig(body.knowledgeConfig)
+    : null;
   // Deferred materialization: when false, members are created as stubs (config
   // + triggers only, no Matrix user / clone / process), shown in the UI and
   // materialized on demand via enable — same model as an orchestrator's
@@ -7162,6 +7170,23 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
       created.members.push(p.memberId);
     }
 
+    // Phase C.5 — persist the wizard's knowledge-learning config (#567). Fatal
+    // like the clone check: a team created with the operator's chosen autonomy /
+    // review / gates silently falling back to defaults would violate AC-3, so a
+    // failure here rolls the whole team back. Only fires when the patch is
+    // non-null (a defaulted wizard writes nothing — AC-4) and only in create mode.
+    if (knowledgeConfigPatch) {
+      const kResp = await fetch(`${orchestratorUrl}/internal/knowledge/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ teamId, config: knowledgeConfigPatch }),
+      });
+      const kData = await kResp.json().catch(() => ({}));
+      if (!kResp.ok || !kData.ok) {
+        throw new Error(`knowledge config: ${kData.error || `HTTP ${kResp.status}`}`);
+      }
+    }
+
     // Phase D — DM rooms (best-effort). Members without DMs miss trigger
     // output until a chat is opened; we keep going on failure. Skipped for
     // deferred (stub) members — they have no Matrix user yet; the DM room is
@@ -7257,6 +7282,10 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
     ? body.skills.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim())
     : [];
   const mode = body.mode === 'extend' ? 'extend' : 'create';
+  // Initial knowledge-learning config (#567) — see the non-streaming handler above.
+  const knowledgeConfigPatch = mode === 'create'
+    ? knowledgeSuggestions.normalizeWizardKnowledgeConfig(body.knowledgeConfig)
+    : null;
   const readyLabel = (typeof body.readyLabel === 'string' && body.readyLabel.trim())
     ? body.readyLabel.trim()
     : 'ready';
@@ -7506,6 +7535,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   for (const p of toCreate) {
     plan.push({ id: `member:${p.memberId}`, label: `Create member: ${p.template.displayName}` });
   }
+  if (knowledgeConfigPatch) plan.push({ id: 'knowledge', label: 'Apply knowledge-learning settings' });
   if (toCreate.length > 0) plan.push({ id: 'dms', label: 'Prepare agent conversations' });
   emit({ type: 'plan', steps: plan });
 
@@ -7698,6 +7728,25 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
       }
       created.members.push(p.memberId);
       emit({ type: 'step', id: stepId, status: 'done' });
+    }
+
+    // Persist the wizard's knowledge-learning config (#567) — fatal, like the
+    // clone check: falling back to defaults would violate AC-3. Only fires for a
+    // non-default patch (AC-4) in create mode.
+    if (knowledgeConfigPatch) {
+      emit({ type: 'step', id: 'knowledge', status: 'running' });
+      const kResp = await fetch(`${orchestratorUrl}/internal/knowledge/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ teamId, config: knowledgeConfigPatch }),
+      });
+      const kData = await kResp.json().catch(() => ({}));
+      if (!kResp.ok || !kData.ok) {
+        const msg = kData.error || `HTTP ${kResp.status}`;
+        emit({ type: 'step', id: 'knowledge', status: 'error', error: msg });
+        throw new Error(`knowledge config: ${msg}`);
+      }
+      emit({ type: 'step', id: 'knowledge', status: 'done' });
     }
 
     if (toCreate.length > 0) {

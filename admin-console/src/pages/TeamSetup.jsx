@@ -10,6 +10,9 @@ import {
 import { useApi } from '../hooks/useApi';
 import ScriptViewerPanel from '../components/ScriptViewerPanel';
 import SkillPicker from '../components/SkillPicker';
+import KnowledgeLearningSections, {
+  KNOWLEDGE_LEARNING_DEFAULTS, AUTONOMY_LEVELS, GATE_ORDER, GATE_LABELS,
+} from '../components/KnowledgeLearningConfig';
 import StepProcess, { BundleRolesSummary, BundleFlowPreview, LintBadges } from './team-setup/StepProcess';
 
 function scriptNameFromPath(scriptPath) {
@@ -231,6 +234,7 @@ function StepEnvironmentReadOnly({ form, environments, sshKeys, githubTokens }) 
 
 function StepKnowledgeReadOnly({ form, mcpServers, mcpCredentials }) {
   const knowledge = (form.mcpSelections || []).filter(s => s.serverId);
+  const kc = form.knowledgeConfig || KNOWLEDGE_LEARNING_DEFAULTS;
   return (
     <Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -253,6 +257,24 @@ function StepKnowledgeReadOnly({ form, mcpServers, mcpCredentials }) {
               })}
             </ul>
           )}
+        </div>
+
+        {/* Existing team's learning config, shown read-only (#567 extend mode).
+            To change it, use the Knowledge page for this team. */}
+        <div>
+          <div style={labelStyle}>How this team learns and shares knowledge</div>
+          <div style={{ ...hintStyle, marginTop: 0 }}>
+            The existing team's current settings. Change them on the Knowledge page for this team.
+          </div>
+          <KnowledgeLearningSections
+            readOnly
+            autonomy={kc.autonomy}
+            review={kc.review}
+            gates={kc.gates}
+            onAutonomy={() => {}}
+            onReview={() => {}}
+            onGate={() => {}}
+          />
         </div>
       </div>
     </Card>
@@ -543,6 +565,27 @@ function StepKnowledgeSummary({ form, setForm, poolSkills, environments, mcpServ
             </ul>
           )}
         </div>
+
+        {/* Knowledge learning configuration (#567) — same sections/copy/controls
+            as the Knowledge page panel (#566), pre-filled with today's defaults. */}
+        <div>
+          <div style={labelStyle}>How this team learns and shares knowledge</div>
+          <div style={{ ...hintStyle, marginTop: 0 }}>
+            These are the defaults every new team starts on. Adjust them here if you like — the result is the
+            same as configuring them on the Knowledge page right after the team is created. You can change all
+            of them later. <strong style={{ color: 'var(--eb-text-primary)' }}>Optional</strong> — leave them as-is to keep the defaults.
+          </div>
+          <KnowledgeLearningSections
+            showDefaults
+            autonomy={form.knowledgeConfig.autonomy}
+            review={form.knowledgeConfig.review}
+            gates={form.knowledgeConfig.gates}
+            onAutonomy={(level) => setForm(f => ({ ...f, knowledgeConfig: { ...f.knowledgeConfig, autonomy: level } }))}
+            onReview={(enabled) => setForm(f => ({ ...f, knowledgeConfig: { ...f.knowledgeConfig, review: enabled } }))}
+            onGate={(transition, mode) => setForm(f => ({ ...f, knowledgeConfig: { ...f.knowledgeConfig, gates: { ...f.knowledgeConfig.gates, [transition]: mode } } }))}
+          />
+        </div>
+
         <ErrorBox message={error} />
       </div>
     </Card>
@@ -1163,6 +1206,19 @@ function StepReview({ form, templates, environments, sshKeys, githubTokens, mcpS
             <ReviewRow label="SSH Key" value={sshKey ? sshKey.name : '—'} />
             <ReviewRow label="GitHub Token" value={ghToken ? ghToken.name : '—'} />
             <ReviewRow label="Initial team skills" value={(form.skills || []).length ? form.skills.join(', ') : '—'} />
+            {(() => {
+              const kc = form.knowledgeConfig || KNOWLEDGE_LEARNING_DEFAULTS;
+              const lvl = AUTONOMY_LEVELS.find(l => l.level === kc.autonomy) || AUTONOMY_LEVELS[1];
+              const gateSummary = GATE_ORDER
+                .map(tr => `${GATE_LABELS[tr]}: ${tr === 'team>global' ? 'always reviewed' : ((kc.gates || {})[tr] || 'review') === 'auto' ? 'automatic' : 'needs review'}`)
+                .join(' · ');
+              return (
+                <ReviewRow
+                  label="Knowledge learning"
+                  value={`Autonomy ${kc.autonomy} · ${lvl.label} · Review ${kc.review ? 'on' : 'off'} · ${gateSummary}`}
+                />
+              );
+            })()}
             <div>
               <div style={labelStyle}>Knowledge sources ({knowledge.length})</div>
               {knowledge.length === 0 ? (
@@ -1462,6 +1518,14 @@ export default function TeamSetup() {
     roleConfig: [],  // Array<{ id: string, count: number }> — extend mode only
     mcpSelections: [],
     skills: [],      // initial team skill set (placed on the team agent)
+    // Knowledge *learning* config (#567) — autonomy/review/promotion gates,
+    // pre-filled with today's defaults and adjustable before team creation.
+    // Storage is deliberately out of scope for the wizard (post-creation only).
+    knowledgeConfig: {
+      autonomy: KNOWLEDGE_LEARNING_DEFAULTS.autonomy,
+      review: KNOWLEDGE_LEARNING_DEFAULTS.review,
+      gates: { ...KNOWLEDGE_LEARNING_DEFAULTS.gates },
+    },
     // Process step (#422): the selected/woven process-template bundle drives
     // team creation in create mode; roleConfig stays for extend mode.
     processMode: null,        // null | 'template' | 'compose'
@@ -1559,6 +1623,25 @@ export default function TeamSetup() {
           if (envRes.ok) env = await envRes.json();
         }
 
+        // Fetch the team's current knowledge learning config (read-only in extend
+        // mode). Best-effort — fall back to defaults if it can't be loaded.
+        let knowledgeConfig = {
+          autonomy: KNOWLEDGE_LEARNING_DEFAULTS.autonomy,
+          review: KNOWLEDGE_LEARNING_DEFAULTS.review,
+          gates: { ...KNOWLEDGE_LEARNING_DEFAULTS.gates },
+        };
+        try {
+          const gatesRes = await fetch(`/api/knowledge/gates?team=${encodeURIComponent(teamId)}`);
+          if (gatesRes.ok) {
+            const gd = await gatesRes.json();
+            knowledgeConfig = {
+              autonomy: typeof gd.autonomy === 'number' ? gd.autonomy : knowledgeConfig.autonomy,
+              review: !!gd.review,
+              gates: { ...knowledgeConfig.gates, ...(gd.gates || {}) },
+            };
+          }
+        } catch { /* keep defaults */ }
+
         const members = (Array.isArray(agentList) ? agentList : (agentList.agents || []))
           .filter(a => a.parentTeamId === teamId && a.role === 'team-member');
 
@@ -1593,6 +1676,7 @@ export default function TeamSetup() {
           readyLabel: 'ready',
           mcpSelections: (env?.mcpServers || []).map(s => ({ serverId: s.serverId, credentialId: s.credentialId || null })),
           roleConfig: uniqueRoles.map(id => ({ id, count: roleCountMap[id] })),
+          knowledgeConfig,
         }));
         // Extend mode edits roles in the wizard's first slot ("Process").
         setStep(0);
@@ -1704,6 +1788,10 @@ export default function TeamSetup() {
     };
     // Initial team skill set (create mode) — placed on the team agent.
     if (!extendMode) body.skills = form.skills || [];
+    // Knowledge learning config (create mode, #567) — autonomy/review/gates.
+    // Persisted onto the new team after creation; the backend drops it when it
+    // matches the defaults (no behaviour change vs today's wizard, AC-4).
+    if (!extendMode && form.knowledgeConfig) body.knowledgeConfig = form.knowledgeConfig;
     // Create mode ships the Process step's bundle (#422); extend mode keeps the
     // catalog-role delta (instance counts are a roles-array concept).
     if (!extendMode && form.processBundle) {

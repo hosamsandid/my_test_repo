@@ -19,6 +19,7 @@ const {
   matchExistingSkill,
   TEAM_KNOWLEDGE_KEYS,
   mergeTeamKnowledgeConfig,
+  normalizeWizardKnowledgeConfig,
 } = require('./knowledge-suggestions');
 
 const NOW = '2026-07-08T12:00:00Z';
@@ -390,4 +391,72 @@ test('mergeTeamKnowledgeConfig: an override key set to a falsy value still wins 
   // explicit 0 must override the env's 2 (hasOwnProperty, not truthiness)
   const merged = mergeTeamKnowledgeConfig({ knowledgeAutonomy: 2 }, { knowledgeAutonomy: 0 });
   assert.equal(merged.knowledgeAutonomy, 0);
+});
+
+// --- normalizeWizardKnowledgeConfig (#567) ----------------------------------
+
+test('normalizeWizardKnowledgeConfig: defaults collapse to null (AC-4 no override written)', () => {
+  // Every shape that means "left on the defaults" must yield null so the wizard
+  // writes no override file and the team reads byte-identically to pre-#567.
+  assert.equal(normalizeWizardKnowledgeConfig(null), null);
+  assert.equal(normalizeWizardKnowledgeConfig(undefined), null);
+  assert.equal(normalizeWizardKnowledgeConfig({}), null);
+  assert.equal(normalizeWizardKnowledgeConfig({ autonomy: 1, review: false }), null);
+  assert.equal(normalizeWizardKnowledgeConfig({
+    autonomy: 1,
+    review: false,
+    gates: { 'team>team': 'auto', 'agent>team': 'review', 'team>global': 'review' },
+  }), null);
+});
+
+test('normalizeWizardKnowledgeConfig: only differing keys land in the patch', () => {
+  assert.deepEqual(normalizeWizardKnowledgeConfig({ autonomy: 3 }), { knowledgeAutonomy: 3 });
+  assert.deepEqual(normalizeWizardKnowledgeConfig({ review: true }), { knowledgeReview: true });
+});
+
+test('normalizeWizardKnowledgeConfig: a changed gate carries the full resolved gate map', () => {
+  const patch = normalizeWizardKnowledgeConfig({
+    gates: { 'team>team': 'review', 'agent>team': 'auto' },
+  });
+  assert.deepEqual(patch, {
+    knowledgePromotionGates: { 'team>team': 'review', 'agent>team': 'auto', 'team>global': 'review' },
+  });
+});
+
+test('normalizeWizardKnowledgeConfig: team>global is forced to review even if the caller sends auto', () => {
+  const patch = normalizeWizardKnowledgeConfig({
+    gates: { 'team>team': 'review', 'team>global': 'auto' },
+  });
+  assert.equal(patch.knowledgePromotionGates['team>global'], 'review');
+});
+
+test('normalizeWizardKnowledgeConfig: autonomy is coerced to an integer and clamped to 0..3', () => {
+  assert.deepEqual(normalizeWizardKnowledgeConfig({ autonomy: 9 }), { knowledgeAutonomy: 3 });
+  assert.deepEqual(normalizeWizardKnowledgeConfig({ autonomy: -2 }), { knowledgeAutonomy: 0 });
+  assert.deepEqual(normalizeWizardKnowledgeConfig({ autonomy: '2' }), { knowledgeAutonomy: 2 });
+  assert.equal(normalizeWizardKnowledgeConfig({ autonomy: 'bogus' }), null); // → default 1 → null
+});
+
+test('normalizeWizardKnowledgeConfig: review accepts string/number truthy forms', () => {
+  assert.deepEqual(normalizeWizardKnowledgeConfig({ review: 'true' }), { knowledgeReview: true });
+  assert.deepEqual(normalizeWizardKnowledgeConfig({ review: '1' }), { knowledgeReview: true });
+  assert.equal(normalizeWizardKnowledgeConfig({ review: 'false' }), null); // not a truthy form → default false
+});
+
+test('normalizeWizardKnowledgeConfig: bogus gate modes fall back to the per-transition default', () => {
+  // 'team>team' default is 'auto' → a bogus value collapses back to it → no diff → null
+  assert.equal(normalizeWizardKnowledgeConfig({ gates: { 'team>team': 'nonsense' } }), null);
+});
+
+test('normalizeWizardKnowledgeConfig: all three groups combined', () => {
+  const patch = normalizeWizardKnowledgeConfig({
+    autonomy: 3,
+    review: true,
+    gates: { 'team>team': 'review', 'agent>team': 'auto' },
+  });
+  assert.deepEqual(patch, {
+    knowledgeAutonomy: 3,
+    knowledgeReview: true,
+    knowledgePromotionGates: { 'team>team': 'review', 'agent>team': 'auto', 'team>global': 'review' },
+  });
 });

@@ -33,6 +33,7 @@ const { buildKnowledgeDigest, DIGEST_FILENAME: KNOWLEDGE_DIGEST_FILENAME } = req
 const memoryMigration = require("./memory-migration");
 const knowledgeConvergence = require("./knowledge-convergence");
 const knowledgeCurator = require("./knowledge-curator");
+const knowledgeCleanup = require("./knowledge-cleanup");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const { resolveCloneTarget } = require("./clone-target");
@@ -1520,6 +1521,66 @@ function deleteAgentFiles(id) {
     try { fs.rmSync(path.join('/root/.claude/homes', id), { recursive: true, force: true }); }
     catch { /* best effort */ }
   }
+}
+
+// Tear down a deleted squad's team-scoped knowledge (#532). Called when a
+// `role: "team"` agent is deleted: without this a later same-name team — whose
+// id is the same deterministic slug, hence the same KB scope — silently
+// re-adopts the dead team's knowledge (a data-isolation leak).
+//
+// Shared-infra safety: the scope is keyed by `agentKnowledgeTeamId`, so we skip
+// the purge entirely if ANY surviving agent still resolves to the same scope
+// (e.g. a standalone agent that set `parentTeamId` to it) — deletion never
+// removes knowledge another live agent still shares.
+//
+// Best-effort: a per-target failure logs and continues; it must never break the
+// delete. The git-side canonical KB (the `agent-knowledge` branch in the team's
+// repo) is deliberately NOT purged here — repo-shared knowledge is the wanted
+// sharing channel, so team deletion never modifies or pushes it (#532 AC6). A
+// same-id team bound to the same repo re-cloning it is intended, not a leak.
+function purgeTeamKnowledge(teamId) {
+  const plan = knowledgeCleanup.planTeamKnowledgePurge(teamId, {
+    cloneRoot: KNOWLEDGE_CLONE_ROOT,
+    teamsDir: path.join(WORKSPACE, "teams"),
+    suggestionsDir: KNOWLEDGE_SUGGESTIONS_DIR,
+    archivedDir: KNOWLEDGE_ARCHIVED_DIR,
+    reviewDir: KNOWLEDGE_REVIEW_DIR,
+    eventsFile: KNOWLEDGE_EVENTS_FILE,
+  });
+  if (!plan) return; // unsafe id → remove nothing
+
+  const stillInUse = listAgentIds().some((otherId) => {
+    const cfg = loadAgentConfig(otherId);
+    return cfg && agentKnowledgeTeamId(cfg) === plan.teamId;
+  });
+  if (stillInUse) {
+    console.log(`[Orchestrator] Skipping knowledge purge for team '${plan.teamId}': still in use by a surviving agent`);
+    return;
+  }
+
+  for (const dir of plan.dirs) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); }
+    catch (err) { console.warn(`[Orchestrator] knowledge purge (${dir}): ${err.message}`); }
+  }
+  for (const file of plan.files) {
+    try { fs.rmSync(file, { force: true }); }
+    catch (err) { console.warn(`[Orchestrator] knowledge purge (${file}): ${err.message}`); }
+  }
+  if (plan.eventsFile) {
+    try {
+      if (fs.existsSync(plan.eventsFile)) {
+        const { kept, removed } = knowledgeCleanup.filterEventsForTeam(
+          fs.readFileSync(plan.eventsFile, "utf8"), plan.teamId);
+        if (removed > 0) {
+          fs.writeFileSync(plan.eventsFile, kept.length ? kept.join("\n") + "\n" : "");
+        }
+      }
+    } catch (err) {
+      console.warn(`[Orchestrator] knowledge purge (feed rewrite): ${err.message}`);
+    }
+  }
+  _kbRefreshThrottles.delete(plan.teamId);
+  console.log(`[Orchestrator] Purged team-scoped knowledge for deleted team '${plan.teamId}'`);
 }
 
 // Mirror named control-plane files (CLAUDE.md, AGENT-PROMPT.md, skills/<name>,
@@ -6380,6 +6441,16 @@ async function main() {
             console.warn(`[Orchestrator] network teardown ${id}: ${e.message}`));
           orchestrator.agentConfigs.delete(id);
           await orchestrator.deactivateMatrixUser(id);
+
+          // Tear down the squad's team-scoped knowledge so a later same-name
+          // (same-id) team can't silently re-adopt it (#532). Only for a `team`
+          // agent — its own id is the KB scope; standalone/member deletes leave
+          // the shared team KB intact. Runs after the parent + its members are
+          // gone so the in-use guard sees the true survivor set.
+          if (parentCfg && parentCfg.role === 'team') {
+            try { purgeTeamKnowledge(agentKnowledgeTeamId(parentCfg)); }
+            catch (err) { console.warn(`[Orchestrator] knowledge purge for '${id}': ${err.message}`); }
+          }
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, cascaded }));

@@ -367,8 +367,10 @@ function ResourceOwnership({ teams, agents, environments, onError, onRefreshAgen
     try {
       if (kind === 'agent') await apiCall('PUT', `/api/agents/${encodeURIComponent(id)}`, { teamId });
       else await apiCall('PUT', `/api/environments/${encodeURIComponent(id)}`, { teamId });
-      if (kind === 'agent') onRefreshAgents(); else onRefreshEnvs();
     } catch (e) { onError(e.message); }
+    finally {
+      if (kind === 'agent') onRefreshAgents(); else onRefreshEnvs();
+    }
   }
 
   const { agentTeams, standaloneAgents } = useMemo(
@@ -426,13 +428,11 @@ function ResourceOwnership({ teams, agents, environments, onError, onRefreshAgen
     </div>
   );
 
-  const agentCount = agents.length;
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 'var(--eb-space-6)' }}>
-      <Section title={`Agents (${agentCount})`}>
-        {agentCount === 0 && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>No agents.</div>}
+      <Section title={`Agents (${agentTeams.length})`}>
+        {agentTeams.length === 0 && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>No agents.</div>}
         {agentTeams.map(teamGroup)}
-        {standaloneAgents.map(a => row('agent', a, a.displayName || a.id, `${a.id} · ${a.role || 'agent'}`))}
       </Section>
       <Section title={`Working Environments (${environments.length})`}>
         {environments.length === 0 && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>No environments.</div>}

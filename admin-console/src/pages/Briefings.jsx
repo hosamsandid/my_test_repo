@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
-import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, Boxes, FileText, Plus, Trash2, Pencil, Check, Upload } from 'lucide-react';
+import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, FileText, Plus, Trash2, Pencil, Check, Upload } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { FlowGraph } from './process/FlowGraph';
 
@@ -87,8 +87,7 @@ function HelpPanel({ onClose }) {
             <p style={{ margin: 0 }}>
               Click <strong>New flow</strong> to author a <strong>Draft</strong> from scratch (add roles, then
               wire hand-offs — GitHub PR/Issue channels, labels, data flows, human-approval gates on the
-              edges), then <strong>Materialize</strong> it into a real team. The read-only <strong>Role templates</strong> blueprint shows the catalog wiring before any
-              team exists.
+              edges), then <strong>Materialize</strong> it into a real team.
             </p>
           </section>
 
@@ -294,7 +293,7 @@ function SectionHeader({ children, action }) {
   );
 }
 
-// Generic selectable row (teams, drafts, role-templates). Mirrors FlowRow's
+// Generic selectable row (teams, drafts). Mirrors FlowRow's
 // look. An optional `onDelete` renders a trash button that fades in on hover;
 // an optional `onRename` renders a pencil button and turns the label into an
 // inline text field (Enter/blur commits, Escape reverts).
@@ -435,9 +434,17 @@ export default function Briefings() {
     () => localStorage.getItem(BANNER_KEY) === 'true'
   );
   // Selection: a process scope (`proc`) takes precedence over a BriefingPack
-  // flow (`flow`). `proc` is a team id, 'templates', or 'draft:<id>'.
+  // flow (`flow`). `proc` is a team id, 'draft:<id>', or 'import'.
   const proc = searchParams.get('proc');
   const selectedFlow = proc ? null : searchParams.get('flow');
+
+  // The former read-only "Role templates" blueprint scope was removed; an old
+  // bookmark on ?proc=templates would otherwise render a broken graph, so drop
+  // the obsolete scope and fall back to the default selection state.
+  useEffect(() => {
+    if (proc === 'templates') setSearchParams({}, { replace: true });
+  }, [proc, setSearchParams]);
+
   const { data: agents } = useApi('/api/agents');
   const { data: environments } = useApi('/api/environments');
   const { data: draftsList, refetch: refetchDrafts } = useApi('/api/process/drafts');
@@ -748,16 +755,6 @@ export default function Briefings() {
                   />
                 ))
               )}
-
-              {/* Role templates — read-only blueprint of the catalog */}
-              <SectionHeader>Blueprint</SectionHeader>
-              <ListRow
-                icon={Boxes}
-                label="Role templates"
-                sub="Read-only catalog"
-                selected={proc === 'templates'}
-                onSelect={() => selectProc('templates')}
-              />
 
               {/* BriefingPack flows (Orchestrator agents) */}
               <SectionHeader>BriefingPack flows</SectionHeader>

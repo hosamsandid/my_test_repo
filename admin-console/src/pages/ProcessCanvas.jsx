@@ -79,12 +79,12 @@ function EditableDraftTitle({ name, onRename }) {
 
 // Process graph panel (#330) — data-driven view of the agent orchestration:
 // which agent reacts to which label, in what order. Embedded into the Flows
-// view; the scope (a team id, 'templates', or 'draft:<id>') is supplied by the
+// view; the scope (a team id or 'draft:<id>') is supplied by the
 // parent, which also owns the scope picker (the left Flows list). The node
 // inspector (#331) and edge modeling (#332) build on the same renderer.
 //
 // Props:
-//   scope             — '<teamId>' | 'templates' | 'draft:<id>' | 'import'
+//   scope             — '<teamId>' | 'draft:<id>' | 'import'
 //   onNavigate(s)     — switch scope (e.g. after creating/opening a draft)
 //   onDraftsChanged   — notify the parent that the drafts list changed (counts)
 //   pendingImport     — { bundle, graph } from the Flows sidebar's Import button
@@ -115,16 +115,15 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     [teams, scope],
   );
 
-  // Scope is always one of: a team id (live graph), 'templates' (blueprint),
-  // 'draft:<id>' (derived client-side from the bundle, so no fetch), or
-  // 'import' (derived client-side from pendingImport, so no fetch either).
+  // Scope is always one of: a team id (live graph), 'draft:<id>' (derived
+  // client-side from the bundle, so no fetch), or 'import' (derived
+  // client-side from pendingImport, so no fetch either). A null url skips the
+  // fetch for the client-derived scopes.
   // All scopes feed the unified rich renderer (#362 UI rework C3).
-  const graphUrl = scope === 'templates'
-    ? '/api/flows/graph?templates=1'
-    : (isDraft || isImportPreview)
-      ? null
-      : `/api/flows/graph?team=${encodeURIComponent(scope)}`;
-  const { data: graph, loading, error, refetch } = useApi(graphUrl || '/api/flows/graph?templates=__none__');
+  const graphUrl = (isDraft || isImportPreview)
+    ? null
+    : `/api/flows/graph?team=${encodeURIComponent(scope)}`;
+  const { data: graph, loading, error, refetch } = useApi(graphUrl);
 
   // An imported bundle (#334) overrides the fetched graph until closed — shown
   // as a read-only blueprint that can be materialised into a real team.
@@ -283,8 +282,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     if (isDraft) {
       bundle = draftBundle;
     } else {
-      const url = scope === 'templates' ? '/api/process/template?templates=1'
-        : `/api/process/template?team=${encodeURIComponent(scope)}`;
+      const url = `/api/process/template?team=${encodeURIComponent(scope)}`;
       const res = await fetch(url);
       if (!res.ok) { setImportError(`Export failed: HTTP ${res.status}`); return; }
       bundle = await res.json();
@@ -308,7 +306,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           )}
           <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
             {caps.readOnlyHint
-              ? `${caps.readOnlyHint}${scope === 'templates' ? ' Select a team or draft on the left to model.' : ''}`
+              ? caps.readOnlyHint
               : isDraft
                 ? 'Draft — design from scratch: + Add role, drag the ● port (roles and sources) to wire, click nodes/edges to edit. Nothing is created until you materialize.'
                 : 'Click a node to edit · drag the ● port (roles and sources) to wire a connection · click an edge to edit it.'}

@@ -5,7 +5,7 @@ import {
   Compass, Code, Search, Shield, FlaskConical, Book, Tag, User,
   Loader2, Circle, XCircle, Lock,
   Network, ClipboardCheck, Gauge, Rocket, MessageCircle, TrendingUp,
-  Layers, Terminal, FileCode2, Workflow,
+  Layers, Terminal, FileCode2,
 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import ScriptViewerPanel from '../components/ScriptViewerPanel';
@@ -52,25 +52,6 @@ const hintStyle = {
   color: 'var(--eb-text-muted)',
   marginTop: 'var(--eb-space-2)',
   lineHeight: 1.5,
-};
-
-const diagramLinkRowStyle = {
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'space-between',
-  gap: 'var(--eb-space-3)',
-  flexWrap: 'wrap',
-  padding: 'var(--eb-space-3) var(--eb-space-4)',
-  marginBottom: 'var(--eb-space-4)',
-  background: 'var(--eb-bg-elevated)',
-  border: '1px dashed var(--eb-border-default)',
-  borderRadius: 'var(--eb-radius-md)',
-};
-
-const diagramLinkCopyStyle = {
-  fontSize: 'var(--eb-text-sm)',
-  color: 'var(--eb-text-secondary)',
-  lineHeight: 1.4,
 };
 
 const diagramLinkButtonStyle = {
@@ -1003,15 +984,6 @@ function StepTeam({ form, setForm, templates, roleConfig, setRoleConfig, error, 
           </ExtendReadOnlyBanner>
         </div>
       )}
-      <div style={diagramLinkRowStyle}>
-        <div style={diagramLinkCopyStyle}>
-          Not sure which roles you need? See how they fit into the trigger- and label-driven flow.
-        </div>
-        <Link to="/flows?proc=templates" style={{ ...diagramLinkButtonStyle, textDecoration: 'none' }}>
-          <Workflow size={14} />
-          Open Process Canvas
-        </Link>
-      </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 'var(--eb-space-3)' }}>
         {templates.map(t => {
           if (extendMode && existingSet.has(t.id)) {

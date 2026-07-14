@@ -4010,35 +4010,6 @@ app.post('/api/knowledge/share-to-team', apiLimiter, async (req, res) => {
  *                      status dropped). Read-only projection over brief.md.
  * Both shapes are { unifiedFlowVersion, source, nodes, edges, gates, labels, lints }. */
 app.get('/api/flows/graph', async (req, res) => {
-  // Template-level blueprint (read-only) — the role-template catalog as a
-  // unified graph, so the rich viewer can render it like any other flow.
-  if (req.query.templates !== undefined) {
-    const derive = req.query.derive !== undefined ? truthyParam(String(req.query.derive)) : true;
-    const ids = truthyParam(String(req.query.templates))
-      ? listAgentTemplateIds()
-      : String(req.query.templates).split(',').map(s => s.trim()).filter(Boolean);
-    const tnodes = [];
-    for (const id of ids) {
-      const t = loadAgentTemplate(id);
-      if (!t) continue;
-      const triggers = effectiveTriggers(
-        (t.triggers || []).map(tr => ({
-          id: tr.id, type: tr.type, events: tr.events, labelFilter: tr.labelFilter,
-          cron: tr.cron, at: tr.at, enabled: tr.enabled,
-          emits: tr.emits, prompt: tr.promptTemplate,
-        })),
-        { derive, systemPrompt: t.promptTemplate || '' },
-      );
-      tnodes.push({
-        id: t.id, role: 'template', displayName: t.displayName || t.id,
-        sessionPolicy: t.sessionPolicy || 'persistent', environmentId: null, triggers,
-        inputs: [], outputs: [], dependsOn: [], content: t.promptTemplate || '',
-        github: t.github || null, channels: Array.isArray(t.channels) ? t.channels : [],
-      });
-    }
-    return res.json({ unifiedFlowVersion: 1, source: 'templates', level: 'template', ...buildUnifiedGraph(tnodes) });
-  }
-
   // BP source — read-only projection of a briefings directory.
   if (typeof req.query.workspace === 'string' && req.query.workspace.trim()) {
     const workspace = req.query.workspace.trim();
@@ -4124,38 +4095,12 @@ app.post('/api/flows/graph', (req, res) => {
 });
 
 /* ─── Process template bundle (export, #334) ────────────────────────────
- * GET /api/process/template?team=<id> | ?templates=1
+ * GET /api/process/template?team=<id>
  * Returns a portable bundle (roles + prompts + triggers incl emits, gates,
  * labels) — the Process Canvas export / import format. */
 app.get('/api/process/template', (req, res) => {
-  const templatesParam = req.query.templates;
   const roleEntries = [];   // for the bundle (prompt + full triggers)
   const graphAgents = [];   // for gates/labels via buildProcessGraph
-
-  if (templatesParam !== undefined) {
-    const ids = truthyParam(String(templatesParam))
-      ? listAgentTemplateIds()
-      : String(templatesParam).split(',').map(s => s.trim()).filter(Boolean);
-    for (const id of ids) {
-      const t = loadAgentTemplate(id);
-      if (!t) continue;
-      const triggers = (t.triggers || []).map(tr => ({
-        ...tr, prompt: tr.promptTemplate,
-        emits: Array.isArray(tr.emits)
-          ? tr.emits
-          : deriveEmitsForTrigger({ promptTemplate: tr.promptTemplate }, t.promptTemplate || '').map(s => s.label),
-      }));
-      roleEntries.push({
-        id: t.id, displayName: t.displayName || t.id, role: 'team-member',
-        sessionPolicy: t.sessionPolicy || 'persistent', systemPrompt: t.promptTemplate || '', triggers,
-      });
-      graphAgents.push({ id: t.id, role: 'template', triggers });
-    }
-    const g = buildProcessGraph(graphAgents);
-    return res.json(buildProcessTemplate({
-      name: 'role-templates', level: 'template', roles: roleEntries, gates: g.gates, labels: g.labels,
-    }));
-  }
 
   const team = typeof req.query.team === 'string' && req.query.team.trim() ? req.query.team.trim() : null;
   if (team && !AGENT_ID_RE.test(team)) return res.status(400).json({ error: 'Invalid team id' });

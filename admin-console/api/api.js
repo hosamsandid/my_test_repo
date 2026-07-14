@@ -24,6 +24,7 @@ const knowledgeLinks = require('./knowledge-links');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId } = require('./process-template');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { normalizeTemplatePorts } = require('./catalog-ports');
+const agentTemplateStore = require('./agent-templates-store');
 const { weaveProcess } = require('./flow-weaver');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
@@ -32,6 +33,10 @@ const { membersOfTeam } = require('./agent-team-cascade');
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
 const AGENT_TEMPLATES_DIR = path.join(POOL_DIR, 'agent-templates');
+// User store for UI-managed role templates (#587). Lives on the durable
+// workspace volume (NOT the pool that `make seed-templates` wipes), so UI
+// edits/creates survive a re-seed. Shadows the seeded defaults: user wins.
+const USER_AGENT_TEMPLATES_DIR = path.join(WORKSPACE, 'agent-templates');
 const AGENTS_DIR = path.join(WORKSPACE, 'agents');
 // Control-plane volume (#185): agents push status + session-log to the
 // orchestrator, which persists them here. Mounted read-write by both services.
@@ -6514,27 +6519,46 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
 
 const TEAM_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 
-function listAgentTemplateIds() {
+// Two-tier role-template store (#587): repo-seeded defaults in the pool volume
+// (AGENT_TEMPLATES_DIR) overlaid by a durable user store (USER_AGENT_TEMPLATES_DIR).
+// Both loaders are overlay-aware, so every consumer — the summary endpoint, the
+// Flow Editor picker, the Team-Setup wizard, and team materialisation — picks up
+// UI edits/creates without a redeploy or re-seed (AC-7).
+function listTemplateIdsIn(dir) {
   try {
-    return fs.readdirSync(AGENT_TEMPLATES_DIR)
+    return fs.readdirSync(dir)
       .filter(f => f.endsWith('.json') && /^[a-z0-9][a-z0-9-]*\.json$/.test(f))
-      .map(f => f.slice(0, -5))
-      .sort();
+      .map(f => f.slice(0, -5));
   } catch {
     return [];
   }
 }
 
-function loadAgentTemplate(id) {
-  if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) return null;
-  const p = path.join(AGENT_TEMPLATES_DIR, id + '.json');
+function readTemplateFile(dir, id) {
+  const p = agentTemplateStore.safeTemplateFile(dir, id);
+  if (!p) return null;
   try {
     if (!fs.existsSync(p)) return null;
     return JSON.parse(fs.readFileSync(p, 'utf8'));
   } catch (err) {
-    console.error(`[Team] Cannot load template ${id}: ${err.message}`);
+    console.error(`[Templates] Cannot load template ${id} from ${dir}: ${err.message}`);
     return null;
   }
+}
+
+// Effective id list = union of both tiers, sorted.
+function listAgentTemplateIds() {
+  return [...new Set([
+    ...listTemplateIdsIn(AGENT_TEMPLATES_DIR),
+    ...listTemplateIdsIn(USER_AGENT_TEMPLATES_DIR),
+  ])].sort();
+}
+
+// Effective template: the user overlay wins over the seeded default.
+function loadAgentTemplate(id) {
+  if (!agentTemplateStore.TEMPLATE_ID_RE.test(id || '')) return null;
+  return readTemplateFile(USER_AGENT_TEMPLATES_DIR, id)
+    || readTemplateFile(AGENT_TEMPLATES_DIR, id);
 }
 
 // Substitute `{{varname}}` placeholders. Unknown vars stay literal so a
@@ -6554,6 +6578,10 @@ app.get('/api/agent-templates', (_req, res) => {
   for (const id of listAgentTemplateIds()) {
     const t = loadAgentTemplate(id);
     if (!t) continue;
+    const origin = agentTemplateStore.templateOrigin(
+      !!readTemplateFile(AGENT_TEMPLATES_DIR, id),
+      !!readTemplateFile(USER_AGENT_TEMPLATES_DIR, id),
+    );
     out.push({
       id: t.id,
       displayName: t.displayName,
@@ -6562,6 +6590,10 @@ app.get('/api/agent-templates', (_req, res) => {
       category: t.category,
       sessionPolicy: t.sessionPolicy,
       envSuffix: t.envSuffix,
+      // Which tier this effective template comes from (#587): 'default'
+      // (seeded, read-only), 'user' (UI-created) or 'override' (UI edit of a
+      // seeded default — can be reset to default).
+      origin,
       defaultEnabled: t.defaultEnabled !== false,
       // Catalog v2 (#420): the normalised composition surface for the wizard's
       // stage picker + the Flow-Weaver (patternRole / stageAffinity / ports).
@@ -6581,6 +6613,100 @@ app.get('/api/agent-templates', (_req, res) => {
     });
   }
   res.json({ templates: out });
+});
+
+// ─── Role-template CRUD (#587) ──────────────────────────────────────────────
+// UI-based management of role templates, mirroring the skills-registry CRUD:
+// server-side validation, slug/id guard, traversal-safe writes. All writes land
+// in the user store (USER_AGENT_TEMPLATES_DIR); the seeded defaults stay
+// read-only. Reads above overlay user over default, so a subsequent GET (and
+// the picker / wizard) reflect the change without a re-seed.
+
+// View a single template's full, editable definition + which tier it is.
+app.get('/api/agent-templates/:id', (req, res) => {
+  const { id } = req.params;
+  if (!agentTemplateStore.TEMPLATE_ID_RE.test(id)) {
+    return res.status(400).json({ error: 'Invalid template id' });
+  }
+  const template = loadAgentTemplate(id);
+  if (!template) return res.status(404).json({ error: 'Template not found' });
+  const origin = agentTemplateStore.templateOrigin(
+    !!readTemplateFile(AGENT_TEMPLATES_DIR, id),
+    !!readTemplateFile(USER_AGENT_TEMPLATES_DIR, id),
+  );
+  res.json({ template, origin });
+});
+
+// Create a new template. Requires a unique, slug-valid id and the minimum
+// fields (id, displayName, prompt/promptTemplate); nothing is persisted on
+// invalid input.
+app.post('/api/agent-templates', (req, res) => {
+  const { valid, errors, value } = agentTemplateStore.validateTemplate(req.body || {}, { requireId: true });
+  if (!valid) return res.status(400).json({ error: errors[0], errors });
+  const { id } = value;
+  if (readTemplateFile(AGENT_TEMPLATES_DIR, id) || readTemplateFile(USER_AGENT_TEMPLATES_DIR, id)) {
+    return res.status(409).json({ error: `A template with id '${id}' already exists` });
+  }
+  const file = agentTemplateStore.safeTemplateFile(USER_AGENT_TEMPLATES_DIR, id);
+  if (!file) return res.status(400).json({ error: 'Invalid template id' });
+  try {
+    fs.mkdirSync(USER_AGENT_TEMPLATES_DIR, { recursive: true });
+    writeJsonAtomic(file, value);
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to save template: ${err.message}` });
+  }
+  res.status(201).json({ id, origin: 'user' });
+});
+
+// Edit an existing template. Persists to the user store — editing a seeded
+// default creates an override that shadows it. Last-write-wins (E4).
+app.put('/api/agent-templates/:id', (req, res) => {
+  const { id } = req.params;
+  if (!agentTemplateStore.TEMPLATE_ID_RE.test(id)) {
+    return res.status(400).json({ error: 'Invalid template id' });
+  }
+  const { valid, errors, value } = agentTemplateStore.validateTemplate(req.body || {}, { expectId: id });
+  if (!valid) return res.status(400).json({ error: errors[0], errors });
+  const hasDefault = !!readTemplateFile(AGENT_TEMPLATES_DIR, id);
+  const hasUser = !!readTemplateFile(USER_AGENT_TEMPLATES_DIR, id);
+  if (!hasDefault && !hasUser) return res.status(404).json({ error: 'Template not found' });
+  const file = agentTemplateStore.safeTemplateFile(USER_AGENT_TEMPLATES_DIR, id);
+  if (!file) return res.status(400).json({ error: 'Invalid template id' });
+  try {
+    fs.mkdirSync(USER_AGENT_TEMPLATES_DIR, { recursive: true });
+    writeJsonAtomic(file, { ...value, id });
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to save template: ${err.message}` });
+  }
+  res.json({ id, origin: agentTemplateStore.templateOrigin(hasDefault, true) });
+});
+
+// Delete a template. For a user-only template this removes it entirely; for an
+// override of a seeded default this removes the overlay and reverts to the
+// default (reset-to-default, D2). A built-in with no overlay is read-only.
+app.delete('/api/agent-templates/:id', (req, res) => {
+  const { id } = req.params;
+  if (!agentTemplateStore.TEMPLATE_ID_RE.test(id)) {
+    return res.status(400).json({ error: 'Invalid template id' });
+  }
+  const file = agentTemplateStore.safeTemplateFile(USER_AGENT_TEMPLATES_DIR, id);
+  if (!file) return res.status(400).json({ error: 'Invalid template id' });
+  const hasUser = fs.existsSync(file);
+  const hasDefault = !!readTemplateFile(AGENT_TEMPLATES_DIR, id);
+  if (!hasUser) {
+    if (hasDefault) {
+      return res.status(409).json({
+        error: `'${id}' is a built-in template and cannot be deleted. Edit it to create an override you can reset to default.`,
+      });
+    }
+    return res.status(404).json({ error: 'Template not found' });
+  }
+  try {
+    fs.rmSync(file, { force: true });
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to delete template: ${err.message}` });
+  }
+  res.json({ deleted: id, revertedToDefault: hasDefault });
 });
 
 // Generic, role-agnostic team prompt. Each member can override this with

@@ -4,7 +4,7 @@ import {
   Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight,
   Boxes, Key, MessageCircle, Github, Layers, GitBranch,
-  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2, Brain, History, Wrench,
+  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2, Brain, History, Wrench, UserCog,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
@@ -63,6 +63,7 @@ const NAV = [
   { section: 'CONFIGURATION', items: [
     { path: '/teams',        label: 'Teams',               Icon: Building2 },
     { path: '/skills',       label: 'Skills Registry',     Icon: Zap },
+    { path: '/role-templates', label: 'Role Templates',    Icon: UserCog },
     { path: '/jobs',         label: 'Triggers',            Icon: Clock },
     { path: '/github-events', label: 'GitHub Event Log',   Icon: History },
     { path: '/models',       label: 'Model Providers',     Icon: Sparkles },
@@ -83,6 +84,7 @@ const BREADCRUMBS = {
   '/ssh-keys':     'SSH Keys',
   '/github-tokens': 'GitHub Tokens',
   '/skills':       'Skills Registry',
+  '/role-templates': 'Role Templates',
   '/jobs':         'Triggers',
   '/github-events': 'GitHub Event Log',
   '/models':       'Model Providers',

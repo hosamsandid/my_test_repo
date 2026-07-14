@@ -11,6 +11,17 @@ function ProcessTeamRedirect() {
   return <Navigate to={`/flows?proc=${encodeURIComponent(teamId)}`} replace />;
 }
 
+// Route guard for System-Admin-only pages (#584 AC8): SSH Keys, GitHub Tokens,
+// Skills, Models, MCP, Maintenance Mode. A non-admin who navigates directly to
+// one of these URLs is bounced to /chats — the nav entries are already hidden
+// (Shell.jsx), so this only catches hand-typed / bookmarked links. The API is
+// independently scoped, so this is UX, not the security boundary.
+function AdminRoute({ children }) {
+  const { user } = useAuth();
+  if (!user?.admin) return <Navigate to="/chats" replace />;
+  return children;
+}
+
 const Agents              = lazy(() => import('./pages/Agents'));
 const AgentChat           = lazy(() => import('./pages/AgentChat'));
 const QuickStart          = lazy(() => import('./pages/QuickStart'));
@@ -93,14 +104,14 @@ export default function App() {
           <Route path="/team-setup"   element={<TeamSetup />} />
           <Route path="/wizard/team"  element={<TeamSetup />} />
           <Route path="/environments" element={<WorkingEnvironments />} />
-          <Route path="/ssh-keys"     element={<SshKeys />} />
-          <Route path="/github-tokens" element={<GithubTokens />} />
-          <Route path="/skills"       element={<SkillsRegistry />} />
+          <Route path="/ssh-keys"     element={<AdminRoute><SshKeys /></AdminRoute>} />
+          <Route path="/github-tokens" element={<AdminRoute><GithubTokens /></AdminRoute>} />
+          <Route path="/skills"       element={<AdminRoute><SkillsRegistry /></AdminRoute>} />
           <Route path="/jobs"         element={<ScheduledJobs />} />
           <Route path="/github-events" element={<GithubEventLog />} />
-          <Route path="/models"       element={<ModelRegistry />} />
-          <Route path="/mcp"          element={<McpServers />} />
-          <Route path="/maintenance-mode" element={<MaintenanceMode />} />
+          <Route path="/models"       element={<AdminRoute><ModelRegistry /></AdminRoute>} />
+          <Route path="/mcp"          element={<AdminRoute><McpServers /></AdminRoute>} />
+          <Route path="/maintenance-mode" element={<AdminRoute><MaintenanceMode /></AdminRoute>} />
           <Route path="/teams"        element={<Teams />} />
           <Route path="/flows"         element={<Briefings />} />
           <Route path="/knowledge"     element={<KnowledgeFlow />} />

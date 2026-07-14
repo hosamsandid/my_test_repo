@@ -2886,6 +2886,43 @@ function archiveKnowledgeEntry(teamId, id, archived) {
   return { id, archived: !!archived };
 }
 
+// Explicit, operator-initiated removal of the source KB entries a freshly-written
+// skill now supersedes (#559). Unlike archiveKnowledgeEntry this DELIBERATELY
+// bypasses the "cannot archive a promoted entry" guard (#553 AC7) — the promotion
+// itself is the authorisation, so this is an intentional override of that silent-
+// archive protection, not a silent archive (E7). Removal = archive (reversible,
+// non-destructive, AC1/Q1): the entry leaves the active KB / digest / search /
+// graph (archived wins over promoted in the collector overlay) but stays
+// recoverable, and each skill's provenance keeps its own entryIds so the
+// skill→knowledge link never dangles (AC8, E2). Best-effort and idempotent:
+// re-removing an already-archived entry is a no-op (E1). Emits ONE distinguishable
+// cleanup feed event (AC9). Re-projects so the removal is reflected everywhere on
+// the next read (AC3, E5).
+function removePromotedSourceEntries(teamId, entryIds, { skill = null, auto = false, env = null } = {}) {
+  const ids = (Array.isArray(entryIds) ? entryIds : [])
+    .filter((x) => typeof x === "string" && /^[0-9a-f]{12}$/.test(x));
+  if (ids.length === 0) return { removed: 0, ids: [] };
+  let resolvedEnv = env;
+  if (!resolvedEnv) {
+    const r = resolveTeamKbRepo(teamId);
+    if (r) resolvedEnv = r.env;
+  }
+  const set = new Set(readArchivedIds(teamId));
+  for (const id of ids) set.add(id); // E1: already-archived is a no-op
+  writeArchivedIds(teamId, [...set]);
+  // Re-project + commit so the removal drops out of the KB / digest / search /
+  // graph, exactly like archiveKnowledgeEntry. Best-effort — a re-projection
+  // failure never rolls the promotion back (AC7): the ids are already archived.
+  try {
+    refreshKnowledgeClone(teamId, { force: true, env: resolvedEnv });
+    runConvergenceCollector(teamId, resolvedEnv);
+  } catch (err) {
+    console.warn(`[Orchestrator] promote-cleanup re-projection for '${teamId}' failed: ${err.message}`);
+  }
+  appendKnowledgeEvents([knowledgeFeed.buildPromotionCleanupEvent({ teamId, skill, entryIds: ids, auto })]);
+  return { removed: ids.length, ids };
+}
+
 // Guarded destination dir for a curator-written TEAM skill:
 // /workspace/teams/<teamId>/skills/<name>. Returns null on an unsafe id/name.
 // The orchestrator can write here (/workspace is RW); it can NEVER write the
@@ -2969,6 +3006,18 @@ function autoPromoteStep(teamId, env, clusters, candidates, { convergenceThresho
     appendKnowledgeEvents(promotedSkills.map((s) => ({
       type: "promotion", ts: now, teamId, skill: { name: s.name, tier: "team" }, entryIds: s.entryIds, auto: true,
     })));
+    // #559 AC12/E6: the autonomy-3 auto-promote path applies the same default as
+    // the promotion-dialog checkbox — remove (archive) the source knowledge
+    // automatically. Because removal is archival (reversible) no knowledge is
+    // irrecoverably lost without human oversight. Best-effort per skill; a
+    // cleanup failure never unwinds the promotion.
+    for (const s of promotedSkills) {
+      try {
+        removePromotedSourceEntries(teamId, s.entryIds, { skill: { name: s.name, tier: "team" }, auto: true, env });
+      } catch (err) {
+        console.warn(`[Orchestrator] auto promote-cleanup for '${s.name}' (team ${teamId}) failed: ${err.message}`);
+      }
+    }
     // Phase 4 (full autonomy): at level 3 an auto-promoted skill is also
     // auto-ACTIVATED — learn → bundle → promote → activate closes without a
     // human. This step only ever runs at autonomy 3 (the curator plan is gated
@@ -7331,6 +7380,31 @@ async function main() {
           const id = String(p.id || '');
           if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
           const result = archiveKnowledgeEntry(teamId, id, p.archived !== false);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+        }
+      });
+      return;
+    }
+
+    // ── Remove the source knowledge a just-promoted skill supersedes (#559) ──────
+    // The admin-console's promote endpoint calls this AFTER a successful skill
+    // write when the operator left the (pre-ticked) "remove source knowledge" box
+    // checked. Archival, reversible, bypasses the promoted-entry archive guard.
+    if (req.method === 'POST' && req.url === '/internal/knowledge/promote-cleanup') {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const p = JSON.parse(body || '{}');
+          const teamId = String(p.teamId || '');
+          if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
+          const skill = p.skill && typeof p.skill === 'object'
+            ? { name: p.skill.name, tier: p.skill.tier } : null;
+          const result = removePromotedSourceEntries(teamId, p.entryIds, { skill, auto: false });
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {

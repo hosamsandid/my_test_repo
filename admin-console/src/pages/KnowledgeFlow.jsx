@@ -1541,15 +1541,33 @@ function activationSummary(d) {
   return `active for ${k}/${ms.length} member${ms.length === 1 ? '' : 's'}`;
 }
 
-function ActivateNowCheckbox({ id, checked, onChange, label }) {
+// A promotion-dialog option toggle. Shared look/placement for the "activate now"
+// (#463) and "remove source knowledge" (#559) checkboxes so they read as siblings.
+// #559: fold the server's best-effort source-cleanup outcome into the dialog's
+// result notice. A cleanup failure is a warning (the skill still promoted, the
+// source entries were left intact — AC7), a removal is confirmed with its count.
+function cleanupResult(d, baseText) {
+  const c = d && d.cleanup;
+  if (c && c.warning) {
+    return { kind: 'warn', text: `${baseText} The source knowledge was NOT removed: ${c.warning} — the entries remain in the team KB.` };
+  }
+  if (c && c.removed > 0) {
+    return { kind: 'ok', text: `${baseText} Removed ${c.removed} source ${c.removed === 1 ? 'entry' : 'entries'} from the team KB.` };
+  }
+  return { kind: 'ok', text: baseText };
+}
+
+function ActivateNowCheckbox({ id, checked, onChange, label, description }) {
   return (
     <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
       <input type="checkbox" id={id} checked={checked} onChange={e => onChange(e.target.checked)} style={{ marginTop: 3, flexShrink: 0 }} />
       <div>
         <label htmlFor={id} style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', cursor: 'pointer' }}>{label}</label>
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 2, lineHeight: 1.5 }}>
-          Copies the skill into every member's workspace and adds it to the team's active skills.
-          Members with their own skill list are excluded — add them afterwards from the skill card.
+          {description || (
+            <>Copies the skill into every member's workspace and adds it to the team's active skills.
+              Members with their own skill list are excluded — add them afterwards from the skill card.</>
+          )}
         </div>
       </div>
     </div>
@@ -1574,6 +1592,9 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [activateNow, setActivateNow] = useState(true);
+  // #559: pre-ticked "remove the source knowledge, now captured in this skill".
+  // Default = remove, so the KB stays lean; the operator can untick to keep it.
+  const [removeSource, setRemoveSource] = useState(true);
   const [result, setResult] = useState(null); // combined promote+activate outcome
   // Create a NEW skill (default) vs extend an EXISTING one (issue #553). When the
   // converged cluster auto-matches a skill (AC4) we open straight in extend mode
@@ -1700,12 +1721,12 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           mode: 'extend', from: 'team', to: tier, teamId, targetName, skillMd,
-          entryIds: suggestion.entryIds,
+          entryIds: suggestion.entryIds, removeSourceKnowledge: removeSource,
           ...(suggestion.id ? { suggestionId: suggestion.id } : {}),
         }),
       })
         .then(async r => { if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`); return r.json(); })
-        .then(() => setResult({ kind: 'ok', text: `Extended “${targetName}” — active agents pick up the update automatically.` }))
+        .then(d => setResult(cleanupResult(d, `Extended “${targetName}” — active agents pick up the update automatically.`)))
         .catch(e => setError(e.message))
         .finally(() => setBusy(''));
       return;
@@ -1714,16 +1735,22 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         from: 'team', to: tier, teamId, name, skillMd,
-        entryIds: suggestion.entryIds,
+        entryIds: suggestion.entryIds, removeSourceKnowledge: removeSource,
         ...(suggestion.id ? { suggestionId: suggestion.id } : {}),
       }),
     })
       .then(async r => { if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`); return r.json(); })
-      .then(() => {
+      .then(d => {
         // Promotion succeeded — never rolled back or reported failed from here on.
-        if (!activateNow) { onDone(); return; }
+        const cleanup = d && d.cleanup;
+        if (!activateNow) {
+          // Legacy behaviour when there is nothing extra to report: close + reload.
+          if (cleanup) { setResult(cleanupResult({ cleanup }, 'Promoted.')); setBusy(''); }
+          else { onDone(); }
+          return;
+        }
         return activateSkill(teamId, name.trim())
-          .then(d => setResult({ kind: 'ok', text: `Promoted and ${activationSummary(d)}.` }))
+          .then(a => setResult(cleanupResult(cleanup ? { cleanup } : null, `Promoted and ${activationSummary(a)}.`)))
           .catch(e => setResult({ kind: 'warn', text: `Promoted — but activation failed: ${e.message}. Use the Activate button on the skill card.` }))
           .finally(() => setBusy(''));
       })
@@ -1842,6 +1869,20 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
           <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
             The refreshed skill is synced automatically to agents that already have “{targetName || 'this skill'}” active.
           </div>
+        )}
+
+        {/* #559: pre-ticked cleanup — remove the source knowledge from the team KB
+            once the skill is written. Shown for BOTH create and extend (AC2). The
+            removal is reversible (the entries are archived, not deleted), so the
+            skill→knowledge trace is preserved. */}
+        {!result && (
+          <ActivateNowCheckbox
+            id="kf-promote-remove-source"
+            checked={removeSource}
+            onChange={setRemoveSource}
+            label="Remove the source knowledge from the team KB (now captured in this skill)"
+            description="Keeps the knowledge base lean — the source entries are archived (recoverable, not deleted) and drop out of the live feed, search and digest. This skill keeps its link to them. Untick to keep the entries in the KB."
+          />
         )}
 
         {error && <div style={{ color: 'var(--eb-status-error, #d33)', fontSize: 'var(--eb-text-xs)' }}>{error}</div>}

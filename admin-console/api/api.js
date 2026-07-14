@@ -3388,6 +3388,28 @@ app.post('/api/knowledge/promotion-suggestions/:id/dismiss', apiLimiter, async (
   res.json({ ok: true });
 });
 
+// #559: after a successful promote/extend, remove (archive) the source KB entries
+// the new skill now supersedes. Best-effort — NEVER rolls the promotion back and
+// never throws: a failure returns a warning the caller surfaces to the operator
+// (AC7) while the skill stays in place. Only called when the operator left the
+// pre-ticked checkbox checked (opt-in at the API layer via removeSourceKnowledge
+// === true), so every existing promotion caller is byte-for-byte unaffected (AC11).
+async function cleanupPromotedSource(teamId, entryIds, skill) {
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/promote-cleanup`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, entryIds, skill }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) {
+      return { removed: 0, warning: (out && out.error) || `source cleanup failed (HTTP ${r.status})` };
+    }
+    return { removed: out.removed || 0 };
+  } catch (err) {
+    return { removed: 0, warning: `source cleanup unreachable: ${err.message}` };
+  }
+}
+
 // promote(from → to): write the operator-approved skill + provenance.json to the
 // target tier. Generalises /api/skills/promote-to-global (agent→team, team→global).
 app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
@@ -3446,7 +3468,16 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
       });
     } catch { /* best-effort */ }
 
-    return res.status(200).json({ name: v.targetName, tier: v.to, teamId, provenance: prov, extended: true });
+    // #559: remove the source knowledge folded into this skill (AC2 — extend path;
+    // AC6 — only after the SKILL.md/provenance write above succeeded). Only the
+    // entries added in THIS action are candidates (E3 — v.entryIds, not the skill's
+    // whole historical backing set). Opt-in, best-effort, never rolls back.
+    let cleanup = null;
+    if (req.body.removeSourceKnowledge === true) {
+      cleanup = await cleanupPromotedSource(teamId, v.entryIds, { name: v.targetName, tier: v.to });
+    }
+
+    return res.status(200).json({ name: v.targetName, tier: v.to, teamId, provenance: prov, extended: true, ...(cleanup ? { cleanup } : {}) });
   }
 
   // agent→team lift (Phase 4): the source is a private AGENT skill. Resolve it and
@@ -3536,7 +3567,16 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     });
   } catch { /* best-effort */ }
 
-  res.status(201).json({ name: v.name, tier: v.to, teamId, provenance: prov });
+  // #559: remove the source knowledge folded into this new skill (AC2 — create
+  // path; AC6 — only after the write above). Opt-in via the pre-ticked checkbox,
+  // best-effort, never rolls back. Absent on an agent→team lift (no checkbox in
+  // that UI) so lifts are untouched.
+  let cleanup = null;
+  if (req.body.removeSourceKnowledge === true) {
+    cleanup = await cleanupPromotedSource(teamId, v.entryIds, { name: v.name, tier: v.to });
+  }
+
+  res.status(201).json({ name: v.name, tier: v.to, teamId, provenance: prov, ...(cleanup ? { cleanup } : {}) });
 });
 
 // List an agent's PRIVATE (agent-tier) skills — the bottom rung of the skill

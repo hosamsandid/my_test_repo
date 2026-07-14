@@ -8,6 +8,7 @@ const {
   canonicalClonePath,
   shouldRefresh,
   buildHarvestEvent,
+  buildPromotionCleanupEvent,
   leanEntry,
   parsePushEntries,
 } = require('./knowledge-feed');
@@ -68,6 +69,41 @@ test('leanEntry defaults convergenceCount to 1', () => {
   assert.equal(leanEntry({ id: 'aaaaaaaaaaaa' }).convergenceCount, 1);
   assert.equal(leanEntry({ id: 'aaaaaaaaaaaa', convergenceCount: 0 }).convergenceCount, 1);
   assert.equal(leanEntry(null), null);
+});
+
+// ── buildPromotionCleanupEvent (#559) ─────────────────────────────────────────
+
+test('buildPromotionCleanupEvent is a distinguishable typed event with a count', () => {
+  const ev = buildPromotionCleanupEvent({
+    teamId: 'acme',
+    skill: { name: 'cobol-tips', tier: 'team', extra: 'drop-me' },
+    entryIds: ['aaaaaaaaaaaa', 'bbbbbbbbbbbb'],
+    auto: false,
+    ts: '2026-07-14T09:12:00Z',
+  });
+  // Separate from promotion/extension so the feed trace stays legible (AC9).
+  assert.equal(ev.type, 'promotion-cleanup');
+  assert.equal(ev.teamId, 'acme');
+  assert.equal(ev.ts, '2026-07-14T09:12:00Z');
+  assert.equal(ev.count, 2);
+  assert.deepEqual(ev.entryIds, ['aaaaaaaaaaaa', 'bbbbbbbbbbbb']);
+  // skill is normalised to name/tier only — no stray fields leak.
+  assert.deepEqual(ev.skill, { name: 'cobol-tips', tier: 'team' });
+  assert.equal(ev.auto, false);
+});
+
+test('buildPromotionCleanupEvent marks the autonomy-3 auto path + tolerates gaps', () => {
+  const ev = buildPromotionCleanupEvent({ teamId: 'acme', entryIds: ['aaaaaaaaaaaa'], auto: true });
+  assert.equal(ev.auto, true);           // E6 — curator auto-promote cleanup
+  assert.equal(ev.skill, null);          // no skill supplied
+  assert.equal(ev.count, 1);
+  assert.ok(typeof ev.ts === 'string' && ev.ts); // defaulted timestamp
+
+  // Junk / empty entryIds collapse to an empty, count-0 event (never throws).
+  const empty = buildPromotionCleanupEvent({ teamId: 'acme', entryIds: [null, 42, ''] });
+  assert.deepEqual(empty.entryIds, []);
+  assert.equal(empty.count, 0);
+  assert.equal(buildPromotionCleanupEvent({}).count, 0);
 });
 
 // ── parsePushEntries ──────────────────────────────────────────────────────────

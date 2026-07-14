@@ -7,6 +7,9 @@ import {
 } from 'lucide-react';
 import InfoTip from '../components/InfoTip';
 import SidePanel from '../components/SidePanel';
+import KnowledgeLearningSections, {
+  AUTONOMY_LEVELS, GATE_ORDER, GATE_LABELS, GATE_TIPS, PanelSection,
+} from '../components/KnowledgeLearningConfig';
 import useSSE from '../hooks/useSSE';
 import { parseTeamParam, resolveSelectedTeam, teamTotals, streamScopeUrl } from './knowledge-scope';
 
@@ -38,29 +41,6 @@ const KIND_COLORS = {
   entity: 'var(--eb-accent-primary)',
   convention: 'var(--eb-status-warning)',
 };
-
-const AUTONOMY_LEVELS = [
-  {
-    level: 0, label: 'Off',
-    desc: 'Agents keep lessons to themselves — nothing is shared.',
-    tip: 'Each agent keeps what it learns in its own private memory. Nothing enters the shared team knowledge base.',
-  },
-  {
-    level: 1, label: 'Share',
-    desc: 'Agents pool their lessons into the shared team knowledge.',
-    tip: 'Every lesson an agent records is shared with the whole team, so all agents benefit from it. Nothing is turned into a skill automatically.',
-  },
-  {
-    level: 2, label: 'Suggest',
-    desc: 'Like Share — plus suggestions when knowledge converges. You confirm each.',
-    tip: 'Like Share — and when several agents learn the same thing independently, you get a suggestion to turn it into a reusable skill. Nothing happens without your confirmation.',
-  },
-  {
-    level: 3, label: 'Auto-curate',
-    desc: 'The team promotes converged knowledge to skills on its own, within the gates.',
-    tip: 'The team curates itself: knowledge several agents converged on becomes a team skill automatically — but only where the promotion gates allow it. Promotion to the global pool always waits for your review.',
-  },
-];
 
 // Plain-language explanations of the three knowledge kinds — used by the
 // intro panel, the filter chips, and the item cards.
@@ -1431,18 +1411,6 @@ function isProtectedBranchName(branch) {
 const KB_DEFAULT_BRANCH = 'agent-knowledge';
 const KB_DEFAULT_PATH = 'docs/agent-knowledge/';
 
-const GATE_ORDER = ['team>team', 'agent>team', 'team>global'];
-const GATE_LABELS = {
-  'team>team': 'Knowledge → team skill',
-  'agent>team': 'Agent skill → team skill',
-  'team>global': 'Team skill → all teams',
-};
-const GATE_TIPS = {
-  'team>team': 'Converged team knowledge becoming a team skill.',
-  'agent>team': 'A skill one agent authored for itself becoming a team skill.',
-  'team>global': 'A team skill becoming available to every team. This step always waits for your review — it can’t be set to automatic.',
-};
-
 /* ── Read-only configuration summary + slide-out configuration panel ─────────── */
 
 // A single labelled value in the collapsed summary strip.
@@ -1452,18 +1420,6 @@ function SummaryPill({ label, value, title }) {
       <span style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--eb-text-muted)' }}>{label}</span>
       <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 600, color: 'var(--eb-text-secondary)' }}>{value}</span>
     </span>
-  );
-}
-
-// One titled section of the configuration panel: heading + plain-language
-// paragraph + the controls for that setting.
-function PanelSection({ title, children, blurb }) {
-  return (
-    <section style={{ paddingTop: 'var(--eb-space-4)', marginTop: 'var(--eb-space-4)', borderTop: '1px solid var(--eb-border-default)' }}>
-      <h3 style={{ margin: 0, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>{title}</h3>
-      <p style={{ margin: '4px 0 var(--eb-space-3)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>{blurb}</p>
-      {children}
-    </section>
   );
 }
 
@@ -1566,7 +1522,6 @@ function ConfigurePanel({ teamId, gates, onClose, onChanged }) {
   const autonomy = gates.autonomy;
   const review = !!gates.review;
   const g = gates.gates || {};
-  const current = AUTONOMY_LEVELS.find(l => l.level === autonomy) || AUTONOMY_LEVELS[1];
 
   /* ── Storage section state (consolidated from the former StorageDialog) ── */
   const initial = gates.store || {};
@@ -1642,85 +1597,16 @@ function ConfigurePanel({ teamId, gates, onClose, onChanged }) {
         knowledge is kept. Changes save immediately; running agents pick them up at their next rebuild.
       </p>
 
-      {/* Autonomy */}
-      <PanelSection
-        title="Autonomy"
-        blurb="How much this team may do on its own with what its agents learn. At 0 every agent keeps its lessons private; at 1 lessons are pooled into shared team knowledge; at 2 you also get suggestions when several agents learn the same thing; at 3 the team promotes converged knowledge into skills by itself, within the gates below. You can change this at any time — higher levels never bypass the gates.">
-        <div style={{ display: 'inline-flex', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', overflow: 'hidden' }}>
-          {AUTONOMY_LEVELS.map(({ level, label, tip }) => {
-            const active = level === autonomy;
-            return (
-              <button
-                key={level}
-                disabled={busy === 'autonomy'}
-                title={tip}
-                onClick={() => !active && call('autonomy', '/api/knowledge/autonomy', { teamId, level })}
-                style={{
-                  padding: '4px 12px', border: 'none', cursor: 'pointer', fontSize: 'var(--eb-text-xs)', fontWeight: 600,
-                  background: active ? 'var(--eb-accent-primary)' : 'transparent',
-                  color: active ? 'var(--eb-text-inverted, #fff)' : 'var(--eb-text-secondary)',
-                }}>
-                {level} {label}
-              </button>
-            );
-          })}
-        </div>
-        <div style={{ marginTop: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{current.desc}</div>
-      </PanelSection>
-
-      {/* Review */}
-      <PanelSection
-        title="Review"
-        blurb="Whether new lessons wait for your approval before they enter the shared team knowledge. When on, each lesson is held in a review queue until you approve it; when off, lessons are shared as soon as an agent records them (you can still retire any of them later). Review needs autonomy 1 or higher — at level 0 nothing is shared in the first place, so it is unavailable.">
-        <button
-          disabled={busy === 'review' || autonomy < 1}
-          title={autonomy < 1
-            ? 'Review needs autonomy 1 or higher — at 0, nothing is shared in the first place'
-            : (review ? 'Click to share new lessons immediately, without approval' : 'Click to hold every new lesson for your approval first')}
-          onClick={() => call('review', '/api/knowledge/review-mode', { teamId, enabled: !review })}
-          style={{
-            fontSize: 'var(--eb-text-xs)', fontWeight: 600, cursor: autonomy < 1 ? 'not-allowed' : 'pointer',
-            borderRadius: 'var(--eb-radius-md)', padding: '4px 12px', opacity: autonomy < 1 ? 0.5 : 1,
-            border: `1px solid ${review ? 'var(--eb-status-warning)' : 'var(--eb-border-default)'}`,
-            color: review ? 'var(--eb-status-warning)' : 'var(--eb-text-muted)', background: 'transparent',
-          }}>
-          {review ? 'on — you approve each lesson' : 'off — shared immediately'}
-        </button>
-      </PanelSection>
-
-      {/* Promotion gates */}
-      <PanelSection
-        title="Promotion gates"
-        blurb="Checkpoints for turning knowledge into skills. Each gate decides whether that promotion step may run on its own (“automatic”) or waits for you (“needs review”). Gates only take effect at autonomy 3 (Auto-curate) — at lower levels every promotion waits for you anyway. Promotion to all teams always waits for your review and cannot be automated.">
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
-          {GATE_ORDER.map(tr => {
-            const mode2 = g[tr] || 'review';
-            const locked = tr === 'team>global';
-            return (
-              <div key={tr} style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }} title={GATE_TIPS[tr]}>
-                <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', flex: 1 }}>{GATE_LABELS[tr]}</span>
-                {locked ? (
-                  <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>always reviewed</span>
-                ) : (
-                  <button
-                    disabled={busy === tr}
-                    onClick={() => call(tr, '/api/knowledge/gates', { teamId, transition: tr, mode: mode2 === 'auto' ? 'review' : 'auto' })}
-                    title={mode2 === 'auto'
-                      ? 'Runs on its own at autonomy 3 — click to require your review instead'
-                      : 'Waits for your review — click to let it run on its own at autonomy 3'}
-                    style={{
-                      fontSize: 'var(--eb-text-xs)', fontWeight: 600, cursor: 'pointer', borderRadius: 4, padding: '2px 8px',
-                      border: `1px solid ${mode2 === 'auto' ? 'var(--eb-status-success)' : 'var(--eb-status-warning)'}`,
-                      color: mode2 === 'auto' ? 'var(--eb-status-success)' : 'var(--eb-status-warning)', background: 'transparent',
-                    }}>
-                    {mode2 === 'auto' ? 'automatic' : 'needs review'}
-                  </button>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </PanelSection>
+      {/* Autonomy / Review / Promotion gates — shared with the wizard (#566/#567) */}
+      <KnowledgeLearningSections
+        autonomy={autonomy}
+        review={review}
+        gates={g}
+        busy={busy}
+        onAutonomy={(level) => call('autonomy', '/api/knowledge/autonomy', { teamId, level })}
+        onReview={(enabled) => call('review', '/api/knowledge/review-mode', { teamId, enabled })}
+        onGate={(transition, mode) => call(transition, '/api/knowledge/gates', { teamId, transition, mode })}
+      />
 
       {/* Storage */}
       <PanelSection

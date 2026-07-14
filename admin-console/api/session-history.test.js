@@ -5,7 +5,7 @@
 // Run: node --test admin-console/api/session-history.test.js
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { buildSessionHistory, deriveFromCorrelationId } = require('./session-history');
+const { buildSessionHistory, deriveFromCorrelationId, findResumableSession } = require('./session-history');
 
 // A representative room log. Two manual DM messages ($dm1, $dm2) are handled
 // within ONE Claude session (sess-A, reused via --resume), so they must group
@@ -180,4 +180,50 @@ test('deriveFromCorrelationId maps known prefixes', () => {
   assert.equal(deriveFromCorrelationId('claim-suggest:1').type, 'claim-suggest');
   assert.equal(deriveFromCorrelationId('weird').type, 'unknown');
   assert.equal(deriveFromCorrelationId('').type, 'unknown');
+});
+
+// ─── findResumableSession (#574) ──────────────────────────────────────────
+
+// A room log with: a finished DM session (sess-A, two messages), a finished
+// github-triggered session (sess-B), and an active DM session (sess-C).
+function resumeFixture() {
+  return [
+    // finished DM session sess-A
+    { ts: '2026-07-14T06:00:00.000Z', type: 'message.received', correlationId: '$dm1' },
+    { ts: '2026-07-14T06:00:01.000Z', type: 'system_init', sessionId: 'sess-A', correlationId: '$dm1' },
+    { ts: '2026-07-14T06:00:05.000Z', type: 'result', sessionId: 'sess-A', correlationId: '$dm1' },
+    { ts: '2026-07-14T06:10:00.000Z', type: 'message.received', correlationId: '$dm2' },
+    { ts: '2026-07-14T06:10:05.000Z', type: 'result', sessionId: 'sess-A', correlationId: '$dm2' },
+    // finished triggered session sess-B
+    { ts: '2026-07-14T07:00:00.000Z', type: 'trigger.fired', triggerType: 'github-event', triggerId: 'pr', correlationId: 'trigger:pr:1' },
+    { ts: '2026-07-14T07:00:02.000Z', type: 'result', sessionId: 'sess-B', correlationId: 'trigger:pr:1' },
+    // active DM session sess-C (correlationId $dm3 is in the active set)
+    { ts: '2026-07-14T08:00:00.000Z', type: 'message.received', correlationId: '$dm3' },
+    { ts: '2026-07-14T08:00:01.000Z', type: 'system_init', sessionId: 'sess-C', correlationId: '$dm3' },
+  ];
+}
+
+test('findResumableSession: returns a finished DM session by session-ID', () => {
+  const s = findResumableSession(resumeFixture(), [], 'sess-A');
+  assert.ok(s);
+  assert.equal(s.sessionId, 'sess-A');
+  assert.equal(s.type, 'dm');
+  // Both DM runs collapse into the one resumable session.
+  assert.deepEqual(s.correlationIds.sort(), ['$dm1', '$dm2']);
+});
+
+test('findResumableSession: a triggered (non-DM) session is NOT resumable', () => {
+  assert.equal(findResumableSession(resumeFixture(), [], 'sess-B'), null);
+});
+
+test('findResumableSession: an active session is NOT resumable', () => {
+  // sess-C is still running ($dm3 active) so it is excluded from history.
+  assert.equal(findResumableSession(resumeFixture(), ['$dm3'], 'sess-C'), null);
+});
+
+test('findResumableSession: unknown / malformed session-ID → null', () => {
+  assert.equal(findResumableSession(resumeFixture(), [], 'no-such'), null);
+  assert.equal(findResumableSession(resumeFixture(), [], ''), null);
+  assert.equal(findResumableSession(resumeFixture(), [], null), null);
+  assert.equal(findResumableSession(resumeFixture(), [], undefined), null);
 });

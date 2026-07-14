@@ -15,7 +15,7 @@ const audit = require('./audit');
 const githubEventLog = require('./github-event-log');
 const maintenanceMode = require('./maintenance-mode');
 const { computeScope, visibleTeam, visibleAgent } = require('./scope');
-const { buildSessionHistory } = require('./session-history');
+const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses } = require('./knowledge-graph');
@@ -8889,6 +8889,93 @@ app.delete('/api/agents/:agentId/session/:roomId/current', apiLimiter, async (re
   }
 
   res.json({ ok: true, repoResults });
+});
+
+// Re-point the room's current-session pointer at a *finished* session so the
+// next message resumes it via `--resume` (#574). Body: `{ sessionId }`. Unlike
+// the runner (which writes the pointer at the natural end of a run), this is an
+// explicit user action from the Sessions tab, so we validate the target against
+// the room's finished-session history: it must be a DM session that exists and
+// is not currently active (findResumableSession). The pointer carries a one-shot
+// `resumeRequested` flag so the runtime treats a failed `--resume` as an error
+// (surfacing a notice) instead of silently starting a fresh empty session (AC6);
+// the flag is cleared by the runner's next pointer write once the resume lands.
+app.post('/api/agents/:agentId/session/:roomId/current', apiLimiter, async (req, res) => {
+  const { agentId, roomId } = req.params;
+  if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : '';
+  if (!SESSION_ID_RE.test(sessionId)) {
+    return res.status(400).json({ error: 'invalid sessionId' });
+  }
+
+  // Load the room's finished-session history and confirm the target is a
+  // resumable DM session (exists, not active). Mirrors the history endpoint.
+  let activeCorrelationIds = [];
+  try {
+    const rf = controlOrAgentPath(agentId, 'running-sessions.json');
+    if (fs.existsSync(rf)) {
+      const arr = JSON.parse(fs.readFileSync(rf, 'utf8'));
+      if (Array.isArray(arr)) {
+        activeCorrelationIds = arr.map(s => s && s.correlationId).filter(Boolean);
+      }
+    }
+  } catch { /* best-effort: missing/corrupt registry ⇒ nothing active */ }
+
+  const filepath = controlOrAgentPath(agentId, 'sessions', roomId + '.jsonl');
+  if (!fs.existsSync(filepath)) {
+    return res.status(404).json({ error: 'session not resumable' });
+  }
+  let events;
+  try {
+    const raw = fs.readFileSync(filepath, 'utf8');
+    events = [];
+    for (const line of raw.split('\n')) {
+      if (line.trim()) events.push(parseJsonlLine(line));
+    }
+  } catch (err) {
+    return res.status(500).json({ error: 'read failed: ' + err.message });
+  }
+
+  const match = findResumableSession(events, activeCorrelationIds, sessionId);
+  if (!match) {
+    // Unknown / non-DM / currently-active session — never silently start fresh.
+    return res.status(404).json({ error: 'session not resumable' });
+  }
+
+  // Write the local pool pointer with a one-shot resumeRequested flag, and clear
+  // any pending reset flag (a resume supersedes a prior reset). On the shared
+  // volume this write is directly visible to the agent; on an isolated volume
+  // the orchestrator call below queues the same work for the agent to apply.
+  const updatedAt = new Date().toISOString();
+  try {
+    const sessionsDir = path.join(AGENTS_DIR, agentId, 'sessions');
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    writeJsonAtomic(
+      path.join(sessionsDir, roomId + '.current.json'),
+      { sessionId, updatedAt, resumeRequested: true },
+    );
+    fs.rmSync(path.join(sessionsDir, roomId + '.reset.json'), { force: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    await fetch(
+      `${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/session-set`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ roomId, sessionId, resumeRequested: true }),
+      },
+    );
+  } catch (err) {
+    console.warn(`[API] session-set call failed for ${agentId}: ${err.message}`);
+  }
+
+  res.json({ ok: true, sessionId, updatedAt });
 });
 
 // Send a stop-session signal to the orchestrator, which forwards it via IPC

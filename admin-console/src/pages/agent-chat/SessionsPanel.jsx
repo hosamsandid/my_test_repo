@@ -1,10 +1,11 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import {
   Activity, Loader2, Square, MessageCircle, Clock, Zap, Github, Terminal,
-  History, ChevronDown, ChevronUp, ArrowLeft, RefreshCw,
+  History, ChevronDown, ChevronUp, ArrowLeft, RefreshCw, RotateCcw,
 } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SessionLogPanel from './SessionLogPanel';
+import { canResumeSession, resumeNeedsConfirm } from './resume-session';
 
 /**
  * Merged "Sessions" tab (#543, extended in #544). Replaces the old standalone
@@ -108,6 +109,7 @@ export default function SessionsPanel({
   agentId, roomId, active,
   onCostUpdate, onContextUpdate, todoCloseSignal = 0,
   hoveredCorrelationId, onHoverCorrelation,
+  onResumeSession,
 }) {
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -253,6 +255,27 @@ export default function SessionsPanel({
     setSelectedId(id);
   }, []);
 
+  // Resume the selected finished session (#574). There is exactly one pointer
+  // per room, so if a healthy session is already active this overwrites it —
+  // confirm first (Open Question B). ChatPanel owns the pointer PUT + sending
+  // the predefined message; we just hand it the chosen session-ID and switch
+  // back to the live view so the resumed session shows as active (AC4).
+  const handleResume = useCallback(() => {
+    if (!historical || !canResumeSession(historical) || !onResumeSession) return;
+    if (resumeNeedsConfirm(sessions)) {
+      const ok = window.confirm(
+        'A session is currently active in this room. Resuming this finished '
+        + 'session will replace the active one (there is a single session per '
+        + 'room). Continue?',
+      );
+      if (!ok) return;
+    }
+    onResumeSession(historical.sessionId);
+    // Switch from the read-only historical view to the live view; the resumed
+    // session appears as the active session once the run starts.
+    setHistoricalId(null);
+  }, [historical, onResumeSession, sessions]);
+
   const hasActive = sessions.length > 0;
 
   return (
@@ -359,6 +382,30 @@ export default function SessionsPanel({
               </span>
               <span>· {countLabel(historical)}</span>
               <div style={{ flex: 1 }} />
+              {canResumeSession(historical) && onResumeSession && (
+                <button
+                  type="button"
+                  onClick={handleResume}
+                  title="Resume this session and continue the conversation"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 4,
+                    padding: '4px 8px',
+                    background: 'none',
+                    border: '1px solid var(--eb-accent-primary)',
+                    borderRadius: 'var(--eb-radius-sm)',
+                    color: 'var(--eb-accent-primary)',
+                    cursor: 'pointer',
+                    fontSize: 'var(--eb-text-xs)',
+                    fontFamily: 'inherit',
+                    flexShrink: 0,
+                  }}
+                >
+                  <RotateCcw size={11} />
+                  Resume session
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setHistoricalId(null)}

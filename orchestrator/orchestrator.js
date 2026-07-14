@@ -6878,6 +6878,43 @@ async function main() {
       return;
     }
 
+    // ── Session set / resume (#574) ───────────────────────────────────────
+    // The admin re-points the room at a finished session (Sessions-tab resume).
+    // We write the pushed pointer mirror (badge shows active now) and, when
+    // isolated, enqueue a command so the agent writes its own --resume pointer
+    // plus a resume-intent marker (so a failed --resume surfaces as an error
+    // rather than silently starting fresh — AC6). With the flag off the admin
+    // already wrote the pool pointer + marker directly, so we only mirror.
+    const sessionSetMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/session-set$/);
+    if (sessionSetMatch) {
+      const id = decodeURIComponent(sessionSetMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
+      req.on('end', () => {
+        try {
+          const { roomId, sessionId, resumeRequested } = JSON.parse(body || '{}');
+          if (!isSafePathSeg(id) || !isSafePathSeg(roomId) || typeof sessionId !== 'string' || !sessionId) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'bad id/roomId/sessionId' }));
+            return;
+          }
+          const dir = path.join(controlAgentDir(id), 'sessions');
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(
+            path.join(dir, `${roomId}.current.json`),
+            JSON.stringify({ sessionId, updatedAt: new Date().toISOString(), resumeRequested: !!resumeRequested }),
+          );
+          if (PER_AGENT_VOLUME) enqueuePending(id, { kind: 'session-set', roomId, sessionId, resumeRequested: !!resumeRequested });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
     // ── Triggers: agent pull (#185 Phase 2) ───────────────────────────────
     // The isolated agent fetches its canonical triggers on each sync tick and
     // whenever SIGUSR2 wakes it. Read-only.

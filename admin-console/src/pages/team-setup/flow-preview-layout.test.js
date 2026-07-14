@@ -129,6 +129,44 @@ test('extended-sdlc preview: labels neither overlap nor cover node boxes', () =>
   }
 });
 
+// Forward edge paths must start ≥3 px past the source box right edge and end
+// ≥6 px before the target box left edge (acceptance criteria, #548).
+// Back edge paths must also end ≥6 px before the target box left edge.
+test('forward and back edge endpoints respect required gaps', () => {
+  const bundle = {
+    stages: ['S1', 'S2'],
+    roles: [
+      role('a', 'S1', { emits: ['go'] }),
+      role('b', 'S2', { triggers: [{ labelFilter: 'go' }], emits: ['back'] }),
+      role('c', 'S1', { triggers: [{ labelFilter: 'back' }] }),
+    ],
+  };
+  const layout = computePreviewLayout(bundle);
+  const aNode = layout.nodes.find(n => n.role.id === 'a');
+  const bNode = layout.nodes.find(n => n.role.id === 'b');
+  const fwd = layout.forward[0];
+  const bkEdge = layout.back[0];
+
+  // Extract the start point of the forward edge (M x y).
+  const fwdStart = fwd.d.match(/^M\s+([\d.]+)\s+([\d.]+)/);
+  const fwdStartX = parseFloat(fwdStart[1]);
+  assert.ok(fwdStartX >= aNode.x + NODE_W + 3,
+    `forward start gap too small: ${fwdStartX} vs box right ${aNode.x + NODE_W}`);
+
+  // Extract the last coordinate of the forward edge cubic bezier (... x2 y2).
+  const fwdEnd = fwd.d.match(/([\d.]+)\s+([\d.]+)$/);
+  const fwdEndX = parseFloat(fwdEnd[1]);
+  assert.ok(bNode.x - fwdEndX >= 6,
+    `forward end gap too small: box.x=${bNode.x}, path ends at ${fwdEndX}`);
+
+  // Back edge: last segment ends at [e.b.x - offset, entryY]; extract last L point.
+  const bkEnd = bkEdge.d.match(/([\d.]+)\s+([\d.]+)$/);
+  const bkEndX = parseFloat(bkEnd[1]);
+  const cNode = layout.nodes.find(n => n.role.id === 'c');
+  assert.ok(cNode.x - bkEndX >= 6,
+    `back edge end gap too small: box.x=${cNode.x}, path ends at ${bkEndX}`);
+});
+
 // Column geometry is unchanged in spirit: one column per stage, unstaged roles
 // in a trailing column.
 test('unstaged roles land in a trailing column', () => {

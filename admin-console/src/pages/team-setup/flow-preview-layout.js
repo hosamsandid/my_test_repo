@@ -122,10 +122,10 @@ export function computePreviewLayout(bundle) {
   // Forward edges: cubic bezier; the label is clamped into the free corridor
   // left of the target column, its y taken from the curve at that x.
   const forward = fw.map(e => {
-    const x1 = e.a.x + NODE_W; const y1 = e.a.y + NODE_H / 2;
+    const x1 = e.a.x + NODE_W + 4; const y1 = e.a.y + NODE_H / 2;
     const x2 = e.b.x; const y2 = e.b.y + NODE_H / 2;
     const midX = (x1 + x2) / 2;
-    const d = `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2 - 3} ${y2}`;
+    const d = `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2 - 9} ${y2}`;
     const labelX = e.b.x - GAP / 2;
     const t = Math.min(1, Math.max(0, (labelX - x1) / (x2 - x1 || 1)));
     const curveY = y1 + (y2 - y1) * (3 * t * t - 2 * t * t * t);
@@ -169,7 +169,7 @@ export function computePreviewLayout(bundle) {
     const entryY = Math.max(e.b.y + 8, e.b.y + NODE_H - 10 - (kIn % 3) * 7);
     const d = roundedPath([
       [e.a.x + NODE_W, exitY], [xr, exitY], [xr, laneY],
-      [xl, laneY], [xl, entryY], [e.b.x - 3, entryY],
+      [xl, laneY], [xl, entryY], [e.b.x - 9, entryY],
     ]);
     return { ...e, d, labelX: (xr + xl) / 2, labelY: laneY - 4 };
   });

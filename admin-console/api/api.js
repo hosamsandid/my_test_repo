@@ -27,6 +27,7 @@ const { normalizeTemplatePorts } = require('./catalog-ports');
 const { weaveProcess } = require('./flow-weaver');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
+const { membersOfTeam } = require('./agent-team-cascade');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -1303,10 +1304,14 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   }
 
   // Reassign the agent to a human Team (#308). Validates against existing
-  // teams; metadata-only, so no respawn is needed.
+  // teams; metadata-only, so no respawn is needed. When the target is an Agent
+  // Team (`role: "team"`) the assignment cascades to every member below (#568)
+  // so a knowledge-sharing squad can never be split across tenant Teams.
+  let cascadeTeamId = false;
   if (teamId !== undefined) {
     try { fresh.teamId = resolveOwnerTeamId(teamId); }
     catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+    cascadeTeamId = fresh.role === 'team';
   }
 
   // Team-member inheritance toggles. `null` means "switch to inherit"
@@ -1337,6 +1342,43 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   }
 
   writeJsonAtomic(cfgPath, fresh);
+
+  // Cascade an Agent-Team tenant reassignment to every member (#568). The
+  // parent team agent's `teamId` was just written; stamp the same tenant on
+  // each `team-member` whose `parentTeamId` points at it so the squad moves as
+  // one unit and can never be split across tenants. teamId is metadata-only, so
+  // each member write is just a config stamp + reload — no respawn. Partial
+  // failures are surfaced (not swallowed) so the UI can report a split (E4).
+  if (cascadeTeamId) {
+    const memberConfigs = listAgentDirs()
+      .map(mid => ({ id: mid, ...readJsonFile(path.join(AGENTS_DIR, mid, 'config.json'), {}) }));
+    const members = membersOfTeam(memberConfigs, id);
+    const movedMembers = [];
+    const failedMembers = [];
+    for (const member of members) {
+      if (member.teamId === fresh.teamId) { movedMembers.push(member.id); continue; }
+      try {
+        const memberCfgPath = path.join(AGENTS_DIR, member.id, 'config.json');
+        const memberFresh = readJsonFile(memberCfgPath, null);
+        if (!memberFresh) { failedMembers.push(member.id); continue; }
+        memberFresh.teamId = fresh.teamId;
+        writeJsonAtomic(memberCfgPath, memberFresh);
+        notifyAgentReload(member.id);
+        movedMembers.push(member.id);
+      } catch (err) {
+        console.error(`[API] Failed to cascade teamId to member ${member.id}: ${err.message}`);
+        failedMembers.push(member.id);
+      }
+    }
+    if (failedMembers.length) {
+      return res.status(500).json({
+        error: `Reassigned the Agent Team but failed to move ${failedMembers.length} member(s): ${failedMembers.join(', ')}. The squad is split across tenants — retry to resolve.`,
+        teamId: fresh.teamId,
+        movedMembers,
+        failedMembers,
+      });
+    }
+  }
   // A team-member's own prompt override was toggled/edited (#510). Because
   // CLAUDE.md now references the prompt via `@AGENT-PROMPT.md`, the effective
   // prompt lives solely in AGENT-PROMPT.md — we only rewrite that file (CLAUDE.md

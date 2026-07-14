@@ -556,6 +556,32 @@ function resolvePromotionGates(env) {
 }
 
 // ---------------------------------------------------------------------------
+// Per-team knowledge config overlay (#570)
+// ---------------------------------------------------------------------------
+
+// The four knowledge-config groups keyed PER TEAM (#570) instead of on the
+// shared environment. Mirror of the orchestrator's knowledge-store.TEAM_KNOWLEDGE_KEYS
+// (the two runtimes never cross-require, so the list is duplicated verbatim).
+const TEAM_KNOWLEDGE_KEYS = ['knowledgeAutonomy', 'knowledgeReview', 'knowledgePromotionGates', 'knowledgeStore'];
+
+// Overlay a team's persisted knowledge-config overrides onto a base environment,
+// producing the env-shaped object the pure readers (teamAutonomyLevel /
+// knowledgeReviewOn / resolvePromotionGates / knowledgeStoreView) consume. A team
+// with no override for a key falls back to the env's value, so a read immediately
+// after the #570 upgrade is byte-identical to before (AC-2). Returns the base env
+// unchanged (same reference) when there are no overrides, and never mutates it.
+function mergeTeamKnowledgeConfig(baseEnv, overrides) {
+  const ov = overrides && typeof overrides === 'object' ? overrides : {};
+  const hasOverride = TEAM_KNOWLEDGE_KEYS.some((k) => Object.prototype.hasOwnProperty.call(ov, k));
+  if (!hasOverride) return baseEnv;
+  const merged = baseEnv && typeof baseEnv === 'object' ? { ...baseEnv } : {};
+  for (const k of TEAM_KNOWLEDGE_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(ov, k)) merged[k] = ov[k];
+  }
+  return merged;
+}
+
+// ---------------------------------------------------------------------------
 // View assembly (candidate + draft → the /promotion-suggestions row the UI gets)
 // ---------------------------------------------------------------------------
 
@@ -610,4 +636,6 @@ module.exports = {
   buildShareProvenance,
   resolvePromotionGates,
   promotionSuggestionView,
+  TEAM_KNOWLEDGE_KEYS,
+  mergeTeamKnowledgeConfig,
 };

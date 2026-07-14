@@ -472,6 +472,41 @@ function buildHarvestHint(autonomyLevel) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Per-team knowledge configuration overlay (#570)
+// ---------------------------------------------------------------------------
+
+// The knowledge configuration groups that are keyed PER TEAM, not per
+// environment: the 0..3 autonomy dial, supervised-review mode, the per-transition
+// promotion gates, and the storage location. Historically all four rode on the
+// environment record (`environment.json`), so two teams sharing one env collapsed
+// onto one set of values. They now live in a per-team overrides document; this
+// list is the single authority for which keys are team-owned (used by both the
+// orchestrator writers and the admin-console read path).
+const TEAM_KNOWLEDGE_KEYS = ['knowledgeAutonomy', 'knowledgeReview', 'knowledgePromotionGates', 'knowledgeStore'];
+
+// Overlay a team's knowledge-config overrides onto its environment, producing an
+// env-shaped object the existing pure readers (knowledgeAutonomyLevel,
+// knowledgeReviewEnabled, resolvePromotionGates, normalizeKnowledgeStore, …)
+// consume unchanged. Only the TEAM_KNOWLEDGE_KEYS are overlaid; every other env
+// field (repositories, knowledgeConvergence, …) passes through untouched.
+//
+// Migration (#570 AC-2) is lazy copy-on-write: a team whose overrides document
+// is absent (or omits a key) falls back to the env's value, so a read
+// immediately after the upgrade is byte-identical to before. A write records the
+// key on the team's own overrides, and from then on that team resolves
+// independently of the env and of sibling teams (AC-1/AC-4).
+function mergeTeamKnowledgeConfig(baseEnv, overrides) {
+  const ov = overrides && typeof overrides === 'object' ? overrides : {};
+  const hasOverride = TEAM_KNOWLEDGE_KEYS.some((k) => Object.prototype.hasOwnProperty.call(ov, k));
+  if (!hasOverride) return baseEnv;
+  const merged = baseEnv && typeof baseEnv === 'object' ? { ...baseEnv } : {};
+  for (const k of TEAM_KNOWLEDGE_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(ov, k)) merged[k] = ov[k];
+  }
+  return merged;
+}
+
 module.exports = {
   KINDS,
   SOURCE_REF_KINDS,
@@ -494,6 +529,8 @@ module.exports = {
   resolvePromotionGates,
   knowledgeCurationConfig,
   buildHarvestHint,
+  TEAM_KNOWLEDGE_KEYS,
+  mergeTeamKnowledgeConfig,
   DEFAULT_SIM_THRESHOLD,
   DEFAULT_CONVERGENCE_THRESHOLD,
   DEFAULT_MAX_AUTO_PROMOTIONS,

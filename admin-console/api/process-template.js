@@ -155,6 +155,30 @@ function emptyDraftBundle(name) {
   };
 }
 
+// Draft storage id (slug) derivation. A draft's id is a name-derived, mutable
+// slug — re-keyed whenever the name changes (#581), not a permanent external
+// identifier. Kept identical to the original creation-time behaviour: lower-case,
+// collapse non-`[a-z0-9-]` runs to `-`, trim leading/trailing `-`, 48-char cap,
+// empty result falls back to `process`.
+const DRAFT_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+function slugifyDraft(name) {
+  const base = String(name || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
+  return base || 'process';
+}
+
+// Derive a unique draft id from a name. `exists(id)` reports whether an id is
+// already taken; `currentId` (when re-deriving on rename) is treated as free so
+// a name whose slug already equals the draft's own id is a no-op — never
+// spuriously suffixed. Collisions reuse the creation-time `-2`/`-3` suffix loop.
+function deriveUniqueDraftId(name, { currentId = null, exists } = {}) {
+  let base = slugifyDraft(name);
+  if (!DRAFT_ID_RE.test(base)) base = 'process';
+  let id = base;
+  let n = 2;
+  while (id !== currentId && exists(id)) { id = `${base}-${n++}`; }
+  return id;
+}
+
 // Transform a bundle's roles into the `customRoles` shape consumed by
 // POST /api/teams — pseudo-templates the existing materialisation loop renders
 // exactly like catalog templates (var substitution over prompt + triggers).
@@ -553,4 +577,5 @@ module.exports = {
   channelTriggerId, isChannelTrigger, stampDerivedActivation,
   emptyDraftBundle, roleKeyOf, VERSION,
   artifactKey, artifactHint, artifactIsNamed,
+  slugifyDraft, deriveUniqueDraftId,
 };

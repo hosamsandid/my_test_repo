@@ -3,7 +3,54 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId } = require('./process-template');
+
+// A tiny stand-in for the on-disk draft store: an id is "taken" iff present.
+const existsIn = (set) => (id) => set.has(id);
+
+test('slugifyDraft normalizes name → slug (unchanged rules)', () => {
+  assert.equal(slugifyDraft('Q3 Roadmap'), 'q3-roadmap');
+  assert.equal(slugifyDraft('  Hello, World!  '), 'hello-world');
+  assert.equal(slugifyDraft('--Trim--'), 'trim');
+  assert.equal(slugifyDraft(''), 'process');
+  assert.equal(slugifyDraft('💥🚀'), 'process');
+  assert.equal(slugifyDraft('x'.repeat(60)).length, 48);
+});
+
+test('deriveUniqueDraftId derives a fresh slug when nothing is taken', () => {
+  assert.equal(deriveUniqueDraftId('Q3 Roadmap', { exists: existsIn(new Set()) }), 'q3-roadmap');
+});
+
+test('deriveUniqueDraftId appends -2/-3 on collision (AC4)', () => {
+  const taken = new Set(['q3-roadmap', 'q3-roadmap-2']);
+  assert.equal(deriveUniqueDraftId('Q3 Roadmap', { exists: existsIn(taken) }), 'q3-roadmap-3');
+});
+
+test('deriveUniqueDraftId keeps distinct slugs distinct for similar names', () => {
+  const taken = new Set(['q3-roadmap']);
+  // "Q3 – Roadmap" slugifies to the same base, so it must get a suffix.
+  assert.equal(deriveUniqueDraftId('Q3 – Roadmap', { exists: existsIn(taken) }), 'q3-roadmap-2');
+});
+
+test('deriveUniqueDraftId treats the draft own id as free — no spurious -2 (AC8)', () => {
+  const taken = new Set(['q3-roadmap']); // only this draft exists
+  // Renaming to a name whose slug equals its own current id is a no-op.
+  assert.equal(deriveUniqueDraftId('Q3 Roadmap', { currentId: 'q3-roadmap', exists: existsIn(taken) }), 'q3-roadmap');
+});
+
+test('deriveUniqueDraftId re-keys off a suffixed id back to the clean base when free', () => {
+  const taken = new Set(['q3-roadmap-2']); // the other q3-roadmap draft is gone
+  assert.equal(deriveUniqueDraftId('Q3 Roadmap', { currentId: 'q3-roadmap-2', exists: existsIn(taken) }), 'q3-roadmap');
+});
+
+test('deriveUniqueDraftId keeps a suffix when the clean base is taken by another draft', () => {
+  const taken = new Set(['q3-roadmap', 'q3-roadmap-2']); // base owned by another draft; self is -2
+  assert.equal(deriveUniqueDraftId('Q3 Roadmap', { currentId: 'q3-roadmap-2', exists: existsIn(taken) }), 'q3-roadmap-2');
+});
+
+test('deriveUniqueDraftId falls back to process for an empty slug and stays unique', () => {
+  assert.equal(deriveUniqueDraftId('💥', { exists: existsIn(new Set(['process'])) }), 'process-2');
+});
 
 const sampleRoles = [
   {

@@ -45,8 +45,7 @@ const dangerButtonStyle = {
 
 export default function MaintenanceMode() {
   const { data, loading, error, refetch } = useApi('/api/maintenance-mode');
-  const [amount, setAmount] = useState('5');
-  const [unit, setUnit] = useState('minutes');
+  const [amount, setAmount] = useState('60');
   const [formError, setFormError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [now, setNow] = useState(Date.now());
@@ -82,7 +81,7 @@ export default function MaintenanceMode() {
       setFormError('Enter a positive whole number.');
       return;
     }
-    const gracePeriodSec = unit === 'minutes' ? n * 60 : n;
+    const gracePeriodSec = n * 60;
     setSubmitting(true);
     try {
       await apiCall('POST', '/api/maintenance-mode/activate', { gracePeriodSec });
@@ -213,22 +212,17 @@ export default function MaintenanceMode() {
                     required
                   />
                 </div>
-                <select
-                  value={unit}
-                  onChange={(e) => setUnit(e.target.value)}
+                <span
                   style={{
                     padding: 'var(--eb-space-2) var(--eb-space-3)',
-                    background: 'var(--eb-bg-elevated)',
-                    border: '1px solid var(--eb-border-default)',
-                    borderRadius: 'var(--eb-radius-md)',
-                    color: 'var(--eb-text-primary)',
+                    color: 'var(--eb-text-secondary)',
                     fontSize: 'var(--eb-text-sm)',
                     fontFamily: 'inherit',
+                    whiteSpace: 'nowrap',
                   }}
                 >
-                  <option value="seconds">seconds</option>
-                  <option value="minutes">minutes</option>
-                </select>
+                  minutes
+                </span>
               </div>
 
               {formError && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{formError}</span>}

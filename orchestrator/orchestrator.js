@@ -49,6 +49,13 @@ const HOMESERVER = process.env.MATRIX_HOMESERVER;
 const CONDUWUIT_ADMIN_TOKEN = process.env.CONDUWUIT_ADMIN_TOKEN;
 const CONDUWUIT_ADMIN_ROOM = process.env.CONDUWUIT_ADMIN_ROOM;
 const BP_EXPLORER_URL = process.env.BP_EXPLORER_URL || "http://bp-explorer:8765";
+// This stack's instance identity. Agent containers are stamped with it
+// (`aee.instance` label, see spawn-container.js) so eviction & reconcile scope
+// to THIS stack when multiple instances share one Podman store. Configured via
+// AEE_INSTANCE_ID in .env, defaulting to COMPOSE_PROJECT_NAME. MUST resolve to
+// the same value as spawn-container.js's INSTANCE_ID (identical precedence).
+const INSTANCE_ID = process.env.AEE_INSTANCE_ID || process.env.COMPOSE_PROJECT_NAME || 'vgh-claw-314092';
+const INSTANCE_LABEL_KEY = 'aee.instance';
 
 const AGENTS_DIR = "/workspace/agents";
 // The filename CLAUDE.md references for the authored prompt. The seeded
@@ -352,15 +359,25 @@ async function evictStaleAgentContainers() {
       return;
     }
     let evicted = 0;
+    let skippedForeign = 0;
     for (const c of list.body) {
       const cid = c.Id || c.ID;
       if (!cid) continue;
+      // Scope eviction to THIS instance. A container labelled for another
+      // compose project belongs to a parallel stack sharing this Podman store —
+      // evicting it would kill a sibling instance's agents (exactly the failure
+      // this guards against). Legacy containers with no instance label are also
+      // left alone so an upgrade boot can't nuke a sibling; operators clear those
+      // once during the label rollout.
+      const labels = c.Labels || c.labels || {};
+      if (labels[INSTANCE_LABEL_KEY] !== INSTANCE_ID) { skippedForeign += 1; continue; }
       const del = await libpodRequest('DELETE', `/containers/${cid}?force=true&v=true`);
       if (del.status < 300) evicted += 1;
       else console.warn(`[Orchestrator] evict: delete ${cid.slice(0, 12)} status=${del.status}`);
     }
-    if (evicted > 0) {
-      console.log(`[Orchestrator] evicted ${evicted} stale ${image} container(s)`);
+    if (evicted > 0 || skippedForeign > 0) {
+      console.log(`[Orchestrator] evicted ${evicted} stale ${image} container(s) for instance '${INSTANCE_ID}'` +
+        (skippedForeign > 0 ? ` (left ${skippedForeign} foreign/legacy container(s) untouched)` : ''));
     }
   } catch (err) {
     console.warn(`[Orchestrator] evict skipped: ${err.message}`);
@@ -6082,6 +6099,10 @@ async function main() {
               const labels = c.Labels || c.labels || {};
               const aid = labels['aee.agent.id'];
               if (!aid) continue;
+              // Only surface THIS instance's containers — a parallel stack
+              // sharing the Podman store also carries aee.agent.id labels, and
+              // merging its agents would show phantom processes in this UI.
+              if (labels[INSTANCE_LABEL_KEY] !== INSTANCE_ID) continue;
               const running = String(c.State || c.state || '').toLowerCase() === 'running';
               const cid = String(c.Id || c.ID || '').slice(0, 12) || null;
               const existing = byId.get(aid);

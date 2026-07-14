@@ -6,6 +6,7 @@ import {
   HelpCircle, BookOpen, Combine,
 } from 'lucide-react';
 import InfoTip from '../components/InfoTip';
+import SidePanel from '../components/SidePanel';
 import useSSE from '../hooks/useSSE';
 import { parseTeamParam, resolveSelectedTeam, teamTotals, streamScopeUrl } from './knowledge-scope';
 
@@ -1419,7 +1420,7 @@ function ReviewQueueBlock({ teamId, items, onChanged }) {
   );
 }
 
-/* ── Learning controls: autonomy dial · review toggle · gates — with feedback ── */
+/* ── Learning controls: read-only summary + a slide-out configuration panel ── */
 
 // Well-known protected branches — mirrors orchestrator knowledge-sync
 // PROTECTED_BRANCHES. Advisory only: the UI warns, it never blocks (#558 AC-3).
@@ -1430,10 +1431,124 @@ function isProtectedBranchName(branch) {
 const KB_DEFAULT_BRANCH = 'agent-knowledge';
 const KB_DEFAULT_PATH = 'docs/agent-knowledge/';
 
+const GATE_ORDER = ['team>team', 'agent>team', 'team>global'];
+const GATE_LABELS = {
+  'team>team': 'Knowledge → team skill',
+  'agent>team': 'Agent skill → team skill',
+  'team>global': 'Team skill → all teams',
+};
+const GATE_TIPS = {
+  'team>team': 'Converged team knowledge becoming a team skill.',
+  'agent>team': 'A skill one agent authored for itself becoming a team skill.',
+  'team>global': 'A team skill becoming available to every team. This step always waits for your review — it can’t be set to automatic.',
+};
+
+/* ── Read-only configuration summary + slide-out configuration panel ─────────── */
+
+// A single labelled value in the collapsed summary strip.
+function SummaryPill({ label, value, title }) {
+  return (
+    <span title={title} style={{ display: 'inline-flex', alignItems: 'baseline', gap: 5 }}>
+      <span style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--eb-text-muted)' }}>{label}</span>
+      <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 600, color: 'var(--eb-text-secondary)' }}>{value}</span>
+    </span>
+  );
+}
+
+// One titled section of the configuration panel: heading + plain-language
+// paragraph + the controls for that setting.
+function PanelSection({ title, children, blurb }) {
+  return (
+    <section style={{ paddingTop: 'var(--eb-space-4)', marginTop: 'var(--eb-space-4)', borderTop: '1px solid var(--eb-border-default)' }}>
+      <h3 style={{ margin: 0, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>{title}</h3>
+      <p style={{ margin: '4px 0 var(--eb-space-3)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>{blurb}</p>
+      {children}
+    </section>
+  );
+}
+
+// The collapsed strip: a read-only summary of the live configuration plus a
+// single action that opens the slide-out panel (#566). Nothing is edited here.
 function ControlStrip({ teamId, gates, onChanged }) {
+  const [panelOpen, setPanelOpen] = useState(false);
+
+  const autonomy = gates.autonomy;
+  const review = !!gates.review;
+  const g = gates.gates || {};
+  const current = AUTONOMY_LEVELS.find(l => l.level === autonomy) || AUTONOMY_LEVELS[1];
+  const store = gates.store || {};
+  const storeBranch = store.branch || KB_DEFAULT_BRANCH;
+  const shared = Array.isArray(gates.sharedWith) ? gates.sharedWith : [];
+
+  return (
+    <div style={{ borderBottom: '1px solid var(--eb-border-default)', background: 'var(--eb-bg-app)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', padding: 'var(--eb-space-2) var(--eb-space-4)', flexWrap: 'wrap' }}>
+        <ShieldCheck size={13} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+        <span style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--eb-text-muted)', flexShrink: 0 }}>
+          Knowledge configuration
+        </span>
+
+        {/* Read-only summary of the live saved values */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', flexWrap: 'wrap', minWidth: 0 }}>
+          <SummaryPill label="Autonomy" value={`${autonomy} · ${current.label}`} title={current.tip} />
+          <SummaryPill label="Review" value={review ? 'on' : 'off'}
+            title={autonomy < 1 ? 'Review needs autonomy 1 or higher — at 0, nothing is shared in the first place.' : (review ? 'New lessons wait for your approval before they are shared.' : 'New lessons are shared immediately.')} />
+          {GATE_ORDER.map(tr => (
+            <SummaryPill key={tr} label={GATE_LABELS[tr]}
+              value={tr === 'team>global' ? 'always reviewed' : ((g[tr] || 'review') === 'auto' ? 'automatic' : 'needs review')}
+              title={GATE_TIPS[tr]} />
+          ))}
+          <SummaryPill
+            label="Storage"
+            title="Where this team’s shared knowledge is stored."
+            value={(
+              <>
+                {store.mode === 'own-repo' ? 'separate repo' : 'in team repo'} · {storeBranch}
+                {isProtectedBranchName(storeBranch) && (
+                  <span title="This is a protected branch — pushes may be rejected." style={{ color: 'var(--eb-status-warning)', marginLeft: 3 }}>⚠</span>
+                )}
+              </>
+            )}
+          />
+        </div>
+
+        <button
+          onClick={() => setPanelOpen(true)}
+          title="Open the knowledge configuration panel"
+          style={{ ...miniBtn, marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
+          <Wand2 size={12} /> Configure knowledge
+        </button>
+      </div>
+
+      {shared.length > 0 && (
+        <div style={{ padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}
+          title={`These controls live on the shared environment '${gates.environment?.name || ''}' — changing them here also changes them for the listed team(s).`}>
+          ⚠ These settings are shared with {shared.join(', ')} — changing them here changes them for those team(s) too.
+        </div>
+      )}
+
+      {panelOpen && (
+        <ConfigurePanel
+          teamId={teamId}
+          gates={gates}
+          onClose={() => setPanelOpen(false)}
+          onChanged={onChanged}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ── Configuration panel: all controls, one slide-out surface (#566) ─────────── */
+
+// The roomy right-side slide-out (built on the shared SidePanel) that holds
+// every knowledge setting — Autonomy, Review, Promotion gates and Storage —
+// each in its own explained section. Writes go through the same endpoints the
+// inline strip used; a successful save refreshes the summary via onChanged.
+// The former standalone StorageDialog (#558) is now the Storage section here.
+function ConfigurePanel({ teamId, gates, onClose, onChanged }) {
   const [busy, setBusy] = useState(null); // which control is writing
   const [flash, setFlash] = useState(null); // { kind: 'ok' | 'error', text }
-  const [storeOpen, setStoreOpen] = useState(false); // storage-location dialog
   const flashTimer = useRef(null);
 
   const feedback = (kind, text) => {
@@ -1441,6 +1556,7 @@ function ControlStrip({ teamId, gates, onChanged }) {
     clearTimeout(flashTimer.current);
     flashTimer.current = setTimeout(() => setFlash(null), kind === 'error' ? 8000 : 3500);
   };
+  useEffect(() => () => clearTimeout(flashTimer.current), []);
 
   const call = (label, url, body) => {
     setBusy(label);
@@ -1459,188 +1575,24 @@ function ControlStrip({ teamId, gates, onChanged }) {
   const review = !!gates.review;
   const g = gates.gates || {};
   const current = AUTONOMY_LEVELS.find(l => l.level === autonomy) || AUTONOMY_LEVELS[1];
-  const GATE_LABELS = {
-    'team>team': 'Knowledge → team skill',
-    'agent>team': 'Agent skill → team skill',
-    'team>global': 'Team skill → all teams',
-  };
-  const GATE_TIPS = {
-    'team>team': 'Converged team knowledge becoming a team skill.',
-    'agent>team': 'A skill one agent authored for itself becoming a team skill.',
-    'team>global': 'A team skill becoming available to every team. This step always waits for your review — it can’t be set to automatic.',
-  };
+  const shared = Array.isArray(gates.sharedWith) ? gates.sharedWith : [];
 
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', padding: 'var(--eb-space-2) var(--eb-space-4)', borderBottom: '1px solid var(--eb-border-default)', background: 'var(--eb-bg-app)', flexWrap: 'wrap' }}>
-      <ShieldCheck size={13} style={{ color: 'var(--eb-accent-primary)' }} />
-      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-        <span style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--eb-text-muted)' }}>Autonomy</span>
-        <InfoTip
-          size={12}
-          title="How much may this team do on its own?"
-          text="From 0 (agents keep everything private) to 3 (the team promotes its own skills). Hover each step for details — you can change this at any time, and higher levels never bypass the gates."
-        />
-      </span>
-      <div style={{ display: 'inline-flex', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', overflow: 'hidden' }}>
-        {AUTONOMY_LEVELS.map(({ level, label, tip }) => {
-          const active = level === autonomy;
-          return (
-            <button
-              key={level}
-              disabled={busy === 'autonomy'}
-              title={tip}
-              onClick={() => !active && call('autonomy', '/api/knowledge/autonomy', { teamId, level })}
-              style={{
-                padding: '3px 10px', border: 'none', cursor: 'pointer', fontSize: 'var(--eb-text-xs)', fontWeight: 600,
-                background: active ? 'var(--eb-accent-primary)' : 'transparent',
-                color: active ? 'var(--eb-text-inverted, #fff)' : 'var(--eb-text-secondary)',
-              }}>
-              {level} {label}
-            </button>
-          );
-        })}
-      </div>
-      <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{current.desc}</span>
-
-      <div style={{ width: 1, height: 18, background: 'var(--eb-border-default)' }} />
-
-      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-        <span style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--eb-text-muted)' }}>Review</span>
-        <InfoTip
-          size={12}
-          title="Approve lessons before they’re shared?"
-          text="When on, every new lesson waits for your approval before entering the shared team knowledge. When off, lessons are shared immediately — you can still retire any of them later. (Needs autonomy 1 or higher.)"
-        />
-      </span>
-      <button
-        disabled={busy === 'review' || autonomy < 1}
-        title={autonomy < 1
-          ? 'Review needs autonomy 1 or higher — at 0, nothing is shared in the first place'
-          : (review ? 'Click to share new lessons immediately, without approval' : 'Click to hold every new lesson for your approval first')}
-        onClick={() => call('review', '/api/knowledge/review-mode', { teamId, enabled: !review })}
-        style={{
-          fontSize: 'var(--eb-text-xs)', fontWeight: 600, cursor: autonomy < 1 ? 'not-allowed' : 'pointer',
-          borderRadius: 'var(--eb-radius-md)', padding: '3px 10px', opacity: autonomy < 1 ? 0.5 : 1,
-          border: `1px solid ${review ? 'var(--eb-status-warning)' : 'var(--eb-border-default)'}`,
-          color: review ? 'var(--eb-status-warning)' : 'var(--eb-text-muted)', background: 'transparent',
-        }}>
-        {review ? 'on — you approve each lesson' : 'off — shared immediately'}
-      </button>
-
-      <div style={{ width: 1, height: 18, background: 'var(--eb-border-default)' }} />
-
-      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-        <span style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--eb-text-muted)' }}>Promotion gates</span>
-        <InfoTip
-          size={12}
-          title="Checkpoints for automatic promotion"
-          text="Only relevant at autonomy 3 (Auto-curate): each gate decides whether that promotion step may run on its own (“automatic”) or waits for you (“needs review”). At lower autonomy levels everything waits for you anyway."
-        />
-      </span>
-      {['team>team', 'agent>team', 'team>global'].map(tr => {
-        const mode = g[tr] || 'review';
-        const locked = tr === 'team>global';
-        return (
-          <span key={tr} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }} title={GATE_TIPS[tr]}>
-            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{GATE_LABELS[tr]}</span>
-            {locked ? (
-              <span style={{ fontSize: 10, color: 'var(--eb-text-muted)' }}>always reviewed</span>
-            ) : (
-              <button
-                disabled={busy === tr}
-                onClick={() => call(tr, '/api/knowledge/gates', { teamId, transition: tr, mode: mode === 'auto' ? 'review' : 'auto' })}
-                title={mode === 'auto'
-                  ? 'Runs on its own at autonomy 3 — click to require your review instead'
-                  : 'Waits for your review — click to let it run on its own at autonomy 3'}
-                style={{
-                  fontSize: 10, fontWeight: 600, cursor: 'pointer', borderRadius: 4, padding: '1px 6px',
-                  border: `1px solid ${mode === 'auto' ? 'var(--eb-status-success)' : 'var(--eb-status-warning)'}`,
-                  color: mode === 'auto' ? 'var(--eb-status-success)' : 'var(--eb-status-warning)', background: 'transparent',
-                }}>
-                {mode === 'auto' ? 'automatic' : 'needs review'}
-              </button>
-            )}
-          </span>
-        );
-      })}
-
-      <div style={{ width: 1, height: 18, background: 'var(--eb-border-default)' }} />
-
-      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-        <span style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--eb-text-muted)' }}>Storage</span>
-        <InfoTip
-          size={12}
-          title="Where this team’s knowledge is kept"
-          text="By default the shared knowledge lives in this team’s repository on a dedicated branch. You can point it at any branch, or at a separate knowledge repository. Changing the location does not move knowledge already stored at the old one."
-        />
-      </span>
-      <button
-        onClick={() => setStoreOpen(true)}
-        title="Configure where this team’s knowledge is stored (repo · branch · path)"
-        style={{
-          fontSize: 'var(--eb-text-xs)', fontWeight: 600, cursor: 'pointer',
-          borderRadius: 'var(--eb-radius-md)', padding: '3px 10px', background: 'transparent',
-          border: '1px solid var(--eb-border-default)', color: 'var(--eb-text-secondary)',
-          display: 'inline-flex', alignItems: 'center', gap: 5,
-        }}>
-        <GitBranch size={12} />
-        {gates.store?.mode === 'own-repo' ? 'separate repo' : 'in team repo'} · {gates.store?.branch || 'agent-knowledge'}
-        {isProtectedBranchName(gates.store?.branch) && <span title="This is a protected branch — pushes may be rejected." style={{ color: 'var(--eb-status-warning)' }}>⚠</span>}
-      </button>
-
-      {storeOpen && (
-        <StorageDialog
-          teamId={teamId}
-          gates={gates}
-          onClose={() => setStoreOpen(false)}
-          onSaved={() => { setStoreOpen(false); feedback('ok', 'Storage location saved. Existing knowledge stays where it was.'); onChanged && onChanged(); }}
-        />
-      )}
-
-      {gates.sharedWith && gates.sharedWith.length > 0 && (
-        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}
-          title={`These controls live on the shared environment '${gates.environment?.name || ''}' — changing them here also changes them for the listed team(s).`}>
-          ⚠ shared with {gates.sharedWith.join(', ')}
-        </span>
-      )}
-
-      {flash && (
-        <span style={{
-          marginLeft: 'auto', fontSize: 'var(--eb-text-xs)', fontWeight: 600,
-          color: flash.kind === 'ok' ? 'var(--eb-status-success)' : 'var(--eb-status-error, #d33)',
-        }}>
-          {flash.kind === 'ok' ? '✓ ' : '⚠ '}{flash.text}
-        </span>
-      )}
-    </div>
-  );
-}
-
-/* ── Storage-location dialog (#558) ─────────────────────────────────────────── */
-
-// Configure where a team's knowledge is stored: in the team's own repo (default,
-// on a dedicated branch) or a separate knowledge repo, plus branch + path. The
-// probe (reachability + access) and the persist both happen server-side on Save;
-// this dialog only collects + validates shape and makes the AC-5 "existing
-// knowledge stays put" contract explicit before it writes.
-function StorageDialog({ teamId, gates, onClose, onSaved }) {
+  /* ── Storage section state (consolidated from the former StorageDialog) ── */
   const initial = gates.store || {};
   const repositories = Array.isArray(gates.repositories) ? gates.repositories : [];
   const [mode, setMode] = useState(initial.mode === 'own-repo' ? 'own-repo' : 'in-repo');
   const [branch, setBranch] = useState(initial.branch || KB_DEFAULT_BRANCH);
   const [kbPath, setKbPath] = useState(initial.path || KB_DEFAULT_PATH);
-  // in-repo repo selection (only matters when the env has more than one repo).
   const [inRepoUrl, setInRepoUrl] = useState(
     (initial.repoRef && initial.repoRef.url) || (repositories[0] && repositories[0].url) || '',
   );
-  // own-repo target + credentials.
   const [ownUrl, setOwnUrl] = useState(initial.mode === 'own-repo' && initial.repoRef ? initial.repoRef.url : '');
   const [sshKeyId, setSshKeyId] = useState((initial.repoRef && initial.repoRef.sshKeyId) || '');
   const [githubTokenId, setGithubTokenId] = useState((initial.repoRef && initial.repoRef.githubTokenId) || '');
   const [sshKeys, setSshKeys] = useState([]);
   const [tokens, setTokens] = useState([]);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [storeBusy, setStoreBusy] = useState(false);
+  const [storeError, setStoreError] = useState('');
   const [ack, setAck] = useState(false);
 
   useEffect(() => {
@@ -1669,13 +1621,13 @@ function StorageDialog({ teamId, gates, onClose, onSaved }) {
     (mode === 'own-repo' && targetUrl !== origUrl) ||
     (mode === 'in-repo' && repositories.length > 1 && targetUrl !== origUrl);
 
-  const canSave = !busy
+  const canSaveStore = !storeBusy
     && (mode === 'in-repo' || ownUrl.trim() !== '')
     && branch.trim() !== ''
     && (!locationChanged || ack);
 
-  const save = () => {
-    setBusy(true); setError('');
+  const saveStore = () => {
+    setStoreBusy(true); setStoreError('');
     const repoRef = mode === 'own-repo'
       ? { url: ownUrl.trim(), sshKeyId: sshKeyId || '', githubTokenId: githubTokenId || '' }
       : { url: repositories.length > 1 ? inRepoUrl.trim() : '', sshKeyId: '', githubTokenId: '' };
@@ -1684,103 +1636,207 @@ function StorageDialog({ teamId, gates, onClose, onSaved }) {
       .then(async r => {
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-        onSaved && onSaved();
+        setAck(false);
+        feedback('ok', 'Storage location saved. Existing knowledge stays where it was.');
+        onChanged && onChanged();
       })
-      .catch(e => setError(e.message))
-      .finally(() => setBusy(false));
+      .catch(e => setStoreError(e.message))
+      .finally(() => setStoreBusy(false));
   };
 
   return (
-    <div onClick={onClose} style={overlay}>
-      <div onClick={e => e.stopPropagation()} style={{ ...dialog, width: 560, display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-          <GitBranch size={18} style={{ color: 'var(--eb-accent-primary)' }} />
-          <h2 style={{ margin: 0, fontSize: 'var(--eb-text-lg)', color: 'var(--eb-text-primary)' }}>Knowledge storage location</h2>
-          <button onClick={onClose} style={{ ...btn, marginLeft: 'auto' }}><X size={14} /></button>
-        </div>
+    <SidePanel open onClose={onClose} title="Team knowledge configuration" loading={busy != null || storeBusy}>
+      <p style={{ margin: '0 0 var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+        Control how this team turns what its agents learn into shared knowledge and reusable skills, and where that
+        knowledge is kept. Changes save immediately; running agents pick them up at their next rebuild.
+      </p>
 
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
-          Choose where this team’s shared knowledge base is kept. All knowledge operations —
-          the agents, the digest, and every push — follow this setting.
+      {shared.length > 0 && (
+        <div style={{
+          padding: 'var(--eb-space-2) var(--eb-space-3)', borderRadius: 'var(--eb-radius-md)',
+          border: '1px solid var(--eb-status-warning)', color: 'var(--eb-status-warning)',
+          fontSize: 'var(--eb-text-xs)', lineHeight: 1.5,
+        }}>
+          ⚠ These settings live on the shared environment{gates.environment?.name ? ` “${gates.environment.name}”` : ''} —
+          changing them here also changes them for {shared.join(', ')}.
         </div>
+      )}
 
-        <label style={lbl}>Where</label>
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
-          <Chip active={mode === 'in-repo'} title="Keep knowledge in the repository this team already uses" onClick={() => setMode('in-repo')}>In the team’s repo</Chip>
-          <Chip active={mode === 'own-repo'} title="Keep knowledge in a separate, dedicated repository" onClick={() => setMode('own-repo')}>Separate knowledge repo</Chip>
+      {/* Autonomy */}
+      <PanelSection
+        title="Autonomy"
+        blurb="How much this team may do on its own with what its agents learn. At 0 every agent keeps its lessons private; at 1 lessons are pooled into shared team knowledge; at 2 you also get suggestions when several agents learn the same thing; at 3 the team promotes converged knowledge into skills by itself, within the gates below. You can change this at any time — higher levels never bypass the gates.">
+        <div style={{ display: 'inline-flex', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', overflow: 'hidden' }}>
+          {AUTONOMY_LEVELS.map(({ level, label, tip }) => {
+            const active = level === autonomy;
+            return (
+              <button
+                key={level}
+                disabled={busy === 'autonomy'}
+                title={tip}
+                onClick={() => !active && call('autonomy', '/api/knowledge/autonomy', { teamId, level })}
+                style={{
+                  padding: '4px 12px', border: 'none', cursor: 'pointer', fontSize: 'var(--eb-text-xs)', fontWeight: 600,
+                  background: active ? 'var(--eb-accent-primary)' : 'transparent',
+                  color: active ? 'var(--eb-text-inverted, #fff)' : 'var(--eb-text-secondary)',
+                }}>
+                {level} {label}
+              </button>
+            );
+          })}
         </div>
+        <div style={{ marginTop: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{current.desc}</div>
+      </PanelSection>
 
-        {mode === 'in-repo' ? (
-          repositories.length === 0 ? (
-            <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-warning)' }}>
-              This team’s environment has no repository — pick “Separate knowledge repo”, or add a repository to the environment first.
-            </div>
-          ) : repositories.length > 1 ? (
-            <>
-              <label style={lbl}>Repository</label>
-              <select value={inRepoUrl} onChange={e => setInRepoUrl(e.target.value)} style={inp}>
-                {repositories.map(r => <option key={r.url} value={r.url}>{r.url}</option>)}
-              </select>
-            </>
-          ) : (
-            <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-              Uses <code>{repositories[0].url}</code> — the repository this team already clones.
-            </div>
-          )
-        ) : (
-          <>
-            <label style={lbl}>Knowledge repository URL</label>
-            <input value={ownUrl} onChange={e => setOwnUrl(e.target.value)} placeholder="git@github.com:org/knowledge.git" style={inp} />
-            <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
-              <div style={{ flex: 1 }}>
-                <label style={lbl}>SSH key</label>
-                <select value={sshKeyId} onChange={e => setSshKeyId(e.target.value)} style={inp}>
-                  <option value="">None</option>
-                  {sshKeys.map(k => <option key={k.id} value={k.id}>{k.name || k.id}</option>)}
-                </select>
+      {/* Review */}
+      <PanelSection
+        title="Review"
+        blurb="Whether new lessons wait for your approval before they enter the shared team knowledge. When on, each lesson is held in a review queue until you approve it; when off, lessons are shared as soon as an agent records them (you can still retire any of them later). Review needs autonomy 1 or higher — at level 0 nothing is shared in the first place, so it is unavailable.">
+        <button
+          disabled={busy === 'review' || autonomy < 1}
+          title={autonomy < 1
+            ? 'Review needs autonomy 1 or higher — at 0, nothing is shared in the first place'
+            : (review ? 'Click to share new lessons immediately, without approval' : 'Click to hold every new lesson for your approval first')}
+          onClick={() => call('review', '/api/knowledge/review-mode', { teamId, enabled: !review })}
+          style={{
+            fontSize: 'var(--eb-text-xs)', fontWeight: 600, cursor: autonomy < 1 ? 'not-allowed' : 'pointer',
+            borderRadius: 'var(--eb-radius-md)', padding: '4px 12px', opacity: autonomy < 1 ? 0.5 : 1,
+            border: `1px solid ${review ? 'var(--eb-status-warning)' : 'var(--eb-border-default)'}`,
+            color: review ? 'var(--eb-status-warning)' : 'var(--eb-text-muted)', background: 'transparent',
+          }}>
+          {review ? 'on — you approve each lesson' : 'off — shared immediately'}
+        </button>
+      </PanelSection>
+
+      {/* Promotion gates */}
+      <PanelSection
+        title="Promotion gates"
+        blurb="Checkpoints for turning knowledge into skills. Each gate decides whether that promotion step may run on its own (“automatic”) or waits for you (“needs review”). Gates only take effect at autonomy 3 (Auto-curate) — at lower levels every promotion waits for you anyway. Promotion to all teams always waits for your review and cannot be automated.">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+          {GATE_ORDER.map(tr => {
+            const mode2 = g[tr] || 'review';
+            const locked = tr === 'team>global';
+            return (
+              <div key={tr} style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }} title={GATE_TIPS[tr]}>
+                <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', flex: 1 }}>{GATE_LABELS[tr]}</span>
+                {locked ? (
+                  <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>always reviewed</span>
+                ) : (
+                  <button
+                    disabled={busy === tr}
+                    onClick={() => call(tr, '/api/knowledge/gates', { teamId, transition: tr, mode: mode2 === 'auto' ? 'review' : 'auto' })}
+                    title={mode2 === 'auto'
+                      ? 'Runs on its own at autonomy 3 — click to require your review instead'
+                      : 'Waits for your review — click to let it run on its own at autonomy 3'}
+                    style={{
+                      fontSize: 'var(--eb-text-xs)', fontWeight: 600, cursor: 'pointer', borderRadius: 4, padding: '2px 8px',
+                      border: `1px solid ${mode2 === 'auto' ? 'var(--eb-status-success)' : 'var(--eb-status-warning)'}`,
+                      color: mode2 === 'auto' ? 'var(--eb-status-success)' : 'var(--eb-status-warning)', background: 'transparent',
+                    }}>
+                    {mode2 === 'auto' ? 'automatic' : 'needs review'}
+                  </button>
+                )}
               </div>
-              <div style={{ flex: 1 }}>
-                <label style={lbl}>GitHub token</label>
-                <select value={githubTokenId} onChange={e => setGithubTokenId(e.target.value)} style={inp}>
-                  <option value="">None</option>
-                  {tokens.map(t => <option key={t.id} value={t.id}>{t.name || t.id}</option>)}
-                </select>
-              </div>
-            </div>
-          </>
-        )}
+            );
+          })}
+        </div>
+      </PanelSection>
 
-        <label style={lbl}>Branch</label>
-        <input value={branch} onChange={e => setBranch(e.target.value)} placeholder={KB_DEFAULT_BRANCH} style={inp} />
-        {isProtectedBranchName(branch) && (
-          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', lineHeight: 1.4 }}>
-            ⚠ <strong>{branch.trim()}</strong> is a protected branch. Agents push knowledge directly and often, so a
-            protected branch may reject those pushes. You can still choose it — just make sure pushes are allowed.
+      {/* Storage */}
+      <PanelSection
+        title="Storage"
+        blurb="Where this team’s shared knowledge base is kept — the agents, the digest and every push all follow this setting. Keep it in the repository this team already uses (on a dedicated branch) or point it at a separate knowledge repository. Changing the location does not move knowledge already stored at the old one; the team starts building fresh at the new location.">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+          <label style={lbl}>Where</label>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+            <Chip active={mode === 'in-repo'} title="Keep knowledge in the repository this team already uses" onClick={() => setMode('in-repo')}>In the team’s repo</Chip>
+            <Chip active={mode === 'own-repo'} title="Keep knowledge in a separate, dedicated repository" onClick={() => setMode('own-repo')}>Separate knowledge repo</Chip>
           </div>
-        )}
 
-        <label style={lbl}>Path within the repo</label>
-        <input value={kbPath} onChange={e => setKbPath(e.target.value)} placeholder={KB_DEFAULT_PATH} style={inp} />
+          {mode === 'in-repo' ? (
+            repositories.length === 0 ? (
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-warning)' }}>
+                This team’s environment has no repository — pick “Separate knowledge repo”, or add a repository to the environment first.
+              </div>
+            ) : repositories.length > 1 ? (
+              <>
+                <label style={lbl}>Repository</label>
+                <select value={inRepoUrl} onChange={e => setInRepoUrl(e.target.value)} style={inp}>
+                  {repositories.map(r => <option key={r.url} value={r.url}>{r.url}</option>)}
+                </select>
+              </>
+            ) : (
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+                Uses <code>{repositories[0].url}</code> — the repository this team already clones.
+              </div>
+            )
+          ) : (
+            <>
+              <label style={lbl}>Knowledge repository URL</label>
+              <input value={ownUrl} onChange={e => setOwnUrl(e.target.value)} placeholder="git@github.com:org/knowledge.git" style={inp} />
+              <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+                <div style={{ flex: 1 }}>
+                  <label style={lbl}>SSH key</label>
+                  <select value={sshKeyId} onChange={e => setSshKeyId(e.target.value)} style={inp}>
+                    <option value="">None</option>
+                    {sshKeys.map(k => <option key={k.id} value={k.id}>{k.name || k.id}</option>)}
+                  </select>
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label style={lbl}>GitHub token</label>
+                  <select value={githubTokenId} onChange={e => setGithubTokenId(e.target.value)} style={inp}>
+                    <option value="">None</option>
+                    {tokens.map(t => <option key={t.id} value={t.id}>{t.name || t.id}</option>)}
+                  </select>
+                </div>
+              </div>
+            </>
+          )}
 
-        {locationChanged && (
-          <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
-            <input type="checkbox" checked={ack} onChange={e => setAck(e.target.checked)} style={{ marginTop: 2 }} />
-            <span>I understand that knowledge already stored at the current location <strong>stays there</strong> — changing this setting does not move or copy it. The team starts building knowledge fresh at the new location.</span>
-          </label>
-        )}
+          <label style={lbl}>Branch</label>
+          <input value={branch} onChange={e => setBranch(e.target.value)} placeholder={KB_DEFAULT_BRANCH} style={inp} />
+          {isProtectedBranchName(branch) && (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', lineHeight: 1.4 }}>
+              ⚠ <strong>{branch.trim()}</strong> is a protected branch. Agents push knowledge directly and often, so a
+              protected branch may reject those pushes. You can still choose it — just make sure pushes are allowed.
+            </div>
+          )}
 
-        {error && (
-          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error, #d33)', fontWeight: 600 }}>⚠ Not saved: {error}</div>
-        )}
+          <label style={lbl}>Path within the repo</label>
+          <input value={kbPath} onChange={e => setKbPath(e.target.value)} placeholder={KB_DEFAULT_PATH} style={inp} />
 
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end' }}>
-          <button onClick={onClose} style={btn}>Cancel</button>
-          <button onClick={save} disabled={!canSave} style={{ ...primaryBtn, opacity: canSave ? 1 : 0.5, cursor: canSave ? 'pointer' : 'not-allowed' }}>
-            {busy ? 'Checking & saving…' : 'Save location'}
-          </button>
+          {locationChanged && (
+            <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+              <input type="checkbox" checked={ack} onChange={e => setAck(e.target.checked)} style={{ marginTop: 2 }} />
+              <span>I understand that knowledge already stored at the current location <strong>stays there</strong> — changing this setting does not move or copy it. The team starts building knowledge fresh at the new location.</span>
+            </label>
+          )}
+
+          {storeError && (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error, #d33)', fontWeight: 600 }}>⚠ Not saved: {storeError}</div>
+          )}
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <button onClick={saveStore} disabled={!canSaveStore} style={{ ...primaryBtn, opacity: canSaveStore ? 1 : 0.5, cursor: canSaveStore ? 'pointer' : 'not-allowed' }}>
+              <GitBranch size={13} />
+              {storeBusy ? 'Checking & saving…' : 'Save storage location'}
+            </button>
+          </div>
         </div>
-      </div>
-    </div>
+      </PanelSection>
+
+      {flash && (
+        <div style={{
+          position: 'sticky', bottom: 0, marginTop: 'var(--eb-space-4)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)', borderRadius: 'var(--eb-radius-md)',
+          background: 'var(--eb-bg-surface)', border: `1px solid ${flash.kind === 'ok' ? 'var(--eb-status-success)' : 'var(--eb-status-error, #d33)'}`,
+          fontSize: 'var(--eb-text-xs)', fontWeight: 600,
+          color: flash.kind === 'ok' ? 'var(--eb-status-success)' : 'var(--eb-status-error, #d33)',
+        }}>
+          {flash.kind === 'ok' ? '✓ ' : '⚠ '}{flash.text}
+        </div>
+      )}
+    </SidePanel>
   );
 }
 

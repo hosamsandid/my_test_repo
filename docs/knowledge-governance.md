@@ -31,20 +31,24 @@ but **settable nowhere in the UI**. Added:
 | Method + path | Where | Purpose |
 |---|---|---|
 | `PUT /api/knowledge/autonomy` `{ teamId, level }` | admin-console | Set the dial (0..3), membership-scoped, proxied. |
-| `POST /internal/knowledge/autonomy` | orchestrator | `writeTeamAutonomy` — raw round-trip write onto the shared env (unrelated fields untouched). |
+| `POST /internal/knowledge/autonomy` | orchestrator | `writeTeamAutonomy` — writes the team's autonomy level to the per-team config file (`/workspace/teams/<teamId>/knowledge-config.json`), leaving the shared env untouched. |
 
 `GET /api/knowledge/gates` already returned the level; the Knowledge Flow
-**Learning controls** panel (`GatePanel` in `KnowledgeFlow.jsx`) now renders a 0..3
-selector with a plain-language description per level, next to the existing
-promotion-gate switches. Orchestrator-side effects (convergence / suggestions /
+**Configure knowledge** slide-out panel (`ConfigurePanel` in `KnowledgeFlow.jsx`,
+opened via the *Configure knowledge* button on the page) renders a 0..3 selector
+with a plain-language description per level, together with the review toggle,
+promotion-gate switches, and storage settings in one unified surface (PR #569). Orchestrator-side effects (convergence / suggestions /
 curation) read the env fresh each collector pass, so a change takes effect
 immediately; the agent-side harvest hint + KB provisioning are read at spawn/seed,
 so a running agent picks the change up on its next rebuild (the panel says so).
 
 ## 2. Supervised-review mode (approve before it enters the shared KB)
 
-`knowledgeReview: boolean` on the shared env (default **false** = today's
-behaviour byte-for-byte; `knowledgeReviewEnabled(env)`, tolerant of the strings
+`knowledgeReview: boolean` stored in the per-team config file
+(`/workspace/teams/<teamId>/knowledge-config.json`, overlaid onto the shared env
+at every read via `mergeTeamKnowledgeConfig` — so two teams sharing one env can
+each have independent review settings). Default **false** = today's behaviour
+byte-for-byte; `knowledgeReviewEnabled(env)`, tolerant of the strings
 `"true"`/`"1"`). Orthogonal to the autonomy dial: the dial gates *how much
 automation* acts on knowledge, review gates *what enters the curated KB at all*.
 
@@ -157,7 +161,7 @@ picker.
   endpoints); `admin-console/api/api.js` (the five routes above + `review` on the
   gates GET + `knowledgeReviewOn`).
 - **Edit — UI:** `admin-console/src/pages/KnowledgeFlow.jsx` (autonomy selector +
-  review toggle in `GatePanel`, `ReviewQueuePanel`, item-card `Retire`,
+  review toggle in `ConfigurePanel`, `ReviewQueuePanel`, item-card `Retire`,
   `ShareDialog`); `admin-console/src/theme/tokens.css` (hover-reveal for the retire
   button).
 

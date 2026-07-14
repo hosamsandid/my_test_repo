@@ -260,6 +260,22 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     } catch (e) { setImportError(e.message); }
   }
 
+  // Live team: materialize a new role as a team-member immediately (#585) via the
+  // existing member-create path — no draft round-trip. The member id mirrors the
+  // wizard's `<teamId>-<roleId>` scheme so a name that resolves to an existing
+  // member surfaces as a clear 409 (E1) instead of silently overwriting. Skills
+  // and MCP are left to inherit from the team/env — no overrides (AC4).
+  async function addLiveRole({ displayName, systemPrompt }) {
+    const slug = String(displayName || 'role').toLowerCase()
+      .replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'role';
+    const body = { id: `${scope}-${slug}`, displayName: displayName.trim() };
+    const prompt = (systemPrompt || '').trim();
+    if (prompt) body.systemPromptOverride = prompt;
+    const created = await apiCall('POST', `/api/agents/${encodeURIComponent(scope)}/members`, body);
+    refetch(); // the graph now shows the new member as a live node (AC5)
+    return (created && created.id) || body.id;
+  }
+
   // Continue an imported blueprint as an editable draft instead of materializing
   // straight away — turns the read-only preview into a real draft you can keep
   // building on before creating a team.
@@ -325,7 +341,10 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           </>
         )}
         {isTeamScope && !imported && (
-          <ToolbarButton onClick={editAsDraft} icon={Boxes}>Edit as draft</ToolbarButton>
+          <>
+            <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus}>Add role</ToolbarButton>
+            <ToolbarButton onClick={editAsDraft} icon={Boxes}>Edit as draft</ToolbarButton>
+          </>
         )}
         <ToolbarButton onClick={exportBundle} icon={Download} disabled={!!imported}>Export</ToolbarButton>
       </div>
@@ -439,11 +458,16 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         />
       )}
 
-      {addRoleOpen && isDraft && (
+      {addRoleOpen && (isDraft || (isTeamScope && !imported)) && (
         <AddRoleDialog
           onClose={() => setAddRoleOpen(false)}
           onCreate={async ({ displayName, systemPrompt }) => {
-            const id = await draftOps.addRole({ displayName, systemPrompt });
+            // Draft: append a free-form role to the bundle. Live team: materialize
+            // the role as a team-member immediately (#585). Errors propagate so the
+            // dialog can surface them and stay open (AC7 / E1).
+            const id = isDraft
+              ? await draftOps.addRole({ displayName, systemPrompt })
+              : await addLiveRole({ displayName, systemPrompt });
             setAddRoleOpen(false);
             setSelectedId(id);
           }}
@@ -479,13 +503,18 @@ function AddRoleDialog({ onClose, onCreate }) {
   const [systemPrompt, setSystemPrompt] = useState('');
   const [notes, setNotes] = useState('');
   const [busy, setBusy] = useState(false);
+  // Surfaced when onCreate rejects (e.g. a live-team id collision, E1) so the
+  // dialog stays open with the error instead of failing silently (AC7).
+  const [submitError, setSubmitError] = useState(null);
   // LLM-assisted prompt authoring (see POST /api/agent-prompt/generate).
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState(null);
   const submit = async () => {
     if (!displayName.trim()) return;
     setBusy(true);
+    setSubmitError(null);
     try { await onCreate({ displayName: displayName.trim(), systemPrompt }); }
+    catch (e) { setSubmitError(e.message || 'Failed to add role'); }
     finally { setBusy(false); }
   };
   const generate = async () => {
@@ -553,6 +582,9 @@ function AddRoleDialog({ onClose, onCreate }) {
             placeholder="What this role does… — or use Generate above to draft it"
             style={{ ...field, minHeight: 160, resize: 'vertical', fontFamily: 'var(--eb-font-mono)' }} />
         </label>
+        {submitError && (
+          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error, #d33)' }}>{submitError}</div>
+        )}
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)' }}>
           <button onClick={onClose} disabled={busy} style={{
             background: 'none', color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',

@@ -276,6 +276,210 @@ function buildSkillProvenance({ from, to, teamId, entryIds, candidate, promotedB
 }
 
 // ---------------------------------------------------------------------------
+// Extend an EXISTING skill from converged knowledge (issue #553)
+// ---------------------------------------------------------------------------
+//
+// The promotion above always CREATES a new skill. Extending instead folds a
+// converged cluster (or an operator's manual combine) into a skill that already
+// lives in the target tier's pool: the SKILL.md is re-synthesised from the prior
+// content + the new knowledge, and the provenance UNIONS the new entry ids onto
+// the existing record (existing ids/origin preserved). Tier is symmetric to the
+// promotion target — team skills for a team-tier extend, global for a global one
+// — so the same two KB transitions apply; agent→team lifts stay create-only.
+
+const EXTEND_TRANSITIONS = new Set(['team>team', 'team>global']);
+
+// Validate an extend(from→to, into targetName) request. Same provenance +
+// tier-transition contract as validatePromotion, but the skill name identifies an
+// EXISTING skill (existence is checked in api.js against the pool) and skillMd is
+// the re-synthesised document. Returns { ok, error?, from, to, targetName,
+// entryIds, skillMd }.
+function validateExtension(input) {
+  const b = input && typeof input === 'object' ? input : {};
+  const from = typeof b.from === 'string' ? b.from.trim() : '';
+  const to = typeof b.to === 'string' ? b.to.trim() : '';
+  if (!TIERS.includes(from)) return { ok: false, error: `from must be one of ${TIERS.join('|')}` };
+  if (!TIERS.includes(to)) return { ok: false, error: `to must be one of ${TIERS.join('|')}` };
+  if (!EXTEND_TRANSITIONS.has(`${from}>${to}`)) {
+    return { ok: false, error: `unsupported extend ${from}→${to} (allowed: team→team, team→global)` };
+  }
+  const targetName = typeof b.targetName === 'string' ? b.targetName.trim() : '';
+  if (!targetName || !SKILL_NAME_RE.test(targetName)) return { ok: false, error: 'invalid target skill name' };
+  const entryIds = Array.isArray(b.entryIds)
+    ? [...new Set(b.entryIds.filter((x) => typeof x === 'string' && /^[0-9a-f]{12}$/.test(x)))]
+    : [];
+  if (entryIds.length === 0) {
+    return { ok: false, error: 'entryIds is required (provenance): an extension must trace to >=1 KB entry' };
+  }
+  const skillMd = typeof b.skillMd === 'string' ? b.skillMd : '';
+  if (skillMd.trim() === '') return { ok: false, error: 'skillMd must be non-empty' };
+  return { ok: true, from, to, targetName, entryIds, skillMd };
+}
+
+// Meta-prompt to RE-SYNTHESISE an existing SKILL.md together with new knowledge
+// into one coherent document (AC5). Pure — api.js supplies model + transport.
+// The prior content is authoritative and must be preserved (nothing dropped);
+// the new lessons are merged, deduplicated and generalised into the whole.
+function buildSkillExtensionRequest(existingSkillMd, candidate) {
+  const c = candidate && typeof candidate === 'object' ? candidate : {};
+  const members = Array.isArray(c.members) ? c.members : [];
+  const facts = members.map((m) => `- ${(m && m.text) || ''}`).join('\n') || `- ${c.text || ''}`;
+  const prior = typeof existingSkillMd === 'string' ? existingSkillMd : '';
+  const instruction = [
+    'You curate reusable skills for a team of AI software-delivery agents.',
+    'An existing skill document already captures durable team knowledge. New,',
+    'independently-recorded lessons about the same area have converged and should',
+    'be folded into it. Produce ONE coherent, updated SKILL.md that MERGES the new',
+    'lessons into the existing document — reorganise, deduplicate and generalise as',
+    'needed. Preserve all durable knowledge already in the existing document; never',
+    'drop information just because it was not repeated in the new lessons.',
+    '',
+    'EXISTING SKILL.md (authoritative — keep its knowledge):',
+    prior,
+    '',
+    `New lessons to fold in (kind: ${c.kind || 'fact'}):`,
+    facts,
+    '',
+    'Requirements for the SKILL.md you produce:',
+    '- Keep a single H1 title line, then short sections.',
+    '- Integrate the new lessons; do not just append them as a separate list.',
+    '- Capture durable, reusable knowledge — no PR/issue-specific or run-specific detail.',
+    '- Do NOT invent tool names, repo names, file paths or credentials that were not stated.',
+    '- Output ONLY the Markdown of the SKILL.md — no preamble, no surrounding code fences.',
+  ].join('\n');
+  return { max_tokens: 1024, messages: [{ role: 'user', content: instruction }] };
+}
+
+// Heuristic re-synthesis fallback (dependency-free, mirrors the create-path
+// draft's role): keep the existing document verbatim and append the new, not-yet-
+// present lessons under an "## Added knowledge" section. Deduplicates against the
+// existing text (case-insensitive substring) so re-running is close to a no-op
+// (E3/E5). Returns { skillMd, llmDrafted:false, added } — `added` is the count of
+// genuinely new lines so the caller can reject an empty/no-op extend.
+function buildHeuristicSkillExtension(existingSkillMd, candidate) {
+  const c = candidate && typeof candidate === 'object' ? candidate : {};
+  const prior = (typeof existingSkillMd === 'string' ? existingSkillMd : '').replace(/\s+$/, '');
+  const priorLc = prior.toLowerCase();
+  const members = Array.isArray(c.members) ? c.members : [];
+  const statements = [];
+  const seen = new Set();
+  for (const m of members) {
+    const t = (m && typeof m.text === 'string' ? m.text.trim() : '');
+    if (!t) continue;
+    const lc = t.toLowerCase();
+    if (seen.has(lc)) continue;
+    seen.add(lc);
+    if (priorLc.includes(lc)) continue; // already covered by the existing doc (E3)
+    statements.push(t);
+  }
+  if (statements.length === 0) {
+    return { skillMd: prior, llmDrafted: false, added: 0 };
+  }
+  const lines = [prior, '', '## Added knowledge', ''];
+  for (const s of statements) lines.push(`- ${s}`);
+  lines.push('');
+  return { skillMd: lines.join('\n'), llmDrafted: false, added: statements.length };
+}
+
+// Union the new provenance onto the existing record (AC6). Existing entryIds,
+// originAgents, convergence and the original promotion metadata are preserved; the
+// new entry ids/agents are merged in, and a dated extension entry (actor + which
+// ids were added) is appended to `extensions[]`. Returns the merged provenance.
+function extendSkillProvenance({ existingProv, from, to, teamId, entryIds, candidate, extendedBy, now } = {}) {
+  const ts = typeof now === 'string' && now.trim() ? now.trim() : new Date().toISOString();
+  const prev = existingProv && typeof existingProv === 'object' ? existingProv : {};
+  const c = candidate && typeof candidate === 'object' ? candidate : {};
+  const members = Array.isArray(c.members) ? c.members : [];
+
+  const prevIds = Array.isArray(prev.entryIds) ? prev.entryIds : [];
+  const addedIds = (Array.isArray(entryIds) ? entryIds : []).filter((id) => !prevIds.includes(id));
+  const mergedIds = [...prevIds, ...addedIds];
+
+  const newAgents = [...new Set(
+    members.map((m) => m && m.originAgent).filter((x) => typeof x === 'string' && x.trim()),
+  )];
+  const prevAgents = Array.isArray(prev.originAgents) ? prev.originAgents : [];
+  const mergedAgents = [...new Set([...prevAgents, ...newAgents])];
+
+  const prevConvergence = Array.isArray(prev.convergence) ? prev.convergence : [];
+  const newConvergence = Array.isArray(c.convergence) ? c.convergence : newAgents;
+  const mergedConvergence = [...new Set([...prevConvergence, ...newConvergence])];
+
+  const sourceRefs = Array.isArray(prev.sourceRefs) ? prev.sourceRefs.slice() : [];
+  const sessions = Array.isArray(prev.sessions) ? prev.sessions.slice() : [];
+  for (const m of members) {
+    if (m && m.correlationId) sessions.push({ agentId: m.originAgent || null, correlationId: m.correlationId });
+    if (m && Array.isArray(m.sourceRefs)) {
+      for (const r of m.sourceRefs) if (r && r.kind && r.ref) sourceRefs.push({ kind: r.kind, ref: r.ref });
+    }
+  }
+
+  const extensions = Array.isArray(prev.extensions) ? prev.extensions.slice() : [];
+  extensions.push({
+    entryIds: addedIds.slice(),
+    addedAgents: newAgents,
+    extendedBy: typeof extendedBy === 'string' && extendedBy.trim() ? extendedBy.trim() : 'operator',
+    extendedAt: ts,
+  });
+
+  return {
+    ...prev,
+    fromTier: prev.fromTier || from,
+    toTier: to || prev.toTier,
+    teamId: teamId || prev.teamId || c.teamId || 'default',
+    entryIds: mergedIds,
+    canonicalId: prev.canonicalId || mergedIds[0] || null,
+    originAgents: mergedAgents,
+    convergence: mergedConvergence,
+    sourceRefs,
+    sessions,
+    originTeamId: prev.originTeamId || teamId || c.teamId || 'default',
+    extensions,
+    lastExtendedAt: ts,
+    lastExtendedBy: typeof extendedBy === 'string' && extendedBy.trim() ? extendedBy.trim() : 'operator',
+  };
+}
+
+// Auto-match a converged candidate to an existing skill (AC4). Given the
+// candidate and a list of eligible skills ({ name, tier, entryIds? }), return the
+// best match or null. Signals, strongest first: (1) any overlap between the
+// candidate's KB entry ids and a skill's provenance entryIds — a direct lineage
+// hit; (2) token overlap between the candidate text and the skill name. A skill is
+// only proposed when a signal actually fires — the default stays "create new".
+function matchExistingSkill(candidate, existingSkills) {
+  const c = candidate && typeof candidate === 'object' ? candidate : {};
+  const skills = Array.isArray(existingSkills) ? existingSkills : [];
+  if (skills.length === 0) return null;
+  const entryIds = new Set(Array.isArray(c.entryIds) ? c.entryIds : []);
+  const textTokens = new Set(
+    String(c.text || '')
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((t) => t.length >= 4),
+  );
+
+  let best = null;
+  let bestScore = 0;
+  for (const s of skills) {
+    if (!s || typeof s.name !== 'string' || !s.name) continue;
+    let idOverlap = 0;
+    for (const id of Array.isArray(s.entryIds) ? s.entryIds : []) {
+      if (entryIds.has(id)) idOverlap += 1;
+    }
+    const nameTokens = s.name.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    let nameOverlap = 0;
+    for (const t of nameTokens) if (textTokens.has(t)) nameOverlap += 1;
+    // Weight id-lineage far above name similarity so a shared entry always wins.
+    const score = idOverlap * 100 + nameOverlap;
+    if (score > bestScore) {
+      bestScore = score;
+      best = { name: s.name, tier: s.tier || null, score, idOverlap, nameOverlap };
+    }
+  }
+  return bestScore > 0 ? best : null;
+}
+
+// ---------------------------------------------------------------------------
 // Directed cross-team sharing (human-in-control lateral knowledge flow)
 // ---------------------------------------------------------------------------
 
@@ -395,6 +599,12 @@ module.exports = {
   buildSkillDraftRequest,
   validatePromotion,
   buildSkillProvenance,
+  EXTEND_TRANSITIONS,
+  validateExtension,
+  buildSkillExtensionRequest,
+  buildHeuristicSkillExtension,
+  extendSkillProvenance,
+  matchExistingSkill,
   SHARE_SOURCES,
   validateShareToTeam,
   buildShareProvenance,

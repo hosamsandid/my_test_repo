@@ -1031,7 +1031,7 @@ export default function ChatPanel({
             gap: 'var(--eb-space-2)',
           }}>
             <Loader2 size={20} style={{ animation: 'spin 1s linear infinite' }} />
-            <div>{creating ? 'Opening DM with agent…' : 'Loading conversation…'}</div>
+            <div>{creating ? 'Opening conversation with agent…' : 'Loading conversation…'}</div>
           </div>
         )}
 

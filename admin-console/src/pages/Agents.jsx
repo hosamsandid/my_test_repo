@@ -2458,7 +2458,7 @@ export default function Agents() {
                   Orphaned agents ({orphans.length})
                 </div>
                 <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 2 }}>
-                  These agents reference a parent that no longer exists. Delete each one to remove its workspace and Matrix user.
+                  These agents reference a parent that no longer exists. Delete each one to remove its workspace and chat account.
                 </div>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
@@ -2720,7 +2720,7 @@ function renderDeleteMessage(target) {
         <>
           <p style={{ margin: 0 }}>
             Delete this {parentNoun}? It currently has no {childNounPlural} attached.
-            The workspace, configuration and Matrix user will be removed permanently.
+            The workspace, configuration and chat account will be removed permanently.
           </p>
         </>
       );
@@ -2738,7 +2738,7 @@ function renderDeleteMessage(target) {
           fontSize: 'var(--eb-text-sm)',
         }}>
           ⚠ This will permanently delete the {parentNoun} <strong>and all {children.length} {children.length === 1 ? childNoun : childNounPlural}</strong> below.
-          Workspaces, session histories and Matrix users for every listed agent will be removed. This cannot be undone.
+          Workspaces, session histories and chat accounts for every listed agent will be removed. This cannot be undone.
         </div>
         <p style={{ margin: 'var(--eb-space-3) 0 var(--eb-space-1)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
           {childNounPlural[0].toUpperCase() + childNounPlural.slice(1)} that will be deleted:

@@ -14,7 +14,7 @@ const auth = require('./auth');
 const audit = require('./audit');
 const githubEventLog = require('./github-event-log');
 const maintenanceMode = require('./maintenance-mode');
-const { computeScope, visibleTeam, visibleAgent } = require('./scope');
+const { computeScope, visibleTeam, visibleAgent, canManageTeam, visibleUser, describeAuthz } = require('./scope');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
@@ -169,7 +169,17 @@ app.use('/api', audit.auditMutations);
 // auth endpoints are registered first; the gate then requires a valid session
 // cookie for all other /api/* routes. Static assets + the SPA fallback stay
 // open so the console can load and render its login screen.
-auth.registerAuthRoutes(app);
+// Inject the authorization descriptor resolver (#584) so the session/login
+// responses carry the caller's admin indicator + per-team roles for the
+// frontend, reusing the same users/memberships indexes as getScope.
+auth.registerAuthRoutes(app, {
+  describeAuthz: (subject) => describeAuthz({
+    username: subject,
+    adminUsername: ADMIN_USERNAME,
+    users: readJsonFile(USERS_INDEX, []),
+    memberships: readJsonFile(MEMBERSHIPS_INDEX, []),
+  }),
+});
 app.use('/api', auth.gate);
 
 // Read recent audit entries (newest first). Protected by the gate above.
@@ -5985,18 +5995,25 @@ function normalizeMcpServersInput(input) {
  * tenant/visibility scope — distinct from the Agent-Team wizard at POST
  * /api/teams. Auth & list-filtering are deliberately out of scope here.
  */
-function proxyAdmin(req, res, subPath) {
+// Low-level call onto the orchestrator's /internal/admin/* surface. Resolves to
+// `{ status, data }` so scope-aware handlers can inspect/filter the payload
+// before responding; rejects only on transport failure (surfaced as 502).
+function callAdmin(method, subPath, body) {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
-  const init = { method: req.method, headers: { 'Content-Type': 'application/json' } };
-  if (req.method === 'POST' || req.method === 'PUT') {
-    init.body = JSON.stringify(req.body || {});
+  const init = { method, headers: { 'Content-Type': 'application/json' } };
+  if (method === 'POST' || method === 'PUT') {
+    init.body = JSON.stringify(body || {});
   }
-  return fetch(`${orchestratorUrl}/internal/admin/${subPath}`, init)
-    .then(async (resp) => {
-      const text = await resp.text();
-      const data = text ? JSON.parse(text) : {};
-      res.status(resp.status).json(data);
-    })
+  return fetch(`${orchestratorUrl}/internal/admin/${subPath}`, init).then(async (resp) => {
+    const text = await resp.text();
+    return { status: resp.status, data: text ? JSON.parse(text) : {} };
+  });
+}
+
+// Straight pass-through (used after the caller has already been authorized).
+function proxyAdmin(req, res, subPath) {
+  return callAdmin(req.method, subPath, req.body)
+    .then(({ status, data }) => res.status(status).json(data))
     .catch((err) => res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` }));
 }
 
@@ -6009,25 +6026,122 @@ function adminQuery(req) {
   return s ? `?${s}` : '';
 }
 
-app.get('/api/admin/teams', (req, res) => proxyAdmin(req, res, 'teams'));
-app.post('/api/admin/teams', apiLimiter, (req, res) => proxyAdmin(req, res, 'teams'));
-app.get('/api/admin/teams/:id', (req, res) => proxyAdmin(req, res, `teams/${encodeURIComponent(req.params.id)}`));
-app.put('/api/admin/teams/:id', apiLimiter, (req, res) => proxyAdmin(req, res, `teams/${encodeURIComponent(req.params.id)}`));
-app.delete('/api/admin/teams/:id', apiLimiter, (req, res) => proxyAdmin(req, res, `teams/${encodeURIComponent(req.params.id)}`));
+// Deny a management action the caller isn't authorized for (#584). Returns true
+// (and has already sent a 403) when denied, so callers early-return on it.
+function denyAdmin(res, reason) {
+  res.status(403).json({ error: reason || 'Forbidden', code: 'forbidden' });
+  return true;
+}
 
-app.get('/api/admin/users', (req, res) => proxyAdmin(req, res, `users${adminQuery(req)}`));
-app.post('/api/admin/users', apiLimiter, (req, res) => proxyAdmin(req, res, 'users'));
-app.get('/api/admin/users/:id', (req, res) => proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}`));
-app.put('/api/admin/users/:id', apiLimiter, (req, res) => proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}`));
-app.delete('/api/admin/users/:id', apiLimiter, (req, res) => proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}`));
+// ── Admin surface: scope-filtered reads + role-gated mutations (#584) ────────
+// The env admin and System Admins keep `all: true` (full visibility, no
+// regression to the single-operator setup). Non-admins see only teams they
+// belong to, only users/memberships within those teams, and may mutate only a
+// team they are the team-admin of. Team/user record creation and global role
+// assignment stay System-Admin actions (docs/multi-user-concept.md §3).
+
+// Teams — list is filtered to the caller's own teams (AC1).
+app.get('/api/admin/teams', (req, res) => {
+  const scope = getScope(req);
+  return callAdmin('GET', 'teams')
+    .then(({ status, data }) => {
+      if (status >= 400 || !Array.isArray(data)) return res.status(status).json(data);
+      res.json(scope.all ? data : data.filter(t => visibleTeam(scope, t.id)));
+    })
+    .catch((err) => res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` }));
+});
+// Team creation is a System-Admin action (a fresh team has no members, so a
+// non-admin creator could not even see it afterwards).
+app.post('/api/admin/teams', apiLimiter, (req, res) => {
+  const scope = getScope(req);
+  if (!scope.all) return denyAdmin(res, 'Only a System Admin may create teams');
+  return proxyAdmin(req, res, 'teams');
+});
+app.get('/api/admin/teams/:id', (req, res) => {
+  const scope = getScope(req);
+  if (!visibleTeam(scope, req.params.id)) return res.status(404).json({ error: 'Team not found' });
+  return proxyAdmin(req, res, `teams/${encodeURIComponent(req.params.id)}`);
+});
+app.put('/api/admin/teams/:id', apiLimiter, (req, res) => {
+  const scope = getScope(req);
+  if (!canManageTeam(scope, req.params.id)) return denyAdmin(res, 'You may not manage this team');
+  return proxyAdmin(req, res, `teams/${encodeURIComponent(req.params.id)}`);
+});
+app.delete('/api/admin/teams/:id', apiLimiter, (req, res) => {
+  const scope = getScope(req);
+  if (!canManageTeam(scope, req.params.id)) return denyAdmin(res, 'You may not manage this team');
+  return proxyAdmin(req, res, `teams/${encodeURIComponent(req.params.id)}`);
+});
+
+// Users — list/read filtered to users who share one of the caller's teams
+// (AC2). Global user-record CRUD + role assignment is System-Admin only (§3).
+app.get('/api/admin/users', (req, res) => {
+  const scope = getScope(req);
+  const memberships = readJsonFile(MEMBERSHIPS_INDEX, []);
+  return callAdmin('GET', `users${adminQuery(req)}`)
+    .then(({ status, data }) => {
+      if (status >= 400 || !Array.isArray(data)) return res.status(status).json(data);
+      res.json(scope.all ? data : data.filter(u => visibleUser(scope, u.id, memberships)));
+    })
+    .catch((err) => res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` }));
+});
+app.post('/api/admin/users', apiLimiter, (req, res) => {
+  const scope = getScope(req);
+  if (!scope.all) return denyAdmin(res, 'Only a System Admin may manage user records');
+  return proxyAdmin(req, res, 'users');
+});
+app.get('/api/admin/users/:id', (req, res) => {
+  const scope = getScope(req);
+  const memberships = readJsonFile(MEMBERSHIPS_INDEX, []);
+  if (!visibleUser(scope, req.params.id, memberships)) return res.status(404).json({ error: 'User not found' });
+  return proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}`);
+});
+app.put('/api/admin/users/:id', apiLimiter, (req, res) => {
+  const scope = getScope(req);
+  if (!scope.all) return denyAdmin(res, 'Only a System Admin may manage user records');
+  return proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}`);
+});
+app.delete('/api/admin/users/:id', apiLimiter, (req, res) => {
+  const scope = getScope(req);
+  if (!scope.all) return denyAdmin(res, 'Only a System Admin may manage user records');
+  return proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}`);
+});
 // Local password set/clear (#374). The verify path is NOT proxied here — it is
 // called directly by the public login route (see auth.js), pre-session.
-app.post('/api/admin/users/:id/password', apiLimiter, (req, res) => proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}/password`));
-app.delete('/api/admin/users/:id/password', apiLimiter, (req, res) => proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}/password`));
+app.post('/api/admin/users/:id/password', apiLimiter, (req, res) => {
+  const scope = getScope(req);
+  if (!scope.all) return denyAdmin(res, 'Only a System Admin may set user passwords');
+  return proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}/password`);
+});
+app.delete('/api/admin/users/:id/password', apiLimiter, (req, res) => {
+  const scope = getScope(req);
+  if (!scope.all) return denyAdmin(res, 'Only a System Admin may clear user passwords');
+  return proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}/password`);
+});
 
-app.get('/api/admin/memberships', (req, res) => proxyAdmin(req, res, `memberships${adminQuery(req)}`));
-app.post('/api/admin/memberships', apiLimiter, (req, res) => proxyAdmin(req, res, 'memberships'));
-app.delete('/api/admin/memberships', apiLimiter, (req, res) => proxyAdmin(req, res, `memberships${adminQuery(req)}`));
+// Memberships — list filtered to the caller's teams (AC2); mutations require
+// team-admin of the target team (AC3).
+app.get('/api/admin/memberships', (req, res) => {
+  const scope = getScope(req);
+  return callAdmin('GET', `memberships${adminQuery(req)}`)
+    .then(({ status, data }) => {
+      if (status >= 400 || !Array.isArray(data)) return res.status(status).json(data);
+      res.json(scope.all ? data : data.filter(m => visibleTeam(scope, m.teamId)));
+    })
+    .catch((err) => res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` }));
+});
+app.post('/api/admin/memberships', apiLimiter, (req, res) => {
+  const scope = getScope(req);
+  const teamId = req.body && req.body.teamId;
+  if (!canManageTeam(scope, teamId)) return denyAdmin(res, 'You may not manage members of this team');
+  return proxyAdmin(req, res, 'memberships');
+});
+app.delete('/api/admin/memberships', apiLimiter, (req, res) => {
+  const scope = getScope(req);
+  const teamId = req.query && req.query.teamId;
+  if (!canManageTeam(scope, teamId)) return denyAdmin(res, 'You may not manage members of this team');
+  return proxyAdmin(req, res, `memberships${adminQuery(req)}`);
+});
 
 app.get('/api/environments', (req, res) => {
   const scope = getScope(req);

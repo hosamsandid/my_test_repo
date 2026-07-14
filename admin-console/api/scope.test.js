@@ -4,7 +4,10 @@
 // Run: node --test admin-console/api/scope.test.js
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { computeScope, visibleTeam, visibleAgent } = require('./scope');
+const {
+  computeScope, visibleTeam, visibleAgent,
+  canManageTeam, visibleUser, describeAuthz,
+} = require('./scope');
 
 const users = [
   { id: 'u-sys', subject: 'sys@corp.com', systemAdmin: true },
@@ -83,4 +86,84 @@ test('visibleAgent: admin sees private agents of others', () => {
 test('visibleAgent: missing visibility defaults to team-wide', () => {
   const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
   assert.equal(visibleAgent(alice, { teamId: 'payments' }), true);
+});
+
+// ── Admin-surface scoping & gating (#584) ──────────────────────────────────
+
+test('computeScope records per-team roles for non-admins', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(alice.roles.get('payments'), 'team-admin');
+  assert.equal(alice.roles.get('default'), 'team-member');
+  assert.equal(alice.roles.has('risk'), false);
+});
+
+test('canManageTeam: admin manages any team', () => {
+  const env = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canManageTeam(env, 'risk'), true);
+  assert.equal(canManageTeam(sys, 'anything'), true);
+});
+
+test('canManageTeam: team-admin manages only their admin team', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canManageTeam(alice, 'payments'), true);  // team-admin
+  assert.equal(canManageTeam(alice, 'default'), false);  // only a member
+  assert.equal(canManageTeam(alice, 'risk'), false);     // not a member
+});
+
+test('canManageTeam: team-member manages nothing', () => {
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canManageTeam(bob, 'risk'), false);
+});
+
+test('canManageTeam: missing teamId collapses to default', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canManageTeam(alice, undefined), false); // alice is only a member of default
+});
+
+test('visibleUser: non-admin sees only users sharing a team', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(visibleUser(alice, 'u-a', memberships), true);  // self
+  assert.equal(visibleUser(alice, 'u-b', memberships), false); // bob is risk-only
+  const sys = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
+  assert.equal(visibleUser(sys, 'u-b', memberships), true);    // admin sees all
+});
+
+test('visibleUser: zero-team caller sees no user (fail-closed)', () => {
+  const ghostUsers = [...users, { id: 'u-lonely', subject: 'lonely@corp.com' }];
+  const s = computeScope({ username: 'lonely@corp.com', adminUsername: 'admin', users: ghostUsers, memberships });
+  assert.equal(visibleUser(s, 'u-lonely', memberships), false);
+  assert.equal(visibleUser(s, 'u-a', memberships), false);
+});
+
+test('describeAuthz: env admin', () => {
+  const a = describeAuthz({ username: 'admin', adminUsername: 'admin', users, memberships });
+  assert.equal(a.admin, true);
+  assert.equal(a.envAdmin, true);
+  assert.equal(a.systemAdmin, false);
+  assert.deepEqual(a.teams, []);
+});
+
+test('describeAuthz: System-Admin user', () => {
+  const a = describeAuthz({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(a.admin, true);
+  assert.equal(a.envAdmin, false);
+  assert.equal(a.systemAdmin, true);
+  assert.equal(a.userId, 'u-sys');
+});
+
+test('describeAuthz: team user carries per-team roles', () => {
+  const a = describeAuthz({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(a.admin, false);
+  assert.equal(a.systemAdmin, false);
+  assert.equal(a.userId, 'u-a');
+  const byTeam = Object.fromEntries(a.teams.map(t => [t.teamId, t.role]));
+  assert.deepEqual(byTeam, { payments: 'team-admin', default: 'team-member' });
+});
+
+test('describeAuthz: unknown subject fails closed', () => {
+  const a = describeAuthz({ username: 'ghost@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(a.admin, false);
+  assert.equal(a.systemAdmin, false);
+  assert.deepEqual(a.teams, []);
 });

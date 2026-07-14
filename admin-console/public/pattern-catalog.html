@@ -1,7 +1,10 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="light">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
+  <script>
+    (function(){var t=localStorage.getItem('pc-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();
+  </script>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Pattern Catalog — Mainframe Modernization</title>
   <style>
@@ -388,6 +391,16 @@
     .rev-date { white-space: nowrap; }
     .rev-author { white-space: nowrap; }
 
+    /* ── Theme toggle button ── */
+    #theme-toggle {
+      background: var(--surface-2); border: 1px solid var(--border);
+      color: var(--text-muted); cursor: pointer;
+      font-size: 14px; line-height: 1; padding: 5px 10px; border-radius: 7px;
+      transition: color 0.15s, background 0.15s; margin-left: 4px;
+      white-space: nowrap;
+    }
+    #theme-toggle:hover { color: var(--text); background: var(--surface-3); }
+
     /* ── View toggle ── */
     .view-toggle {
       display: flex; align-items: center; gap: 4px; margin-bottom: 14px;
@@ -471,6 +484,7 @@
   <a href="#refinement" class="nav-mvv">Refinement Phase</a>
   <a href="#revision-log">Revision Log</a>
   <span class="nav-version">v1.10.0</span>
+  <button id="theme-toggle" title="Toggle light / dark mode" onclick="toggleTheme()">☀</button>
 </nav>
 
 
@@ -484,8 +498,8 @@
   <div class="doc-meta">
     <span>&#128197; Created: 2026-06-23</span>
     <span>&#128196; Version: v1.10.0</span>
-    <span>&#128101; Author: Stefan Copetchi</span>
-    <span>&#127959; Project: Mainframe (Interest-Bearing Policy Loans) PoC</span>
+    <span>&#128101; Author: Project Team</span>
+    <span>&#127959; Project: Legacy COBOL Modernization PoC</span>
   </div>
 
   <!-- Introduction -->
@@ -863,7 +877,7 @@
 
       <div>
         <div class="pc-sec-label">Technical Implementation</div>
-        <p class="pc-text">Phase A begins with automated parsing of COBOL source via the Cobolitics tool, supplemented by manual analysis of external C modules (LNM actuarial bridge and DMDH001P data handler) that are invisible to the static parser. Phase B enriches structural artifacts with business-language descriptions — use cases, transformation specs per program, and a 2,749-rule business rules catalog. Phase C consolidates all artifacts into a Knowledge Graph using a KDM-inspired ontology with 10 node types and 8 edge types. The Analysis Readiness gate runs a cross-consistency validator across 10 structural invariants; a PASS verdict is required before Forward Engineering may begin.</p>
+        <p class="pc-text">Phase A begins with automated parsing of COBOL source via the Cobolitics tool, supplemented by manual analysis of external C modules (actuarial math bridge and data handler module) that are invisible to the static parser. Phase B enriches structural artifacts with business-language descriptions — use cases, transformation specs per program, and a 2,749-rule business rules catalog. Phase C consolidates all artifacts into a Knowledge Graph using a KDM-inspired ontology with 10 node types and 8 edge types. The Analysis Readiness gate runs a cross-consistency validator across 10 structural invariants; a PASS verdict is required before Forward Engineering may begin.</p>
       </div>
 
       <div>
@@ -873,7 +887,7 @@
             <div class="pc-step-num" style="background:var(--re-dim);color:var(--re-light)">A</div>
             <div>
               <div class="pc-step-title">Phase A — Static Analysis</div>
-              <div class="pc-step-desc">Parse all COBOL sources with Cobolitics; analyse the LNM C bridge and DMDH001P data handler; produce inventory, call graph, copybook cross-references, data access matrix, data division structures (2,424 fields), and CICS command profiles.</div>
+              <div class="pc-step-desc">Parse all COBOL sources with Cobolitics; analyse the actuarial C bridge and data handler module; produce inventory, call graph, copybook cross-references, data access matrix, data division structures (2,424 fields), and CICS command profiles.</div>
             </div>
           </div>
           <div class="pc-step">
@@ -967,7 +981,7 @@
         <div>
           <div class="pc-sec-label">Technical Implementation</div>
           <p class="pc-text">Cobolitics is invoked per-program and its outputs are merged into slice-level canonical JSON artifacts. It extracts five categories of structural information: <strong style="color:var(--text)">(1) Program inventory</strong> — name, type (online/batch), CICS interaction classification. <strong style="color:var(--text)">(2) Copybook cross-references</strong> — all COPY statements with §7-classified relationship types. <strong style="color:var(--text)">(3) Call graph edges</strong> — all CALL statements with resolution status (static/dynamic/unresolved). <strong style="color:var(--text)">(4) Data division structures</strong> — all data items with PIC/USAGE clauses, 88-level conditions, and redefine chains (2,424 fields across the slice). <strong style="color:var(--text)">(5) CICS command profiles</strong> — all EXEC CICS verbs with per-program interaction surfaces.</p>
-          <p class="pc-text">Known limitation: Cobolitics resolves only static CALL statements. Dynamic dispatch patterns — KONST&#8594;MOVE&#8594;CALL sequences and K-function routing through DMDH001P — are not traced and produce unresolved edges in the call graph. These gaps are addressed by the External C Modules Analysis pattern (SA-002) and documented as upstream fix candidates (UF-007 in phase-a-upstream-fix-candidates.json).</p>
+          <p class="pc-text">Known limitation: Cobolitics resolves only static CALL statements. Dynamic dispatch patterns — constant-routing&#8594;MOVE&#8594;CALL sequences and indirect routing through the data handler module — are not traced and produce unresolved edges in the call graph. These gaps are addressed by the External C Modules Analysis pattern (SA-002) and documented as upstream fix candidates (UF-007 in phase-a-upstream-fix-candidates.json).</p>
         </div>
 
         <div>
@@ -991,14 +1005,14 @@
               <div class="pc-step-num" style="background:var(--sa-dim);color:var(--sa-light)">3</div>
               <div>
                 <div class="pc-step-title">Identify unresolved call edges and missing entries</div>
-                <div class="pc-step-desc">Flag DMDH001P dispatch sites (11 edges unresolved), missing *Z supplement programs (11 inventory entries), and other missing-source callees for Phase A.2 follow-up.</div>
+                <div class="pc-step-desc">Flag data handler dispatch sites (11 edges unresolved), missing supplement programs (11 inventory entries), and other missing-source callees for Phase A.2 follow-up.</div>
               </div>
             </div>
             <div class="pc-step">
               <div class="pc-step-num" style="background:var(--sa-dim);color:var(--sa-light)">4</div>
               <div>
                 <div class="pc-step-title">Document known limitations as upstream fix candidates</div>
-                <div class="pc-step-desc">Record K-function dispatch resolution gap as UF-007; catalogue 14 upstream fix candidates (UF-001..014) for future Cobolitics enhancements so they are not silently lost.</div>
+                <div class="pc-step-desc">Record indirect dispatch resolution gap as UF-007; catalogue 14 upstream fix candidates (UF-001..014) for future Cobolitics enhancements so they are not silently lost.</div>
               </div>
             </div>
           </div>
@@ -1019,8 +1033,8 @@
             <div class="pc-cons">
               <div class="pc-proscons-label">Weaknesses</div>
               <ul>
-                <li>Cannot resolve dynamic dispatch patterns (KONST&#8594;MOVE&#8594;CALL, K-function dispatch via DMDH001P)</li>
-                <li>11 DMDH dispatch edges and 11 *Z program entries missing from initial pass — require supplementary Phase A.2 analysis</li>
+                <li>Cannot resolve dynamic dispatch patterns (constant-routing&#8594;MOVE&#8594;CALL, indirect dispatch via the data handler module)</li>
+                <li>11 data handler dispatch edges and 11 supplement program entries missing from initial pass — require supplementary Phase A.2 analysis</li>
                 <li>Structural output must be enriched with business semantics in Phase B — static parsing alone is insufficient for migration planning</li>
               </ul>
             </div>
@@ -1053,14 +1067,14 @@
 
         <div>
           <div class="pc-sec-label">Functional Overview</div>
-          <p class="pc-text">The COBOL codebase integrates with two distinct C subsystems that the Cobolitics static parser cannot see: the <strong style="color:var(--sa-light)">LNM actuarial math engine</strong> (pure stateless computation, no database access) and the <strong style="color:var(--sa-light)">DMDH001P data handler bridge</strong> (routes all DB2 access for 8 COBOL programs). Without explicit analysis of these subsystems, 11 call-graph edges remain unresolved and the data access matrix is incomplete for every DMDH caller — making it impossible to correctly model data ownership in the Forward Engineering phase.</p>
-          <p class="pc-text">This pattern describes the structured two-track approach used to catalog and integrate these hidden C dependencies. It is the direct complement to SA-001: Cobolitics provides the structural baseline, and this analysis fills the gaps that static COBOL parsing structurally cannot cover. The findings feed directly into Pre-Migration Gate isolation scoring, where DMDH dispatch edges receive a reduced weight of 0.5 rather than 1.0.</p>
+          <p class="pc-text">The COBOL codebase integrates with two distinct C subsystems that the Cobolitics static parser cannot see: the <strong style="color:var(--sa-light)">external actuarial math engine</strong> (pure stateless computation, no database access) and the <strong style="color:var(--sa-light)">data handler bridge module</strong> (routes all DB2 access for 8 COBOL programs). Without explicit analysis of these subsystems, 11 call-graph edges remain unresolved and the data access matrix is incomplete for every data handler caller — making it impossible to correctly model data ownership in the Forward Engineering phase.</p>
+          <p class="pc-text">This pattern describes the structured two-track approach used to catalog and integrate these hidden C dependencies. It is the direct complement to SA-001: Cobolitics provides the structural baseline, and this analysis fills the gaps that static COBOL parsing structurally cannot cover. The findings feed directly into Pre-Migration Gate isolation scoring, where data handler dispatch edges receive a reduced weight of 0.5 rather than 1.0.</p>
         </div>
 
         <div>
           <div class="pc-sec-label">Technical Implementation</div>
-          <p class="pc-text"><strong style="color:var(--text)">Track 1 — LNM Actuarial Math Engine:</strong> The LNM0011X (63 dispatch entries) and LNM0021X (15 function families) C bridge dispatchers were cataloged via the slice supplement C source (LNM0505F.c). Copybook pairings (LNM&#8594;bridge family) were documented, providing the COBOL&#8596;C interface contract. Because LNM modules are stateless mathematical functions with no DB2 access, three Java migration paths were identified: JNI wrapping (preserve the binary), Java rewrite (translate the algorithm), or microservice extraction.</p>
-          <p class="pc-text"><strong style="color:var(--text)">Track 2 — DMDH001P Data Handler Bridge:</strong> The K-function dispatch protocol was reverse-engineered from COBOL caller patterns and the 17 zugriffsmodul bodies in the slice supplement. The protocol: callers populate a 288-byte DMDHCTR1 control structure (sub-structs SD/GI/RC/FB with SQLCA arm), set DH-ZG-MODUL (zugriffsmodul name) and DH-FKT-CODE (SELECT/INSERT/UPDATE/DELETE), then CALL DMDH001P. Ten K-function &#8594; DB2 table mappings were cataloged, covering LNV087K1, LNV111K1, LNV112K1, LNV222A1, LNV233A1, LNT066N, LNT306N and others. These findings were propagated back into call-graph.json (11 new dynamic_call_konst edges) and data-access-matrix.json (accesses_via_dispatch entries for 8 DMDH callers). In the Java target, DMDH001P is replaced entirely by the JPA/Hibernate persistence layer.</p>
+          <p class="pc-text"><strong style="color:var(--text)">Track 1 — Actuarial Math Engine:</strong> The primary dispatcher CALCENG1 (63 dispatch entries) and secondary dispatcher CALCENG2 (15 function families) were cataloged via the C bridge source file (calcengine.c). Copybook pairings (actuarial engine&#8594;bridge family) were documented, providing the COBOL&#8596;C interface contract. Because actuarial math modules are stateless mathematical functions with no DB2 access, three Java migration paths were identified: JNI wrapping (preserve the binary), Java rewrite (translate the algorithm), or microservice extraction.</p>
+          <p class="pc-text"><strong style="color:var(--text)">Track 2 — Data Handler Bridge Module:</strong> The data handler dispatch protocol was reverse-engineered from COBOL caller patterns and the 17 access module bodies in the slice supplement. The protocol: callers populate the handler control structure (DHCTRBLK), set the target access module name and function code (SELECT/INSERT/UPDATE/DELETE), then CALL DHANDLER. Ten dispatch function &#8594; DB2 table mappings were cataloged, covering the key tables in the insurance domain. These findings were propagated back into call-graph.json (11 new dynamic_dispatch edges) and data-access-matrix.json (accesses_via_dispatch entries for 8 data handler callers). In the Java target, DHANDLER is replaced entirely by the JPA/Hibernate persistence layer.</p>
         </div>
 
         <div>
@@ -1070,35 +1084,35 @@
               <div class="pc-step-num" style="background:var(--sa-dim);color:var(--sa-light)">1</div>
               <div>
                 <div class="pc-step-title">Identify unresolved call edges from Cobolitics output</div>
-                <div class="pc-step-desc">List all call-graph edges with resolution_category = unresolved_external or dynamic; identify LNM bridge entries and DMDH dispatch sites as the two C subsystem tracks requiring separate analysis.</div>
+                <div class="pc-step-desc">List all call-graph edges with resolution_category = unresolved_external or dynamic; identify actuarial bridge entries and data handler dispatch sites as the two C subsystem tracks requiring separate analysis.</div>
               </div>
             </div>
             <div class="pc-step">
               <div class="pc-step-num" style="background:var(--sa-dim);color:var(--sa-light)">2</div>
               <div>
-                <div class="pc-step-title">Track 1 — Catalogue LNM dispatch entries</div>
-                <div class="pc-step-desc">Analyse LNM0505F.c and slice supplement; document LNM0011X and LNM0021X dispatch tables (63 + 15 function families); define COBOL&#8596;C copybook pairings; identify Java migration path per LNM family.</div>
+                <div class="pc-step-title">Track 1 — Catalogue actuarial engine dispatch entries</div>
+                <div class="pc-step-desc">Analyse calcengine.c and slice supplement; document CALCENG1 and CALCENG2 dispatch tables (63 + 15 function families); define COBOL&#8596;C copybook pairings; identify Java migration path per actuarial function family.</div>
               </div>
             </div>
             <div class="pc-step">
               <div class="pc-step-num" style="background:var(--sa-dim);color:var(--sa-light)">3</div>
               <div>
-                <div class="pc-step-title">Track 2 — Reverse-engineer DMDH K-function dispatch protocol</div>
-                <div class="pc-step-desc">Analyse COBOL caller patterns; inspect 17 zugriffsmodul bodies; decode DMDHCTR1 288-byte control structure; catalogue 10 K-function &#8594; DB2 table mappings in dmdh-k-function-catalog.json.</div>
+                <div class="pc-step-title">Track 2 — Reverse-engineer data handler dispatch protocol</div>
+                <div class="pc-step-desc">Analyse COBOL caller patterns; inspect 17 access module bodies; decode the handler control structure (DHCTRBLK); catalogue 10 dispatch function &#8594; DB2 table mappings in handler-dispatch-catalog.json.</div>
               </div>
             </div>
             <div class="pc-step">
               <div class="pc-step-num" style="background:var(--sa-dim);color:var(--sa-light)">4</div>
               <div>
                 <div class="pc-step-title">Propagate findings into canonical artifacts</div>
-                <div class="pc-step-desc">Add 11 dynamic_call_konst edges to call-graph.json; add accesses_via_dispatch entries to data-access-matrix.json for 8 DMDH callers; annotate inventory.json with DMDH dispatcher metadata.</div>
+                <div class="pc-step-desc">Add 11 dynamic_dispatch edges to call-graph.json; add accesses_via_dispatch entries to data-access-matrix.json for 8 data handler callers; annotate inventory.json with data handler dispatcher metadata.</div>
               </div>
             </div>
             <div class="pc-step">
               <div class="pc-step-num" style="background:var(--sa-dim);color:var(--sa-light)">5</div>
               <div>
                 <div class="pc-step-title">Document residual gaps and Java migration options</div>
-                <div class="pc-step-desc">Record 2 partially-unresolved DMDH callers (LND0195F, LNDHFEHL) as CAV-001; specify Java migration strategy — LNM (JNI/rewrite/microservice) and DMDH (fully replaced by JPA/Hibernate ivv persistence framework).</div>
+                <div class="pc-step-desc">Record 2 partially-unresolved data handler callers (PROG195F, ERRHNDLR) as CAV-001; specify Java migration strategy — actuarial engine (JNI/rewrite/microservice) and data handler (fully replaced by JPA/Hibernate persistence layer).</div>
               </div>
             </div>
           </div>
@@ -1111,7 +1125,7 @@
               <div class="pc-proscons-label">Strengths</div>
               <ul>
                 <li>Fills critical call-graph gaps — 8 programs gain complete, accurate data ownership visibility</li>
-                <li>Enables correct Pre-Migration Gate isolation scoring by weighting DMDH dispatch edges at 0.5 rather than a misleading 1.0</li>
+                <li>Enables correct Pre-Migration Gate isolation scoring by weighting data handler dispatch edges at 0.5 rather than a misleading 1.0</li>
                 <li>Documents the Java migration path for both C subsystems before any code is generated</li>
                 <li>Produces self-contained catalogs that decouple future KG updates from re-analysis of the C sources</li>
               </ul>
@@ -1119,10 +1133,10 @@
             <div class="pc-cons">
               <div class="pc-proscons-label">Weaknesses</div>
               <ul>
-                <li>Requires deep reverse-engineering expertise — no tool support exists for the DMDH dispatch protocol</li>
-                <li>DMDH001P is binary-only; its full behavior must be inferred entirely from callers and zugriffsmodul bodies</li>
-                <li>2 DMDH callers remain partially unresolved after catalog completion (CAV-001)</li>
-                <li>Catalogs must be maintained manually if caller code or zugriffsmoduls change</li>
+                <li>Requires deep reverse-engineering expertise — no tool support exists for the data handler dispatch protocol</li>
+                <li>The data handler module is binary-only; its full behavior must be inferred entirely from callers and access module bodies</li>
+                <li>2 data handler callers remain partially unresolved after catalog completion (CAV-001)</li>
+                <li>Catalogs must be maintained manually if caller code or access modules change</li>
               </ul>
             </div>
           </div>
@@ -1132,7 +1146,7 @@
           <div class="pc-sec-label">Key Artifacts</div>
           <div class="pc-artifacts">
             <span class="pc-artifact">c-integration-catalog.json</span>
-            <span class="pc-artifact">dmdh-k-function-catalog.json</span>
+            <span class="pc-artifact">handler-dispatch-catalog.json</span>
             <span class="pc-artifact">c-integration-overview.md</span>
             <span class="pc-artifact">cobol-missing-sources-catalog.json</span>
           </div>
@@ -1167,7 +1181,7 @@
 
         <div>
           <div class="pc-sec-label">Technical Implementation</div>
-          <p class="pc-text">Rules are extracted through paragraph-by-paragraph analysis of all 24 in-scope COBOL programs and classified by type: validation, calculation, condition, decision, or transformation. At the use-case level, 1,714 rules are absorbed into 8 lifecycle use cases (offer lifecycle, disbursement, offer deletion, repayment, conditions amendment, contract display, master data display, value sheet). 1,035 rules are cross-cutting — shared logic appearing across multiple use cases that must not be duplicated in the Java implementation.</p>
+          <p class="pc-text">Rules are extracted through paragraph-by-paragraph analysis of all 24 in-scope COBOL programs and classified by type: validation, calculation, condition, decision, or transformation. At the use-case level, 1,714 rules are absorbed into 8 lifecycle use cases (UC-001 through UC-008). 1,035 rules are cross-cutting — shared logic appearing across multiple use cases that must not be duplicated in the Java implementation.</p>
           <p class="pc-text">Decision tables (91 total, 72 absorbed into use cases) provide structured multi-condition representations reviewable by non-technical stakeholders, with 5–7 key rules per use case expressed as business prose. A quirks catalog captures behavioral outliers, non-obvious calculations, and edge cases that could be missed in a linear reading of the COBOL. Twenty-four transformation specifications (one per program) serve as the authoritative blueprint bridging paragraph-level rules to the Java service methods a Forward Engineering agent must produce.</p>
         </div>
 
@@ -1185,7 +1199,7 @@
               <div class="pc-step-num" style="background:var(--sem-dim);color:var(--sem-light)">2</div>
               <div>
                 <div class="pc-step-title">Extract and classify rules per paragraph</div>
-                <div class="pc-step-desc">Identify conditions (88-level references), validations (range/type checks), calculations (interest, repayment, premium formulas), decisions (branch logic), and transformations (data mapping); record in rule-catalog.json.</div>
+                <div class="pc-step-desc">Identify conditions (88-level references), validations (range/type checks), calculations (financial computation formulas), decisions (branch logic), and transformations (data mapping); record in rule-catalog.json.</div>
               </div>
             </div>
             <div class="pc-step">
@@ -1235,7 +1249,7 @@
               <div class="pc-proscons-label">Weaknesses</div>
               <ul>
                 <li>Highly labor-intensive — requires domain-expert review of every COBOL paragraph</li>
-                <li>German insurance terminology (Tilgung, Sollstellung, Auszahlung, Angebot) creates a significant knowledge barrier</li>
+                <li>Domain-specific terminology in the customer's business language creates a significant knowledge barrier</li>
                 <li>Rule boundary ambiguity — some business logic spans multiple paragraphs and programs, making scoping judgements necessary</li>
                 <li>Cross-cutting rules require careful deduplication to avoid inflating rule equivalence test counts</li>
               </ul>
@@ -1284,7 +1298,7 @@
         <div>
           <div class="pc-sec-label">Technical Implementation</div>
           <p class="pc-text">The KG uses a minimal KDM-inspired (Knowledge Discovery Metamodel) ontology — only the relationships that have proven structurally or semantically significant are included. The ontology defines <strong style="color:var(--text)">10 node types</strong>: Program, Copybook, ExternalProgram, Paragraph, DB2Table, DB2Cursor, CICSInteractionPoint, 88LevelCondition, BusinessRule, and BusinessRuleDecision. <strong style="color:var(--text)">8 edge types</strong> connect them: calls, depends-on, owns, reads, writes, dispatches_via, implements, and implements_decision. All nodes carry <code style="font-family:monospace;color:var(--kg-light);font-size:12px">prog:</code>-prefixed IDs for unambiguous cross-artifact reference.</p>
-          <p class="pc-text">Three companion artifacts are generated: a traceability-matrix.json (program&#8596;rule&#8596;paragraph cross-reference consumed by FE generation agents), a cross-reference-index.json (bidirectional lookup index for fast tooling queries), and an interactive kg-viewer.html for visual exploration. A cross-consistency validator verifies KG coherence against all source artifacts before Phase C is signed off — this check caught a missing node (LNM0105F) that would have silently produced an incorrect isolation score in Pre-Migration Gate had it gone undetected.</p>
+          <p class="pc-text">Three companion artifacts are generated: a traceability-matrix.json (program&#8596;rule&#8596;paragraph cross-reference consumed by FE generation agents), a cross-reference-index.json (bidirectional lookup index for fast tooling queries), and an interactive kg-viewer.html for visual exploration. A cross-consistency validator verifies KG coherence against all source artifacts before Phase C is signed off — this check caught a missing node (an actuarial math engine module) that would have silently produced an incorrect isolation score in Pre-Migration Gate had it gone undetected.</p>
         </div>
 
         <div>
@@ -1308,7 +1322,7 @@
               <div class="pc-step-num" style="background:var(--kg-dim);color:var(--kg-light)">3</div>
               <div>
                 <div class="pc-step-title">Add structural edges</div>
-                <div class="pc-step-desc">Populate <em>calls</em> edges from call-graph.json; <em>depends-on</em> from copybook-xref.json; <em>reads/writes</em> from data-access-matrix.json; <em>dispatches_via</em> from dmdh-k-function-catalog.json.</div>
+                <div class="pc-step-desc">Populate <em>calls</em> edges from call-graph.json; <em>depends-on</em> from copybook-xref.json; <em>reads/writes</em> from data-access-matrix.json; <em>dispatches_via</em> from handler-dispatch-catalog.json.</div>
               </div>
             </div>
             <div class="pc-step">
@@ -1523,7 +1537,7 @@
         <div>
           <div class="pc-sec-label">Technical Implementation</div>
           <p class="pc-text">The composite score is a weighted sum of three independent components, each measuring a different dimension of structural coupling:</p>
-          <p class="pc-text"><strong style="color:var(--text)">Call isolation (40%)</strong> — computed as <code style="font-family:monospace;font-size:12px;color:var(--p0-light)">1 / (1 + weighted_call_degree)</code>. Not all call edges count equally: a normal resolved in-slice call has weight 1.0; a DMDH dispatch edge has weight 0.5 (the actual target is a data-access function, not a business program); a call to a missing-source program has weight 0.0 (no in-slice coupling to measure). This weighting prevents DMDH-heavy programs from appearing artificially isolated or artificially coupled.</p>
+          <p class="pc-text"><strong style="color:var(--text)">Call isolation (40%)</strong> — computed as <code style="font-family:monospace;font-size:12px;color:var(--p0-light)">1 / (1 + weighted_call_degree)</code>. Not all call edges count equally: a normal resolved in-slice call has weight 1.0; a data handler dispatch edge has weight 0.5 (the actual target is a data-access function, not a business program); a call to a missing-source program has weight 0.0 (no in-slice coupling to measure). This weighting prevents handler-heavy programs from appearing artificially isolated or artificially coupled.</p>
           <p class="pc-text"><strong style="color:var(--text)">Shared data isolation (40%)</strong> — the sum of copybook fan-in counts across all copybooks the program references. A copybook referenced by many programs is a shared data structure; modifying it requires coordinating all its consumers. <strong style="color:var(--text)">Cross-UC isolation (20%)</strong> — count of distinct lifecycle use cases in which the program appears, normalized over 8. Programs that appear in many use cases are structural hubs that affect multiple migration slices simultaneously.</p>
           <p class="pc-text">Programs tier into three bands: <strong style="color:#22c55e">Tier A</strong> (≥ 0.60 — well-isolated structural leaves, safe to migrate early), <strong style="color:var(--p0-light)">Tier B</strong> (0.30–0.59 — moderately coupled, sequence with care), <strong style="color:#ef4444">Tier C</strong> (&#60; 0.30 — structurally embedded, migrate last). Three use cases with null scores (UC-003, UC-006, UC-007) are hollow — handled by the Java front-end with no COBOL substrate; a null score must not be read as "easy to migrate."</p>
         </div>
@@ -1542,7 +1556,7 @@
               <div class="pc-step-num" style="background:var(--p0-dim);color:var(--p0-light)">2</div>
               <div>
                 <div class="pc-step-title">Compute weighted call degree per program</div>
-                <div class="pc-step-desc">For each program, sum edge weights across outbound call-graph edges: resolved in-slice &#215; 1.0, DMDH dispatch &#215; 0.5, missing-source &#215; 0.0. Derive call isolation: 1 / (1 + weighted_degree).</div>
+                <div class="pc-step-desc">For each program, sum edge weights across outbound call-graph edges: resolved in-slice &#215; 1.0, data handler dispatch &#215; 0.5, missing-source &#215; 0.0. Derive call isolation: 1 / (1 + weighted_degree).</div>
               </div>
             </div>
             <div class="pc-step">
@@ -1583,7 +1597,7 @@
               <div class="pc-proscons-label">Strengths</div>
               <ul>
                 <li>Objective, data-driven input to sequencing — replaces intuition with structural evidence derived directly from RE artifacts</li>
-                <li>Weighted edge treatment eliminates noise from DMDH dispatch and missing-source callees that would otherwise distort scores</li>
+                <li>Weighted edge treatment eliminates noise from data handler dispatch and missing-source callees that would otherwise distort scores</li>
                 <li>Tier classification makes results immediately actionable — Phase 1A can read the tiers directly into slice sequencing</li>
                 <li>Hollow use cases are explicitly flagged with null scores, preventing them from being silently misread as trivially simple</li>
               </ul>
@@ -1592,7 +1606,7 @@
               <div class="pc-proscons-label">Weaknesses</div>
               <ul>
                 <li>Scores capture structural isolation only — a Tier A program can still carry highly complex business rules</li>
-                <li>The 0.5 weight for DMDH edges and 0.05 shared-write penalty are calibrated design choices that could be argued differently</li>
+                <li>The 0.5 weight for data handler edges and 0.05 shared-write penalty are calibrated design choices that could be argued differently</li>
                 <li>Three hollow use cases (UC-003, UC-006, UC-007) require a separate migration treatment that the score alone does not prescribe</li>
               </ul>
             </div>
@@ -1631,7 +1645,7 @@
 
         <div>
           <div class="pc-sec-label">Functional Overview</div>
-          <p class="pc-text">Before any Java code is generated, the target architecture and technology stack must be explicitly defined and locked in a binding document. This ensures all Forward Engineering agents produce code that is consistent, directly integrable, and immediately deployable — rather than discovering incompatibilities when 8 independently generated slices are assembled. The choice of JBoss EAP 8 / Jakarta EE 10 is not discretionary: it is mandated by the <strong style="color:var(--text)">iVAS JEE 2027 profile</strong>, the production environment the migrated application must run in. Every other technology choice flows from this constraint.</p>
+          <p class="pc-text">Before any Java code is generated, the target architecture and technology stack must be explicitly defined and locked in a binding document. This ensures all Forward Engineering agents produce code that is consistent, directly integrable, and immediately deployable — rather than discovering incompatibilities when 8 independently generated slices are assembled. The choice of JBoss EAP 8 / Jakarta EE 10 is not discretionary: it is mandated by the target <strong style="color:var(--text)">production runtime profile</strong>, the production environment the migrated application must run in. Every other technology choice flows from this constraint.</p>
           <p class="pc-text">The architecture pattern and tech stack choices have a compounding effect: they determine what Java features agents may use, which dependencies they may declare, which annotations are correct, and how layers must be structured. Getting these right before Phase 3 begins eliminates an entire class of post-generation rework — rework that would otherwise require touching every generated slice to align it with a late-decided standard.</p>
         </div>
 
@@ -1648,14 +1662,14 @@
               <div class="pc-step-num" style="background:var(--fe-dim);color:var(--arch)">&#9679;</div>
               <div>
                 <div class="pc-step-title">Runtime — JBoss EAP 8.0.6.GA / Jakarta EE 10 / Java 21 LTS</div>
-                <div class="pc-step-desc">Mandatory runtime per iVAS JEE 2027 profile. Provides CDI 4.0, JAX-RS 3.1, JPA 3.1 (Hibernate 5.6), Jakarta Batch 2.1, Jakarta Security 3.0, Transactions 2.0, and MicroProfile 6.1.</div>
+                <div class="pc-step-desc">Mandatory runtime per production runtime profile. Provides CDI 4.0, JAX-RS 3.1, JPA 3.1 (Hibernate 5.6), Jakarta Batch 2.1, Jakarta Security 3.0, Transactions 2.0, and MicroProfile 6.1.</div>
               </div>
             </div>
             <div class="pc-step">
               <div class="pc-step-num" style="background:var(--fe-dim);color:var(--arch)">&#9679;</div>
               <div>
                 <div class="pc-step-title">ORM — Hibernate 5.6 (PINNED, not 6.x)</div>
-                <div class="pc-step-desc">JBoss EAP 8 ships Hibernate 5.6; the Hibernate 6.x API must not be used. Replaces DMDH001P data handler entirely — all DB2 access is rewritten as JPA entities with Hibernate 5.6 queries.</div>
+                <div class="pc-step-desc">JBoss EAP 8 ships Hibernate 5.6; the Hibernate 6.x API must not be used. Replaces the data handler module entirely — all DB2 access is rewritten as JPA entities with Hibernate 5.6 queries.</div>
               </div>
             </div>
             <div class="pc-step">
@@ -1691,7 +1705,7 @@
                 <li>Binding manifest prevents version drift across 8 independently generated slices — all agents work from the same dependency baseline</li>
                 <li>ADRs capture rationale with explicit trade-off reasoning, making decisions reviewable and challengeable by the client</li>
                 <li>ArchUnit enforcement catches layer violations at build time — structural regressions fail the build before they reach code review</li>
-                <li>iVAS JEE 2027 compliance is guaranteed from the first generated line of code, not retrofitted at the end</li>
+                <li>Runtime profile compliance is guaranteed from the first generated line of code, not retrofitted at the end</li>
               </ul>
             </div>
             <div class="pc-cons">
@@ -1746,8 +1760,8 @@
 
         <div>
           <div class="pc-sec-label">Technical Implementation</div>
-          <p class="pc-text">Slices are defined in migration_slices.json (produced by Phase 1A). Each slice entry specifies: the use case it implements, in-scope programs, copybooks, DB2 tables accessed (direct and via DMDH dispatch), the predecessor slice in the dependency chain, API contracts (one OpenAPI YAML), and acceptance criteria from the register. Each slice executes as a dedicated leaf Briefing Pack (SL-001..SL-008) with a fixed 10-task template covering the complete vertical stack.</p>
-          <p class="pc-text">The 4-layer architecture (controller / service / repository / domain) is applied per slice and enforced by the ArchUnit rules from Phase 2B. DMDH001P is replaced entirely by the JPA/Hibernate repository layer — no DMDH calls appear in the generated Java code. MapStruct handles all DTO &#8596; domain object mapping, eliminating hand-coded conversion logic. Where the COBOL slice includes batch programs, Jakarta Batch 2.1 ItemReader/ItemProcessor/ItemWriter jobs replace the Control-M scheduled COBOL. Each slice concludes with a Flyway migration script and a proxy routing update that directs traffic for the now-migrated use case to the Java implementation.</p>
+          <p class="pc-text">Slices are defined in migration_slices.json (produced by Phase 1A). Each slice entry specifies: the use case it implements, in-scope programs, copybooks, DB2 tables accessed (direct and via data handler dispatch), the predecessor slice in the dependency chain, API contracts (one OpenAPI YAML), and acceptance criteria from the register. Each slice executes as a dedicated leaf Briefing Pack (SL-001..SL-008) with a fixed 10-task template covering the complete vertical stack.</p>
+          <p class="pc-text">The 4-layer architecture (controller / service / repository / domain) is applied per slice and enforced by the ArchUnit rules from Phase 2B. The data handler module is replaced entirely by the JPA/Hibernate repository layer — no data handler calls appear in the generated Java code. MapStruct handles all DTO &#8596; domain object mapping, eliminating hand-coded conversion logic. Where the COBOL slice includes batch programs, Jakarta Batch 2.1 ItemReader/ItemProcessor/ItemWriter jobs replace the Control-M scheduled COBOL. Each slice concludes with a Flyway migration script and a proxy routing update that directs traffic for the now-migrated use case to the Java implementation.</p>
         </div>
 
         <div>
@@ -1771,7 +1785,7 @@
               <div class="pc-step-num" style="background:var(--cg-dim);color:var(--cg)">3</div>
               <div>
                 <div class="pc-step-title">Repository layer</div>
-                <div class="pc-step-desc">Implement JPA repositories replacing DMDH001P dispatch for this slice's DB2 tables. One repository class per aggregate root. Use only Hibernate 5.6 query API — no Hibernate 6 or Spring Data.</div>
+                <div class="pc-step-desc">Implement JPA repositories replacing the data handler dispatch for this slice's DB2 tables. One repository class per aggregate root. Use only Hibernate 5.6 query API — no Hibernate 6 or Spring Data.</div>
               </div>
             </div>
             <div class="pc-step">
@@ -1879,7 +1893,7 @@
           <div class="pc-sec-label">Technical Implementation</div>
           <p class="pc-text"><strong style="color:var(--text)">Track 1 — Static verification (build time):</strong> ArchUnit rules enforce the 4-layer architecture on every build. Prohibited patterns include: controller &#8594; repository direct calls, domain &#8594; service references, and Jakarta EE annotation misuse (e.g., &#64;SessionScoped on a service). Build fails on any violation. Coding standards compliance (naming conventions, import restrictions, prohibited Spring annotations) is checked here too. This track has zero false negatives for the patterns it targets — if the rule fires, the code is wrong.</p>
           <p class="pc-text"><strong style="color:var(--text)">Track 2 — Rule equivalence (per slice):</strong> Test cases are derived directly from rule-catalog.json. Each rule entry in the catalog maps to one or more JUnit 5 test methods that exercise the Java implementation with the same input conditions the COBOL logic would receive. This creates end-to-end RE&#8594;FE traceability: every catalogued rule has a corresponding test, and a test failure is immediately traceable to the specific rule that broke. Tests run via Arquillian against a deployed EAP instance to exercise the full persistence stack.</p>
-          <p class="pc-text"><strong style="color:var(--text)">Track 3 — Workflow scenarios:</strong> Cross-slice end-to-end tests exercise complete lifecycle workflows — offer &#8594; disbursement &#8594; repayment &#8594; conditions amendment — catching integration regressions that pass individual slice tests but fail when slices interact. These tests consume the parallel_run_spec_{id}.json files produced during slice generation, which define the expected outputs for known business scenarios.</p>
+          <p class="pc-text"><strong style="color:var(--text)">Track 3 — Workflow scenarios:</strong> Cross-slice end-to-end tests exercise complete lifecycle workflows — initiation &#8594; financial processing &#8594; settlement &#8594; amendment — catching integration regressions that pass individual slice tests but fail when slices interact. These tests consume the parallel_run_spec_{id}.json files produced during slice generation, which define the expected outputs for known business scenarios.</p>
           <p class="pc-text"><strong style="color:var(--text)">Track 4 — Cross-UC consistency:</strong> Validates that shared JPA entities (mapped from shared copybooks) produce consistent behavior across all use cases that reference them. A shared entity modified by one slice's service method must not break another slice's invariants. This track specifically targets the failure mode that sequential slice migration creates: entity schema decisions made in slice N can silently break assumptions in slice N+5.</p>
         </div>
 
@@ -1904,7 +1918,7 @@
               <div class="pc-step-num" style="background:var(--mvv-dim);color:var(--test)">3</div>
               <div>
                 <div class="pc-step-title">Workflow scenarios — cross-slice lifecycle tests</div>
-                <div class="pc-step-desc">End-to-end lifecycle flows (offer &#8594; disbursement &#8594; repayment, etc.) exercised across multiple migrated slices. Detects inter-slice integration regressions. Inputs and expected outputs sourced from parallel_run_spec files. Run against the full deployed application.</div>
+                <div class="pc-step-desc">End-to-end lifecycle flows (initiation &#8594; financial processing &#8594; settlement, etc.) exercised across multiple migrated slices. Detects inter-slice integration regressions. Inputs and expected outputs sourced from parallel_run_spec files. Run against the full deployed application.</div>
               </div>
             </div>
             <div class="pc-step">
@@ -1933,7 +1947,7 @@
               <div class="pc-proscons-label">Weaknesses</div>
               <ul>
                 <li>Rule equivalence tests require COBOL baseline test data — if no historical test data exists for the slice, it must be synthesised from the transformation specs</li>
-                <li>Date-dependent calculations (interest accrual, repayment schedules) require stable test-clock setup to be deterministic</li>
+                <li>Date-dependent calculations (financial accrual, payment schedules) require stable test-clock setup to be deterministic</li>
                 <li>Arquillian tests require a running EAP instance in CI, adding infrastructure overhead compared to plain JUnit tests</li>
                 <li>Cross-UC consistency tests must be actively maintained as slice boundaries are refined post-migration; stale tests can give false confidence</li>
               </ul>
@@ -2027,7 +2041,7 @@
       <tr>
         <td><span class="rev-ver">v1.10.0</span></td>
         <td class="rev-date">2026-06-24</td>
-        <td class="rev-author">Stefan Copetchi</td>
+        <td class="rev-author">Project Team</td>
         <td>
           Added Tier List diagram view as a toggleable alternative to the workflow SVG.
           Renamed "Pre-Migration Gate" level (formerly "Phase 0") throughout: legend,
@@ -2038,18 +2052,16 @@
       <tr>
         <td><span class="rev-ver">v1.9.0</span></td>
         <td class="rev-date">2026-06-24</td>
-        <td class="rev-author">Stefan Copetchi</td>
+        <td class="rev-author">Project Team</td>
         <td>
-          Renamed project reference from "VZ-Darlehen" to "Mainframe" throughout: page
-          title, nav brand, overview subtitle, doc-meta project field, SVG workflow label,
-          SA-001 step description, and tier list data. Simplified page title from
-          "Mainframe Mainframe Modernization" to "Mainframe Modernization".
+          Renamed project reference throughout: page title, nav brand, overview subtitle,
+          doc-meta project field, SVG workflow label, SA-001 step description, and tier list data.
         </td>
       </tr>
       <tr>
         <td><span class="rev-ver">v1.8.0</span></td>
         <td class="rev-date">2026-06-24</td>
-        <td class="rev-author">Stefan Copetchi</td>
+        <td class="rev-author">Project Team</td>
         <td>
           A <code>PATTERN_HIERARCHY</code> JavaScript data structure serves as the single
           source of truth for the tier list; the table is built dynamically from it.
@@ -2064,7 +2076,7 @@
       <tr>
         <td><span class="rev-ver">v1.7.0</span></td>
         <td class="rev-date">2026-06-23</td>
-        <td class="rev-author">Stefan Copetchi</td>
+        <td class="rev-author">Project Team</td>
         <td>
           Distinct color coding for MV and MR sub-phase nodes. Migration Verification uses
           emerald green (<code>--mv</code> #10b981); Migration Refinement uses yellow
@@ -2076,7 +2088,7 @@
       <tr>
         <td><span class="rev-ver">v1.6.0</span></td>
         <td class="rev-date">2026-06-23</td>
-        <td class="rev-author">Stefan Copetchi</td>
+        <td class="rev-author">Project Team</td>
         <td>
           Expanded SVG hierarchy diagram to show two child nodes under Refinement Phase:
           <em>Mig. Verification</em> (MV, cx=1207) and <em>Mig. Refinement</em> (MR, cx=1362).
@@ -2087,7 +2099,7 @@
       <tr>
         <td><span class="rev-ver">v1.5.0</span></td>
         <td class="rev-date">2026-06-23</td>
-        <td class="rev-author">Stefan Copetchi</td>
+        <td class="rev-author">Project Team</td>
         <td>
           Renamed "MVV" to "Refinement Phase" throughout. Restructured § 4 into two TBD
           sub-phases: Migration Verification (MV) and Migration Refinement (MR). Updated SVG
@@ -2097,7 +2109,7 @@
       <tr>
         <td><span class="rev-ver">v1.4.0</span></td>
         <td class="rev-date">2026-06-23</td>
-        <td class="rev-author">Stefan Copetchi</td>
+        <td class="rev-author">Project Team</td>
         <td>
           Added dark / light mode toggle. SVG diagram fills and strokes migrated from hardcoded hex
           to CSS variables; full light-theme override block added (<code>html[data-theme="light"]</code>).
@@ -2107,7 +2119,7 @@
       <tr>
         <td><span class="rev-ver">v1.3.0</span></td>
         <td class="rev-date">2026-06-23</td>
-        <td class="rev-author">Stefan Copetchi</td>
+        <td class="rev-author">Project Team</td>
         <td>
           Completed all 10 patterns. Added FE-CG-001 (Migration Slices &amp; Java Code Generation)
           with 10-task slice execution template; FE-TEST-001 (Testing &amp; Validation Framework)
@@ -2119,7 +2131,7 @@
       <tr>
         <td><span class="rev-ver">v1.2.0</span></td>
         <td class="rev-date">2026-06-23</td>
-        <td class="rev-author">Stefan Copetchi</td>
+        <td class="rev-author">Project Team</td>
         <td>
           Added next 3 patterns with full content: FE-001 (Overall FE Approach), FE-P0-001 (Isolation
           Scores Gate), FE-ARCH-001 (Target Architecture &amp; Technology Stack). Remaining 3 placeholders
@@ -2129,7 +2141,7 @@
       <tr>
         <td><span class="rev-ver">v1.1.0</span></td>
         <td class="rev-date">2026-06-23</td>
-        <td class="rev-author">Stefan Copetchi</td>
+        <td class="rev-author">Project Team</td>
         <td>
           Added first 5 patterns with full content: RE-001 (Overall RE Process), SA-001 (Cobolitics),
           SA-002 (External C Modules), SEM-001 (Business Rules Extraction), KG-001 (Knowledge Graph).
@@ -2140,7 +2152,7 @@
       <tr>
         <td><span class="rev-ver">v1.0.0</span></td>
         <td class="rev-date">2026-06-23</td>
-        <td class="rev-author">Stefan Copetchi</td>
+        <td class="rev-author">Project Team</td>
         <td>
           Initial draft. Established document structure, level hierarchy, and section scaffold.
           Registered 11 pattern placeholders across RE (RE-001, SA-001, SA-002, SEM-001, KG-001),
@@ -2154,11 +2166,20 @@
 </section>
 
 <script>
-  /* ── Theme bridge (receives theme from the parent admin console) ── */
-  window.addEventListener('message', function(e) {
-    if (!e.data || e.data.type !== 'set-theme') return;
-    document.documentElement.setAttribute('data-theme', e.data.theme === 'dark' ? 'dark' : 'light');
-  });
+  /* ── Theme ── */
+  function toggleTheme() {
+    var html = document.documentElement;
+    var next = html.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+    html.setAttribute('data-theme', next);
+    localStorage.setItem('pc-theme', next);
+    syncToggleLabel();
+  }
+  function syncToggleLabel() {
+    var btn = document.getElementById('theme-toggle');
+    if (!btn) return;
+    btn.textContent = document.documentElement.getAttribute('data-theme') === 'light' ? '🌙' : '☀';
+  }
+  syncToggleLabel();
 
   /* ── Pattern hierarchy — single source of truth for the tier list.
         When adding or removing a node here, also update the workflow SVG above. ── */

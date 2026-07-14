@@ -56,19 +56,19 @@ const NAV = [
     // { path: '/orchestrator-wizard', label: 'Orchestrator Wizard', Icon: Wand2 },
   ]},
   { section: 'WORKSPACES', items: [
-    { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key },
-    { path: '/github-tokens', label: 'GitHub Tokens',        Icon: Github },
+    { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key,    adminOnly: true },
+    { path: '/github-tokens', label: 'GitHub Tokens',        Icon: Github, adminOnly: true },
     { path: '/environments',  label: 'Working Environments', Icon: Boxes },
   ]},
   { section: 'CONFIGURATION', items: [
     { path: '/teams',        label: 'Teams',               Icon: Building2 },
-    { path: '/skills',       label: 'Skills Registry',     Icon: Zap },
+    { path: '/skills',       label: 'Skills Registry',     Icon: Zap,     adminOnly: true },
     { path: '/jobs',         label: 'Triggers',            Icon: Clock },
     { path: '/github-events', label: 'GitHub Event Log',   Icon: History },
-    { path: '/models',       label: 'Model Providers',     Icon: Sparkles },
-    { path: '/mcp',          label: 'MCP Servers',         Icon: Server },
+    { path: '/models',       label: 'Model Providers',     Icon: Sparkles, adminOnly: true },
+    { path: '/mcp',          label: 'MCP Servers',         Icon: Server,  adminOnly: true },
     { path: '/patterns',     label: 'Patterns Catalog',    Icon: BookOpen },
-    { path: '/maintenance-mode', label: 'Maintenance Mode', Icon: Wrench },
+    { path: '/maintenance-mode', label: 'Maintenance Mode', Icon: Wrench, adminOnly: true },
   ]},
 ];
 
@@ -139,6 +139,17 @@ export default function Shell({ children }) {
 
   const sidebarWidth = collapsed ? 'var(--eb-sidebar-collapsed)' : 'var(--eb-sidebar-width)';
 
+  // Hide admin-only nav entries (SSH Keys, GitHub Tokens, Skills, Models, MCP,
+  // Maintenance Mode) from non-System-Admins (#584 AC8). Backend route guards
+  // (App.jsx) and the scoped API back this up — this is defence-in-depth, not
+  // the only enforcement. Drop sections that end up empty.
+  const nav = NAV
+    .map(section => ({
+      ...section,
+      items: section.items.filter(item => user?.admin || !item.adminOnly),
+    }))
+    .filter(section => section.items.length > 0);
+
   return (
     <div style={{ display: 'flex', width: '100%', minHeight: '100vh' }}>
 
@@ -208,7 +219,7 @@ export default function Shell({ children }) {
 
         {/* Nav sections */}
         <nav style={{ flex: 1, overflowY: 'auto', padding: 'var(--eb-space-2) 0' }}>
-          {NAV.map((section, sectionIndex) => (
+          {nav.map((section, sectionIndex) => (
             <div key={section.section || sectionIndex} style={{ marginBottom: 'var(--eb-space-2)' }}>
               {!collapsed && section.section && (
                 <div style={{

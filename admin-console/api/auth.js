@@ -176,7 +176,24 @@ function requireAuth(req, res, next) {
 
 // Registers the public auth endpoints. Must be called BEFORE the gate so these
 // routes stay reachable without a session.
-function registerAuthRoutes(app) {
+//
+// `describeAuthz(subject)` is an optional injected resolver that returns the
+// caller's authorization descriptor (admin/System-Admin indicator + per-team
+// roles, #584) to merge onto the session `user`. It is injected rather than
+// imported so this module stays free of the users/memberships file IO (which
+// lives in api.js) and provider-agnostic. Best-effort: a throw degrades to the
+// bare `{ username }` shape rather than failing the request.
+function registerAuthRoutes(app, { describeAuthz } = {}) {
+  const buildUser = (subject) => {
+    const base = { username: subject };
+    if (typeof describeAuthz !== 'function') return base;
+    try {
+      return { ...base, ...(describeAuthz(subject) || {}) };
+    } catch {
+      return base;
+    }
+  };
+
   app.post('/api/auth/login', loginLimiter, async (req, res) => {
     const { username, password } = req.body || {};
     // 1) Per-user local password (#374), best-effort. 2) the env single-admin
@@ -186,13 +203,13 @@ function registerAuthRoutes(app) {
       return res.status(401).json({ error: 'Invalid username or password' });
     }
     setSessionCookie(res, issueToken(principal.sub));
-    res.json({ authenticated: true, user: { username: principal.sub } });
+    res.json({ authenticated: true, user: buildUser(principal.sub) });
   });
 
   app.get('/api/auth/session', (req, res) => {
     const session = getSession(req);
     if (!session) return res.json({ authenticated: false });
-    res.json({ authenticated: true, user: { username: session.sub } });
+    res.json({ authenticated: true, user: buildUser(session.sub) });
   });
 
   app.post('/api/auth/logout', (req, res) => {

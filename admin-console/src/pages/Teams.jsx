@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { Plus, Trash2, Users2, UserPlus, Settings2, ShieldCheck, KeyRound } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
+import { useAuth } from '../auth/AuthContext';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
@@ -108,7 +109,11 @@ function CreateTeamForm({ onSave, onCancel, saving, error }) {
 }
 
 /* ── Manage-team panel (details + members) ────────────────────────────── */
-function ManageTeamPanel({ team, users, memberships, onRefresh, onError }) {
+// `readOnly` (a Team Member viewing a team they don't administer, #584 AC9)
+// renders details + members as a read-only view: no editing, adding, role
+// changes or removals. The backend gates these mutations independently
+// (canManageTeam → 403), so this only trims the UI to what's permitted.
+function ManageTeamPanel({ team, users, memberships, onRefresh, onError, readOnly = false }) {
   const [name, setName] = useState(team.name || '');
   const [description, setDescription] = useState(team.description || '');
   const [savingDetails, setSavingDetails] = useState(false);
@@ -162,13 +167,15 @@ function ManageTeamPanel({ team, users, memberships, onRefresh, onError }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-6)' }}>
       <Section title="Team details" right={<LearningBadge scope={`team:${team.id}`} showZero title="Team knowledge learned" />}>
-        <FormInput label="Name" value={name} onChange={setName} />
-        <FormInput label="Description" value={description} onChange={setDescription} multiline rows={3} />
-        <div>
-          <button onClick={saveDetails} disabled={savingDetails || !name.trim()} style={{ ...primaryBtn, opacity: (savingDetails || !name.trim()) ? 0.6 : 1 }}>
-            {savingDetails ? 'Saving…' : 'Save details'}
-          </button>
-        </div>
+        <FormInput label="Name" value={name} onChange={setName} disabled={readOnly} />
+        <FormInput label="Description" value={description} onChange={setDescription} multiline rows={3} disabled={readOnly} />
+        {!readOnly && (
+          <div>
+            <button onClick={saveDetails} disabled={savingDetails || !name.trim()} style={{ ...primaryBtn, opacity: (savingDetails || !name.trim()) ? 0.6 : 1 }}>
+              {savingDetails ? 'Saving…' : 'Save details'}
+            </button>
+          </div>
+        )}
       </Section>
 
       <Section title={`Members (${teamMembers.length})`}>
@@ -194,28 +201,38 @@ function ManageTeamPanel({ team, users, memberships, onRefresh, onError }) {
                 </div>
                 {u?.email && <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{u.email}</div>}
               </div>
-              <select value={m.role} onChange={e => setRole(m.userId, e.target.value)} disabled={busy} style={{ ...inputStyle, width: 'auto' }}>
-                {ROLE_OPTIONS.map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
-              </select>
-              <IconButton icon={Trash2} label="Remove from team" danger onClick={() => removeMember(m.userId)} disabled={busy} />
+              {readOnly ? (
+                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{ROLE_LABELS[m.role] || m.role}</span>
+              ) : (
+                <>
+                  <select value={m.role} onChange={e => setRole(m.userId, e.target.value)} disabled={busy} style={{ ...inputStyle, width: 'auto' }}>
+                    {ROLE_OPTIONS.map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
+                  </select>
+                  <IconButton icon={Trash2} label="Remove from team" danger onClick={() => removeMember(m.userId)} disabled={busy} />
+                </>
+              )}
             </div>
           );
         })}
 
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', paddingTop: 'var(--eb-space-2)' }}>
-          <select value={addUserId} onChange={e => setAddUserId(e.target.value)} style={{ ...inputStyle, flex: 1 }}>
-            <option value="">{candidateUsers.length ? 'Select a user to add…' : 'No more users — create one first'}</option>
-            {candidateUsers.map(u => <option key={u.id} value={u.id}>{(u.displayName || u.subject)}{u.email ? ` — ${u.email}` : ''}</option>)}
-          </select>
-          <select value={addRole} onChange={e => setAddRole(e.target.value)} style={{ ...inputStyle, width: 'auto' }}>
-            {ROLE_OPTIONS.map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
-          </select>
-          <button onClick={addMember} disabled={busy || !addUserId} style={{ ...primaryBtn, padding: 'var(--eb-space-2) var(--eb-space-3)', opacity: (busy || !addUserId) ? 0.6 : 1 }}>
-            <UserPlus size={14} /> Add
-          </button>
-        </div>
+        {!readOnly && (
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', paddingTop: 'var(--eb-space-2)' }}>
+            <select value={addUserId} onChange={e => setAddUserId(e.target.value)} style={{ ...inputStyle, flex: 1 }}>
+              <option value="">{candidateUsers.length ? 'Select a user to add…' : 'No more users — create one first'}</option>
+              {candidateUsers.map(u => <option key={u.id} value={u.id}>{(u.displayName || u.subject)}{u.email ? ` — ${u.email}` : ''}</option>)}
+            </select>
+            <select value={addRole} onChange={e => setAddRole(e.target.value)} style={{ ...inputStyle, width: 'auto' }}>
+              {ROLE_OPTIONS.map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
+            </select>
+            <button onClick={addMember} disabled={busy || !addUserId} style={{ ...primaryBtn, padding: 'var(--eb-space-2) var(--eb-space-3)', opacity: (busy || !addUserId) ? 0.6 : 1 }}>
+              <UserPlus size={14} /> Add
+            </button>
+          </div>
+        )}
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-          Users are created under <strong>Manage Users</strong>. System Admins have global access regardless of team membership.
+          {readOnly
+            ? 'You have read-only access to this team. Team Admins can manage members.'
+            : <>Users are created under <strong>Manage Users</strong>. System Admins have global access regardless of team membership.</>}
         </div>
       </Section>
     </div>
@@ -444,6 +461,14 @@ function ResourceOwnership({ teams, agents, environments, onError, onRefreshAgen
 
 /* ── Page ─────────────────────────────────────────────────────────────── */
 export default function Teams() {
+  const { user } = useAuth();
+  // Full admins (env admin + System Admin) manage everything; a non-admin may
+  // only manage a team they are the Team Admin of (#584 AC9). Mirrors the
+  // backend's canManageTeam — the UI trims controls, the API enforces.
+  const isAdmin = !!user?.admin;
+  const canManage = (teamId) =>
+    isAdmin || (user?.teams || []).some(t => t.teamId === teamId && t.role === 'team-admin');
+
   const { data: teams, loading: lt, error: et, refetch: refetchTeams } = useApi('/api/admin/teams');
   const { data: users, loading: lu, error: eu, refetch: refetchUsers } = useApi('/api/admin/users');
   const { data: memberships, refetch: refetchMemberships } = useApi('/api/admin/memberships');
@@ -475,19 +500,28 @@ export default function Teams() {
     { key: '_members', label: 'Members', sortable: false, render: (_, row) => memberCount[row.id] || 0 },
     {
       key: '_actions', label: '', sortable: false,
-      render: (_, row) => (
-        <div className="eb-wrap-md" style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
-          <button onClick={() => setManageTeam(row)} title="Manage" style={ghostBtn}><Settings2 size={13} /> Manage</button>
-          <IconButton
-            icon={Trash2}
-            label="Delete"
-            danger
-            onClick={() => setDeleteTarget(row)}
-            disabled={row.id === DEFAULT_TEAM_ID}
-            title={row.id === DEFAULT_TEAM_ID ? 'The default team cannot be deleted' : 'Delete'}
-          />
-        </div>
-      ),
+      render: (_, row) => {
+        const manageable = canManage(row.id);
+        return (
+          <div className="eb-wrap-md" style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
+            <button onClick={() => setManageTeam(row)} title={manageable ? 'Manage' : 'View'} style={ghostBtn}>
+              <Settings2 size={13} /> {manageable ? 'Manage' : 'View'}
+            </button>
+            {/* Delete is a management action: only shown to a full admin or the
+                team's Team Admin (never for the default team). #584 AC9. */}
+            {manageable && (
+              <IconButton
+                icon={Trash2}
+                label="Delete"
+                danger
+                onClick={() => setDeleteTarget(row)}
+                disabled={row.id === DEFAULT_TEAM_ID}
+                title={row.id === DEFAULT_TEAM_ID ? 'The default team cannot be deleted' : 'Delete'}
+              />
+            )}
+          </div>
+        );
+      },
     },
   ];
 
@@ -531,14 +565,19 @@ export default function Teams() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-5)' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>Teams</h1>
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
-          <button onClick={() => setManagingUsers(true)} style={{ ...ghostBtn, padding: 'var(--eb-space-2) var(--eb-space-4)', fontSize: 'var(--eb-text-sm)' }}>
-            <Users2 size={15} /> Manage Users
-          </button>
-          <button onClick={() => { setCreating(true); setCreateError(null); }} style={primaryBtn}>
-            <Plus size={15} /> New Team
-          </button>
-        </div>
+        {/* Creating teams and managing global user records are System-Admin
+            actions (#584); a Team Admin manages memberships within their own
+            team via the per-team Manage panel, not here. */}
+        {isAdmin && (
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+            <button onClick={() => setManagingUsers(true)} style={{ ...ghostBtn, padding: 'var(--eb-space-2) var(--eb-space-4)', fontSize: 'var(--eb-text-sm)' }}>
+              <Users2 size={15} /> Manage Users
+            </button>
+            <button onClick={() => { setCreating(true); setCreateError(null); }} style={primaryBtn}>
+              <Plus size={15} /> New Team
+            </button>
+          </div>
+        )}
       </div>
 
       <div style={{
@@ -556,14 +595,18 @@ export default function Teams() {
 
       <DataTable columns={COLUMNS} data={teamList} emptyText="No teams yet. Click 'New Team' to add one." getRowKey={r => r.id} onRowClick={r => setManageTeam(r)} />
 
-      <ResourceOwnership
-        teams={teamList}
-        agents={agents ?? []}
-        environments={environments ?? []}
-        onError={setActionError}
-        onRefreshAgents={refetchAgents}
-        onRefreshEnvs={refetchEnvs}
-      />
+      {/* Reassigning agents/environments across teams is a global operation —
+          System-Admin-only (#584). Non-admins never see this section. */}
+      {isAdmin && (
+        <ResourceOwnership
+          teams={teamList}
+          agents={agents ?? []}
+          environments={environments ?? []}
+          onError={setActionError}
+          onRefreshAgents={refetchAgents}
+          onRefreshEnvs={refetchEnvs}
+        />
+      )}
 
       <SidePanel open={creating} onClose={() => setCreating(false)} title="New team" width="520px">
         {creating && <CreateTeamForm onSave={handleCreate} onCancel={() => setCreating(false)} saving={savingCreate} error={createError} />}
@@ -577,6 +620,7 @@ export default function Teams() {
             memberships={membershipList}
             onRefresh={refreshAll}
             onError={setActionError}
+            readOnly={!canManage(liveManageTeam.id)}
           />
         )}
       </SidePanel>

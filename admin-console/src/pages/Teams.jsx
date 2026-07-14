@@ -9,6 +9,7 @@ import IdField from '../components/IdField';
 import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import LearningBadge from '../components/LearningBadge';
+import { groupAgentsForOwnership } from './teams-ownership';
 
 const DEFAULT_TEAM_ID = 'default';
 const ROLE_LABELS = { 'team-admin': 'Team Admin', 'team-member': 'Team Member' };
@@ -359,13 +360,23 @@ function ResourceOwnership({ teams, agents, environments, onError, onRefreshAgen
   const teamName = id => teams.find(t => t.id === id)?.name || id;
   const teamOptions = teams.map(t => t.id);
 
+  // An Agent Team moves between tenants as one unit (#568): reassigning the
+  // parent `team` agent cascades to all its members server-side, so the UI
+  // fires a single call against the team agent and re-fetches.
   async function reassign(kind, id, teamId) {
     try {
       if (kind === 'agent') await apiCall('PUT', `/api/agents/${encodeURIComponent(id)}`, { teamId });
       else await apiCall('PUT', `/api/environments/${encodeURIComponent(id)}`, { teamId });
-      if (kind === 'agent') onRefreshAgents(); else onRefreshEnvs();
     } catch (e) { onError(e.message); }
+    finally {
+      if (kind === 'agent') onRefreshAgents(); else onRefreshEnvs();
+    }
   }
+
+  const { agentTeams, standaloneAgents } = useMemo(
+    () => groupAgentsForOwnership(agents),
+    [agents],
+  );
 
   const TeamSelect = ({ value, onChange }) => (
     <select value={value || DEFAULT_TEAM_ID} onChange={e => onChange(e.target.value)} style={{ ...inputStyle, width: 'auto' }}>
@@ -373,12 +384,15 @@ function ResourceOwnership({ teams, agents, environments, onError, onRefreshAgen
     </select>
   );
 
+  const cardStyle = {
+    display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+    padding: 'var(--eb-space-2) var(--eb-space-3)',
+    background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+  };
+
+  // A standalone agent / environment: its own assignment control.
   const row = (kind, item, label, sub) => (
-    <div key={`${kind}:${item.id}`} style={{
-      display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
-      padding: 'var(--eb-space-2) var(--eb-space-3)',
-      background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
-    }}>
+    <div key={`${kind}:${item.id}`} style={cardStyle}>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 'var(--eb-text-sm)' }}>{label}</div>
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>{sub}</div>
@@ -387,11 +401,38 @@ function ResourceOwnership({ teams, agents, environments, onError, onRefreshAgen
     </div>
   );
 
+  // An Agent Team: one assignment control for the whole squad; members are
+  // listed read-only beneath it (no individual dropdown — they inherit).
+  const teamGroup = ({ team, members }) => (
+    <div key={`team:${team.id}`} style={{ ...cardStyle, flexDirection: 'column', alignItems: 'stretch', gap: 'var(--eb-space-2)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 'var(--eb-text-sm)', display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)' }}>
+            <Users2 size={13} /> {team.displayName || team.id}
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Agent Team · {members.length} member{members.length === 1 ? '' : 's'}</span>
+          </div>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>{team.id}</div>
+        </div>
+        <TeamSelect value={team.teamId} onChange={tid => reassign('agent', team.id, tid)} />
+      </div>
+      {members.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)', paddingLeft: 'var(--eb-space-3)', borderLeft: '2px solid var(--eb-border-default)' }}>
+          {members.map(m => (
+            <div key={m.id} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', display: 'flex', justifyContent: 'space-between', gap: 'var(--eb-space-2)' }}>
+              <span>{m.displayName || m.id}</span>
+              <span style={{ color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>{m.id}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 'var(--eb-space-6)' }}>
-      <Section title={`Agents (${agents.length})`}>
-        {agents.length === 0 && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>No agents.</div>}
-        {agents.map(a => row('agent', a, a.displayName || a.id, `${a.id} · ${a.role || 'agent'}`))}
+      <Section title={`Agents (${agentTeams.length})`}>
+        {agentTeams.length === 0 && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>No agents.</div>}
+        {agentTeams.map(teamGroup)}
       </Section>
       <Section title={`Working Environments (${environments.length})`}>
         {environments.length === 0 && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>No environments.</div>}

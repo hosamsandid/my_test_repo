@@ -581,6 +581,40 @@ function mergeTeamKnowledgeConfig(baseEnv, overrides) {
   return merged;
 }
 
+// Normalize the wizard's knowledge-*learning* config (autonomy / review / gates,
+// #567) into a minimal per-team override patch keyed like TEAM_KNOWLEDGE_KEYS.
+// Storage is out of scope here — the wizard never touches knowledgeStore.
+//
+// The patch carries ONLY keys that differ from the brand-new-team defaults, and
+// the function returns `null` when nothing differs. That is what makes AC-4 hold:
+// a wizard run left on the defaults writes no override file at all, so the team
+// reads byte-identically to a team created before #567 existed.
+function normalizeWizardKnowledgeConfig(input) {
+  const src = input && typeof input === 'object' ? input : {};
+
+  let autonomy = Number(src.autonomy);
+  if (!Number.isInteger(autonomy)) autonomy = 1;
+  autonomy = Math.max(0, Math.min(3, autonomy));
+
+  const review = src.review === true || src.review === 'true' || src.review === '1';
+
+  const rawGates = src.gates && typeof src.gates === 'object' ? src.gates : {};
+  const gates = {};
+  for (const t of PROMOTION_TRANSITIONS) {
+    const m = rawGates[t];
+    gates[t] = GATE_MODES.includes(m) ? m : DEFAULT_PROMOTION_GATES[t];
+  }
+  gates['team>global'] = 'review'; // always reviewed — can't be automated
+
+  const patch = {};
+  if (autonomy !== 1) patch.knowledgeAutonomy = autonomy;
+  if (review !== false) patch.knowledgeReview = true;
+  const gatesDiffer = PROMOTION_TRANSITIONS.some((t) => gates[t] !== DEFAULT_PROMOTION_GATES[t]);
+  if (gatesDiffer) patch.knowledgePromotionGates = gates;
+
+  return Object.keys(patch).length ? patch : null;
+}
+
 // ---------------------------------------------------------------------------
 // View assembly (candidate + draft → the /promotion-suggestions row the UI gets)
 // ---------------------------------------------------------------------------
@@ -638,4 +672,5 @@ module.exports = {
   promotionSuggestionView,
   TEAM_KNOWLEDGE_KEYS,
   mergeTeamKnowledgeConfig,
+  normalizeWizardKnowledgeConfig,
 };

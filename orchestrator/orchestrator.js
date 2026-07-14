@@ -2390,6 +2390,43 @@ function writeTeamReview(teamId, enabled) {
   return { review: knowledgeReviewEnabled({ knowledgeReview: !!enabled }) };
 }
 
+// Persist the wizard's knowledge-*learning* config in ONE write at team-creation
+// time (#567). Accepts a patch already reduced to the differing keys by the
+// admin-console's normalizeWizardKnowledgeConfig; here we sanitize each key
+// defensively (values from an HTTP body are never trusted) before merging it onto
+// the team's own knowledge-config.json. STORAGE is deliberately out of scope — a
+// `knowledgeStore` key in the patch is ignored, so the wizard can never repoint a
+// team's KB repo. Returns the sanitized patch that was written.
+function writeTeamKnowledgeConfig(teamId, patch) {
+  const src = patch && typeof patch === 'object' ? patch : {};
+  const clean = {};
+
+  if ('knowledgeAutonomy' in src) {
+    const level = Number(src.knowledgeAutonomy);
+    if (!Number.isInteger(level) || level < 0 || level > 3) throw new Error('knowledgeAutonomy must be an integer 0..3');
+    clean.knowledgeAutonomy = level;
+  }
+  if ('knowledgeReview' in src) {
+    clean.knowledgeReview = src.knowledgeReview === true || src.knowledgeReview === 'true';
+  }
+  if ('knowledgePromotionGates' in src) {
+    const raw = src.knowledgePromotionGates;
+    if (!raw || typeof raw !== 'object') throw new Error('knowledgePromotionGates must be an object');
+    const gates = {};
+    for (const t of PROMOTION_TRANSITIONS) {
+      if (!(t in raw)) continue;
+      if (!GATE_MODES.includes(raw[t])) throw new Error(`invalid gate mode for '${t}'`);
+      gates[t] = raw[t];
+    }
+    gates['team>global'] = 'review'; // always reviewed — can't be automated
+    clean.knowledgePromotionGates = gates;
+  }
+
+  if (!Object.keys(clean).length) throw new Error('no valid knowledge-config keys in patch');
+  writeTeamKnowledgeOverrides(teamId, clean);
+  return clean;
+}
+
 // Persist the knowledge storage location — repo, branch, path (#558) — PER TEAM
 // (#570), on the team's own knowledge-config file, not the shared environment.
 // The env is still consulted (read-only) for the code-repository list, so an
@@ -7518,6 +7555,30 @@ async function main() {
           const result = writeTeamAutonomy(teamId, level);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+        }
+      });
+      return;
+    }
+
+    // ── Persist the wizard's initial knowledge-learning config in one write (#567) ─
+    // The admin-console POST /api/teams(/stream) proxies here right after the team +
+    // members are materialised, with a patch already reduced to non-default keys.
+    // Only ever called for a non-default config, so a defaulted wizard writes no
+    // override file at all (AC-4). Storage is out of scope and ignored by the writer.
+    if (req.method === 'POST' && req.url === '/internal/knowledge/config') {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const p = JSON.parse(body || '{}');
+          const teamId = String(p.teamId || '');
+          if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
+          const result = writeTeamKnowledgeConfig(teamId, p.config || {});
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, config: result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));

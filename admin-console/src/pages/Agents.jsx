@@ -2715,6 +2715,18 @@ function renderDeleteMessage(target) {
     const childNounPlural = target.role === 'team' ? 'members' : 'missions';
     const parentNoun = target.role === 'team' ? 'team' : 'orchestrator';
 
+    // Deleting a team purges its locally cached / curated knowledge on this
+    // stack (#532) — the honest counterpart to actually purging the data on the
+    // backend. Knowledge shared via the team's repository is NOT touched (that
+    // is the sanctioned sharing channel), so the note must say so explicitly.
+    const knowledgeNote = target.role === 'team' ? (
+      <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-text-primary)' }}>
+        <strong>This team's locally cached and curated knowledge will be permanently removed</strong> —
+        its local Knowledge Base copy, promotion suggestions, archive, review decisions and team skill pool.
+        Knowledge shared via the team's repository is <strong>not affected</strong>.
+      </p>
+    ) : null;
+
     if (children.length === 0) {
       return (
         <>
@@ -2722,6 +2734,7 @@ function renderDeleteMessage(target) {
             Delete this {parentNoun}? It currently has no {childNounPlural} attached.
             The workspace, configuration and chat account will be removed permanently.
           </p>
+          {knowledgeNote}
         </>
       );
     }
@@ -2782,6 +2795,7 @@ function renderDeleteMessage(target) {
             </li>
           ))}
         </ul>
+        {knowledgeNote}
       </>
     );
   }

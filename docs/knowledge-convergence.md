@@ -119,9 +119,12 @@ similar(a, b, threshold)   // similarity >= threshold
 
 clusterEntries(entries, { simThreshold })
 //   → [{ canonicalId, kind, memberIds[], convergence[], text }]
-//   single-link agglomeration within a kind; deterministic order
-//   (sort by createdAt then id); convergence = distinct union of member
-//   originAgents ∪ member.convergence[].
+//   single-link agglomeration; same-kind entries link by similarity (exact OR
+//   fuzzy), different-kind entries link ONLY on an exact normalized-text match
+//   (C1, #605 — an identical lesson recorded under two kinds converges, fuzzy
+//   cross-kind stays apart); canonical kind = the winner (oldest/id) member's,
+//   so it is deterministic. Deterministic order (sort by createdAt then id);
+//   convergence = distinct union of member originAgents ∪ member.convergence[].
 
 buildCanonicalProjection(entriesByKind, { simThreshold, now })
 //   → { canonical: { <kind>: [entry…] }, tombstones: { <kind>: [entry…] },
@@ -417,8 +420,10 @@ knowledge promote <id> [--note "why this is skill-worthy"]
 - `similarity` / `similar`: exact-normalized ⇒ 1.0; near-dup ("polls every 30s" vs
   "polls the Events API every 30 s") ≥ threshold; unrelated facts < threshold.
 - `clusterEntries`: near-dups cluster; distinct facts don't; **same agent twice
-  ⇒ convergence stays 1 distinct agent**; convergence = distinct union; kinds
-  never cross-cluster; deterministic order.
+  ⇒ convergence stays 1 distinct agent**; convergence = distinct union;
+  **identical normalized text converges across kinds (C1, #605) with a
+  deterministic canonical kind, while cross-kind fuzzy matches stay apart**;
+  deterministic order.
 - `buildCanonicalProjection`: earliest member wins the canonical id; convergence
   grown; a tombstone per absorbed id with `mergedInto`; **idempotent** (re-run ⇒
   byte-identical via `serializeEntry`); no-dup input ⇒ no tombstones.

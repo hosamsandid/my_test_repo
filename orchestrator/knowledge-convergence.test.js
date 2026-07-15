@@ -96,13 +96,84 @@ test('clusterEntries: same agent recording twice does NOT grow convergence', () 
   assert.deepEqual(c.memberIds.sort(), ['a1a1a1a1a1a1', 'b2b2b2b2b2b2']);
 });
 
-test('clusterEntries: kinds never cross-cluster', () => {
+test('clusterEntries: identical normalized text converges across kinds (C1, #605)', () => {
+  // Same lesson recorded once as a fact, once as a convention — only casing /
+  // punctuation differ, so both normalize identically. They must converge into
+  // ONE cluster, and the canonical kind is the oldest member's (deterministic).
   const entries = [
-    entry({ id: 'a1a1a1a1a1a1', kind: 'fact', text: 'same words here now' }),
-    entry({ id: 'b2b2b2b2b2b2', kind: 'entity', text: 'same words here now' }),
+    entry({ id: 'b2b2b2b2b2b2', kind: 'convention', originAgent: 'dev-2', text: 'Same words, here now.', createdAt: '2026-07-08T08:00:00Z' }),
+    entry({ id: 'a1a1a1a1a1a1', kind: 'fact', originAgent: 'dev-1', text: 'same words here now', createdAt: '2026-07-08T09:00:00Z' }),
   ];
   const clusters = clusterEntries(entries, { simThreshold: 0.6 });
+  assert.equal(clusters.length, 1);
+  const [c] = clusters;
+  assert.equal(c.canonicalId, 'b2b2b2b2b2b2'); // oldest wins
+  assert.equal(c.kind, 'convention'); // canonical kind = winner's kind
+  assert.deepEqual(c.memberIds.sort(), ['a1a1a1a1a1a1', 'b2b2b2b2b2b2']);
+  assert.deepEqual(c.convergence, ['dev-1', 'dev-2']);
+  assert.equal(c.convergenceCount, 2);
+});
+
+test('clusterEntries: cross-kind fuzzy (non-exact) matches do NOT converge', () => {
+  // AC2: the fuzzy path stays within a single kind. These two share most tokens
+  // (Jaccard >= threshold) but are not byte-identical after normalization, and
+  // they carry different kinds — so they must remain two separate clusters.
+  const entries = [
+    entry({ id: 'a1a1a1a1a1a1', kind: 'fact', text: 'the poller polls the events api every 30 seconds' }),
+    entry({ id: 'b2b2b2b2b2b2', kind: 'entity', text: 'the poller polls the events api every 30 seconds now' }),
+  ];
+  const clusters = clusterEntries(entries, { simThreshold: 0.5 });
   assert.equal(clusters.length, 2);
+});
+
+test('clusterEntries: same-kind fuzzy clustering is unchanged by the cross-kind path', () => {
+  // AC2 guard: two same-kind fuzzy near-dups still cluster together exactly as
+  // before, even when an unrelated different-kind entry is interleaved.
+  const entries = [
+    entry({ id: 'a1a1a1a1a1a1', kind: 'fact', originAgent: 'dev-1', text: 'poller polls the events api every 30s', createdAt: '2026-07-08T08:00:00Z' }),
+    entry({ id: 'z9z9z9z9z9z9', kind: 'entity', originAgent: 'dev-9', text: 'the makefile builds the container image', createdAt: '2026-07-08T08:30:00Z' }),
+    entry({ id: 'b2b2b2b2b2b2', kind: 'fact', originAgent: 'dev-2', text: 'poller polls the events api every 30 s', createdAt: '2026-07-08T09:00:00Z' }),
+  ];
+  const clusters = clusterEntries(entries, { simThreshold: 0.5 });
+  assert.equal(clusters.length, 2);
+  const poller = clusters.find((c) => c.text.includes('poller'));
+  assert.deepEqual(poller.memberIds.sort(), ['a1a1a1a1a1a1', 'b2b2b2b2b2b2']);
+  assert.equal(poller.kind, 'fact');
+  assert.deepEqual(poller.convergence, ['dev-1', 'dev-2']);
+});
+
+test('buildCanonicalProjection: cross-kind exact merge is deterministic & idempotent (C1, #605)', () => {
+  // The evidence case from #605: the SAME lesson recorded as a convention and a
+  // fact. Winner (oldest) keeps its kind + id; the absorbed member becomes a
+  // merge tombstone (carrying its own original kind) filed under the winner's
+  // kind bucket, and the projection round-trips byte-identically.
+  const entries = [
+    entry({ id: 'b2b2b2b2b2b2', kind: 'convention', originAgent: 'dev-2',
+      text: 'gh-as-agent commit sets author but not committer', createdAt: '2026-07-08T08:00:00Z' }),
+    entry({ id: 'a1a1a1a1a1a1', kind: 'fact', originAgent: 'dev-1',
+      text: 'gh-as-agent commit sets author but not committer.', createdAt: '2026-07-08T09:00:00Z' }),
+  ];
+  const proj = buildCanonicalProjection(entries, { simThreshold: 0.6, now: NOW });
+  assert.equal(proj.clusters.length, 1);
+  // Winner's kind bucket holds the canonical entry AND the absorbed tombstone.
+  assert.equal(proj.byKind.convention.canonical.length, 1);
+  assert.equal(proj.byKind.convention.tombstones.length, 1);
+  assert.ok(!proj.byKind.fact); // the fact winner was absorbed, so no fact bucket
+
+  const canon = proj.byKind.convention.canonical[0];
+  assert.equal(canon.id, 'b2b2b2b2b2b2');
+  assert.equal(canon.kind, 'convention');
+  assert.deepEqual(canon.convergence, ['dev-1', 'dev-2']);
+
+  const tomb = proj.byKind.convention.tombstones[0];
+  assert.equal(tomb.id, 'a1a1a1a1a1a1');
+  assert.equal(tomb.kind, 'fact'); // tombstone keeps its own original kind
+  assert.equal(tomb.status, 'merged');
+  assert.equal(tomb.mergedInto, 'b2b2b2b2b2b2');
+
+  for (const line of proj.lines.convention) assert.ok(parseEntry(line), `line parses: ${line}`);
+  const proj2 = buildCanonicalProjection(entries, { simThreshold: 0.6, now: NOW });
+  assert.deepEqual(proj2.lines, proj.lines);
 });
 
 test('clusterEntries: tombstones/malformed are ignored', () => {

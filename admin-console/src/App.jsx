@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useState, useEffect } from 'react';
-import { Routes, Route, Navigate, useParams } from 'react-router-dom';
+import { Routes, Route, Navigate, useParams, useSearchParams } from 'react-router-dom';
 import Shell from './components/Shell';
 import SetupWizard from './pages/SetupWizard';
 import Login from './pages/Login';
@@ -9,6 +9,19 @@ import { useAuth } from './auth/AuthContext';
 function ProcessTeamRedirect() {
   const { teamId } = useParams();
   return <Navigate to={`/flows?proc=${encodeURIComponent(teamId)}`} replace />;
+}
+
+// The Extend-team wizard flow was removed (#588) — growing a team now happens in
+// the Flow Editor. Old `?mode=extend` deep links redirect there; every other
+// entry into the wizard is create-mode and renders normally.
+function TeamSetupRoute() {
+  const [params] = useSearchParams();
+  if (params.get('mode') === 'extend') {
+    const team = params.get('team');
+    const target = team ? `/flows?proc=${encodeURIComponent(team)}` : '/flows';
+    return <Navigate to={target} replace />;
+  }
+  return <TeamSetup />;
 }
 
 // Route guard for System-Admin-only pages (#584 AC8): SSH Keys, GitHub Tokens,
@@ -102,8 +115,8 @@ export default function App() {
           <Route path="/chats"           element={<AgentChat />} />
           <Route path="/chats/:agentId"  element={<AgentChat />} />
           <Route path="/quickstart"   element={<QuickStart />} />
-          <Route path="/team-setup"   element={<TeamSetup />} />
-          <Route path="/wizard/team"  element={<TeamSetup />} />
+          <Route path="/team-setup"   element={<TeamSetupRoute />} />
+          <Route path="/wizard/team"  element={<TeamSetupRoute />} />
           <Route path="/environments" element={<WorkingEnvironments />} />
           <Route path="/ssh-keys"     element={<AdminRoute><SshKeys /></AdminRoute>} />
           <Route path="/github-tokens" element={<AdminRoute><GithubTokens /></AdminRoute>} />

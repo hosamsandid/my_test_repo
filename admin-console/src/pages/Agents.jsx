@@ -5,7 +5,7 @@ import remarkGfm from 'remark-gfm';
 import {
   Plus, Trash2, Layers, ChevronDown, ChevronRight,
   Edit, MessageCircle, RefreshCw, Power, PowerOff, FileText,
-  User, Users, Workflow, Info, GitMerge, Download, Upload, Copy,
+  User, Users, Workflow, Info, Download, Upload, Copy,
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import SidePanel from '../components/SidePanel';
@@ -1838,7 +1838,8 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
             {children.length} member{children.length !== 1 ? 's' : ''}
           </span>
           <button
-            onClick={() => navigate(`/team-setup?team=${encodeURIComponent(agent.id)}&mode=extend`)}
+            onClick={() => navigate(`/flows?proc=${encodeURIComponent(agent.id)}`)}
+            title="Grow this team by adding roles in the Flow Editor"
             style={{
               background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
               borderRadius: 'var(--eb-radius-md)', cursor: 'pointer',
@@ -1846,7 +1847,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
               display: 'flex', alignItems: 'center', gap: 4, color: 'var(--eb-text-secondary)',
             }}
           >
-            <GitMerge size={13} /> Extend team
+            <Workflow size={13} /> Open in Flow Editor
           </button>
           <button
             onClick={() => onAddMember(agent)}

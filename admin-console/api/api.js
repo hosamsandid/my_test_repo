@@ -21,7 +21,7 @@ const { buildProcessGraph } = require('./process-graph');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { normalizeTemplatePorts } = require('./catalog-ports');
@@ -1902,6 +1902,52 @@ app.post('/api/agents/:id/sync-bps', heavyLimiter, async (req, res) => {
   }
 });
 
+// Resolve the `{{var}}` substitution set for a LIVE team from its team agent
+// config + bound Working Environment, mirroring the wizard's POST /api/teams
+// vars (#586, AC-5). The team-level label choices (ready/dispatch/maxParallel)
+// aren't persisted on a materialised team, so they fall back to the same
+// defaults the wizard uses — a caller may override them in the request body.
+// Returns { vars } on success or { error } for a clean 400/404.
+function resolveTeamMemberVars(teamId, overrides = {}) {
+  const teamCfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null);
+  if (!teamCfg) return { error: 'Team not found' };
+  const envId = teamCfg.environmentId;
+  const env = envId ? loadEnvironment(envId) : null;
+  if (!env) return { error: `Team '${teamId}' has no Working Environment` };
+  const repos = Array.isArray(env.repositories)
+    ? env.repositories
+    : (env.repository ? [env.repository] : []);
+  const primary = repos[0];
+  if (!primary?.url) return { error: `Team '${teamId}' environment has no repository configured` };
+  let parsed;
+  try {
+    parsed = parseGitHubUrl(primary.url);
+  } catch (err) {
+    return { error: `Team repository URL is not parseable: ${err.message}` };
+  }
+  const branch = typeof primary.branch === 'string' && /^[A-Za-z0-9._/-]+$/.test(primary.branch)
+    ? primary.branch
+    : 'main';
+  const readyLabel = typeof overrides.readyLabel === 'string' && overrides.readyLabel.trim()
+    ? overrides.readyLabel.trim() : 'ready';
+  const dispatchLabel = typeof overrides.dispatchLabel === 'string' && overrides.dispatchLabel.trim()
+    ? overrides.dispatchLabel.trim() : 'dispatch';
+  return {
+    vars: {
+      teamName: teamCfg.displayName || teamId,
+      teamId,
+      repoFullName: `${parsed.org}/${parsed.repo}`,
+      repoOwner: parsed.org,
+      repoName: parsed.repo,
+      repoUrl: primary.url,
+      branch,
+      readyLabel,
+      dispatchLabel,
+      maxParallel: Number.isInteger(overrides.maxParallel) ? overrides.maxParallel : 1,
+    },
+  };
+}
+
 app.post('/api/agents/:teamId/members', heavyLimiter, async (req, res) => {
   const { teamId } = req.params;
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid agent id' });
@@ -1920,12 +1966,38 @@ app.post('/api/agents/:teamId/members', heavyLimiter, async (req, res) => {
   // Body is optional. When present it carries the override / config fields
   // the orchestrator's addTeamMember now accepts: { id, displayName,
   // systemPromptOverride, skillsOverride, sessionPolicy, triggers }.
+  //
+  // Add-role-from-a-template (#586, AC-5): when the body carries a `templateId`
+  // instead of a free-form prompt, load that role template and build the
+  // member-create body server-side via the SAME buildMemberFromTemplate used by
+  // the Team-Setup wizard — so the live-materialised member gets the template's
+  // session policy + triggers with per-member `{{repoFullName}}`/`{{agentId}}`
+  // (and the rest of the team vars) substituted identically. The orchestrator
+  // still enforces member-id uniqueness (409 on collision, E1/AC-7).
+  const inBody = req.body || {};
+  let outBody = inBody;
+  if (typeof inBody.templateId === 'string' && inBody.templateId) {
+    const template = loadAgentTemplate(inBody.templateId);
+    if (!template) return res.status(400).json({ error: `Role template '${inBody.templateId}' not found` });
+    const memberId = typeof inBody.id === 'string' && inBody.id ? inBody.id : `${teamId}-${inBody.templateId}`;
+    if (!AGENT_ID_RE.test(memberId)) return res.status(400).json({ error: 'Invalid member id' });
+    const memberDisplayName = typeof inBody.displayName === 'string' && inBody.displayName.trim()
+      ? inBody.displayName.trim() : template.displayName;
+    const resolved = resolveTeamMemberVars(teamId, inBody);
+    if (resolved.error) return res.status(400).json({ error: resolved.error });
+    outBody = buildMemberFromTemplate(template, {
+      teamId,
+      memberId,
+      memberDisplayName,
+      vars: { ...resolved.vars, agentId: memberId },
+    });
+  }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(teamId)}/members`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body || {}),
+      body: JSON.stringify(outBody),
     });
     const data = await resp.json();
     if (!resp.ok) return res.status(resp.status).json(data);
@@ -6764,6 +6836,11 @@ app.get('/api/agent-templates', (_req, res) => {
 // the picker / wizard) reflect the change without a re-seed.
 
 // View a single template's full, editable definition + which tier it is.
+// The response carries the raw promptTemplate + triggers (for the Flow Editor's
+// "add role from a template" flow, #586 — the picker pre-fills a draft role and
+// keeps `{{vars}}` raw) plus the normalised composition surface
+// (`normalizeTemplatePorts`: patternRole / stageAffinity / ports) and `origin`
+// (the #587 tier: default / user / override).
 app.get('/api/agent-templates/:id', (req, res) => {
   const { id } = req.params;
   if (!agentTemplateStore.TEMPLATE_ID_RE.test(id)) {
@@ -6775,7 +6852,7 @@ app.get('/api/agent-templates/:id', (req, res) => {
     !!readTemplateFile(AGENT_TEMPLATES_DIR, id),
     !!readTemplateFile(USER_AGENT_TEMPLATES_DIR, id),
   );
-  res.json({ template, origin });
+  res.json({ template: { ...template, ...normalizeTemplatePorts(template) }, origin });
 });
 
 // Create a new template. Requires a unique, slug-valid id and the minimum
@@ -6923,24 +7000,6 @@ function planMembers(teamId, normalizedRoles, loadTemplate) {
     }
   }
   return planned;
-}
-
-// Build the `dataFlow` config block for a materialised member from its custom
-// role's ports (#379). dependsOn role ids → member ids so the live graph
-// connects members; artifact paths are global and pass through unchanged.
-// Returns null when the role carries no ports (keeps ordinary teams clean).
-function dataFlowForMember(template, teamId) {
-  const inputs = Array.isArray(template?.inputs) ? template.inputs : [];
-  const outputs = Array.isArray(template?.outputs) ? template.outputs : [];
-  const dependsOn = Array.isArray(template?.dependsOn) ? template.dependsOn : [];
-  if (!inputs.length && !outputs.length && !dependsOn.length) return null;
-  return {
-    dataFlow: {
-      ...(inputs.length ? { inputs } : {}),
-      ...(outputs.length ? { outputs } : {}),
-      ...(dependsOn.length ? { dependsOn: dependsOn.map(d => `${teamId}-${d}`) } : {}),
-    },
-  };
 }
 
 app.post('/api/teams', heavyLimiter, async (req, res) => {
@@ -7328,62 +7387,6 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     // useful as a fallback) and the role's full triggers.json.
     for (const p of toCreate) {
       const memberVars = { ...vars, agentId: p.memberId };
-      const promptText = applyTemplateVars(p.template.promptTemplate, memberVars);
-      const triggersOut = (p.template.triggers || []).map(tr => {
-        const out = {
-          id: tr.id,
-          type: tr.type,
-          enabled: tr.enabled !== false,
-          description: tr.description || `${p.template.displayName} — ${tr.id}`,
-          prompt: applyTemplateVars(tr.promptTemplate || '', memberVars),
-        };
-        if (tr.type === 'github-event') {
-          out.events = tr.events || [];
-          out.repo = vars.repoFullName;
-          // Carry the optional label-name filter through if the template
-          // defines one (e.g. developer.json pins it to the wizard's
-          // {{readyLabel}} so the trigger fires only on that label).
-          if (typeof tr.labelFilter === 'string' && tr.labelFilter.trim()) {
-            out.labelFilter = applyTemplateVars(tr.labelFilter, memberVars);
-          }
-          // Data-flow (agent dependency) marker so the trigger UI renders it as
-          // an editable "push from <upstream>" hand-off rather than a raw push.
-          if (tr.dataFlow) out.dataFlow = true;
-          // GitHub-channel marker (#380) so reconciliation can regenerate it and
-          // the graph builders skip it (the on:'github' edge comes from the port).
-          if (tr.channel) out.channel = true;
-          // Stamp the history horizon (#320/#446) on EVERY github-event trigger,
-          // authored and derived, so the poller starts fresh members from "now"
-          // instead of the volatile triggers.json mtime. Reconciliation preserves
-          // this activatedAt when it regenerates channel/dataFlow triggers
-          // (stampDerivedActivation), so a later triggers.json rewrite can't push
-          // the horizon forward and drop pending events.
-          {
-            const now = new Date().toISOString();
-            out.createdAt = now;
-            out.activatedAt = now;
-          }
-        } else if (tr.type === 'cron') {
-          out.cron = tr.cron;
-        }
-        // Carry pre-check script fields (used by the bid-loop cron trigger).
-        if (tr.preCheckScript) {
-          out.preCheckScript = tr.preCheckScript;
-        }
-        if (tr.preCheckEnv && typeof tr.preCheckEnv === 'object') {
-          out.preCheckEnv = Object.fromEntries(
-            Object.entries(tr.preCheckEnv).map(([k, v]) => [k, applyTemplateVars(v, memberVars)])
-          );
-        }
-        // Carry the optional declarative `emits` set through (Process Canvas
-        // #328) — the labels this trigger's run is expected to set. Template
-        // tokens (e.g. `started:{{agentId}}`) are resolved per-member.
-        if (Array.isArray(tr.emits)) {
-          out.emits = tr.emits.map(e => applyTemplateVars(String(e), memberVars));
-        }
-        return out;
-      });
-
       // Member display name is the role name only (optionally numbered for
       // multi-instance roles). The parent team name is intentionally NOT
       // prepended — UIs already group members under their team, so prefixing
@@ -7391,45 +7394,17 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
       const memberDisplayName = p.instanceIndex !== null
         ? `${p.template.displayName} ${p.instanceIndex}`
         : p.template.displayName;
+      // Single source of truth for the member-create body (shared with the
+      // streaming endpoint and the Flow Editor's add-role-from-template, #586):
+      // prompt + triggers substituted per-member; declarative ports carried.
+      const memberBody = buildMemberFromTemplate(p.template, {
+        teamId, memberId: p.memberId, memberDisplayName, vars: memberVars,
+        materialize: materializeMembers,
+      });
       const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(teamAgentId)}/members`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: p.memberId,
-          displayName: memberDisplayName,
-          systemPromptOverride: promptText,
-          // skillsOverride deliberately omitted — members inherit the TEAM
-          // AGENT's `skills[]` (team-owned grant). Role-specific Skill packs
-          // will plug in here as overrides.
-          sessionPolicy: p.template.sessionPolicy === 'per-invocation' ? 'per-invocation' : undefined,
-          triggers: triggersOut,
-          // BP data-flow ports (#379), recorded on the member config so the live
-          // graph renders dependency/artifact edges. dependsOn role ids are
-          // mapped to member ids (`<teamId>-<roleId>`) so the graph connects
-          // members; artifact paths match across nodes unchanged.
-          ...(dataFlowForMember(p.template, teamId) || {}),
-          // Parent-child hierarchy: map the role's parent id → member id so the
-          // agent overview + live graph render the tree like an orchestrator.
-          ...(typeof p.template.parent === 'string' && p.template.parent
-            ? { parentMemberId: `${teamId}-${p.template.parent}` } : {}),
-          // Agent-level emitted labels (label hand-offs) — recorded on config.
-          ...(Array.isArray(p.template.emits) && p.template.emits.length
-            ? { emits: p.template.emits } : {}),
-          // Process stage band — recorded on config so the live graph reproduces
-          // the draft's stage layout (the top-level order lives on the team).
-          ...(typeof p.template.stage === 'string' && p.template.stage
-            ? { stage: p.template.stage } : {}),
-          // GitHub artifact ports (#380): produce flags verbatim; channel `from`
-          // role ids mapped to member ids (`<teamId>-<roleId>`) so the live graph
-          // connects members. The derived consumer triggers are already in
-          // triggersOut (from expandGithubChannels).
-          ...(p.template.github && (p.template.github.producesPr || p.template.github.producesIssue)
-            ? { github: p.template.github } : {}),
-          ...(Array.isArray(p.template.channels) && p.template.channels.length
-            ? { channels: p.template.channels.map(c => ({ ...c, from: `${teamId}-${c.from}` })) } : {}),
-          // Deferred materialization — create as a stub when requested.
-          materialize: materializeMembers,
-        }),
+        body: JSON.stringify(memberBody),
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
@@ -7895,62 +7870,6 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
       const stepId = `member:${p.memberId}`;
       emit({ type: 'step', id: stepId, status: 'running' });
       const memberVars = { ...vars, agentId: p.memberId };
-      const promptText = applyTemplateVars(p.template.promptTemplate, memberVars);
-      const triggersOut = (p.template.triggers || []).map(tr => {
-        const out = {
-          id: tr.id,
-          type: tr.type,
-          enabled: tr.enabled !== false,
-          description: tr.description || `${p.template.displayName} — ${tr.id}`,
-          prompt: applyTemplateVars(tr.promptTemplate || '', memberVars),
-        };
-        if (tr.type === 'github-event') {
-          out.events = tr.events || [];
-          out.repo = vars.repoFullName;
-          // Carry the optional label-name filter through if the template
-          // defines one (e.g. developer.json pins it to the wizard's
-          // {{readyLabel}} so the trigger fires only on that label).
-          if (typeof tr.labelFilter === 'string' && tr.labelFilter.trim()) {
-            out.labelFilter = applyTemplateVars(tr.labelFilter, memberVars);
-          }
-          // Data-flow (agent dependency) marker so the trigger UI renders it as
-          // an editable "push from <upstream>" hand-off rather than a raw push.
-          if (tr.dataFlow) out.dataFlow = true;
-          // GitHub-channel marker (#380) so reconciliation can regenerate it and
-          // the graph builders skip it (the on:'github' edge comes from the port).
-          if (tr.channel) out.channel = true;
-          // Stamp the history horizon (#320/#446) on EVERY github-event trigger,
-          // authored and derived, so the poller starts fresh members from "now"
-          // instead of the volatile triggers.json mtime. Reconciliation preserves
-          // this activatedAt when it regenerates channel/dataFlow triggers
-          // (stampDerivedActivation), so a later triggers.json rewrite can't push
-          // the horizon forward and drop pending events.
-          {
-            const now = new Date().toISOString();
-            out.createdAt = now;
-            out.activatedAt = now;
-          }
-        } else if (tr.type === 'cron') {
-          out.cron = tr.cron;
-        }
-        // Carry pre-check script fields (used by the bid-loop cron trigger).
-        if (tr.preCheckScript) {
-          out.preCheckScript = tr.preCheckScript;
-        }
-        if (tr.preCheckEnv && typeof tr.preCheckEnv === 'object') {
-          out.preCheckEnv = Object.fromEntries(
-            Object.entries(tr.preCheckEnv).map(([k, v]) => [k, applyTemplateVars(v, memberVars)])
-          );
-        }
-        // Carry the optional declarative `emits` set through (Process Canvas
-        // #328) — the labels this trigger's run is expected to set. Template
-        // tokens (e.g. `started:{{agentId}}`) are resolved per-member.
-        if (Array.isArray(tr.emits)) {
-          out.emits = tr.emits.map(e => applyTemplateVars(String(e), memberVars));
-        }
-        return out;
-      });
-
       // Member display name is the role name only (optionally numbered for
       // multi-instance roles). The parent team name is intentionally NOT
       // prepended — UIs already group members under their team, so prefixing
@@ -7958,29 +7877,16 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
       const memberDisplayName = p.instanceIndex !== null
         ? `${p.template.displayName} ${p.instanceIndex}`
         : p.template.displayName;
+      // Same member-create body as the non-streaming endpoint + the Flow Editor
+      // add-role-from-template (#586). `materialize` is left to the orchestrator
+      // default here (the streaming wizard always materializes its members).
+      const memberBody = buildMemberFromTemplate(p.template, {
+        teamId, memberId: p.memberId, memberDisplayName, vars: memberVars,
+      });
       const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(teamAgentId)}/members`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: p.memberId,
-          displayName: memberDisplayName,
-          systemPromptOverride: promptText,
-          sessionPolicy: p.template.sessionPolicy === 'per-invocation' ? 'per-invocation' : undefined,
-          triggers: triggersOut,
-          // Declarative ports (parity with POST /api/teams): data-flow (#379),
-          // hierarchy (#377), agent-level emits, stage band, GitHub ports (#380).
-          ...(dataFlowForMember(p.template, teamId) || {}),
-          ...(typeof p.template.parent === 'string' && p.template.parent
-            ? { parentMemberId: `${teamId}-${p.template.parent}` } : {}),
-          ...(Array.isArray(p.template.emits) && p.template.emits.length
-            ? { emits: p.template.emits } : {}),
-          ...(typeof p.template.stage === 'string' && p.template.stage
-            ? { stage: p.template.stage } : {}),
-          ...(p.template.github && (p.template.github.producesPr || p.template.github.producesIssue)
-            ? { github: p.template.github } : {}),
-          ...(Array.isArray(p.template.channels) && p.template.channels.length
-            ? { channels: p.template.channels.map(c => ({ ...c, from: `${teamId}-${c.from}` })) } : {}),
-        }),
+        body: JSON.stringify(memberBody),
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {

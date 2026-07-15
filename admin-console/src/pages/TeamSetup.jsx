@@ -2,12 +2,12 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { useNavigate, Link, useSearchParams, useLocation } from 'react-router-dom';
 import {
   ArrowLeft, ArrowRight, Check, AlertCircle, CheckCircle, Github,
-  Compass, Code, Search, Shield, FlaskConical, Book, Tag, User,
+  User,
   Loader2, Circle, XCircle, Lock,
-  Network, ClipboardCheck, Gauge, Rocket, MessageCircle, TrendingUp,
   Layers, Terminal, FileCode2,
 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
+import { ROLE_ICONS } from '../components/role-icons';
 import ScriptViewerPanel from '../components/ScriptViewerPanel';
 import SkillPicker from '../components/SkillPicker';
 import KnowledgeLearningSections, {
@@ -21,13 +21,6 @@ function scriptNameFromPath(scriptPath) {
   if (!trimmed) return null;
   return trimmed.split('/').filter(Boolean).pop() || null;
 }
-
-const ROLE_ICONS = {
-  compass: Compass, code: Code, search: Search, shield: Shield,
-  flask: FlaskConical, book: Book, tag: Tag,
-  network: Network, 'clipboard-check': ClipboardCheck, gauge: Gauge,
-  rocket: Rocket, 'message-circle': MessageCircle, 'trending-up': TrendingUp,
-};
 
 const inputStyle = {
   width: '100%',

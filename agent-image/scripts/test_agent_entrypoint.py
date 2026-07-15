@@ -402,6 +402,150 @@ class MaintenanceModeGating(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(maintenance_calls), 2)
 
 
+class TriggerBackstopUnit(unittest.TestCase):
+    """#611: the pure per-agent backstop that caps concurrent + per-window
+    triggered Claude spawns so a self-triggering loop can't fan out unbounded."""
+
+    def _clock(self):
+        # A mutable, injectable monotonic clock.
+        state = {"t": 1000.0}
+        return state, (lambda: state["t"])
+
+    def test_concurrency_ceiling_denies_when_full(self):
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=2, max_per_window=0, window_sec=0)
+        self.assertTrue(b.try_acquire().allowed)
+        self.assertTrue(b.try_acquire().allowed)
+        d = b.try_acquire()
+        self.assertFalse(d.allowed)
+        self.assertEqual(d.reason, "concurrency")
+        self.assertEqual(d.active, 2)
+
+    def test_release_frees_a_slot(self):
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=1, max_per_window=0, window_sec=0)
+        self.assertTrue(b.try_acquire().allowed)
+        self.assertFalse(b.try_acquire().allowed)
+        b.release()
+        self.assertTrue(b.try_acquire().allowed)
+
+    def test_release_never_goes_negative(self):
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=1, max_per_window=0, window_sec=0)
+        b.release()
+        b.release()
+        self.assertEqual(b.snapshot()["active"], 0)
+        self.assertTrue(b.try_acquire().allowed)
+
+    def test_rate_limit_denies_after_window_full(self):
+        state, clock = self._clock()
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=0, max_per_window=3, window_sec=300, clock=clock)
+        # Three spawns fit in the window; the fourth is dropped.
+        for _ in range(3):
+            self.assertTrue(b.try_acquire().allowed)
+            b.release()  # concurrency disabled, but release keeps active honest
+        d = b.try_acquire()
+        self.assertFalse(d.allowed)
+        self.assertEqual(d.reason, "rate")
+
+    def test_rate_limit_recovers_after_window_slides(self):
+        state, clock = self._clock()
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=0, max_per_window=2, window_sec=300, clock=clock)
+        self.assertTrue(b.try_acquire().allowed)
+        self.assertTrue(b.try_acquire().allowed)
+        self.assertFalse(b.try_acquire().allowed)
+        # Advance past the window — the old spawns age out.
+        state["t"] += 301
+        self.assertTrue(b.try_acquire().allowed)
+
+    def test_zero_limits_disable_the_backstop(self):
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=0, max_per_window=0, window_sec=0)
+        for _ in range(50):
+            self.assertTrue(b.try_acquire().allowed)
+
+    def test_warn_fires_once_per_episode_then_resets_on_success(self):
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=1, max_per_window=0, window_sec=0)
+        self.assertTrue(b.try_acquire().allowed)  # at ceiling
+        first = b.try_acquire()
+        self.assertFalse(first.allowed)
+        self.assertTrue(first.warn)            # first drop warns
+        second = b.try_acquire()
+        self.assertFalse(second.allowed)
+        self.assertFalse(second.warn)          # subsequent drops stay silent
+        b.release()
+        self.assertTrue(b.try_acquire().allowed)  # pressure eased → episode ends
+        b.release()
+        b.try_acquire()  # back to ceiling
+        self.assertTrue(b.try_acquire().warn)  # a fresh episode warns again
+
+
+class TriggerBackstopExecuteIntegration(unittest.IsolatedAsyncioTestCase):
+    """#611: `_execute` — the single chokepoint for triggered work — consults
+    the backstop before spawning, drops over-limit runs without calling
+    `_execute_inner`, and pairs every allowed spawn with a release."""
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=None, blueprint_id=None,
+        )
+
+    async def test_execute_dropped_when_backstop_denies(self):
+        scheduler = self._scheduler()
+        scheduler._backstop = entrypoint.TriggerBackstop(
+            max_concurrent=1, max_per_window=0, window_sec=0)
+        scheduler._backstop.try_acquire()  # fill to ceiling
+        inner = AsyncMock()
+        warn = AsyncMock()
+        trigger = {"id": "t1", "type": "cron"}
+        with patch.object(entrypoint, "_under_test_harness", return_value=False), \
+             patch.object(scheduler, "_execute_inner", inner), \
+             patch.object(scheduler, "_post_backstop_warning", warn):
+            await scheduler._execute(trigger)
+        inner.assert_not_called()
+        warn.assert_called_once()
+        self.assertNotIn("t1", scheduler._running)
+
+    async def test_execute_allowed_then_released(self):
+        scheduler = self._scheduler()
+        inner = AsyncMock()
+        trigger = {"id": "t1", "type": "cron"}
+        with patch.object(entrypoint, "_under_test_harness", return_value=False), \
+             patch.object(scheduler, "_execute_inner", inner):
+            await scheduler._execute(trigger)
+        inner.assert_called_once()
+        # Released after completion, so the slot is free again.
+        self.assertEqual(scheduler._backstop.snapshot()["active"], 0)
+        self.assertNotIn("t1", scheduler._running)
+
+    async def test_execute_releases_even_when_inner_raises(self):
+        scheduler = self._scheduler()
+        inner = AsyncMock(side_effect=RuntimeError("boom"))
+        trigger = {"id": "t1", "type": "cron"}
+        with patch.object(entrypoint, "_under_test_harness", return_value=False), \
+             patch.object(scheduler, "_execute_inner", inner):
+            await scheduler._execute(trigger)  # error is swallowed + logged
+        self.assertEqual(scheduler._backstop.snapshot()["active"], 0)
+
+    async def test_only_first_drop_posts_a_warning(self):
+        scheduler = self._scheduler()
+        scheduler._backstop = entrypoint.TriggerBackstop(
+            max_concurrent=1, max_per_window=0, window_sec=0)
+        scheduler._backstop.try_acquire()  # fill to ceiling
+        trigger = {"id": "t1", "type": "cron"}
+        with patch.object(entrypoint, "_under_test_harness", return_value=False), \
+             patch.object(scheduler, "_execute_inner", AsyncMock()), \
+             patch.object(scheduler, "_post_backstop_warning", AsyncMock()) as warn:
+            await scheduler._execute(trigger)
+            await scheduler._execute(trigger)
+            await scheduler._execute(trigger)
+        warn.assert_called_once()
+
+
 class ResultEventContextTokens(unittest.TestCase):
     """#509: `result.usage` is a turn-wide aggregate across every internal
     API round-trip in the agentic tool-call loop (confirmed against a live

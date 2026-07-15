@@ -10,6 +10,7 @@ const {
   similarity,
   similar,
   clusterEntries,
+  filterEntriesToTeam,
   buildCanonicalProjection,
   crossesConvergence,
   stableSuggestionId,
@@ -330,6 +331,76 @@ test('themeToCandidate: members carry sourceRefs for skill provenance', () => {
   assert.deepEqual(withRefs.sourceRefs, [{ kind: 'pr', ref: '42' }]);
   const without = cand.members.find((m) => m.id === 'b2b2b2b2b2b2');
   assert.ok(!('sourceRefs' in without));
+});
+
+// ─── filterEntriesToTeam (#603): team-scope the shared-branch clustering input ─
+
+test('filterEntriesToTeam: multi-team shard set keeps only this team’s members', () => {
+  const entries = [
+    entry({ id: 'a1a1a1a1a1a1', originAgent: 'agent-studio-developer' }),
+    entry({ id: 'b2b2b2b2b2b2', originAgent: 'agent-studio-reviewer' }),
+    entry({ id: 'c3c3c3c3c3c3', originAgent: 'core-sdlc-developer' }),
+    entry({ id: 'd4d4d4d4d4d4', originAgent: 'core-sdlc-reviewer' }),
+  ];
+  const members = new Set(['agent-studio', 'agent-studio-developer', 'agent-studio-reviewer']);
+  const kept = filterEntriesToTeam(entries, members);
+  assert.deepEqual(kept.map((e) => e.id), ['a1a1a1a1a1a1', 'b2b2b2b2b2b2']);
+});
+
+test('filterEntriesToTeam: single-team set is the identity function (no-op)', () => {
+  const entries = [
+    entry({ id: 'a1a1a1a1a1a1', originAgent: 'acme-dev-1' }),
+    entry({ id: 'b2b2b2b2b2b2', originAgent: 'acme-dev-2' }),
+  ];
+  const kept = filterEntriesToTeam(entries, ['acme', 'acme-dev-1', 'acme-dev-2']);
+  assert.equal(kept.length, entries.length);
+  assert.deepEqual(kept, entries);
+});
+
+test('filterEntriesToTeam: accepts a member id array as well as a Set', () => {
+  const entries = [
+    entry({ id: 'a1a1a1a1a1a1', originAgent: 'team-a-dev' }),
+    entry({ id: 'c3c3c3c3c3c3', originAgent: 'team-b-dev' }),
+  ];
+  assert.deepEqual(
+    filterEntriesToTeam(entries, ['team-a-dev']).map((e) => e.id),
+    ['a1a1a1a1a1a1'],
+  );
+});
+
+test('filterEntriesToTeam: drops entries whose originAgent is missing/blank or unknown', () => {
+  const entries = [
+    entry({ id: 'a1a1a1a1a1a1', originAgent: 'team-a-dev' }),
+    entry({ id: 'b2b2b2b2b2b2', originAgent: '   ' }),
+    { id: 'c3c3c3c3c3c3', kind: 'fact', text: 'no origin at all' },
+  ];
+  assert.deepEqual(
+    filterEntriesToTeam(entries, ['team-a-dev']).map((e) => e.id),
+    ['a1a1a1a1a1a1'],
+  );
+});
+
+test('filterEntriesToTeam: empty member set / non-array input yield no entries', () => {
+  const entries = [entry({ id: 'a1a1a1a1a1a1', originAgent: 'team-a-dev' })];
+  assert.deepEqual(filterEntriesToTeam(entries, []), []);
+  assert.deepEqual(filterEntriesToTeam(entries, new Set()), []);
+  assert.deepEqual(filterEntriesToTeam(null, ['team-a-dev']), []);
+});
+
+test('filterEntriesToTeam: feeding the scoped subset into projection excludes co-tenant clusters', () => {
+  // Two teams sharing a branch; the same near-duplicate text is learned by each.
+  const entries = [
+    entry({ id: 'a1a1a1a1a1a1', originAgent: 'agent-studio-dev', text: 'branch from origin/main', createdAt: '2026-07-08T08:00:00Z' }),
+    entry({ id: 'b2b2b2b2b2b2', originAgent: 'core-sdlc-dev', text: 'branch from origin main', createdAt: '2026-07-08T09:00:00Z' }),
+  ];
+  const scoped = filterEntriesToTeam(entries, new Set(['agent-studio', 'agent-studio-dev']));
+  const proj = buildCanonicalProjection(scoped, { simThreshold: 0.5, now: NOW });
+  const allOrigins = proj.clusters.flatMap((c) => c.members.map((m) => m.originAgent));
+  assert.ok(allOrigins.every((o) => o === 'agent-studio-dev'));
+  assert.ok(!allOrigins.includes('core-sdlc-dev'));
+  // Idempotent (AC4): re-projecting the scoped subset is byte-identical.
+  const proj2 = buildCanonicalProjection(scoped, { simThreshold: 0.5, now: NOW });
+  assert.deepEqual(proj.lines, proj2.lines);
 });
 
 test('clustersCoveredByThemes: a promoted MANUAL combine covers its lessons too', () => {

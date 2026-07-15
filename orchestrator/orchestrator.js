@@ -2304,6 +2304,23 @@ function agentKnowledgeTeamId(cfg) {
   return cfg.teamId || DEFAULT_TEAM_ID;
 }
 
+// The squad members whose harvested knowledge belongs to `teamId` — every agent
+// whose agentKnowledgeTeamId resolves to this team (a member via parentTeamId, or
+// the team agent itself). Used to team-scope the shared-branch clustering input
+// (#603): teams working the same repo share one `agent-knowledge` branch, so a
+// team's canonical clone contains co-tenant teams' shards. The team id is always
+// in the set (a `team` agent's own id === teamId), so members whose shards carry
+// originAgent = their id are matched via their parentTeamId resolving here.
+function teamSquadMemberIds(teamId) {
+  const ids = new Set();
+  if (typeof teamId === "string" && teamId.trim()) ids.add(teamId.trim());
+  for (const otherId of listAgentIds()) {
+    const cfg = loadAgentConfig(otherId);
+    if (cfg && agentKnowledgeTeamId(cfg) === teamId) ids.add(otherId);
+  }
+  return ids;
+}
+
 // Per-team knowledge-config overrides (#570). The four knowledge-config groups
 // (autonomy / review / promotion gates / storage) are keyed PER TEAM here, not on
 // the shared environment record, so two teams reusing one environment hold
@@ -2809,7 +2826,12 @@ function baselineReviewApprovals(teamId, env) {
       const storeRel = _kbStoreRel(env);
       const storeRoot = storeRel ? path.join(clonePath, storeRel) : clonePath;
       const manifest = _loadCloneManifest(storeRoot);
-      shardEntries = _readCloneShards(storeRoot, manifest);
+      // #603: scope to this team's squad — the shared KB branch can hold co-tenant
+      // teams' shards, and grandfathering must approve only this team's own ids.
+      shardEntries = knowledgeConvergence.filterEntriesToTeam(
+        _readCloneShards(storeRoot, manifest),
+        teamSquadMemberIds(teamId),
+      );
     }
     // No canonical clone (yet): baseline from the team agents' local checkouts
     // instead, so flipping review on still grandfathers everything already
@@ -2917,7 +2939,14 @@ function runConvergenceCollector(teamId, envArg) {
   const storeRel = _kbStoreRel(env);
   const storeRoot = storeRel ? path.join(clonePath, storeRel) : clonePath;
   const manifest = _loadCloneManifest(storeRoot);
-  const shardEntries = _readCloneShards(storeRoot, manifest);
+  // #603: a shared `agent-knowledge` branch means this clone can hold co-tenant
+  // teams' shards — scope the clustering input to this team's squad before
+  // projecting, so the canonical merge, candidate store, suggestions and
+  // auto-promotion all operate on team-owned knowledge only.
+  const shardEntries = knowledgeConvergence.filterEntriesToTeam(
+    _readCloneShards(storeRoot, manifest),
+    teamSquadMemberIds(teamId),
+  );
   if (shardEntries.length === 0) return;
 
   const { simThreshold, convergenceThreshold, relatedThreshold } = knowledgeConvergenceConfig(env);
@@ -3320,7 +3349,12 @@ function nominateKnowledgeEntry(agentId, entryId, note) {
   const storeRel = _kbStoreRel(env);
   const storeRoot = storeRel ? path.join(clonePath, storeRel) : clonePath;
   const manifest = _loadCloneManifest(storeRoot);
-  const shardEntries = _readCloneShards(storeRoot, manifest);
+  // #603: scope to this team's squad so a nomination can never pull a co-tenant
+  // team's entry (sharing the KB branch) into the resolved cluster / candidate.
+  const shardEntries = knowledgeConvergence.filterEntriesToTeam(
+    _readCloneShards(storeRoot, manifest),
+    teamSquadMemberIds(teamId),
+  );
   const { simThreshold } = knowledgeConvergenceConfig(env);
   const clusters = knowledgeConvergence.buildCanonicalProjection(shardEntries, { simThreshold }).clusters;
   const cluster = clusters.find((c) => c.memberIds.includes(entryId));

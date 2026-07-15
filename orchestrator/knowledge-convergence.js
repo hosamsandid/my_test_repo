@@ -221,6 +221,26 @@ function canonicalEntry(cluster, now) {
   return out;
 }
 
+// Team-scope the clustering input (#603). Multiple teams working the same repo
+// share ONE `agent-knowledge` branch, so a team's canonical clone physically
+// contains the OTHER teams' shards. Convergence, the candidate store, suggestions
+// and auto-promotion must all operate on this team's own knowledge only — filter
+// the raw shard entries to the squad `memberIds` (agents whose knowledge belongs
+// to this team) BEFORE projecting. `originAgent` is a required provenance field
+// on every stored entry, so an entry whose originAgent is not a known member is a
+// co-tenant team's shard and is dropped. When every entry is already team-owned
+// (a team on its own, unshared branch) this is the identity function.
+function filterEntriesToTeam(entries, memberIds) {
+  if (!Array.isArray(entries)) return [];
+  const members = memberIds instanceof Set
+    ? memberIds
+    : new Set(Array.isArray(memberIds) ? memberIds : []);
+  return entries.filter((e) => {
+    const origin = e && typeof e.originAgent === 'string' ? e.originAgent.trim() : '';
+    return origin !== '' && members.has(origin);
+  });
+}
+
 /**
  * Build the canonical projection from all shard entries.
  * @param {object[]} entries  raw parsed shard entries
@@ -581,6 +601,7 @@ module.exports = {
   similarity,
   similar,
   isClusterable,
+  filterEntriesToTeam,
   clusterEntries,
   mergedTombstone,
   canonicalEntry,

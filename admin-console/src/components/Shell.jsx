@@ -63,7 +63,7 @@ const NAV = [
   { section: 'CONFIGURATION', items: [
     { path: '/teams',        label: 'Teams',               Icon: Building2 },
     { path: '/skills',       label: 'Skills Registry',     Icon: Zap,     adminOnly: true },
-    { path: '/role-templates', label: 'Role Templates',    Icon: UserCog, adminOnly: true },
+    { path: '/role-templates', label: 'Agent Templates',    Icon: UserCog, adminOnly: true },
     { path: '/jobs',         label: 'Triggers',            Icon: Clock },
     { path: '/github-events', label: 'GitHub Event Log',   Icon: History },
     { path: '/models',       label: 'Model Providers',     Icon: Sparkles, adminOnly: true },
@@ -84,7 +84,7 @@ const BREADCRUMBS = {
   '/ssh-keys':     'SSH Keys',
   '/github-tokens': 'GitHub Tokens',
   '/skills':       'Skills Registry',
-  '/role-templates': 'Role Templates',
+  '/role-templates': 'Agent Templates',
   '/jobs':         'Triggers',
   '/github-events': 'GitHub Event Log',
   '/models':       'Model Providers',

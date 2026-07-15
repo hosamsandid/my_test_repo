@@ -85,7 +85,7 @@ function HelpPanel({ onClose }) {
               <em> listens</em> on it, and that wiring is the graph.
             </p>
             <p style={{ margin: 0 }}>
-              Click <strong>New flow</strong> to author a <strong>Draft</strong> from scratch (add roles, then
+              Click <strong>New flow</strong> to author a <strong>Draft</strong> from scratch (add agents, then
               wire hand-offs — GitHub PR/Issue channels, labels, data flows, human-approval gates on the
               edges), then <strong>Materialize</strong> it into a real team.
             </p>
@@ -132,11 +132,11 @@ function HelpPanel({ onClose }) {
             <p style={{ margin: '0 0 var(--eb-space-1)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>Flow graph</p>
             <ol style={{ paddingLeft: 'var(--eb-space-4)', margin: '0 0 var(--eb-space-3)' }}>
               <li>Click <strong>New flow</strong> to start a draft, or pick an existing <strong>Team</strong>.</li>
-              <li>Add roles and wire hand-offs, then <strong>Materialize</strong> the draft into a team.</li>
+              <li>Add agents and wire hand-offs, then <strong>Materialize</strong> the draft into a team.</li>
             </ol>
             <p style={{ margin: '0 0 var(--eb-space-1)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>BriefingPack flow</p>
             <ol style={{ paddingLeft: 'var(--eb-space-4)', margin: 0 }}>
-              <li>Go to the <strong>Agents</strong> page and create an agent with role <strong>Orchestrator</strong>.</li>
+              <li>Go to the <strong>Agents</strong> page and create an <strong>Orchestrator</strong> agent.</li>
               <li>Set the <strong>Briefings Path</strong> to the directory containing your BriefingPacks.</li>
               <li>The new flow appears under <strong>BriefingPack flows</strong> once the agent is enabled.</li>
             </ol>
@@ -669,7 +669,7 @@ export default function Briefings() {
                     key={d.id}
                     icon={FileText}
                     label={d.name}
-                    sub={`${d.roleCount} role${d.roleCount === 1 ? '' : 's'}`}
+                    sub={`${d.roleCount} agent${d.roleCount === 1 ? '' : 's'}`}
                     selected={proc === `draft:${d.id}`}
                     onSelect={() => selectProc(`draft:${d.id}`)}
                     onDelete={() => deleteDraft(d)}
@@ -682,11 +682,11 @@ export default function Briefings() {
               <SectionHeader>BriefingPack flows</SectionHeader>
               {orchestrators.length === 0 ? (
                 <div style={{ padding: '0 var(--eb-space-4) var(--eb-space-3)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.6 }}>
-                  None. Create an agent with role{' '}
+                  None. Create an{' '}
                   <Link
                     to="/agents"
                     style={{ color: 'var(--eb-accent-primary)', textDecoration: 'none' }}
-                  >Orchestrator</Link>.
+                  >Orchestrator</Link> agent.
                 </div>
               ) : (
                 orchestrators.map(a => (

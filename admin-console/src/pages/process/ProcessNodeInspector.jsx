@@ -167,8 +167,8 @@ function TemplateReadonly({ node }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
       <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
-        This is a <strong>role template</strong> (blueprint view). Editing happens on live agents —
-        switch the scope to a team, or materialise this role via the Team Wizard.
+        This is an <strong>agent template</strong> (blueprint view). Editing happens on live agents —
+        switch the scope to a team, or materialise this agent via the Team Wizard.
       </div>
       <div>
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginBottom: 4 }}>Triggers</div>

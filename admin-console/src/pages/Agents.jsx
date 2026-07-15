@@ -1839,7 +1839,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
           </span>
           <button
             onClick={() => navigate(`/flows?proc=${encodeURIComponent(agent.id)}`)}
-            title="Grow this team by adding roles in the Flow Editor"
+            title="Grow this team by adding agents in the Flow Editor"
             style={{
               background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
               borderRadius: 'var(--eb-radius-md)', cursor: 'pointer',

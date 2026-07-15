@@ -15,7 +15,7 @@ export default function SdlcCatalogPage() {
         <div style={titleGroupStyle}>
           <h1 style={titleStyle}>SDLC Catalog</h1>
           <p style={subtitleStyle}>
-            End-to-end view of the trigger- and label-driven team — pick roles based on which lanes you want to staff.
+            End-to-end view of the trigger- and label-driven team — pick agents based on which lanes you want to staff.
           </p>
         </div>
         <a

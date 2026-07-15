@@ -121,7 +121,7 @@ export default function ConnectionsSection({ node, siblings = [], inheritedStage
         </div>
       ) : (
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-          No dependencies or data flow yet — drag a role's ● port on the canvas to add one.
+          No dependencies or data flow yet — drag an agent's ● port on the canvas to add one.
         </div>
       )}
     </div>

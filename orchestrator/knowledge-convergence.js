@@ -115,16 +115,62 @@ function unionConvergence(members) {
   return [...seen].sort();
 }
 
-// Single-link agglomerative clustering WITHIN one kind: an entry joins a cluster
-// if it is `similar` to ANY member. O(n²) in the worst case, which is fine for a
-// team KB (hundreds of entries) and keeps the logic obvious.
-function clusterEntriesOfKind(entries, simThreshold) {
-  const items = sortMembers((entries || []).filter(isClusterable));
+// The effective kind of an entry — entries may omit `kind` (defaults to "fact",
+// the same default the store and canonical projection use).
+function entryKind(e) {
+  return e && typeof e.kind === 'string' ? e.kind : 'fact';
+}
+
+// Do two clusterable entries belong in the same cluster?
+//  - SAME kind: the normal `similar` test (exact-normalized fast path OR fuzzy
+//    Jaccard >= threshold) — unchanged Phase-3 behaviour.
+//  - DIFFERENT kind: only an EXACT normalized-text match links them (C1, #605).
+//    The same lesson recorded once as a `fact` and once as a `convention` is one
+//    lesson and must converge; a merely fuzzy cross-kind pair is left apart to
+//    avoid over-merging differently-phrased lessons of different kinds.
+function entriesLink(a, b, simThreshold) {
+  if (entryKind(a) === entryKind(b)) return similar(a.text, b.text, simThreshold);
+  const na = normalizeText(a.text);
+  return na !== '' && na === normalizeText(b.text);
+}
+
+// Shape a settled member list into a cluster record. The FIRST member (oldest,
+// id tiebreak — see sortMembers) is the canonical winner, so its kind is the
+// deterministic canonical kind even for a cross-kind (exact-match) cluster.
+function buildCluster(memberList) {
+  const members = sortMembers(memberList);
+  const winner = members[0];
+  const convergence = unionConvergence(members);
+  return {
+    canonicalId: winner.id,
+    kind: winner.kind,
+    teamId: winner.teamId,
+    text: winner.text,
+    memberIds: members.map((m) => m.id),
+    members,
+    convergence,
+    convergenceCount: convergence.length,
+  };
+}
+
+/**
+ * Single-link agglomerative clustering over ALL clusterable entries: an entry
+ * joins a cluster if it `entriesLink`s ANY member. Same-kind entries link by
+ * similarity (exact or fuzzy); different-kind entries link only on an exact
+ * normalized-text match (C1, #605), so an identical lesson recorded under two
+ * kinds converges while fuzzy matches stay within one kind. O(n²) worst case,
+ * fine for a team KB (hundreds of entries) and keeps the logic obvious.
+ * @param {object[]} entries  raw parsed shard entries (any agents, any kinds)
+ * @param {{simThreshold?: number}} opts
+ * @returns {object[]} clusters (see buildCluster)
+ */
+function clusterEntries(entries, { simThreshold = 0.6 } = {}) {
+  const items = sortMembers((Array.isArray(entries) ? entries : []).filter(isClusterable));
   const clusters = [];
   for (const e of items) {
     let joined = null;
     for (const c of clusters) {
-      if (c.members.some((m) => similar(m.text, e.text, simThreshold))) {
+      if (c.members.some((m) => entriesLink(m, e, simThreshold))) {
         c.members.push(e);
         joined = c;
         break;
@@ -132,41 +178,8 @@ function clusterEntriesOfKind(entries, simThreshold) {
     }
     if (!joined) clusters.push({ members: [e] });
   }
-  return clusters.map((c) => {
-    const members = sortMembers(c.members);
-    const winner = members[0];
-    const convergence = unionConvergence(members);
-    return {
-      canonicalId: winner.id,
-      kind: winner.kind,
-      teamId: winner.teamId,
-      text: winner.text,
-      memberIds: members.map((m) => m.id),
-      members,
-      convergence,
-      convergenceCount: convergence.length,
-    };
-  });
-}
-
-/**
- * Cluster entries across all kinds. Kinds never cross-cluster.
- * @param {object[]} entries  raw parsed shard entries (any agents)
- * @param {{simThreshold?: number}} opts
- * @returns {object[]} clusters (see clusterEntriesOfKind)
- */
-function clusterEntries(entries, { simThreshold = 0.6 } = {}) {
-  const byKind = new Map();
-  for (const e of Array.isArray(entries) ? entries : []) {
-    if (!isClusterable(e)) continue;
-    const kind = typeof e.kind === 'string' ? e.kind : 'fact';
-    if (!byKind.has(kind)) byKind.set(kind, []);
-    byKind.get(kind).push(e);
-  }
-  const out = [];
-  for (const [, group] of byKind) out.push(...clusterEntriesOfKind(group, simThreshold));
   // Stable overall order: kind, then canonical createdAt, then id.
-  return out.sort(
+  return clusters.map((c) => buildCluster(c.members)).sort(
     (a, b) =>
       String(a.kind).localeCompare(String(b.kind)) ||
       entryCreatedMs(a.members[0]) - entryCreatedMs(b.members[0]) ||

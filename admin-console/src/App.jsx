@@ -30,6 +30,7 @@ const WorkingEnvironments = lazy(() => import('./pages/WorkingEnvironments'));
 const SshKeys             = lazy(() => import('./pages/SshKeys'));
 const GithubTokens        = lazy(() => import('./pages/GithubTokens'));
 const SkillsRegistry      = lazy(() => import('./pages/SkillsRegistry'));
+const RoleTemplates       = lazy(() => import('./pages/RoleTemplates'));
 const ScheduledJobs       = lazy(() => import('./pages/ScheduledJobs'));
 const GithubEventLog      = lazy(() => import('./pages/GithubEventLog'));
 const ModelRegistry       = lazy(() => import('./pages/ModelRegistry'));
@@ -107,6 +108,7 @@ export default function App() {
           <Route path="/ssh-keys"     element={<AdminRoute><SshKeys /></AdminRoute>} />
           <Route path="/github-tokens" element={<AdminRoute><GithubTokens /></AdminRoute>} />
           <Route path="/skills"       element={<AdminRoute><SkillsRegistry /></AdminRoute>} />
+          <Route path="/role-templates" element={<AdminRoute><RoleTemplates /></AdminRoute>} />
           <Route path="/jobs"         element={<ScheduledJobs />} />
           <Route path="/github-events" element={<GithubEventLog />} />
           <Route path="/models"       element={<AdminRoute><ModelRegistry /></AdminRoute>} />

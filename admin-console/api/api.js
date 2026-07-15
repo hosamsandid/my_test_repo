@@ -22,6 +22,7 @@ const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, 
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId } = require('./process-template');
+const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
@@ -1001,6 +1002,26 @@ function notifyAgentReload(agentId) {
     .catch(() => {});
 }
 
+// Resolve the "<org>/<repo>" that a team member's github-event triggers must
+// target, from its bound environment's first repository. The pure `expand*`
+// builders (expandGithubChannels / expandDataFlowSteps) emit derived
+// github-event triggers WITHOUT a `repo` field — at materialise time it's
+// injected from the env (out.repo = vars.repoFullName); the live reconcile path
+// must do the same, or the GitHub poller silently skips the trigger
+// (`_buildPollPlan` requires `t.repo`) and the subscriber never fires. Returns
+// null when unresolvable (no env / no repo / unparseable), in which case we
+// leave `repo` unset rather than writing a bogus value.
+function memberRepoFullName(cfg) {
+  try {
+    const env = cfg && cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+    const repos = env && Array.isArray(env.repositories) ? env.repositories : [];
+    const url = repos[0] && repos[0].url;
+    if (!url) return null;
+    const { org, repo } = parseGitHubUrl(url);
+    return `${org}/${repo}`;
+  } catch { return null; }
+}
+
 // A derived data-flow trigger is one the `expandDataFlowSteps` derivation owns:
 // it carries the `dataFlow` marker and the canonical `<consumer>-on-push-<up>`
 // id. Manually-authored data-flow triggers (arbitrary ids) don't match and are
@@ -1027,7 +1048,7 @@ async function reconcileTeamDataFlow(teamId) {
     if (!cfg || cfg.parentTeamId !== teamId) continue;
     const df = cfg.dataFlow && typeof cfg.dataFlow === 'object' ? cfg.dataFlow : {};
     const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
-    members.push({ id, displayName: cfg.displayName || id, triggers: Array.isArray(triggers) ? triggers : [], df });
+    members.push({ id, displayName: cfg.displayName || id, triggers: Array.isArray(triggers) ? triggers : [], df, repo: memberRepoFullName(cfg) });
   }
   if (members.length === 0) return;
 
@@ -1051,7 +1072,10 @@ async function reconcileTeamDataFlow(teamId) {
     // (#446). Content-compare (order-insensitive on id) so we write when the
     // wiring OR its preserved activatedAt genuinely changed — but skip a pure
     // no-op, which would bump triggers.json mtime for nothing.
-    const next = stampDerivedActivation(byId.get(m.id)?.triggers || [], m.triggers);
+    const next = injectDerivedTriggerRepo(
+      stampDerivedActivation(byId.get(m.id)?.triggers || [], m.triggers),
+      m.repo,
+    );
     if (norm(next) === norm(m.triggers)) continue;
     try { await putTriggers(m.id, next); notifyAgentReload(m.id); }
     catch { /* best-effort — never break the originating request */ }
@@ -1074,7 +1098,7 @@ async function reconcileTeamGithubChannels(teamId) {
     if (!cfg || cfg.parentTeamId !== teamId) continue;
     const channels = Array.isArray(cfg.channels) ? cfg.channels : [];
     const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
-    members.push({ id, displayName: cfg.displayName || id, channels, triggers: Array.isArray(triggers) ? triggers : [] });
+    members.push({ id, displayName: cfg.displayName || id, channels, triggers: Array.isArray(triggers) ? triggers : [], repo: memberRepoFullName(cfg) });
   }
   if (members.length === 0) return;
 
@@ -1092,7 +1116,10 @@ async function reconcileTeamGithubChannels(teamId) {
     // Preserve each regenerated channel trigger's history-horizon stamp so this
     // rewrite can't push the poller's horizon to "now" and drop a pending PR/issue
     // event (#446 — the exact case that kept the code-reviewer from ever firing).
-    const next = stampDerivedActivation(byId.get(m.id)?.triggers || [], m.triggers);
+    const next = injectDerivedTriggerRepo(
+      stampDerivedActivation(byId.get(m.id)?.triggers || [], m.triggers),
+      m.repo,
+    );
     if (norm(next) === norm(m.triggers)) continue;
     try { await putTriggers(m.id, next); notifyAgentReload(m.id); }
     catch { /* best-effort — never break the originating request */ }

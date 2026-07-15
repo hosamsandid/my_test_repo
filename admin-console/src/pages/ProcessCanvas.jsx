@@ -336,13 +336,13 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
             {caps.readOnlyHint
               ? caps.readOnlyHint
               : isDraft
-                ? 'Draft — design from scratch: + Add role, drag the ● port (roles and sources) to wire, click nodes/edges to edit. Nothing is created until you materialize.'
-                : 'Click a node to edit · drag the ● port (roles and sources) to wire a connection · click an edge to edit it.'}
+                ? 'Draft — design from scratch: + Add agent, drag the ● port (agents and sources) to wire, click nodes/edges to edit. Nothing is created until you materialize.'
+                : 'Click a node to edit · drag the ● port (agents and sources) to wire a connection · click an edge to edit it.'}
           </div>
         </div>
         {isDraft && (
           <>
-            <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus}>Add role</ToolbarButton>
+            <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus}>Add agent</ToolbarButton>
             <ToolbarButton onClick={() => setStagesOpen(true)} icon={Layers}>Stages</ToolbarButton>
             <ToolbarButton onClick={() => setMaterializeOpen(true)} icon={Boxes}
               disabled={!draftBundle?.roles?.length}>Materialize…</ToolbarButton>
@@ -350,7 +350,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         )}
         {isTeamScope && !imported && (
           <>
-            <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus}>Add role</ToolbarButton>
+            <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus}>Add agent</ToolbarButton>
             <ToolbarButton onClick={editAsDraft} icon={Boxes}>Edit as draft</ToolbarButton>
           </>
         )}
@@ -366,7 +366,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         }}>
           <Boxes size={16} style={{ color: 'var(--eb-accent-primary)' }} />
           <span style={{ flex: 1, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-            Imported blueprint <strong>{imported.bundle?.name}</strong> ({imported.graph?.nodes?.length || 0} roles) — read-only preview.
+            Imported blueprint <strong>{imported.bundle?.name}</strong> ({imported.graph?.nodes?.length || 0} agents) — read-only preview.
           </span>
           <button onClick={continueImportAsDraft} style={{
             background: 'none', color: 'var(--eb-accent-primary)', border: '1px solid var(--eb-accent-primary)',
@@ -541,7 +541,7 @@ function AddRoleDialog({ onClose, onCreate }) {
         // stay on the scratch path so the dialog is never blocked (E1).
         if (list.length) setMode('template');
       } catch (e) {
-        if (live) setTemplatesError(e.message || 'Could not load role templates');
+        if (live) setTemplatesError(e.message || 'Could not load agent templates');
       }
     })();
     return () => { live = false; };
@@ -582,7 +582,7 @@ function AddRoleDialog({ onClose, onCreate }) {
   const submit = async () => {
     if (!displayName.trim()) return;
     if (mode === 'template' && (!selectedTemplateId || !fullTemplate)) {
-      setSubmitError('Pick a role template first, or switch to “From scratch”.');
+      setSubmitError('Pick an agent template first, or switch to “From scratch”.');
       return;
     }
     setBusy(true);
@@ -592,7 +592,7 @@ function AddRoleDialog({ onClose, onCreate }) {
         ? { displayName: displayName.trim(), templateId: selectedTemplateId, template: fullTemplate }
         : { displayName: displayName.trim(), systemPrompt });
     }
-    catch (e) { setSubmitError(e.message || 'Failed to add role'); }
+    catch (e) { setSubmitError(e.message || 'Failed to add agent'); }
     finally { setBusy(false); }
   };
   const generate = async () => {
@@ -617,7 +617,7 @@ function AddRoleDialog({ onClose, onCreate }) {
   };
   const hasTemplates = templates.length > 0;
   return (
-    <SidePanel open onClose={onClose} title="Add role" width="480px">
+    <SidePanel open onClose={onClose} title="Add agent" width="480px">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
         {/* Source toggle (#586): pick a predefined role template or author one
             from scratch. Hidden when no templates are available — the dialog
@@ -638,14 +638,14 @@ function AddRoleDialog({ onClose, onCreate }) {
         )}
         {templatesError && (
           <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
-            Role templates could not be loaded ({templatesError}). You can still add a role from scratch.
+            Agent templates could not be loaded ({templatesError}). You can still add an agent from scratch.
           </div>
         )}
 
         {/* Template picker (AC-1): icon, name, description, category. */}
         {mode === 'template' && hasTemplates && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Role template</span>
+            <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Agent template</span>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 220, overflowY: 'auto' }}>
               {templates.map(t => {
                 const sel = t.id === selectedTemplateId;
@@ -676,7 +676,7 @@ function AddRoleDialog({ onClose, onCreate }) {
         )}
 
         <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Role name</span>
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Agent name</span>
           <input autoFocus value={displayName} onChange={e => setDisplayName(e.target.value)}
             placeholder="e.g. Business Analyst" style={field}
             onKeyDown={e => { if (e.key === 'Enter') submit(); }} />
@@ -692,7 +692,7 @@ function AddRoleDialog({ onClose, onCreate }) {
             placeholder="A few keywords — e.g. reviews COBOL, flags risky changes, hands off to the migration lead"
             style={{ ...field, minHeight: 64, resize: 'vertical' }} />
           <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
-            Generate uses the role name and these notes to draft an agent prompt via the configured LLM.
+            Generate uses the agent name and these notes to draft an agent prompt via the configured LLM.
             You can edit the result below.
           </span>
         </label>
@@ -715,7 +715,7 @@ function AddRoleDialog({ onClose, onCreate }) {
         <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Agent prompt (optional now)</span>
           <textarea value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)}
-            placeholder="What this role does… — or use Generate above to draft it"
+            placeholder="What this agent does… — or use Generate above to draft it"
             style={{ ...field, minHeight: 160, resize: 'vertical', fontFamily: 'var(--eb-font-mono)' }} />
         </label>
         </>)}
@@ -725,12 +725,12 @@ function AddRoleDialog({ onClose, onCreate }) {
         {mode === 'template' && (
           <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Agent prompt (from template)</span>
-            <textarea readOnly value={loadingTemplate ? 'Loading…' : (systemPrompt || (selectedTemplateId ? '' : 'Select a role template above.'))}
+            <textarea readOnly value={loadingTemplate ? 'Loading…' : (systemPrompt || (selectedTemplateId ? '' : 'Select an agent template above.'))}
               style={{ ...field, minHeight: 160, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', opacity: 0.85 }} />
             {fullTemplate && Array.isArray(fullTemplate.triggers) && fullTemplate.triggers.length > 0 && (
               <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
                 Includes {fullTemplate.triggers.length} trigger{fullTemplate.triggers.length === 1 ? '' : 's'}
-                {fullTemplate.sessionPolicy === 'per-invocation' ? ' · per-invocation session' : ''}. You can edit the role name above.
+                {fullTemplate.sessionPolicy === 'per-invocation' ? ' · per-invocation session' : ''}. You can edit the agent name above.
               </span>
             )}
           </label>
@@ -747,7 +747,7 @@ function AddRoleDialog({ onClose, onCreate }) {
           <button onClick={submit} disabled={busy || !displayName.trim()} style={{
             background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
             borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
-          }}>Add role</button>
+          }}>Add agent</button>
         </div>
       </div>
     </SidePanel>

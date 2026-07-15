@@ -311,7 +311,7 @@ function EnvironmentCard({ env, selected, onSelect }) {
           {repos.length > 0 && !env.githubTokenId && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', color: 'var(--eb-status-warning)' }}>
               <AlertCircle size={12} style={{ flexShrink: 0 }} />
-              No GitHub token — roles reacting to issues / PRs won&apos;t trigger.
+              No GitHub token — agents reacting to issues / PRs won&apos;t trigger.
             </div>
           )}
         </div>
@@ -540,7 +540,7 @@ function StepReview({ form, environments, sshKeys, githubTokens, mcpServers, mcp
             <div style={labelStyle}>
               {/* Composed bundles are woven before the team name exists (#428) —
                   show the name the materialised bundle will carry. */}
-              Process: {form.processMode === 'compose' ? (form.teamName?.trim() || form.processBundle.name) : form.processBundle.name} ({(form.processBundle.roles || []).length} roles)
+              Process: {form.processMode === 'compose' ? (form.teamName?.trim() || form.processBundle.name) : form.processBundle.name} ({(form.processBundle.roles || []).length} agents)
             </div>
             <BundleFlowPreview bundle={form.processBundle} />
             <LintBadges lints={form.processLints} loading={false} />
@@ -756,7 +756,7 @@ export default function TeamSetup() {
     if (step === 2) {
       if (!form.teamName.trim()) return 'Team name required';
       if (!/^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/.test(form.teamId)) return 'Team ID must be 1–40 chars, [a-z0-9-]';
-      if (takenAgentIds.has(form.teamId)) return `Team ID '${form.teamId}' is already used by an existing agent or team — pick a different one (to add roles to an existing team, open it in the Flow Editor)`;
+      if (takenAgentIds.has(form.teamId)) return `Team ID '${form.teamId}' is already used by an existing agent or team — pick a different one (to add agents to an existing team, open it in the Flow Editor)`;
       return null;
     }
     // Step 3 — Knowledge sources are inherited from the environment and
@@ -993,7 +993,7 @@ export default function TeamSetup() {
             <button type="button" onClick={() => submit('extend')}
               disabled={submitting}
               style={primaryButtonStyle(submitting)}>
-              {submitting ? 'Adding…' : 'Add missing roles'}
+              {submitting ? 'Adding…' : 'Add missing agents'}
             </button>
             <button type="button" onClick={() => setCollisionInfo(null)}
               style={secondaryButtonStyle()}>Cancel</button>

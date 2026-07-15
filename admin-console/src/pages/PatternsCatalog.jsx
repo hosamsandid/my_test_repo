@@ -9,7 +9,7 @@ const CATALOGS = [
     Icon: GitBranch,
     title: 'SDLC Catalog',
     description:
-      'End-to-end view of the trigger- and label-driven Software Development Lifecycle workflow. Shows how each agent role fits into the automated CI/CD pipeline.',
+      'End-to-end view of the trigger- and label-driven Software Development Lifecycle workflow. Shows how each agent fits into the automated CI/CD pipeline.',
     accent: 'var(--eb-color-blue-500, #3b82f6)',
     accentDim: 'oklch(0.45 0.18 250 / 0.12)',
   },

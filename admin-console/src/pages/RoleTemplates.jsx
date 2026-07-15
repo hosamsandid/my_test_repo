@@ -207,7 +207,7 @@ function Editor({ initial, origin, onSaved, onClose }) {
           style={{ ...inputStyle, minHeight: 220, fontFamily: 'var(--eb-font-mono, monospace)', resize: 'vertical' }}
           value={promptText}
           onChange={e => setPromptText(e.target.value)}
-          placeholder="The role's system/agent prompt…"
+          placeholder="The agent's system prompt…"
         />
       </Field>
 
@@ -272,9 +272,9 @@ export default function RoleTemplates() {
     <div style={{ maxWidth: 1100 }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 'var(--eb-space-4)' }}>
         <div>
-          <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>Role Templates</h1>
+          <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>Agent Templates</h1>
           <p style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)', marginTop: 'var(--eb-space-1)', maxWidth: 720 }}>
-            Predefined roles used by the Team-Setup wizard and Flow editor. Edits create a stored override that shadows the built-in default and survives a redeploy or re-seed. Changing a template only affects <strong>future</strong> team members — already-created agents are independent.
+            Predefined agents used by the Team-Setup wizard and Flow editor. Edits create a stored override that shadows the built-in default and survives a redeploy or re-seed. Changing a template only affects <strong>future</strong> team members — already-created agents are independent.
           </p>
         </div>
         <button style={btn('primary')} onClick={() => { setActionError(null); setEditing({ origin: 'new' }); }}>
@@ -297,7 +297,7 @@ export default function RoleTemplates() {
         <table style={{ width: '100%', borderCollapse: 'collapse', background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)' }}>
           <thead>
             <tr>
-              <th style={th}>Role</th>
+              <th style={th}>Agent</th>
               <th style={th}>ID</th>
               <th style={th}>Category</th>
               <th style={th}>Session</th>
@@ -334,7 +334,7 @@ export default function RoleTemplates() {
               </tr>
             ))}
             {templates.length === 0 && (
-              <tr><td style={{ ...cell, color: 'var(--eb-text-muted)' }} colSpan={6}>No role templates.</td></tr>
+              <tr><td style={{ ...cell, color: 'var(--eb-text-muted)' }} colSpan={6}>No agent templates.</td></tr>
             )}
           </tbody>
         </table>
@@ -343,7 +343,7 @@ export default function RoleTemplates() {
       <SidePanel
         open={!!editing}
         onClose={() => setEditing(null)}
-        title={editing ? (editing.origin === 'new' ? 'New role template' : `Edit: ${editing.template.displayName || editing.template.id}`) : ''}
+        title={editing ? (editing.origin === 'new' ? 'New agent template' : `Edit: ${editing.template.displayName || editing.template.id}`) : ''}
         width="640px"
       >
         {editing && (

@@ -360,19 +360,19 @@ function CustomRoleDialog({ stageName, onAdd, onClose }) {
         onClick={e => e.stopPropagation()}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 600, color: 'var(--eb-text-primary)' }}>
-            Custom role — {stageName}
+            Custom agent — {stageName}
           </div>
           <button type="button" style={tinyButtonStyle} onClick={onClose}><X size={12} /></button>
         </div>
 
         <div style={fieldRow}>
-          <label style={labelStyle}>Role name</label>
+          <label style={labelStyle}>Agent name</label>
           <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. JCL Migration Engineer" style={selectStyle} autoFocus />
         </div>
         <div style={fieldRow}>
           <label style={labelStyle}>Notes (optional)</label>
           <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} style={{ ...selectStyle, resize: 'vertical', fontFamily: 'inherit' }}
-            placeholder="Keywords for what this role should do" />
+            placeholder="Keywords for what this agent should do" />
         </div>
 
         <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
@@ -431,7 +431,7 @@ function CustomRoleDialog({ stageName, onAdd, onClose }) {
             ...tinyButtonStyle, background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
             border: 'none', padding: 'var(--eb-space-2) var(--eb-space-3)',
           }}>
-            <Plus size={12} /> Add role
+            <Plus size={12} /> Add agent
           </button>
         </div>
       </div>
@@ -589,7 +589,7 @@ export default function StepProcess({ form, setForm, templates, error }) {
             copy="Start from a curated process (Core SDLC, Extended SDLC, …) or one of your saved drafts. One click, ready to review."
             onClick={() => setForm(f => ({ ...f, processMode: 'template' }))} />
           <EntryCard icon={Blocks} title="Compose a process" disabled badge="Coming soon"
-            copy="Define stages and pick 1–3 roles per stage from the catalog. The Flow-Weaver wires hand-offs, human gates and escalation loops for you." />
+            copy="Define stages and pick 1–3 agents per stage from the catalog. The Flow-Weaver wires hand-offs, human gates and escalation loops for you." />
           <EntryCard icon={PencilRuler} title="Start blank in the canvas"
             copy="Open an empty draft in the Flows editor and design the process free-form. Materialise it into a team later."
             onClick={startBlank} />
@@ -635,7 +635,7 @@ export default function StepProcess({ form, setForm, templates, error }) {
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                   <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 600, color: 'var(--eb-text-primary)' }}>{t.name}</div>
                   <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', whiteSpace: 'nowrap' }}>
-                    {t.kind === 'draft' ? 'Draft' : `${t.roleCount} roles`}
+                    {t.kind === 'draft' ? 'Draft' : `${t.roleCount} agents`}
                   </span>
                 </div>
                 <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginTop: 4, lineHeight: 1.5 }}>{t.description}</div>
@@ -713,7 +713,7 @@ export default function StepProcess({ form, setForm, templates, error }) {
             ))}
 
             <div>
-              <div style={{ ...hintStyle, marginBottom: 2 }}>Additional roles</div>
+              <div style={{ ...hintStyle, marginBottom: 2 }}>Additional agents</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                 {extraCandidates.map(t => {
                   const checked = (s.extras || []).includes(t.id);
@@ -732,7 +732,7 @@ export default function StepProcess({ form, setForm, templates, error }) {
 
             {(s.customRoles || []).length > 0 && (
               <div>
-                <div style={{ ...hintStyle, marginBottom: 2 }}>Custom roles</div>
+                <div style={{ ...hintStyle, marginBottom: 2 }}>Custom agents</div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                   {(s.customRoles || []).map((r, k) => (
                     <div key={`${r.id}-${k}`} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
@@ -752,7 +752,7 @@ export default function StepProcess({ form, setForm, templates, error }) {
 
             <button type="button" style={{ ...tinyButtonStyle, alignSelf: 'flex-start' }}
               onClick={() => setCustomRoleStage(i)}>
-              <Plus size={11} /> Custom role
+              <Plus size={11} /> Custom agent
             </button>
 
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', cursor: 'pointer', marginTop: 2 }}>
@@ -801,7 +801,7 @@ function PreviewBlock({ form, lints, lintLoading, onSaveDraft, savingDraft }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-4)' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-sm)', fontWeight: 600, color: 'var(--eb-text-primary)' }}>
-          <Workflow size={14} /> Flow preview — {form.processBundle.roles.length} roles
+          <Workflow size={14} /> Flow preview — {form.processBundle.roles.length} agents
         </div>
         <button type="button" onClick={onSaveDraft} disabled={savingDraft} style={tinyButtonStyle}>
           {savingDraft ? <Loader2 size={11} style={{ animation: 'team-setup-spin 0.9s linear infinite' }} /> : <Save size={11} />}

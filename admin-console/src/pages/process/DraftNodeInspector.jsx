@@ -56,7 +56,7 @@ export default function DraftNodeInspector({ role, roles = [], stages = [], ops,
   return (
     <SidePanel open onClose={onClose} title={role.displayName || role.id} width="560px">
       <div style={{ display: 'flex', gap: 6, marginBottom: 'var(--eb-space-4)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-        <span style={badge}>draft role</span>
+        <span style={badge}>draft agent</span>
       </div>
 
       <div style={{ display: 'flex', borderBottom: '1px solid var(--eb-border-default)', marginBottom: 'var(--eb-space-4)' }}>
@@ -80,7 +80,7 @@ export default function DraftNodeInspector({ role, roles = [], stages = [], ops,
         </Field>
         <Field label="Agent prompt">
           <textarea value={prompt} onChange={e => { setPrompt(e.target.value); setSaved(false); }}
-            placeholder="What this role does, its responsibilities and tone…"
+            placeholder="What this agent does, its responsibilities and tone…"
             style={{ ...input, minHeight: 220, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', lineHeight: 1.5 }} />
         </Field>
         <Field label="Stage (layout column)">
@@ -106,7 +106,7 @@ export default function DraftNodeInspector({ role, roles = [], stages = [], ops,
         <div style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)' }}>
           <button onClick={async () => { await ops.deleteRole(role.id); onDeleted?.(); }}
             style={{ ...ghost, color: 'var(--eb-status-error)', borderColor: 'var(--eb-status-error)' }}>
-            <Trash2 size={14} /> Delete role
+            <Trash2 size={14} /> Delete agent
           </button>
         </div>
       </div>

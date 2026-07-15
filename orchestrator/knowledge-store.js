@@ -62,6 +62,11 @@ const DEFAULT_PROMOTION_GATES = { 'team>team': 'auto', 'team>global': 'review', 
 // pass; the overflow is deferred to review cards (lossless), so flipping the dial
 // to level 3 over a large backlog can't emit a flood of skills at once.
 const DEFAULT_MAX_AUTO_PROMOTIONS = 3;
+// #604: at level 3 the curator also auto-promotes a strong single-role THEME (>=
+// this many topically-related durable lessons) to a team skill. Deliberately >
+// the theme card floor (strongLessons=3) so a weaker theme still gets human
+// review rather than an automatic skill.
+const DEFAULT_AUTO_THEME_MIN_LESSONS = 4;
 
 // ---------------------------------------------------------------------------
 // Ids / clock (injectable so tests are deterministic)
@@ -437,16 +442,23 @@ function resolvePromotionGates(env) {
   return out;
 }
 
-// Curation config (Phase 4), read off the environment the team shares. Clamped
-// with a safe default so any legacy env (no `knowledgeCuration`) behaves as
-// { maxAutoPromotionsPerPass: 3 }. The cap clamps to an integer >= 1.
+// Curation config (Phase 4), read off the environment the team shares — so it is
+// per-team (each team has its own shared env), exactly like maxAutoPromotionsPerPass.
+// Clamped with safe defaults so any legacy env (no `knowledgeCuration`) behaves as
+// { maxAutoPromotionsPerPass: 3, autoThemeMinLessons: 4 } — existing teams gain
+// the #604 theme auto-promotion behaviour without any config change, nothing
+// breaks. Each value clamps to an integer >= 1.
 function knowledgeCurationConfig(env) {
   const raw = env && typeof env.knowledgeCuration === 'object' && env.knowledgeCuration
     ? env.knowledgeCuration
     : {};
   let cap = Number(raw.maxAutoPromotionsPerPass);
   if (!Number.isInteger(cap) || cap < 1) cap = DEFAULT_MAX_AUTO_PROMOTIONS;
-  return { maxAutoPromotionsPerPass: cap };
+  let autoThemeMinLessons = Number(raw.autoThemeMinLessons);
+  if (!Number.isInteger(autoThemeMinLessons) || autoThemeMinLessons < 1) {
+    autoThemeMinLessons = DEFAULT_AUTO_THEME_MIN_LESSONS;
+  }
+  return { maxAutoPromotionsPerPass: cap, autoThemeMinLessons };
 }
 
 // The per-session harvest instruction woven into the agent's memory hint

@@ -3056,9 +3056,19 @@ function runConvergenceCollector(teamId, envArg) {
     } catch (err) {
       console.warn(`[Orchestrator] auto-promotion for '${teamId}' failed: ${err.message}`);
     }
-    // Related themes are review cards even at level 3 — synthesising distinct
-    // lessons into one skill needs judgment, so the curator never auto-promotes
-    // them. Re-read the store: autoPromoteStep just rewrote it.
+    // #604: strong single-role accumulation themes are also auto-promoted (and
+    // auto-activated) at level 3 — one reusable team skill per theme whose
+    // lessonCount >= autoThemeMinLessons. Re-read the store: autoPromoteStep just
+    // rewrote it.
+    try {
+      autoPromoteThemesStep(teamId, env, eligibleClusters, readKnowledgeCandidates(teamId), { relatedThreshold, now });
+    } catch (err) {
+      console.warn(`[Orchestrator] theme auto-promotion for '${teamId}' failed: ${err.message}`);
+    }
+    // Weaker themes (strongLessons <= lessonCount < autoThemeMinLessons), gated or
+    // over-cap themes stay review cards — synthesising a borderline theme into a
+    // skill needs judgment. raiseRelatedSuggestions raises only the remainder
+    // (planRelatedSuggestions excludes the clusters just auto-promoted above).
     try {
       raiseRelatedSuggestions(teamId, eligibleClusters, readKnowledgeCandidates(teamId), { relatedThreshold, now });
     } catch (err) {
@@ -3287,41 +3297,7 @@ function autoPromoteStep(teamId, env, clusters, candidates, { convergenceThresho
 
   writeKnowledgeCandidates(teamId, [...byId.values()]);
 
-  if (promotedSkills.length > 0) {
-    appendKnowledgeEvents(promotedSkills.map((s) => ({
-      type: "promotion", ts: now, teamId, skill: { name: s.name, tier: "team" }, entryIds: s.entryIds, auto: true,
-    })));
-    // #559 AC12/E6: the autonomy-3 auto-promote path applies the same default as
-    // the promotion-dialog checkbox — remove (archive) the source knowledge
-    // automatically. Because removal is archival (reversible) no knowledge is
-    // irrecoverably lost without human oversight. Best-effort per skill; a
-    // cleanup failure never unwinds the promotion.
-    for (const s of promotedSkills) {
-      try {
-        removePromotedSourceEntries(teamId, s.entryIds, { skill: { name: s.name, tier: "team" }, auto: true, env });
-      } catch (err) {
-        console.warn(`[Orchestrator] auto promote-cleanup for '${s.name}' (team ${teamId}) failed: ${err.message}`);
-      }
-    }
-    // Phase 4 (full autonomy): at level 3 an auto-promoted skill is also
-    // auto-ACTIVATED — learn → bundle → promote → activate closes without a
-    // human. This step only ever runs at autonomy 3 (the curator plan is gated
-    // on it), so no extra dial check is needed here. Fire-and-forget,
-    // best-effort: an activation failure surfaces as a ⚪ not-active card the
-    // operator can repair from the Knowledge page; the feed gets its own
-    // `activation` event (auto: true) from setTeamSkillActive.
-    if (orchestratorSingleton) {
-      (async () => {
-        for (const s of promotedSkills) {
-          try {
-            await orchestratorSingleton.setTeamSkillActive(teamId, s.name, { active: true, auto: true });
-          } catch (err) {
-            console.warn(`[Orchestrator] auto-activate '${s.name}' for team ${teamId} failed: ${err.message}`);
-          }
-        }
-      })();
-    }
-  }
+  _finalizePromotedSkills(teamId, env, promotedSkills, now);
   if (raisedCards.length > 0) {
     appendKnowledgeEvents([{
       type: "suggestion", ts: now, teamId, count: raisedCards.length,
@@ -3330,6 +3306,92 @@ function autoPromoteStep(teamId, env, clusters, candidates, { convergenceThresho
       })),
     }]);
   }
+}
+
+// Shared finalize for a batch of curator auto-promotions (convergence clusters or
+// themes): emit the `promotion` feed event (auto:true), archive the source KB
+// entries so the promoted knowledge drops out of the KB/digest/graph, and
+// auto-activate each new team skill (auto:true) — closing learn→bundle→promote→
+// activate without a human (docs/knowledge-curation.md §4). Each side is
+// best-effort: a per-skill failure logs and never rolls the promotion back (AC7).
+function _finalizePromotedSkills(teamId, env, promotedSkills, now) {
+  if (!promotedSkills || promotedSkills.length === 0) return;
+  appendKnowledgeEvents(promotedSkills.map((s) => ({
+    type: "promotion", ts: now, teamId, skill: { name: s.name, tier: "team" }, entryIds: s.entryIds, auto: true,
+  })));
+  for (const s of promotedSkills) {
+    try {
+      removePromotedSourceEntries(teamId, s.entryIds, { skill: { name: s.name, tier: "team" }, auto: true, env });
+    } catch (err) {
+      console.warn(`[Orchestrator] auto promote-cleanup for '${s.name}' (team ${teamId}) failed: ${err.message}`);
+    }
+  }
+  if (orchestratorSingleton) {
+    (async () => {
+      for (const s of promotedSkills) {
+        try {
+          await orchestratorSingleton.setTeamSkillActive(teamId, s.name, { active: true, auto: true });
+        } catch (err) {
+          console.warn(`[Orchestrator] auto-activate '${s.name}' for team ${teamId} failed: ${err.message}`);
+        }
+      }
+    })();
+  }
+}
+
+// Level-3 theme auto-promotion (#604). Sibling of autoPromoteStep for single-role
+// accumulation THEMES: plans with the pure curator core (planAutoPromoteThemes),
+// writes each strong theme (lessonCount >= autoThemeMinLessons) as ONE team skill
+// bundling its members across clusters/kinds (SKILL.md + provenance.json,
+// promotedBy:"curator"), flips its candidate to promoted, and finalizes (promotion
+// event + source archival + auto-activation). Weaker/gated/over-cap themes are NOT
+// raised here — the caller's raiseRelatedSuggestions raises the remainder as cards
+// (planRelatedSuggestions naturally excludes the clusters this step just promoted).
+function autoPromoteThemesStep(teamId, env, clusters, candidates, { relatedThreshold, now }) {
+  env = teamKnowledgeEnv(teamId, env); // #570: per-team knowledge config
+  const gates = resolvePromotionGates(env);
+  const { maxAutoPromotionsPerPass, autoThemeMinLessons } = knowledgeCurationConfig(env);
+  const plan = knowledgeCurator.planAutoPromoteThemes(clusters, candidates, gates, {
+    autoThemeMinLessons,
+    cap: maxAutoPromotionsPerPass,
+    relatedThreshold,
+    teamId,
+    now,
+  });
+  if (plan.promote.length === 0) return;
+
+  const byId = new Map((candidates || []).filter((c) => c && c.id).map((c) => [c.id, c]));
+  const promotedSkills = [];
+  for (const item of plan.promote) {
+    const dir = _teamSkillDir(teamId, item.name);
+    if (!dir) {
+      console.warn(`[Orchestrator] auto-promote theme: unsafe skill dir for '${item.name}'`);
+      continue;
+    }
+    const promotedCand = { ...item.candidate, status: "promoted", resolvedAt: now, promotedBy: "curator" };
+    // Idempotent: never clobber an existing skill — just settle the candidate.
+    if (fs.existsSync(path.join(dir, "SKILL.md"))) {
+      byId.set(item.candidate.id, promotedCand);
+      continue;
+    }
+    const prov = knowledgeCurator.curatorThemeSkillProvenance({
+      teamId, candidate: item.candidate, entryIds: item.candidate.entryIds, now,
+    });
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      const md = item.draft.skillMd.endsWith("\n") ? item.draft.skillMd : item.draft.skillMd + "\n";
+      fs.writeFileSync(path.join(dir, "SKILL.md"), md);
+      fs.writeFileSync(path.join(dir, "provenance.json"), JSON.stringify(prov, null, 2));
+    } catch (err) {
+      console.warn(`[Orchestrator] auto-promote theme: writing skill '${item.name}' failed: ${err.message}`);
+      continue;
+    }
+    byId.set(item.candidate.id, promotedCand);
+    promotedSkills.push({ name: item.name, entryIds: item.candidate.entryIds });
+  }
+
+  writeKnowledgeCandidates(teamId, [...byId.values()]);
+  _finalizePromotedSkills(teamId, env, promotedSkills, now);
 }
 
 // Record an agent nomination (the `knowledge promote <id>` CLI verb). Builds a

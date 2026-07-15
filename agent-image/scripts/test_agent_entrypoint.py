@@ -553,6 +553,67 @@ class BuildKnowledgeDigest(unittest.TestCase):
         self.assertIn("- fact: line one line two (2026-07-01)", res["markdown"])
 
 
+class HarvestBlock(unittest.TestCase):
+    """Two-sided contract with orchestrator/harvest-block.js: both test suites
+    assert identical entries + stripped text against the SAME golden fixture
+    (orchestrator/harvest-block.fixture.json), so the JS anchor and this Python
+    runtime (the only side that harvests at run end) cannot drift (issue #602)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        fixture_path = (Path(__file__).resolve().parents[2]
+                        / "orchestrator" / "harvest-block.fixture.json")
+        cls.fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    def test_golden_fixture_cases(self):
+        for case in self.fixture["cases"]:
+            with self.subTest(case=case["name"]):
+                self.assertEqual(
+                    entrypoint.parse_harvest_block(case["input"]),
+                    case["expectedEntries"],
+                )
+                self.assertEqual(
+                    entrypoint.strip_harvest_block(case["input"]),
+                    case["expectedStripped"],
+                )
+
+    def test_malformed_input_never_raises(self):
+        for bad in (None, 42, {}, [], True):
+            self.assertEqual(entrypoint.parse_harvest_block(bad), [])
+        # strip returns non-str as "" and a plain string unchanged.
+        self.assertEqual(entrypoint.strip_harvest_block(None), "")
+        self.assertEqual(entrypoint.strip_harvest_block(42), "")
+        self.assertEqual(entrypoint.strip_harvest_block("plain text"), "plain text")
+
+    def test_unknown_kind_dropped_valid_sibling_kept(self):
+        text = "\n".join([
+            "ok",
+            "```knowledge",
+            '{"kind":"story","text":"nope"}',
+            '{"kind":"fact","text":"yes"}',
+            "```",
+        ])
+        self.assertEqual(entrypoint.parse_harvest_block(text),
+                         [{"kind": "fact", "text": "yes"}])
+
+
+class BuildHarvestBlockHint(unittest.TestCase):
+    fn = staticmethod(entrypoint.build_harvest_block_hint)
+
+    def test_level_0_is_empty(self):
+        self.assertEqual(self.fn(0), "")
+        self.assertEqual(self.fn(-1), "")
+        self.assertEqual(self.fn("1"), "")
+
+    def test_level_1_plus_asks_for_block(self):
+        for lvl in (1, 2, 3):
+            out = self.fn(lvl)
+            self.assertIn("```knowledge", out)
+            self.assertIn("fact|convention|entity", out)
+            self.assertIn("do NOT run the knowledge CLI", out)
+
+
 class KnowledgeTeamId(unittest.TestCase):
     """_knowledge_team_id mirrors the `knowledge` CLI / orchestrator precedence so
     the runtime digest is scoped to the same team even without the spawn-time env

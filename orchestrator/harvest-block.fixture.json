@@ -1,0 +1,73 @@
+{
+  "comment": "Shared golden fixture for the harvest-block two-sided contract (issue #602): orchestrator/harvest-block.js (JS) and parse_harvest_block()/strip_harvest_block() in agent-image/scripts/agent-entrypoint.py (Python) must both reproduce expectedEntries and expectedStripped for each input. Only the Python side harvests at run end; JS is the contract anchor. Regenerate ONLY when deliberately changing the block format — and change both implementations in the same commit.",
+  "cases": [
+    {
+      "name": "single-lesson",
+      "input": "Done — opened the PR and set the label.\n\n```knowledge\n{\"kind\": \"fact\", \"text\": \"CI runs the pure test cores with node --test\"}\n```",
+      "expectedEntries": [
+        { "kind": "fact", "text": "CI runs the pure test cores with node --test" }
+      ],
+      "expectedStripped": "Done — opened the PR and set the label."
+    },
+    {
+      "name": "multiple-lessons",
+      "input": "Summary of the run.\n\n```knowledge\n{\"kind\": \"convention\", \"text\": \"Branch from origin/main\"}\n{\"kind\": \"fact\", \"text\": \"node_modules is absent in this workspace\"}\n{\"kind\": \"entity\", \"text\": \"github-poller.js polls the Events API every 30s\"}\n```",
+      "expectedEntries": [
+        { "kind": "convention", "text": "Branch from origin/main" },
+        { "kind": "fact", "text": "node_modules is absent in this workspace" },
+        { "kind": "entity", "text": "github-poller.js polls the Events API every 30s" }
+      ],
+      "expectedStripped": "Summary of the run."
+    },
+    {
+      "name": "empty-block",
+      "input": "Nothing durable to share this run.\n\n```knowledge\n```",
+      "expectedEntries": [],
+      "expectedStripped": "Nothing durable to share this run."
+    },
+    {
+      "name": "no-block",
+      "input": "Just a plain reply with no harvest block at all.",
+      "expectedEntries": [],
+      "expectedStripped": "Just a plain reply with no harvest block at all."
+    },
+    {
+      "name": "malformed-lines-skipped",
+      "input": "Report.\n\n```knowledge\nnot json at all\n{\"kind\": \"nonsense\", \"text\": \"bad kind\"}\n{\"kind\": \"fact\"}\n{\"kind\": \"fact\", \"text\": \"   \"}\n[\"an\", \"array\"]\n{\"kind\": \"fact\", \"text\": \"  the one good lesson  \"}\n```",
+      "expectedEntries": [
+        { "kind": "fact", "text": "the one good lesson" }
+      ],
+      "expectedStripped": "Report."
+    },
+    {
+      "name": "ignores-other-fences",
+      "input": "Here is some code:\n\n```json\n{\"kind\": \"fact\", \"text\": \"this is inside a json fence, not knowledge\"}\n```\n\nAnd the lesson:\n\n```knowledge\n{\"kind\": \"convention\", \"text\": \"stamp bodies before posting\"}\n```",
+      "expectedEntries": [
+        { "kind": "convention", "text": "stamp bodies before posting" }
+      ],
+      "expectedStripped": "Here is some code:\n\n```json\n{\"kind\": \"fact\", \"text\": \"this is inside a json fence, not knowledge\"}\n```\n\nAnd the lesson:"
+    },
+    {
+      "name": "prefers-last-block",
+      "input": "```knowledge\n{\"kind\": \"fact\", \"text\": \"an earlier echoed example\"}\n```\n\nActual result text.\n\n```knowledge\n{\"kind\": \"entity\", \"text\": \"the real lesson\"}\n```",
+      "expectedEntries": [
+        { "kind": "entity", "text": "the real lesson" }
+      ],
+      "expectedStripped": "```knowledge\n{\"kind\": \"fact\", \"text\": \"an earlier echoed example\"}\n```\n\nActual result text."
+    },
+    {
+      "name": "block-runs-to-eof",
+      "input": "Result body.\n\n```knowledge\n{\"kind\": \"fact\", \"text\": \"unterminated block still parses\"}",
+      "expectedEntries": [
+        { "kind": "fact", "text": "unterminated block still parses" }
+      ],
+      "expectedStripped": "Result body."
+    },
+    {
+      "name": "empty-input",
+      "input": "",
+      "expectedEntries": [],
+      "expectedStripped": ""
+    }
+  ]
+}

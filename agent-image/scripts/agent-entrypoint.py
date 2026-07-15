@@ -1160,6 +1160,112 @@ def build_harvest_hint(autonomy_level: int) -> str:
     )
 
 
+# ---- Structured harvest block (Auto-learning A, issue #602) ----
+#
+# Byte-for-byte mirror of orchestrator/harvest-block.js. A per-invocation run
+# ends its reply with a fenced ```knowledge block (one JSON object per line);
+# the RUNTIME parses it here and records each lesson in the shared KB via
+# `knowledge add`, instead of depending on the model choosing to run the CLI
+# mid-task. The same two-sided contract as build_knowledge_digest() <->
+# knowledge-digest.js: given the same reply text, this port and the JS builder
+# MUST return the identical entries and the identical stripped text. If you
+# change one side, change the other in the same commit; the shared golden
+# fixture orchestrator/harvest-block.fixture.json is asserted by both test
+# suites. Robust to a missing/malformed block (-> 0 entries, never raises).
+
+_HARVEST_KINDS = frozenset(("fact", "entity", "convention"))
+
+
+def _harvest_fence_label(line):
+    """Info string after a fence's opening backticks, trimmed — or None if the
+    line is not a ``` fence. '```knowledge' -> 'knowledge'; '```' -> '' (a
+    closing fence); '```json' -> 'json' (unrelated fence, ignored)."""
+    s = ("" if line is None else str(line)).strip()
+    if not s.startswith("```"):
+        return None
+    return s[3:].strip()
+
+
+def _harvest_is_open_fence(line) -> bool:
+    return _harvest_fence_label(line) == "knowledge"
+
+
+def _harvest_is_close_fence(line) -> bool:
+    return _harvest_fence_label(line) == ""
+
+
+def _harvest_locate_block(lines):
+    """Locate the LAST ```knowledge block. Returns (start, end) line indices —
+    start is the opening-fence line, end is one past the closing fence (or
+    len(lines) when the block runs to EOF) — or None if there is no block."""
+    start = -1
+    for i, line in enumerate(lines):
+        if _harvest_is_open_fence(line):
+            start = i
+    if start == -1:
+        return None
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if _harvest_is_close_fence(lines[i]):
+            end = i + 1
+            break
+    return (start, end)
+
+
+def parse_harvest_block(text):
+    """Parse the fenced ```knowledge block into a list of {kind, text} lessons.
+    Every line inside that is a JSON object with a valid kind and a non-empty
+    string text becomes one entry; blank/malformed/invalid lines are skipped.
+    No block -> []. Mirrors parseHarvestBlock() in harvest-block.js."""
+    if not isinstance(text, str) or text == "":
+        return []
+    lines = text.split("\n")
+    loc = _harvest_locate_block(lines)
+    if loc is None:
+        return []
+    start, end = loc
+    out = []
+    for i in range(start + 1, end):
+        raw = lines[i]
+        if _harvest_is_close_fence(raw):
+            break
+        line = raw.strip()
+        if line == "":
+            continue
+        try:
+            obj = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        kind = obj.get("kind")
+        if kind not in _HARVEST_KINDS:
+            continue
+        t = obj.get("text")
+        if not isinstance(t, str):
+            continue
+        trimmed = t.strip()
+        if trimmed == "":
+            continue
+        out.append({"kind": kind, "text": trimmed})
+    return out
+
+
+def strip_harvest_block(text):
+    """Return the reply with its ```knowledge block removed (trailing whitespace
+    left by the removal trimmed). No block -> unchanged. Mirrors
+    stripHarvestBlock() in harvest-block.js."""
+    if not isinstance(text, str) or text == "":
+        return text if isinstance(text, str) else ""
+    lines = text.split("\n")
+    loc = _harvest_locate_block(lines)
+    if loc is None:
+        return text
+    start, end = loc
+    kept = lines[:start] + lines[end:]
+    return re.sub(r"\s+$", "", "\n".join(kept))
+
+
 # ---- Knowledge digest (Memory/Knowledge unification, Phase 1) ----
 #
 # Byte-for-byte mirror of orchestrator/knowledge-digest.js — the same
@@ -1505,6 +1611,77 @@ def _build_memory_hint(blueprint_id: str | None) -> str:
         "IMPORTANT: Your workspace root is the current working directory."
         + harvest
     )
+
+
+# ---- Deterministic KB harvest of the structured block (issue #602) ----
+
+def build_harvest_block_hint(autonomy_level: int) -> str:
+    """The per-invocation instruction that asks the run to END its reply with a
+    fenced ```knowledge block the runtime harvests deterministically. Empty at
+    autonomy 0 (KB off) — nothing to route to a shared KB that isn't there."""
+    if not isinstance(autonomy_level, int) or autonomy_level < 1:
+        return ""
+    return (
+        "\n\nTo share a durable lesson with your teammates through the team "
+        "knowledge base, END your reply with a fenced ```knowledge block — one "
+        "JSON object per line, like:\n\n"
+        "```knowledge\n"
+        '{"kind": "fact", "text": "<one-line reusable lesson>"}\n'
+        '{"kind": "convention", "text": "<another lesson>"}\n'
+        "```\n\n"
+        "`kind` is one of fact|convention|entity. The runtime records each line "
+        "for you, so do NOT run the knowledge CLI yourself. Record only durable, "
+        "team-useful lessons (a project convention, an environment fact, a key "
+        "entity), never PR/issue-specific detail. If there is nothing durable to "
+        "share, omit the block. It is stripped from what the user sees."
+    )
+
+
+def _knowledge_add_entry(kind: str, text: str, correlation_id: str) -> bool:
+    """Record one harvested lesson via the `knowledge` CLI. Best-effort: returns
+    True on rc 0, logs and returns False otherwise. Never raises. Provenance
+    (correlationId/sessionId, team id, store paths) rides in from the container
+    env the orchestrator injected; push happens via the orchestrator as today."""
+    try:
+        env = {**os.environ}
+        if correlation_id:
+            env["KNOWLEDGE_CORRELATION_ID"] = correlation_id
+        proc = subprocess.run(
+            ["knowledge", "add", kind, text],
+            cwd=str(_agent_workdir()),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if proc.returncode != 0:
+            print(f"[Runner] knowledge add failed (rc={proc.returncode}): "
+                  f"{(proc.stderr or '').strip()}", file=sys.stderr)
+            return False
+        return True
+    except (subprocess.SubprocessError, OSError) as exc:
+        print(f"[Runner] knowledge add error: {exc}", file=sys.stderr)
+        return False
+
+
+def _harvest_shared_lessons(text: str, correlation_id: str) -> str:
+    """Deterministic structured-block harvest (issue #602): parse the fenced
+    ```knowledge block the per-invocation run emitted, record each lesson in the
+    shared KB via `knowledge add` (only when the team KB is on), and return the
+    reply with the block removed so the user never sees it. Best-effort: any
+    failure leaves the original reply intact and never breaks the run."""
+    try:
+        if _knowledge_autonomy_level() >= 1:
+            entries = parse_harvest_block(text)
+            for entry in entries:
+                _knowledge_add_entry(entry["kind"], entry["text"], correlation_id)
+            if entries:
+                print(f"[Runner] harvested {len(entries)} KB lesson(s) from the "
+                      "structured block", file=sys.stderr)
+        return strip_harvest_block(text)
+    except Exception as exc:  # noqa: BLE001 — never break an invocation
+        print(f"[Runner] harvest failed: {exc}", file=sys.stderr)
+        return text
 
 
 # ---- Claude invocation (stream-json + session resumption) ----
@@ -2681,14 +2858,18 @@ class TriggerScheduler:
 
         learn_hint = ""
         if is_per_invocation:
+            # memory/log.md stays the PRIVATE episodic notebook (behaviour
+            # unchanged); the shared-KB routing now goes through the structured
+            # block, harvested deterministically by the runtime (issue #602).
             learn_hint = (
                 "\n\n---\nAfter finishing the task, before you send your final reply:\n"
                 "- If this run produced a REUSABLE insight (project convention, "
                 "recurring pattern, recurring pitfall that matters for future runs of your role), "
-                "append a brief note to memory/log.md.\n"
+                "append a brief note to memory/log.md — your private episodic notebook.\n"
                 "- No PR/issue-specific details — only lessons that hold *beyond* this single run.\n"
                 "- One or two lines per lesson, no code dump.\n"
                 "- If there is nothing to learn: skip, write nothing."
+                + build_harvest_block_hint(_knowledge_autonomy_level())
             )
 
         prompt = (
@@ -2765,10 +2946,24 @@ class TriggerScheduler:
         finally:
             _bump_active(-1, session)
 
+        # Deterministic KB harvest (issue #602): record the structured
+        # ```knowledge block the run emitted, then drop it from the reply. Only
+        # per-invocation runs carry the block instruction.
+        if is_per_invocation:
+            result = await asyncio.to_thread(
+                _harvest_shared_lessons, result, correlation_id
+            )
+
         # [PASS] means "nothing to report" — do not post to Matrix, just log.
         if result and result.strip().startswith("[PASS]"):
             print(f"[Runner:{self._agent_id}] Trigger {tid}: [PASS]",
                   file=sys.stderr)
+            return
+
+        # A reply that was ONLY a harvest block is now empty — nothing to post.
+        if not result or not result.strip():
+            print(f"[Runner:{self._agent_id}] Trigger {tid}: nothing to post "
+                  "after harvest", file=sys.stderr)
             return
 
         try:

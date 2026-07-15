@@ -60,4 +60,44 @@ function makeSkillSourceResolver({ workspace, templateWorkspace, defaultTeamId =
   return { agentSkillsDir, teamSkillsDir, globalSkillsDir, resolveSkillSourceDir };
 }
 
-module.exports = { makeSkillSourceResolver };
+// Extract the one-line `description` from a SKILL.md's YAML frontmatter, so the
+// composed CLAUDE.md Skills section can advertise "when to reach for this"
+// alongside each granted skill name (#617). Pure (string in, string out).
+//
+// Handles the three shapes skill authors use:
+//   - inline scalar:      `description: Do the thing`  (optionally quoted)
+//   - folded/literal block: `description: >-` (or `|`) followed by indented lines
+//   - plain multi-line:   an empty value followed by indented continuation lines
+// A folded/multi-line value is whitespace-collapsed to a single line (AC8).
+// Returns null when there is no frontmatter, no `description` key, or an empty
+// value — the caller then lists the skill by name only (fail-soft, AC7).
+function parseSkillDescription(skillMd) {
+  const text = String(skillMd == null ? '' : skillMd);
+  const fm = /^﻿?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(text);
+  if (!fm) return null;
+  const lines = fm[1].split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^description[ \t]*:(.*)$/.exec(lines[i]);
+    if (!m) continue;
+    const inline = m[1].trim();
+    // Block scalar indicator (>, |, with optional chomping/indent) or an empty
+    // value → gather the following indented continuation lines.
+    if (inline === '' || /^[|>][+-]?\d*$/.test(inline)) {
+      const collected = [];
+      for (let j = i + 1; j < lines.length; j++) {
+        const line = lines[j];
+        if (line.trim() === '' || /^[ \t]/.test(line)) collected.push(line.trim());
+        else break; // a new, non-indented key ends the block
+      }
+      const joined = collected.join(' ').replace(/\s+/g, ' ').trim();
+      return joined || null;
+    }
+    // Inline scalar, possibly wrapped in matching quotes.
+    const unquoted = inline.replace(/^(['"])([\s\S]*)\1$/, '$2');
+    const joined = unquoted.replace(/\s+/g, ' ').trim();
+    return joined || null;
+  }
+  return null;
+}
+
+module.exports = { makeSkillSourceResolver, parseSkillDescription };

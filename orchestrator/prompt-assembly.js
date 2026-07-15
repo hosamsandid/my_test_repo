@@ -297,6 +297,32 @@ function hasSkillGrant(skills) {
   return Array.isArray(skills) && skills.length > 0;
 }
 
+// Compose the Skills section: the base template's "how skills work" guidance
+// (preserved verbatim, AC3) followed by one line per granted skill carrying its
+// name and — mirroring the knowledge digest's guaranteed-in-context injection —
+// the one-line `description` from its SKILL.md frontmatter (#617). The
+// descriptions are supplied by the caller (`buildAgentClaudeMd` reads them via
+// skill-source.js), so this module stays pure/fs-free (AC5).
+//
+// Fail-soft (AC7): a skill with no resolved description is still listed by name.
+// Whitespace is collapsed defensively (AC8); no truncation is applied (AC9).
+// Returns null when the resolved grant is empty (AC4) — the caller drops the
+// whole section.
+function skillsSection(baseSkillsText, skills, skillDescriptions = {}) {
+  if (!hasSkillGrant(skills)) return null;
+  const base = String(baseSkillsText == null ? '' : baseSkillsText).trim();
+  const descs = skillDescriptions && typeof skillDescriptions === 'object' ? skillDescriptions : {};
+  const items = skills.map((name) => {
+    const raw = descs[name];
+    const desc = typeof raw === 'string' ? raw.replace(/\s+/g, ' ').trim() : '';
+    return desc ? `- **${name}** — ${desc}` : `- **${name}**`;
+  });
+  const granted =
+    'Skills granted to you (open the full `skills/<name>/SKILL.md` before relying on one):\n\n' +
+    items.join('\n');
+  return base ? `${base}\n\n${granted}` : `## Skills\n\n${granted}`;
+}
+
 // Compose the full CLAUDE.md from the base template + per-agent inputs.
 //
 // Ordering (fix: the authored role used to be buried in the middle):
@@ -322,11 +348,14 @@ function hasSkillGrant(skills) {
 // Left null (the default) the prompt is inlined — the form the prompt-preview
 // endpoint uses so the operator sees the fully-resolved text.
 // `skills`: the agent's resolved skill grant (team-owned — skill-grants.js).
+// `skillDescriptions`: optional `{ <skillName>: description }` map the caller
+// reads from each granted skill's SKILL.md frontmatter (#617). Supplied as data
+// so this module stays fs-free; skills without an entry are listed by name only.
 // `knowledgeDigestRef` (e.g. "knowledge-digest.md"): when set, a Team
 // Knowledge section `@`-imports the generated digest (Memory/Knowledge
 // unification, Phase 1). Callers pass it only when the agent's KB checkout is
 // actually provisioned, so the import never dangles.
-function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], blueprintId = null, autonomous = false, promptRef = null, knowledgeDigestRef = null } = {}) {
+function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDescriptions = {}, blueprintId = null, autonomous = false, promptRef = null, knowledgeDigestRef = null } = {}) {
   const { preamble, sections } = splitSections(base);
   const byHeading = new Map(sections.map((s) => [s.heading, s.text]));
   const consumed = new Set();
@@ -375,9 +404,13 @@ function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], blueprint
   const kd = knowledgeDigestSection(knowledgeDigestRef);
   if (kd) blocks.push(kd);
 
-  // 8. Skills — only when the agent's resolved grant actually contains skills
+  // 8. Skills — only when the agent's resolved grant actually contains skills.
+  //    The base "how skills work" text is enriched with each granted skill's
+  //    name + one-line description (#617); take() still consumes the base
+  //    section so it can't also leak through the pass-through below.
   const skillsBlock = take("Skills");
-  if (skillsBlock && hasSkillGrant(skills)) blocks.push(skillsBlock);
+  const enrichedSkills = skillsSection(skillsBlock, skills, skillDescriptions);
+  if (enrichedSkills) blocks.push(enrichedSkills);
 
   // 9. Git — only when the env has a repository
   if (envHasRepository(env)) blocks.push(GIT_SECTION);
@@ -473,6 +506,7 @@ module.exports = {
   blueprintSection,
   envHasRepository,
   hasSkillGrant,
+  skillsSection,
   WORKSPACE_SECTION,
   GIT_SECTION,
   TRIGGER_SECTION,

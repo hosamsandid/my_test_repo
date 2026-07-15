@@ -11,7 +11,7 @@ const bpEventRouter = require("./bp-event-router");
 const { findEnclosingGitRepo } = require("./git-workspace");
 const { bpsToBriefingsMap } = require("./briefings-graph");
 const { createTeamsStore, DEFAULT_TEAM_ID } = require("./teams-store");
-const { makeSkillSourceResolver } = require("./skill-source");
+const { makeSkillSourceResolver, parseSkillDescription } = require("./skill-source");
 const {
   normalizeKnowledgeStore,
   knowledgeAutonomyLevel,
@@ -783,14 +783,18 @@ function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
   // Skills are team-owned (skill-grants.js): resolve the effective grant from
   // the agent's own config (saved before every saveAgentPrompt call in all
   // paths), so no caller can forget to thread it through.
-  const skills = effectiveSkills(loadAgentConfig(id), loadAgentConfig);
+  const cfg = loadAgentConfig(id);
+  const skills = effectiveSkills(cfg, loadAgentConfig);
+  // #617: enrich the Skills section with each granted skill's SKILL.md
+  // description, resolved from the same tier seeding would copy from.
+  const skillDescriptions = agentSkillDescriptions(id, (cfg && cfg.teamId) || DEFAULT_TEAM_ID, skills);
   // Seeding runs before every saveAgentPrompt call in all paths, so the
   // on-disk checkout the gate reads is the live truth here.
   const knowledgeDigestRef = agentKnowledgeDigestRef(id, env);
   // Reference mode: CLAUDE.md points at AGENT-PROMPT.md instead of inlining it.
   fs.writeFileSync(
     path.join(dir, "CLAUDE.md"),
-    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef }),
+    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, skillDescriptions, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef }),
   );
 }
 
@@ -910,6 +914,27 @@ function seedBlueprintMemory(blueprintId) {
   }
 }
 
+// Read the one-line `description` for each granted skill from its SKILL.md,
+// resolving the source with the SAME agent→team→global order as seeding
+// (skill-source.js) so a team-overridden skill shows that copy's description
+// (#617). Returns `{ <skillName>: description }`; skills whose dir/SKILL.md/
+// description can't be resolved are simply omitted (fail-soft, AC7) — the
+// assembler then lists them by name only. The I/O lives here so
+// `assembleClaudeMd` stays pure (AC5).
+function agentSkillDescriptions(id, teamId, skills) {
+  const out = {};
+  if (!Array.isArray(skills)) return out;
+  for (const name of skills) {
+    try {
+      const src = resolveSkillSourceDir(name, teamId, { agentId: id });
+      if (!src) continue;
+      const desc = parseSkillDescription(fs.readFileSync(path.join(src, "SKILL.md"), "utf8"));
+      if (desc) out[name] = desc;
+    } catch { /* fail-soft: list this skill by name only */ }
+  }
+  return out;
+}
+
 // Compose an agent's CLAUDE.md. The base template is read here (I/O); the
 // ordering / conditional-gating / de-duplication rules live in the pure,
 // unit-tested `prompt-assembly` module, which the prompt-preview endpoint also
@@ -938,6 +963,7 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null, opts = {
     role,
     env,
     skills: Array.isArray(opts.skills) ? opts.skills : [],
+    skillDescriptions: opts.skillDescriptions && typeof opts.skillDescriptions === "object" ? opts.skillDescriptions : {},
     blueprintId,
     autonomous: !!opts.autonomous,
     // Seeding passes promptRef so CLAUDE.md references AGENT-PROMPT.md; the
@@ -6509,12 +6535,15 @@ async function main() {
         // Team-owned skills: resolve the same grant the seed path uses, so the
         // preview's Skills gate is byte-identical to what gets seeded.
         const skills = effectiveSkills(cfg, loadAgentConfig);
+        // #617: same skill-description enrichment (and same source resolution)
+        // as the seed path, so the preview's Skills section is byte-identical.
+        const skillDescriptions = agentSkillDescriptions(id, cfg.teamId || DEFAULT_TEAM_ID, skills);
         // Same live gate as saveAgentPrompt (autonomy >= 1 + provisioned
         // checkout): digest import, unified Memory System section AND the
         // unified memory hint all flip together — byte-identical to what the
         // runtime resolves via _memory_model_unified().
         const knowledgeDigestRef = agentKnowledgeDigestRef(id, env);
-        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous, skills, knowledgeDigestRef });
+        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous, skills, skillDescriptions, knowledgeDigestRef });
         const appendSystemPrompt = buildMemoryHint(blueprintId, { unified: !!knowledgeDigestRef });
         return sendJson(res, 200, {
           agentId: id,

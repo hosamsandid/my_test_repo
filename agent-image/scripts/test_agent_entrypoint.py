@@ -319,12 +319,40 @@ class MaintenanceModeGating(unittest.IsolatedAsyncioTestCase):
         past = (entrypoint.datetime.now(entrypoint._TRIGGER_TZ)
                 - timedelta(minutes=1)).isoformat()
         trigger = {"id": "o1", "type": "once", "at": past, "enabled": True}
+        # _execute MUST be mocked (#606): the once-firing path calls the real
+        # _execute via asyncio.create_task, which would spawn a real Claude run /
+        # write the live session log when this suite is run inside a live agent
+        # container. Patching it here is the correct unit boundary — firing the
+        # once trigger means "call _execute once".
         with patch.object(entrypoint, "_load_triggers", return_value=[trigger]), \
              patch.object(entrypoint, "_save_triggers") as save_mock, \
+             patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
              patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
             await scheduler._sync()
+            # Let the create_task-scheduled coroutine run so no task is left
+            # pending at teardown.
+            await entrypoint.asyncio.sleep(0)
+        execute_mock.assert_called_once()
         save_mock.assert_called_once()
         self.assertIn("o1", scheduler._fired_once)
+
+    async def test_under_test_harness_suppresses_execute(self):
+        # Defense in depth (#606): even if a test forgets to mock _execute, the
+        # real _execute must be inert under a test harness — it must never spawn
+        # a Claude run, post to Matrix, or write the live session log.
+        self.assertTrue(entrypoint._under_test_harness())
+        scheduler = self._scheduler()
+        trigger = {"id": "o1", "type": "once", "at": "2020-01-01T00:00:00Z",
+                   "enabled": True}
+        with patch.object(entrypoint, "_load_dm_room_id",
+                          return_value="!room:local") as room_mock, \
+             patch.object(entrypoint, "_call_claude_once") as claude_mock, \
+             patch.object(entrypoint, "_append_event") as append_mock:
+            await scheduler._execute(trigger)
+        claude_mock.assert_not_called()
+        append_mock.assert_not_called()
+        room_mock.assert_not_called()
+        self.assertNotIn("o1", scheduler._running)
 
     async def test_pending_loop_skips_processing_during_maintenance(self):
         scheduler = self._scheduler()

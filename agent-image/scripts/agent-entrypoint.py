@@ -1856,6 +1856,23 @@ def _clamp_event_deep(value, depth: int = 0):
     return value
 
 
+def _under_test_harness() -> bool:
+    """True when a test runner is loaded (``unittest``/``pytest``) or
+    ``AEE_TEST_MODE`` is set in the environment.
+
+    Used as a hard safety net (#606) to disable real side effects — spawning a
+    Claude subprocess, posting to Matrix, writing the live session log — while a
+    test harness is active. Production never imports ``unittest``/``pytest``, so
+    this is False in the live runtime; but if a test is non-hermetic (or an agent
+    runs this repo's own suite via ``python3 -m unittest`` inside a live
+    container), it prevents that test from firing real triggered work. Without
+    this guard a single un-mocked ``_execute`` once caused a self-amplifying fork
+    bomb of Claude sessions."""
+    if os.environ.get("AEE_TEST_MODE"):
+        return True
+    return "unittest" in sys.modules or "pytest" in sys.modules
+
+
 class TriggerScheduler:
     """Schedules cron / once / http triggers for an agent container.
 
@@ -2608,6 +2625,18 @@ class TriggerScheduler:
 
     async def _execute(self, trigger: dict, ctx: dict | None = None) -> None:
         tid = trigger.get("id", "?")
+        if _under_test_harness():
+            # Safety net (#606): never spawn a real Claude run, post to Matrix,
+            # or write the live session log while a test harness is loaded. This
+            # is the single chokepoint for triggered work, so guarding it here
+            # neutralises any non-hermetic test — including this repo's own suite
+            # run by an agent inside a live container — before it can fire.
+            print(
+                f"[Runner:{self._agent_id}] Trigger {tid} suppressed: "
+                f"test harness detected (see #606)",
+                file=sys.stderr,
+            )
+            return
         if tid in self._running:
             print(f"[Runner:{self._agent_id}] Trigger {tid} still running — skipping",
                   file=sys.stderr)

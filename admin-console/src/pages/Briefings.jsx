@@ -553,15 +553,6 @@ export default function Briefings() {
                   }}>
                     Flows
                   </div>
-                  <div style={{
-                    fontSize: 'var(--eb-text-xs)',
-                    color: 'var(--eb-text-muted)',
-                    marginTop: 'var(--eb-space-1)',
-                  }}>
-                    {orchestrators.length > 0
-                      ? `${orchestrators.length} flow${orchestrators.length !== 1 ? 's' : ''}`
-                      : ''}
-                  </div>
                 </div>
                 {/* AC 2: persistent help icon, always visible */}
                 <button

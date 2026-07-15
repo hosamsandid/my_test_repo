@@ -37,6 +37,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections import deque, namedtuple
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -2050,6 +2051,118 @@ def _under_test_harness() -> bool:
     return "unittest" in sys.modules or "pytest" in sys.modules
 
 
+def _int_env(name: str, default: int) -> int:
+    """Read a non-negative int from the environment, falling back to `default`
+    on absence or a malformed value."""
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+# ---- triggered-session backstop (#611) ----
+#
+# A per-agent blast-radius cap on *triggered* Claude sessions. The 2026-07-15
+# fork-bomb (#606) showed a self-triggering loop can spawn many concurrent
+# Claude runs (17 in ~17 min, one OOM-killed) with nothing throttling the
+# growth: the per-trigger `_running` guard only stops one trigger overlapping
+# itself, and `_bump_active` merely tracks status — neither caps fan-out. This
+# is a hard concurrency ceiling plus a sliding-window spawn-rate limit that
+# `_execute` — the single chokepoint for triggered work — consults before it
+# spawns. It is deliberately independent of the #606 test-harness guard: that
+# removed one *cause*; this bounds the blast radius of *any* future loop.
+#
+# Defaults sit well above normal single-agent operation (1–2 concurrent
+# triggered runs) and well below the incident (17). A limit of 0 disables that
+# check, so an operator can opt out per agent via the environment.
+_MAX_TRIGGERED_SESSIONS = _int_env("AEE_MAX_TRIGGERED_SESSIONS", 4)
+_TRIGGERED_SPAWN_LIMIT = _int_env("AEE_TRIGGERED_SPAWN_LIMIT", 12)
+_TRIGGERED_SPAWN_WINDOW_SEC = _int_env("AEE_TRIGGERED_SPAWN_WINDOW_SEC", 300)
+
+
+BackstopDecision = namedtuple(
+    "BackstopDecision",
+    ["allowed", "reason", "warn", "active", "window_count"],
+)
+
+
+class TriggerBackstop:
+    """Per-agent blast-radius cap on triggered Claude sessions (#611).
+
+    Two independent limits, both per agent-container:
+      - a concurrency ceiling (`max_concurrent`): at most N triggered sessions
+        may run at once;
+      - a sliding-window spawn-rate limit (`max_per_window` in `window_sec`):
+        at most M triggered sessions may *start* within any window.
+
+    `try_acquire()` is the gate `_execute` calls before spawning. A caller that
+    is allowed MUST pair it with exactly one `release()` when the session ends;
+    a denied caller must not. A limit set to 0 (or negative) disables that
+    check. `warn` is True only on the *first* denial of a runaway episode and
+    resets once a spawn succeeds again — so the runtime emits one DM per episode
+    and then drops silently, mirroring the GitHub poller's throttle warning.
+    `clock` is injectable for tests; a lock keeps the counters consistent since
+    the session registry callbacks run on other threads.
+    """
+
+    def __init__(self, *, max_concurrent: int, max_per_window: int,
+                 window_sec: float, clock=time.monotonic):
+        self._max_concurrent = max_concurrent
+        self._max_per_window = max_per_window
+        self._window_sec = window_sec
+        self._clock = clock
+        self._active = 0
+        self._spawns: deque[float] = deque()
+        self._warned = False
+        self._lock = threading.Lock()
+
+    def _prune(self, now: float) -> None:
+        if self._window_sec <= 0 or self._max_per_window <= 0:
+            self._spawns.clear()
+            return
+        cutoff = now - self._window_sec
+        while self._spawns and self._spawns[0] <= cutoff:
+            self._spawns.popleft()
+
+    def try_acquire(self) -> BackstopDecision:
+        now = self._clock()
+        with self._lock:
+            self._prune(now)
+            reason = None
+            if self._max_concurrent > 0 and self._active >= self._max_concurrent:
+                reason = "concurrency"
+            elif self._max_per_window > 0 and len(self._spawns) >= self._max_per_window:
+                reason = "rate"
+            if reason is not None:
+                warn = not self._warned
+                self._warned = True
+                return BackstopDecision(
+                    False, reason, warn, self._active, len(self._spawns))
+            self._active += 1
+            if self._max_per_window > 0:
+                self._spawns.append(now)
+            self._warned = False
+            return BackstopDecision(
+                True, None, False, self._active, len(self._spawns))
+
+    def release(self) -> None:
+        with self._lock:
+            if self._active > 0:
+                self._active -= 1
+
+    def snapshot(self) -> dict:
+        now = self._clock()
+        with self._lock:
+            self._prune(now)
+            return {
+                "active": self._active,
+                "windowCount": len(self._spawns),
+                "maxConcurrent": self._max_concurrent,
+                "maxPerWindow": self._max_per_window,
+                "windowSec": self._window_sec,
+            }
+
+
 class TriggerScheduler:
     """Schedules cron / once / http triggers for an agent container.
 
@@ -2080,6 +2193,13 @@ class TriggerScheduler:
         self._cron_tasks: dict[str, dict] = {}  # triggerId -> {"task": Task, "expr": str}
         self._running: set[str] = set()
         self._fired_once: set[str] = set()  # once-triggers already fired this lifetime (#185)
+        # Blast-radius backstop (#611): caps concurrent + per-window triggered
+        # Claude spawns so a self-triggering loop can't fan out unbounded.
+        self._backstop = TriggerBackstop(
+            max_concurrent=_MAX_TRIGGERED_SESSIONS,
+            max_per_window=_TRIGGERED_SPAWN_LIMIT,
+            window_sec=_TRIGGERED_SPAWN_WINDOW_SEC,
+        )
         self._reload_event = asyncio.Event()
         self._shutdown_event = asyncio.Event()
         self._sync_task: asyncio.Task | None = None
@@ -2818,6 +2938,28 @@ class TriggerScheduler:
             print(f"[Runner:{self._agent_id}] Trigger {tid} still running — skipping",
                   file=sys.stderr)
             return
+        # Blast-radius backstop (#611): drop the spawn if this agent is already
+        # at its concurrency ceiling or over its spawn-rate for the window, so a
+        # self-triggering loop can't grow unbounded. Surfaced once per episode
+        # (log always, one DM), then silent until the pressure eases.
+        decision = self._backstop.try_acquire()
+        if not decision.allowed:
+            print(
+                f"[Runner:{self._agent_id}] Trigger {tid} dropped by backstop "
+                f"(reason={decision.reason}, active={decision.active}, "
+                f"window={decision.window_count}) — see #611",
+                file=sys.stderr,
+            )
+            if decision.warn:
+                try:
+                    await self._post_backstop_warning(trigger, decision)
+                except Exception as exc:
+                    print(
+                        f"[Runner:{self._agent_id}] backstop warning post failed: "
+                        f"{exc}",
+                        file=sys.stderr,
+                    )
+            return
         self._running.add(tid)
         try:
             await self._execute_inner(trigger, ctx)
@@ -2826,6 +2968,56 @@ class TriggerScheduler:
                   file=sys.stderr)
         finally:
             self._running.discard(tid)
+            self._backstop.release()
+
+    async def _post_backstop_warning(self, trigger: dict,
+                                     decision: BackstopDecision) -> None:
+        """Post one plain DM notice when the backstop first drops a triggered
+        run (#611). Best-effort, no Claude call — mirrors the throttle/burst
+        warnings. Further drops of the same episode stay silent until a spawn
+        succeeds again."""
+        raw_room_id = trigger.get("roomId") or _load_dm_room_id()
+        room_id = (
+            raw_room_id
+            if isinstance(raw_room_id, str) and _MATRIX_ROOM_ID_RE.match(raw_room_id)
+            else None
+        )
+        if not room_id:
+            return
+        snap = self._backstop.snapshot()
+        if decision.reason == "rate":
+            window_min = max(1, int(round(snap["windowSec"] / 60)))
+            detail = (
+                f"mehr als {snap['maxPerWindow']} getriggerte Sessions in "
+                f"{window_min} min gestartet"
+            )
+        else:
+            detail = (
+                f"bereits {snap['maxConcurrent']} getriggerte Sessions laufen "
+                f"parallel"
+            )
+        body = (
+            f"⚠️ **Trigger-Backstop aktiv** — {detail}. Weitere getriggerte "
+            f"Läufe werden vorerst verworfen (Schutz gegen Runaway-Schleifen, "
+            f"#611). Ich melde das einmal und unterdrücke weitere Meldungen, "
+            f"bis sich die Lage entspannt."
+        )
+        content = {
+            "msgtype": "m.notice",
+            "body": body,
+            "io.aee.backstop": {
+                "reason": decision.reason,
+                "active": snap["active"],
+                "windowCount": snap["windowCount"],
+                "maxConcurrent": snap["maxConcurrent"],
+                "maxPerWindow": snap["maxPerWindow"],
+            },
+        }
+        await self._client.room_send(
+            room_id=room_id,
+            message_type="m.room.message",
+            content=content,
+        )
 
     async def _execute_inner(self, trigger: dict, ctx: dict | None) -> None:
         tid = trigger.get("id", "?")

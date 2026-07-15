@@ -10,6 +10,11 @@ manually per repo convention. Run with:
     python3 -m unittest agent-image/scripts/test_knowledge.py
 """
 import importlib.util
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -377,6 +382,138 @@ class TeamIdResolution(unittest.TestCase):
         e = kn.build_entry("fact", "x", origin_agent="a", team_id=kn._team_id(),
                            correlation_id="c1")
         self.assertEqual(e["teamId"], "agent-studio")
+
+
+class BuildCommitArgs(unittest.TestCase):
+    """`knowledge add`'s commit must be self-sufficient (issue #615): committer
+    identity set INLINE (mirroring gh-as-agent commit) so it works with no ambient
+    git identity, the author keeps the @agents.local loop-protection marker, and
+    the global git config is never touched."""
+
+    def test_inline_committer_identity(self):
+        args = kn.build_commit_args("cobol-agent", "fact", "0123456789ab")
+        # committer set inline via -c pairs (mirrors gh-as-agent commit)
+        self.assertIn("-c", args)
+        self.assertIn("user.name=agent-cobol-agent", args)
+        self.assertIn("user.email=agent-cobol-agent@ace.local", args)
+
+    def test_author_keeps_agents_local_marker(self):
+        args = kn.build_commit_args("cobol-agent", "fact", "0123456789ab")
+        i = args.index("--author")
+        self.assertEqual(args[i + 1], "cobol-agent <cobol-agent@agents.local>")
+
+    def test_never_mutates_global_config(self):
+        # no `config` / `--global` — identity is per-commit only (AC3)
+        args = kn.build_commit_args("a1", "entity", "aaaaaaaaaaaa")
+        self.assertNotIn("config", args)
+        self.assertNotIn("--global", args)
+        self.assertNotIn("--system", args)
+
+    def test_commit_shape(self):
+        args = kn.build_commit_args("a1", "convention", "aaaaaaaaaaaa")
+        self.assertIn("commit", args)
+        i = args.index("-m")
+        self.assertEqual(args[i + 1], "knowledge(convention): aaaaaaaaaaaa")
+        # the -c identity flags precede the `commit` subcommand
+        self.assertLess(args.index("-c"), args.index("commit"))
+
+
+def _has_git():
+    return shutil.which("git") is not None
+
+
+@unittest.skipUnless(_has_git(), "git not available")
+class AddCommitIntegration(unittest.TestCase):
+    """End-to-end coverage for the #615 fix: `knowledge add` commits in a context
+    with NO ambient git identity, and fails loud when the commit cannot happen."""
+
+    def _run_add(self, cwd_repo, *extra, env_over=None):
+        """Run the real CLI as a subprocess with a git context that has NO ambient
+        identity (empty HOME, global/system config pointed at /dev/null) so a
+        commit only succeeds if the CLI sets the identity itself."""
+        env = dict(os.environ)
+        # Strip any inherited git identity so the ambient identity is truly absent.
+        for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+                  "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+            env.pop(k, None)
+        env["HOME"] = self._home
+        env["GIT_CONFIG_GLOBAL"] = os.devnull
+        env["GIT_CONFIG_SYSTEM"] = os.devnull
+        env["AGENT_ID"] = "cobol-agent"
+        env["KNOWLEDGE_DIR"] = cwd_repo
+        env["KNOWLEDGE_TEAM_ID"] = "team-x"
+        env["KNOWLEDGE_CORRELATION_ID"] = "evt-1"
+        if env_over:
+            env.update(env_over)
+        return subprocess.run(
+            [sys.executable, str(_CLI_PATH), "add", *extra],
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+
+    def _git(self, repo, *args):
+        return subprocess.run(
+            ["git", "-C", repo, *args],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": self._home,
+                 "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull},
+            timeout=15,
+        )
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="kn-test-")
+        self._home = os.path.join(self._tmp, "home")
+        os.makedirs(self._home)
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_commit_succeeds_without_ambient_identity(self):
+        repo = os.path.join(self._tmp, "kb")
+        os.makedirs(repo)
+        self.assertEqual(self._git(repo, "init").returncode, 0)
+
+        res = self._run_add(repo, "fact", "no-ambient-identity works", "--no-push")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("Committer identity unknown", res.stderr)
+        self.assertIn("recorded fact", res.stderr)  # success line printed (AC5)
+
+        # AC2: committer is the deterministic agent identity, author unchanged.
+        log = self._git(repo, "log", "-1", "--format=%cn|%ce|%an|%ae")
+        self.assertEqual(log.returncode, 0, log.stderr)
+        cn, ce, an, ae = log.stdout.strip().split("|")
+        self.assertEqual((cn, ce), ("agent-cobol-agent", "agent-cobol-agent@ace.local"))
+        self.assertEqual((an, ae), ("cobol-agent", "cobol-agent@agents.local"))
+
+    def test_prior_uncommitted_entry_is_committed_next_time(self):
+        # Edge case: an entry appended by an earlier (buggy) run but never committed
+        # must land on the next successful add, without duplication.
+        repo = os.path.join(self._tmp, "kb")
+        os.makedirs(repo)
+        self.assertEqual(self._git(repo, "init").returncode, 0)
+        shard = os.path.join(repo, "docs/agent-knowledge/facts/shards/cobol-agent.jsonl")
+        os.makedirs(os.path.dirname(shard))
+        with open(shard, "w", encoding="utf-8") as fh:
+            fh.write('{"v":1,"id":"aaaaaaaaaaaa","kind":"fact","text":"leftover"}\n')
+
+        res = self._run_add(repo, "fact", "fresh entry", "--no-push")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        # both the leftover and the fresh line are now committed (one commit).
+        show = self._git(repo, "show", "HEAD:docs/agent-knowledge/facts/shards/cobol-agent.jsonl")
+        self.assertEqual(show.returncode, 0, show.stderr)
+        self.assertIn("leftover", show.stdout)
+        self.assertIn("fresh entry", show.stdout)
+        self.assertEqual(show.stdout.count("aaaaaaaaaaaa"), 1)  # no duplication
+
+    def test_fail_loud_when_commit_cannot_happen(self):
+        # KNOWLEDGE_DIR is NOT a git repo → the commit fails; the CLI must exit
+        # non-zero and must NOT print the `recorded` success line (AC4).
+        not_a_repo = os.path.join(self._tmp, "plain")
+        os.makedirs(not_a_repo)
+        res = self._run_add(not_a_repo, "fact", "should not be reported as shared",
+                            "--no-push")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertNotIn("recorded fact", res.stderr)
+        self.assertIn("NOT recorded", res.stderr)
 
 
 if __name__ == "__main__":

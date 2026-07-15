@@ -551,6 +551,26 @@ def _git(*args, timeout=15):
     )
 
 
+def build_commit_args(agent_id, kind, entry_id):
+    """The `git` args (after the `-C <checkout>` already added by `_git`) for a KB
+    `add` commit.
+
+    Mirrors `gh-as-agent commit` (agent-image/scripts/gh-as-agent): the committer
+    identity is set INLINE via `-c user.name`/`-c user.email` so the commit
+    succeeds even when no ambient git identity is configured (the chat/harness
+    path, a manual shell) — without ever touching the global/system git config.
+    The author keeps the `<agentId>@agents.local` marker the poller reads for loop
+    protection. Pure (just string assembly) so it is unit-tested directly.
+    """
+    return [
+        "-c", f"user.name=agent-{agent_id}",
+        "-c", f"user.email=agent-{agent_id}@ace.local",
+        "commit",
+        "--author", f"{agent_id} <{agent_id}@agents.local>",
+        "-m", f"knowledge({kind}): {entry_id}",
+    ]
+
+
 def _read_all_entries(manifest, kind=None):
     """Read every entry from all shard files (+ any curated canonical file)."""
     import glob
@@ -690,15 +710,21 @@ def cmd_add(argv):
         _die(f"could not write shard {shard}: {exc}", 2)
 
     # Commit with the agent identity so provenance holds on the shared branch.
+    # Committer identity is set inline (see build_commit_args) so this works with
+    # no ambient git identity configured and never mutates the global git config.
     rel = os.path.relpath(shard, _checkout_root())
     _git("add", rel)
-    commit = _git(
-        "commit",
-        "--author", f"{_agent_id()} <{_agent_id()}@agents.local>",
-        "-m", f"knowledge({kind}): {entry['id']}",
-    )
+    commit = _git(*build_commit_args(_agent_id(), kind, entry["id"]))
     if commit.returncode != 0:
-        sys.stderr.write(f"knowledge: local commit failed: {commit.stderr.strip()}\n")
+        # Fail loud: the entry is appended to the shard but the commit that would
+        # share it did not happen — never print the `recorded` success line, and
+        # exit non-zero so a caller (including the autonomy-3 curator flow) can
+        # detect the loss instead of believing the lesson was shared.
+        _die(
+            f'entry {entry["id"]} was NOT recorded: local commit failed — the '
+            f"lesson was not shared: {commit.stderr.strip()}",
+            2,
+        )
 
     if not no_push:
         ok, detail = _push_via_orchestrator([entry])

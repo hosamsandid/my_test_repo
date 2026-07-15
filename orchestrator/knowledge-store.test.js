@@ -344,9 +344,12 @@ test('resolvePromotionGates: defaults + team>global forced review + fail-safe cl
 });
 
 test('knowledgeCurationConfig: clamp + legacy default', () => {
-  assert.deepEqual(knowledgeCurationConfig(null), { maxAutoPromotionsPerPass: 3 });
+  assert.deepEqual(knowledgeCurationConfig(null), { maxAutoPromotionsPerPass: 3, autoThemeMinLessons: 4 });
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { maxAutoPromotionsPerPass: 10 } }).maxAutoPromotionsPerPass, 10);
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { maxAutoPromotionsPerPass: -2 } }).maxAutoPromotionsPerPass, 3);
+  // #604: autoThemeMinLessons default 4, clamps to int >= 1.
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { autoThemeMinLessons: 6 } }).autoThemeMinLessons, 6);
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { autoThemeMinLessons: -2 } }).autoThemeMinLessons, 4);
 });
 
 // --- mergeTeamKnowledgeConfig (#570) ----------------------------------------

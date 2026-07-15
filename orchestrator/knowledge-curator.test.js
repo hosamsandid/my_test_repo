@@ -9,11 +9,14 @@ const {
   slugifySkillName,
   curatorSkillDraft,
   curatorSkillProvenance,
+  curatorThemeSkillDraft,
+  curatorThemeSkillProvenance,
   targetTransitionFor,
   planAutoPromotions,
+  planAutoPromoteThemes,
 } = require('./knowledge-curator');
 const { resolvePromotionGates, knowledgeCurationConfig } = require('./knowledge-store');
-const { buildCanonicalProjection } = require('./knowledge-convergence');
+const { buildCanonicalProjection, groupRelatedClusters, themeToCandidate } = require('./knowledge-convergence');
 
 const NOW = '2026-07-08T12:00:00Z';
 
@@ -64,11 +67,15 @@ test('resolvePromotionGates: absent transition uses its default, present valid v
   assert.equal(g['agent>team'], 'review'); // absent → default
 });
 
-test('knowledgeCurationConfig: default cap, clamp, legacy env', () => {
-  assert.deepEqual(knowledgeCurationConfig(null), { maxAutoPromotionsPerPass: 3 });
+test('knowledgeCurationConfig: default cap + autoThemeMinLessons, clamp, legacy env', () => {
+  assert.deepEqual(knowledgeCurationConfig(null), { maxAutoPromotionsPerPass: 3, autoThemeMinLessons: 4 });
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { maxAutoPromotionsPerPass: 7 } }).maxAutoPromotionsPerPass, 7);
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { maxAutoPromotionsPerPass: 0 } }).maxAutoPromotionsPerPass, 3);
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { maxAutoPromotionsPerPass: 'x' } }).maxAutoPromotionsPerPass, 3);
+  // #604: autoThemeMinLessons per-team overridable, default 4, clamps to int >= 1.
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { autoThemeMinLessons: 6 } }).autoThemeMinLessons, 6);
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { autoThemeMinLessons: 0 } }).autoThemeMinLessons, 4);
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { autoThemeMinLessons: 'x' } }).autoThemeMinLessons, 4);
 });
 
 // ─── target transition ──────────────────────────────────────────────────────────
@@ -181,4 +188,153 @@ test('slugifySkillName: fallback to kind-based slug for empty/invalid text', () 
   assert.equal(slugifySkillName('', 'entity'), 'entity-skill');
   assert.equal(slugifySkillName('!!!', 'fact'), 'fact-skill');
   assert.equal(slugifySkillName('Hello World Foo'), 'hello-world-foo');
+});
+
+// ─── theme (single-role accumulation) auto-promotion (#604) ─────────────────────
+
+// One agent accumulating several topically-related (not near-duplicate) lessons —
+// the primary single-role learning model. buildCanonicalProjection keeps them as
+// distinct clusters; groupRelatedClusters bundles them into one theme.
+function accumulationEntries() {
+  return [
+    entry({ id: 'a1a1a1a1a1a1', originAgent: 'acme-rev', kind: 'fact', createdAt: '2026-07-08T08:00:00Z',
+      text: 'the ready-for-review label on a pull request triggers the code review agent' }),
+    entry({ id: 'b2b2b2b2b2b2', originAgent: 'acme-rev', kind: 'convention', createdAt: '2026-07-08T09:00:00Z',
+      text: 'always set the ready-for-review label after opening a pull request' }),
+    entry({ id: 'c3c3c3c3c3c3', originAgent: 'acme-rev', kind: 'fact', createdAt: '2026-07-08T10:00:00Z',
+      text: 'github delivers issues labeled reliably but pull request label events are not guaranteed' }),
+    entry({ id: 'd4d4d4d4d4d4', originAgent: 'acme-rev', kind: 'convention', createdAt: '2026-07-08T11:00:00Z',
+      text: 'a stale pull request review needs the ready-for-review label reapplied to re-notify' }),
+  ];
+}
+
+// A second, vocabulary-disjoint theme (container build) so it never cross-groups
+// with the label theme — used to exercise the per-pass cap.
+function buildThemeEntries() {
+  return [
+    entry({ id: 'e5e5e5e5e5e5', originAgent: 'acme-ops', kind: 'fact', createdAt: '2026-07-08T08:00:00Z',
+      text: 'the agent container image builds with podman compose from the makefile target' }),
+    entry({ id: 'f6f6f6f6f6f6', originAgent: 'acme-ops', kind: 'convention', createdAt: '2026-07-08T09:00:00Z',
+      text: 'rebuild the orchestrator container image with make build after editing the dockerfile' }),
+    entry({ id: '676767676767', originAgent: 'acme-ops', kind: 'fact', createdAt: '2026-07-08T10:00:00Z',
+      text: 'the podman compose file wires every service and volume for the container image stack' }),
+    entry({ id: '787878787878', originAgent: 'acme-ops', kind: 'convention', createdAt: '2026-07-08T11:00:00Z',
+      text: 'run make up to start the container image stack after a fresh podman compose build' }),
+  ];
+}
+
+function themeClusters(entries) {
+  return buildCanonicalProjection(entries, { simThreshold: 0.6, now: NOW }).clusters;
+}
+
+test('accumulation fixture forms one strong single-agent theme', () => {
+  const clusters = themeClusters(accumulationEntries());
+  assert.equal(clusters.length, 4); // 4 distinct lessons, no near-dups
+  const groups = groupRelatedClusters(clusters, { relatedThreshold: 0.3 });
+  assert.equal(groups.length, 1); // one theme
+  const cand = themeToCandidate(groups[0], { teamId: 'acme', now: NOW });
+  assert.equal(cand.lessonCount, 4);
+  assert.deepEqual(cand.convergence, ['acme-rev']); // single role, explicitly allowed
+});
+
+test('planAutoPromoteThemes: strong single-agent theme with auto gate → promote', () => {
+  const clusters = themeClusters(accumulationEntries());
+  const gates = resolvePromotionGates(null); // team>team auto
+  const { promote, defer } = planAutoPromoteThemes(clusters, [], gates, { autoThemeMinLessons: 4, cap: 3, teamId: 'acme', now: NOW });
+  assert.equal(promote.length, 1);
+  assert.equal(defer.length, 0);
+  assert.equal(promote[0].transition, 'team>team');
+  assert.equal(promote[0].candidate.source, 'related');
+  assert.equal(promote[0].candidate.lessonCount, 4);
+  assert.equal(typeof promote[0].name, 'string');
+  assert.ok(promote[0].draft.skillMd.includes('#'));
+});
+
+test('planAutoPromoteThemes: lessonCount below autoThemeMinLessons defers "below-threshold"', () => {
+  const clusters = themeClusters(accumulationEntries()); // lessonCount 4
+  const gates = resolvePromotionGates(null);
+  const { promote, defer } = planAutoPromoteThemes(clusters, [], gates, { autoThemeMinLessons: 5, cap: 3, teamId: 'acme', now: NOW });
+  assert.equal(promote.length, 0);
+  assert.equal(defer.length, 1);
+  assert.equal(defer[0].reason, 'below-threshold');
+});
+
+test('planAutoPromoteThemes: card-floor theme (3 lessons) stays a card at default threshold 4', () => {
+  const clusters = themeClusters(accumulationEntries().slice(0, 3));
+  const groups = groupRelatedClusters(clusters, { relatedThreshold: 0.3 });
+  assert.equal(groups[0].length, 3); // strongLessons floor
+  const gates = resolvePromotionGates(null);
+  const { promote, defer } = planAutoPromoteThemes(clusters, [], gates, { autoThemeMinLessons: 4, cap: 3, teamId: 'acme', now: NOW });
+  assert.equal(promote.length, 0);
+  assert.equal(defer.length, 1);
+  assert.equal(defer[0].reason, 'below-threshold');
+});
+
+test('planAutoPromoteThemes: non-auto gate → defer "gated"', () => {
+  const clusters = themeClusters(accumulationEntries());
+  const gates = resolvePromotionGates({ knowledgePromotionGates: { 'team>team': 'review' } });
+  const { promote, defer } = planAutoPromoteThemes(clusters, [], gates, { autoThemeMinLessons: 4, cap: 3, teamId: 'acme', now: NOW });
+  assert.equal(promote.length, 0);
+  assert.equal(defer.length, 1);
+  assert.equal(defer[0].reason, 'gated');
+});
+
+test('planAutoPromoteThemes: per-pass cap respected, overflow deferred "over-cap" (lossless)', () => {
+  const clusters = themeClusters([...accumulationEntries(), ...buildThemeEntries()]);
+  const gates = resolvePromotionGates(null);
+  // Both themes qualify with a generous cap.
+  const wide = planAutoPromoteThemes(clusters, [], gates, { autoThemeMinLessons: 4, cap: 3, teamId: 'acme', now: NOW });
+  assert.equal(wide.promote.length, 2);
+  // With cap 1 the second theme is deferred, not dropped.
+  const { promote, defer } = planAutoPromoteThemes(clusters, [], gates, { autoThemeMinLessons: 4, cap: 1, teamId: 'acme', now: NOW });
+  assert.equal(promote.length, 1);
+  assert.ok(defer.some((d) => d.reason === 'over-cap'));
+  assert.equal(promote.length + defer.length, wide.promote.length);
+});
+
+test('planAutoPromoteThemes: promoted/dismissed theme is never re-promoted (idempotent)', () => {
+  const clusters = themeClusters(accumulationEntries());
+  const gates = resolvePromotionGates(null);
+  const cand = planAutoPromoteThemes(clusters, [], gates, { autoThemeMinLessons: 4, cap: 3, teamId: 'acme', now: NOW }).promote[0].candidate;
+  for (const status of ['promoted', 'dismissed']) {
+    const { promote } = planAutoPromoteThemes(clusters, [{ ...cand, status }], gates, { autoThemeMinLessons: 4, cap: 3, teamId: 'acme', now: NOW });
+    assert.equal(promote.length, 0, status);
+  }
+});
+
+test('planAutoPromoteThemes: empty inputs → empty plan', () => {
+  assert.deepEqual(planAutoPromoteThemes([], [], {}, {}), { promote: [], defer: [] });
+  assert.deepEqual(planAutoPromoteThemes(null, null, null, {}), { promote: [], defer: [] });
+});
+
+test('curatorThemeSkillDraft: accumulation framing, member texts, no secret fields', () => {
+  const groups = groupRelatedClusters(themeClusters(accumulationEntries()), { relatedThreshold: 0.3 });
+  const cand = themeToCandidate(groups[0], { teamId: 'acme', now: NOW });
+  const d = curatorThemeSkillDraft(cand);
+  assert.ok(/^[a-z0-9-]+$/.test(d.name));
+  assert.ok(d.skillMd.includes('accumulated by this team')); // theme framing, not convergence
+  assert.ok(d.skillMd.includes('pull request')); // a member lesson made it in
+  assert.equal(d.llmDrafted, false);
+  assert.ok(!/correlationId|sessionId|token|secret/i.test(d.skillMd));
+});
+
+test('curatorThemeSkillProvenance: promotedBy curator, entryIds trace every member', () => {
+  const groups = groupRelatedClusters(themeClusters(accumulationEntries()), { relatedThreshold: 0.3 });
+  const cand = themeToCandidate(groups[0], { teamId: 'acme', now: NOW });
+  const prov = curatorThemeSkillProvenance({ teamId: 'acme', candidate: cand, entryIds: cand.entryIds, now: NOW });
+  assert.equal(prov.promotedBy, 'curator');
+  assert.equal(prov.fromTier, 'team');
+  assert.equal(prov.toTier, 'team');
+  // graph builder's skillEntryIds() needs the member ids to render the T1→T2 edge.
+  assert.deepEqual(prov.entryIds.slice().sort(), cand.entryIds.slice().sort());
+  assert.deepEqual(prov.convergence, ['acme-rev']);
+  assert.equal(prov.originTeamId, 'acme');
+  assert.equal(prov.promotedAt, NOW);
+});
+
+test('curatorThemeSkillProvenance: falls back to candidate entryIds when omitted', () => {
+  const groups = groupRelatedClusters(themeClusters(accumulationEntries()), { relatedThreshold: 0.3 });
+  const cand = themeToCandidate(groups[0], { teamId: 'acme', now: NOW });
+  const prov = curatorThemeSkillProvenance({ teamId: 'acme', candidate: cand, now: NOW });
+  assert.deepEqual(prov.entryIds.slice().sort(), cand.entryIds.slice().sort());
 });

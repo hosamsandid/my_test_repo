@@ -566,7 +566,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, installableAgents, agentSki
         )}
         {isAgent && (
           <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
-            Agent skills are read-only here and can't be moved to the global pool directly. To share one, lift it into a team pool first, then promote that team skill to global — both steps run through the tier-transfer engine so provenance is recorded.
+            Agent skills are read-only here and can't be moved to the global pool directly. To share one, lift it into a team pool first via the Knowledge page, then promote that team skill to global using Promote to global above — both steps write provenance and skill.json lineage.
           </span>
         )}
       </div>

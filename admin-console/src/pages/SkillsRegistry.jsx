@@ -295,12 +295,11 @@ function CodeBlock({ content }) {
 }
 
 /* ─── Skill viewer / inline editor ────────────────────────────────────── */
-function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgents, agentSkills }) {
+function SkillViewer({ skill, onDeleted, onPromoted, installableAgents, agentSkills, teams }) {
   const isPool = skill.source === 'pool';
   const isTeam = skill.source === 'team';
   const isAgent = skill.source === 'agent';
   const isManaged = isPool || isTeam; // editable / deletable here
-  const inPool = poolNames?.has(skill.name);
   const skillKey = `${skill.source}:${skill.agentId ?? ''}:${skill.teamId ?? ''}:${skill.name}`;
 
   // Append the source-specific scope params (agentId for agent skills, teamId
@@ -335,11 +334,13 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
   const [promoting, setPromoting] = useState(false);
   const [promoteError, setPromoteError] = useState(null);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
+  const [pendingTransfer, setPendingTransfer] = useState(null);
   const [installTarget, setInstallTarget] = useState('');
   const [installing, setInstalling] = useState(false);
   const [installError, setInstallError] = useState(null);
   const [installMsg, setInstallMsg] = useState(null);
   const [confirmInstallOverwrite, setConfirmInstallOverwrite] = useState(false);
+  const [adoptTeamId, setAdoptTeamId] = useState('');
 
   // Load the file list whenever the selected skill changes.
   useEffect(() => {
@@ -381,23 +382,37 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
     window.open(`/api/skills/${encodeURIComponent(skill.name)}/export?${params}`, '_blank');
   }
 
-  // Promote a team skill up to the global pool (#306 two-stage promotion).
-  async function promoteToGlobal(overwrite) {
+  // Unified tier-transfer (#626): one endpoint for every tier transition — adopt
+  // (global→team), promote copy (team→global), and move (team→global). `to`/`from`/
+  // `mode` are passed through to the engine, which validates the cell, gates on
+  // permission, stamps lineage + carries provenance. On a destination name
+  // collision the engine returns 409 {exists}; we surface the overwrite dialog and
+  // replay the same transfer with onCollision:'overwrite'.
+  async function transfer(body) {
     setPromoting(true);
     setPromoteError(null);
     try {
-      const res = await fetch('/api/skills/promote-to-global', {
+      const res = await fetch('/api/skills/transfer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: skill.name, teamId: skill.teamId, overwrite }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       if (!res.ok) {
-        if (res.status === 409 && data.exists) { setConfirmOverwrite(true); setPromoting(false); return; }
+        if (res.status === 409 && data.exists) {
+          setPendingTransfer(body);
+          setConfirmOverwrite(true);
+          setPromoting(false);
+          return;
+        }
+        if (res.status === 409 && data.agents) {
+          throw new Error(`${data.error}: ${data.agents.join(', ')}`);
+        }
         throw new Error(data.error || `HTTP ${res.status}`);
       }
       setConfirmOverwrite(false);
-      onPromoted?.(data);
+      setPendingTransfer(null);
+      onPromoted?.({ name: data.name, source: data.to?.tier === 'team' ? 'team' : 'pool', teamId: data.to?.teamId });
     } catch (e) {
       setPromoteError(e.message);
     } finally {
@@ -440,33 +455,6 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
       .filter(s => s.source === 'agent' && s.name === skill.name && s.agentId)
       .map(s => s.agentId),
   );
-
-  async function promote(overwrite) {
-    setPromoting(true);
-    setPromoteError(null);
-    try {
-      const res = await fetch('/api/skills/promote', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agentId: skill.agentId, name: skill.name, overwrite }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        if (res.status === 409 && data.exists) {
-          setConfirmOverwrite(true);
-          setPromoting(false);
-          return;
-        }
-        throw new Error(data.error || `HTTP ${res.status}`);
-      }
-      setConfirmOverwrite(false);
-      onPromoted?.(data);
-    } catch (e) {
-      setPromoteError(e.message);
-    } finally {
-      setPromoting(false);
-    }
-  }
 
   async function handleSaveFile() {
     setSaving(true);
@@ -533,8 +521,23 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
               Edit {files.length > 1 ? 'file' : ''}
             </button>
             {isTeam && (
-              <button onClick={() => promoteToGlobal(false)} disabled={promoting} style={primaryBtnStyle(promoting)} title="Copy this team skill into the global pool (visible to all teams)">
+              <button
+                onClick={() => transfer({ name: skill.name, from: { tier: 'team', teamId: skill.teamId }, to: { tier: 'global' }, mode: 'copy' })}
+                disabled={promoting}
+                style={primaryBtnStyle(promoting)}
+                title="Copy this team skill into the global pool (visible to all teams); the team-tier copy stays put"
+              >
                 {promoting ? 'Promoting…' : 'Promote to global'}
+              </button>
+            )}
+            {isTeam && (
+              <button
+                onClick={() => transfer({ name: skill.name, from: { tier: 'team', teamId: skill.teamId }, to: { tier: 'global' }, mode: 'move' })}
+                disabled={promoting}
+                style={secondaryBtnStyle}
+                title="Move this team skill into the global pool (retires the team-tier copy, keeps a recoverable snapshot)"
+              >
+                {promoting ? 'Moving…' : 'Move to global'}
               </button>
             )}
             <button onClick={() => { setDeleteError(null); setConfirmDelete(true); }} style={dangerBtnStyle}>
@@ -562,14 +565,9 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
           </>
         )}
         {isAgent && (
-          <>
-            <button onClick={() => promote(false)} disabled={promoting} style={primaryBtnStyle(promoting)}>
-              {promoting ? 'Promoting…' : (inPool ? 'Update pool copy' : 'Promote to pool')}
-            </button>
-            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
-              Agent skills are read-only here. Promoting copies the whole skill directory (scripts included) into the shared pool.
-            </span>
-          </>
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
+            Agent skills are read-only here and can't be moved to the global pool directly. To share one, lift it into a team pool first via the Knowledge page, then promote that team skill to global using Promote to global above — both steps write provenance and skill.json lineage.
+          </span>
         )}
       </div>
 
@@ -578,6 +576,47 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
       )}
       {promoteError && (
         <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{promoteError}</div>
+      )}
+
+      {/* Adopt a global skill into a team pool (#626, global→team transfer) */}
+      {isPool && !editing && (
+        <div style={{
+          display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)',
+          padding: 'var(--eb-space-3)', background: 'var(--eb-bg-elevated)',
+          border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
+        }}>
+          <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)' }}>
+            Adopt as team skill
+          </span>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
+            <select
+              value={adoptTeamId}
+              onChange={e => { setAdoptTeamId(e.target.value); setPromoteError(null); }}
+              style={{
+                padding: '5px 10px', borderRadius: 'var(--eb-radius-sm)',
+                border: '1px solid var(--eb-border-default)', background: 'var(--eb-bg-surface)',
+                color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+                minWidth: 180,
+              }}
+            >
+              <option value="">Select a team…</option>
+              {(teams ?? []).map(t => (
+                <option key={t.id} value={t.id}>{t.name || t.id}</option>
+              ))}
+            </select>
+            <button
+              onClick={() => transfer({ name: skill.name, from: { tier: 'global' }, to: { tier: 'team', teamId: adoptTeamId } })}
+              disabled={!adoptTeamId || promoting}
+              style={primaryBtnStyle(!adoptTeamId || promoting)}
+              title="Copy this global skill into the selected team's pool and activate it"
+            >
+              {promoting ? 'Adopting…' : 'Adopt'}
+            </button>
+          </div>
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
+            Copies the whole skill into the team pool (activated by default) so the team owns and can curate its copy.
+          </span>
+        </div>
       )}
 
       {/* Install pool skill into an existing agent (no full workspace reset) */}
@@ -723,17 +762,15 @@ function SkillViewer({ skill, onDeleted, onPromoted, poolNames, installableAgent
         onCancel={() => { setConfirmDelete(false); setDeleteError(null); }}
       />
 
-      {/* Overwrite confirmation (global pool already has a skill with this name) */}
+      {/* Overwrite confirmation (destination tier already has a skill with this name) */}
       <ConfirmDialog
         open={confirmOverwrite}
-        title="Skill already in global pool"
+        title="Skill already exists at destination"
         variant="danger"
-        message={isTeam
-          ? `A global skill named "${skill.name}" already exists. Overwrite it with this team's version? This replaces the entire global skill directory.`
-          : `A pool skill named "${skill.name}" already exists. Overwrite it with the version from agent "${skill.agentId}"? This replaces the entire pool skill directory.`}
+        message={`A skill named "${skill.name}" already exists at the destination. Overwrite it with this version? This replaces the entire destination skill directory.`}
         confirmLabel={promoting ? 'Overwriting…' : 'Overwrite'}
-        onConfirm={() => (isTeam ? promoteToGlobal(true) : promote(true))}
-        onCancel={() => setConfirmOverwrite(false)}
+        onConfirm={() => pendingTransfer && transfer({ ...pendingTransfer, onCollision: 'overwrite' })}
+        onCancel={() => { setConfirmOverwrite(false); setPendingTransfer(null); }}
       />
 
       {/* Reinstall confirmation (agent already has a skill with this name) */}
@@ -866,7 +903,6 @@ export default function SkillsRegistry() {
     }
   }
 
-  const poolNames = new Set((allSkills ?? []).filter(s => s.source === 'pool').map(s => s.name));
   // Only materialized, enabled agents can receive a skill in-place (a stub has
   // no workspace yet and would be re-seeded from its environment on enable).
   const installableAgents = (allAgents ?? [])
@@ -960,8 +996,8 @@ export default function SkillsRegistry() {
           Skills live in two tiers (#306): <strong>Global</strong> skills are visible to everyone, while{' '}
           <strong>Team</strong> skills are seeded only into agents owned by that team. Both can be edited here and are
           attached to Working Environments by name (an agent resolves a name from its own team's pool first, then global).
-          A team skill can be lifted to the global pool with <em>Promote to global</em>.{' '}
-          <strong>Agent</strong> skills are read-only — use <em>Promote to pool</em> to lift one into the global pool, or{' '}
+          A team skill can be copied to the global pool with <em>Promote to global</em> or relocated with <em>Move to global</em>.{' '}
+          <strong>Agent</strong> skills are read-only — lift one into a team pool first, then promote that team skill to global; use{' '}
           <em>Install into agent</em> to push a global skill into a running agent. Click a skill to browse its files.
         </p>
       </div>
@@ -1036,9 +1072,9 @@ export default function SkillsRegistry() {
             skill={selectedSkill}
             onDeleted={handleDeleted}
             onPromoted={handlePromoted}
-            poolNames={poolNames}
             installableAgents={installableAgents}
             agentSkills={allSkills ?? []}
+            teams={allTeams ?? []}
           />
         )}
       </SidePanel>

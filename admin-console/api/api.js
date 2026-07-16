@@ -31,6 +31,7 @@ const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
 const { membersOfTeam } = require('./agent-team-cascade');
 const skillManifest = require('./skill-manifest');
+const skillTransfer = require('./skill-transfer');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -5152,6 +5153,9 @@ app.post('/api/skills', (req, res) => {
 // ENTIRE skill directory (SKILL.md plus any scripts/assets) recursively so it
 // can be reused by other agents. Refuses to clobber an existing pool skill
 // unless `overwrite: true` is passed.
+// DEPRECATED (#626): superseded by POST /api/skills/transfer. The agent→global
+// cell is retired from the transition matrix (go via the team tier), so this
+// path is kept only for older clients and removed from the UI.
 app.post('/api/skills/promote', (req, res) => {
   const { agentId, name, overwrite = false } = req.body || {};
   if (typeof name !== 'string' || !SKILL_NAME_RE.test(name)) {
@@ -5342,6 +5346,9 @@ app.delete('/api/skills/:name', (req, res) => {
 // the global pool is a System-Admin / governance action. Copies the whole skill
 // directory recursively. Refuses to clobber an existing global skill unless
 // `overwrite: true`.
+// DEPRECATED (#626): the team→global cell is now the unified POST
+// /api/skills/transfer ({from:{tier:'team',teamId}, to:{tier:'global'}}). Kept
+// for older clients; the UI promotes via the transfer engine.
 app.post('/api/skills/promote-to-global', (req, res) => {
   const { name, teamId, overwrite = false } = req.body || {};
   if (typeof name !== 'string' || !SKILL_NAME_RE.test(name)) {
@@ -5374,6 +5381,235 @@ app.post('/api/skills/promote-to-global', (req, res) => {
     origin: skillOrigin({ tier: 'team', teamId, sourceVersion: srcId.sourceVersion, sourceHash: srcId.sourceHash }),
   });
   res.status(201).json({ name, source: 'pool', fromTeam: teamId, overwritten: !!overwrite });
+});
+
+/* ─── Unified skill tier-transfer (#626, docs/skill-lifecycle-concept.md §3) ──
+ * One endpoint for every cell of the tier-transition matrix (adopt / lift /
+ * share / promote, in copy or move flavour). The pure planner+validator lives
+ * in skill-transfer.js; this endpoint does the file work: copy the whole skill
+ * dir (provenance.json carried forward), stamp the target's skill.json with the
+ * transfer action + origin, on `move` guard-then-retire the source (archive
+ * snapshot + delete), and best-effort activate a team target. */
+
+// Resolve a from/to tier reference to its on-disk skill dir, containment-guarded
+// with the same path.resolve + path.relative pattern the other skill endpoints
+// use (so CodeQL's path-injection query sees the guard in-flow). Returns
+// { dir } or { error }. `ref` is a validated ref from the planner.
+function resolveTransferSkillDir(ref, name) {
+  if (ref.tier === 'team') {
+    const dir = safeTeamSkillDir(ref.teamId, name);
+    return dir ? { dir } : { error: 'invalid team id or skill name' };
+  }
+  if (ref.tier === 'global') {
+    const base = path.resolve(POOL_DIR, 'skills');
+    const dir = path.resolve(base, name);
+    const rel = path.relative(base, dir);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return { error: 'invalid skill name' };
+    return { dir };
+  }
+  // agent tier (source only — the planner rejects agent targets).
+  const base = path.resolve(AGENTS_DIR);
+  const dir = path.resolve(base, ref.agentId, 'skills', name);
+  const rel = path.relative(base, dir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return { error: 'invalid agent id or skill name' };
+  return { dir };
+}
+
+// Does a skill by this name already exist at the destination tier? Used as the
+// existsFn for the deterministic collision rename.
+function transferSkillExistsAt(toRef, name) {
+  const r = resolveTransferSkillDir(toRef, name);
+  if (r.error) return true; // an unrepresentable name is "taken" — never picked
+  return fs.existsSync(path.join(r.dir, 'SKILL.md'));
+}
+
+// Agent constructs that grant `name` (skills[] or skillsOverride), each with its
+// owning human teamId — the basis for the move-would-strand-grants guard.
+function agentsGrantingSkill(name) {
+  const out = [];
+  let ids;
+  try { ids = fs.readdirSync(AGENTS_DIR); } catch { return out; }
+  for (const id of ids) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg) continue;
+    const granted = (Array.isArray(cfg.skills) && cfg.skills.includes(name)) ||
+      (Array.isArray(cfg.skillsOverride) && cfg.skillsOverride.includes(name));
+    if (granted) out.push({ id: cfg.id || id, teamId: cfg.teamId || DEFAULT_TEAM_ID });
+  }
+  return out;
+}
+
+// Copy a skill dir to the visible archive before a move retires it (concept
+// §3.2 — a move keeps a recoverable snapshot, it does not destroy). Best-effort.
+function archiveSkillDir(srcDir, fromRef, name, hash) {
+  try {
+    const tierSeg = fromRef.tier === 'team' ? `team-${fromRef.teamId}`
+      : fromRef.tier === 'agent' ? `agent-${fromRef.agentId}` : 'global';
+    const stamp = `${name}-${hash || 'nohash'}-${Date.now()}`;
+    const base = path.resolve(WORKSPACE, 'skill-archive');
+    const dst = path.resolve(base, tierSeg, stamp);
+    const rel = path.relative(base, dst);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    fs.cpSync(srcDir, dst, { recursive: true });
+    return dst;
+  } catch { return null; }
+}
+
+// Best-effort activation of a freshly-landed team skill on every squad (role
+// 'team' agent) of the owning human team. Activation is keyed by squad id, not
+// the human team id that keys the pool dir (see the two-keyspace note), so we
+// fan out to each squad. Never rolls the transfer back on failure.
+async function activateTransferredTeamSkill(humanTeamId, name) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  const results = [];
+  let ids;
+  try { ids = fs.readdirSync(AGENTS_DIR); } catch { return results; }
+  for (const id of ids) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg || cfg.role !== 'team' || (cfg.teamId || DEFAULT_TEAM_ID) !== humanTeamId) continue;
+    const squadId = cfg.id || id;
+    try {
+      const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(squadId)}/skills/activate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ skillName: name }),
+      });
+      results.push({ squadId, status: resp.status });
+    } catch (err) {
+      results.push({ squadId, error: err.message });
+    }
+  }
+  return results;
+}
+
+app.post('/api/skills/transfer', heavyLimiter, async (req, res) => {
+  // 1. Validate + plan (pure). Regexes are the api.js originals so a valid plan
+  //    is always writable by the dir resolvers below.
+  const plan = skillTransfer.planTransfer(req.body, {
+    skillNameRe: SKILL_NAME_RE, agentIdRe: AGENT_ID_RE, teamIdRe: POOL_TEAM_ID_RE,
+  });
+  if (!plan.ok) return res.status(400).json({ error: plan.error });
+
+  // 2. Permission gate — map the caller's scope to transfer capabilities.
+  const scope = getScope(req);
+  const permit = skillTransfer.permitTransfer(plan.permission, {
+    systemAdmin: !!scope.all,
+    isTeamAdmin: (teamId) => canManageTeam(scope, teamId),
+  });
+  if (!permit.ok) return res.status(403).json({ error: permit.error });
+
+  // 3. Resolve source + verify it exists.
+  const src = resolveTransferSkillDir(plan.from, plan.name);
+  if (src.error) return res.status(400).json({ error: `from: ${src.error}` });
+  if (!fs.existsSync(path.join(src.dir, 'SKILL.md'))) {
+    return res.status(404).json({ error: `skill '${plan.name}' not found at the source` });
+  }
+
+  // 4. Resolve destination name honouring the collision mode.
+  let destName = plan.name;
+  if (plan.onCollision === 'rename') {
+    destName = skillTransfer.resolveCollisionName(plan.name, (n) => transferSkillExistsAt(plan.to, n));
+  } else if (plan.onCollision === 'reject' && transferSkillExistsAt(plan.to, plan.name)) {
+    return res.status(409).json({ error: `skill '${plan.name}' already exists at the destination`, exists: true });
+  }
+  const dst = resolveTransferSkillDir(plan.to, destName);
+  if (dst.error) return res.status(400).json({ error: `to: ${dst.error}` });
+
+  // No-op self-transfer guard beyond the planner's team→team same-team check:
+  // a copy onto its own resolved dir would clobber the source.
+  if (path.resolve(dst.dir) === path.resolve(src.dir)) {
+    return res.status(400).json({ error: 'source and destination resolve to the same location' });
+  }
+
+  // 5. Move guard: refuse to strand grants. A move to GLOBAL never strands (the
+  //    universal fallback remains); a move to a TEAM tier can orphan grantees
+  //    outside that team unless a global copy of the name still exists.
+  if (plan.retireSource && plan.to.tier === 'team') {
+    // Route the global-copy probe through the containment-guarded resolver (same
+    // path.resolve + path.relative guard as every other tier lookup) so CodeQL's
+    // path-injection query sees the guard in-flow — destName is already validated
+    // against SKILL_NAME_RE by the planner, this keeps the check consistent + safe.
+    const globalCopyRemains = transferSkillExistsAt({ tier: 'global' }, destName) && plan.from.tier !== 'global';
+    if (!globalCopyRemains) {
+      const stranded = agentsGrantingSkill(plan.name).filter(a => a.teamId !== plan.to.teamId);
+      if (stranded.length > 0 && req.body.force !== true) {
+        return res.status(409).json({
+          error: 'move would strand skill grants outside the target team',
+          agents: stranded.map(a => a.id),
+          hint: 'pass force:true to move anyway',
+        });
+      }
+    }
+  }
+
+  // 6. Capture source identity BEFORE the copy (for the origin stamp).
+  const srcId = skillSourceIdentity(src.dir);
+
+  // 7. Copy the whole dir (provenance.json is carried forward by cpSync).
+  try {
+    if (plan.onCollision === 'overwrite') fs.rmSync(dst.dir, { recursive: true, force: true });
+    fs.mkdirSync(path.dirname(dst.dir), { recursive: true });
+    fs.cpSync(src.dir, dst.dir, { recursive: true });
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to copy skill: ${err.message}` });
+  }
+
+  // 8. Stamp the target's skill.json — a fresh v1 chain recording the transfer
+  //    action (adopted|promoted|lifted|shared|moved) and where it came from.
+  stampSkillCopy(dst.dir, {
+    name: destName, by: skillActor(req), action: plan.action,
+    origin: skillOrigin({
+      tier: plan.from.tier,
+      teamId: plan.from.tier === 'team' ? plan.from.teamId : undefined,
+      agentId: plan.from.tier === 'agent' ? plan.from.agentId : undefined,
+      sourceVersion: srcId.sourceVersion, sourceHash: srcId.sourceHash,
+    }),
+  });
+
+  // 9. Move: archive-snapshot then retire the source.
+  let archived = null;
+  if (plan.retireSource) {
+    archived = archiveSkillDir(src.dir, plan.from, plan.name, srcId.sourceHash);
+    try { fs.rmSync(src.dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+
+  // 10. Best-effort activation of a team target (default on) + a live-feed event.
+  let activation = null;
+  if (plan.activate && plan.to.tier === 'team') {
+    activation = await activateTransferredTeamSkill(plan.to.teamId, destName);
+  }
+  try {
+    fs.mkdirSync(path.dirname(KNOWLEDGE_EVENTS_FILE), { recursive: true });
+    fs.appendFileSync(KNOWLEDGE_EVENTS_FILE, JSON.stringify({
+      type: 'skill-transfer',
+      ts: new Date().toISOString(),
+      teamId: plan.to.tier === 'team' ? plan.to.teamId : undefined,
+      skillName: destName,
+      action: plan.action,
+      semanticAction: plan.semanticAction,
+      from: plan.from,
+      to: plan.to,
+      mode: plan.mode,
+      renamed: destName !== plan.name ? plan.name : undefined,
+      by: skillActor(req),
+    }) + '\n');
+  } catch { /* best effort */ }
+
+  res.status(201).json({
+    name: destName,
+    requestedName: plan.name,
+    from: plan.from,
+    to: plan.to,
+    mode: plan.mode,
+    action: plan.action,
+    semanticAction: plan.semanticAction,
+    renamed: destName !== plan.name,
+    retiredSource: plan.retireSource,
+    archived: archived || undefined,
+    activate: plan.activate,
+    activation: activation || undefined,
+  });
 });
 
 /* ─── LLM Config ─────────────────────────────────────────────────────── */

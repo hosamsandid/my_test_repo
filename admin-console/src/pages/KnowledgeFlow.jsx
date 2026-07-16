@@ -120,6 +120,16 @@ export default function KnowledgeFlow() {
     setShowIntro(false);
     try { localStorage.setItem('kf.introSeen', '1'); } catch { /* ignore */ }
   }, []);
+  // Two ways to look at the same team knowledge: the left-to-right flow graph
+  // (default) and the human-readable overview table (#635). The choice persists
+  // across visits; both honour the same filter bar.
+  const [view, setView] = useState(() => {
+    try { return localStorage.getItem('kf.view') === 'table' ? 'table' : 'flow'; } catch { return 'flow'; }
+  });
+  const chooseView = useCallback((v) => {
+    setView(v);
+    try { localStorage.setItem('kf.view', v); } catch { /* ignore */ }
+  }, []);
 
   // Mirrors selectedTeam for async guards: a slow in-flight response for a team
   // that is no longer selected must not flip the shared loading spinner or its
@@ -285,6 +295,58 @@ export default function KnowledgeFlow() {
       .catch(() => {});
   }, [teams, loadTeamData]);
 
+  // Bulk retire / un-retire for the overview table. Each id is flipped
+  // independently (already-in-target-state ids are filtered out by the caller,
+  // so this never errors on a no-op), then the team slice is reloaded once.
+  const bulkArchive = useCallback((ids, teamId, archived) => {
+    const list = [...new Set(Array.isArray(ids) ? ids : [])];
+    if (list.length === 0) return Promise.resolve();
+    return Promise.all(list.map(id =>
+      fetch(`/api/knowledge/item/${encodeURIComponent(id)}/archive`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ teamId, archived }),
+      }).then(r => (r.ok ? r.json() : null)).catch(() => null)
+    )).then(() => {
+      setSelected(null); setDetail(null);
+      const t = (teams || []).find(x => x.id === teamId);
+      return loadTeamData(teamId, t ? t.members : [], { withPrivate: false });
+    });
+  }, [teams, loadTeamData]);
+
+  // Generate-and-store the human-readable summaries (#635, AC3). Runs on demand
+  // when the overview table is opened for a team — drains in batches (the API
+  // caps each request) and reloads once if any summary was freshly persisted.
+  // A team is backfilled at most once per session; unchanged entries never
+  // trigger a new LLM call on subsequent opens.
+  const backfilledRef = useRef(new Set());
+  const runBackfill = useCallback(async (teamId) => {
+    if (!teamId || backfilledRef.current.has(teamId)) return;
+    backfilledRef.current.add(teamId);
+    let reloadNeeded = false;
+    for (let i = 0; i < 25; i++) {
+      let d = null;
+      try {
+        const r = await fetch('/api/knowledge/summaries/backfill', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ teamId }),
+        });
+        d = r.ok ? await r.json() : null;
+      } catch { d = null; }
+      if (!d) break;
+      if (d.generated > 0) reloadNeeded = true;
+      // No LLM target (heuristic only) or nothing left / no progress → stop.
+      if (d.source !== 'llm' || !d.remaining || d.remaining <= 0 || d.generated <= 0) break;
+    }
+    if (reloadNeeded && activeTeamRef.current === teamId) {
+      const t = (teams || []).find(x => x.id === teamId);
+      loadTeamData(teamId, t ? t.members : [], { withPrivate: false });
+    }
+  }, [teams, loadTeamData]);
+
+  useEffect(() => {
+    if (view === 'table' && selectedTeam) runBackfill(selectedTeam);
+  }, [view, selectedTeam, runBackfill]);
+
   // Header counts scoped to the selected team only — never a cross-team sum.
   const totals = useMemo(
     () => teamTotals(selectedTeam ? data[selectedTeam] : null),
@@ -352,6 +414,22 @@ export default function KnowledgeFlow() {
       {/* ── Filter bar (refines the selected team in place) ─────────────────── */}
       {selectedTeam && (
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: '0 0 var(--eb-space-3)', flexWrap: 'wrap' }}>
+        <div style={{ display: 'inline-flex', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', overflow: 'hidden' }}>
+          {[['flow', 'Flow', 'The left-to-right flow: agents → team knowledge → skills'],
+            ['table', 'Table', 'A human-readable overview: one row per learned fact, with bulk actions']].map(([v, label, tip]) => (
+            <button
+              key={v}
+              onClick={() => chooseView(v)}
+              title={tip}
+              style={{
+                padding: '3px var(--eb-space-3)', border: 'none', cursor: 'pointer',
+                fontSize: 'var(--eb-text-xs)',
+                background: view === v ? 'var(--eb-accent-muted)' : 'var(--eb-bg-surface)',
+                color: view === v ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)',
+                fontWeight: view === v ? 'var(--eb-font-semibold)' : 'normal',
+              }}>{label}</button>
+          ))}
+        </div>
         <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: '3px var(--eb-space-2)', background: 'var(--eb-bg-surface)' }}>
           <Search size={13} style={{ color: 'var(--eb-text-muted)' }} />
           <input
@@ -399,6 +477,18 @@ export default function KnowledgeFlow() {
             <div style={{ color: 'var(--eb-text-muted)' }}>No agents yet — create a team and its agents will start learning.</div>
           ) : !selectedTeamObj ? (
             <ChooseTeam />
+          ) : view === 'table' ? (
+            <OverviewTable
+              key={selectedTeamObj.id}
+              team={selectedTeamObj}
+              data={data[selectedTeamObj.id]}
+              filters={filters}
+              pulseId={pulseId}
+              selectedId={selected?.teamId === selectedTeamObj.id ? selected.id : null}
+              onOpenItem={openItem}
+              onBulkArchive={(ids, archived) => bulkArchive(ids, selectedTeamObj.id, archived)}
+              onCombineItems={(sel, teamSkills) => setPromoting({ suggestion: manualSuggestionFrom(sel), teamId: selectedTeamObj.id, teamSkills })}
+            />
           ) : (
             <TeamSection
               key={selectedTeamObj.id}
@@ -846,6 +936,220 @@ const TeamSection = React.forwardRef(function TeamSection({
     </section>
   );
 });
+
+/* ── Overview table — human-readable, one row per learned fact (#635) ───────── */
+
+function OverviewTable({ team, data, filters, pulseId, selectedId, onOpenItem, onBulkArchive, onCombineItems }) {
+  const graph = data?.graph;
+  const skills = useMemo(() => (graph?.nodes || []).filter(n => n.kind === 'skill'), [graph]);
+
+  const items = useMemo(() => {
+    const list = (graph?.nodes || []).filter(n => n.kind === 'item');
+    const now = Date.now();
+    const DAY = 24 * 3600 * 1000;
+    const q = filters.q.trim().toLowerCase();
+    return list
+      .map(n => ({ ...n, id: n.id.slice(5) })) // strip "item:" prefix
+      .filter(n => {
+        if (filters.kind !== 'all' && n.entryKind !== filters.kind) return false;
+        if (filters.convergedOnly && !n.converged) return false;
+        if (filters.today) {
+          const t = n.createdAt ? Date.parse(n.createdAt) : NaN;
+          if (Number.isNaN(t) || now - t >= DAY) return false;
+        }
+        if (q) {
+          const hay = `${n.displaySummary || ''} ${n.text || ''}`.toLowerCase();
+          if (!hay.includes(q)) return false;
+        }
+        return true;
+      })
+      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  }, [graph, filters]);
+
+  const [picked, setPicked] = useState(() => new Set());
+  const [expanded, setExpanded] = useState(() => new Set());
+
+  // Keep the selection to what's actually on screen — a filter change or a
+  // reload must not leave a tick on a row nobody can see.
+  useEffect(() => {
+    setPicked(prev => {
+      if (prev.size === 0) return prev;
+      const visible = new Set(items.map(i => i.id));
+      const next = new Set();
+      let changed = false;
+      prev.forEach(id => { if (visible.has(id)) next.add(id); else changed = true; });
+      return changed ? next : prev;
+    });
+  }, [items]);
+
+  const togglePick = useCallback((id) => {
+    setPicked(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+  const toggleExpand = useCallback((id) => {
+    setExpanded(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const allSelected = items.length > 0 && items.every(i => picked.has(i.id));
+  const someSelected = picked.size > 0 && !allSelected;
+  const selectAllRef = useRef(null);
+  useEffect(() => {
+    if (selectAllRef.current) selectAllRef.current.indeterminate = someSelected;
+  }, [someSelected]);
+  const toggleAll = useCallback(() => {
+    setPicked(prev => (items.every(i => prev.has(i.id))
+      ? new Set()
+      : new Set(items.map(i => i.id))));
+  }, [items]);
+
+  const pickedItems = useMemo(() => items.filter(i => picked.has(i.id)), [items, picked]);
+  const toRetire = useMemo(() => pickedItems.filter(i => !i.archived && i.status !== 'promoted'), [pickedItems]);
+  const toUnretire = useMemo(() => pickedItems.filter(i => i.archived), [pickedItems]);
+  const toCombine = useMemo(() => pickedItems.filter(i => !i.archived && i.status !== 'promoted'), [pickedItems]);
+
+  const doRetire = useCallback(() => {
+    const n = toRetire.length;
+    if (n === 0) return;
+    if (!window.confirm(`Retire ${n === 1 ? 'this learning' : `these ${n} learnings`} from the shared KB?\n\nThey stay in git for audit and can be un-retired.`)) return;
+    Promise.resolve(onBulkArchive(toRetire.map(i => i.id), true)).finally(() => setPicked(new Set()));
+  }, [toRetire, onBulkArchive]);
+
+  const doUnretire = useCallback(() => {
+    const n = toUnretire.length;
+    if (n === 0) return;
+    if (!window.confirm(`Un-retire ${n === 1 ? 'this learning' : `these ${n} learnings`} back into the shared KB?`)) return;
+    Promise.resolve(onBulkArchive(toUnretire.map(i => i.id), false)).finally(() => setPicked(new Set()));
+  }, [toUnretire, onBulkArchive]);
+
+  const doCombine = useCallback(() => {
+    if (toCombine.length < 1) return;
+    onCombineItems(toCombine, skills);
+    setPicked(new Set());
+  }, [toCombine, onCombineItems, skills]);
+
+  const th = { textAlign: 'left', padding: 'var(--eb-space-2) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)', textTransform: 'uppercase', letterSpacing: '0.03em', color: 'var(--eb-text-secondary)', borderBottom: '1px solid var(--eb-border-default)', whiteSpace: 'nowrap' };
+  const td = { padding: 'var(--eb-space-2) var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', borderBottom: '1px solid var(--eb-border-default)', verticalAlign: 'top' };
+
+  return (
+    <section style={{
+      border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-lg)',
+      background: 'var(--eb-bg-surface)', marginBottom: 'var(--eb-space-4)', overflow: 'hidden',
+    }}>
+      {/* Bulk-action bar */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-3) var(--eb-space-4)', borderBottom: '1px solid var(--eb-border-default)', flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+          {picked.size > 0
+            ? <><strong style={{ color: 'var(--eb-text-primary)' }}>{picked.size}</strong> of {items.length} selected</>
+            : <>{items.length} learned fact{items.length === 1 ? '' : 's'}</>}
+        </span>
+        <InfoTip size={12} title="One row per learned fact" text="A plain-language overview of everything this team’s agents have learned. Tick rows to retire / un-retire them, or to combine several related lessons into one skill. The summary is a readable rewrite; expand a row to see the exact text agents use." />
+        <div style={{ flex: 1 }} />
+        <button onClick={doCombine} disabled={toCombine.length < 1} title={toCombine.length < 1 ? 'Select one or more active lessons to combine' : 'Open the review dialog with the selected lessons'} style={{ ...miniBtn, display: 'inline-flex', alignItems: 'center', gap: 4, opacity: toCombine.length < 1 ? 0.5 : 1, cursor: toCombine.length < 1 ? 'default' : 'pointer' }}>
+          <Combine size={12} /> Combine{toCombine.length ? ` (${toCombine.length})` : ''}
+        </button>
+        <button onClick={doUnretire} disabled={toUnretire.length < 1} title={toUnretire.length < 1 ? 'Select one or more retired lessons to un-retire' : 'Bring the selected retired lessons back into the KB'} style={{ ...miniBtn, opacity: toUnretire.length < 1 ? 0.5 : 1, cursor: toUnretire.length < 1 ? 'default' : 'pointer' }}>
+          Un-retire{toUnretire.length ? ` (${toUnretire.length})` : ''}
+        </button>
+        <button onClick={doRetire} disabled={toRetire.length < 1} title={toRetire.length < 1 ? 'Select one or more active lessons to retire' : 'Retire the selected lessons (kept in git for audit)'} style={{ ...miniBtn, display: 'inline-flex', alignItems: 'center', gap: 4, opacity: toRetire.length < 1 ? 0.5 : 1, cursor: toRetire.length < 1 ? 'default' : 'pointer', color: toRetire.length < 1 ? undefined : 'var(--eb-status-warning)', borderColor: toRetire.length < 1 ? undefined : 'var(--eb-status-warning)' }}>
+          <Archive size={11} /> Retire{toRetire.length ? ` (${toRetire.length})` : ''}
+        </button>
+      </div>
+
+      {items.length === 0 ? (
+        <div style={{ padding: 'var(--eb-space-4)' }}>
+          <EmptyKnowledge autonomy={data?.gates ? data.gates.autonomy : 1} counts={graph?.counts || { items: 0 }} filtered={!!(filters.q || filters.kind !== 'all' || filters.convergedOnly || filters.today)} />
+        </div>
+      ) : (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                <th style={{ ...th, width: 28 }}>
+                  <input ref={selectAllRef} type="checkbox" checked={allSelected} onChange={toggleAll} title="Select all rows in view" style={{ margin: 0, cursor: 'pointer', accentColor: 'var(--eb-accent-primary)' }} />
+                </th>
+                <th style={th}>Kind</th>
+                <th style={{ ...th, width: '55%' }}>Summary</th>
+                <th style={th}>Learned by</th>
+                <th style={th}>Created</th>
+                <th style={th}>Status</th>
+                <th style={{ ...th, textAlign: 'right' }} title="How many agents learned this independently">Converged</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map(n => {
+                const isOpen = expanded.has(n.id);
+                const isPicked = picked.has(n.id);
+                const summary = n.displaySummary || n.summary || n.text || '—';
+                return (
+                  <React.Fragment key={n.id}>
+                    <tr
+                      className={pulseId === n.id ? 'kf-node-pulse' : undefined}
+                      style={{ background: isPicked ? 'var(--eb-accent-muted)' : (selectedId === n.id ? 'var(--eb-bg-elevated)' : 'transparent'), opacity: n.archived ? 0.6 : 1 }}>
+                      <td style={{ ...td, textAlign: 'center' }}>
+                        <input type="checkbox" checked={isPicked} onChange={() => togglePick(n.id)} title="Select this lesson" style={{ margin: 0, cursor: 'pointer', accentColor: 'var(--eb-accent-primary)' }} />
+                      </td>
+                      <td style={td}>
+                        <span title={KIND_EXPLAIN[n.entryKind]} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'help', whiteSpace: 'nowrap' }}>
+                          <span style={{ width: 7, height: 7, borderRadius: 'var(--eb-radius-full)', background: KIND_COLORS[n.entryKind] || 'var(--eb-accent-primary)' }} />
+                          <span style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.03em', color: 'var(--eb-text-muted)' }}>{n.entryKind}</span>
+                        </span>
+                      </td>
+                      <td style={td}>
+                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+                          <span
+                            onClick={() => onOpenItem(n.id, team.id)}
+                            title={n.text || ''}
+                            style={{ lineHeight: 1.4, wordBreak: 'break-word', cursor: 'pointer', flex: 1, minWidth: 0 }}>
+                            {summary}
+                          </span>
+                          <button
+                            onClick={() => toggleExpand(n.id)}
+                            title={isOpen ? 'Hide the exact text agents use' : 'Show the exact text agents use'}
+                            style={{ ...linkBtn, flexShrink: 0 }}>
+                            {isOpen ? 'Hide text' : 'Text'}
+                          </button>
+                        </div>
+                        {isOpen && (
+                          <div style={{ marginTop: 6, padding: 'var(--eb-space-2)', borderLeft: '2px solid var(--eb-border-default)', background: 'var(--eb-bg-app)', borderRadius: 'var(--eb-radius-sm)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.45, wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>
+                            {n.text || '—'}
+                          </div>
+                        )}
+                      </td>
+                      <td style={{ ...td, whiteSpace: 'nowrap' }}>
+                        <span style={{ color: 'var(--eb-text-secondary)' }}>{n.provenance?.originAgent || (n.convergence || [])[0] || '—'}</span>
+                        {n.convergenceCount > 1 ? <span style={{ color: 'var(--eb-text-muted)' }}> +{n.convergenceCount - 1}</span> : ''}
+                      </td>
+                      <td style={{ ...td, whiteSpace: 'nowrap', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)' }}>{fmtWhen(n.createdAt) || '—'}</td>
+                      <td style={{ ...td, whiteSpace: 'nowrap' }}>
+                        {n.archived ? (
+                          <span title="Retired from the active KB — kept in git for audit" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', border: '1px solid var(--eb-border-default)', padding: '0 6px', borderRadius: 'var(--eb-radius-full)' }}>retired</span>
+                        ) : (
+                          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-success)' }}>active</span>
+                        )}
+                      </td>
+                      <td style={{ ...td, textAlign: 'right', whiteSpace: 'nowrap' }}>
+                        {n.converged
+                          ? <span title={`${n.convergenceCount} agents learned this independently`} style={{ fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-accent-primary)' }}>{n.convergenceCount}×</span>
+                          : <span style={{ color: 'var(--eb-text-muted)' }}>{n.convergenceCount || 1}</span>}
+                      </td>
+                    </tr>
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
 
 function ColHeader({ label, hint, tip, trailing }) {
   return (

@@ -92,6 +92,13 @@ function computeContentHash(files) {
 // updatedAt/updatedBy (so re-running a write path or the backfill is idempotent).
 // History is newest-first and bounded to HISTORY_LIMIT. `origin` is preserved
 // from the previous manifest unless a new one is explicitly supplied.
+//
+// `opts.forceHistory` records a history entry (and refreshes updatedAt/updatedBy)
+// even when the content hash is unchanged, WITHOUT bumping the version — for a
+// provenance-only lifecycle event that re-homes existing content rather than
+// editing it (e.g. an import round-trip of a byte-identical skill: the version
+// chain continues, an `imported` entry is appended, nothing is reset). It has no
+// effect when the hash already changed (that path always records + bumps).
 function stampManifest(existing, opts) {
   const o = opts || {};
   const contentHash = o.contentHash;
@@ -103,6 +110,7 @@ function stampManifest(existing, opts) {
   const prevVersion = prev && Number.isInteger(prev.version) ? prev.version : 0;
   const changed = !prev || prev.contentHash !== contentHash;
   const version = changed ? prevVersion + 1 : prevVersion;
+  const record = changed || o.forceHistory === true;
 
   const name = o.name != null ? o.name : (prev && prev.name != null ? prev.name : undefined);
 
@@ -111,7 +119,7 @@ function stampManifest(existing, opts) {
   else if (prev && prev.origin !== undefined) origin = prev.origin;
 
   const history = (prev && Array.isArray(prev.history)) ? prev.history.slice() : [];
-  if (changed) {
+  if (record) {
     const entry = { version, hash: contentHash, at, by, action };
     if (o.note != null && o.note !== '') entry.note = o.note;
     history.unshift(entry);
@@ -121,8 +129,8 @@ function stampManifest(existing, opts) {
   if (name !== undefined) manifest.name = name;
   manifest.version = version;
   manifest.contentHash = contentHash;
-  manifest.updatedAt = changed ? at : (prev ? prev.updatedAt : at);
-  manifest.updatedBy = changed ? by : (prev ? prev.updatedBy : by);
+  manifest.updatedAt = record ? at : (prev ? prev.updatedAt : at);
+  manifest.updatedBy = record ? by : (prev ? prev.updatedBy : by);
   if (origin !== undefined) manifest.origin = origin;
   manifest.history = history.slice(0, HISTORY_LIMIT);
   return manifest;
@@ -212,6 +220,7 @@ function stampSkillDir(dir, opts = {}) {
   const manifest = stampManifest(existing, {
     contentHash, name,
     now: opts.now, by: opts.by, action: opts.action, origin: opts.origin, note: opts.note,
+    forceHistory: opts.forceHistory,
   });
   writeManifest(dir, manifest, io);
   return manifest;

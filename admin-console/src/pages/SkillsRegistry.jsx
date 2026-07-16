@@ -870,6 +870,7 @@ export default function SkillsRegistry() {
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState(null);
   const [importSuccess, setImportSuccess] = useState(null);
+  const [importTarget, setImportTarget] = useState('global'); // 'global' or 'team:<id>'
 
   const filteredSkills = (allSkills ?? []).filter(s => {
     if (filter === 'Global') return s.source === 'pool';
@@ -909,12 +910,21 @@ export default function SkillsRegistry() {
     try {
       const formData = new FormData();
       formData.append('file', file);
+      if (importTarget.startsWith('team:')) {
+        formData.append('tier', 'team');
+        formData.append('teamId', importTarget.slice('team:'.length));
+      } else {
+        formData.append('tier', 'global');
+      }
       const resp = await fetch('/api/skills/import', { method: 'POST', body: formData });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-      setImportSuccess(`Skill '${data.name}' imported into the pool.`);
+      const where = data.source === 'team' ? `team '${data.teamId}'` : 'the global pool';
+      setImportSuccess(`Skill '${data.name}' imported into ${where}.`);
       refetch?.();
-      openSkill({ name: data.name, source: 'pool' });
+      openSkill(data.source === 'team'
+        ? { name: data.name, source: 'team', teamId: data.teamId }
+        : { name: data.name, source: 'pool' });
     } catch (e) {
       setImportError(e.message);
     } finally {
@@ -985,11 +995,28 @@ export default function SkillsRegistry() {
             onChange={handleImport}
             style={{ display: 'none' }}
           />
+          <select
+            value={importTarget}
+            onChange={e => setImportTarget(e.target.value)}
+            disabled={importing}
+            title="Where to import the skill — the global pool (System Admin) or a team pool (Team Admin)"
+            style={{
+              padding: '6px 10px',
+              border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
+              background: 'var(--eb-bg-surface)', color: 'var(--eb-text-primary)',
+              fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+            }}
+          >
+            <option value="global">Import to: Global pool</option>
+            {(allTeams ?? []).map(t => (
+              <option key={t.id} value={`team:${t.id}`}>Import to: Team {t.name} ({t.id})</option>
+            ))}
+          </select>
           <button
             onClick={() => importFileRef.current?.click()}
             disabled={importing}
             style={secondaryBtnStyle}
-            title="Upload a skill packaged as a .zip or .skill archive and add it to the pool"
+            title="Upload a skill packaged as a .zip or .skill archive and add it to the selected pool"
           >
             {importing ? 'Importing…' : 'Import skill'}
           </button>

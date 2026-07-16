@@ -95,6 +95,50 @@ test('IO wrappers round-trip through a real directory', () => {
   }
 });
 
+test('import round-trip: forceHistory continues the chain + appends `imported` (AC3), foreign → v1 (AC4)', () => {
+  // AC4 — a foreign archive with no manifest is stamped fresh at v1/imported.
+  const foreign = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-import-foreign-'));
+  try {
+    fs.writeFileSync(path.join(foreign, 'SKILL.md'), '---\nname: f\ndescription: d\n---\nbody\n');
+    const man = m.stampSkillDir(foreign, { by: 'operator:t', action: 'imported', origin: { tier: 'external' }, now: '2026-07-16T09:00:00Z' });
+    assert.equal(man.version, 1);
+    assert.equal(man.history[0].action, 'imported');
+    assert.deepEqual(man.origin, { tier: 'external' });
+  } finally {
+    fs.rmSync(foreign, { recursive: true, force: true });
+  }
+
+  // AC3 — an archive carrying a skill.json keeps its version chain and gains an
+  // `imported` history entry even though the content is byte-identical.
+  const withManifest = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-import-chain-'));
+  try {
+    fs.writeFileSync(path.join(withManifest, 'SKILL.md'), '---\nname: c\ndescription: d\n---\nbody\n');
+    const seeded = m.stampSkillDir(withManifest, { by: 'operator:t', action: 'created', now: '2026-07-16T08:00:00Z' });
+    // simulate a couple of edits so the incoming chain is at v3
+    fs.writeFileSync(path.join(withManifest, 'SKILL.md'), '---\nname: c\ndescription: d\n---\nbody v2\n');
+    m.stampSkillDir(withManifest, { by: 'operator:t', action: 'edited', now: '2026-07-16T08:30:00Z' });
+    fs.writeFileSync(path.join(withManifest, 'SKILL.md'), '---\nname: c\ndescription: d\n---\nbody v3\n');
+    const before = m.stampSkillDir(withManifest, { by: 'operator:t', action: 'edited', now: '2026-07-16T08:45:00Z' });
+    assert.equal(before.version, 3);
+    const histLenBefore = before.history.length;
+
+    // Import stamp on unchanged content (forceHistory): version stays, imported appended.
+    const imported = m.stampSkillDir(withManifest, {
+      by: 'operator:ines', action: 'imported', origin: { tier: 'external' },
+      forceHistory: true, now: '2026-07-16T10:00:00Z',
+    });
+    assert.equal(imported.version, 3, 'version chain continues (not reset, not bumped)');
+    assert.equal(imported.history.length, histLenBefore + 1);
+    assert.equal(imported.history[0].action, 'imported');
+    assert.equal(imported.history[0].version, 3);
+    assert.deepEqual(imported.origin, { tier: 'external' });
+    assert.equal(imported.updatedBy, 'operator:ines');
+    assert.ok(seeded); // silence unused
+  } finally {
+    fs.rmSync(withManifest, { recursive: true, force: true });
+  }
+});
+
 test('ACTIONS is the closed set from the concept', () => {
   assert.deepEqual(m.ACTIONS, [
     'created', 'edited', 'imported', 'adopted', 'promoted',

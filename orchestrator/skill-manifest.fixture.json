@@ -639,6 +639,67 @@
           }
         ]
       }
+    },
+    {
+      "name": "forceHistory records an import event on unchanged content (version chain continues)",
+      "existing": {
+        "v": 1,
+        "name": "demo",
+        "version": 3,
+        "contentHash": "aaaaaaaaaaaa",
+        "updatedAt": "2026-07-16T09:00:00Z",
+        "updatedBy": "operator:thorsten",
+        "origin": {
+          "tier": "team",
+          "teamId": "alpha"
+        },
+        "history": [
+          {
+            "version": 3,
+            "hash": "aaaaaaaaaaaa",
+            "at": "2026-07-16T09:00:00Z",
+            "by": "operator:thorsten",
+            "action": "edited"
+          }
+        ]
+      },
+      "opts": {
+        "contentHash": "aaaaaaaaaaaa",
+        "now": "2026-07-16T12:00:00Z",
+        "by": "operator:ines",
+        "action": "imported",
+        "origin": {
+          "tier": "external"
+        },
+        "forceHistory": true
+      },
+      "expected": {
+        "v": 1,
+        "name": "demo",
+        "version": 3,
+        "contentHash": "aaaaaaaaaaaa",
+        "updatedAt": "2026-07-16T12:00:00Z",
+        "updatedBy": "operator:ines",
+        "origin": {
+          "tier": "external"
+        },
+        "history": [
+          {
+            "version": 3,
+            "hash": "aaaaaaaaaaaa",
+            "at": "2026-07-16T12:00:00Z",
+            "by": "operator:ines",
+            "action": "imported"
+          },
+          {
+            "version": 3,
+            "hash": "aaaaaaaaaaaa",
+            "at": "2026-07-16T09:00:00Z",
+            "by": "operator:thorsten",
+            "action": "edited"
+          }
+        ]
+      }
     }
   ],
   "driftCases": [

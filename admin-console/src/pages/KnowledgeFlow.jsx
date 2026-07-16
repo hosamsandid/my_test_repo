@@ -415,8 +415,8 @@ export default function KnowledgeFlow() {
               }}
               onUnarchiveItem={(item) => archiveItem(item.id, selectedTeamObj.id, false)}
               onOpenChat={(agentId) => navigate(`/chats/${encodeURIComponent(agentId)}`)}
-              onReviewSuggestion={(s) => setPromoting({ suggestion: s, teamId: selectedTeamObj.id })}
-              onCombineItems={(sel) => setPromoting({ suggestion: manualSuggestionFrom(sel), teamId: selectedTeamObj.id })}
+              onReviewSuggestion={(s, teamSkills) => setPromoting({ suggestion: s, teamId: selectedTeamObj.id, teamSkills })}
+              onCombineItems={(sel, teamSkills) => setPromoting({ suggestion: manualSuggestionFrom(sel), teamId: selectedTeamObj.id, teamSkills })}
               onShareSkill={(node) => setSharing({ node, teamId: selectedTeamObj.id })}
               onControlsChanged={() => loadTeamData(selectedTeamObj.id, selectedTeamObj.members, { withPrivate: false })}
               onLifted={() => loadTeamData(selectedTeamObj.id, selectedTeamObj.members)}
@@ -441,6 +441,7 @@ export default function KnowledgeFlow() {
         <PromotionDialog
           suggestion={promoting.suggestion}
           teamId={promoting.teamId}
+          teamSkills={promoting.teamSkills}
           onClose={() => setPromoting(null)}
           onDone={() => {
             const teamId = promoting.teamId;
@@ -669,9 +670,9 @@ const TeamSection = React.forwardRef(function TeamSection({
   const pickedItems = useMemo(() => allItems.filter(n => picked.has(n.id)), [allItems, picked]);
   const combine = useCallback(() => {
     if (pickedItems.length < 1) return;
-    onCombineItems(pickedItems);
+    onCombineItems(pickedItems, skills);
     setPicked(new Set());
-  }, [pickedItems, onCombineItems]);
+  }, [pickedItems, onCombineItems, skills]);
   const suggestions = data?.suggestions || [];
   const reviewQueue = data?.reviewQueue || [];
   const privateSkills = data?.privateSkills || [];
@@ -814,7 +815,7 @@ const TeamSection = React.forwardRef(function TeamSection({
             }}
           />
           {suggestions.map(s => (
-            <SuggestionCard key={s.id} suggestion={s} onReview={() => onReviewSuggestion(s)} />
+            <SuggestionCard key={s.id} suggestion={s} onReview={() => onReviewSuggestion(s, skills)} />
           ))}
           {pending.map(p => {
             const s = suggestions.find(x => x.id === p.suggestionId);
@@ -1033,10 +1034,12 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
   const members = act ? (act.members || []) : [];
   const activeCount = members.filter(m => m.state === 'active').length;
   const badge = !act ? null : !act.active
-    ? { text: 'not active', color: 'var(--eb-text-muted)', border: 'var(--eb-border-default)' }
+    ? { text: 'promoted · not activated', color: 'var(--eb-text-muted)', border: 'var(--eb-border-default)',
+        tip: 'This skill is promoted and lives in the team’s pool, but it is not in the team’s active set — no member loads it yet. Click Activate to sync it into members.' }
     : { text: `active · ${activeCount}/${members.length}`,
         color: activeCount === members.length ? 'var(--eb-status-success)' : 'var(--eb-status-warning)',
-        border: activeCount === members.length ? 'var(--eb-status-success)' : 'var(--eb-status-warning)' };
+        border: activeCount === members.length ? 'var(--eb-status-success)' : 'var(--eb-status-warning)',
+        tip: 'This skill is in the team’s active set. The count shows how many members actually have it in their workspace.' };
 
   return (
     <div style={{
@@ -1050,14 +1053,14 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
           <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{skill.label}</div>
           <div
             style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', cursor: 'help' }}
-            title={`${skill.tier === 'global' ? 'Global skill — agents in every team load it' : 'Team skill — only this team’s agents load it'}${auto ? '. Promoted automatically by the team’s curator (autonomy 3).' : ''}${skill.adopted ? '. Adopted from the global pool into this team’s active set.' : ''}`}>
-            {skill.tier} skill{auto ? ' · auto-promoted' : ''}{skill.adopted ? ' · adopted' : ''}
+            title={`${skill.tier === 'global' ? 'Global skill — agents in every team load it' : 'Team skill — only this team’s agents load it'}${skill.alsoGlobal ? '. Also promoted to the global pool — the team keeps its own copy.' : ''}${auto ? '. Promoted automatically by the team’s curator (autonomy 3).' : ''}${skill.adopted ? '. Adopted from the global pool into this team’s active set.' : ''}`}>
+            {skill.tier} skill{skill.alsoGlobal ? ' · also global' : ''}{auto ? ' · auto-promoted' : ''}{skill.adopted ? ' · adopted' : ''}
           </div>
         </div>
         {badge && (
           <span
             onClick={() => members.length > 0 && setExpanded(x => !x)}
-            title="Whether this skill is in the team's active set and which members actually have it in their workspace."
+            title={badge.tip}
             style={{
               flexShrink: 0, fontSize: 10, fontWeight: 600, padding: '1px 7px',
               borderRadius: 'var(--eb-radius-full)', border: `1px solid ${badge.border}`,
@@ -1853,7 +1856,7 @@ const resultNotice = (result) => (
 
 /* ── Promotion dialog (unchanged mechanics: draft → confirm → promote) ────────── */
 
-function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
+function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
   const [name, setName] = useState(suggestion.draft?.name || '');
   const [skillMd, setSkillMd] = useState(suggestion.draft?.skillMd || '');
   const [tier, setTier] = useState('team');
@@ -1890,14 +1893,43 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
   // ("Combine 1 lessons"), so the title/body/button switch to singular phrasing.
   const single = aggregated && lessonN <= 1;
 
-  // Skills eligible as an extend target, scoped to the chosen tier (AC2): the
-  // team's own skills for a team-tier extend, the global pool for a global one.
-  const eligible = useMemo(() => (
-    tier === 'team'
-      ? skills.filter(s => s.source === 'team' && s.teamId === teamId)
-      : skills.filter(s => s.source === 'pool')
-  ), [skills, tier, teamId]);
+  // The Skills column's own nodes (issue #620, AC5): the ONE definition of "this
+  // team's skills" shared with the graph builder + activation overlay. Deduped by
+  // name, they include team-owned skills AND global skills the team has adopted or
+  // promoted — the very skills the old `source==='team'` filter dropped (AC3).
+  const columnSkills = Array.isArray(teamSkills) ? teamSkills : [];
+
+  // Skills eligible as an extend target. Team-tier (AC3): every skill the column
+  // shows — each carrying its INTRINSIC scope (a global-pool file is 'global'
+  // even when the team merely adopted/promoted it). Global-tier (AC6, unchanged):
+  // the full global pool, so any global skill stays extendable. Falls back to the
+  // fetched team list if the column nodes weren't threaded in (defensive).
+  const eligible = useMemo(() => {
+    if (tier === 'team') {
+      const fromColumn = columnSkills.map(n => ({
+        name: n.label,
+        scope: n.tier === 'global' ? 'global' : 'team',
+      }));
+      if (fromColumn.length) return fromColumn;
+      return skills
+        .filter(s => s.source === 'team' && s.teamId === teamId)
+        .map(s => ({ name: s.name, scope: 'team' }));
+    }
+    return skills.filter(s => s.source === 'pool').map(s => ({ name: s.name, scope: 'global' }));
+  }, [skills, tier, teamId, columnSkills]);
   const canExtend = eligible.length > 0;
+
+  // The selected target's INTRINSIC scope drives the effective promotion scope: a
+  // team-tier extend of a global/adopted skill still writes the global pool file
+  // (validateExtension allows team→global). Create stays governed by the tier
+  // chip. This is the `to`/`tier` sent to extend-draft + promote.
+  const selectedTarget = eligible.find(s => s.name === targetName) || null;
+  const effectiveTo = mode === 'extend'
+    ? (tier === 'team' ? (selectedTarget?.scope || 'team') : 'global')
+    : tier;
+  // AC4: extending a global/adopted skill from the "team only" chip affects every
+  // team — surface it explicitly so the operator can't do it unaware.
+  const globalScopeWarning = mode === 'extend' && tier === 'team' && selectedTarget?.scope === 'global';
 
   // Load the tier-scoped skill catalogue once so the picker + AC8 fallback know
   // whether any extend target exists.
@@ -1926,7 +1958,7 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
     fetch('/api/knowledge/extend-draft', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        team: teamId, tier, targetName,
+        team: teamId, tier: effectiveTo, targetName,
         ...(suggestion.id ? { suggestionId: suggestion.id } : { entryIds: suggestion.entryIds }),
         ...(useLLM ? {} : { heuristicOnly: true }),
       }),
@@ -1992,7 +2024,7 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
       fetch('/api/knowledge/promote', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          mode: 'extend', from: 'team', to: tier, teamId, targetName, skillMd,
+          mode: 'extend', from: 'team', to: effectiveTo, teamId, targetName, skillMd,
           entryIds: suggestion.entryIds, removeSourceKnowledge: removeSource,
           ...(suggestion.id ? { suggestionId: suggestion.id } : {}),
         }),
@@ -2113,10 +2145,20 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
               <option value="">Select a skill…</option>
               {eligible.map(s => (
                 <option key={s.name} value={s.name}>
-                  {s.name}{suggestion.matchedSkill?.name === s.name ? ' — suggested' : ''}
+                  {s.name}{s.scope === 'global' ? ' — global (all teams)' : ''}{suggestion.matchedSkill?.name === s.name ? ' — suggested' : ''}
                 </option>
               ))}
             </select>
+            {globalScopeWarning && (
+              <div style={{
+                fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', lineHeight: 1.5,
+                background: 'var(--eb-bg-app)', border: '1px solid var(--eb-status-warning)',
+                borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)',
+              }}>
+                <strong>“{targetName}” is a global skill</strong> — shared with every team. Extending it here
+                updates it for <strong>all teams</strong>, not just this one.
+              </div>
+            )}
           </>
         )}
 

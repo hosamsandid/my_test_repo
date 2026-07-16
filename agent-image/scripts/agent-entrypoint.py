@@ -2536,6 +2536,13 @@ def _handle_stop_session(signum: int, frame) -> None:
 
 _TRIGGERS_FILENAME = "triggers.json"
 _PENDING_FILENAME = "pending-triggers.json"
+# Durable markers for #506: a trigger firing is recorded here *before* it's
+# taken out of the pending queue / triggers.json, and removed again once its
+# execution completes (success or failure alike). A marker still present at
+# the next TriggerScheduler.start() means the previous run was interrupted
+# (crash or forced restart) between those two points — see
+# TriggerScheduler._reconcile_in_flight.
+_IN_FLIGHT_FILENAME = "in-flight-triggers.json"
 _TRIGGER_TZ = ZoneInfo("Europe/Berlin")
 # Skip queue entries with these `kind` discriminators — they're written by the
 # orchestrator-side `processPending` siblings (bp-event-batch, throttle-warning)
@@ -2577,6 +2584,25 @@ def _save_triggers(triggers: list[dict]) -> None:
         _atomic_write_json(_agent_workdir() / _TRIGGERS_FILENAME, triggers)
     except Exception as exc:
         print(f"[Runner] _save_triggers: {exc}", file=sys.stderr)
+
+
+def _load_in_flight() -> list[dict]:
+    p = _agent_workdir() / _IN_FLIGHT_FILENAME
+    try:
+        if not p.exists():
+            return []
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception as exc:
+        print(f"[Runner] _load_in_flight: {exc}", file=sys.stderr)
+        return []
+
+
+def _save_in_flight(markers: list[dict]) -> None:
+    try:
+        _atomic_write_json(_agent_workdir() / _IN_FLIGHT_FILENAME, markers)
+    except Exception as exc:
+        print(f"[Runner] _save_in_flight: {exc}", file=sys.stderr)
 
 
 def _load_dm_room_id() -> str | None:
@@ -2828,6 +2854,7 @@ class TriggerScheduler:
             # Should not happen on Linux/Podman, but degrade gracefully.
             print(f"[Runner:{self._agent_id}] SIGUSR2 handler not installed: {exc}",
                   file=sys.stderr)
+        await self._reconcile_in_flight()
         await self._sync()
         self._sync_task = asyncio.create_task(self._sync_loop())
         self._pending_task = asyncio.create_task(self._pending_loop())
@@ -2857,6 +2884,118 @@ class TriggerScheduler:
             asyncio.get_running_loop().remove_signal_handler(signal.SIGUSR2)
         except (NotImplementedError, RuntimeError, ValueError):
             pass
+
+    # -- in-flight markers (#506 crash reconciliation) -----------------------
+
+    @staticmethod
+    def _mark_in_flight(marker: dict) -> None:
+        markers = _load_in_flight()
+        markers.append(marker)
+        _save_in_flight(markers)
+
+    @staticmethod
+    def _clear_in_flight(marker_id: str) -> None:
+        if not marker_id:
+            return
+        markers = [m for m in _load_in_flight() if m.get("id") != marker_id]
+        _save_in_flight(markers)
+
+    @staticmethod
+    def _attach_pending_markers(entries: list) -> None:
+        """#506 Race 1: persist a durable marker for each drained queue entry
+        that represents an `http`/`github-event` trigger firing, before the
+        caller hands it off for execution — so a crash before that execution
+        completes is detectable on the next startup. Other queue kinds
+        (session-reset, handover-dm, digests, ...) are control messages, not
+        trigger firings, and are out of scope (see issue #506's Race 1).
+        Markers are attached to the entry dicts in-place under a private key
+        so `_process_pending` can clear them once each entry is handled.
+        """
+        in_scope = [
+            e for e in entries
+            if isinstance(e, dict) and not e.get("kind") and e.get("triggerId")
+        ]
+        if not in_scope:
+            return
+        markers = _load_in_flight()
+        now_ms = int(time.time() * 1000)
+        for i, entry in enumerate(in_scope):
+            gh = entry.get("github") if isinstance(entry.get("github"), dict) else None
+            marker_id = f"pending:{entry.get('triggerId')}:{now_ms}:{i}"
+            entry["_inFlightMarkerId"] = marker_id
+            markers.append({
+                "id": marker_id,
+                "kind": "pending",
+                "triggerId": entry.get("triggerId"),
+                "triggerType": "github-event" if gh else "http",
+                "repo": (gh or {}).get("repo"),
+                "event": (gh or {}).get("event"),
+            })
+        _save_in_flight(markers)
+
+    @staticmethod
+    def _describe_in_flight_marker(marker: dict) -> str:
+        kind = marker.get("kind")
+        tid = marker.get("triggerId", "?")
+        if kind == "once":
+            return f"one-shot trigger `{tid}`"
+        ttype = marker.get("triggerType") or "http"
+        if ttype == "github-event":
+            repo = marker.get("repo") or "?"
+            event = marker.get("event") or "?"
+            return f"github-event trigger `{tid}` (`{event}` on `{repo}`)"
+        return f"http trigger `{tid}`"
+
+    async def _reconcile_in_flight(self) -> None:
+        """Startup reconciliation for #506: a marker still on disk means the
+        previous run was interrupted (crash or forced restart) after a
+        pending-queue entry was drained or a `once` trigger was removed, but
+        before its execution completed. Surface a visible, informational-only
+        notice per orphaned marker — no automatic re-execution — then clear
+        the markers so they aren't reported again. Best-effort: must never
+        block scheduler startup.
+        """
+        try:
+            orphaned = _load_in_flight()
+        except Exception as exc:
+            print(f"[Runner:{self._agent_id}] _reconcile_in_flight load failed: {exc}",
+                  file=sys.stderr)
+            return
+        if not orphaned:
+            return
+
+        room_id = _load_dm_room_id()
+        for marker in orphaned:
+            if not isinstance(marker, dict):
+                continue
+            detail = self._describe_in_flight_marker(marker)
+            print(
+                f"[Runner:{self._agent_id}] Orphaned trigger marker detected "
+                f"(likely lost to a crash): {detail}",
+                file=sys.stderr,
+            )
+            if not room_id:
+                continue
+            body = (
+                "⚠️ **Trigger possibly lost**\n\n"
+                f"A container restart interrupted the execution of {detail} "
+                "before it completed. **No** automatic re-run was started — "
+                "please check whether the action needs to be redone manually."
+            )
+            try:
+                await self._send_formatted(room_id, body)
+            except Exception as exc:
+                print(
+                    f"[Runner:{self._agent_id}] Could not post orphaned-trigger "
+                    f"notice: {exc}",
+                    file=sys.stderr,
+                )
+            try:
+                _append_event(room_id, {"type": "trigger.lost", "marker": marker})
+            except Exception:
+                pass
+
+        _save_in_flight([])
 
     # -- signal --------------------------------------------------------------
 
@@ -3004,9 +3143,18 @@ class TriggerScheduler:
                     if tid in self._fired_once:
                         continue
                     self._fired_once.add(tid)
+                    # #506 Race 2: persist a durable marker *before* the
+                    # trigger is removed from triggers.json, so a crash
+                    # between removal and completed execution is detectable
+                    # on the next startup (see _reconcile_in_flight).
+                    marker_id = f"once:{tid}:{int(time.time() * 1000)}"
+                    self._mark_in_flight({
+                        "id": marker_id, "kind": "once", "triggerId": tid,
+                    })
                     # Fire and remove. Spawn as task so a slow Claude run
                     # doesn't block the sync loop.
-                    asyncio.create_task(self._execute(dict(trigger)))
+                    asyncio.create_task(
+                        self._execute_and_clear_marker(dict(trigger), marker_id))
                     remaining = [t for t in _load_triggers() if t.get("id") != tid]
                     _save_triggers(remaining)
                     if _PER_AGENT_VOLUME:
@@ -3175,7 +3323,13 @@ class TriggerScheduler:
             except Exception:
                 return []
             entries = data.get("entries") if isinstance(data, dict) else data
-            return entries if isinstance(entries, list) else []
+            entries = entries if isinstance(entries, list) else []
+            # #506: the orchestrator's pending-drain endpoint already cleared
+            # the canonical queue in the same round trip, so this is the
+            # earliest point we can persist a marker under per-agent-volume
+            # isolation — still closes almost all of the crash window.
+            self._attach_pending_markers(entries)
+            return entries
 
         pending_path = _agent_workdir() / _PENDING_FILENAME
         if not pending_path.exists():
@@ -3186,6 +3340,10 @@ class TriggerScheduler:
             return []
         if not isinstance(entries, list) or not entries:
             return []
+        # #506: persist a durable marker for each in-scope entry *before* the
+        # queue is cleared, so a crash between the clear and a completed
+        # execution is detectable on the next startup.
+        self._attach_pending_markers(entries)
         # Clear before firing so a slow run can't double-process the queue
         # (matches agent-runner.js:501).
         try:
@@ -3205,90 +3363,98 @@ class TriggerScheduler:
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            kind = entry.get("kind")
-            if kind == "session-reset":
-                # Control→agent reset command (#185): the admin can't delete our
-                # pointer on an isolated volume, so it asks us to drop it.
-                rid = entry.get("roomId")
-                if rid:
-                    _clear_session_pointer(rid)
-                    print(f"[Runner:{self._agent_id}] session-reset for {rid}",
-                          file=sys.stderr)
-                continue
-            if kind == "session-set":
-                # Control→agent resume command (#574): the admin can't write our
-                # pointer on an isolated volume, so it asks us to re-point the
-                # room at a chosen finished session. resumeRequested is persisted
-                # so a failed resume surfaces an error instead of a fresh session.
-                rid = entry.get("roomId")
-                sid = entry.get("sessionId")
-                if rid and isinstance(sid, str) and sid:
-                    _write_session_pointer(
-                        rid, sid, resume_requested=bool(entry.get("resumeRequested")))
-                    print(f"[Runner:{self._agent_id}] session-set {rid} -> {sid}",
-                          file=sys.stderr)
-                continue
-            if kind == "handover-dm":
-                print(f"[Runner:{self._agent_id}] handover-dm from queue",
-                      file=sys.stderr)
-                try:
-                    await self._execute_handover_dm(entry)
-                except Exception as exc:
-                    print(f"[Runner:{self._agent_id}] handover-dm error: {exc}",
-                          file=sys.stderr)
-                continue
-            if kind == "github-digest":
-                # #449-D: a burst of GitHub events for one (agent, conversation)
-                # was collapsed by the poller into a single lossless digest.
-                # Deliver it as a plain DM (no Claude call) — the burst is an
-                # exceptional/loop-ish signal, so we surface it and let the human
-                # decide rather than auto-acting on a batched backlog.
-                try:
-                    await self._execute_github_digest(entry)
-                except Exception as exc:
-                    print(f"[Runner:{self._agent_id}] github-digest error: {exc}",
-                          file=sys.stderr)
-                continue
-            if kind in _PENDING_OUT_OF_SCOPE_KINDS:
-                print(
-                    f"[Runner:{self._agent_id}] pending kind={kind} not yet ported "
-                    f"in Python — skipping",
-                    file=sys.stderr,
-                )
-                continue
-
-            entry_tid = entry.get("triggerId")
-            if not entry_tid:
-                continue
-            match = next(
-                (
-                    t for t in triggers
-                    if t.get("id") == entry_tid
-                    and t.get("type") in ("http", "github-event")
-                    and t.get("enabled", True)
-                ),
-                None,
-            )
-            if not match:
-                print(
-                    f"[Runner:{self._agent_id}] Pending trigger '{entry_tid}' "
-                    f"not found or disabled — skipping",
-                    file=sys.stderr,
-                )
-                continue
-
-            gh = entry.get("github")
-            label = (
-                f"{(gh or {}).get('event') or '?'} ({(gh or {}).get('eventId') or '?'})"
-                if match.get("type") == "github-event"
-                else "HTTP trigger"
-            )
-            print(f"[Runner:{self._agent_id}] {label}: {entry_tid}", file=sys.stderr)
+            # #506: clear this entry's in-flight marker (if any — only
+            # http/github-event trigger entries get one) once it's been
+            # handled, whichever branch below that turns out to be.
+            marker_id = entry.pop("_inFlightMarkerId", None)
             try:
-                await self._execute(dict(match), ctx={"github": gh} if gh else None)
-            except Exception as exc:
-                print(f"[Runner:{self._agent_id}] pending _execute({entry_tid}) error: {exc}",
-                      file=sys.stderr)
+                kind = entry.get("kind")
+                if kind == "session-reset":
+                    # Control→agent reset command (#185): the admin can't delete our
+                    # pointer on an isolated volume, so it asks us to drop it.
+                    rid = entry.get("roomId")
+                    if rid:
+                        _clear_session_pointer(rid)
+                        print(f"[Runner:{self._agent_id}] session-reset for {rid}",
+                              file=sys.stderr)
+                    continue
+                if kind == "session-set":
+                    # Control→agent resume command (#574): the admin can't write our
+                    # pointer on an isolated volume, so it asks us to re-point the
+                    # room at a chosen finished session. resumeRequested is persisted
+                    # so a failed resume surfaces an error instead of a fresh session.
+                    rid = entry.get("roomId")
+                    sid = entry.get("sessionId")
+                    if rid and isinstance(sid, str) and sid:
+                        _write_session_pointer(
+                            rid, sid, resume_requested=bool(entry.get("resumeRequested")))
+                        print(f"[Runner:{self._agent_id}] session-set {rid} -> {sid}",
+                              file=sys.stderr)
+                    continue
+                if kind == "handover-dm":
+                    print(f"[Runner:{self._agent_id}] handover-dm from queue",
+                          file=sys.stderr)
+                    try:
+                        await self._execute_handover_dm(entry)
+                    except Exception as exc:
+                        print(f"[Runner:{self._agent_id}] handover-dm error: {exc}",
+                              file=sys.stderr)
+                    continue
+                if kind == "github-digest":
+                    # #449-D: a burst of GitHub events for one (agent, conversation)
+                    # was collapsed by the poller into a single lossless digest.
+                    # Deliver it as a plain DM (no Claude call) — the burst is an
+                    # exceptional/loop-ish signal, so we surface it and let the human
+                    # decide rather than auto-acting on a batched backlog.
+                    try:
+                        await self._execute_github_digest(entry)
+                    except Exception as exc:
+                        print(f"[Runner:{self._agent_id}] github-digest error: {exc}",
+                              file=sys.stderr)
+                    continue
+                if kind in _PENDING_OUT_OF_SCOPE_KINDS:
+                    print(
+                        f"[Runner:{self._agent_id}] pending kind={kind} not yet ported "
+                        f"in Python — skipping",
+                        file=sys.stderr,
+                    )
+                    continue
+
+                entry_tid = entry.get("triggerId")
+                if not entry_tid:
+                    continue
+                match = next(
+                    (
+                        t for t in triggers
+                        if t.get("id") == entry_tid
+                        and t.get("type") in ("http", "github-event")
+                        and t.get("enabled", True)
+                    ),
+                    None,
+                )
+                if not match:
+                    print(
+                        f"[Runner:{self._agent_id}] Pending trigger '{entry_tid}' "
+                        f"not found or disabled — skipping",
+                        file=sys.stderr,
+                    )
+                    continue
+
+                gh = entry.get("github")
+                label = (
+                    f"{(gh or {}).get('event') or '?'} ({(gh or {}).get('eventId') or '?'})"
+                    if match.get("type") == "github-event"
+                    else "HTTP trigger"
+                )
+                print(f"[Runner:{self._agent_id}] {label}: {entry_tid}", file=sys.stderr)
+                try:
+                    await self._execute(dict(match), ctx={"github": gh} if gh else None)
+                except Exception as exc:
+                    print(f"[Runner:{self._agent_id}] pending _execute({entry_tid}) error: {exc}",
+                          file=sys.stderr)
+            finally:
+                if marker_id:
+                    self._clear_in_flight(marker_id)
 
     # -- handover DM ---------------------------------------------------------
 
@@ -3629,6 +3795,17 @@ class TriggerScheduler:
             message_type="m.room.message",
             content=content,
         )
+
+    async def _execute_and_clear_marker(self, trigger: dict, marker_id: str,
+                                        ctx: dict | None = None) -> None:
+        """Wrap `_execute` so the #506 in-flight marker is cleared once the
+        run truly completes (success or failure) rather than merely once it's
+        launched — a crash while this coroutine is running leaves the marker
+        behind for `_reconcile_in_flight` to find on the next startup."""
+        try:
+            await self._execute(trigger, ctx)
+        finally:
+            self._clear_in_flight(marker_id)
 
     async def _execute_inner(self, trigger: dict, ctx: dict | None) -> None:
         tid = trigger.get("id", "?")

@@ -23,6 +23,7 @@ const {
   knowledgeReviewEnabled,
   knowledgeConvergenceConfig,
   resolvePromotionGates,
+  resolveSkillResyncMode,
   knowledgeCurationConfig,
   buildHarvestHint,
   TEAM_KNOWLEDGE_KEYS,
@@ -374,11 +375,21 @@ test('knowledgeCurationConfig: clamp + legacy default', () => {
 
 // --- mergeTeamKnowledgeConfig (#570) ----------------------------------------
 
-test('TEAM_KNOWLEDGE_KEYS covers exactly the four per-team groups', () => {
+test('TEAM_KNOWLEDGE_KEYS covers exactly the per-team groups', () => {
   assert.deepEqual(
     [...TEAM_KNOWLEDGE_KEYS].sort(),
-    ['knowledgeAutonomy', 'knowledgePromotionGates', 'knowledgeReview', 'knowledgeStore'],
+    ['knowledgeAutonomy', 'knowledgePromotionGates', 'knowledgeReview', 'knowledgeStore', 'skillResyncMode'],
   );
+});
+
+test('resolveSkillResyncMode: default review + valid pass-through + fail-safe clamp (#629 AC5)', () => {
+  assert.equal(resolveSkillResyncMode(null), 'review');
+  assert.equal(resolveSkillResyncMode({}), 'review');
+  assert.equal(resolveSkillResyncMode({ skillResyncMode: 'auto' }), 'auto');
+  assert.equal(resolveSkillResyncMode({ skillResyncMode: 'review' }), 'review');
+  // present-but-invalid → conservative default (never silently auto-resyncs)
+  assert.equal(resolveSkillResyncMode({ skillResyncMode: 'nope' }), 'review');
+  assert.equal(resolveSkillResyncMode({ skillResyncMode: 42 }), 'review');
 });
 
 test('mergeTeamKnowledgeConfig: no overrides returns the base env unchanged (migration byte-identity)', () => {

@@ -31,6 +31,7 @@ const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
 const { membersOfTeam } = require('./agent-team-cascade');
 const skillManifest = require('./skill-manifest');
+const skillDrift = require('./skill-drift');
 const skillTransfer = require('./skill-transfer');
 const skillDeletion = require('./skill-deletion');
 const skillImport = require('./skill-import');
@@ -3144,20 +3145,36 @@ function augmentSkillActivation(graph, parsed) {
   for (const node of skillNodes) {
     const name = node.label;
     const inList = teamSkills.includes(name);
+    const driftStates = [];
     node.activation = {
       active: inList,
       members: members.map(m => {
         const hasOverride = Array.isArray(m.skillsOverride);
         const granted = hasOverride ? m.skillsOverride.includes(name) : inList;
-        const seeded = !!(manifests.get(m.id) || {})[name];
+        const seededEntry = (manifests.get(m.id) || {})[name];
+        const seeded = !!seededEntry;
         const state = !m.token ? 'stub'
           : (hasOverride && !granted) ? 'excluded-override'
           : seeded ? 'active'
           : granted ? 'pending'
           : 'inactive';
-        return { agentId: m.id, displayName: m.displayName || m.id, state };
+        const out = { agentId: m.id, displayName: m.displayName || m.id, state };
+        // Drift (#629 AC2) is meaningful only for a copy that was actually
+        // seeded into this member's workspace — the seeded entry is the anchor.
+        if (seeded) {
+          const origin = seededEntry.tier
+            ? { tier: seededEntry.tier, teamId: seededEntry.tier === 'team' ? m.teamId : undefined, sourceHash: seededEntry.contentHash }
+            : null;
+          const copyDir = path.join(AGENTS_DIR, m.id, 'skills', name);
+          const sourceDir = origin ? resolveSkillSourceDir(name, origin.tier, origin.teamId) : null;
+          const d = skillDrift.copyDriftState({ copyDir, sourceHash: origin && origin.sourceHash, sourceDir });
+          out.drift = d.state;
+          driftStates.push(d.state);
+        }
+        return out;
       }),
     };
+    node.drift = skillDrift.rollupDrift(driftStates);
   }
 }
 
@@ -3931,6 +3948,46 @@ async function proxySkillActivation(req, res, active) {
 app.post('/api/knowledge/activate', apiLimiter, (req, res) => proxySkillActivation(req, res, true));
 app.post('/api/knowledge/deactivate', apiLimiter, (req, res) => proxySkillActivation(req, res, false));
 
+// ── Skill drift resync (#629 AC3/AC4) ───────────────────────────────────────
+// Deliver the current source content to seeded copies through the orchestrator's
+// drift-gated additive sync. Body: { name, scope: { teamId?, agentId? } }.
+// A per-copy `outdated` is resynced; `diverged`/`conflict`/`orphaned`/`unknown`
+// is refused (never auto-overwritten) and surfaced with a manual-path hint.
+// Bulk "Sync all outdated" for a team is the { name, scope: { teamId } } form.
+app.post('/api/skills/resync', apiLimiter, async (req, res) => {
+  const { name, scope } = req.body || {};
+  const skillName = typeof name === 'string' ? name : (req.body || {}).skillName;
+  if (typeof skillName !== 'string' || !SKILL_NAME_RE.test(skillName)) {
+    return res.status(400).json({ error: 'name required (letters, digits, -, _)' });
+  }
+  const s = scope && typeof scope === 'object' ? scope : {};
+  const teamId = typeof s.teamId === 'string' ? s.teamId : null;
+  const agentId = typeof s.agentId === 'string' ? s.agentId : null;
+  if (!teamId && !agentId) return res.status(400).json({ error: 'scope.teamId or scope.agentId required' });
+  if (teamId && !AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'invalid scope.teamId' });
+  if (agentId && !AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'invalid scope.agentId' });
+
+  // Scope-visibility: the caller must be able to see the targeted construct.
+  const anchorId = teamId || agentId;
+  const cfg = readJsonFile(path.join(AGENTS_DIR, anchorId, 'config.json'), null);
+  if (!cfg) return res.status(404).json({ error: 'target not found' });
+  const callerScope = getScope(req);
+  if (!visibleAgent(callerScope, cfg)) return res.status(403).json({ error: 'forbidden' });
+
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/skills/resync`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skillName, ...(teamId ? { teamId } : {}), ...(agentId ? { agentId } : {}) }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 // The environment a team shares (from any of its agents' configs). Mirrors the
 // orchestrator's resolveTeamEnvId; used only to read/display config here.
 function teamEnvironment(teamId) {
@@ -3961,6 +4018,43 @@ function loadTeamKnowledgeOverrides(teamId) {
 // through this so two teams sharing one env report independent settings.
 function teamKnowledgeEnv(teamId) {
   return knowledgeSuggestions.mergeTeamKnowledgeConfig(teamEnvironment(teamId), loadTeamKnowledgeOverrides(teamId));
+}
+
+// Auto-resync gate (#629 AC5): after a source skill is EDITED, fan the drift-
+// gated resync out to every affected team whose resync mode is `auto`. The
+// default `review` changes nothing (dependent copies simply show `outdated`
+// until an operator resyncs them). Best-effort + fire-and-forget: an edit must
+// never fail or block because auto-resync could not fan out. The orchestrator's
+// resyncSkill is itself drift-gated (only `outdated` copies are overwritten;
+// diverged/conflict/orphaned/unknown are refused), so this is safe to fire even
+// for a team that also carries its own team-tier copy of the name.
+function autoResyncOnEdit(skillName, { tier, teamId } = {}) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  let targetTeams = [];
+  if (tier === 'team') {
+    if (teamId) targetTeams = [teamId];
+  } else {
+    // Global edit: every team agent that grants the skill (members resolve it
+    // team-first, so a team with its own copy is a no-op resync — see above).
+    let ids;
+    try { ids = fs.readdirSync(AGENTS_DIR); } catch { ids = []; }
+    for (const id of ids) {
+      const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+      if (cfg && cfg.role === 'team' && Array.isArray(cfg.skills) && cfg.skills.includes(skillName)) {
+        targetTeams.push(cfg.id || id);
+      }
+    }
+  }
+  for (const tid of targetTeams) {
+    let mode;
+    try { mode = knowledgeSuggestions.resolveSkillResyncMode(teamKnowledgeEnv(tid)); } catch { mode = null; }
+    if (mode !== 'auto') continue; // default `review`: leave copies outdated
+    fetch(`${orchestratorUrl}/internal/skills/resync`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skillName, teamId: tid }),
+    }).catch(() => { /* best-effort */ });
+  }
 }
 
 // Team autonomy level (0..3, default 1). Local read — api.js does not import the
@@ -4668,6 +4762,42 @@ function skillManifestSummary(dir) {
   } catch { return {}; }
 }
 
+// Resolve the CURRENT on-disk directory of a skill's source at the given tier
+// (#629). tier `global` → the global pool; tier `team` → the owning team's pool.
+// Returns the path even when the dir no longer exists (the caller / drift glue
+// detects deletion by the absent SKILL.md), or null when the tier/name is
+// unroutable. Mirrors the seed-time team-first-then-global resolution — the tier
+// the copy recorded at seed/copy time is authoritative here.
+function resolveSkillSourceDir(name, tier, teamId) {
+  if (!SKILL_NAME_RE.test(String(name || ''))) return null;
+  if (tier === 'team') return safeTeamSkillDir(teamId, name);
+  if (tier === 'global') {
+    const base = path.resolve(POOL_DIR, 'skills');
+    const dir = path.resolve(base, name);
+    const rel = path.relative(base, dir);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+    return dir;
+  }
+  return null;
+}
+
+// The drift summary (#629, AC2) surfaced on a skill COPY in API responses: the
+// per-copy state (in-sync|outdated|diverged|conflict|orphaned|unknown), whether
+// an automatic resync may touch it, and the source version currently available.
+// `origin` is the copy's recorded lineage (from its own skill.json); a copy with
+// no origin/anchor is hand-authored → no drift block (returns {}).
+function skillDriftSummary(copyDir, origin) {
+  const o = origin && typeof origin === 'object' ? origin : null;
+  if (!o || !o.tier) return {};
+  const sourceDir = resolveSkillSourceDir(path.basename(copyDir), o.tier, o.teamId);
+  const { state } = skillDrift.copyDriftState({ copyDir, sourceHash: o.sourceHash, sourceDir });
+  const summary = { drift: state, resyncable: skillManifest.isResyncable(state) };
+  let srcMan = null;
+  try { srcMan = sourceDir ? skillManifest.readManifest(sourceDir) : null; } catch { srcMan = null; }
+  if (srcMan && Number.isInteger(srcMan.version)) summary.sourceVersion = srcMan.version;
+  return summary;
+}
+
 // Agent-tier dirs are stamped lazily on first API read (agents own those dirs,
 // so the backfill deliberately skips them — concept §2.2).
 function lazyStampAgentSkill(dir, agentId) {
@@ -4804,7 +4934,12 @@ app.get('/api/skills', (req, res) => {
   const filterTeam = typeof req.query.teamId === 'string' ? req.query.teamId : null;
   skills.push(...listTeamSkills(filterTeam)
     .filter(s => visibleTeam(scope, s.teamId))
-    .map(s => ({ ...s, ...skillManifestSummary(path.dirname(s.path)) })));
+    .map(s => {
+      const dir = path.dirname(s.path);
+      let origin = null;
+      try { const man = skillManifest.readManifest(dir); origin = man && man.origin; } catch { /* none */ }
+      return { ...s, ...skillManifestSummary(dir), ...skillDriftSummary(dir, origin) };
+    }));
 
   // Agent skills — visible only when the owning agent is visible (#302), so an
   // agent's skills don't leak its existence across teams.
@@ -4812,6 +4947,10 @@ app.get('/api/skills', (req, res) => {
     const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), {});
     if (!visibleAgent(scope, cfg)) continue;
     const agentSkillsDir = path.join(AGENTS_DIR, agentId, 'skills');
+    // A seeded agent copy anchors its drift on the source hash recorded at seed
+    // time in .aee/seeded-skills.json — NOT on the copy's own skill.json origin
+    // (agent-tier dirs are stamped without one). Build a synthetic origin from it.
+    const seededManifest = readJsonFile(path.join(AGENTS_DIR, agentId, '.aee', 'seeded-skills.json'), {}) || {};
     try {
       fs.readdirSync(agentSkillsDir).forEach(name => {
         const skillMd = path.join(agentSkillsDir, name, 'SKILL.md');
@@ -4821,7 +4960,11 @@ app.get('/api/skills', (req, res) => {
             seen.add(key);
             const dir = path.join(agentSkillsDir, name);
             lazyStampAgentSkill(dir, agentId);
-            skills.push({ name, source: 'agent', agentId, path: skillMd, ...skillManifestSummary(dir) });
+            const seeded = seededManifest[name];
+            const origin = seeded && seeded.tier
+              ? { tier: seeded.tier, teamId: seeded.tier === 'team' ? cfg.teamId : undefined, sourceHash: seeded.contentHash }
+              : null;
+            skills.push({ name, source: 'agent', agentId, path: skillMd, ...skillManifestSummary(dir), ...skillDriftSummary(dir, origin) });
           }
         }
       });
@@ -4991,6 +5134,7 @@ app.put('/api/skills/:name/file', (req, res) => {
     return res.status(500).json({ error: err.message });
   }
   stampSkill(root, { name, by: skillActor(req), action: 'edited' });
+  autoResyncOnEdit(name, source === 'team' ? { tier: 'team', teamId } : { tier: 'global' });
   res.json({ path: String(file), source: 'pool' });
 });
 
@@ -5337,6 +5481,7 @@ app.put('/api/skills/:name', (req, res) => {
     if (!fs.existsSync(teamSkillPath)) return res.status(404).json({ error: 'Skill not found' });
     fs.writeFileSync(teamSkillPath, content, 'utf8');
     stampSkill(dir, { name, by: skillActor(req), action: 'edited' });
+    autoResyncOnEdit(name, { tier: 'team', teamId: req.query.teamId });
     return res.json({ name, source: 'team', teamId: req.query.teamId });
   }
   const skillDir = path.join(POOL_DIR, 'skills', path.basename(name));
@@ -5344,6 +5489,7 @@ app.put('/api/skills/:name', (req, res) => {
   if (!fs.existsSync(skillPath)) return res.status(404).json({ error: 'Skill not found' });
   fs.writeFileSync(skillPath, content, 'utf8');
   stampSkill(skillDir, { name, by: skillActor(req), action: 'edited' });
+  autoResyncOnEdit(name, { tier: 'global' });
   res.json({ name, source: 'pool' });
 });
 

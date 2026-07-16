@@ -36,6 +36,30 @@ for (const c of FIXTURE.driftCases) {
   });
 }
 
+for (const c of FIXTURE.copyDriftCases) {
+  test(`golden copy-drift: ${c.name}`, () => {
+    assert.equal(m.classifyCopyDrift(c.input), c.expected);
+  });
+}
+
+for (const c of FIXTURE.resyncableCases) {
+  test(`golden resyncable: ${c.state} → ${c.expected}`, () => {
+    assert.equal(m.isResyncable(c.state), c.expected);
+  });
+}
+
+test('classifyCopyDrift surfaces every DRIFT_STATES member and never null; only outdated is resyncable', () => {
+  for (const s of m.DRIFT_STATES) {
+    assert.equal(typeof s, 'string');
+  }
+  // classifyCopyDrift never returns null (the pre-manifest copy maps to unknown).
+  assert.equal(m.classifyCopyDrift({ sourceHash: null }), 'unknown');
+  assert.ok(m.DRIFT_STATES.includes('unknown'));
+  // Exactly one state is resyncable.
+  const resyncable = m.DRIFT_STATES.filter(s => m.isResyncable(s));
+  assert.deepEqual(resyncable, ['outdated']);
+});
+
 test('two-sided guard: admin-console canonical is byte-identical to orchestrator copy', () => {
   const here = fs.readFileSync(path.join(__dirname, 'skill-manifest.js'));
   const there = fs.readFileSync(path.join(__dirname, '..', '..', 'orchestrator', 'skill-manifest.js'));

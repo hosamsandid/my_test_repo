@@ -153,6 +153,34 @@ function classifyDrift({ copyHash, sourceHash, sourceCurrentHash } = {}) {
   return 'conflict';
 }
 
+// The closed set of drift states surfaced on a copy (#629). `unknown` is the
+// pre-manifest copy — a team/seeded copy that has an origin tier but no recorded
+// `sourceHash` to compare against (predates the skill.json manifest). It is
+// surfaced so an operator can SEE it, but `isResyncable` refuses it: without a
+// recorded source hash we can't prove the copy is unmodified, so overwriting it
+// could silently destroy a local edit.
+const DRIFT_STATES = Object.freeze([
+  'in-sync', 'outdated', 'diverged', 'conflict', 'orphaned', 'unknown',
+]);
+
+// The surfacing wrapper the API/UI use for an actual COPY (the caller already
+// knows it is a copy — team copy of a global skill, or a seeded replica of a
+// pool skill). `classifyDrift` returns null only when no `sourceHash` was
+// recorded; for a copy that means "predates the manifest" → `unknown`, never
+// null. A genuinely hand-authored source is not a copy and never routed here.
+function classifyCopyDrift(args) {
+  return classifyDrift(args) || 'unknown';
+}
+
+// Only an `outdated` copy is safe to resync automatically (AC4): the source
+// moved on while the copy was untouched, so re-copying loses nothing.
+// `diverged`/`conflict` carry local edits (manual side-by-side review),
+// `orphaned` has no source, `unknown` can't be proven unmodified, and `in-sync`
+// needs no work. A resync endpoint MUST refuse every non-resyncable state.
+function isResyncable(state) {
+  return state === 'outdated';
+}
+
 /* ─── Thin IO wrappers (fs/path injectable for tests) ────────────────────── */
 
 // Read every hashable file of a skill directory as {path (posix-relative), bytes}.
@@ -227,8 +255,8 @@ function stampSkillDir(dir, opts = {}) {
 }
 
 module.exports = {
-  MANIFEST_FILENAME, MANIFEST_V, HISTORY_LIMIT, HASH_LEN, ACTIONS,
+  MANIFEST_FILENAME, MANIFEST_V, HISTORY_LIMIT, HASH_LEN, ACTIONS, DRIFT_STATES,
   normalizeRelPath, isExcludedPath, normalizeFiles, computeContentHash,
-  stampManifest, classifyDrift,
+  stampManifest, classifyDrift, classifyCopyDrift, isResyncable,
   readSkillDirFiles, hashSkillDir, readManifest, writeManifest, stampSkillDir,
 };

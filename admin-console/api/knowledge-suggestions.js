@@ -590,6 +590,8 @@ function buildShareProvenance({ from, sourceTeamId, targetTeamId, name, sourcePr
 const PROMOTION_TRANSITIONS = ['team>team', 'team>global', 'agent>team'];
 const GATE_MODES = ['auto', 'review'];
 const DEFAULT_PROMOTION_GATES = { 'team>team': 'auto', 'team>global': 'review', 'agent>team': 'review' };
+// Auto-resync gate default (#629 AC5) — MIRRORS knowledge-store.DEFAULT_SKILL_RESYNC_MODE.
+const DEFAULT_SKILL_RESYNC_MODE = 'review';
 
 function resolvePromotionGates(env) {
   const raw = env && typeof env.knowledgePromotionGates === 'object' && env.knowledgePromotionGates
@@ -604,6 +606,15 @@ function resolvePromotionGates(env) {
   return out;
 }
 
+// Resolve the per-team skill auto-resync gate (#629 AC5) — MIRRORS
+// knowledge-store.resolveSkillResyncMode. Fail-safe: an invalid/absent mode
+// falls back to the conservative `review` default (edit flips copies to
+// `outdated` and waits for a human), so existing teams are unchanged.
+function resolveSkillResyncMode(env) {
+  const raw = env && typeof env.skillResyncMode === 'string' ? env.skillResyncMode : null;
+  return GATE_MODES.includes(raw) ? raw : DEFAULT_SKILL_RESYNC_MODE;
+}
+
 // ---------------------------------------------------------------------------
 // Per-team knowledge config overlay (#570)
 // ---------------------------------------------------------------------------
@@ -611,7 +622,7 @@ function resolvePromotionGates(env) {
 // The four knowledge-config groups keyed PER TEAM (#570) instead of on the
 // shared environment. Mirror of the orchestrator's knowledge-store.TEAM_KNOWLEDGE_KEYS
 // (the two runtimes never cross-require, so the list is duplicated verbatim).
-const TEAM_KNOWLEDGE_KEYS = ['knowledgeAutonomy', 'knowledgeReview', 'knowledgePromotionGates', 'knowledgeStore'];
+const TEAM_KNOWLEDGE_KEYS = ['knowledgeAutonomy', 'knowledgeReview', 'knowledgePromotionGates', 'knowledgeStore', 'skillResyncMode'];
 
 // Overlay a team's persisted knowledge-config overrides onto a base environment,
 // producing the env-shaped object the pure readers (teamAutonomyLevel /
@@ -702,6 +713,7 @@ module.exports = {
   PROMOTION_TRANSITIONS,
   GATE_MODES,
   DEFAULT_PROMOTION_GATES,
+  DEFAULT_SKILL_RESYNC_MODE,
   slugifySkillName,
   buildHeuristicSkillDraft,
   candidateFromEntries,
@@ -720,6 +732,7 @@ module.exports = {
   validateShareToTeam,
   buildShareProvenance,
   resolvePromotionGates,
+  resolveSkillResyncMode,
   promotionSuggestionView,
   TEAM_KNOWLEDGE_KEYS,
   mergeTeamKnowledgeConfig,

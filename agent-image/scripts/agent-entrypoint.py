@@ -2005,6 +2005,12 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     # from the container env the orchestrator injected, so they need no per-run
     # override here. (Shared Agent Learning, Phase 1.)
     env["KNOWLEDGE_CORRELATION_ID"] = correlation_id or ""
+    # Tier-A attribution passthrough (#655, §3.2 of docs/cost-per-pr-concept.md):
+    # `gh-as-agent push`/`pr` runs inside this Claude invocation and forwards this
+    # id in its POST body, so the orchestrator can stamp the correlation id of the
+    # run that opened the PR onto the pr-created record. Empty when unknown — the
+    # record then lands with correlationId:null and tier C covers attribution.
+    env["AEE_CORRELATION_ID"] = correlation_id or ""
     if resume_id:
         env["KNOWLEDGE_SESSION_ID"] = resume_id
 

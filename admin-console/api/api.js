@@ -15,6 +15,8 @@ const audit = require('./audit');
 const githubEventLog = require('./github-event-log');
 const usageLog = require('./usage-log');
 const { summarize } = require('./usage-summary');
+const prEventsLog = require('./pr-events-log');
+const { buildWorkItems, workItemDetail } = require('./work-items');
 const maintenanceMode = require('./maintenance-mode');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, visibleUser, describeAuthz } = require('./scope');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
@@ -240,6 +242,53 @@ app.get('/api/usage/summary', (req, res) => {
     records = records.filter((r) => visibleTeam(scope, r && r.teamId));
   }
   res.json(summarize(records, { since, until, groupBy }));
+});
+
+// Work-item attribution (#655, §5 view 2 of docs/cost-per-pr-concept.md).
+// Groups token usage by the issue↔PR chain a run belongs to (a connected
+// component of the artifact graph), reporting per-role cost and the always-visible
+// unattributed remainder. Tokens only. Team-scoped like the summary above: usage
+// records outside the caller's memberships (or the optional `team` narrowing) are
+// dropped BEFORE attribution, so a work item with no in-scope runs never surfaces.
+// pr-link records are read unfiltered — they only supply the graph edges; output
+// is gated on in-scope runs > 0, so no cross-team artifact leaks.
+function scopedUsageRecords(req) {
+  const { since } = req.query;
+  const scope = getScope(req);
+  const team = typeof req.query.team === 'string' && req.query.team ? req.query.team : null;
+  let records = usageLog.readRecords({ since });
+  if (!scope.all || team) {
+    records = records.filter((r) => {
+      const t = r && r.teamId;
+      if (!scope.all && !visibleTeam(scope, t)) return false;
+      if (team && t !== team) return false;
+      return true;
+    });
+  }
+  return records;
+}
+
+app.get('/api/usage/work-items', (req, res) => {
+  const { since, until } = req.query;
+  const records = scopedUsageRecords(req);
+  const prEvents = prEventsLog.readRecords();
+  res.json(buildWorkItems(records, prEvents, { since, until }));
+});
+
+// Drill-down addressed by ANY artifact in the chain. `repo` is owner/name, so it
+// arrives as two path segments reassembled here.
+app.get('/api/usage/work-items/:owner/:repo/:number', (req, res) => {
+  const { since, until } = req.query;
+  const repo = `${req.params.owner}/${req.params.repo}`;
+  const number = Number(req.params.number);
+  if (!Number.isInteger(number) || number <= 0) {
+    return res.status(400).json({ error: 'invalid artifact number' });
+  }
+  const records = scopedUsageRecords(req);
+  const prEvents = prEventsLog.readRecords();
+  const detail = workItemDetail(records, prEvents, repo, number, { since, until });
+  if (!detail) return res.status(404).json({ error: 'work item not found' });
+  res.json(detail);
 });
 
 const MCP_SERVER_ID_RE = /^[a-z0-9-]+$/;

@@ -150,6 +150,9 @@ case "${1:-}" in
     pairs=(setUpstream="$set_upstream")
     [[ -n "$repo" ]] && pairs+=(repo="$repo")
     [[ -n "$branch" ]] && pairs+=(branch="$branch")
+    # Forward the invocation's correlation id (#655 tier A) when the runtime set
+    # it, so the orchestrator can tie the resulting pr-events record to this run.
+    [[ -n "${AEE_CORRELATION_ID:-}" ]] && pairs+=(correlationId="$AEE_CORRELATION_ID")
     _post "/internal/agents/${AGENT_ID}/git/push" "$(_json "${pairs[@]}")"
     ;;
 
@@ -176,6 +179,10 @@ case "${1:-}" in
     [[ -n "$repo" ]] && pairs+=(repo="$repo")
     [[ -n "$base" ]] && pairs+=(base="$base")
     [[ -n "$body_text" ]] && pairs+=(body="$body_text")
+    # Forward the invocation's correlation id (#655 tier A) when the runtime set
+    # it, so the orchestrator can tie the pr-created record to the run that opened
+    # the PR (the exact "which run created this PR" signal).
+    [[ -n "${AEE_CORRELATION_ID:-}" ]] && pairs+=(correlationId="$AEE_CORRELATION_ID")
     _post "/internal/agents/${AGENT_ID}/git/pr" "$(_json "${pairs[@]}")"
     ;;
 

@@ -6,6 +6,7 @@ import {
 import { apiCall } from '../../hooks/useApi';
 import SessionLogPanel from './SessionLogPanel';
 import { canResumeSession, resumeNeedsConfirm } from './resume-session';
+import { findActiveSessionMatch, findFinishedSessionMatch } from '../github-event-session';
 
 /**
  * Merged "Sessions" tab (#543, extended in #544). Replaces the old standalone
@@ -109,7 +110,7 @@ export default function SessionsPanel({
   agentId, roomId, active,
   onCostUpdate, onContextUpdate, todoCloseSignal = 0,
   hoveredCorrelationId, onHoverCorrelation,
-  onResumeSession,
+  onResumeSession, selectRequest = null,
 }) {
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -129,6 +130,10 @@ export default function SessionsPanel({
   // session id (Claude session-ID, or a correlationId fallback) of the
   // finished session currently being viewed (or null) — #555.
   const [historicalId, setHistoricalId] = useState(null);
+
+  // Non-blocking notice shown when a deep-link (#642) couldn't locate the
+  // requested session (outside the history window, log pruned, no DM room, …).
+  const [notFound, setNotFound] = useState(null); // { correlationId } | null
 
   const fetchSessions = useCallback(async () => {
     if (!agentId) return;
@@ -202,7 +207,63 @@ export default function SessionsPanel({
     setHistoricalId(null);
     setHistory([]);
     setHistoryOpen(false);
+    setNotFound(null);
   }, [agentId, roomId]);
+
+  // Deep-link preselection (#642): a delivered GitHub-event chip asks us to open
+  // the session whose correlationId is `trigger:<triggerId>:gh:<eventId>`. Match
+  // an active session first (select its sub-tab), otherwise the finished-session
+  // group (open + select it); if neither exists, surface a graceful notice (AC6).
+  // We fetch fresh here rather than trust the polled state so a cold navigation
+  // (tab just became visible) doesn't race the first poll.
+  useEffect(() => {
+    if (!selectRequest || !selectRequest.correlationId || !agentId) return undefined;
+    const target = selectRequest.correlationId;
+    let cancelled = false;
+    (async () => {
+      setNotFound(null);
+
+      // 1) Active sessions — a still-running session is selected as a sub-tab.
+      let activeList = [];
+      try {
+        const data = await apiCall('GET', `/api/agents/${encodeURIComponent(agentId)}/sessions/active`);
+        activeList = Array.isArray(data?.sessions) ? data.sessions : [];
+      } catch { /* fall through to history */ }
+      if (cancelled) return;
+      const activeMatch = findActiveSessionMatch(activeList, target);
+      if (activeMatch) {
+        setSessions(activeList);
+        setHistoricalId(null);
+        setSelectedId(activeMatch.id);
+        return;
+      }
+
+      // 2) Finished sessions — needs a room to query the per-room history.
+      if (!roomId) { setNotFound({ correlationId: target }); return; }
+      let hist = [];
+      try {
+        const data = await apiCall(
+          'GET',
+          `/api/agents/${encodeURIComponent(agentId)}/sessions/history`
+            + `?roomId=${encodeURIComponent(roomId)}&limit=${HISTORY_LIMIT}`,
+        );
+        hist = Array.isArray(data?.sessions) ? data.sessions : [];
+      } catch {
+        if (!cancelled) setNotFound({ correlationId: target });
+        return;
+      }
+      if (cancelled) return;
+      const histMatch = findFinishedSessionMatch(hist, target);
+      if (histMatch) {
+        setHistory(hist);
+        setHistoryOpen(true);
+        setHistoricalId(histMatch.id);
+        return;
+      }
+      setNotFound({ correlationId: target });
+    })();
+    return () => { cancelled = true; };
+  }, [selectRequest, agentId, roomId]);
 
   // Keep the selection stable across polls: hold the selected id while it is
   // still running; fall back to the first session when it disappears (a
@@ -290,6 +351,45 @@ export default function SessionsPanel({
           flexShrink: 0,
         }}>
           {error}
+        </div>
+      )}
+
+      {notFound && (
+        <div role="status" style={{
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: 'var(--eb-space-2)',
+          padding: 'var(--eb-space-2) var(--eb-space-4)',
+          background: 'var(--eb-status-warning-bg)',
+          borderBottom: '1px solid var(--eb-status-warning)',
+          color: 'var(--eb-text-primary)',
+          fontSize: 'var(--eb-text-xs)',
+          lineHeight: 1.5,
+          flexShrink: 0,
+        }}>
+          <span style={{ flex: 1 }}>
+            Couldn't locate the session this event triggered — it may be older
+            than the retained history, its log may have been pruned, or the agent
+            has no chat room yet.
+          </span>
+          <button
+            type="button"
+            onClick={() => setNotFound(null)}
+            aria-label="Dismiss"
+            title="Dismiss"
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--eb-text-secondary)',
+              cursor: 'pointer',
+              padding: 0,
+              fontSize: 'var(--eb-text-sm)',
+              lineHeight: 1,
+              flexShrink: 0,
+            }}
+          >
+            ✕
+          </button>
         </div>
       )}
 

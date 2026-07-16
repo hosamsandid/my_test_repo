@@ -4,6 +4,8 @@
 // Run: node --test admin-console/api/work-items.test.js
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { buildWorkItems, workItemDetail, attributeRun } = require('./work-items');
 
 const REPO = 'org/repo'; // owner/name — the identity github.repo + pr-created.repo share
@@ -212,4 +214,15 @@ test('since/until window: a run outside the window is excluded', () => {
   const res = buildWorkItems(usage, prEvents, { since: '2026-07-15', until: '2026-07-17' });
   assert.equal(res.totals.runs, 1);
   assert.equal(res.workItems[0].runs, 1);
+});
+
+// Two-sided guard: the orchestrator mirrors this canonical module verbatim so the
+// PR-token-comment feature (#678) can reuse the Phase-2 aggregation without a
+// cross-package runtime require (the two container images can't require each
+// other's files). Same discipline as skill-manifest.js — assert byte-identical
+// so the mirror can never drift.
+test('two-sided guard: admin-console canonical is byte-identical to orchestrator mirror', () => {
+  const here = fs.readFileSync(path.join(__dirname, 'work-items.js'));
+  const there = fs.readFileSync(path.join(__dirname, '..', '..', 'orchestrator', 'work-items.js'));
+  assert.ok(here.equals(there), 'admin-console/api/work-items.js and orchestrator/work-items.js must be identical');
 });

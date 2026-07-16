@@ -45,6 +45,11 @@ const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } 
 const skillManifest = require("./skill-manifest");
 const usageLog = require("./usage-log");
 const prEventsLog = require("./pr-events-log");
+const usageRecordsReader = require("./usage-records-reader");
+const { workItemDetail } = require("./work-items");
+const prTokenComment = require("./pr-token-comment");
+const prCommentConfig = require("./pr-comment-config");
+const { parseRepoFullName: ghParseRepoFullName } = require("./github-poller");
 
 // ============================================================
 // Config
@@ -3784,6 +3789,111 @@ function agentCreatePr(id, env, body = {}) {
     throw e;
   } finally {
     try { fs.unlinkSync(tmp); } catch { /* best effort */ }
+  }
+}
+
+// ── PR-merge token comment (#678, Phase 3 item 2) ───────────────────────────
+//
+// Wired as the poller's `onMergedPr` callback: fired once per merged PR. Thin
+// shell (AC8) over the tested pure modules — resolve the repo's team + token,
+// gate on the per-team opt-in (OFF by default, AC4), reuse the Phase-2 work-item
+// aggregation to compute the summary (reuse, do not re-implement), then post a
+// single identity-stamped, idempotent comment (AC1–3, 5–7). Fully best-effort:
+// any failure logs and returns — a merge event must never be disrupted by this.
+
+// Resolve the environment (hence GitHub token + owning team) for a polled repo,
+// mirroring the poller's own "first environment referencing the repo wins" rule.
+// Returns { token, teamId, envId } or null when unresolvable.
+function _resolveRepoCommentContext(repoFullName) {
+  let envIds;
+  try {
+    envIds = fs.readdirSync(ENVIRONMENTS_DIR).filter((n) => !n.startsWith("_"));
+  } catch {
+    return null;
+  }
+  for (const envId of envIds) {
+    const env = loadEnvironment(envId);
+    if (!env || !env.githubTokenId) continue;
+    const repos = Array.isArray(env.repositories) ? env.repositories : [];
+    const match = repos.some((r) => ghParseRepoFullName(r && r.url) === repoFullName);
+    if (!match) continue;
+    let token;
+    try {
+      token = fs.readFileSync(path.join(GH_TOKENS_DIR, env.githubTokenId), "utf8").trim();
+    } catch {
+      continue;
+    }
+    if (!token) continue;
+    // Owning team: the first agent bound to this env (a team shares one env).
+    let teamId = null;
+    for (const id of listAgentIds()) {
+      const cfg = loadAgentConfig(id);
+      if (cfg && cfg.environmentId === envId) { teamId = agentKnowledgeTeamId(cfg); break; }
+    }
+    return { token, teamId, envId };
+  }
+  return null;
+}
+
+// gh api helper bound to a token — no repo checkout needed (`gh api` works from
+// anywhere). Returns stdout string; throws on non-zero exit.
+function _ghApi(token, args, input) {
+  const env = { ...process.env, GH_TOKEN: token, GITHUB_TOKEN: token };
+  return execFileSync("gh", ["api", ...args], {
+    env,
+    stdio: input === undefined ? "pipe" : ["pipe", "pipe", "pipe"],
+    input,
+    timeout: 30_000,
+    maxBuffer: 10 * 1024 * 1024,
+  }).toString();
+}
+
+async function postPrTokenComment(repoFullName, prNumber, _ghEvent) {
+  try {
+    const ctx = _resolveRepoCommentContext(repoFullName);
+    if (!ctx) return; // no token/env for this repo — can't post, nothing to do
+
+    // AC4 — opt-in, OFF by default. Skip silently unless the owning team enabled it.
+    if (!ctx.teamId || !prCommentConfig.isPrMergeCommentEnabled(WORKSPACE, ctx.teamId)) return;
+
+    // Reuse the Phase-2 aggregation (§3) to resolve the work item + its summary.
+    const usage = usageRecordsReader.readUsageRecords();
+    const prEvents = usageRecordsReader.readPrEvents();
+    const detail = workItemDetail(usage, prEvents, repoFullName, prNumber, {});
+
+    // AC6 — a PR mapping to no work item yields the labelled "unattributed" note,
+    // never a wrong/empty total. The formatter decides which body to render.
+    const { body: summaryBody } = prTokenComment.formatPrTokenComment({ repo: repoFullName, prNumber, detail });
+
+    // AC5 — identity-stamp like gh-as-agent does (invisible HTML comment). The
+    // poster is the team agent; loop-protection is frequency-only, and posting a
+    // comment does not re-fire the merge callback, so no self-trigger.
+    const idMarker = `<!-- agent: ${ctx.teamId} -->`;
+    const body = summaryBody.includes(idMarker) ? summaryBody : `${summaryBody}\n${idMarker}\n`;
+
+    // AC7 — idempotent update-or-skip. List existing PR comments and look for our
+    // stable marker; PATCH if the content changed, skip if identical, else create.
+    let existing = null;
+    try {
+      const raw = _ghApi(ctx.token, [`repos/${repoFullName}/issues/${prNumber}/comments`, "--paginate"]);
+      existing = prTokenComment.findExistingComment(JSON.parse(raw));
+    } catch (err) {
+      console.error(`[PR-token-comment] ${repoFullName}#${prNumber}: could not list comments: ${err.message}`);
+      // If we can't confirm absence, do NOT create — risking a duplicate is worse
+      // than skipping (AC7). Bail out.
+      return;
+    }
+
+    if (existing) {
+      if (typeof existing.body === "string" && existing.body.trim() === body.trim()) return; // no change
+      _ghApi(ctx.token, [`repos/${repoFullName}/issues/comments/${existing.id}`, "--method", "PATCH", "-f", `body=${body}`]);
+      console.log(`[PR-token-comment] ${repoFullName}#${prNumber}: updated existing comment ${existing.id}`);
+    } else {
+      _ghApi(ctx.token, [`repos/${repoFullName}/issues/${prNumber}/comments`, "--method", "POST", "-f", `body=${body}`]);
+      console.log(`[PR-token-comment] ${repoFullName}#${prNumber}: posted token-usage comment`);
+    }
+  } catch (err) {
+    console.error(`[PR-token-comment] ${repoFullName}#${prNumber}: ${err.message}`);
   }
 }
 
@@ -8832,6 +8942,46 @@ async function main() {
       return;
     }
 
+    // GET|POST /internal/teams/:teamId/token-telemetry — read / toggle the
+    // per-team opt-in for the PR-merge token comment (#678, AC4 — OFF by default).
+    // The only switch for a feature that ships dark; no admin-console proxy/UI yet
+    // (out of scope for #678). GET returns { enabled }; POST { enabled: bool } sets it.
+    const tokenTelemetryMatch = req.url.match(/^\/internal\/teams\/([^/]+)\/token-telemetry$/);
+    if (tokenTelemetryMatch && (req.method === 'GET' || req.method === 'POST')) {
+      const teamId = decodeURIComponent(tokenTelemetryMatch[1]);
+      if (req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ enabled: prCommentConfig.isPrMergeCommentEnabled(WORKSPACE, teamId) }));
+        return;
+      }
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', () => {
+        let payload;
+        try { payload = JSON.parse(body || '{}'); }
+        catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `Invalid JSON body: ${err.message}` }));
+          return;
+        }
+        if (typeof payload?.enabled !== 'boolean') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'enabled (boolean) required' }));
+          return;
+        }
+        try {
+          prCommentConfig.setPrMergeCommentEnabled(WORKSPACE, teamId, payload.enabled);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ enabled: payload.enabled }));
+        } catch (err) {
+          const status = /unsafe team id/i.test(err.message) ? 400 : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
     // POST /internal/teams/:teamId/prompt — update team's systemPromptTemplate
     // and push it to all inheriting members.
     const teamPromptMatch = req.method === 'POST' && req.url.match(/^\/internal\/teams\/([^/]+)\/prompt$/);
@@ -9063,6 +9213,7 @@ async function main() {
     },
     enqueuePending, // #185 Phase 2: orchestrator owns the queue (control plane when isolated)
     triggersPath: (agentId) => controlOrPoolPath(agentId, 'triggers.json'),
+    onMergedPr: postPrTokenComment, // #678 Phase 3 item 2: PR-merge token comment
   });
   ghPoller.start();
 

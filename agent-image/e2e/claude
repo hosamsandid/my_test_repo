@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""Fake `claude` CLI for end-to-end tests (issue #666, docs/e2e-testing-concept.md §4.2).
+
+Shipped in the agent image but inert unless the agent entrypoint prepends this
+directory to PATH — which it does only when `AEE_FAKE_CLAUDE=1` is in the
+container env. With the flag absent the real Claude Code CLI wins on PATH and
+production behaviour is byte-identical.
+
+It emulates just enough of `claude -p <prompt> --output-format stream-json
+--verbose ...`: it reads the prompt, picks a reply, and emits the same
+NDJSON stream-json sequence the real CLI does — `system:init` → `assistant`
+(text + usage) → `result` (usage, cost, session id, final text). The agent
+runtime's parser (`_map_stream_json_line` in agent-entrypoint.py) consumes this
+verbatim, so chat flows become deterministic and free of any model call.
+
+Reply selection, in order:
+  1. `$AEE_FAKE_CLAUDE_FIXTURES` — path to a JSON file of rules
+     `[{"match": "<substring>", "reply": "<text>"}]`; first rule whose `match`
+     is a substring of the prompt wins.
+  2. otherwise a default reply.
+Any `[[E2E:<token>]]` marker found in the prompt is echoed back as
+`E2E-ACK:<token>` at the head of the reply, so a spec can assert an
+unambiguous round-trip.
+
+Determinism knobs (for the two-sided parser fixture test):
+  - `$AEE_FAKE_CLAUDE_SESSION_ID` pins the session id (else `--resume <id>`,
+    else a random uuid).
+  - token counts / duration / cost are fixed constants below.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+import uuid
+
+# Fixed, deterministic accounting values so fixture-based tests can assert
+# exact normalized output.
+_MODEL = "claude-fake-e2e"
+_DURATION_MS = 5
+_COST_USD = 0.0
+_USAGE = {
+    "input_tokens": 12,
+    "output_tokens": 7,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 3,
+}
+_DEFAULT_REPLY = "Hello from the fake claude shim."
+_MARKER_RE = re.compile(r"\[\[E2E:([^\]]+)\]\]")
+
+
+def _parse_args(argv: list[str]) -> dict:
+    """Pull the handful of flags we care about out of the CLI args; ignore the
+    rest (`--verbose`, `--permission-mode`, `--append-system-prompt`, …)."""
+    out: dict = {"prompt": "", "resume": None, "model": None}
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ("-p", "--print"):
+            if i + 1 < len(argv):
+                out["prompt"] = argv[i + 1]
+                i += 2
+                continue
+        elif arg == "--resume":
+            if i + 1 < len(argv):
+                out["resume"] = argv[i + 1]
+                i += 2
+                continue
+        elif arg == "--model":
+            if i + 1 < len(argv):
+                out["model"] = argv[i + 1]
+                i += 2
+                continue
+        i += 1
+    return out
+
+
+def _load_rules() -> list[dict]:
+    path = os.environ.get("AEE_FAKE_CLAUDE_FIXTURES")
+    if not path:
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _pick_reply(prompt: str) -> str:
+    reply = _DEFAULT_REPLY
+    for rule in _load_rules():
+        if not isinstance(rule, dict):
+            continue
+        match = rule.get("match")
+        if isinstance(match, str) and match and match in prompt:
+            reply = str(rule.get("reply", _DEFAULT_REPLY))
+            break
+    marker = _MARKER_RE.search(prompt or "")
+    if marker:
+        reply = f"E2E-ACK:{marker.group(1)} {reply}"
+    return reply
+
+
+def _emit(obj: dict) -> None:
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def main() -> None:
+    args = _parse_args(sys.argv[1:])
+    session_id = (
+        os.environ.get("AEE_FAKE_CLAUDE_SESSION_ID")
+        or args["resume"]
+        or str(uuid.uuid4())
+    )
+    model = args["model"] or _MODEL
+    reply = _pick_reply(args["prompt"])
+
+    _emit({
+        "type": "system",
+        "subtype": "init",
+        "session_id": session_id,
+        "model": model,
+    })
+    _emit({
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "model": model,
+            "content": [{"type": "text", "text": reply}],
+            "usage": dict(_USAGE),
+        },
+    })
+    _emit({
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "duration_ms": _DURATION_MS,
+        "total_cost_usd": _COST_USD,
+        "usage": dict(_USAGE),
+        "session_id": session_id,
+        "result": reply,
+    })
+
+
+if __name__ == "__main__":
+    main()

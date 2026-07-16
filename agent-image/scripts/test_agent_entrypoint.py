@@ -939,5 +939,135 @@ class SessionPointerResumeFlag(unittest.TestCase):
         self._run(body)
 
 
+class FakeClaudeShim(unittest.TestCase):
+    """Two-sided contract for the E2E fake `claude` shim (#666): the shim
+    (agent-image/e2e/claude) is the PRODUCER, _map_stream_json_line is the
+    CONSUMER, and agent-image/e2e/fake-claude.fixture.json is the shared golden.
+    Each case runs the shim as a subprocess, feeds its stdout line-by-line
+    through the real parser (threading one usage_sink like the runtime's
+    handle_line does), and asserts the normalized events. Guarantees the shim's
+    stream-json can never silently drift from what the runtime accepts."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        cls.shim = Path(__file__).resolve().parents[1] / "e2e" / "claude"
+        fixture_path = (Path(__file__).resolve().parents[1]
+                        / "e2e" / "fake-claude.fixture.json")
+        cls.fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    def _run_shim(self, argv, extra_env=None):
+        import os
+        import subprocess
+        env = dict(os.environ)
+        env["AEE_FAKE_CLAUDE_SESSION_ID"] = self.fixture["sessionId"]
+        if extra_env:
+            env.update(extra_env)
+        proc = subprocess.run(
+            ["python3", str(self.shim), *argv],
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        return proc.stdout
+
+    def _parse(self, stdout):
+        """Mirror the runtime's handle_line: one usage_sink across the whole
+        invocation so the result event's contextTokens is populated."""
+        usage_sink: dict = {}
+        events = []
+        for line in stdout.splitlines():
+            if not line.strip():
+                continue
+            events.extend(map_stream_json_line(
+                line, self.fixture["correlationId"], usage_sink))
+        return events
+
+    def test_golden_fixture_cases(self):
+        for case in self.fixture["cases"]:
+            with self.subTest(case=case["name"]):
+                stdout = self._run_shim(case["argv"])
+                events = self._parse(stdout)
+                self.assertEqual(events, case["expectedEvents"])
+
+    def test_fixtures_rule_match_overrides_default(self):
+        import json
+        import tempfile
+        rules = [{"match": "COBOL", "reply": "Converted the COBOL program."}]
+        with tempfile.NamedTemporaryFile(
+                "w", suffix=".json", delete=False, encoding="utf-8") as fh:
+            json.dump(rules, fh)
+            rules_path = fh.name
+        stdout = self._run_shim(
+            ["-p", "please migrate this COBOL job", "--output-format", "stream-json"],
+            extra_env={"AEE_FAKE_CLAUDE_FIXTURES": rules_path})
+        events = self._parse(stdout)
+        text = next(e for e in events if e["type"] == "assistant_text")["text"]
+        self.assertEqual(text, "Converted the COBOL program.")
+
+    def test_resume_id_used_as_session_when_no_env_override(self):
+        import os
+        import subprocess
+        env = {k: v for k, v in os.environ.items()
+               if k != "AEE_FAKE_CLAUDE_SESSION_ID"}
+        proc = subprocess.run(
+            ["python3", str(self.shim), "-p", "hi", "--resume", "resumed-sess",
+             "--output-format", "stream-json"],
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        events = self._parse(proc.stdout)
+        init = next(e for e in events if e["type"] == "system_init")
+        self.assertEqual(init["sessionId"], "resumed-sess")
+
+
+class MaybeEnableFakeClaude(unittest.TestCase):
+    """The PATH seam (#666) must be a strict no-op unless AEE_FAKE_CLAUDE=1, so
+    a production container (flag unset) never resolves `claude` to the shim."""
+
+    def _run(self, env_flag, shim_dir=None):
+        # Point FAKE_CLAUDE_DIR at a caller-supplied dir so the positive path is
+        # exercised deterministically (the baked-in /opt/ace/e2e path doesn't
+        # exist in a repo checkout). Default: the real dir, i.e. the guard path.
+        import os
+        path_before = "/usr/local/bin:/usr/bin"
+        with patch.dict(os.environ, {"PATH": path_before}, clear=False):
+            if env_flag is None:
+                os.environ.pop("AEE_FAKE_CLAUDE", None)
+            else:
+                os.environ["AEE_FAKE_CLAUDE"] = env_flag
+            if shim_dir is not None:
+                with patch.object(entrypoint, "FAKE_CLAUDE_DIR", shim_dir):
+                    entrypoint._maybe_enable_fake_claude()
+            else:
+                entrypoint._maybe_enable_fake_claude()
+            return os.environ["PATH"]
+
+    def test_flag_unset_leaves_path_untouched(self):
+        self.assertNotIn(str(entrypoint.FAKE_CLAUDE_DIR), self._run(None))
+
+    def test_flag_not_one_leaves_path_untouched(self):
+        self.assertNotIn(str(entrypoint.FAKE_CLAUDE_DIR), self._run("0"))
+
+    def test_flag_one_prepends_existing_shim_dir(self):
+        # Positive path: flag set AND a shim present -> the dir is prepended.
+        import os, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            shim_dir = Path(d)
+            (shim_dir / "claude").write_text("#!/bin/sh\n")
+            result = self._run("1", shim_dir=shim_dir)
+            self.assertTrue(
+                result.startswith(str(shim_dir) + os.pathsep),
+                f"expected {shim_dir} prepended to PATH, got {result!r}",
+            )
+
+    def test_flag_one_missing_shim_is_noop(self):
+        # Flag set but no shim on disk -> log and leave PATH untouched.
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            shim_dir = Path(d)  # empty: no `claude` file
+            result = self._run("1", shim_dir=shim_dir)
+            self.assertNotIn(str(shim_dir), result)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -49,6 +49,10 @@ from zoneinfo import ZoneInfo
 REPO_DIR = Path("/repo")
 ACE_DIR = Path("/opt/ace")
 SCRIPTS_DIR = ACE_DIR / "scripts"
+# E2E only: a fake `claude` shim lives here. It is prepended to PATH exclusively
+# when AEE_FAKE_CLAUDE=1 (see _maybe_enable_fake_claude), so with the flag unset
+# the real Claude Code CLI wins and production behaviour is unchanged (#666).
+FAKE_CLAUDE_DIR = ACE_DIR / "e2e"
 SKILLS_DIR = ACE_DIR / "skills"
 MENTORSCRIPTS_DIR = ACE_DIR / "mentorscripts"
 CLAUDE_MD = ACE_DIR / "CLAUDE.md"
@@ -4161,8 +4165,25 @@ def _run_bp_dispatch(args) -> None:
     sys.exit(exit_code)
 
 
+def _maybe_enable_fake_claude() -> None:
+    """E2E seam (#666): when AEE_FAKE_CLAUDE=1, prepend the fake-claude shim dir
+    to PATH so bare `claude` invocations resolve to the deterministic shim
+    instead of the real CLI. No-op (and thus production-identical) otherwise."""
+    if os.environ.get("AEE_FAKE_CLAUDE") != "1":
+        return
+    if not (FAKE_CLAUDE_DIR / "claude").exists():
+        print(f"[agent] AEE_FAKE_CLAUDE=1 but {FAKE_CLAUDE_DIR}/claude is missing",
+              file=sys.stderr)
+        return
+    os.environ["PATH"] = f"{FAKE_CLAUDE_DIR}{os.pathsep}{os.environ.get('PATH', '')}"
+    print(f"[agent] AEE_FAKE_CLAUDE=1 — using fake claude shim at {FAKE_CLAUDE_DIR}",
+          file=sys.stderr)
+
+
 def main() -> None:
     global _args
+
+    _maybe_enable_fake_claude()
 
     parser = argparse.ArgumentParser(
         description="Agent Execution Environment entrypoint",

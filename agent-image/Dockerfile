@@ -56,6 +56,13 @@ RUN pip install --no-cache-dir -r /opt/ace/requirements.txt
 COPY scripts/ /opt/ace/scripts/
 COPY CLAUDE.md /opt/ace/CLAUDE.md
 
+# Fake `claude` shim for end-to-end tests (#666, docs/e2e-testing-concept.md
+# §4.2). Shipped in every image but inert: the entrypoint only prepends this
+# dir to PATH when AEE_FAKE_CLAUDE=1, so with the flag unset the real Claude
+# Code CLI installed above wins and production behaviour is byte-identical.
+COPY e2e/ /opt/ace/e2e/
+RUN chmod +x /opt/ace/e2e/claude
+
 # `aee-artifact` — register/resolve mission artifacts by logical name via the
 # git-committed manifest (.aee/artifacts.jsonl). On PATH so agents call it
 # directly to record what they produced and to resolve an upstream's outputs

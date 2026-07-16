@@ -19,6 +19,7 @@ const prEventsLog = require('./pr-events-log');
 const { buildWorkItems, workItemDetail } = require('./work-items');
 const usageExport = require('./usage-export');
 const maintenanceMode = require('./maintenance-mode');
+const { detectRasterImageType, imageContentType } = require('./image-type');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, visibleUser, describeAuthz } = require('./scope');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
@@ -11021,15 +11022,74 @@ app.get('/api/agents/:agentId/workspace/file', apiLimiter, (req, res) => {
   const probe = buf.slice(0, Math.min(buf.length, 8192));
   const isBinary = probe.includes(0);
 
+  // Flag supported raster images (by magic bytes, not extension) so the viewer
+  // can render an inline preview via the /image endpoint instead of the generic
+  // "binary file" placeholder. SVG carries no raster magic → stays a text/binary
+  // file (D2/E3). Detection reads only the header, so a truncated read is fine.
+  const imageType = isBinary ? detectRasterImageType(buf) : null;
+
   const echoPath = path.relative(path.join(AGENTS_DIR, agentId), target);
   res.json({
     path: echoPath,
     size: st.size,
     truncated,
     binary: isBinary,
+    imageType,
     content: isBinary ? null : buf.toString('utf8'),
     mtime: st.mtimeMs,
   });
+});
+
+// Inline image bytes for the workspace previewer. Streams the FULL file (no
+// 512 KB cap, unlike /file — AC8) with the correct image Content-Type so the
+// browser renders it as an <img> source. Only the supported raster formats
+// (PNG/JPEG/GIF/WebP) are served, detected by magic bytes (E2); anything else
+// (SVG, other binaries, a corrupt/empty file) returns an error the viewer turns
+// into a friendly message (AC9). Same safeAgentPath traversal guard as the
+// other workspace endpoints (AC7).
+app.get('/api/agents/:agentId/workspace/image', apiLimiter, (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  const target = safeAgentPath(agentId, relPath);
+  if (!target) return res.status(400).json({ error: 'invalid path' });
+
+  let st;
+  try {
+    st = fs.statSync(target);
+  } catch (err) {
+    if (err.code === 'ENOENT') return res.status(404).json({ error: 'not found' });
+    return res.status(500).json({ error: err.message });
+  }
+  if (!st.isFile()) return res.status(400).json({ error: 'not a file' });
+
+  // Sniff the header to confirm it is a supported raster image before serving.
+  let header;
+  try {
+    const fd = fs.openSync(target, 'r');
+    try {
+      const n = Math.min(st.size, 16);
+      header = Buffer.alloc(n);
+      if (n > 0) fs.readSync(fd, header, 0, n, 0);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+
+  const imageType = detectRasterImageType(header);
+  const contentType = imageContentType(imageType);
+  if (!contentType) return res.status(415).json({ error: 'unsupported image type' });
+
+  res.setHeader('Content-Type', contentType);
+  res.setHeader('Content-Length', st.size);
+  res.setHeader('Content-Disposition', 'inline');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+
+  const stream = fs.createReadStream(target);
+  stream.on('error', () => res.end());
+  stream.pipe(res);
 });
 
 // Raw file download — streams the full file with Content-Disposition: attachment

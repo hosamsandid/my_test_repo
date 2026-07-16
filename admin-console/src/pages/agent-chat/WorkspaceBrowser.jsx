@@ -7,8 +7,10 @@ import {
   ChevronRight, ChevronDown, Folder, FolderOpen, FileText, FileCode,
   Brain, Sparkles, BookOpen, Loader2, X, RefreshCw, AlertCircle, FileWarning,
   Maximize2, Minimize2, Code2, Eye, GitBranch, Upload, GitCompare, Download, Trash2,
+  ImageOff,
 } from 'lucide-react';
 import DiffView from './DiffView';
+import { isImageData, imageSrcUrl } from './workspace-image';
 import ConfirmDialog from '../../components/ConfirmDialog';
 
 const MODE_KEY = 'agentChat.workspaceMode';
@@ -1105,7 +1107,69 @@ function FileViewerHeader({ relPath, data, isMarkdown, viewMode, onToggleViewMod
   );
 }
 
-function FileViewerBody({ loading, error, data, viewMode }) {
+// Inline raster-image preview (PNG/JPEG/GIF/WebP). The image scales to fit its
+// container without distortion (object-fit: contain) — in the maximize modal
+// that container is the full window, giving the fit-to-window view (AC4). A
+// checkerboard backdrop keeps transparent PNGs legible in both themes (E5). On
+// a load failure (missing / corrupt / unsupported bytes) it shows a readable
+// message instead of a broken-image icon (AC9). Filename lives in the header;
+// the size caption keeps it visible here too (AC5). Remounted per file via a
+// `key` on the caller so the error state resets on file change.
+function ImagePreview({ agentId, relPath, data }) {
+  const [failed, setFailed] = useState(false);
+  const src = imageSrcUrl(agentId, relPath);
+
+  if (failed || !src) {
+    return (
+      <div style={{ ...emptyStyle, padding: 'var(--eb-space-4)', flexDirection: 'column', textAlign: 'center', color: 'var(--eb-status-error)' }}>
+        <ImageOff size={20} />
+        <div style={{ marginTop: 8 }}>Image could not be displayed</div>
+        <div style={{ marginTop: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+          The file may be missing or corrupt.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      height: '100%',
+      minHeight: 0,
+      padding: 'var(--eb-space-4)',
+      gap: 'var(--eb-space-2)',
+      boxSizing: 'border-box',
+    }}>
+      <img
+        src={src}
+        alt={relPath}
+        onError={() => setFailed(true)}
+        style={{
+          maxWidth: '100%',
+          maxHeight: '100%',
+          objectFit: 'contain',
+          borderRadius: 'var(--eb-radius-sm)',
+          // Checkerboard so transparency reads in light and dark themes (E5).
+          backgroundColor: '#ffffff',
+          backgroundImage:
+            'linear-gradient(45deg, #c0c0c0 25%, transparent 25%), linear-gradient(-45deg, #c0c0c0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #c0c0c0 75%), linear-gradient(-45deg, transparent 75%, #c0c0c0 75%)',
+          backgroundSize: '16px 16px',
+          backgroundPosition: '0 0, 0 8px, 8px -8px, -8px 0',
+        }}
+      />
+      {data?.size != null && (
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', flexShrink: 0 }}>
+          {formatBytes(data.size)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FileViewerBody({ agentId, relPath, loading, error, data, viewMode }) {
   return (
     <div style={{
       flex: 1,
@@ -1126,7 +1190,10 @@ function FileViewerBody({ loading, error, data, viewMode }) {
           <span style={{ marginLeft: 8 }}>{error}</span>
         </div>
       )}
-      {!loading && !error && data && data.binary && (
+      {!loading && !error && data && isImageData(data) && (
+        <ImagePreview key={relPath} agentId={agentId} relPath={relPath} data={data} />
+      )}
+      {!loading && !error && data && data.binary && !isImageData(data) && (
         <div style={{ ...emptyStyle, padding: 'var(--eb-space-4)', flexDirection: 'column', textAlign: 'center' }}>
           <FileWarning size={20} />
           <div style={{ marginTop: 8 }}>Binary file — preview unavailable</div>
@@ -1241,7 +1308,7 @@ function FileViewerModal({ agentId, relPath, data, loading, error, viewMode, onT
           onToggleExpand={onClose}
           onClose={onClose}
         />
-        <FileViewerBody loading={loading} error={error} data={data} viewMode={viewMode} />
+        <FileViewerBody agentId={agentId} relPath={relPath} loading={loading} error={error} data={data} viewMode={viewMode} />
       </div>
     </div>,
     document.body,
@@ -1306,7 +1373,7 @@ function FileViewer({ agentId, path: relPath, onClose }) {
           onToggleExpand={() => setExpanded(true)}
           onClose={onClose}
         />
-        <FileViewerBody loading={loading} error={error} data={data} viewMode={viewMode} />
+        <FileViewerBody agentId={agentId} relPath={relPath} loading={loading} error={error} data={data} viewMode={viewMode} />
       </div>
       {expanded && (
         <FileViewerModal

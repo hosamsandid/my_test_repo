@@ -294,8 +294,248 @@ function CodeBlock({ content }) {
   );
 }
 
+/* ─── Version / drift / provenance chips (#632) ───────────────────────── */
+const DRIFT_META = {
+  'in-sync': { label: 'in sync', color: 'var(--eb-status-success)', bg: 'var(--eb-status-success-bg)' },
+  outdated:  { label: 'outdated', color: 'var(--eb-status-warning)', bg: 'var(--eb-status-warning-bg)' },
+  diverged:  { label: 'diverged', color: 'var(--eb-status-warning)', bg: 'var(--eb-status-warning-bg)' },
+  conflict:  { label: 'conflict', color: 'var(--eb-status-error)',   bg: 'var(--eb-status-error-bg)' },
+  orphaned:  { label: 'orphaned', color: 'var(--eb-status-error)',   bg: 'var(--eb-status-error-bg)' },
+  unknown:   { label: 'unknown',  color: 'var(--eb-text-muted)',     bg: 'var(--eb-bg-elevated)' },
+};
+
+function Chip({ label, color, bg, title, mono }) {
+  return (
+    <span title={title} style={{
+      padding: '1px 7px', borderRadius: 'var(--eb-radius-sm)',
+      fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)',
+      background: bg || 'var(--eb-bg-elevated)', color: color || 'var(--eb-text-secondary)',
+      border: `1px solid ${color || 'var(--eb-border-default)'}`,
+      fontFamily: mono ? 'var(--eb-font-mono)' : 'inherit', whiteSpace: 'nowrap',
+    }}>{label}</span>
+  );
+}
+
+function DriftBadge({ state }) {
+  const m = DRIFT_META[state];
+  if (!m) return null;
+  return <Chip label={m.label} color={m.color} bg={m.bg} title={`Drift vs. source: ${state}`} />;
+}
+
+// The `v4 · a1b2c3` content-version chip the list rows + detail header render.
+function VersionChip({ version, contentHash }) {
+  if (!Number.isInteger(version)) return null;
+  const short = typeof contentHash === 'string' ? contentHash.slice(0, 6) : '';
+  return <Chip mono label={`v${version}${short ? ` · ${short}` : ''}`} title="Content version · hash prefix" />;
+}
+
+// Provenance chips derived from the list row's compact summary (#632, AC2):
+// `shared` when the copy carries an origin team, `provenance` when a
+// provenance.json exists at all. Absent for hand-authored skills.
+function ProvenanceChips({ row }) {
+  const chips = [];
+  if (row.originTeamId) chips.push(<Chip key="shared" label={`shared from ${row.originTeamId}`} title="Promoted/shared from a team pool" color="var(--eb-status-info)" bg="var(--eb-status-info-bg)" />);
+  else if (row.provenance) chips.push(<Chip key="prov" label="provenance" title="Carries knowledge provenance" color="var(--eb-status-info)" bg="var(--eb-status-info-bg)" />);
+  if (!chips.length) return null;
+  return <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap' }}>{chips}</span>;
+}
+
+function formatTs(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return Number.isNaN(d.getTime()) ? String(ts) : d.toLocaleString();
+}
+
+const TIER_LABEL = { global: 'global', team: 'team', agent: 'agent' };
+
+// Map a lineage copy ({tier, teamId?, agentId?}) to the row shape openSkill
+// expects (the list tags the global tier as `pool`).
+function copyToRow(copy, name) {
+  const source = copy.tier === 'global' ? 'pool' : copy.tier;
+  return { name, source, teamId: copy.teamId, agentId: copy.agentId };
+}
+
+/* ─── Versions tab — skill.json history timeline (#632, AC2) ───────────── */
+function VersionsTab({ lineage, loading, error }) {
+  if (loading) return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading version history…</div>;
+  if (error) return <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load lineage: {error}</div>;
+  const versions = lineage?.versions;
+  const history = Array.isArray(versions?.history) ? versions.history : [];
+  if (!history.length) {
+    return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)', fontStyle: 'italic' }}>No version history recorded yet.</div>;
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+      {history.map((h, i) => (
+        <div key={`${h.version}-${h.hash}-${i}`} style={{
+          display: 'flex', flexDirection: 'column', gap: 2,
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          border: `1px solid ${h.current ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+          background: h.current ? 'var(--eb-accent-muted)' : 'var(--eb-bg-surface)',
+          borderRadius: 'var(--eb-radius-sm)',
+        }}>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
+            <VersionChip version={h.version} contentHash={h.hash} />
+            {h.action && <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)' }}>{h.action}</span>}
+            {h.current && <Chip label="current" color="var(--eb-accent-primary)" bg="var(--eb-accent-muted)" title="The live revision on disk" />}
+          </div>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            {[h.by, formatTs(h.at)].filter(Boolean).join(' · ')}
+          </div>
+          {h.note && <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', fontStyle: 'italic' }}>{h.note}</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ─── Lineage tab — provenance + origin + every known copy (#632, AC2) ── */
+function LineageTab({ lineage, loading, error, name, onOpenCopy }) {
+  if (loading) return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading lineage…</div>;
+  if (error) return <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load lineage: {error}</div>;
+  if (!lineage) return null;
+
+  const origin = lineage.origin;
+  const prov = lineage.provenance;
+  const copies = Array.isArray(lineage.copies) ? lineage.copies : [];
+  const entryIds = Array.isArray(prov?.entryIds) ? prov.entryIds : [];
+  const knowledgeHref = prov?.originTeamId ? `/knowledge?team=${encodeURIComponent(prov.originTeamId)}` : '/knowledge';
+
+  const sectionTitle = { fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)', textTransform: 'uppercase', letterSpacing: '0.04em' };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      {/* Origin (content lineage — where THIS copy descends from) */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+        <span style={sectionTitle}>Origin</span>
+        {origin ? (
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+            {[TIER_LABEL[origin.tier] || origin.tier, origin.teamId, origin.action].filter(Boolean).join(' · ')}
+            {origin.sourceHash ? <span style={{ fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)' }}> ({String(origin.sourceHash).slice(0, 6)})</span> : null}
+          </span>
+        ) : (
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>Hand-authored — no recorded origin.</span>
+        )}
+      </div>
+
+      {/* Provenance (knowledge lineage — entryIds that drove a promotion) */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+        <span style={sectionTitle}>Knowledge provenance</span>
+        {prov ? (
+          <>
+            {prov.originTeamId && (
+              <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+                Promoted from team <strong>{prov.originTeamId}</strong>
+              </span>
+            )}
+            {entryIds.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{entryIds.length} knowledge entr{entryIds.length === 1 ? 'y' : 'ies'}:</span>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                  {entryIds.map(id => (
+                    <a key={id} href={knowledgeHref} title={`Open the Knowledge page (entry ${id})`}
+                      style={{ textDecoration: 'none' }}>
+                      <Chip mono label={String(id).slice(0, 10)} color="var(--eb-accent-primary)" bg="var(--eb-accent-muted)" />
+                    </a>
+                  ))}
+                </div>
+              </div>
+            )}
+            <a href={knowledgeHref} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)' }}>View in Knowledge →</a>
+          </>
+        ) : (
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>No knowledge provenance (not a promoted/shared skill).</span>
+        )}
+      </div>
+
+      {/* All known copies across tiers with drift */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+        <span style={sectionTitle}>Copies ({copies.length})</span>
+        {copies.length === 0 ? (
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>No other copies found.</span>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {copies.map((c, i) => {
+              const scopeLabel = c.tier === 'global' ? 'global pool' : c.tier === 'team' ? `team ${c.teamId}` : `agent ${c.agentId}`;
+              return (
+                <button
+                  key={`${c.tier}:${c.teamId ?? ''}:${c.agentId ?? ''}:${i}`}
+                  onClick={() => onOpenCopy?.(copyToRow(c, name))}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap',
+                    padding: 'var(--eb-space-2) var(--eb-space-3)', textAlign: 'left', width: '100%',
+                    border: `1px solid ${c.viewed ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+                    background: c.viewed ? 'var(--eb-accent-muted)' : 'var(--eb-bg-surface)',
+                    borderRadius: 'var(--eb-radius-sm)', cursor: 'pointer', fontFamily: 'inherit',
+                  }}
+                  title={`Open the ${scopeLabel} copy`}
+                >
+                  <SourceBadge value={c.tier === 'global' ? 'pool' : c.tier} />
+                  <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', fontFamily: 'var(--eb-font-mono)' }}>{scopeLabel}</span>
+                  {Number.isInteger(c.version) && <VersionChip version={c.version} contentHash={c.contentHash} />}
+                  {c.drift && <DriftBadge state={c.drift} />}
+                  {c.viewed && <Chip label="viewing" color="var(--eb-accent-primary)" bg="var(--eb-accent-muted)" />}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─── Usage tab — where the skill is actually seeded (#632, AC2/AC3) ───── */
+function UsageTab({ lineage, loading, error }) {
+  if (loading) return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading usage…</div>;
+  if (error) return <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load lineage: {error}</div>;
+  const copies = Array.isArray(lineage?.copies) ? lineage.copies : [];
+  const agentCopies = copies.filter(c => c.tier === 'agent');
+  const summary = lineage?.summary;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+      {summary && (
+        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+          Lives in <strong>{summary.total}</strong> place{summary.total === 1 ? '' : 's'} — {summary.byTier.global} global, {summary.byTier.team} team, {summary.byTier.agent} agent.
+          {summary.worstDrift && <> Worst drift: <DriftBadge state={summary.worstDrift} />.</>}
+        </div>
+      )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+        <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)' }}>
+          Seeded into agents ({agentCopies.length})
+        </span>
+        {agentCopies.length === 0 ? (
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
+            No agent currently carries this skill in its workspace.
+          </span>
+        ) : (
+          agentCopies.map((c, i) => (
+            <div key={`${c.agentId}:${i}`} style={{
+              display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap',
+              padding: 'var(--eb-space-2) var(--eb-space-3)',
+              border: '1px solid var(--eb-border-default)', background: 'var(--eb-bg-surface)',
+              borderRadius: 'var(--eb-radius-sm)',
+            }}>
+              <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', fontFamily: 'var(--eb-font-mono)' }}>{c.agentId}</span>
+              {c.teamId && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>({c.teamId})</span>}
+              {c.drift && <DriftBadge state={c.drift} />}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+const VIEWER_TABS = [
+  { id: 'content', label: 'Content' },
+  { id: 'versions', label: 'Versions' },
+  { id: 'lineage', label: 'Lineage' },
+  { id: 'usage', label: 'Usage' },
+];
+
 /* ─── Skill viewer / inline editor ────────────────────────────────────── */
-function SkillViewer({ skill, onDeleted, onPromoted, installableAgents, agentSkills, teams }) {
+function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgents, agentSkills, teams }) {
   const isPool = skill.source === 'pool';
   const isTeam = skill.source === 'team';
   const isAgent = skill.source === 'agent';
@@ -342,6 +582,36 @@ function SkillViewer({ skill, onDeleted, onPromoted, installableAgents, agentSki
   const [installMsg, setInstallMsg] = useState(null);
   const [confirmInstallOverwrite, setConfirmInstallOverwrite] = useState(false);
   const [adoptTeamId, setAdoptTeamId] = useState('');
+
+  // Detail tabs (#632): Content (files, default) + Versions / Lineage / Usage,
+  // the latter three fed by one lineage fetch. The fetch is lazy — it only fires
+  // once the operator leaves the Content tab, so browsing files stays a single
+  // round-trip.
+  const [tab, setTab] = useState('content');
+  const [lineage, setLineage] = useState(null);
+  const [lineageLoading, setLineageLoading] = useState(false);
+  const [lineageError, setLineageError] = useState(null);
+
+  useEffect(() => {
+    // Reset when the selected skill changes; the fetch effect below refills it
+    // when a lineage tab is active.
+    setTab('content');
+    setLineage(null);
+    setLineageError(null);
+  }, [skillKey]);
+
+  useEffect(() => {
+    if (tab === 'content' || lineage || lineageLoading) return;
+    let cancelled = false;
+    setLineageLoading(true); setLineageError(null);
+    const params = withScope(new URLSearchParams({ source: skill.source }));
+    fetch(`/api/skills/${encodeURIComponent(skill.name)}/lineage?${params}`)
+      .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`); return d; })
+      .then(d => { if (!cancelled) setLineage(d); })
+      .catch(e => { if (!cancelled) setLineageError(e.message); })
+      .finally(() => { if (!cancelled) setLineageLoading(false); });
+    return () => { cancelled = true; };
+  }, [tab, skillKey, lineage, lineageLoading]);
 
   // Load the file list whenever the selected skill changes.
   useEffect(() => {
@@ -509,6 +779,35 @@ function SkillViewer({ skill, onDeleted, onPromoted, installableAgents, agentSki
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', height: '100%' }}>
+      {/* Detail tab strip (#632) */}
+      <div style={{ display: 'flex', gap: 'var(--eb-space-1)', borderBottom: '1px solid var(--eb-border-default)' }}>
+        {VIEWER_TABS.map(t => {
+          const active = tab === t.id;
+          return (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              style={{
+                padding: 'var(--eb-space-2) var(--eb-space-3)',
+                background: 'none', border: 'none', cursor: 'pointer',
+                fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
+                fontWeight: active ? 'var(--eb-font-semibold)' : 'var(--eb-font-medium)',
+                color: active ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)',
+                borderBottom: `2px solid ${active ? 'var(--eb-accent-primary)' : 'transparent'}`,
+                marginBottom: -1,
+              }}
+            >
+              {t.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {tab === 'versions' && <VersionsTab lineage={lineage} loading={lineageLoading} error={lineageError} />}
+      {tab === 'lineage' && <LineageTab lineage={lineage} loading={lineageLoading} error={lineageError} name={skill.name} onOpenCopy={onOpenCopy} />}
+      {tab === 'usage' && <UsageTab lineage={lineage} loading={lineageLoading} error={lineageError} />}
+
+      {tab === 'content' && (<>
       {/* toolbar */}
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
         {!editing && (
@@ -801,6 +1100,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, installableAgents, agentSki
         onConfirm={() => install(true)}
         onCancel={() => setConfirmInstallOverwrite(false)}
       />
+      </>)}
     </div>
   );
 }
@@ -1178,6 +1478,18 @@ function makeColumns(onDeleteRow, select) {
         ? <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span>
         : <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
     } },
+    { key: 'version', label: 'Version', sortable: false, render: (_, row) => (
+      Number.isInteger(row.version)
+        ? <VersionChip version={row.version} contentHash={row.contentHash} />
+        : <span style={{ color: 'var(--eb-text-muted)' }}>—</span>
+    ) },
+    { key: '_prov', label: 'Provenance', sortable: false, render: (_, row) => {
+      const chips = <ProvenanceChips row={row} />;
+      return chips || <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
+    } },
+    { key: 'drift', label: 'Drift', sortable: false, render: (v) => (
+      v ? <DriftBadge state={v} /> : <span style={{ color: 'var(--eb-text-muted)' }}>—</span>
+    ) },
     {
       key: '_del',
       label: '',
@@ -1350,9 +1662,14 @@ export default function SkillsRegistry() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--eb-space-3)' }}>
-        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
-          Skills Registry
-        </h1>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
+            Skills
+          </h1>
+          <a href="/knowledge" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)', textDecoration: 'none' }}>
+            ← Knowledge (learning, promotion &amp; activation)
+          </a>
+        </div>
         <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
           <input
             ref={importFileRef}
@@ -1528,6 +1845,7 @@ export default function SkillsRegistry() {
             skill={selectedSkill}
             onDeleted={handleDeleted}
             onPromoted={handlePromoted}
+            onOpenCopy={openSkill}
             installableAgents={installableAgents}
             agentSkills={allSkills ?? []}
             teams={allTeams ?? []}

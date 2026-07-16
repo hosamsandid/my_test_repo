@@ -34,6 +34,7 @@ const skillManifest = require('./skill-manifest');
 const skillDrift = require('./skill-drift');
 const skillTransfer = require('./skill-transfer');
 const skillDeletion = require('./skill-deletion');
+const skillMerge = require('./skill-merge');
 const skillImport = require('./skill-import');
 
 const WORKSPACE = '/workspace';
@@ -6079,6 +6080,265 @@ app.post('/api/skills/transfer', heavyLimiter, async (req, res) => {
     archived: archived || undefined,
     activate: plan.activate,
     activation: activation || undefined,
+  });
+});
+
+/* ─── Skill merge (#631, concept §3.4) ───────────────────────────────────
+ * Fold N existing skills into ONE target skill: draft a combined SKILL.md
+ * (LLM-synthesised with a deterministic concat fallback), UNION the sources'
+ * provenance.json into the target's, carry the sources' extra files over
+ * (collisions namespaced under files/<source-name>/…), migrate every grant
+ * naming a retired source to the target, and retire the sources through the
+ * archive-and-delete path. The pure planner (skill-merge.js) validates the
+ * request + computes the grant/file/provenance plans; this endpoint does the IO. */
+
+// Read a merge source's on-disk facts: dir, whether it exists, its SKILL.md,
+// provenance.json, content hash, and its carried extra-file relative paths.
+function readMergeSource(ref) {
+  const r = resolveTransferSkillDir(ref, ref.name);
+  if (r.error) return { ref, error: r.error };
+  const dir = r.dir;
+  const exists = fs.existsSync(path.join(dir, 'SKILL.md'));
+  if (!exists) return { ref, dir, exists: false };
+  let skillMd = '';
+  try { skillMd = fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8'); } catch { /* empty */ }
+  const prov = readSkillProvenance(dir);
+  const { sourceHash } = skillSourceIdentity(dir);
+  return { ref, dir, exists: true, skillMd, prov, hash: sourceHash || null, files: listSkillDirFiles(dir) };
+}
+
+// List a skill dir's files as posix-relative paths (for planFileMerge). Excludes
+// nothing here — isCarriedFile does the sidecar/_archive filtering in the planner.
+function listSkillDirFiles(dir) {
+  const out = [];
+  const walk = (rel) => {
+    let entries;
+    try { entries = fs.readdirSync(path.join(dir, rel), { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const childRel = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(childRel);
+      else if (e.isFile()) out.push(childRel);
+    }
+  };
+  walk('');
+  return out;
+}
+
+// Every agent construct as the plain shape planGrantMigration consumes.
+function readAllConstructs() {
+  const out = [];
+  let ids;
+  try { ids = fs.readdirSync(AGENTS_DIR); } catch { return out; }
+  for (const id of ids) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg) continue;
+    out.push({
+      id: cfg.id || id, role: cfg.role,
+      skills: cfg.skills, skillsOverride: cfg.skillsOverride,
+      parentTeamId: cfg.parentTeamId, teamId: cfg.teamId || DEFAULT_TEAM_ID,
+    });
+  }
+  return out;
+}
+
+// Execute the grant-migration plan through the orchestrator's existing
+// (de)activation endpoints (workspace sync + manifest + CLAUDE.md rebuild). For
+// each affected construct: activate the target FIRST (so no member is left
+// without the skill in the gap), then deactivate every source it granted. A team
+// step fans out to inheriting members; an agent step edits one construct's own
+// grant. Best-effort, per-construct — activation of a target a construct's tier
+// can't resolve (a pathological cross-team merge) simply no-ops its workspace
+// copy while the grant name is still rewritten. Never rolls the merge back.
+async function migrateGrantsForMerge(sources, target) {
+  const gm = skillMerge.planGrantMigration(readAllConstructs(), { sources, target });
+  const orchestratorUrl = ORCH_URL();
+  const call = async (base, id, verb, skillName) => {
+    try {
+      const resp = await fetch(`${orchestratorUrl}/internal/${base}/${encodeURIComponent(id)}/skills/${verb}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ skillName }),
+      });
+      return { verb, skillName, status: resp.status };
+    } catch (err) { return { verb, skillName, error: err.message }; }
+  };
+  const run = async (base, steps) => {
+    const results = [];
+    for (const step of steps) {
+      const ops = [];
+      if (step.addTarget) ops.push(await call(base, step.id, 'activate', target.name));
+      for (const n of step.removes) ops.push(await call(base, step.id, 'deactivate', n));
+      results.push({ id: step.id, ops });
+    }
+    return results;
+  };
+  return { teams: await run('teams', gm.teams), agents: await run('agents', gm.agents) };
+}
+
+// POST /api/skills/merge-draft — synthesise a combined SKILL.md preview from the
+// sources (nothing persisted). LLM-with-heuristic-fallback, same shape as
+// /api/knowledge/draft; `heuristicOnly:true` skips the LLM for an instant prefill.
+app.post('/api/skills/merge-draft', heavyLimiter, async (req, res) => {
+  const plan = skillMerge.planMerge(req.body, {
+    skillNameRe: SKILL_NAME_RE, agentIdRe: AGENT_ID_RE, teamIdRe: POOL_TEAM_ID_RE, requireDraft: false,
+  });
+  if (!plan.ok) return res.status(400).json({ error: plan.error });
+
+  const scope = getScope(req);
+  const permit = skillMerge.permitMerge(plan.permission, {
+    systemAdmin: !!scope.all, isTeamAdmin: (teamId) => canManageTeam(scope, teamId),
+  });
+  if (!permit.ok) return res.status(403).json({ error: permit.error });
+
+  const infos = plan.sources.map(readMergeSource);
+  const missing = infos.find((i) => !i.exists);
+  if (missing) return res.status(404).json({ error: `source skill '${missing.ref.name}' not found`, ref: missing.ref });
+
+  const draftSources = infos.map((i) => ({ name: i.ref.name, tier: i.ref.tier, skillMd: i.skillMd }));
+  const heuristic = knowledgeSuggestions.buildHeuristicSkillMerge(draftSources, { targetName: plan.target.name });
+  const fallback = () => res.json({ draft: heuristic, source: 'heuristic' });
+  if (req.body?.heuristicOnly) return fallback();
+
+  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  if (target.error) return fallback();
+  const url = buildMessagesUrl(target.baseUrl);
+  const headers = {
+    'anthropic-version': '2023-06-01',
+    ...(target.token ? { Authorization: `Bearer ${target.token}`, 'x-api-key': target.token } : {}),
+  };
+  const payload = { model: target.model, ...knowledgeSuggestions.buildSkillMergeRequest(draftSources) };
+  const result = await httpPostJson(url, headers, payload);
+  if (result.error || result.status < 200 || result.status >= 300) return fallback();
+  const skillMd = extractMessageText(result.body);
+  if (!skillMd) return fallback();
+  res.json({ draft: { name: plan.target.name, skillMd, llmDrafted: true }, source: 'llm', model: target.model });
+});
+
+// POST /api/skills/merge — commit the merge: write the target from the operator's
+// draft, union provenance, carry extra files, migrate grants + retire sources.
+app.post('/api/skills/merge', heavyLimiter, async (req, res) => {
+  // 1. Validate + plan (pure). A committing merge requires a non-empty draft.
+  const plan = skillMerge.planMerge(req.body, {
+    skillNameRe: SKILL_NAME_RE, agentIdRe: AGENT_ID_RE, teamIdRe: POOL_TEAM_ID_RE, requireDraft: true,
+  });
+  if (!plan.ok) return res.status(400).json({ error: plan.error });
+
+  // 2. Permission gate — target-tier (Team Admin for a team target, System Admin
+  //    for a global target).
+  const scope = getScope(req);
+  const permit = skillMerge.permitMerge(plan.permission, {
+    systemAdmin: !!scope.all, isTeamAdmin: (teamId) => canManageTeam(scope, teamId),
+  });
+  if (!permit.ok) return res.status(403).json({ error: permit.error });
+
+  // 3. Resolve + verify every source exists.
+  const infos = plan.sources.map(readMergeSource);
+  const missing = infos.find((i) => !i.exists);
+  if (missing) return res.status(404).json({ error: `source skill '${missing.ref.name}' not found`, ref: missing.ref });
+
+  // 4. Resolve the target dir (containment-guarded) + collision check.
+  const dst = resolveTransferSkillDir(plan.target, plan.target.name);
+  if (dst.error) return res.status(400).json({ error: `target: ${dst.error}` });
+  const targetIsSource = infos.some((i) => path.resolve(i.dir) === path.resolve(dst.dir));
+  if (fs.existsSync(path.join(dst.dir, 'SKILL.md')) && !req.body.overwrite && !targetIsSource) {
+    return res.status(409).json({ error: `skill '${plan.target.name}' already exists at the target`, exists: true });
+  }
+
+  // 5. Provenance union + mergedFrom history (concept §3.4).
+  const hashByKey = new Map(infos.map((i) => [skillMerge.refKey(i.ref), i.hash]));
+  const mergedFrom = skillMerge.buildMergedFrom(plan.sources, (s) => hashByKey.get(skillMerge.refKey(s)) || null);
+  const prov = skillMerge.mergeProvenance({
+    sourceProvs: infos.map((i) => i.prov),
+    target: plan.target,
+    mergedFrom,
+    mergedBy: skillActor(req),
+  });
+
+  // 6. Write the target (draft SKILL.md + provenance.json).
+  const draft = plan.draft;
+  try {
+    if (req.body.overwrite && !targetIsSource) fs.rmSync(dst.dir, { recursive: true, force: true });
+    fs.mkdirSync(dst.dir, { recursive: true });
+    fs.writeFileSync(path.join(dst.dir, 'SKILL.md'), draft.endsWith('\n') ? draft : draft + '\n');
+    fs.writeFileSync(path.join(dst.dir, 'provenance.json'), JSON.stringify(prov, null, 2));
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to write merged skill: ${err.message}` });
+  }
+
+  // 7. Carry the sources' extra files over. A path in exactly one source keeps its
+  //    location; a path in >1 source is namespaced under files/<source-name>/… so
+  //    no source silently wins.
+  const fileMerge = skillMerge.planFileMerge(infos.map((i) => ({ name: i.ref.name, files: i.files })));
+  const dirByName = new Map(infos.map((i) => [i.ref.name, i.dir]));
+  for (const copy of fileMerge.copies) {
+    const fromDir = dirByName.get(copy.sourceName);
+    if (!fromDir) continue;
+    try {
+      const from = path.resolve(fromDir, copy.from);
+      const to = path.resolve(dst.dir, copy.to);
+      // Containment guard: never write outside the target dir.
+      if (path.relative(path.resolve(dst.dir), to).startsWith('..')) continue;
+      if (path.resolve(from) === to) continue; // target is one of the sources — skip self-copy
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.copyFileSync(from, to);
+    } catch { /* best-effort per file */ }
+  }
+
+  // 8. Stamp the target's skill.json — a fresh v1 chain with the `merged` action;
+  //    record mergedFrom on the history entry + top-level for the lineage view.
+  stampSkillCopy(dst.dir, {
+    name: plan.target.name, by: skillActor(req), action: 'merged',
+    note: `merged ${plan.sources.length} skills: ${plan.sources.map((s) => s.name).join(', ')}`,
+  });
+  try {
+    const man = skillManifest.readManifest(dst.dir);
+    if (man) {
+      man.mergedFrom = mergedFrom;
+      if (Array.isArray(man.history) && man.history[0]) man.history[0].mergedFrom = mergedFrom;
+      skillManifest.writeManifest(dst.dir, man);
+    }
+  } catch { /* best-effort */ }
+
+  // 9. Grant migration + source retirement (only when retiring — keeping the
+  //    sources means keeping their grants). Migration rewrites every grant naming
+  //    a retired source to the target, then the sources are archived + removed.
+  let grantMigration = null;
+  const archived = [];
+  if (plan.retireSources) {
+    grantMigration = await migrateGrantsForMerge(plan.sources, plan.target);
+    for (const i of infos) {
+      if (path.resolve(i.dir) === path.resolve(dst.dir)) continue; // never retire the target
+      const srcId = skillSourceIdentity(i.dir);
+      const snap = archiveDeletedSkill(i.dir, i.ref, i.ref.name, srcId, req);
+      if (snap) archived.push({ name: i.ref.name, id: snap.id });
+      try { fs.rmSync(i.dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
+  }
+
+  // 10. Live-feed event (skill-merged).
+  try {
+    fs.mkdirSync(path.dirname(KNOWLEDGE_EVENTS_FILE), { recursive: true });
+    fs.appendFileSync(KNOWLEDGE_EVENTS_FILE, JSON.stringify({
+      type: 'skill-merged',
+      ts: new Date().toISOString(),
+      tier: plan.target.tier,
+      teamId: plan.target.tier === 'team' ? plan.target.teamId : undefined,
+      skillName: plan.target.name,
+      sources: plan.sources.map((s) => s.name),
+      retiredSources: plan.retireSources,
+      by: skillActor(req),
+    }) + '\n');
+  } catch { /* best-effort */ }
+
+  res.status(201).json({
+    name: plan.target.name,
+    target: plan.target,
+    sources: plan.sources,
+    retiredSources: plan.retireSources,
+    provenance: prov,
+    mergedFrom,
+    collisions: fileMerge.collisions,
+    archived: archived.length ? archived : undefined,
+    grantMigration: grantMigration || undefined,
   });
 });
 

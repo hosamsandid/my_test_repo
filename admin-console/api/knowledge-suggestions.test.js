@@ -17,6 +17,8 @@ const {
   buildSkillExtensionRequest,
   buildHeuristicSkillExtension,
   extendSkillProvenance,
+  buildSkillMergeRequest,
+  buildHeuristicSkillMerge,
   matchExistingSkill,
   TEAM_KNOWLEDGE_KEYS,
   mergeTeamKnowledgeConfig,
@@ -297,6 +299,36 @@ test('buildHeuristicSkillExtension: appends only genuinely-new lessons, dedupes 
     candidate(),
   );
   assert.equal(noop.added, 0);
+});
+
+test('buildSkillMergeRequest: names every source and asks to preserve all knowledge', () => {
+  const req = buildSkillMergeRequest([
+    { name: 'jcl-tips', tier: 'team', skillMd: '# JCL Tips\n\n- tip a' },
+    { name: 'jcl-conversion', tier: 'team', skillMd: '# JCL Conversion\n\n- convert b' },
+  ]);
+  assert.equal(req.messages[0].role, 'user');
+  assert.match(req.messages[0].content, /SOURCE SKILL "jcl-tips"/);
+  assert.match(req.messages[0].content, /SOURCE SKILL "jcl-conversion"/);
+  assert.match(req.messages[0].content, /2 overlapping skill documents/);
+  assert.match(req.messages[0].content, /Preserve all durable knowledge from every/);
+});
+
+test('buildHeuristicSkillMerge: keeps every source verbatim under its own heading (concat fallback)', () => {
+  const out = buildHeuristicSkillMerge(
+    [
+      { name: 'jcl-tips', skillMd: '# JCL Tips\n\n- tip a' },
+      { name: 'jcl-conversion', skillMd: '# JCL Conversion\n\n- convert b' },
+    ],
+    { targetName: 'jcl-all' },
+  );
+  assert.equal(out.llmDrafted, false);
+  assert.equal(out.name, 'jcl-all');
+  assert.match(out.skillMd, /^# jcl-all/);
+  assert.match(out.skillMd, /merged from 2 source/);
+  assert.match(out.skillMd, /## From: jcl-tips/);
+  assert.match(out.skillMd, /## From: jcl-conversion/);
+  assert.match(out.skillMd, /- tip a/);
+  assert.match(out.skillMd, /- convert b/);
 });
 
 test('extendSkillProvenance: unions new ids onto existing, preserves origin, records extension', () => {

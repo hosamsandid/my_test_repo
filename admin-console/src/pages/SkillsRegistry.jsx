@@ -805,6 +805,322 @@ function SkillViewer({ skill, onDeleted, onPromoted, installableAgents, agentSki
   );
 }
 
+/* ─── Merge helpers (#631) ─────────────────────────────────────────────── */
+
+// A stable key for a skill row (matches getRowKey below and skill-merge refKey).
+function skillRowKey(row) {
+  return `${row.source}:${row.agentId ?? ''}:${row.teamId ?? ''}:${row.name}`;
+}
+
+// Map a skills-list row to the merge endpoint's source-ref shape. The list tags
+// the global pool as `pool`; the merge API calls that tier `global`.
+function rowToMergeSource(row) {
+  if (row.source === 'team') return { tier: 'team', teamId: row.teamId, name: row.name };
+  if (row.source === 'agent') return { tier: 'agent', agentId: row.agentId, name: row.name };
+  return { tier: 'global', name: row.name };
+}
+
+const MERGE_SOURCE_BADGE = { global: 'global', team: 'team', agent: 'agent' };
+
+/* ─── Merge dialog (#631, concept §3.4) ────────────────────────────────────
+ * Fold the multi-selected skills into ONE target skill. The operator picks the
+ * target name + tier, edits an LLM-drafted (heuristic-fallback) combined
+ * SKILL.md, and chooses whether to retire the sources (default on). Submitting
+ * unions the sources' provenance, carries their files, migrates every grant
+ * naming a retired source to the target, and archives the retired sources. */
+function MergeSkillsDialog({ sources, teams = [], onClose, onMerged }) {
+  // Default target: if every source is a team skill in the same team, target
+  // that team; otherwise the global pool. Prefill the name from the first source.
+  const allSameTeam = sources.length > 0 && sources.every(
+    s => s.tier === 'team' && s.teamId === sources[0].teamId,
+  );
+  const [targetTier, setTargetTier] = useState(allSameTeam ? 'team' : 'global');
+  const [targetTeamId, setTargetTeamId] = useState(allSameTeam ? sources[0].teamId : '');
+  const [name, setName] = useState(sources[0]?.name ?? '');
+  const [draft, setDraft] = useState('');
+  const [retireSources, setRetireSources] = useState(true);
+  const [preview, setPreview] = useState(false);
+
+  const [drafting, setDrafting] = useState(false);
+  const [draftSource, setDraftSource] = useState(null); // 'heuristic' | 'llm'
+  const [draftError, setDraftError] = useState(null);
+  const [merging, setMerging] = useState(false);
+  const [error, setError] = useState(null);
+  const [confirmOverwrite, setConfirmOverwrite] = useState(false);
+
+  const nameValid = SKILL_NAME_RE.test(name);
+  const targetReady = nameValid && (targetTier === 'global' || !!targetTeamId);
+
+  const target = useCallback(() => (
+    targetTier === 'team' ? { tier: 'team', teamId: targetTeamId, name } : { tier: 'global', name }
+  ), [targetTier, targetTeamId, name]);
+
+  // Draft a combined SKILL.md. `heuristicOnly` skips the LLM for an instant
+  // deterministic concat prefill; otherwise the server tries the LLM first.
+  const generate = useCallback(async (heuristicOnly) => {
+    if (!targetReady) return;
+    setDrafting(true);
+    setDraftError(null);
+    try {
+      const res = await fetch('/api/skills/merge-draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sources, target: target(), heuristicOnly: !!heuristicOnly }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      setDraft(data.draft?.skillMd ?? '');
+      setDraftSource(data.source || null);
+    } catch (e) {
+      setDraftError(e.message);
+    } finally {
+      setDrafting(false);
+    }
+  }, [sources, target, targetReady]);
+
+  // Prefill once with the instant heuristic concat so the textarea is never
+  // empty; the operator can then regenerate with AI or edit by hand.
+  const prefilled = useRef(false);
+  useEffect(() => {
+    if (prefilled.current || !targetReady) return;
+    prefilled.current = true;
+    generate(true);
+  }, [targetReady, generate]);
+
+  async function merge(overwrite) {
+    if (!targetReady || !draft.trim()) return;
+    setMerging(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/skills/merge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sources, target: target(), draft, retireSources, overwrite }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (res.status === 409 && data.exists) {
+          setConfirmOverwrite(true);
+          setMerging(false);
+          return;
+        }
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      setConfirmOverwrite(false);
+      onMerged?.(data);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setMerging(false);
+    }
+  }
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 1000,
+        background: 'rgba(0,0,0,0.45)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: 'var(--eb-space-4)',
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          width: 'min(680px, 100%)', maxHeight: '90vh', overflowY: 'auto',
+          background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-lg)', padding: 'var(--eb-space-5)',
+          display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)',
+        }}
+      >
+        <div>
+          <h2 style={{ fontSize: 'var(--eb-text-lg)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
+            Merge {sources.length} skills
+          </h2>
+          <p style={{ margin: 'var(--eb-space-1) 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+            Fold the selected skills into one. The target's provenance unions every source's, extra files are carried over,
+            and grants pointing at retired sources are migrated to the target.
+          </p>
+        </div>
+
+        {/* Source list */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+          <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)' }}>
+            Sources
+          </span>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-1)' }}>
+            {sources.map((s, i) => (
+              <span
+                key={`${s.tier}:${s.teamId ?? ''}:${s.agentId ?? ''}:${s.name}:${i}`}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                  padding: '2px 8px', borderRadius: 'var(--eb-radius-sm)',
+                  fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)',
+                  border: '1px solid var(--eb-border-default)', background: 'var(--eb-bg-elevated)',
+                }}
+              >
+                {s.name}
+                <span style={{ color: 'var(--eb-text-muted)', fontFamily: 'inherit' }}>
+                  {MERGE_SOURCE_BADGE[s.tier]}{s.teamId ? `:${s.teamId}` : s.agentId ? `:${s.agentId}` : ''}
+                </span>
+              </span>
+            ))}
+          </div>
+        </div>
+
+        {/* Target tier + name */}
+        <div style={{ display: 'flex', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
+          <div style={{ flex: '1 1 220px' }}>
+            <label style={{ display: 'block', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', marginBottom: 4 }}>
+              Target tier
+            </label>
+            <select
+              value={targetTier === 'team' ? `team:${targetTeamId}` : 'global'}
+              onChange={e => {
+                const v = e.target.value;
+                if (v.startsWith('team:')) { setTargetTier('team'); setTargetTeamId(v.slice('team:'.length)); }
+                else { setTargetTier('global'); setTargetTeamId(''); }
+              }}
+              style={{
+                width: '100%', padding: '6px 10px',
+                border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
+                background: 'var(--eb-bg-surface)', color: 'var(--eb-text-primary)',
+                fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', boxSizing: 'border-box',
+              }}
+            >
+              <option value="global">Global pool</option>
+              {teams.map(t => <option key={t.id} value={`team:${t.id}`}>Team: {t.name || t.id} ({t.id})</option>)}
+            </select>
+          </div>
+          <div style={{ flex: '1 1 220px' }}>
+            <label style={{ display: 'block', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', marginBottom: 4 }}>
+              Target skill name
+            </label>
+            <input
+              value={name}
+              onChange={e => setName(e.target.value)}
+              placeholder="e.g. jcl-conversion"
+              style={{
+                width: '100%', padding: '6px 10px',
+                border: `1px solid ${name && !nameValid ? 'var(--eb-status-error)' : 'var(--eb-border-default)'}`,
+                borderRadius: 'var(--eb-radius-sm)', background: 'var(--eb-bg-surface)',
+                color: 'var(--eb-text-primary)', fontFamily: 'var(--eb-font-mono)',
+                fontSize: 'var(--eb-text-sm)', boxSizing: 'border-box',
+              }}
+            />
+            {name && !nameValid && (
+              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>
+                Only letters, digits, hyphens, underscores, dots, and colons allowed.
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Draft editor */}
+        <div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4, gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+            <label style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
+              Combined SKILL.md
+              {draftSource && (
+                <span style={{ marginLeft: 8, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-normal)' }}>
+                  ({draftSource === 'llm' ? 'AI-drafted' : 'concatenated'})
+                </span>
+              )}
+            </label>
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+              <button
+                type="button"
+                onClick={() => generate(false)}
+                disabled={!targetReady || drafting}
+                style={{ ...secondaryBtnStyle, padding: '3px 10px', opacity: (!targetReady || drafting) ? 0.5 : 1 }}
+                title="Ask the model to synthesise one coherent SKILL.md from the sources"
+              >
+                {drafting ? 'Generating…' : 'Generate with AI'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setPreview(p => !p)}
+                style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+              >
+                {preview ? 'Edit' : 'Preview'}
+              </button>
+            </div>
+          </div>
+          {preview ? (
+            <div style={{
+              minHeight: 200, maxHeight: 360, overflowY: 'auto', padding: 'var(--eb-space-3)',
+              border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
+              background: 'var(--eb-bg-elevated)',
+            }}>
+              <SkillMarkdown content={draft} />
+            </div>
+          ) : (
+            <textarea
+              value={draft}
+              onChange={e => setDraft(e.target.value)}
+              rows={14}
+              placeholder={drafting ? 'Generating draft…' : 'The combined skill content…'}
+              style={{
+                width: '100%', padding: '8px 10px',
+                border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
+                background: 'var(--eb-bg-surface)', color: 'var(--eb-text-primary)',
+                fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-sm)',
+                resize: 'vertical', boxSizing: 'border-box',
+              }}
+            />
+          )}
+          {draftError && (
+            <span role="alert" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>
+              Draft failed: {draftError}
+            </span>
+          )}
+        </div>
+
+        {/* Retire sources */}
+        <label style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer' }}>
+          <input type="checkbox" checked={retireSources} onChange={e => setRetireSources(e.target.checked)} style={{ marginTop: 3 }} />
+          <span>
+            <strong>Retire source skills</strong> after merging
+            <span style={{ display: 'block', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+              Migrates every grant naming a source to the target, then archives the sources (restorable). Uncheck to keep the sources in place.
+            </span>
+          </span>
+        </label>
+
+        {error && (
+          <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{error}</div>
+        )}
+
+        {/* Actions */}
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end' }}>
+          <button type="button" onClick={onClose} disabled={merging} style={secondaryBtnStyle}>Cancel</button>
+          <button
+            type="button"
+            onClick={() => merge(false)}
+            disabled={merging || drafting || !targetReady || !draft.trim()}
+            style={primaryBtnStyle(merging || drafting || !targetReady || !draft.trim())}
+          >
+            {merging ? 'Merging…' : 'Merge skills'}
+          </button>
+        </div>
+
+        <ConfirmDialog
+          open={confirmOverwrite}
+          title="Target skill already exists"
+          variant="danger"
+          message={`A skill named "${name}" already exists at the target. Overwrite it with the merged version? This replaces the entire target skill directory.`}
+          confirmLabel={merging ? 'Overwriting…' : 'Overwrite'}
+          onConfirm={() => merge(true)}
+          onCancel={() => setConfirmOverwrite(false)}
+        />
+      </div>
+    </div>
+  );
+}
+
 /* ─── Source badge ─────────────────────────────────────────────────────── */
 const BADGE_LABEL = { pool: 'global', team: 'team', agent: 'agent' };
 function SourceBadge({ value: v }) {
@@ -831,8 +1147,29 @@ function SourceBadge({ value: v }) {
   );
 }
 
-function makeColumns(onDeleteRow) {
-  return [
+function makeColumns(onDeleteRow, select) {
+  const cols = [];
+  if (select) {
+    cols.push({
+      key: '_select',
+      label: '',
+      sortable: false,
+      render: (_, row) => {
+        const checked = select.isSelected(row);
+        return (
+          <input
+            type="checkbox"
+            checked={checked}
+            aria-label={`Select ${row.name} for merge`}
+            onClick={e => e.stopPropagation()}
+            onChange={e => { e.stopPropagation(); select.onToggle(row); }}
+            style={{ cursor: 'pointer' }}
+          />
+        );
+      },
+    });
+  }
+  cols.push(
     { key: 'name', label: 'Skill Name' },
     { key: 'source', label: 'Tier', render: v => <SourceBadge value={v} /> },
     { key: '_scope', label: 'Scope', sortable: false, render: (_, row) => {
@@ -849,7 +1186,8 @@ function makeColumns(onDeleteRow) {
         <IconButton icon={Trash2} label="Delete skill" danger onClick={e => { e.stopPropagation(); onDeleteRow(row); }} size={14} />
       ) : null,
     },
-  ];
+  );
+  return cols;
 }
 
 /* ─── Main page ────────────────────────────────────────────────────────── */
@@ -871,6 +1209,10 @@ export default function SkillsRegistry() {
   const [importError, setImportError] = useState(null);
   const [importSuccess, setImportSuccess] = useState(null);
   const [importTarget, setImportTarget] = useState('global'); // 'global' or 'team:<id>'
+  // multi-select → merge (#631): rowKey → row for the selected skills
+  const [selectedRows, setSelectedRows] = useState({});
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [mergeSuccess, setMergeSuccess] = useState(null);
 
   const filteredSkills = (allSkills ?? []).filter(s => {
     if (filter === 'Global') return s.source === 'pool';
@@ -883,6 +1225,17 @@ export default function SkillsRegistry() {
   const openSkill = useCallback((row) => {
     setSelectedSkill(row);
   }, []);
+
+  const toggleRow = useCallback((row) => {
+    const key = skillRowKey(row);
+    setSelectedRows(prev => {
+      const next = { ...prev };
+      if (next[key]) delete next[key]; else next[key] = row;
+      return next;
+    });
+  }, []);
+  const isRowSelected = useCallback((row) => !!selectedRows[skillRowKey(row)], [selectedRows]);
+  const selectedList = Object.values(selectedRows);
 
   function handleCreated(skill) {
     setShowNewForm(false);
@@ -970,7 +1323,20 @@ export default function SkillsRegistry() {
     }
   }
 
-  const columns = makeColumns(row => { setRowDeleteError(null); setRowDeleteTarget(row); });
+  function handleMerged(data) {
+    setMergeOpen(false);
+    setSelectedRows({});
+    setMergeSuccess(`Merged into "${data.name}"${data.retiredSources ? ` (${(data.sources || []).length} source(s) retired)` : ''}.`);
+    refetch?.();
+    openSkill(data.target?.tier === 'team'
+      ? { name: data.name, source: 'team', teamId: data.target.teamId }
+      : { name: data.name, source: 'pool' });
+  }
+
+  const columns = makeColumns(
+    row => { setRowDeleteError(null); setRowDeleteTarget(row); },
+    { isSelected: isRowSelected, onToggle: toggleRow },
+  );
 
   if (loading) {
     return <div aria-busy="true" style={{ height: 300, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />;
@@ -1101,6 +1467,38 @@ export default function SkillsRegistry() {
         ))}
       </div>
 
+      {/* Merge success feedback */}
+      {mergeSuccess && (
+        <div role="status" style={{ color: 'var(--eb-status-success)', fontSize: 'var(--eb-text-sm)' }}>
+          {mergeSuccess}
+        </div>
+      )}
+
+      {/* Multi-select merge action bar (#631) — checkboxes in the table drive this */}
+      {selectedList.length > 0 && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', flexWrap: 'wrap',
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          background: 'var(--eb-accent-muted)', border: '1px solid var(--eb-accent-primary)',
+          borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
+        }}>
+          <span style={{ color: 'var(--eb-text-primary)' }}>
+            {selectedList.length} skill{selectedList.length === 1 ? '' : 's'} selected
+          </span>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', marginLeft: 'auto' }}>
+            <button onClick={() => setSelectedRows({})} style={secondaryBtnStyle}>Clear</button>
+            <button
+              onClick={() => { setMergeSuccess(null); setMergeOpen(true); }}
+              disabled={selectedList.length < 2}
+              style={primaryBtnStyle(selectedList.length < 2)}
+              title={selectedList.length < 2 ? 'Select at least two skills to merge' : 'Merge the selected skills into one'}
+            >
+              Merge selected
+            </button>
+          </div>
+        </div>
+      )}
+
       <DataTable
         columns={columns}
         data={filteredSkills}
@@ -1108,6 +1506,15 @@ export default function SkillsRegistry() {
         emptyText="No skills found."
         getRowKey={row => `${row.source}:${row.agentId ?? ''}:${row.teamId ?? ''}:${row.name}`}
       />
+
+      {mergeOpen && (
+        <MergeSkillsDialog
+          sources={selectedList.map(rowToMergeSource)}
+          teams={allTeams ?? []}
+          onClose={() => setMergeOpen(false)}
+          onMerged={handleMerged}
+        />
+      )}
 
       <SidePanel
         open={!!selectedSkill}

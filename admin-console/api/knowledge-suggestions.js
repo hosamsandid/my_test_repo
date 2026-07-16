@@ -489,6 +489,79 @@ function extendSkillProvenance({ existingProv, from, to, teamId, entryIds, candi
   };
 }
 
+// ---------------------------------------------------------------------------
+// Merge N existing skills into one (#631, concept §3.4)
+// ---------------------------------------------------------------------------
+//
+// Promotion/extension fold KB knowledge into a skill. Merge is different: it
+// synthesises N EXISTING SKILL.md documents (near-duplicate skills the operator
+// wants to consolidate) into ONE combined document. The pure planner
+// (skill-merge.js) validates the request + computes the grant/file/provenance
+// plans; these two helpers produce the draft SKILL.md the operator then edits,
+// mirroring the create-path draft's LLM-with-heuristic-fallback shape.
+
+// Meta-prompt: synthesise several existing skill documents into one coherent
+// SKILL.md. Pure — api.js supplies the model + transport. `sources` is
+// [{ name, tier?, skillMd }]. All source knowledge must be preserved; the
+// combined document reorganises, deduplicates and generalises across them.
+function buildSkillMergeRequest(sources) {
+  const list = Array.isArray(sources) ? sources : [];
+  const docs = list
+    .map((s, i) => {
+      const name = (s && s.name) || `source-${i + 1}`;
+      const md = typeof (s && s.skillMd) === 'string' ? s.skillMd.trim() : '';
+      return `--- SOURCE SKILL "${name}" ---\n${md}`;
+    })
+    .join('\n\n');
+  const instruction = [
+    'You curate reusable skills for a team of AI software-delivery agents.',
+    `The team has ${list.length} overlapping skill documents about the same area.`,
+    'Merge them into ONE coherent, reusable SKILL.md — reorganise, deduplicate and',
+    'generalise across the sources. Preserve all durable knowledge from every',
+    'source; never drop information just because another source did not repeat it.',
+    '',
+    'The source skill documents:',
+    docs,
+    '',
+    'Requirements for the SKILL.md you produce:',
+    '- Start with a single H1 title line, then short sections.',
+    '- Integrate the sources; do not just concatenate them under separate headings.',
+    '- Capture durable, reusable knowledge — no PR/issue-specific or run-specific detail.',
+    '- Do NOT invent tool names, repo names, file paths or credentials that were not stated.',
+    '- Output ONLY the Markdown of the SKILL.md — no preamble, no surrounding code fences.',
+  ].join('\n');
+  return { max_tokens: 1536, messages: [{ role: 'user', content: instruction }] };
+}
+
+// Deterministic concat fallback (AC4 — draft degrades gracefully without a model
+// provider). Keeps every source document verbatim under its own H2 so nothing is
+// lost, prefixed with a note that the operator should consolidate them. Mirrors
+// buildHeuristicSkillDraft's never-throw posture. `sources` is
+// [{ name, tier?, skillMd }]; `targetName` titles the combined document.
+function buildHeuristicSkillMerge(sources, { targetName } = {}) {
+  const list = Array.isArray(sources) ? sources : [];
+  const title = (typeof targetName === 'string' && targetName.trim()) || 'Merged skill';
+  const names = list.map((s) => (s && s.name) || '?');
+  const lines = [];
+  lines.push(`# ${title}`);
+  lines.push('');
+  lines.push(
+    `This skill was merged from ${list.length} source skill(s): ` +
+    `${names.join(', ')}. Each source's content is preserved below — review and ` +
+    'consolidate the sections into one coherent document.',
+  );
+  lines.push('');
+  for (const s of list) {
+    const name = (s && s.name) || '?';
+    const md = typeof (s && s.skillMd) === 'string' ? s.skillMd.trim() : '';
+    lines.push(`## From: ${name}`);
+    lines.push('');
+    if (md) lines.push(md);
+    lines.push('');
+  }
+  return { name: title, skillMd: lines.join('\n').replace(/\s+$/, '') + '\n', llmDrafted: false };
+}
+
 // Auto-match a converged candidate to an existing skill (AC4). Given the
 // candidate and a list of eligible skills ({ name, tier, entryIds? }), return the
 // best match or null. Signals, strongest first: (1) any overlap between the
@@ -727,6 +800,8 @@ module.exports = {
   buildSkillExtensionRequest,
   buildHeuristicSkillExtension,
   extendSkillProvenance,
+  buildSkillMergeRequest,
+  buildHeuristicSkillMerge,
   matchExistingSkill,
   SHARE_SOURCES,
   validateShareToTeam,

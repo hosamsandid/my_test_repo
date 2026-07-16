@@ -13,6 +13,8 @@ const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
 const githubEventLog = require('./github-event-log');
+const usageLog = require('./usage-log');
+const { summarize } = require('./usage-summary');
 const maintenanceMode = require('./maintenance-mode');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, visibleUser, describeAuthz } = require('./scope');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
@@ -220,6 +222,23 @@ app.get('/api/github-events', (req, res) => {
     ...e,
     outcomes: (e.outcomes || []).map((o) => ({ ...o, agentName: agentName(o.agentId) })),
   })));
+});
+
+// Token-usage statistics (#654, §5 view 1 of docs/cost-per-pr-concept.md).
+// Reads the day-bucketed usage records the orchestrator ingested and runs the
+// pure aggregator. Tokens only — dollar figures are never surfaced (AC4).
+// Team-scoped (#302): callers without full visibility only see records whose
+// teamId is one of their memberships, applied BEFORE aggregation so totals and
+// groups both reflect the caller's scope. Protected by the auth gate above.
+app.get('/api/usage/summary', (req, res) => {
+  const { since, until } = req.query;
+  const groupBy = req.query.groupBy;
+  const scope = getScope(req);
+  let records = usageLog.readRecords({ since });
+  if (!scope.all) {
+    records = records.filter((r) => visibleTeam(scope, r && r.teamId));
+  }
+  res.json(summarize(records, { since, until, groupBy }));
 });
 
 const MCP_SERVER_ID_RE = /^[a-z0-9-]+$/;

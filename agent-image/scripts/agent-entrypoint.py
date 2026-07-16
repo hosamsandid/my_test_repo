@@ -596,6 +596,9 @@ class _StatePushClient:
         if not self._started:
             self._started = True
             self._thread.start()
+            # Flush any usage records left on the spool by a previous run that
+            # crashed / was killed while the orchestrator was unreachable (#654).
+            self._q.put(("usage", None))
 
     def push_status(self, data: dict) -> None:
         self._q.put(("status", dict(data)))
@@ -614,6 +617,12 @@ class _StatePushClient:
         # session_id="" / None means "clear" (drops the admin's Session-aktiv
         # badge after a reset). Last write per room wins within a debounce tick.
         self._q.put(("pointer", (room_id, session_id or "", updated_at or "")))
+
+    def drain_usage(self) -> None:
+        # Nudge the push thread to flush the durable usage spool (#654). The
+        # records themselves are already on disk (survive an orchestrator
+        # outage / container restart); this only asks the thread to try sending.
+        self._q.put(("usage", None))
 
     def _run(self) -> None:
         while True:
@@ -634,6 +643,7 @@ class _StatePushClient:
             running_sessions = None
             dirty: list[str] = []
             pointers: dict[str, tuple[str, str]] = {}
+            drain_usage = False
             for kind, payload in items:
                 if kind == "status":
                     status_data = payload
@@ -644,6 +654,8 @@ class _StatePushClient:
                 elif kind == "pointer":
                     room_id, sid, upd = payload  # type: ignore[misc]
                     pointers[room_id] = (sid, upd)
+                elif kind == "usage":
+                    drain_usage = True  # coalesce many nudges into one drain
             try:
                 if status_data is not None:
                     self._post_status(status_data)
@@ -653,6 +665,8 @@ class _StatePushClient:
                     self._flush_session(room_id)
                 for room_id, (sid, upd) in pointers.items():
                     self._post_pointer(room_id, sid, upd)
+                if drain_usage:
+                    self._drain_usage_spool()
             except Exception as exc:  # never let the push thread die
                 print(f"[Runner] state-push tick failed: {exc}", file=sys.stderr)
 
@@ -671,6 +685,34 @@ class _StatePushClient:
             "updatedAt": updated_at,
         }).encode("utf-8")
         self._post(f"/internal/agents/{self._agent_id}/session-pointer", body)
+
+    def _post_usage(self, record: dict) -> tuple[int, str]:
+        body = json.dumps(record).encode("utf-8")
+        return self._post(f"/internal/agents/{self._agent_id}/usage", body)
+
+    def _drain_usage_spool(self) -> None:
+        """Send every spooled usage record; keep the ones that fail for the next
+        drain (#654). The spool is the durable buffer — records survive an
+        orchestrator outage or a container restart here, so this is at-least-once
+        delivery. Runs under the spool lock so it can't race a concurrent append."""
+        with _usage_spool_lock:
+            records = _read_usage_spool()
+            if not records:
+                return
+            remaining: list[dict] = []
+            stop = False
+            for i, rec in enumerate(records):
+                if stop:
+                    remaining.append(rec)
+                    continue
+                status, _resp = self._post_usage(rec)
+                if status == 200:
+                    continue  # acked — drop from the spool
+                # First failure: orchestrator down/erroring. Keep this and every
+                # later record and stop hammering until the next drain nudge.
+                remaining.append(rec)
+                stop = True
+            _write_usage_spool(remaining)
 
     def _flush_session(self, room_id: str) -> None:
         p = _session_log_file(room_id)
@@ -730,6 +772,75 @@ class _StatePushClient:
 
 _push_client: _StatePushClient | None = None
 
+# ---- durable usage-record spool (#654) ----
+#
+# One record per claude invocation is written here at result time and drained to
+# the orchestrator's ingest endpoint by the push thread. The spool is the
+# durability boundary: if the orchestrator is unreachable the record stays on
+# disk and is retried on the next drain nudge and on process start, so a token
+# record is never lost to a transient outage. Capped so a long outage can't grow
+# it without bound (oldest records win the cap — they are the ones already tried).
+_usage_spool_lock = threading.Lock()
+_USAGE_SPOOL_MAX = 5000
+
+
+def _usage_spool_file() -> Path:
+    return _agent_workdir() / "usage-spool.jsonl"
+
+
+def _read_usage_spool() -> list[dict]:
+    p = _usage_spool_file()
+    try:
+        if not p.exists():
+            return []
+        out: list[dict] = []
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue  # skip a corrupt line rather than lose the whole spool
+            if isinstance(rec, dict):
+                out.append(rec)
+        return out
+    except Exception as exc:
+        print(f"[Runner] usage spool read failed: {exc}", file=sys.stderr)
+        return []
+
+
+def _write_usage_spool(records: list[dict]) -> None:
+    p = _usage_spool_file()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if not records:
+            p.unlink(missing_ok=True)
+            return
+        if len(records) > _USAGE_SPOOL_MAX:
+            records = records[-_USAGE_SPOOL_MAX:]
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+        tmp.replace(p)
+    except Exception as exc:
+        print(f"[Runner] usage spool write failed: {exc}", file=sys.stderr)
+
+
+def _spool_usage_record(record: dict) -> None:
+    """Durably append one usage record and nudge the push thread to drain it.
+    Best-effort: a spool failure is logged but never breaks the claude run."""
+    try:
+        with _usage_spool_lock:
+            records = _read_usage_spool()
+            records.append(record)
+            _write_usage_spool(records)
+    except Exception as exc:
+        print(f"[Runner] usage spool append failed: {exc}", file=sys.stderr)
+        return
+    pc = _get_push_client()
+    if pc:
+        pc.drain_usage()
+
 
 def _get_push_client() -> _StatePushClient | None:
     global _push_client
@@ -773,6 +884,64 @@ def _normalize_usage_tokens(usage: dict) -> dict:
         "output": usage.get("output_tokens"),
         "cacheCreationInput": usage.get("cache_creation_input_tokens") or 0,
         "cacheReadInput": usage.get("cache_read_input_tokens") or 0,
+    }
+
+
+def _normalize_model_usage(model_usage: dict | None) -> dict:
+    """Shape the CLI result-event `modelUsage` (a per-model map with camelCase
+    `inputTokens`/`outputTokens`/`cacheCreationInputTokens`/`cacheReadInputTokens`
+    — plus cost/window fields we drop) into the same four-class token dict used
+    everywhere else, keyed by model name. Cost is intentionally NOT carried:
+    view 1 is tokens-only (#654 AC4). Preserves model insertion order."""
+    out: dict = {}
+    if not isinstance(model_usage, dict):
+        return out
+    for model, u in model_usage.items():
+        if not isinstance(u, dict):
+            continue
+        out[model] = {
+            "input": u.get("inputTokens") or 0,
+            "output": u.get("outputTokens") or 0,
+            "cacheCreationInput": u.get("cacheCreationInputTokens") or 0,
+            "cacheReadInput": u.get("cacheReadInputTokens") or 0,
+        }
+    return out
+
+
+def build_usage_record(ctx: dict) -> dict:
+    """Pure assembler for a §4.1 token-usage record (#654). Takes a run-context
+    dict (identity + trigger/github/git provenance + the captured `resultEvent`
+    from _map_stream_json_line) and returns the canonical record. This schema is
+    the shared emitter↔aggregator contract, asserted from both this suite and
+    admin-console/api/usage-summary.test.js via usage-summary.fixture.json —
+    change both sides in one commit.
+
+    `totalCostUsd` is stored opaque for possible future use but is never
+    surfaced by the aggregator/UI (tokens-only, AC4). Missing token counts
+    default to 0 so downstream summation never sees None."""
+    result = ctx.get("resultEvent") or {}
+    tokens = result.get("tokens") or {}
+    return {
+        "ts": ctx.get("ts"),
+        "agentId": ctx.get("agentId"),
+        "teamId": ctx.get("teamId"),
+        "roleId": ctx.get("roleId"),
+        "flowInstanceId": ctx.get("flowInstanceId"),
+        "provider": ctx.get("provider"),
+        "correlationId": ctx.get("correlationId"),
+        "sessionId": ctx.get("sessionId"),
+        "trigger": ctx.get("trigger"),
+        "github": ctx.get("github"),
+        "git": ctx.get("git"),
+        "tokens": {
+            "input": tokens.get("input") or 0,
+            "output": tokens.get("output") or 0,
+            "cacheCreationInput": tokens.get("cacheCreationInput") or 0,
+            "cacheReadInput": tokens.get("cacheReadInput") or 0,
+        },
+        "modelUsage": _normalize_model_usage(result.get("modelUsage")),
+        "durationMs": result.get("durationMs"),
+        "totalCostUsd": result.get("costUsd"),
     }
 
 
@@ -888,6 +1057,11 @@ def _map_stream_json_line(line: str, correlation_id: str,
             # unlike `tokens` above. None if no assistant message carried
             # usage before this result (defensive; shouldn't normally happen).
             "contextTokens": dict(usage_sink) if usage_sink else None,
+            # Raw per-model usage map from the CLI (#654). Kept verbatim on the
+            # event; build_usage_record normalizes it into the four-class split.
+            # A single invocation aggregates every model / sub-agent it drove,
+            # so this is the per-invocation model breakdown.
+            "modelUsage": parsed.get("modelUsage"),
             "costUsd": parsed.get("total_cost_usd"),
             "sessionId": parsed.get("session_id"),
             "result": parsed.get("result"),
@@ -1711,9 +1885,93 @@ def _base_claude_args(prompt: str, memory_hint: str, model_arg: str | None) -> l
     return args
 
 
+# ---- usage-record run context + git capture (#654) ----
+
+def _base_run_context() -> dict:
+    """Identity block for a usage record, from env + config. roleId/provider are
+    best-effort here (config `role`, AEE_LLM_PROVIDER_ID) — the orchestrator's
+    ingest enriches them authoritatively (roleId from the <team>-<role> agent id,
+    provider from the agent's resolved Model-Provider binding)."""
+    cfg = _load_dm_agent_config()
+    role = cfg.get("role")
+    return {
+        "agentId": os.environ.get("AGENT_ID"),
+        "teamId": _knowledge_team_id(),
+        "roleId": role if isinstance(role, str) and role else None,
+        "provider": os.environ.get("AEE_LLM_PROVIDER_ID") or None,
+        "flowInstanceId": None,
+    }
+
+
+def _usage_github_and_key(gh: dict | None) -> tuple[dict | None, str | None]:
+    """From a poller github ctx block ({repo, event, eventId, payload, ...}) derive
+    the usage record's `github` block ({repo, prNumber, issueNumber}) and the
+    trigger `conversationKey` (pr:N / issue:N / push:<ref>), mirroring the poller's
+    grouping. Returns (None, None) for a non-github (DM/cron) run."""
+    if not isinstance(gh, dict) or not gh:
+        return None, None
+    payload = gh.get("payload") if isinstance(gh.get("payload"), dict) else {}
+    pr = payload.get("pull_request") if isinstance(payload.get("pull_request"), dict) else None
+    issue = payload.get("issue") if isinstance(payload.get("issue"), dict) else None
+    pr_number = pr.get("number") if pr else None
+    issue_number = issue.get("number") if issue else None
+    block = {
+        "repo": gh.get("repo"),
+        "prNumber": pr_number,
+        "issueNumber": issue_number,
+    }
+    if pr_number is not None:
+        key = f"pr:{pr_number}"
+    elif issue_number is not None:
+        key = f"issue:{issue_number}"
+    else:
+        ref = payload.get("ref") if isinstance(payload.get("ref"), str) else None
+        key = f"push:{ref}" if ref else None
+    return block, key
+
+
+def _resolve_repo_dir() -> Path | None:
+    """Best-effort single git repo for the git-context block. /repo when it is a
+    git repo (bind/clone/image modes), else the sole git repo directly under the
+    agent workspace (Agent-Studio clone layout), else None (none / ambiguous)."""
+    try:
+        if (REPO_DIR / ".git").exists():
+            return REPO_DIR
+    except Exception:
+        pass
+    try:
+        candidates = [d for d in _agent_workdir().iterdir()
+                      if d.is_dir() and (d / ".git").exists()]
+        if len(candidates) == 1:
+            return candidates[0]
+    except Exception:
+        pass
+    return None
+
+
+def _git_short_head(repo_dir: Path | None) -> str | None:
+    if repo_dir is None:
+        return None
+    try:
+        r = _git_run(["rev-parse", "--short", "HEAD"], check=False, cwd=str(repo_dir))
+        return (r.stdout or "").strip() or None
+    except Exception:
+        return None
+
+
+def _git_branch(repo_dir: Path | None) -> str | None:
+    if repo_dir is None:
+        return None
+    try:
+        r = _git_run(["rev-parse", "--abbrev-ref", "HEAD"], check=False, cwd=str(repo_dir))
+        return (r.stdout or "").strip() or None
+    except Exception:
+        return None
+
+
 def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
                       resume_id: str | None, blueprint_id: str | None,
-                      timeout_sec: int) -> tuple[str, str | None]:
+                      timeout_sec: int, run_context: dict | None = None) -> tuple[str, str | None]:
     """Run claude once. Returns (final_text, observed_session_id).
 
     Raises CalledProcessError on non-zero exit. Sets module-level
@@ -1749,6 +2007,12 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     env["KNOWLEDGE_CORRELATION_ID"] = correlation_id or ""
     if resume_id:
         env["KNOWLEDGE_SESSION_ID"] = resume_id
+
+    # Git context for the usage record (#654): capture HEAD before the run so the
+    # record can show what this invocation moved. Best-effort — never blocks the run.
+    _usage_repo_dir = _resolve_repo_dir()
+    _usage_head_before = _git_short_head(_usage_repo_dir)
+
     proc = subprocess.Popen(
         ["claude", *args],
         cwd=str(_agent_workdir()),
@@ -1763,18 +2027,20 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
 
     final_result: str | None = None
     observed_session: str | None = None
+    result_event: dict | None = None  # full result event for the usage record (#654)
     assistant_chunks: list[str] = []
     stderr_chunks: list[str] = []
     ask_question_input: dict | None = None  # first AskUserQuestion tool input (#447)
     context_usage: dict = {}  # last assistant-message usage this invocation (#509)
 
     def handle_line(line: str) -> None:
-        nonlocal final_result, observed_session, ask_question_input
+        nonlocal final_result, observed_session, ask_question_input, result_event
         for ev in _map_stream_json_line(line, correlation_id, context_usage):
             _append_event(room_id, ev)  # log tab is unchanged (#447 AC6)
             if ev.get("type") == "system_init" and isinstance(ev.get("sessionId"), str):
                 observed_session = ev["sessionId"]
             elif ev.get("type") == "result":
+                result_event = ev
                 if isinstance(ev.get("sessionId"), str):
                     observed_session = ev["sessionId"]
                 if isinstance(ev.get("result"), str):
@@ -1820,6 +2086,34 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     rc = proc.returncode
     stderr_blob = "".join(stderr_chunks)
 
+    # Emit one usage record per invocation that produced a result event (#654).
+    # Aborted/crashed runs with no result event emit nothing — there are no token
+    # counts to report. Runs into their own error handling (rc != 0, e.g. an
+    # AskUserQuestion pause) still get a record when the CLI reported a result.
+    if result_event is not None:
+        try:
+            ctx = dict(run_context) if isinstance(run_context, dict) else _base_run_context()
+            ctx.setdefault("flowInstanceId", None)
+            head_after = _git_short_head(_usage_repo_dir)
+            git_block = None
+            if _usage_repo_dir is not None:
+                git_block = {
+                    "repo": _usage_repo_dir.name,
+                    "branch": _git_branch(_usage_repo_dir),
+                    "headBefore": _usage_head_before,
+                    "headAfter": head_after,
+                }
+            ctx.update({
+                "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "correlationId": correlation_id,
+                "sessionId": observed_session,
+                "git": git_block,
+                "resultEvent": result_event,
+            })
+            _spool_usage_record(build_usage_record(ctx))
+        except Exception as exc:  # telemetry must never break the run
+            print(f"[Runner] usage-record emit failed: {exc}", file=sys.stderr)
+
     # An agent that called AskUserQuestion is pausing for human input. The tool
     # is denied (non-interactive run) and the CLI may or may not exit non-zero,
     # but for the user this is a question, not a crash — surface the rendered
@@ -1848,7 +2142,8 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
 
 
 def _call_claude(prompt: str, room_id: str, correlation_id: str,
-                 blueprint_id: str | None, timeout_sec: int = CLAUDE_TIMEOUT_SEC) -> str:
+                 blueprint_id: str | None, timeout_sec: int = CLAUDE_TIMEOUT_SEC,
+                 run_context: dict | None = None) -> str:
     """Drive _call_claude_once with --resume retry-on-stale-session logic."""
     # Pyramid level 1 guarantee: the digest CLAUDE.md @-imports is current for
     # this run (per-invocation agents see the team state on every run).
@@ -1857,7 +2152,8 @@ def _call_claude(prompt: str, room_id: str, correlation_id: str,
     if resume_id:
         try:
             text, observed = _call_claude_once(
-                prompt, room_id, correlation_id, resume_id, blueprint_id, timeout_sec
+                prompt, room_id, correlation_id, resume_id, blueprint_id, timeout_sec,
+                run_context,
             )
             if observed:
                 _write_session_pointer(room_id, observed)
@@ -1884,7 +2180,8 @@ def _call_claude(prompt: str, room_id: str, correlation_id: str,
                     file=sys.stderr,
                 )
                 text, observed = _call_claude_once(
-                    prompt, room_id, correlation_id, None, blueprint_id, timeout_sec
+                    prompt, room_id, correlation_id, None, blueprint_id, timeout_sec,
+                    run_context,
                 )
                 if observed:
                     _write_session_pointer(room_id, observed)
@@ -1892,7 +2189,8 @@ def _call_claude(prompt: str, room_id: str, correlation_id: str,
             raise
 
     text, observed = _call_claude_once(
-        prompt, room_id, correlation_id, None, blueprint_id, timeout_sec
+        prompt, room_id, correlation_id, None, blueprint_id, timeout_sec,
+        run_context,
     )
     if observed:
         _write_session_pointer(room_id, observed)
@@ -3055,6 +3353,17 @@ class TriggerScheduler:
         else:
             correlation_id = f"trigger:{tid}:{int(time.time() * 1000)}"
 
+        # Usage-record run context (#654): identity + trigger/github provenance,
+        # threaded into the claude call so the emitted record can attribute tokens.
+        github_block, conversation_key = _usage_github_and_key(gh)
+        run_context = _base_run_context()
+        run_context["trigger"] = {
+            "type": trigger.get("type"),
+            "id": tid,
+            "conversationKey": conversation_key,
+        }
+        run_context["github"] = github_block
+
         cfg = _load_dm_agent_config()
         session_policy = cfg.get("sessionPolicy")
         is_per_invocation = session_policy == "per-invocation"
@@ -3146,12 +3455,13 @@ class TriggerScheduler:
                     result, _observed = await asyncio.to_thread(
                         _call_claude_once,
                         prompt, room_id, correlation_id, None,
-                        self._blueprint_id, timeout_sec,
+                        self._blueprint_id, timeout_sec, run_context,
                     )
                 else:
                     result = await asyncio.to_thread(
                         _call_claude,
                         prompt, room_id, correlation_id, self._blueprint_id, timeout_sec,
+                        run_context,
                     )
             except subprocess.CalledProcessError as err:
                 try:

@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+"""usage — read-only view of your (or your team's) token usage (#679).
+
+Token telemetry phase 3 item 3: a `knowledge`-style CLI that lets an agent ask
+"how many tokens have I — or my team — consumed" from *inside* the container.
+
+The usage store (/workspace/usage/) is owned and written by the orchestrator,
+and an agent container is volume-isolated from it (concept §4.1) — so this CLI
+never reads those files directly. It queries the orchestrator's read-only
+endpoint (GET /internal/agents/:id/usage/summary) across that boundary, exactly
+as `knowledge` and `gh-as-agent` route through the orchestrator.
+
+It is READ-ONLY and TOKENS-ONLY: it can never write or delete a usage record,
+and it never surfaces a dollar/cost figure — only the four token classes
+(input, output, cacheCreationInput, cacheReadInput), their total, and the
+invocation count that backs them.
+
+Your own usage:
+
+    usage me
+    usage me --since 2026-07-01 --until 2026-07-16
+    usage me --group-by day
+    usage me --json
+
+Your team's aggregate (never another team — fail-closed):
+
+    usage team
+    usage team --group-by agent
+    usage team --since 2026-07-10 --json
+
+Options:
+
+    --since <ISO>     start of the half-open [since, until) window (inclusive)
+    --until <ISO>     end of the window (exclusive)
+    --group-by <g>    agent | team | model | provider | day   (default: agent)
+    --json            print the raw endpoint JSON instead of the table
+
+Scope is resolved server-side from your agent identity: `me` is your own
+records; `team` is your resolved team's aggregate. An unknown/teamless agent on
+`team` scope gets a zeroed result, never another team's usage.
+
+Exit codes: 0 ok · 2 usage error · 3 orchestrator unreachable / bad response.
+"""
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+# ===========================================================================
+# Pure core — no fs / no network. URL assembly + rendering only, so it is
+# unit-tested directly in test_usage.py. All IO lives in the cmd_* wrappers.
+# ===========================================================================
+
+SCOPES = ("self", "team")
+GROUP_BY = ("agent", "team", "model", "provider", "day")
+TOKEN_CLASSES = ("input", "output", "cacheCreationInput", "cacheReadInput")
+
+# Human labels for the four token classes (display only).
+CLASS_LABELS = {
+    "input": "Input",
+    "output": "Output",
+    "cacheCreationInput": "Cache write",
+    "cacheReadInput": "Cache read",
+}
+
+
+def build_summary_url(base, agent_id, *, scope="self", since=None, until=None, group_by=None):
+    """Assemble the read-only summary endpoint URL + query string. Pure.
+
+    `base` is the orchestrator internal root; `agent_id` is path-quoted. Only the
+    provided query params are appended, so the endpoint applies its own defaults.
+    """
+    root = (base or "").rstrip("/")
+    quoted = urllib.parse.quote(str(agent_id), safe="")
+    params = {"scope": scope if scope in SCOPES else "self"}
+    if since:
+        params["since"] = since
+    if until:
+        params["until"] = until
+    if group_by:
+        params["groupBy"] = group_by
+    return f"{root}/internal/agents/{quoted}/usage/summary?" + urllib.parse.urlencode(params)
+
+
+def _fmt_int(n):
+    try:
+        return f"{int(n):,}"
+    except (TypeError, ValueError):
+        return "0"
+
+
+def format_summary(result):
+    """Render the endpoint JSON as a tokens-only human table. Pure.
+
+    Never emits a money figure — it only reads the four token classes, their
+    total, and the invocation count. A malformed/empty result renders as a
+    zeroed table rather than raising.
+    """
+    if not isinstance(result, dict):
+        result = {}
+    totals = result.get("totals") if isinstance(result.get("totals"), dict) else {}
+    scope = result.get("scope", "self")
+    who = "team " + str(result.get("teamId")) if scope == "team" else "agent " + str(result.get("agentId"))
+    window = []
+    if result.get("since"):
+        window.append(f"since {result['since']}")
+    if result.get("until"):
+        window.append(f"until {result['until']}")
+    win = (" (" + ", ".join(window) + ")") if window else " (all time)"
+
+    lines = [f"Token usage for {who}{win} — token counts only:", ""]
+    for k in TOKEN_CLASSES:
+        lines.append(f"  {CLASS_LABELS[k]:<12} {_fmt_int(totals.get(k, 0)):>14}")
+    lines.append(f"  {'Total':<12} {_fmt_int(totals.get('total', 0)):>14}")
+    lines.append(f"  {'Invocations':<12} {_fmt_int(totals.get('invocations', 0)):>14}")
+
+    groups = result.get("groups") if isinstance(result.get("groups"), list) else []
+    if groups:
+        lines.append("")
+        lines.append(f"By {result.get('groupBy', 'agent')}:")
+        for g in groups:
+            if not isinstance(g, dict):
+                continue
+            tk = g.get("tokens") if isinstance(g.get("tokens"), dict) else {}
+            lines.append(f"  {str(g.get('key', '?')):<24} total={_fmt_int(tk.get('total', 0))} "
+                         f"(in={_fmt_int(tk.get('input', 0))} out={_fmt_int(tk.get('output', 0))} "
+                         f"cw={_fmt_int(tk.get('cacheCreationInput', 0))} cr={_fmt_int(tk.get('cacheReadInput', 0))})")
+    return "\n".join(lines)
+
+
+# ===========================================================================
+# IO layer — orchestrator base resolution + the read-only GET.
+# ===========================================================================
+
+def _agent_id():
+    return os.environ.get("AGENT_ID", "unknown")
+
+
+def _orchestrator_base():
+    return (os.environ.get("ORCHESTRATOR_INTERNAL_URL")
+            or os.environ.get("AEE_ORCHESTRATOR_URL")
+            or "http://orchestrator:4002")
+
+
+def _fetch_summary(url):
+    """GET the summary endpoint. Returns (ok, result_or_errmsg). Read-only —
+    never writes. A transport error / non-JSON body fails cleanly so a caller
+    never mistakes a partial response for a real total (edge case: unreachable)."""
+    req = urllib.request.Request(url, method="GET", headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace") if exc.fp else str(exc)
+        return False, f"HTTP {exc.code}: {detail}"
+    except (urllib.error.URLError, OSError) as exc:
+        return False, str(exc)
+    try:
+        return True, json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        return False, f"orchestrator returned a non-JSON response: {body[:200]}"
+
+
+def _die(msg, code=2):
+    sys.stderr.write(f"usage: {msg}\n")
+    sys.exit(code)
+
+
+def _run(scope, argv):
+    since = until = group_by = None
+    as_json = False
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--since":
+            i += 1
+            since = argv[i] if i < len(argv) else None
+        elif a.startswith("--since="):
+            since = a[len("--since="):]
+        elif a == "--until":
+            i += 1
+            until = argv[i] if i < len(argv) else None
+        elif a.startswith("--until="):
+            until = a[len("--until="):]
+        elif a in ("--group-by", "--groupBy"):
+            i += 1
+            group_by = argv[i] if i < len(argv) else None
+        elif a.startswith("--group-by="):
+            group_by = a[len("--group-by="):]
+        elif a.startswith("--groupBy="):
+            group_by = a[len("--groupBy="):]
+        elif a == "--json":
+            as_json = True
+        else:
+            _die(f"unknown option '{a}'")
+        i += 1
+
+    if group_by is not None and group_by not in GROUP_BY:
+        _die("--group-by must be one of " + "|".join(GROUP_BY))
+
+    url = build_summary_url(_orchestrator_base(), _agent_id(),
+                            scope=scope, since=since, until=until, group_by=group_by)
+    ok, result = _fetch_summary(url)
+    if not ok:
+        _die(f"could not read usage from the orchestrator: {result}", 3)
+
+    if as_json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(format_summary(result))
+
+
+def cmd_me(argv):
+    _run("self", argv)
+
+
+def cmd_team(argv):
+    _run("team", argv)
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
+        sys.stdout.write(__doc__)
+        return
+    cmd, rest = sys.argv[1], sys.argv[2:]
+    dispatch = {"me": cmd_me, "team": cmd_team}
+    fn = dispatch.get(cmd)
+    if not fn:
+        sys.stderr.write(
+            f"usage: unknown subcommand '{cmd}'. Supported: me, team.\n"
+        )
+        sys.exit(2)
+    fn(rest)
+
+
+if __name__ == "__main__":
+    main()

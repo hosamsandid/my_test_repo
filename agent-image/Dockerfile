@@ -90,6 +90,13 @@ RUN chmod +x /opt/ace/scripts/gh-as-agent \
 RUN chmod +x /opt/ace/scripts/knowledge \
     && ln -sf /opt/ace/scripts/knowledge /usr/local/bin/knowledge
 
+# `usage` — read-only view of this agent's / its team's token usage (#679). On
+# PATH so agents call it directly: `usage me` / `usage team` query the
+# orchestrator's read-only usage endpoint across the volume-isolation boundary
+# (the agent can't read /workspace/usage/ itself). Token counts only, never money.
+RUN chmod +x /opt/ace/scripts/usage \
+    && ln -sf /opt/ace/scripts/usage /usr/local/bin/usage
+
 ENV NODE_ENV=production
 
 ENTRYPOINT ["python3", "/opt/ace/scripts/agent-entrypoint.py"]

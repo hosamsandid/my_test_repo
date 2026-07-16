@@ -44,4 +44,45 @@ function record(entry) {
   }
 }
 
-module.exports = { USAGE_LOG_DIR, dayOf, record };
+// ── Read half (#679) ───────────────────────────────────────────────────────
+// The orchestrator is the store OWNER (single writer above), and it is also the
+// only process able to read the store on behalf of an agent, because an agent
+// container is volume-isolated from /workspace/usage/. The internal read
+// endpoint (GET /internal/agents/:id/usage/summary) uses these to feed the pure
+// aggregation (usage-summary.js) + scoping (usage-query.js). Read-only: nothing
+// here writes or deletes. Mirrors the read half of admin-console/api/usage-log.js.
+
+function listDayFiles() {
+  try {
+    return fs.readdirSync(USAGE_LOG_DIR)
+      .filter((f) => /^usage-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f))
+      .sort(); // chronological by name
+  } catch {
+    return [];
+  }
+}
+
+// Read every usage record across day files. Optionally skip whole files that
+// end before `since` (a cheap day-granularity prefilter; the summarizer still
+// applies the exact half-open [since, until) window per record). Best-effort;
+// returns [] on any error, skips corrupt lines.
+function readRecords({ since } = {}) {
+  const sinceDay = typeof since === 'string' && /^\d{4}-\d{2}-\d{2}/.test(since) ? since.slice(0, 10) : null;
+  try {
+    const records = [];
+    for (const f of listDayFiles()) {
+      const day = f.slice('usage-'.length, f.length - '.jsonl'.length);
+      if (sinceDay && day < sinceDay) continue;
+      const content = fs.readFileSync(path.join(USAGE_LOG_DIR, f), 'utf8');
+      for (const ln of content.split('\n')) {
+        if (!ln.trim()) continue;
+        try { records.push(JSON.parse(ln)); } catch { /* skip corrupt line */ }
+      }
+    }
+    return records;
+  } catch {
+    return [];
+  }
+}
+
+module.exports = { USAGE_LOG_DIR, dayOf, record, listDayFiles, readRecords };

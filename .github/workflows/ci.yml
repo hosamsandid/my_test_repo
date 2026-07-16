@@ -1,0 +1,94 @@
+# CI — runs the existing unit-test suites on every pull request and on pushes to main.
+#
+# Covered suites (one job each):
+#   orchestrator          — orchestrator/*.test.js            (node --test)
+#   admin-api             — admin-console/api/*.test.js       (node --test)
+#   admin-console-build   — admin-console Vite production build (no frontend test runner yet, see #651)
+#   agent-image           — agent-image/scripts/test_*.py     (pytest, python 3.12)
+#
+# Deliberately minimal (issue #665 / e2e-testing-concept §1): no lint, no coverage —
+# just make the suites that already exist run automatically. Recommend promoting these
+# to required checks once green.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Newer pushes to the same branch/PR supersede in-flight runs.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  orchestrator:
+    name: orchestrator (node --test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        working-directory: orchestrator
+        run: npm install --no-audit --no-fund
+      - name: Run unit tests
+        working-directory: orchestrator
+        run: npm test
+
+  admin-api:
+    name: admin-console/api (node --test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        working-directory: admin-console/api
+        run: npm install --no-audit --no-fund
+      - name: Run unit tests
+        working-directory: admin-console/api
+        run: node --test
+
+  admin-console-build:
+    name: admin-console (vite build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        working-directory: admin-console
+        # --include=dev so the Vite toolchain (a devDependency) installs even when
+        # a runner sets NODE_ENV=production.
+        run: npm ci --include=dev --no-audit --no-fund
+      - name: Build
+        working-directory: admin-console
+        run: npm run build
+
+  agent-image:
+    name: agent-image (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r agent-image/requirements.txt pytest
+      - name: Run unit tests
+        working-directory: agent-image/scripts
+        run: python -m pytest test_agent_entrypoint.py test_knowledge.py -q

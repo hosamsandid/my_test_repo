@@ -92,6 +92,10 @@ export const liveOps = {
   updateTrigger: (roleId, tid, body) => apiCall('PUT', `/api/agents/${roleId}/triggers/${tid}`, body),
   deleteTrigger: (roleId, tid) => apiCall('DELETE', `/api/agents/${roleId}/triggers/${tid}`),
   setEmits: (roleId, tid, emits) => apiCall('PUT', `/api/agents/${roleId}/triggers/${tid}/emits`, { emits }),
+  // Display name (#692) — safe on a live agent: it is display-only and does not
+  // change the agent id (that is immutable once materialized). Shape-compatible
+  // with makeDraftOps.renameRole so the shared inspector never branches on mode.
+  renameRole: (roleId, displayName) => apiCall('PUT', `/api/agents/${roleId}`, { displayName }),
   // Agent-level emitted labels (label hand-offs) — independent of any trigger.
   getRoleEmits: async (roleId) => {
     const a = await apiCall('GET', `/api/agents/${roleId}`);

@@ -2,8 +2,7 @@ import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react'
 import { AlertTriangle, Download, Boxes, X, Plus, Layers, Sparkles, Pencil } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { initFlowGraph } from './process/flow-graph-render';
-import ProcessNodeInspector from './process/ProcessNodeInspector';
-import DraftNodeInspector from './process/DraftNodeInspector';
+import NodeInspector from './process/NodeInspector';
 import StageManager from './process/StageManager';
 import { EditHandoffDialog, CreateEdgeDialog } from './process/EdgeDialogs';
 import MaterializeDialog from './process/MaterializeDialog';
@@ -419,11 +418,12 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         />
       </div>
 
-      {/* Inspector — draft roles use the lightweight draft inspector. */}
+      {/* Inspector — ONE shared component drives both draft and live modes (#692). */}
       {isDraft && selectedRole && (
-        <DraftNodeInspector
+        <NodeInspector
           key={selectedRole.id}
-          role={selectedRole}
+          mode="draft"
+          node={selectedRole}
           roles={draftBundle?.roles || []}
           stages={draftBundle?.stages || []}
           ops={draftOps}
@@ -434,11 +434,13 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         />
       )}
       {!isDraft && selectedNode && (
-        <ProcessNodeInspector
+        <NodeInspector
           key={selectedNode.id}
+          mode="live"
           node={selectedNode}
           nodes={displayGraph?.nodes || []}
           stages={displayGraph?.stages || []}
+          ops={liveOps}
           teamId={isTeamScope && !imported ? scope : undefined}
           level={imported ? 'template' : displayGraph?.level}
           onClose={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}

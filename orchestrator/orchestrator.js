@@ -37,6 +37,7 @@ const knowledgeCurator = require("./knowledge-curator");
 const knowledgeCleanup = require("./knowledge-cleanup");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
+const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
 const { assembleClaudeMd, buildMemoryHint } = require("./prompt-assembly");
 const { readMaintenanceState } = require("./maintenance-state-reader");
@@ -3716,6 +3717,184 @@ function agentCreatePr(id, env, body = {}) {
   } finally {
     try { fs.unlinkSync(tmp); } catch { /* best effort */ }
   }
+}
+
+// ── Deterministic Workspace Git panel action (issue #648) ──────────────────
+//
+// Operator-triggered, no LLM: switch the local branch, fast-forward-update the
+// current branch, or discard local changes for one repo in the agent's
+// workspace. Called by the admin-console proxy after it re-checks that the
+// agent has no running session (AC7). Hard guardrails:
+//   - switch / update refuse while the working tree is dirty (AC4/AC5)
+//   - discard is the only path that destroys uncommitted work (AC6)
+//   - update only ever fast-forwards; a diverged branch is refused, never
+//     merged or rebased (AC3 + edge cases)
+//   - only the selected repo is touched (AC8)
+//
+// Throws caller-facing Errors; `err.gitFailed = true` marks the ones the API
+// should surface as a 409 (dirty / diverged / git failure) rather than a 400
+// (bad request / config).
+function performGitPanelAction(id, env, body = {}) {
+  const { action, repoPath, branch } = gitPanelOps.normalizeGitAction(body);
+  const repoDir = gitPanelOps.resolveWorkspaceRepoDir({
+    agentWorkspace: agentDir(id),
+    repoPath,
+  });
+
+  const baseGitEnv = {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: "0",
+    LC_ALL: "C",
+    GIT_OPTIONAL_LOCKS: "0",
+  };
+  const runRaw = (args, { env: e = baseGitEnv, timeout = 15_000 } = {}) =>
+    execFileSync("git", args, { cwd: repoDir, env: e, stdio: "pipe", timeout }).toString();
+  const tryRun = (args, opts) => {
+    try {
+      return { ok: true, out: runRaw(args, opts) };
+    } catch (err) {
+      const detail = agentGitOps
+        .sanitizeGitOutput((err.stderr || err.stdout || err.message || "").toString())
+        .trim()
+        .slice(0, 500);
+      return { ok: false, detail };
+    }
+  };
+  const fail = (msg) => {
+    const e = new Error(msg);
+    e.gitFailed = true;
+    return e;
+  };
+
+  // Current state — branch, detached-HEAD, dirty.
+  const curBranchRes = tryRun(["rev-parse", "--abbrev-ref", "HEAD"]);
+  const currentBranch = curBranchRes.ok ? curBranchRes.out.trim() : null;
+  const detached = currentBranch === "HEAD" || currentBranch === null;
+  const dirtyRes = tryRun(["status", "--porcelain"]);
+  const dirty = dirtyRes.ok ? dirtyRes.out.trim().length > 0 : false;
+
+  if (action === "discard") {
+    // The only action that removes uncommitted work: reset tracked changes to
+    // HEAD, then remove untracked files + directories.
+    const r1 = tryRun(["reset", "--hard", "HEAD"]);
+    if (!r1.ok) throw fail(`discard failed: ${r1.detail}`);
+    const r2 = tryRun(["clean", "-fd"]);
+    if (!r2.ok) throw fail(`discard failed: ${r2.detail}`);
+    return {
+      ok: true,
+      action,
+      repoPath,
+      branch: currentBranch,
+      message: "Discarded all uncommitted changes.",
+    };
+  }
+
+  if (action === "switch") {
+    if (dirty) {
+      throw fail(
+        "repository has uncommitted changes — discard them or ask the agent to commit before switching branches",
+      );
+    }
+    if (branch === currentBranch) {
+      return {
+        ok: true,
+        action,
+        repoPath,
+        branch,
+        noop: true,
+        message: `Already on '${branch}'.`,
+      };
+    }
+    // Local branch must already exist (refs/heads). We never create a branch
+    // or check out a remote-tracking ref here.
+    const verify = tryRun(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);
+    if (!verify.ok || !verify.out.trim()) {
+      throw fail(`no local branch named '${branch}'`);
+    }
+    const co = tryRun(["checkout", branch]);
+    if (!co.ok) throw fail(`branch switch failed: ${co.detail}`);
+    return { ok: true, action, repoPath, branch, message: `Switched to '${branch}'.` };
+  }
+
+  // action === "update" → fetch + fast-forward pull of the current branch.
+  if (dirty) {
+    throw fail("repository has uncommitted changes — resolve them before updating");
+  }
+  if (detached) {
+    throw fail("workspace is in detached HEAD — check out a branch before updating");
+  }
+
+  const remoteRes = tryRun(["remote", "get-url", "origin"]);
+  if (!remoteRes.ok) {
+    return {
+      ok: true,
+      action,
+      repoPath,
+      branch: currentBranch,
+      message: "No remote configured — nothing to update.",
+    };
+  }
+  const remoteUrl = remoteRes.out.trim();
+  const matched = gitPanelOps.matchEnvRepoByRemote(remoteUrl, env?.repositories);
+  const gitEnv = agentGitOps.buildRepoGitEnv({
+    env,
+    repoUrl: remoteUrl,
+    sshKeyId: matched?.sshKeyId || null,
+    githubTokenId: env?.githubTokenId,
+    baseEnv: baseGitEnv,
+    sshKeysDir: SSH_KEYS_DIR,
+    ghTokensDir: GH_TOKENS_DIR,
+  });
+
+  const upstreamRes = tryRun(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
+  if (!upstreamRes.ok) {
+    return {
+      ok: true,
+      action,
+      repoPath,
+      branch: currentBranch,
+      message: "Branch has no upstream — nothing to update.",
+    };
+  }
+  const upstream = upstreamRes.out.trim();
+
+  const fetchRes = tryRun(["fetch", "origin"], { env: gitEnv, timeout: 60_000 });
+  if (!fetchRes.ok) throw fail(`git fetch failed: ${fetchRes.detail}`);
+
+  let ahead = 0;
+  let behind = 0;
+  const countRes = tryRun(["rev-list", "--left-right", "--count", "HEAD...@{u}"]);
+  if (countRes.ok) {
+    const parts = countRes.out.trim().split(/\s+/);
+    ahead = Number(parts[0]) || 0;
+    behind = Number(parts[1]) || 0;
+  }
+  const cls = gitPanelOps.classifyFastForward({ ahead, behind });
+  if (cls.kind === "up-to-date") {
+    return {
+      ok: true,
+      action,
+      repoPath,
+      branch: currentBranch,
+      message: "Already up to date.",
+    };
+  }
+  if (cls.kind === "diverged") {
+    throw fail(
+      `branch has diverged from ${upstream} (${ahead} local, ${behind} remote commit${behind === 1 ? "" : "s"}) — ` +
+        "a fast-forward is not possible. Resolve it via the agent; merge/rebase are out of scope here.",
+    );
+  }
+
+  const pullRes = tryRun(["pull", "--ff-only"], { env: gitEnv, timeout: 60_000 });
+  if (!pullRes.ok) throw fail(`git pull --ff-only failed: ${pullRes.detail}`);
+  return {
+    ok: true,
+    action,
+    repoPath,
+    branch: currentBranch,
+    message: `Fast-forwarded ${behind} commit${behind === 1 ? "" : "s"} from ${upstream}.`,
+  };
 }
 
 // Inspect every repo of an agent's environment in its workspace and report
@@ -7757,6 +7936,43 @@ async function main() {
           console.warn(`[Orchestrator] git ${gitPushMatch ? 'push' : 'pr'} for ${id}: ${msg}`);
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(payload));
+        }
+      });
+      return;
+    }
+
+    // ── Deterministic Workspace Git panel action (issue #648) ────────────────
+    // switch / update / discard for one repo in an agent's workspace, executed
+    // server-side (no LLM). The admin-console proxy re-checks running state
+    // before calling this (AC7). See performGitPanelAction above for the
+    // guardrails.
+    const gitActionMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/workspace\/git-action$/);
+    if (gitActionMatch) {
+      const id = decodeURIComponent(gitActionMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* {} */ }
+        try {
+          const cfg = loadAgentConfig(id);
+          if (!cfg) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: `Agent '${id}' not found` }));
+            return;
+          }
+          const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+          const result = performGitPanelAction(id, env, parsed);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          const msg = (err && err.message) ? err.message : String(err);
+          // 409 for a git-level refusal the operator can act on (dirty tree,
+          // diverged branch, checkout/pull failure); 400 for bad requests.
+          const status = err && err.gitFailed ? 409 : 400;
+          console.warn(`[Orchestrator] git-action for ${id}: ${msg}`);
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: msg }));
         }
       });
       return;

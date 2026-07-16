@@ -10855,6 +10855,27 @@ function summarizeStatus(X, Y) {
   return X;
 }
 
+// Read branch metadata for the Git panel (#648): the local branch list, plus
+// flags the UI uses to hide/disable controls. All commands are local (no
+// network) and read-only. `abs` is the sanitised repo dir from
+// resolveAgentRepo(); runGit() re-validates the cwd.
+function readRepoBranchMeta(abs) {
+  const meta = { currentBranch: null, branches: [], detached: false, hasRemote: false, hasUpstream: false };
+  const cur = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], abs, { maxBuffer: 64 * 1024 });
+  const curBranch = cur.status === 0 ? cur.stdout.toString('utf8').trim() : '';
+  meta.detached = curBranch === '' || curBranch === 'HEAD';
+  meta.currentBranch = meta.detached ? null : curBranch;
+  const br = runGit(['for-each-ref', '--format=%(refname:short)', 'refs/heads'], abs, { maxBuffer: 256 * 1024 });
+  if (br.status === 0) {
+    meta.branches = br.stdout.toString('utf8').split('\n').map(s => s.trim()).filter(Boolean);
+  }
+  const rem = runGit(['remote'], abs, { maxBuffer: 64 * 1024 });
+  meta.hasRemote = rem.status === 0 && rem.stdout.toString('utf8').trim().length > 0;
+  const up = runGit(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], abs, { maxBuffer: 64 * 1024 });
+  meta.hasUpstream = up.status === 0;
+  return meta;
+}
+
 // GET /api/agents/:agentId/workspace/git-status
 // Lists changed files for every git repo in the agent workspace. Multi-repo
 // support comes for free via getAgentGitRepos().
@@ -10938,11 +10959,53 @@ app.get('/api/agents/:agentId/workspace/git-status', heavyLimiter, (req, res) =>
       repoPath: repoMeta.repoPath,
       branch: repoMeta.branch,
       changesCount: files.length,
+      dirty: files.length > 0,
       files,
+      ...readRepoBranchMeta(abs),
     });
   }
 
   res.json({ repos: result });
+});
+
+// POST /api/agents/:agentId/workspace/git-action — deterministic Workspace Git
+// panel action (switch / update / discard), executed server-side by the
+// orchestrator with no LLM (#648 AC9). This proxy re-checks the agent's running
+// state at execution time (AC7) so a stale browser snapshot can never bypass
+// the guard, then forwards to the orchestrator, which owns the git credentials.
+app.post('/api/agents/:agentId/workspace/git-action', heavyLimiter, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+
+  // AC7: re-check running state here, reading the same running-sessions.json
+  // that GET /api/agents/:id/sessions/active reads (pushed control-plane copy).
+  try {
+    const filePath = controlOrAgentPath(agentId, 'running-sessions.json');
+    if (fs.existsSync(filePath)) {
+      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return res.status(409).json({
+          error: 'The agent has a running session. Git actions are disabled until it finishes.',
+        });
+      }
+    }
+  } catch { /* unreadable/corrupt registry → treat as not running, best-effort */ }
+
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(
+      `${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/workspace/git-action`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body || {}),
+      },
+    );
+    const data = await resp.json().catch(() => ({ error: 'Invalid response from orchestrator' }));
+    res.status(resp.status).json(data);
+  } catch (err) {
+    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
 });
 
 // GET /api/agents/:agentId/workspace/git-diff?repo=...&path=...&context=3

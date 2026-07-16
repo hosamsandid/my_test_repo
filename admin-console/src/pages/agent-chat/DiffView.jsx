@@ -1,16 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Loader2, AlertCircle, RefreshCw, GitBranch, X, FileWarning, ChevronDown,
+  DownloadCloud, Trash2, Check,
 } from 'lucide-react';
+import ConfirmDialog from '../../components/ConfirmDialog';
+import { deriveGitControls, discardConfirmMessage } from './git-panel-logic';
 
 /**
- * Read-only diff view for an agent workspace.
+ * Workspace Git panel for an agent (issue #648).
  *
- * Top half: flat list of changed files (status badge, path, +/- counter).
- * Bottom half: unified diff for the selected file.
+ * Top: deterministic git actions — switch local branch, fast-forward update,
+ * discard local changes (all executed server-side by the orchestrator, no LLM).
+ * Middle: flat list of changed files (status badge, path, +/- counter).
+ * Bottom: unified diff for the selected file.
  *
- * MVP-1 always compares working tree against HEAD. Multi-repo workspaces
- * get a small selector at the top; single-repo workspaces hide it.
+ * Always compares working tree against HEAD. Multi-repo workspaces get a small
+ * selector at the top; single-repo workspaces hide it.
  *
  * Props:
  *   - agentId  Selected agent id.
@@ -24,6 +29,11 @@ export default function DiffView({ agentId, active }) {
   const [selectedRepo, setRepo]       = useState(null);   // repoPath
   const [selected, setSelected]       = useState(null);   // { repoPath, path, status }
 
+  const [running, setRunning]         = useState(false);  // agent has a live session (AC7)
+  const [actionBusy, setActionBusy]   = useState(false);  // a git action is in flight
+  const [actionMsg, setActionMsg]     = useState(null);   // { kind: 'success'|'error', text }
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+
   const reqIdRef = useRef(0);
 
   /* Reset state when the agent changes. */
@@ -33,6 +43,8 @@ export default function DiffView({ agentId, active }) {
     setError(null);
     setRepo(null);
     setSelected(null);
+    setActionMsg(null);
+    setConfirmDiscard(false);
   }, [agentId]);
 
   const fetchStatus = useCallback(() => {
@@ -63,12 +75,56 @@ export default function DiffView({ agentId, active }) {
       });
   }, [agentId]);
 
+  /* Running-state probe (AC7). Reads the same endpoint the session badge uses;
+     polled while the panel is visible so the controls disable within a few
+     seconds of the agent starting a session. The server re-checks at execution
+     time regardless, so this is purely a UX affordance. */
+  const fetchRunning = useCallback(() => {
+    if (!agentId) return;
+    fetch(`/api/agents/${encodeURIComponent(agentId)}/sessions/active`)
+      .then(r => (r.ok ? r.json() : { sessions: [] }))
+      .then(j => setRunning(Array.isArray(j?.sessions) && j.sessions.length > 0))
+      .catch(() => { /* best-effort; leave prior value */ });
+  }, [agentId]);
+
   /* Initial fetch when this view becomes active. */
   useEffect(() => {
     if (!active || !agentId) return;
     if (data || loading) return;
     fetchStatus();
   }, [active, agentId, data, loading, fetchStatus]);
+
+  useEffect(() => {
+    if (!active || !agentId) return undefined;
+    fetchRunning();
+    const t = setInterval(fetchRunning, 5000);
+    return () => clearInterval(t);
+  }, [active, agentId, fetchRunning]);
+
+  /* Execute a deterministic git action (switch / update / discard) against the
+     selected repo (AC8), then auto-refresh status + running state (AC10). */
+  const runAction = useCallback((action, repoPath, extra = {}) => {
+    if (!agentId || !repoPath || actionBusy) return;
+    setActionBusy(true);
+    setActionMsg(null);
+    fetch(`/api/agents/${encodeURIComponent(agentId)}/workspace/git-action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, repoPath, ...extra }),
+    })
+      .then(r => r.json().then(j => ({ ok: r.ok, j })))
+      .then(({ ok, j }) => {
+        if (!ok) throw new Error(j?.error || 'Action failed');
+        setActionMsg({ kind: 'success', text: j?.message || 'Done.' });
+      })
+      .catch(e => setActionMsg({ kind: 'error', text: e.message }))
+      .finally(() => {
+        setActionBusy(false);
+        setConfirmDiscard(false);
+        fetchStatus();     // AC10 — refresh status after any successful action
+        fetchRunning();
+      });
+  }, [agentId, actionBusy, fetchStatus, fetchRunning]);
 
   /* Drop the selected diff if it disappears from the file list (e.g. after
      a refresh). */
@@ -81,13 +137,14 @@ export default function DiffView({ agentId, active }) {
   }, [data, selected]);
 
   if (!agentId) {
-    return <div style={emptyStyle}>Select an agent to inspect its workspace diff.</div>;
+    return <div style={emptyStyle}>Select an agent to inspect its workspace git state.</div>;
   }
 
   const repos      = data?.repos || [];
   const repoEntry  = repos.find(r => r.repoPath === selectedRepo) || repos[0] || null;
   const files      = repoEntry?.files || [];
   const hasMulti   = repos.length > 1;
+  const controls   = deriveGitControls({ repoEntry, running });
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
@@ -133,6 +190,19 @@ export default function DiffView({ agentId, active }) {
         </button>
       </div>
 
+      {/* Git actions bar — switch / update / discard for the selected repo. */}
+      {repoEntry && (
+        <GitActions
+          controls={controls}
+          repoPath={repoEntry.repoPath}
+          busy={actionBusy}
+          message={actionMsg}
+          onSwitch={(branch) => runAction('switch', repoEntry.repoPath, { branch })}
+          onUpdate={() => runAction('update', repoEntry.repoPath)}
+          onDiscardRequest={() => setConfirmDiscard(true)}
+        />
+      )}
+
       {/* File list (top) — shrinks when a diff is open below, mirroring the
           tree/file-viewer split in the Tree mode. */}
       <div style={{
@@ -161,8 +231,245 @@ export default function DiffView({ agentId, active }) {
           onClose={() => setSelected(null)}
         />
       )}
+
+      {/* Discard confirmation (AC6) — the only path that destroys uncommitted
+          work, so it names the repo and states the change is unrecoverable. */}
+      <ConfirmDialog
+        open={confirmDiscard && !!repoEntry}
+        variant="danger"
+        title="Discard local changes?"
+        message={discardConfirmMessage(repoEntry?.repoPath)}
+        confirmLabel="Discard changes"
+        cancelLabel="Cancel"
+        busy={actionBusy}
+        onConfirm={() => repoEntry && runAction('discard', repoEntry.repoPath)}
+        onCancel={() => setConfirmDiscard(false)}
+      />
     </div>
   );
+}
+
+/* ─── Git actions bar ──────────────────────────────────────────────── */
+
+// Deterministic switch / update / discard controls (#648). All decisions about
+// what's enabled come from deriveGitControls(); this component is presentation.
+function GitActions({ controls, repoPath, busy, message, onSwitch, onUpdate, onDiscardRequest }) {
+  const {
+    currentBranch, otherBranches, detached,
+    canSwitch, canUpdate, canDiscard,
+    switchReason, updateReason, discardReason, dirty, running,
+  } = controls;
+
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 6,
+      padding: 'var(--eb-space-2) var(--eb-space-3)',
+      borderBottom: '1px solid var(--eb-border-default)',
+      background: 'var(--eb-bg-surface)',
+      flexShrink: 0,
+    }}>
+      {running && (
+        <div style={bannerStyle('warning')}>
+          <AlertCircle size={12} />
+          <span>The agent has a running session — git actions are paused until it finishes.</span>
+        </div>
+      )}
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+        {/* Branch switcher (local branches only). */}
+        <BranchSwitcher
+          currentBranch={detached ? null : currentBranch}
+          detached={detached}
+          branches={otherBranches}
+          disabled={busy || !canSwitch}
+          disabledReason={switchReason}
+          onSwitch={onSwitch}
+        />
+
+        <div style={{ flex: 1 }} />
+
+        <ActionButton
+          icon={<DownloadCloud size={12} />}
+          label="Update"
+          title={canUpdate ? 'Fetch and fast-forward the current branch' : updateReason}
+          disabled={busy || !canUpdate}
+          onClick={onUpdate}
+        />
+        <ActionButton
+          icon={<Trash2 size={12} />}
+          label="Discard…"
+          title={canDiscard ? 'Discard all uncommitted changes' : discardReason}
+          disabled={busy || !canDiscard}
+          danger
+          onClick={onDiscardRequest}
+        />
+      </div>
+
+      {/* AC5: when the tree is dirty, spell out the exactly-two paths — discard
+          (above) or ask the agent (the console never commits). */}
+      {dirty && !running && (
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
+          Uncommitted changes block branch switch and update. Either <strong>Discard…</strong> them,
+          or ask the agent in chat to commit — the console never commits for you.
+        </div>
+      )}
+
+      {busy && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+          <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
+          <span>Working…</span>
+        </div>
+      )}
+      {!busy && message && (
+        <div style={bannerStyle(message.kind === 'error' ? 'error' : 'success')}>
+          {message.kind === 'error' ? <AlertCircle size={12} /> : <Check size={12} />}
+          <span>{message.text}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BranchSwitcher({ currentBranch, detached, branches, disabled, disabledReason, onSwitch }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const onClick = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', onClick);
+    return () => document.removeEventListener('mousedown', onClick);
+  }, [open]);
+
+  const label = detached ? 'detached HEAD' : (currentBranch || '—');
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button
+        type="button"
+        disabled={disabled}
+        title={disabled ? (disabledReason || '') : 'Switch to another local branch'}
+        onClick={() => setOpen(o => !o)}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '3px 8px',
+          background: 'var(--eb-bg-elevated)',
+          border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-sm)',
+          color: disabled ? 'var(--eb-text-muted)' : 'var(--eb-text-secondary)',
+          fontSize: 'var(--eb-text-xs)',
+          fontFamily: 'var(--eb-font-mono)',
+          cursor: disabled ? 'not-allowed' : 'pointer',
+          opacity: disabled ? 0.7 : 1,
+        }}
+      >
+        <GitBranch size={11} />
+        <span style={{ maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {label}
+        </span>
+        <ChevronDown size={11} />
+      </button>
+      {open && branches.length > 0 && (
+        <div style={{
+          position: 'absolute',
+          top: 'calc(100% + 2px)',
+          left: 0,
+          minWidth: 200,
+          maxHeight: 260,
+          overflowY: 'auto',
+          background: 'var(--eb-bg-surface)',
+          border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-sm)',
+          boxShadow: 'var(--eb-shadow-md, 0 4px 12px rgba(0,0,0,0.2))',
+          zIndex: 10,
+          padding: 4,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 1,
+        }}>
+          {branches.map(b => (
+            <button
+              key={b}
+              type="button"
+              onClick={() => { setOpen(false); onSwitch(b); }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                width: '100%',
+                textAlign: 'left',
+                padding: '4px 6px',
+                background: 'none',
+                border: 'none',
+                borderRadius: 'var(--eb-radius-sm)',
+                color: 'var(--eb-text-primary)',
+                fontFamily: 'var(--eb-font-mono)',
+                fontSize: 'var(--eb-text-xs)',
+                cursor: 'pointer',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'none'; }}
+            >
+              <GitBranch size={10} style={{ color: 'var(--eb-text-muted)' }} />
+              {b}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ActionButton({ icon, label, title, disabled, danger, onClick }) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      title={title || ''}
+      onClick={onClick}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '3px 10px',
+        background: 'var(--eb-bg-elevated)',
+        border: `1px solid ${danger ? 'var(--eb-status-error-bg)' : 'var(--eb-border-default)'}`,
+        borderRadius: 'var(--eb-radius-sm)',
+        color: disabled
+          ? 'var(--eb-text-muted)'
+          : (danger ? 'var(--eb-status-error)' : 'var(--eb-text-secondary)'),
+        fontSize: 'var(--eb-text-xs)',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.6 : 1,
+      }}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+}
+
+function bannerStyle(kind) {
+  const map = {
+    error:   { fg: 'var(--eb-status-error)',   bg: 'var(--eb-status-error-bg)' },
+    success: { fg: 'var(--eb-status-success)', bg: 'var(--eb-status-success-bg)' },
+    warning: { fg: 'var(--eb-status-warning)', bg: 'var(--eb-status-warning-bg)' },
+  };
+  const m = map[kind] || map.warning;
+  return {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '4px 8px',
+    borderRadius: 'var(--eb-radius-sm)',
+    background: m.bg,
+    color: m.fg,
+    fontSize: 'var(--eb-text-xs)',
+    lineHeight: 1.4,
+  };
 }
 
 /* ─── Repo selector / label ────────────────────────────────────────── */

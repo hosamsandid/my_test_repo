@@ -5392,12 +5392,16 @@ app.post('/api/skills/promote', (req, res) => {
   res.status(201).json({ name, source: 'pool', overwritten: !!overwrite });
 });
 
-// Install a pool skill into an EXISTING agent's workspace, copying the whole
-// skill directory (SKILL.md plus any scripts/assets) recursively. This is the
-// inverse of /promote and avoids a full deactivate+enable workspace reset:
-// the running agent picks the skill up on its next invocation. Refuses to
-// clobber an existing agent skill unless `overwrite: true` is passed.
-app.post('/api/skills/install', (req, res) => {
+// Install a pool skill into an EXISTING agent's workspace. This delegates to
+// the orchestrator's skill-activation path (`/internal/agents/:id/skills/
+// activate`) so install WRITES THE GRANT (config `skills[]` / a team-member's
+// `skillsOverride`), not just an ad-hoc file copy — a subsequent full re-seed
+// then retains the skill and the seeded manifest can no longer diverge from the
+// grant (#630 AC1). Activation is the concept's default last step of every
+// pool-filling flow. Refuses to clobber an existing agent skill unless
+// `overwrite: true` is passed. The running agent picks the skill up on its next
+// invocation (additive sync, no respawn).
+app.post('/api/skills/install', async (req, res) => {
   const { agentId, name, overwrite = false } = req.body || {};
   if (typeof name !== 'string' || !SKILL_NAME_RE.test(name)) {
     return res.status(400).json({ error: 'Invalid skill name' });
@@ -5409,12 +5413,6 @@ app.post('/api/skills/install', (req, res) => {
   // Containment check: AGENT_ID_RE / SKILL_NAME_RE already exclude traversal
   // segments, but the path.resolve + path.relative pattern is what CodeQL's
   // path-injection query recognises in-flow.
-  const poolSkillsBaseDir = path.resolve(POOL_DIR, 'skills');
-  const srcDir = path.resolve(poolSkillsBaseDir, name);
-  const srcRel = path.relative(poolSkillsBaseDir, srcDir);
-  if (srcRel.startsWith('..') || path.isAbsolute(srcRel)) {
-    return res.status(400).json({ error: 'Invalid skill name' });
-  }
   const agentsBaseDir = path.resolve(AGENTS_DIR);
   const agentDirPath = path.resolve(agentsBaseDir, agentId);
   const dstDir = path.resolve(agentDirPath, 'skills', name);
@@ -5430,39 +5428,44 @@ app.post('/api/skills/install', (req, res) => {
   if (cfg.enabled === false || !cfg.token) {
     return res.status(409).json({ error: `Agent '${agentId}' is not active — enable it before installing skills` });
   }
-
-  if (!fs.existsSync(path.join(srcDir, 'SKILL.md'))) {
-    return res.status(404).json({ error: `Skill '${name}' not found in the pool` });
-  }
-  if (fs.existsSync(dstDir) && !overwrite) {
+  const scope = getScope(req);
+  if (!visibleAgent(scope, cfg)) return res.status(403).json({ error: 'forbidden' });
+  // Refuse to clobber a skill the agent already carries unless overwrite:true —
+  // an existing workspace dir OR a grant already listing the name both count.
+  // Resolve the grant inline the same way as elsewhere (team-owned, orchestrator/
+  // skill-grants.js): member override wins, else own skills[], else the parent
+  // construct's list. The admin-console does not cross-require orchestrator code.
+  const parentId = cfg.role === 'team-member' ? cfg.parentTeamId
+    : cfg.role === 'bp-instance' ? cfg.parentOrchestratorId
+    : null;
+  const parentCfg = parentId ? readJsonFile(path.join(AGENTS_DIR, parentId, 'config.json'), null) : null;
+  const granted = Array.isArray(cfg.skillsOverride) ? cfg.skillsOverride
+    : Array.isArray(cfg.skills) ? cfg.skills
+    : (parentCfg && Array.isArray(parentCfg.skills)) ? parentCfg.skills
+    : [];
+  if ((fs.existsSync(dstDir) || granted.includes(name)) && !overwrite) {
     return res.status(409).json({ error: `Agent '${agentId}' already has a skill named '${name}'`, exists: true });
   }
 
+  // Delegate the grant edit + workspace sync to the orchestrator so its
+  // in-memory config map, the seeded manifest, and CLAUDE.md all stay consistent
+  // with the grant (the team-first source resolution matches a full re-seed).
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
-    fs.mkdirSync(path.dirname(dstDir), { recursive: true });
-    if (overwrite) fs.rmSync(dstDir, { recursive: true, force: true });
-    fs.cpSync(srcDir, dstDir, { recursive: true });
+    const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/skills/activate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skillName: name }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return res.status(resp.status).json(data);
+    if (data?.result?.status === 'error') {
+      return res.status(404).json({ error: data.result.error || `Skill '${name}' not found in the pool` });
+    }
+    return res.status(201).json({ name, agentId, installed: true, overwritten: !!overwrite });
   } catch (err) {
-    return res.status(500).json({ error: `Failed to install skill: ${err.message}` });
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
   }
-  // Keep the seeded-skills manifest truthful (activation status reads it).
-  // NOTE: install is an ad-hoc workspace copy — it does not touch the agent's
-  // grant, so a full re-seed drops it unless the operator activates it too.
-  try {
-    const manifestPath = path.join(agentDirPath, '.aee', 'seeded-skills.json');
-    const manifest = readJsonFile(manifestPath, {}) || {};
-    const srcId = skillSourceIdentity(srcDir);
-    manifest[name] = {
-      tier: 'global', seededAt: new Date().toISOString(),
-      contentHash: srcId.sourceHash, sourceVersion: srcId.sourceVersion,
-    };
-    fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
-    writeJsonAtomic(manifestPath, manifest);
-  } catch { /* best effort */ }
-  // Mirror the installed skill into an isolated agent's dedicated volume so the
-  // running agent picks it up on its next message (#185 item 5).
-  notifyAgentReseed(agentId, ['skills/' + name]);
-  res.status(201).json({ name, agentId, installed: true, overwritten: !!overwrite });
 });
 
 app.put('/api/skills/:name', (req, res) => {

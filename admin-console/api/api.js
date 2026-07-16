@@ -3835,18 +3835,20 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     const prov = knowledgeSuggestions.extendSkillProvenance({
       existingProv, from: v.from, to: v.to, teamId, entryIds: v.entryIds, candidate: cand, extendedBy,
     });
-    try {
-      fs.writeFileSync(path.join(target.dir, 'SKILL.md'), v.skillMd.endsWith('\n') ? v.skillMd : v.skillMd + '\n');
-      fs.writeFileSync(path.join(target.dir, 'provenance.json'), JSON.stringify(prov, null, 2));
-    } catch (err) {
-      return res.status(500).json({ error: `Failed to write skill: ${err.message}` });
-    }
-    // #625: fold-in edits an EXISTING skill — continue its chain with an
-    // `extended` marker noting how many entries were folded (concept §2.2).
-    stampSkill(target.dir, {
-      name: v.targetName, by: skillActor(req), action: 'extended',
-      note: `folded ${Array.isArray(v.entryIds) ? v.entryIds.length : 0} converged ${(Array.isArray(v.entryIds) && v.entryIds.length === 1) ? 'lesson' : 'lessons'}`,
+    // #639: write the re-synthesised content + unioned provenance in place and
+    // continue the EXISTING skill's chain (mode 'chain') via the shared core. The
+    // extend target is supposed to already exist, so there is no collision gate
+    // here (planSkillWrite's allowExisting case) — the write is unconditional.
+    const wrote = commitSkillWrite({
+      destDir: target.dir,
+      skillMd: v.skillMd,
+      provenance: prov,
+      stamp: {
+        mode: 'chain', name: v.targetName, by: skillActor(req), action: 'extended',
+        note: `folded ${Array.isArray(v.entryIds) ? v.entryIds.length : 0} converged ${(Array.isArray(v.entryIds) && v.entryIds.length === 1) ? 'lesson' : 'lessons'}`,
+      },
     });
+    if (wrote.error) return res.status(500).json({ error: `Failed to write skill: ${wrote.error}` });
 
     // Best-effort: orchestrator flips the candidate lifecycle, emits a distinct
     // "extension" feed event, and (team tier) re-syncs the refreshed content to
@@ -3919,9 +3921,9 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     const rel = path.relative(poolSkillsBaseDir, dstDir);
     if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid skill name' });
   }
-  if (fs.existsSync(path.join(dstDir, 'SKILL.md')) && !req.body.overwrite) {
-    return res.status(409).json({ error: `Skill '${v.name}' already exists`, exists: true });
-  }
+  const dstExists = fs.existsSync(path.join(dstDir, 'SKILL.md'));
+  const wp = skillTransfer.planSkillWrite({ onCollision: req.body.overwrite ? 'overwrite' : 'reject', exists: dstExists });
+  if (!wp.ok) return res.status(409).json({ error: `Skill '${v.name}' already exists`, exists: true });
 
   const promotedBy = (req.user && (req.user.sub || req.user.username)) || 'operator';
   const prov = v.from === 'agent'
@@ -3942,25 +3944,18 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     : knowledgeSuggestions.buildSkillProvenance({
         from: v.from, to: v.to, teamId, entryIds: v.entryIds, candidate: cand, promotedBy,
       });
-  try {
-    if (req.body.overwrite) fs.rmSync(dstDir, { recursive: true, force: true });
-    fs.mkdirSync(dstDir, { recursive: true });
-    fs.writeFileSync(path.join(dstDir, 'SKILL.md'), v.skillMd.endsWith('\n') ? v.skillMd : v.skillMd + '\n');
-    fs.writeFileSync(path.join(dstDir, 'provenance.json'), JSON.stringify(prov, null, 2));
-  } catch (err) {
-    return res.status(500).json({ error: `Failed to write skill: ${err.message}` });
-  }
-  // #625: an agent→team lift records the agent origin; a KB→skill promote is
-  // authored here (no origin). SKILL.md is (re)written by content, so this is a
-  // fresh instance chain — discard any stale copied manifest.
-  if (v.from === 'agent') {
-    stampSkillCopy(dstDir, {
-      name: v.name, by: skillActor(req), action: 'lifted',
-      origin: skillOrigin({ tier: 'agent', agentId: req.body.agentId, sourceVersion: liftSrcId && liftSrcId.sourceVersion, sourceHash: liftSrcId && liftSrcId.sourceHash }),
-    });
-  } else {
-    stampSkillCopy(dstDir, { name: v.name, by: skillActor(req), action: 'promoted' });
-  }
+  // #625/#639: an agent→team lift records the agent origin; a KB→skill promote
+  // is authored here (no origin). SKILL.md is written by content, so this is a
+  // fresh instance chain (mode 'copy' — discards any stale copied manifest). The
+  // write + stamp go through the shared file-write core.
+  const stamp = v.from === 'agent'
+    ? {
+        mode: 'copy', name: v.name, by: skillActor(req), action: 'lifted',
+        origin: skillOrigin({ tier: 'agent', agentId: req.body.agentId, sourceVersion: liftSrcId && liftSrcId.sourceVersion, sourceHash: liftSrcId && liftSrcId.sourceHash }),
+      }
+    : { mode: 'copy', name: v.name, by: skillActor(req), action: 'promoted' };
+  const wrote = commitSkillWrite({ destDir: dstDir, overwrite: wp.overwrite, skillMd: v.skillMd, provenance: prov, stamp });
+  if (wrote.error) return res.status(500).json({ error: `Failed to write skill: ${wrote.error}` });
 
   // Best-effort: orchestrator flips the candidate lifecycle + emits the feed event.
   try {
@@ -4467,9 +4462,9 @@ app.post('/api/knowledge/share-to-team', apiLimiter, async (req, res) => {
 
   const dstDir = safeTeamSkillDir(v.targetTeamId, v.name);
   if (!dstDir) return res.status(400).json({ error: 'invalid target team or skill name' });
-  if (fs.existsSync(path.join(dstDir, 'SKILL.md')) && !req.body.overwrite) {
-    return res.status(409).json({ error: `Skill '${v.name}' already exists in team '${v.targetTeamId}'`, exists: true });
-  }
+  const dstExists = fs.existsSync(path.join(dstDir, 'SKILL.md'));
+  const wp = skillTransfer.planSkillWrite({ onCollision: req.body.overwrite ? 'overwrite' : 'reject', exists: dstExists });
+  if (!wp.ok) return res.status(409).json({ error: `Skill '${v.name}' already exists in team '${v.targetTeamId}'`, exists: true });
 
   const sharedBy = (req.user && (req.user.sub || req.user.username)) || 'operator';
   const prov = knowledgeSuggestions.buildShareProvenance({
@@ -4477,21 +4472,22 @@ app.post('/api/knowledge/share-to-team', apiLimiter, async (req, res) => {
     sourceProvenance: readSkillProvenance(srcDir), sharedBy,
   });
   const shareSrcId = skillSourceIdentity(srcDir);
-  try {
-    let md;
-    try { md = fs.readFileSync(srcSkill, 'utf8'); } catch { md = ''; }
-    if (req.body.overwrite) fs.rmSync(dstDir, { recursive: true, force: true });
-    fs.mkdirSync(dstDir, { recursive: true });
-    fs.writeFileSync(path.join(dstDir, 'SKILL.md'), md.endsWith('\n') ? md : md + '\n');
-    fs.writeFileSync(path.join(dstDir, 'provenance.json'), JSON.stringify(prov, null, 2));
-  } catch (err) {
-    return res.status(500).json({ error: `Failed to write shared skill: ${err.message}` });
-  }
-  // #625: a cross-tier share is a fresh copy recording where it came from.
-  stampSkillCopy(dstDir, {
-    name: v.name, by: skillActor(req), action: 'shared',
-    origin: skillOrigin({ tier: v.from, teamId: v.from === 'team' ? v.sourceTeamId : undefined, sourceVersion: shareSrcId.sourceVersion, sourceHash: shareSrcId.sourceHash }),
+  // #639: a lateral share now copies the FULL skill directory (copyFrom: srcDir)
+  // — SKILL.md rides along unchanged (same content as before), plus any extra
+  // files the skill carries. The share-specific provenance override is written
+  // AFTER the copy so it replaces the dragged-along provenance.json; the stamp is
+  // a fresh copy (mode 'copy') recording where it came from (#625).
+  const wrote = commitSkillWrite({
+    destDir: dstDir,
+    overwrite: wp.overwrite,
+    copyFrom: srcDir,
+    provenance: prov,
+    stamp: {
+      mode: 'copy', name: v.name, by: skillActor(req), action: 'shared',
+      origin: skillOrigin({ tier: v.from, teamId: v.from === 'team' ? v.sourceTeamId : undefined, sourceVersion: shareSrcId.sourceVersion, sourceHash: shareSrcId.sourceHash }),
+    },
   });
+  if (wrote.error) return res.status(500).json({ error: `Failed to write shared skill: ${wrote.error}` });
   res.status(201).json({ name: v.name, tier: 'team', teamId: v.targetTeamId, from: v.from, sourceTeamId: v.sourceTeamId, provenance: prov });
 });
 
@@ -4944,6 +4940,53 @@ function lazyStampAgentSkill(dir, agentId) {
 function stampSkillCopy(dstDir, opts) {
   try { fs.rmSync(path.join(dstDir, skillManifest.MANIFEST_FILENAME), { force: true }); } catch { /* none */ }
   return stampSkill(dstDir, opts);
+}
+
+// ── Shared skill-file-write core (#639, concept §3.2) ──────────────────────
+// The ONE place a skill directory is materialised on disk + stamped. Every
+// endpoint that lands a skill (POST /api/skills/transfer, and the KB endpoints
+// /api/knowledge/{promote,share-to-team}) funnels its file write here, so the
+// cpSync/mkdir/manifest-stamp sequence lives once. The pure collision decision
+// stays in skill-transfer.planSkillWrite (unit-tested); this helper only does IO.
+//
+//   destDir     absolute target skill dir.
+//   overwrite   rm the dir first (from planSkillWrite — an overwrite collision).
+//   copyFrom    when set, cpSync the WHOLE source dir (provenance/extra files ride
+//               along); when absent, just mkdir destDir and write the given files.
+//   skillMd     optional SKILL.md content (a trailing newline is ensured).
+//   provenance  optional provenance.json object — written AFTER any copyFrom, so
+//               it overrides the copied-along provenance (share/lift/promote).
+//   stamp       optional { mode:'copy'|'chain', name, by, action, origin?, note? }:
+//               'copy' → stampSkillCopy (fresh v1 chain, discards dragged manifest);
+//               'chain' → stampSkill (continues the target's chain — the extend case).
+// Returns { ok: true } or { error } (the content write failed — the caller 500s;
+// stamping is best-effort and never surfaced as an error).
+function commitSkillWrite({ destDir, overwrite, copyFrom, skillMd, provenance, stamp }) {
+  try {
+    if (overwrite) fs.rmSync(destDir, { recursive: true, force: true });
+    if (copyFrom) {
+      fs.mkdirSync(path.dirname(destDir), { recursive: true });
+      fs.cpSync(copyFrom, destDir, { recursive: true });
+    } else {
+      fs.mkdirSync(destDir, { recursive: true });
+    }
+    if (skillMd !== undefined) {
+      fs.writeFileSync(path.join(destDir, 'SKILL.md'), skillMd.endsWith('\n') ? skillMd : skillMd + '\n');
+    }
+    if (provenance !== undefined) {
+      fs.writeFileSync(path.join(destDir, 'provenance.json'), JSON.stringify(provenance, null, 2));
+    }
+  } catch (err) {
+    return { error: err.message };
+  }
+  if (stamp) {
+    const s = { name: stamp.name, by: stamp.by, action: stamp.action };
+    if (stamp.origin !== undefined) s.origin = stamp.origin;
+    if (stamp.note !== undefined) s.note = stamp.note;
+    if (stamp.mode === 'chain') stampSkill(destDir, s);
+    else stampSkillCopy(destDir, s);
+  }
+  return { ok: true };
 }
 
 // ── Two-tier skill pool (#306) ──────────────────────────────────────────
@@ -6261,26 +6304,25 @@ app.post('/api/skills/transfer', heavyLimiter, async (req, res) => {
   // 6. Capture source identity BEFORE the copy (for the origin stamp).
   const srcId = skillSourceIdentity(src.dir);
 
-  // 7. Copy the whole dir (provenance.json is carried forward by cpSync).
-  try {
-    if (plan.onCollision === 'overwrite') fs.rmSync(dst.dir, { recursive: true, force: true });
-    fs.mkdirSync(path.dirname(dst.dir), { recursive: true });
-    fs.cpSync(src.dir, dst.dir, { recursive: true });
-  } catch (err) {
-    return res.status(500).json({ error: `Failed to copy skill: ${err.message}` });
-  }
-
-  // 8. Stamp the target's skill.json — a fresh v1 chain recording the transfer
-  //    action (adopted|promoted|lifted|shared|moved) and where it came from.
-  stampSkillCopy(dst.dir, {
-    name: destName, by: skillActor(req), action: plan.action,
-    origin: skillOrigin({
-      tier: plan.from.tier,
-      teamId: plan.from.tier === 'team' ? plan.from.teamId : undefined,
-      agentId: plan.from.tier === 'agent' ? plan.from.agentId : undefined,
-      sourceVersion: srcId.sourceVersion, sourceHash: srcId.sourceHash,
-    }),
+  // 7+8. Copy the whole dir (provenance.json rides along via cpSync) and stamp
+  //      the target's skill.json — a fresh v1 chain recording the transfer action
+  //      (adopted|promoted|lifted|shared|moved) and where it came from. Both go
+  //      through the shared file-write core (#639).
+  const wrote = commitSkillWrite({
+    destDir: dst.dir,
+    overwrite: plan.onCollision === 'overwrite',
+    copyFrom: src.dir,
+    stamp: {
+      mode: 'copy', name: destName, by: skillActor(req), action: plan.action,
+      origin: skillOrigin({
+        tier: plan.from.tier,
+        teamId: plan.from.tier === 'team' ? plan.from.teamId : undefined,
+        agentId: plan.from.tier === 'agent' ? plan.from.agentId : undefined,
+        sourceVersion: srcId.sourceVersion, sourceHash: srcId.sourceHash,
+      }),
+    },
   });
+  if (wrote.error) return res.status(500).json({ error: `Failed to copy skill: ${wrote.error}` });
 
   // 9. Move: archive-snapshot then retire the source.
   let archived = null;

@@ -910,16 +910,24 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
               ))}
             </select>
             <button
-              onClick={() => transfer({ name: skill.name, from: { tier: 'global' }, to: { tier: 'team', teamId: adoptTeamId } })}
+              onClick={() => transfer({ name: skill.name, from: { tier: 'global' }, to: { tier: 'team', teamId: adoptTeamId }, mode: 'copy' })}
               disabled={!adoptTeamId || promoting}
               style={primaryBtnStyle(!adoptTeamId || promoting)}
               title="Copy this global skill into the selected team's pool and activate it"
             >
               {promoting ? 'Adopting…' : 'Adopt'}
             </button>
+            <button
+              onClick={() => transfer({ name: skill.name, from: { tier: 'global' }, to: { tier: 'team', teamId: adoptTeamId }, mode: 'move' })}
+              disabled={!adoptTeamId || promoting}
+              style={!adoptTeamId || promoting ? { ...secondaryBtnStyle, cursor: 'not-allowed', opacity: 0.5 } : secondaryBtnStyle}
+              title="Move this global skill into the selected team's pool (retires the global copy, keeps a recoverable snapshot). Requires System Admin."
+            >
+              {promoting ? 'Moving…' : 'Move to team'}
+            </button>
           </div>
           <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
-            Copies the whole skill into the team pool (activated by default) so the team owns and can curate its copy.
+            <strong>Adopt</strong> copies the whole skill into the team pool (activated by default) so the team owns a curatable copy; <strong>Move to team</strong> relocates it and retires the global copy (a recoverable snapshot is archived).
           </span>
         </div>
       )}

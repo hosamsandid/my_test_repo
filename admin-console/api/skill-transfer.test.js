@@ -250,3 +250,27 @@ test('resolveCollisionName: falls back to a timestamped name after exhausting th
   const name = T.resolveCollisionName('foo', () => true); // everything taken
   assert.match(name, /^foo-\d{10,}$/);
 });
+
+/* ─── planSkillWrite (#639 shared file-write core) ───────────────────────── */
+
+test('planSkillWrite: a free destination proceeds without overwrite', () => {
+  assert.deepEqual(T.planSkillWrite({ onCollision: 'reject', exists: false }), { ok: true, overwrite: false });
+  assert.deepEqual(T.planSkillWrite({ onCollision: 'overwrite', exists: false }), { ok: true, overwrite: false });
+});
+
+test('planSkillWrite: an occupied destination in reject mode conflicts (caller 409s)', () => {
+  assert.deepEqual(T.planSkillWrite({ onCollision: 'reject', exists: true }), { ok: false, conflict: true });
+});
+
+test('planSkillWrite: an occupied destination in overwrite mode proceeds with overwrite', () => {
+  assert.deepEqual(T.planSkillWrite({ onCollision: 'overwrite', exists: true }), { ok: true, overwrite: true });
+});
+
+test('planSkillWrite: allowExisting (extend) always writes in place, never a conflict', () => {
+  assert.deepEqual(T.planSkillWrite({ allowExisting: true, exists: true }), { ok: true, overwrite: false });
+  assert.deepEqual(T.planSkillWrite({ allowExisting: true, exists: true, onCollision: 'reject' }), { ok: true, overwrite: false });
+});
+
+test('planSkillWrite: defaults (no args) treat the destination as free + reject-mode', () => {
+  assert.deepEqual(T.planSkillWrite(), { ok: true, overwrite: false });
+});

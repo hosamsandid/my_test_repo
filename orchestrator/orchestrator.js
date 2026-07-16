@@ -4753,6 +4753,105 @@ class Orchestrator {
     return { teamId, skillName: name, resynced: true, members: results };
   }
 
+  // Drift state of ONE seeded copy against the source it descends from (#629,
+  // concept §2.4). Mirrors admin-console/api/skill-drift.copyDriftState on the
+  // orchestrator side: hash the copy dir + the CURRENT source dir on disk and
+  // compare against the anchor hash the copy recorded at seed time (the seeded
+  // manifest's contentHash). A deleted source is detected by the absent SKILL.md
+  // (NOT a hash of an empty dir, which would look in-sync). Returns
+  // { state, sourceVersion } — `state` is one of skillManifest.DRIFT_STATES.
+  _copyDriftState(id, cfg, skillName, seeded) {
+    const copyDir = path.join(agentDir(id), "skills", skillName);
+    const srcDir = resolveSkillSourceDir(skillName, cfg.teamId || DEFAULT_TEAM_ID, { agentId: id });
+    const anchor = seeded && seeded.contentHash ? seeded.contentHash : null;
+    let copyHash = null;
+    try { if (fs.existsSync(path.join(copyDir, "SKILL.md"))) copyHash = skillManifest.hashSkillDir(copyDir); } catch { copyHash = null; }
+    let sourceCurrentHash = null;
+    try { if (srcDir && fs.existsSync(path.join(srcDir, "SKILL.md"))) sourceCurrentHash = skillManifest.hashSkillDir(srcDir); } catch { sourceCurrentHash = null; }
+    const state = skillManifest.classifyCopyDrift({ copyHash, sourceHash: anchor, sourceCurrentHash });
+    let sourceVersion;
+    try { const m = srcDir ? skillManifest.readManifest(srcDir) : null; if (m && Number.isInteger(m.version)) sourceVersion = m.version; } catch { /* unstamped */ }
+    return { state, sourceVersion };
+  }
+
+  // Drift-gated resync (#629 AC3/AC4): deliver the CURRENT source content to
+  // every seeded copy in scope through the SAME additive sync as activation
+  // (_syncSkillIntoWorkspace: re-copy + re-stamp the seeded manifest anchor +
+  // rebuild CLAUDE.md + mirror the isolated volume — no respawn). Per-copy the
+  // drift is classified first: only an `outdated` copy (isResyncable) is
+  // overwritten; `in-sync` is a no-op (so the whole op is idempotent — a second
+  // call touches nothing); `diverged`/`conflict`/`orphaned`/`unknown` are
+  // REFUSED and surfaced with a manual-path hint, never auto-overwritten (AC4).
+  //
+  // Scope: { name, teamId } fans out to every materialized member of the team
+  // that carries the skill seeded; { name, agentId } targets one copy. Emits one
+  // `skill-resynced` feed event with the member fan-out results.
+  async resyncSkill({ name, teamId = null, agentId = null } = {}) {
+    const skillName = typeof name === "string" ? name.trim() : "";
+    if (!skillName) throw new Error("skillName required");
+    if (!teamId && !agentId) throw new Error("scope required: teamId or agentId");
+
+    // Resolve the target agent ids from the scope.
+    let targetIds;
+    if (agentId) {
+      targetIds = [agentId];
+    } else {
+      targetIds = listAgentIds()
+        .map((id) => loadAgentConfig(id))
+        .filter((c) => c && c.role === "team-member" && c.parentTeamId === teamId)
+        .map((c) => c.id);
+    }
+
+    const REFUSAL_HINT = {
+      diverged: "copy edited locally — resolve manually (re-import or discard the local edit)",
+      conflict: "copy and source both changed — resolve manually (re-import or discard the local edit)",
+      orphaned: "source skill was deleted — restore it from the archive or detach the copy",
+      unknown: "pre-manifest copy with no recorded origin — re-import to establish an anchor",
+    };
+
+    const members = [];
+    for (const id of targetIds) {
+      const cfg = loadAgentConfig(id);
+      if (!cfg) { members.push({ agentId: id, state: "unknown", action: "refused", reason: "agent not found" }); continue; }
+      const seeded = readSeededSkills(id)[skillName];
+      if (!seeded) {
+        // Not seeded on this copy — nothing to resync. For an explicit single
+        // agent scope surface it; for a team fan-out skip silently (never had it).
+        if (agentId) members.push({ agentId: id, state: "unknown", action: "refused", reason: "skill not seeded on this agent" });
+        continue;
+      }
+      const { state, sourceVersion } = this._copyDriftState(id, cfg, skillName, seeded);
+      if (skillManifest.isResyncable(state)) {
+        const r = await this._syncSkillIntoWorkspace(id, cfg, skillName, { remove: false });
+        members.push({ agentId: id, state, action: "resynced", status: r.status, sourceVersion });
+      } else if (state === "in-sync") {
+        members.push({ agentId: id, state, action: "skipped" });
+      } else {
+        members.push({ agentId: id, state, action: "refused", reason: REFUSAL_HINT[state] || "cannot resync automatically" });
+      }
+    }
+
+    const resynced = members.filter((m) => m.action === "resynced").length;
+    const skipped = members.filter((m) => m.action === "skipped").length;
+    const refused = members.filter((m) => m.action === "refused").length;
+    console.log(
+      `[Orchestrator] resync skill '${skillName}' (${agentId ? `agent ${agentId}` : `team ${teamId}`}): ` +
+      `${resynced} resynced, ${skipped} in-sync, ${refused} refused`
+    );
+    appendKnowledgeEvents([{
+      type: "skill-resynced",
+      ts: new Date().toISOString(),
+      teamId: teamId || (targetIds.length ? agentKnowledgeTeamId(loadAgentConfig(targetIds[0])) : null),
+      ...(agentId ? { agentId } : {}),
+      skillName,
+      resynced,
+      skipped,
+      refused,
+      total: members.length,
+    }]);
+    return { skillName, teamId, agentId, resynced, skipped, refused, total: members.length, members };
+  }
+
   // (De)activate a skill on a single non-member agent (standalone /
   // orchestrator): same idempotent list edit + file sync, one workspace.
   async setAgentSkillActive(id, skillName, { active = true } = {}) {
@@ -8372,6 +8471,40 @@ async function main() {
           const status = /not found/i.test(err.message) ? 404
             : /team-member|is a team|required/i.test(err.message) ? 400
             : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // POST /internal/skills/resync — drift-gated resync (#629 AC3/AC4). Body:
+    // { skillName, teamId?, agentId? }. Delivers the current source content to
+    // every seeded copy in scope through the additive sync, refusing
+    // diverged/conflict/orphaned/unknown copies (never auto-overwritten).
+    const skillResyncMatch = req.method === 'POST' && req.url === '/internal/skills/resync';
+    if (skillResyncMatch) {
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        let payload;
+        try { payload = JSON.parse(body || '{}'); }
+        catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `Invalid JSON body: ${err.message}` }));
+          return;
+        }
+        try {
+          const result = await orchestrator.resyncSkill({
+            name: payload?.skillName,
+            teamId: typeof payload?.teamId === 'string' ? payload.teamId : null,
+            agentId: typeof payload?.agentId === 'string' ? payload.agentId : null,
+          });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] resyncSkill error: ${err.message}`);
+          const status = /required/i.test(err.message) ? 400 : 500;
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));
         }

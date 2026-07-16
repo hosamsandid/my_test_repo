@@ -3948,6 +3948,46 @@ async function proxySkillActivation(req, res, active) {
 app.post('/api/knowledge/activate', apiLimiter, (req, res) => proxySkillActivation(req, res, true));
 app.post('/api/knowledge/deactivate', apiLimiter, (req, res) => proxySkillActivation(req, res, false));
 
+// ── Skill drift resync (#629 AC3/AC4) ───────────────────────────────────────
+// Deliver the current source content to seeded copies through the orchestrator's
+// drift-gated additive sync. Body: { name, scope: { teamId?, agentId? } }.
+// A per-copy `outdated` is resynced; `diverged`/`conflict`/`orphaned`/`unknown`
+// is refused (never auto-overwritten) and surfaced with a manual-path hint.
+// Bulk "Sync all outdated" for a team is the { name, scope: { teamId } } form.
+app.post('/api/skills/resync', apiLimiter, async (req, res) => {
+  const { name, scope } = req.body || {};
+  const skillName = typeof name === 'string' ? name : (req.body || {}).skillName;
+  if (typeof skillName !== 'string' || !SKILL_NAME_RE.test(skillName)) {
+    return res.status(400).json({ error: 'name required (letters, digits, -, _)' });
+  }
+  const s = scope && typeof scope === 'object' ? scope : {};
+  const teamId = typeof s.teamId === 'string' ? s.teamId : null;
+  const agentId = typeof s.agentId === 'string' ? s.agentId : null;
+  if (!teamId && !agentId) return res.status(400).json({ error: 'scope.teamId or scope.agentId required' });
+  if (teamId && !AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'invalid scope.teamId' });
+  if (agentId && !AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'invalid scope.agentId' });
+
+  // Scope-visibility: the caller must be able to see the targeted construct.
+  const anchorId = teamId || agentId;
+  const cfg = readJsonFile(path.join(AGENTS_DIR, anchorId, 'config.json'), null);
+  if (!cfg) return res.status(404).json({ error: 'target not found' });
+  const callerScope = getScope(req);
+  if (!visibleAgent(callerScope, cfg)) return res.status(403).json({ error: 'forbidden' });
+
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/skills/resync`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skillName, ...(teamId ? { teamId } : {}), ...(agentId ? { agentId } : {}) }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 // The environment a team shares (from any of its agents' configs). Mirrors the
 // orchestrator's resolveTeamEnvId; used only to read/display config here.
 function teamEnvironment(teamId) {

@@ -1,9 +1,38 @@
 import React, { useState, useMemo } from 'react';
-import { RefreshCw } from 'lucide-react';
+import { RefreshCw, Download } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useApi } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
-import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, buildDaySeries, stackSegments } from './token-usage-view.js';
+import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, buildDaySeries, stackSegments, buildExportUrl } from './token-usage-view.js';
+
+// Trigger a browser download of an export URL. The endpoints are behind the
+// auth-cookie gate, so a same-origin anchor navigation carries the session.
+function downloadExport(url) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+// CSV / JSON export buttons for a view (#656 phase 3).
+function ExportButtons({ kind, since }) {
+  return (
+    <span style={{ display: 'inline-flex', gap: 'var(--eb-space-1)' }}>
+      {['csv', 'json'].map((format) => (
+        <button
+          key={format}
+          onClick={() => downloadExport(buildExportUrl(kind, { since, format }))}
+          title={`Download ${format.toUpperCase()} (tokens only — apply prices downstream)`}
+          style={{ ...CONTROL_STYLE, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}
+        >
+          <Download size={14} /> {format.toUpperCase()}
+        </button>
+      ))}
+    </span>
+  );
+}
 
 /* ── Time-range presets ────────────────────────────────────────────── */
 const RANGE_PRESETS = [
@@ -156,6 +185,7 @@ function StatisticsTab() {
         <button onClick={refresh} style={{ ...CONTROL_STYLE, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
           <RefreshCw size={14} /> Refresh
         </button>
+        <ExportButtons kind="summary" since={since} />
         {error && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load: {error}</span>}
       </div>
 
@@ -335,6 +365,7 @@ function WorkItemsTab() {
         <button onClick={refetch} style={{ ...CONTROL_STYLE, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
           <RefreshCw size={14} /> Refresh
         </button>
+        <ExportButtons kind="work-items" since={since} />
         {error && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load: {error}</span>}
       </div>
 

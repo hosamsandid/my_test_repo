@@ -1,0 +1,700 @@
+{
+  "_comment": "GENERATED golden fixture for skill-manifest.js. Asserted byte-for-byte by admin-console/api/skill-manifest.test.js AND orchestrator/skill-manifest.test.js. Regenerate with the case list in those suites if the contract changes; change BOTH module copies in the same commit.",
+  "hashCases": [
+    {
+      "name": "single SKILL.md",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "text": "---\nname: x\n---\nbody\n"
+        }
+      ],
+      "expectedHash": "c02c99de26ff"
+    },
+    {
+      "name": "two files, order independent (supplied reversed)",
+      "files": [
+        {
+          "path": "scripts/run.sh",
+          "text": "echo hi\n"
+        },
+        {
+          "path": "SKILL.md",
+          "text": "a"
+        }
+      ],
+      "expectedHash": "e1563c9da19f"
+    },
+    {
+      "name": "exclusions ignored (skill.json/provenance.json/_archive)",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "text": "---\nname: x\n---\nbody\n"
+        },
+        {
+          "path": "skill.json",
+          "text": "{\"v\":1,\"version\":9}"
+        },
+        {
+          "path": "provenance.json",
+          "text": "{\"entryIds\":[]}"
+        },
+        {
+          "path": "_archive/old-SKILL.md",
+          "text": "stale"
+        }
+      ],
+      "expectedHash": "c02c99de26ff"
+    },
+    {
+      "name": "nested dir file",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "text": "a"
+        },
+        {
+          "path": "refs/table.md",
+          "text": "| a | b |\n"
+        }
+      ],
+      "expectedHash": "bdb6e3c7645b"
+    },
+    {
+      "name": "empty (no hashable files)",
+      "files": [],
+      "expectedHash": "e3b0c44298fc"
+    },
+    {
+      "name": "content change flips hash",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "text": "---\nname: x\n---\nbody EDITED\n"
+        }
+      ],
+      "expectedHash": "4e9cd1f16eae"
+    }
+  ],
+  "stampCases": [
+    {
+      "name": "fresh create (existing null) → v1",
+      "existing": null,
+      "opts": {
+        "contentHash": "aaaaaaaaaaaa",
+        "name": "demo",
+        "now": "2026-07-16T09:00:00Z",
+        "by": "operator:thorsten",
+        "action": "created"
+      },
+      "expected": {
+        "v": 1,
+        "name": "demo",
+        "version": 1,
+        "contentHash": "aaaaaaaaaaaa",
+        "updatedAt": "2026-07-16T09:00:00Z",
+        "updatedBy": "operator:thorsten",
+        "history": [
+          {
+            "version": 1,
+            "hash": "aaaaaaaaaaaa",
+            "at": "2026-07-16T09:00:00Z",
+            "by": "operator:thorsten",
+            "action": "created"
+          }
+        ]
+      }
+    },
+    {
+      "name": "edit changing hash → v2, newest-first history",
+      "existing": {
+        "v": 1,
+        "name": "demo",
+        "version": 1,
+        "contentHash": "aaaaaaaaaaaa",
+        "updatedAt": "2026-07-16T09:00:00Z",
+        "updatedBy": "operator:thorsten",
+        "history": [
+          {
+            "version": 1,
+            "hash": "aaaaaaaaaaaa",
+            "at": "2026-07-16T09:00:00Z",
+            "by": "operator:thorsten",
+            "action": "created"
+          }
+        ]
+      },
+      "opts": {
+        "contentHash": "bbbbbbbbbbbb",
+        "now": "2026-07-16T10:00:00Z",
+        "by": "operator:thorsten",
+        "action": "edited"
+      },
+      "expected": {
+        "v": 1,
+        "name": "demo",
+        "version": 2,
+        "contentHash": "bbbbbbbbbbbb",
+        "updatedAt": "2026-07-16T10:00:00Z",
+        "updatedBy": "operator:thorsten",
+        "history": [
+          {
+            "version": 2,
+            "hash": "bbbbbbbbbbbb",
+            "at": "2026-07-16T10:00:00Z",
+            "by": "operator:thorsten",
+            "action": "edited"
+          },
+          {
+            "version": 1,
+            "hash": "aaaaaaaaaaaa",
+            "at": "2026-07-16T09:00:00Z",
+            "by": "operator:thorsten",
+            "action": "created"
+          }
+        ]
+      }
+    },
+    {
+      "name": "no-op stamp (same hash) is idempotent",
+      "existing": {
+        "v": 1,
+        "name": "demo",
+        "version": 1,
+        "contentHash": "aaaaaaaaaaaa",
+        "updatedAt": "2026-07-16T09:00:00Z",
+        "updatedBy": "operator:thorsten",
+        "history": [
+          {
+            "version": 1,
+            "hash": "aaaaaaaaaaaa",
+            "at": "2026-07-16T09:00:00Z",
+            "by": "operator:thorsten",
+            "action": "created"
+          }
+        ]
+      },
+      "opts": {
+        "contentHash": "aaaaaaaaaaaa",
+        "now": "2026-07-16T10:00:00Z",
+        "by": "someone-else",
+        "action": "edited"
+      },
+      "expected": {
+        "v": 1,
+        "name": "demo",
+        "version": 1,
+        "contentHash": "aaaaaaaaaaaa",
+        "updatedAt": "2026-07-16T09:00:00Z",
+        "updatedBy": "operator:thorsten",
+        "history": [
+          {
+            "version": 1,
+            "hash": "aaaaaaaaaaaa",
+            "at": "2026-07-16T09:00:00Z",
+            "by": "operator:thorsten",
+            "action": "created"
+          }
+        ]
+      }
+    },
+    {
+      "name": "origin recorded on a copy",
+      "existing": null,
+      "opts": {
+        "contentHash": "cccccccccccc",
+        "name": "copied",
+        "now": "2026-07-16T09:00:00Z",
+        "by": "curator",
+        "action": "promoted",
+        "origin": {
+          "tier": "team",
+          "teamId": "payments",
+          "sourceVersion": 3,
+          "sourceHash": "0f9e8d7c6b5a"
+        }
+      },
+      "expected": {
+        "v": 1,
+        "name": "copied",
+        "version": 1,
+        "contentHash": "cccccccccccc",
+        "updatedAt": "2026-07-16T09:00:00Z",
+        "updatedBy": "curator",
+        "origin": {
+          "tier": "team",
+          "teamId": "payments",
+          "sourceVersion": 3,
+          "sourceHash": "0f9e8d7c6b5a"
+        },
+        "history": [
+          {
+            "version": 1,
+            "hash": "cccccccccccc",
+            "at": "2026-07-16T09:00:00Z",
+            "by": "curator",
+            "action": "promoted"
+          }
+        ]
+      }
+    },
+    {
+      "name": "origin preserved across an edit that supplies none",
+      "existing": {
+        "v": 1,
+        "name": "copied",
+        "version": 1,
+        "contentHash": "cccccccccccc",
+        "updatedAt": "2026-07-16T09:00:00Z",
+        "updatedBy": "curator",
+        "origin": {
+          "tier": "team",
+          "teamId": "payments",
+          "sourceVersion": 3,
+          "sourceHash": "0f9e8d7c6b5a"
+        },
+        "history": [
+          {
+            "version": 1,
+            "hash": "cccccccccccc",
+            "at": "2026-07-16T09:00:00Z",
+            "by": "curator",
+            "action": "promoted"
+          }
+        ]
+      },
+      "opts": {
+        "contentHash": "dddddddddddd",
+        "now": "2026-07-16T10:00:00Z",
+        "by": "operator:t",
+        "action": "edited"
+      },
+      "expected": {
+        "v": 1,
+        "name": "copied",
+        "version": 2,
+        "contentHash": "dddddddddddd",
+        "updatedAt": "2026-07-16T10:00:00Z",
+        "updatedBy": "operator:t",
+        "origin": {
+          "tier": "team",
+          "teamId": "payments",
+          "sourceVersion": 3,
+          "sourceHash": "0f9e8d7c6b5a"
+        },
+        "history": [
+          {
+            "version": 2,
+            "hash": "dddddddddddd",
+            "at": "2026-07-16T10:00:00Z",
+            "by": "operator:t",
+            "action": "edited"
+          },
+          {
+            "version": 1,
+            "hash": "cccccccccccc",
+            "at": "2026-07-16T09:00:00Z",
+            "by": "curator",
+            "action": "promoted"
+          }
+        ]
+      }
+    },
+    {
+      "name": "note attached to history entry",
+      "existing": null,
+      "opts": {
+        "contentHash": "eeeeeeeeeeee",
+        "name": "n",
+        "now": "2026-07-16T09:00:00Z",
+        "by": "curator",
+        "action": "extended",
+        "note": "folded 3 converged lessons"
+      },
+      "expected": {
+        "v": 1,
+        "name": "n",
+        "version": 1,
+        "contentHash": "eeeeeeeeeeee",
+        "updatedAt": "2026-07-16T09:00:00Z",
+        "updatedBy": "curator",
+        "history": [
+          {
+            "version": 1,
+            "hash": "eeeeeeeeeeee",
+            "at": "2026-07-16T09:00:00Z",
+            "by": "curator",
+            "action": "extended",
+            "note": "folded 3 converged lessons"
+          }
+        ]
+      }
+    },
+    {
+      "name": "history bounded to 20, oldest dropped",
+      "existing": {
+        "v": 1,
+        "name": "b",
+        "version": 20,
+        "contentHash": "h00000000019",
+        "updatedAt": "2026-01-01T00:00:09Z",
+        "updatedBy": "x",
+        "history": [
+          {
+            "version": 20,
+            "hash": "h00000000019",
+            "at": "2026-01-01T00:00:09Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 19,
+            "hash": "h00000000018",
+            "at": "2026-01-01T00:00:08Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 18,
+            "hash": "h00000000017",
+            "at": "2026-01-01T00:00:07Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 17,
+            "hash": "h00000000016",
+            "at": "2026-01-01T00:00:06Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 16,
+            "hash": "h00000000015",
+            "at": "2026-01-01T00:00:05Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 15,
+            "hash": "h00000000014",
+            "at": "2026-01-01T00:00:04Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 14,
+            "hash": "h00000000013",
+            "at": "2026-01-01T00:00:03Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 13,
+            "hash": "h00000000012",
+            "at": "2026-01-01T00:00:02Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 12,
+            "hash": "h00000000011",
+            "at": "2026-01-01T00:00:01Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 11,
+            "hash": "h00000000010",
+            "at": "2026-01-01T00:00:00Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 10,
+            "hash": "h00000000009",
+            "at": "2026-01-01T00:00:09Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 9,
+            "hash": "h00000000008",
+            "at": "2026-01-01T00:00:08Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 8,
+            "hash": "h00000000007",
+            "at": "2026-01-01T00:00:07Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 7,
+            "hash": "h00000000006",
+            "at": "2026-01-01T00:00:06Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 6,
+            "hash": "h00000000005",
+            "at": "2026-01-01T00:00:05Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 5,
+            "hash": "h00000000004",
+            "at": "2026-01-01T00:00:04Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 4,
+            "hash": "h00000000003",
+            "at": "2026-01-01T00:00:03Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 3,
+            "hash": "h00000000002",
+            "at": "2026-01-01T00:00:02Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 2,
+            "hash": "h00000000001",
+            "at": "2026-01-01T00:00:01Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 1,
+            "hash": "h0000000000a",
+            "at": "2026-01-01T00:00:00Z",
+            "by": "x",
+            "action": "created"
+          }
+        ]
+      },
+      "opts": {
+        "contentHash": "h0000000000z",
+        "now": "2026-02-02T00:00:00Z",
+        "by": "x",
+        "action": "edited"
+      },
+      "expected": {
+        "v": 1,
+        "name": "b",
+        "version": 21,
+        "contentHash": "h0000000000z",
+        "updatedAt": "2026-02-02T00:00:00Z",
+        "updatedBy": "x",
+        "history": [
+          {
+            "version": 21,
+            "hash": "h0000000000z",
+            "at": "2026-02-02T00:00:00Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 20,
+            "hash": "h00000000019",
+            "at": "2026-01-01T00:00:09Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 19,
+            "hash": "h00000000018",
+            "at": "2026-01-01T00:00:08Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 18,
+            "hash": "h00000000017",
+            "at": "2026-01-01T00:00:07Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 17,
+            "hash": "h00000000016",
+            "at": "2026-01-01T00:00:06Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 16,
+            "hash": "h00000000015",
+            "at": "2026-01-01T00:00:05Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 15,
+            "hash": "h00000000014",
+            "at": "2026-01-01T00:00:04Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 14,
+            "hash": "h00000000013",
+            "at": "2026-01-01T00:00:03Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 13,
+            "hash": "h00000000012",
+            "at": "2026-01-01T00:00:02Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 12,
+            "hash": "h00000000011",
+            "at": "2026-01-01T00:00:01Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 11,
+            "hash": "h00000000010",
+            "at": "2026-01-01T00:00:00Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 10,
+            "hash": "h00000000009",
+            "at": "2026-01-01T00:00:09Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 9,
+            "hash": "h00000000008",
+            "at": "2026-01-01T00:00:08Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 8,
+            "hash": "h00000000007",
+            "at": "2026-01-01T00:00:07Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 7,
+            "hash": "h00000000006",
+            "at": "2026-01-01T00:00:06Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 6,
+            "hash": "h00000000005",
+            "at": "2026-01-01T00:00:05Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 5,
+            "hash": "h00000000004",
+            "at": "2026-01-01T00:00:04Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 4,
+            "hash": "h00000000003",
+            "at": "2026-01-01T00:00:03Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 3,
+            "hash": "h00000000002",
+            "at": "2026-01-01T00:00:02Z",
+            "by": "x",
+            "action": "edited"
+          },
+          {
+            "version": 2,
+            "hash": "h00000000001",
+            "at": "2026-01-01T00:00:01Z",
+            "by": "x",
+            "action": "edited"
+          }
+        ]
+      }
+    }
+  ],
+  "driftCases": [
+    {
+      "name": "in-sync",
+      "input": {
+        "copyHash": "A",
+        "sourceHash": "A",
+        "sourceCurrentHash": "A"
+      },
+      "expected": "in-sync"
+    },
+    {
+      "name": "outdated (source moved on)",
+      "input": {
+        "copyHash": "A",
+        "sourceHash": "A",
+        "sourceCurrentHash": "B"
+      },
+      "expected": "outdated"
+    },
+    {
+      "name": "diverged (copy edited locally)",
+      "input": {
+        "copyHash": "C",
+        "sourceHash": "A",
+        "sourceCurrentHash": "A"
+      },
+      "expected": "diverged"
+    },
+    {
+      "name": "conflict (both changed)",
+      "input": {
+        "copyHash": "C",
+        "sourceHash": "A",
+        "sourceCurrentHash": "B"
+      },
+      "expected": "conflict"
+    },
+    {
+      "name": "orphaned (source deleted)",
+      "input": {
+        "copyHash": "A",
+        "sourceHash": "A",
+        "sourceCurrentHash": null
+      },
+      "expected": "orphaned"
+    },
+    {
+      "name": "not applicable (hand-authored, no sourceHash)",
+      "input": {
+        "copyHash": "A",
+        "sourceHash": null,
+        "sourceCurrentHash": "A"
+      },
+      "expected": null
+    }
+  ]
+}

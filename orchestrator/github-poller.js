@@ -152,6 +152,30 @@ function conversationKey(ghEvent) {
   return ghEvent?.type || 'misc';
 }
 
+// Merged-PR detection for the PR-token-comment feature (#678). A merge is a
+// `PullRequestEvent` with `action: 'closed'` AND `pull_request.merged === true`
+// — a PR closed WITHOUT merging carries `merged: false` and must be ignored
+// (AC edge case "PR closed without merge → no comment"). Pure + unit-tested;
+// returns one `{ prNumber, event }` per merged PR (deduped by number, keeping the
+// latest by created_at so a re-delivered event resolves to a single post).
+function detectMergedPrs(ghEvents) {
+  const byNumber = new Map();
+  for (const ev of Array.isArray(ghEvents) ? ghEvents : []) {
+    if (!ev || ev.type !== 'PullRequestEvent') continue;
+    const p = ev.payload || {};
+    if (p.action !== 'closed') continue;
+    const pr = p.pull_request || {};
+    if (pr.merged !== true) continue;
+    const prNumber = Number(pr.number);
+    if (!Number.isInteger(prNumber) || prNumber <= 0) continue;
+    const prev = byNumber.get(prNumber);
+    if (!prev || String(ev.created_at || '') >= String(prev.event.created_at || '')) {
+      byNumber.set(prNumber, { prNumber, event: ev });
+    }
+  }
+  return [...byNumber.values()];
+}
+
 // Accepts SSH (`git@github.com:owner/repo.git`) and HTTPS
 // (`https://github.com/owner/repo[.git]`) — anything else returns null and
 // is silently ignored (non-GitHub remotes can't be polled).
@@ -283,9 +307,14 @@ function planBurstHandoffs(deliverables, cap) {
 }
 
 class GitHubPoller {
-  constructor({ loadEnvironment, listEnvironmentIds, enqueuePending, triggersPath } = {}) {
+  constructor({ loadEnvironment, listEnvironmentIds, enqueuePending, triggersPath, onMergedPr } = {}) {
     this.loadEnvironment = loadEnvironment;
     this.listEnvironmentIds = listEnvironmentIds;
+    // #678: best-effort callback fired once per merged PR seen in a poll, so the
+    // orchestrator can post the work item's token summary. Independent of
+    // subscriber fan-out (a merge is a human action nobody need subscribe to).
+    // Absent in unit tests → merge detection is a no-op.
+    this.onMergedPr = typeof onMergedPr === 'function' ? onMergedPr : null;
     // #185 Phase 2: the orchestrator owns the pending queue (it writes to the
     // control plane when the agent's volume is isolated). When not injected
     // (unit tests), we fall back to writing the agent's pool file directly.
@@ -546,10 +575,27 @@ class GitHubPoller {
       // in causal order. Events without a timestamp sort last (stable).
       fresh.sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
       await this._fanOutBatch(repoFullName, fresh, subscribers, token);
+      await this._handleMergedPrs(repoFullName, fresh);
     }
 
     this.state[repoFullName] = repoState;
     this._saveState();
+  }
+
+  // #678: fire the merge callback for every merged PR in this batch. Fully
+  // best-effort and isolated per PR — a token-comment failure must never break
+  // event delivery or poller state. The callback (orchestrator side) owns the
+  // opt-in gate, work-item resolution, idempotency and posting; the poller only
+  // detects the merge and hands off (thin shell, AC8).
+  async _handleMergedPrs(repoFullName, ghEvents) {
+    if (!this.onMergedPr) return;
+    for (const { prNumber, event } of detectMergedPrs(ghEvents)) {
+      try {
+        await this.onMergedPr(repoFullName, prNumber, event);
+      } catch (err) {
+        console.error(`[GH-Poller] ${repoFullName}#${prNumber}: merge callback failed: ${err.message}`);
+      }
+    }
   }
 
   async _fanOutBatch(repoFullName, ghEvents, subscribers, token) {
@@ -1017,6 +1063,7 @@ module.exports = {
   prApiUrlToHtmlUrl,
   eventKey,
   conversationKey,
+  detectMergedPrs,
   effectiveHorizon,
   backfillHorizonStamps,
   passesHorizon,

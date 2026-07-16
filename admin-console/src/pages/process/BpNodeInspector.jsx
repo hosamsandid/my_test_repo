@@ -3,7 +3,7 @@ import { Save, X } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
 
 // Right-side inspector for a BriefingPack node (#362 UI rework) — the same
-// editing pattern as the process DraftNodeInspector, so editing is consistent
+// editing pattern as the shared process NodeInspector, so editing is consistent
 // across BP and process flows. Edits write back to brief.md via bpOps
 // (prompt body, stage, and removal of dependency / artifact links).
 export default function BpNodeInspector({ node, nodes = [], ops, onClose, onChanged }) {

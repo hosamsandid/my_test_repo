@@ -1464,6 +1464,12 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
           style={{ display: 'inline-flex', flexShrink: 0, cursor: 'pointer', color: 'var(--eb-text-muted)' }}>
           <Share2 size={13} />
         </span>
+        <a
+          href={`/skills?team=${encodeURIComponent(teamId)}`}
+          title="Manage this skill in the Skills surface — files, version history, lineage & usage"
+          style={{ display: 'inline-flex', flexShrink: 0, color: 'var(--eb-text-muted)' }}>
+          <ExternalLink size={13} />
+        </a>
         {skill.tier === 'team' && (
           <span
             title="Delete this team skill — archives a restorable snapshot, then removes it from the team pool (Team Admin)"

@@ -113,6 +113,12 @@ export default function AgentKnowledgePanel({ agentId, active = false, refreshKe
           style={{ ...linkBtn }}>
           Team knowledge <ArrowUpRight size={11} />
         </button>
+        <button
+          onClick={() => navigate(teamId ? `/skills?team=${encodeURIComponent(teamId)}` : '/skills')}
+          title="Open the Skills surface — files, version history, lineage & usage for this team's skills"
+          style={{ ...linkBtn }}>
+          Skills <ArrowUpRight size={11} />
+        </button>
       </div>
 
       {/* Entries */}

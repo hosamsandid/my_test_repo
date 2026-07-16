@@ -331,6 +331,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, installableAgents, agentSki
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
+  const [deleteBlocking, setDeleteBlocking] = useState(null);
   const [promoting, setPromoting] = useState(false);
   const [promoteError, setPromoteError] = useState(null);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
@@ -477,22 +478,27 @@ function SkillViewer({ skill, onDeleted, onPromoted, installableAgents, agentSki
     }
   }
 
-  async function handleDelete() {
+  async function handleDelete(cascade = false) {
     setDeleting(true);
     setDeleteError(null);
     try {
       const params = withScope(new URLSearchParams({ source: skill.source }));
+      if (cascade) params.set('cascade', 'true');
       const res = await fetch(`/api/skills/${encodeURIComponent(skill.name)}?${params}`, { method: 'DELETE' });
       const data = await res.json();
       if (!res.ok) {
         if (res.status === 409 && data.agents) {
-          setDeleteError(`Skill is in use by agents: ${data.agents.join(', ')}`);
+          // Guarded: the skill still resolves to this tier for these constructs.
+          // Offer a cascade (deactivate the grants, then delete) in one action.
+          setDeleteBlocking(data.agents);
+          setDeleteError(`Skill is in use by: ${data.agents.join(', ')}`);
           setDeleting(false);
           return;
         }
         throw new Error(data.error || `HTTP ${res.status}`);
       }
       setConfirmDelete(false);
+      setDeleteBlocking(null);
       onDeleted(skill.name);
     } catch (e) {
       setDeleteError(e.message);
@@ -741,25 +747,37 @@ function SkillViewer({ skill, onDeleted, onPromoted, installableAgents, agentSki
         </div>
       )}
 
-      {/* Delete confirmation dialog */}
+      {/* Delete confirmation dialog. A guarded delete (409) surfaces the
+          blocking constructs and offers a cascade: deactivate the grants, then
+          delete — in one confirm. A snapshot is archived either way (restorable). */}
       <ConfirmDialog
         open={confirmDelete}
         title="Delete skill"
         variant="danger"
         message={
-          deleteError ? (
+          deleteBlocking ? (
+            <span>
+              <strong>{skill.name}</strong> still resolves to this tier for: {deleteBlocking.join(', ')}.
+              <br />Deactivate those grants and delete anyway? A restorable snapshot is archived first.
+            </span>
+          ) : deleteError ? (
             <span><strong>Cannot delete:</strong> {deleteError}</span>
           ) : (
-            `Delete "${skill.name}"? This removes the entire skill directory permanently.`
+            `Delete "${skill.name}"? A restorable snapshot is archived, then the skill directory is removed.`
           )
         }
-        confirmLabel={deleteError ? undefined : (deleting ? 'Deleting…' : 'Delete')}
-        alertOnly={!!deleteError}
-        onConfirm={deleteError
-          ? () => { setConfirmDelete(false); setDeleteError(null); }
-          : handleDelete
+        confirmLabel={
+          deleteBlocking ? (deleting ? 'Deactivating…' : 'Deactivate grants & delete')
+            : deleteError ? undefined
+            : (deleting ? 'Deleting…' : 'Delete')
         }
-        onCancel={() => { setConfirmDelete(false); setDeleteError(null); }}
+        alertOnly={!!deleteError && !deleteBlocking}
+        onConfirm={
+          deleteBlocking ? () => handleDelete(true)
+            : deleteError ? () => { setConfirmDelete(false); setDeleteError(null); }
+            : () => handleDelete(false)
+        }
+        onCancel={() => { setConfirmDelete(false); setDeleteError(null); setDeleteBlocking(null); }}
       />
 
       {/* Overwrite confirmation (destination tier already has a skill with this name) */}
@@ -845,6 +863,7 @@ export default function SkillsRegistry() {
   // row-level delete state (separate from the side-panel delete flow)
   const [rowDeleteTarget, setRowDeleteTarget] = useState(null);
   const [rowDeleteError, setRowDeleteError] = useState(null);
+  const [rowDeleteBlocking, setRowDeleteBlocking] = useState(null);
   const [rowDeleting, setRowDeleting] = useState(false);
   // import (.zip / .skill upload → pool skill)
   const importFileRef = useRef(null);
@@ -909,18 +928,20 @@ export default function SkillsRegistry() {
     .filter(a => a.enabled !== false && a.token && a.role !== 'team' && a.role !== 'orchestrator')
     .map(a => ({ id: a.id, displayName: a.displayName || a.id }));
 
-  async function confirmRowDelete() {
+  async function confirmRowDelete(cascade = false) {
     if (!rowDeleteTarget) return;
     setRowDeleting(true);
     setRowDeleteError(null);
     try {
       const params = new URLSearchParams({ source: rowDeleteTarget.source });
       if (rowDeleteTarget.teamId) params.set('teamId', rowDeleteTarget.teamId);
+      if (cascade) params.set('cascade', 'true');
       const res = await fetch(`/api/skills/${encodeURIComponent(rowDeleteTarget.name)}?${params}`, { method: 'DELETE' });
       const data = await res.json();
       if (!res.ok) {
         if (res.status === 409 && data.agents) {
-          setRowDeleteError(`Skill is in use by agents: ${data.agents.join(', ')}`);
+          setRowDeleteBlocking(data.agents);
+          setRowDeleteError(`Skill is in use by: ${data.agents.join(', ')}`);
           setRowDeleting(false);
           return;
         }
@@ -930,6 +951,7 @@ export default function SkillsRegistry() {
         setSelectedSkill(null);
       }
       setRowDeleteTarget(null);
+      setRowDeleteBlocking(null);
       refetch?.();
     } catch (e) {
       setRowDeleteError(e.message);
@@ -1085,19 +1107,29 @@ export default function SkillsRegistry() {
         title="Delete skill"
         variant="danger"
         message={
-          rowDeleteError ? (
+          rowDeleteBlocking ? (
+            <span>
+              <strong>{rowDeleteTarget?.name}</strong> still resolves to this tier for: {rowDeleteBlocking.join(', ')}.
+              <br />Deactivate those grants and delete anyway? A restorable snapshot is archived first.
+            </span>
+          ) : rowDeleteError ? (
             <span><strong>Cannot delete:</strong> {rowDeleteError}</span>
           ) : (
-            `Delete "${rowDeleteTarget?.name}"? This removes the SKILL.md file permanently.`
+            `Delete "${rowDeleteTarget?.name}"? A restorable snapshot is archived, then the skill is removed.`
           )
         }
-        confirmLabel={rowDeleteError ? undefined : (rowDeleting ? 'Deleting…' : 'Delete')}
-        alertOnly={!!rowDeleteError}
-        onConfirm={rowDeleteError
-          ? () => { setRowDeleteTarget(null); setRowDeleteError(null); }
-          : confirmRowDelete
+        confirmLabel={
+          rowDeleteBlocking ? (rowDeleting ? 'Deactivating…' : 'Deactivate grants & delete')
+            : rowDeleteError ? undefined
+            : (rowDeleting ? 'Deleting…' : 'Delete')
         }
-        onCancel={() => { setRowDeleteTarget(null); setRowDeleteError(null); }}
+        alertOnly={!!rowDeleteError && !rowDeleteBlocking}
+        onConfirm={
+          rowDeleteBlocking ? () => confirmRowDelete(true)
+            : rowDeleteError ? () => { setRowDeleteTarget(null); setRowDeleteError(null); }
+            : () => confirmRowDelete(false)
+        }
+        onCancel={() => { setRowDeleteTarget(null); setRowDeleteError(null); setRowDeleteBlocking(null); }}
       />
     </div>
   );

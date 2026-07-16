@@ -11,12 +11,17 @@ import { liveOps } from './edit-adapters';
 // existing endpoints; on any write it calls onChanged so the canvas re-fetches
 // the graph. The Connections tab (#unified) edits the same declarative edges
 // (parent / stage / dependency / data-flow) a draft does, via liveOps.
-export default function ProcessNodeInspector({ node, level, nodes = [], onClose, onChanged }) {
+export default function ProcessNodeInspector({ node, level, nodes = [], stages = [], teamId, onClose, onChanged }) {
   const [tab, setTab] = useState('prompt');
   if (!node) return null;
   const isTemplate = level === 'template' || node.role === 'template';
   const siblings = nodes.filter(n => n.id !== node.id).map(n => ({ id: n.id, displayName: n.displayName || n.id }));
   const inheritedStage = !node.stage && node.effectiveStage ? node.effectiveStage : '';
+  // Stage picker (#674): bind the team id so a brand-new stage typed in the
+  // inspector registers on the team agent's ordered list before assignment.
+  const stageOps = teamId
+    ? { ...liveOps, addStage: (name) => liveOps.addStage(teamId, name) }
+    : liveOps;
 
   return (
     <SidePanel open onClose={onClose} title={node.displayName || node.id} width="560px">
@@ -43,7 +48,7 @@ export default function ProcessNodeInspector({ node, level, nodes = [], onClose,
           )}
           {tab === 'connections' && (
             <ConnectionsSection node={node} siblings={siblings} inheritedStage={inheritedStage}
-              ops={liveOps} onChanged={onChanged} />
+              stages={stages} ops={stageOps} onChanged={onChanged} />
           )}
         </>
       )}

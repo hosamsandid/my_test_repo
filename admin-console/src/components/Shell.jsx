@@ -62,7 +62,7 @@ const NAV = [
   ]},
   { section: 'CONFIGURATION', items: [
     { path: '/teams',        label: 'Teams',               Icon: Building2 },
-    { path: '/skills',       label: 'Skills Registry',     Icon: Zap,     adminOnly: true },
+    { path: '/skills',       label: 'Skills',              Icon: Zap },
     { path: '/role-templates', label: 'Agent Templates',    Icon: UserCog, adminOnly: true },
     { path: '/jobs',         label: 'Triggers',            Icon: Clock },
     { path: '/github-events', label: 'GitHub Event Log',   Icon: History },

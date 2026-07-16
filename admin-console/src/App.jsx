@@ -120,7 +120,7 @@ export default function App() {
           <Route path="/environments" element={<WorkingEnvironments />} />
           <Route path="/ssh-keys"     element={<AdminRoute><SshKeys /></AdminRoute>} />
           <Route path="/github-tokens" element={<AdminRoute><GithubTokens /></AdminRoute>} />
-          <Route path="/skills"       element={<AdminRoute><SkillsRegistry /></AdminRoute>} />
+          <Route path="/skills"       element={<SkillsRegistry />} />
           <Route path="/role-templates" element={<AdminRoute><RoleTemplates /></AdminRoute>} />
           <Route path="/jobs"         element={<ScheduledJobs />} />
           <Route path="/github-events" element={<GithubEventLog />} />

@@ -32,6 +32,7 @@ const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unified
 const { membersOfTeam } = require('./agent-team-cascade');
 const skillManifest = require('./skill-manifest');
 const skillTransfer = require('./skill-transfer');
+const skillDeletion = require('./skill-deletion');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -5301,44 +5302,319 @@ app.put('/api/skills/:name', (req, res) => {
   res.json({ name, source: 'pool' });
 });
 
-app.delete('/api/skills/:name', (req, res) => {
-  const { name } = req.params;
-  const { source } = req.query;
-  if (!SKILL_NAME_RE.test(name)) return res.status(400).json({ error: 'Invalid skill name' });
-  if (source === 'agent') {
-    return res.status(403).json({ error: 'Agent skills cannot be deleted from the registry.' });
-  }
-  // Team-scoped skill (#306).
-  if (source === 'team') {
-    const dir = safeTeamSkillDir(req.query.teamId, name);
-    if (!dir) return res.status(400).json({ error: 'Invalid team id or skill name' });
-    if (!fs.existsSync(path.join(dir, 'SKILL.md'))) return res.status(404).json({ error: 'Skill not found' });
-    fs.rmSync(dir, { recursive: true, force: true });
-    return res.json({ deleted: name, source: 'team', teamId: req.query.teamId });
-  }
-  const skillDir = path.join(POOL_DIR, 'skills', path.basename(name));
-  const skillPath = path.join(skillDir, 'SKILL.md');
-  if (!fs.existsSync(skillPath)) return res.status(404).json({ error: 'Skill not found' });
+/* ─── Uniform guarded skill deletion (#627, docs/skill-lifecycle-concept.md §3.3)
+ * One rule on all three tiers, replacing the old mix (guarded global / blind
+ * team / 403 agent): a delete is GUARDED (refused while a granting construct's
+ * name RESOLVES to the tier being deleted, unless `cascade` deactivates those
+ * grants first), snapshots the dir to the shared skill-archive before removing
+ * it (restorable), and is permission-gated (Team Admin for a team skill, System
+ * Admin for global/agent). The pure planner/validator/prune lives in
+ * skill-deletion.js; this endpoint does the file work + orchestrator cascade. */
 
-  // In-use check against the team-owned grants: the skill name may be listed
-  // on any agent construct's skills[] (team / standalone / orchestrator) or a
-  // member's skillsOverride — the Working Environment no longer grants skills.
-  let blocking = [];
+// Where does `name` resolve for an agent construct — agent → team → global,
+// mirroring orchestrator/skill-source.js against the admin-console mounts.
+// Returns the tier ref the grant currently lands on, or null when nothing
+// backs the name anywhere.
+function resolveGrantTier(agentId, teamId, name) {
+  const agentDir = path.join(AGENTS_DIR, path.basename(agentId), 'skills', path.basename(name));
+  if (fs.existsSync(path.join(agentDir, 'SKILL.md'))) return { tier: 'agent', agentId };
+  const teamDir = safeTeamSkillDir(teamId, name);
+  if (teamDir && fs.existsSync(path.join(teamDir, 'SKILL.md'))) return { tier: 'team', teamId };
+  const globalDir = path.join(POOL_DIR, 'skills', path.basename(name));
+  if (fs.existsSync(path.join(globalDir, 'SKILL.md'))) return { tier: 'global' };
+  return null;
+}
+
+// The grants that would be stranded by deleting `plan`'s tier: every construct
+// that grants the name AND whose resolution currently lands on the tier being
+// deleted (concept §3.3 — "refuse while a grant resolves to this tier"). An
+// inheriting member is represented by its squad's grant (its own config carries
+// no skills[]); a squad / standalone / override-member is named directly.
+function blockingGrantsForDeletion(plan) {
+  const out = [];
+  let ids;
+  try { ids = fs.readdirSync(AGENTS_DIR); } catch { return out; }
+  for (const id of ids) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg) continue;
+    const hasOverride = Array.isArray(cfg.skillsOverride) && cfg.skillsOverride.includes(plan.name);
+    const grants = hasOverride || (Array.isArray(cfg.skills) && cfg.skills.includes(plan.name));
+    if (!grants) continue;
+    const teamId = cfg.teamId || DEFAULT_TEAM_ID;
+    const r = resolveGrantTier(cfg.id || id, teamId, plan.name);
+    if (!r) continue;
+    const hits = plan.tier === 'team' ? (r.tier === 'team' && r.teamId === plan.teamId)
+      : plan.tier === 'agent' ? (r.tier === 'agent' && r.agentId === plan.agentId)
+      : (r.tier === 'global');
+    if (hits) out.push({ id: cfg.id || id, teamId, role: cfg.role, parentTeamId: cfg.parentTeamId, hasOverride });
+  }
+  return out;
+}
+
+// Cascade: deactivate every blocking grant through the orchestrator's existing
+// (de)activation path (workspace sync + manifest + CLAUDE.md rebuild) so the
+// same code that would toggle a skill off does the retirement. Best-effort —
+// the caller re-scans the guard afterwards and only deletes if it is clear.
+async function cascadeDeactivateForDeletion(plan) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  const blocking = blockingGrantsForDeletion(plan);
+  const teamCalls = new Map(); // squadId -> Set(override memberIds to strip)
+  const agentCalls = new Set();
+  for (const b of blocking) {
+    if (b.role === 'team') { if (!teamCalls.has(b.id)) teamCalls.set(b.id, new Set()); }
+    else if (b.role === 'team-member' && b.parentTeamId) {
+      if (!teamCalls.has(b.parentTeamId)) teamCalls.set(b.parentTeamId, new Set());
+      if (b.hasOverride) teamCalls.get(b.parentTeamId).add(b.id);
+    } else { agentCalls.add(b.id); }
+  }
+  const results = [];
+  for (const [squadId, includeMembers] of teamCalls) {
+    try {
+      const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(squadId)}/skills/deactivate`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ skillName: plan.name, includeMembers: [...includeMembers] }),
+      });
+      results.push({ squadId, status: resp.status });
+    } catch (err) { results.push({ squadId, error: err.message }); }
+  }
+  for (const agentId of agentCalls) {
+    try {
+      const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/skills/deactivate`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ skillName: plan.name }),
+      });
+      results.push({ agentId, status: resp.status });
+    } catch (err) { results.push({ agentId, error: err.message }); }
+  }
+  return results;
+}
+
+// Reconstruct a tier ref from an archive segment (`global` / `team-<id>` /
+// `agent-<id>`) for archive entries with no meta sidecar (e.g. move snapshots).
+function segToRef(seg, name) {
+  if (seg === 'global') return { tier: 'global', name };
+  if (seg.startsWith('team-')) return { tier: 'team', teamId: seg.slice(5), name };
+  if (seg.startsWith('agent-')) return { tier: 'agent', agentId: seg.slice(6), name };
+  return null;
+}
+
+// Snapshot a skill dir to the shared archive before deletion (restorable — AC3).
+// Uses the SAME `<tierSeg>/<name>-<hash>-<ts>` layout skill-transfer.js's move
+// archive writes, plus an archive-meta.json sidecar carrying the tier the skill
+// came from so a restore round-trips its metadata. Returns { id, dir } or null.
+function archiveDeletedSkill(srcDir, plan, name, srcId, req, now = Date.now()) {
   try {
-    blocking = fs.readdirSync(AGENTS_DIR)
-      .map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null))
-      .filter(cfg => cfg && (
-        (Array.isArray(cfg.skills) && cfg.skills.includes(name)) ||
-        (Array.isArray(cfg.skillsOverride) && cfg.skillsOverride.includes(name))
-      ))
-      .map(cfg => cfg.id);
-  } catch { /* no agents dir yet */ }
-  if (blocking.length > 0) {
-    return res.status(409).json({ error: 'Skill is in use', agents: blocking });
+    const { seg, stamp, id } = skillDeletion.archiveStamp(plan, name, srcId.sourceHash, now);
+    const base = path.resolve(WORKSPACE, 'skill-archive');
+    const dst = path.resolve(base, seg, stamp);
+    const rel = path.relative(base, dst);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    fs.cpSync(srcDir, dst, { recursive: true });
+    fs.writeFileSync(path.join(dst, 'archive-meta.json'), JSON.stringify({
+      id, tier: plan.tier, name, teamId: plan.teamId, agentId: plan.agentId,
+      hash: srcId.sourceHash || null, version: srcId.sourceVersion,
+      deletedAt: new Date(now).toISOString(), by: skillActor(req),
+    }, null, 2));
+    return { id, dir: dst };
+  } catch { return null; }
+}
+
+// Append a skill lifecycle event (skill-deleted / skill-restored, issue item 6)
+// to the shared knowledge live feed. Best-effort, same file the transfer event
+// and (de)activation events use.
+function appendSkillFeedEvent({ type, ref, name, archiveId, by }) {
+  try {
+    fs.mkdirSync(path.dirname(KNOWLEDGE_EVENTS_FILE), { recursive: true });
+    fs.appendFileSync(KNOWLEDGE_EVENTS_FILE, JSON.stringify({
+      type, ts: new Date().toISOString(),
+      tier: ref.tier,
+      teamId: ref.tier === 'team' ? ref.teamId : undefined,
+      agentId: ref.tier === 'agent' ? ref.agentId : undefined,
+      skillName: name, archiveId: archiveId || undefined, by,
+    }) + '\n');
+  } catch { /* best effort */ }
+}
+
+app.delete('/api/skills/:name', heavyLimiter, async (req, res) => {
+  // 1. Validate + plan (pure). `source` is the historic query alias for `tier`;
+  //    query + body are merged so the CLI query-string form and a JSON body both
+  //    work. Regexes are the api.js originals so a valid plan is always writable.
+  const plan = skillDeletion.planDeletion(
+    { ...req.query, ...(req.body || {}), name: req.params.name },
+    { skillNameRe: SKILL_NAME_RE, agentIdRe: AGENT_ID_RE, teamIdRe: POOL_TEAM_ID_RE },
+  );
+  if (!plan.ok) return res.status(400).json({ error: plan.error });
+
+  // 2. Permission gate: Team Admin for a team skill (AC4 — no System Admin
+  //    needed), System Admin for global/agent.
+  const scope = getScope(req);
+  const permit = skillDeletion.permitDeletion(plan.permission, {
+    systemAdmin: !!scope.all,
+    isTeamAdmin: (teamId) => canManageTeam(scope, teamId),
+  });
+  if (!permit.ok) return res.status(403).json({ error: permit.error });
+
+  // 3. Resolve the target dir (containment-guarded) + verify it exists.
+  const target = resolveTransferSkillDir(plan, plan.name);
+  if (target.error) return res.status(400).json({ error: target.error });
+  if (!fs.existsSync(path.join(target.dir, 'SKILL.md'))) {
+    return res.status(404).json({ error: 'Skill not found' });
   }
 
-  fs.rmSync(skillDir, { recursive: true, force: true });
-  res.json({ deleted: name });
+  // 4. Snapshot FIRST (a cascade on the agent tier removes the very dir), then
+  //    guard / cascade. Roll the snapshot back if the delete is ultimately
+  //    refused so a blocked attempt never leaves an orphan archive.
+  const srcId = skillSourceIdentity(target.dir);
+  const archived = archiveDeletedSkill(target.dir, plan, plan.name, srcId, req);
+
+  // 5. Uniform guard: refuse while a grant resolves to this tier. `cascade`
+  //    deactivates the blocking grants first, then we re-scan.
+  let cascade = null;
+  if (plan.cascade) cascade = await cascadeDeactivateForDeletion(plan);
+  const blocking = blockingGrantsForDeletion(plan);
+  if (blocking.length > 0) {
+    if (archived) { try { fs.rmSync(archived.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+    return res.status(409).json({
+      error: 'Skill is in use',
+      agents: blocking.map((b) => b.id),
+      hint: plan.cascade ? 'grants remain after cascade' : 'pass cascade:true to deactivate the blocking grants first',
+    });
+  }
+
+  // 6. Remove the tier's copy (a cascade on the agent tier may already have
+  //    removed it — rmSync is then a no-op).
+  try { fs.rmSync(target.dir, { recursive: true, force: true }); }
+  catch (err) {
+    return res.status(500).json({ error: `Failed to delete skill: ${err.message}` });
+  }
+
+  // 7. Live-feed event (issue item 6).
+  appendSkillFeedEvent({ type: 'skill-deleted', ref: plan, name: plan.name, archiveId: archived && archived.id, by: skillActor(req) });
+
+  res.json({
+    deleted: plan.name,
+    tier: plan.tier,
+    teamId: plan.teamId,
+    agentId: plan.agentId,
+    cascade: plan.cascade,
+    cascadeResults: cascade || undefined,
+    archive: archived ? archived.id : null,
+  });
+});
+
+/* ─── Skill archive: list / restore / prune (#627, AC3) ──────────────────── */
+
+// GET /api/skills/archive — list restorable deletion (and move) snapshots,
+// newest-first. Metadata comes from the archive-meta.json sidecar, falling back
+// to parsing the stamp for meta-less (pre-#627 / move) entries. Team-tier
+// entries are filtered by the caller's scope (global always visible).
+app.get('/api/skills/archive', (req, res) => {
+  const base = path.resolve(WORKSPACE, 'skill-archive');
+  const scope = getScope(req);
+  const out = [];
+  let segs;
+  try { segs = fs.readdirSync(base); } catch { return res.json({ archives: [] }); }
+  for (const seg of segs) {
+    let stamps;
+    try { stamps = fs.readdirSync(path.join(base, seg)); } catch { continue; }
+    for (const stamp of stamps) {
+      const dir = path.join(base, seg, stamp);
+      try { if (!fs.statSync(dir).isDirectory()) continue; } catch { continue; }
+      const id = `${seg}/${stamp}`;
+      const meta = readJsonFile(path.join(dir, 'archive-meta.json'), null);
+      const parsed = skillDeletion.parseArchiveId(id) || {};
+      const tier = meta && meta.tier ? meta.tier : (segToRef(seg, parsed.name) || {}).tier;
+      const teamId = meta ? meta.teamId : (seg.startsWith('team-') ? seg.slice(5) : undefined);
+      const agentId = meta ? meta.agentId : (seg.startsWith('agent-') ? seg.slice(6) : undefined);
+      if (!scope.all && tier === 'team' && !canManageTeam(scope, teamId)) continue;
+      out.push({
+        id, tier, teamId, agentId,
+        name: (meta && meta.name) || parsed.name,
+        hash: (meta && meta.hash) || parsed.hash || null,
+        deletedAt: (meta && meta.deletedAt) || (parsed.ts ? new Date(parsed.ts).toISOString() : null),
+        by: meta ? meta.by : undefined,
+      });
+    }
+  }
+  out.sort((a, b) => String(b.deletedAt || '').localeCompare(String(a.deletedAt || '')));
+  res.json({ archives: out });
+});
+
+// POST /api/skills/archive/restore { id, overwrite? } — copy a snapshot back to
+// its origin tier (content + metadata round-trip; the meta sidecar is excluded
+// from the restored dir). Permission-gated the same way as a delete at that
+// tier. Refuses to clobber an existing skill unless `overwrite: true`.
+app.post('/api/skills/archive/restore', heavyLimiter, (req, res) => {
+  const { id, overwrite = false } = req.body || {};
+  const parsed = skillDeletion.parseArchiveId(id);
+  if (!parsed) return res.status(400).json({ error: 'invalid archive id' });
+  const base = path.resolve(WORKSPACE, 'skill-archive');
+  const srcDir = path.resolve(base, parsed.seg, parsed.stamp);
+  const rel = path.relative(base, srcDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'invalid archive id' });
+  if (!fs.existsSync(path.join(srcDir, 'SKILL.md'))) return res.status(404).json({ error: 'archive not found' });
+
+  const meta = readJsonFile(path.join(srcDir, 'archive-meta.json'), null);
+  const ref = meta && meta.tier
+    ? { tier: meta.tier, teamId: meta.teamId, agentId: meta.agentId, name: meta.name || parsed.name }
+    : segToRef(parsed.seg, parsed.name);
+  if (!ref || !ref.name) return res.status(400).json({ error: 'cannot resolve archive tier' });
+
+  const scope = getScope(req);
+  const permit = skillDeletion.permitDeletion(skillDeletion.requiredPermission(ref), {
+    systemAdmin: !!scope.all,
+    isTeamAdmin: (teamId) => canManageTeam(scope, teamId),
+  });
+  if (!permit.ok) return res.status(403).json({ error: permit.error });
+
+  const dst = resolveTransferSkillDir(ref, ref.name);
+  if (dst.error) return res.status(400).json({ error: dst.error });
+  if (fs.existsSync(path.join(dst.dir, 'SKILL.md')) && !overwrite) {
+    return res.status(409).json({ error: `skill '${ref.name}' already exists at the ${ref.tier} tier`, exists: true });
+  }
+  try {
+    if (overwrite) fs.rmSync(dst.dir, { recursive: true, force: true });
+    fs.mkdirSync(path.dirname(dst.dir), { recursive: true });
+    fs.cpSync(srcDir, dst.dir, { recursive: true, filter: (s) => path.basename(s) !== 'archive-meta.json' });
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to restore skill: ${err.message}` });
+  }
+  appendSkillFeedEvent({ type: 'skill-restored', ref, name: ref.name, archiveId: id, by: skillActor(req) });
+  res.status(201).json({ restored: ref.name, tier: ref.tier, teamId: ref.teamId, agentId: ref.agentId, from: id });
+});
+
+// POST /api/skills/archive/prune { retentionDays? } — remove snapshots older
+// than the retention window (default 90d). Which ids to drop is decided by the
+// unit-tested pure helper planArchivePrune; System-Admin only.
+app.post('/api/skills/archive/prune', (req, res) => {
+  const scope = getScope(req);
+  if (!scope.all) return res.status(403).json({ error: 'forbidden: retention prune requires System Admin' });
+  const retentionDays = Number.isFinite(req.body?.retentionDays) ? req.body.retentionDays : skillDeletion.DEFAULT_RETENTION_DAYS;
+  const base = path.resolve(WORKSPACE, 'skill-archive');
+  const entries = [];
+  let segs;
+  try { segs = fs.readdirSync(base); } catch { return res.json({ pruned: [], retentionDays }); }
+  for (const seg of segs) {
+    let stamps;
+    try { stamps = fs.readdirSync(path.join(base, seg)); } catch { continue; }
+    for (const stamp of stamps) {
+      const id = `${seg}/${stamp}`;
+      const meta = readJsonFile(path.join(base, seg, stamp, 'archive-meta.json'), null);
+      const parsed = skillDeletion.parseArchiveId(id);
+      entries.push({ id, deletedAt: (meta && meta.deletedAt) || (parsed && parsed.ts != null ? parsed.ts : undefined) });
+    }
+  }
+  const pruned = [];
+  for (const id of skillDeletion.planArchivePrune(entries, { retentionDays })) {
+    const p = skillDeletion.parseArchiveId(id);
+    if (!p) continue;
+    const dir = path.resolve(base, p.seg, p.stamp);
+    const r = path.relative(base, dir);
+    if (r.startsWith('..') || path.isAbsolute(r)) continue;
+    try { fs.rmSync(dir, { recursive: true, force: true }); pruned.push(id); } catch { /* best effort */ }
+  }
+  res.json({ pruned, retentionDays });
 });
 
 // Two-stage promotion (#306, relates to #173): promote a TEAM skill up to the

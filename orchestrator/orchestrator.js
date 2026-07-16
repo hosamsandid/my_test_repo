@@ -4686,6 +4686,23 @@ class Orchestrator {
       }
       results.push(await this._syncSkillIntoWorkspace(step.agentId, cfg, name, { remove: !active }));
     }
+    // Cascade deactivation (skill-deletion #627): stripping the team grant leaves
+    // an OVERRIDE member's own `skillsOverride` grant in place — a delete guard
+    // would still see it and the skill would strand once the pool dir is gone.
+    // When the caller opts a member in via includeMembers on a DEACTIVATE, remove
+    // the name from that member's own list too, so the grant is fully retired.
+    if (!active && includeMembers.length) {
+      const optIn = new Set(includeMembers);
+      for (const m of members) {
+        if (!optIn.has(m.id) || !Array.isArray(m.skillsOverride) || !m.skillsOverride.includes(name)) continue;
+        m.skillsOverride = m.skillsOverride.filter((s) => s !== name);
+        saveAgentConfig(m.id, m);
+        this.agentConfigs.set(m.id, { config: m });
+        if (m.token && !results.some((r) => r.agentId === m.id && (r.status === "seeded" || r.status === "removed"))) {
+          results.push(await this._syncSkillIntoWorkspace(m.id, m, name, { remove: true }));
+        }
+      }
+    }
     console.log(
       `[Orchestrator] Team ${teamId}: skill '${name}' ${active ? "activated" : "deactivated"} — ` +
       results.map((r) => `${r.agentId}:${r.status}`).join(", ") || "no members"

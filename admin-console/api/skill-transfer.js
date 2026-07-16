@@ -191,6 +191,21 @@ function resolveCollisionName(name, existsFn) {
   return `${name}-${Date.now()}`;
 }
 
+// Pure collision decision for the shared skill-file-write core (#639). Every
+// endpoint that lands a skill on disk (transfer, promote/lift, share, extend)
+// funnels its "does the destination already exist and may I write it" question
+// through here, so the reject/overwrite semantics live in one tested place while
+// the caller does the fs work. `allowExisting` is the extend case: the target is
+// SUPPOSED to already exist and is written in place (never a collision). Returns
+// { ok: true, overwrite } to proceed (overwrite=true means rm the dir first) or
+// { ok: false, conflict: true } to signal the caller should 409.
+function planSkillWrite({ onCollision = 'reject', exists = false, allowExisting = false } = {}) {
+  if (allowExisting) return { ok: true, overwrite: false };
+  if (!exists) return { ok: true, overwrite: false };
+  if (onCollision === 'overwrite') return { ok: true, overwrite: true };
+  return { ok: false, conflict: true };
+}
+
 module.exports = {
   TIERS,
   MODES,
@@ -205,4 +220,5 @@ module.exports = {
   permitTransfer,
   buildTransferOrigin,
   resolveCollisionName,
+  planSkillWrite,
 };

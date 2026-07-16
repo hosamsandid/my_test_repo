@@ -5437,7 +5437,11 @@ app.post('/api/skills/transfer', heavyLimiter, async (req, res) => {
   //    universal fallback remains); a move to a TEAM tier can orphan grantees
   //    outside that team unless a global copy of the name still exists.
   if (plan.retireSource && plan.to.tier === 'team') {
-    const globalCopyRemains = fs.existsSync(path.join(POOL_DIR, 'skills', destName, 'SKILL.md')) && plan.from.tier !== 'global';
+    // Route the global-copy probe through the containment-guarded resolver (same
+    // path.resolve + path.relative guard as every other tier lookup) so CodeQL's
+    // path-injection query sees the guard in-flow — destName is already validated
+    // against SKILL_NAME_RE by the planner, this keeps the check consistent + safe.
+    const globalCopyRemains = transferSkillExistsAt({ tier: 'global' }, destName) && plan.from.tier !== 'global';
     if (!globalCopyRemains) {
       const stranded = agentsGrantingSkill(plan.name).filter(a => a.teamId !== plan.to.teamId);
       if (stranded.length > 0 && req.body.force !== true) {

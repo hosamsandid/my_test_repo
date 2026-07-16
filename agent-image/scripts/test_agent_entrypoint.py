@@ -265,6 +265,60 @@ class ResultEventTokens(unittest.TestCase):
         self.assertEqual(tokens["cacheReadInput"], 0)
 
 
+class ResultEventModelUsage(unittest.TestCase):
+    """#654: the result-event wrapper must now also surface the raw per-model
+    `modelUsage` map (previously dropped) so the usage-record emitter can build
+    the per-model four-class split."""
+
+    def test_model_usage_passed_through_raw(self):
+        line = __import__("json").dumps({
+            "type": "result",
+            "usage": {"input_tokens": 10, "output_tokens": 42},
+            "modelUsage": {"claude-sonnet-4-6": {"inputTokens": 8, "outputTokens": 40}},
+        })
+        ev = next(e for e in map_stream_json_line(line, "corr-1")
+                  if e["type"] == "result")
+        self.assertEqual(ev["modelUsage"],
+                         {"claude-sonnet-4-6": {"inputTokens": 8, "outputTokens": 40}})
+
+    def test_model_usage_none_when_absent(self):
+        line = __import__("json").dumps({"type": "result", "usage": {}})
+        ev = next(e for e in map_stream_json_line(line, "corr-1")
+                  if e["type"] == "result")
+        self.assertIsNone(ev["modelUsage"])
+
+
+class BuildUsageRecord(unittest.TestCase):
+    """Two-sided contract with admin-console/api/usage-summary.js: build_usage_record
+    (emitter) is asserted against the SAME golden fixture the JS aggregator uses
+    (admin-console/api/usage-summary.fixture.json), so the canonical usage-record
+    schema cannot drift between the Python emitter and the JS aggregator."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        fixture_path = (Path(__file__).resolve().parents[2]
+                        / "admin-console" / "api" / "usage-summary.fixture.json")
+        cls.fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    def test_golden_records(self):
+        for case in self.fixture["records"]:
+            with self.subTest(case=case["name"]):
+                self.assertEqual(
+                    entrypoint.build_usage_record(case["input"]),
+                    case["expected"],
+                )
+
+    def test_normalize_model_usage_ignores_non_dict_and_defaults(self):
+        self.assertEqual(entrypoint._normalize_model_usage(None), {})
+        self.assertEqual(entrypoint._normalize_model_usage({"m": "bad"}), {})
+        self.assertEqual(
+            entrypoint._normalize_model_usage({"m": {"inputTokens": 3}}),
+            {"m": {"input": 3, "output": 0,
+                   "cacheCreationInput": 0, "cacheReadInput": 0}},
+        )
+
+
 class MaintenanceModeGating(unittest.IsolatedAsyncioTestCase):
     """#504: cron/once triggers must not fire while Maintenance Mode (#501) is
     active, http/github-event pending entries must not be drained/processed

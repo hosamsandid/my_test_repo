@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { PanelRightOpen, MessageCircle, Loader2 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import AgentList, { buildGroups } from './agent-chat/AgentList';
@@ -97,6 +97,7 @@ function saveLastViewed(map) {
 export default function AgentChat() {
   const { agentId } = useParams();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { data: agents, loading, error, refetch } = useApi('/api/matrix/agents');
 
   // Local map agentId -> roomId, for rooms we created during this session
@@ -343,6 +344,30 @@ export default function AgentChat() {
     if (!sessionId) return;
     setResumeRequest({ sessionId, ts: Date.now() });
   }, []);
+
+  // Deep-link from the GitHub Event Log (#642): a `?session=<correlationId>`
+  // query param means "open the Sessions tab and preselect the session this
+  // delivered event triggered". Consumed once agents have loaded and the target
+  // agent exists, then the param is cleared so a reload doesn't re-fire it.
+  // Cold-nav safe (AC7): the effect waits for the async agent list. SessionsPanel
+  // owns the active-vs-finished match + the graceful "not found" notice (AC6).
+  const [sessionSelectRequest, setSessionSelectRequest] = useState(null);
+  const consumedSessionRef = useRef(null);
+  const requestedSession = searchParams.get('session');
+  useEffect(() => {
+    if (!requestedSession || loading || !agents) return;
+    // Unknown agent → the redirect effect below handles it; don't consume here.
+    if (!agents.find(a => a.id === agentId)) return;
+    if (consumedSessionRef.current === requestedSession) return;
+    consumedSessionRef.current = requestedSession;
+    setLogOpen(true);
+    setRailTabRequest({ tab: 'sessions', ts: Date.now() });
+    setSessionSelectRequest({ correlationId: requestedSession, ts: Date.now() });
+    // Strip the param (keep any others) so the deep-link doesn't persist.
+    const next = new URLSearchParams(searchParams);
+    next.delete('session');
+    setSearchParams(next, { replace: true });
+  }, [requestedSession, loading, agents, agentId, searchParams, setSearchParams]);
 
   const selectedAgent = (agents ?? []).find(a => a.id === agentId) || null;
   const effectiveRoomId =
@@ -603,6 +628,7 @@ export default function AgentChat() {
             knowledgeRefreshKey={knowledgeRefreshKey}
             openTabRequest={railTabRequest}
             onResumeSession={handleResumeSession}
+            sessionSelectRequest={sessionSelectRequest}
           />
         </div>
         </>

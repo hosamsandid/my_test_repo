@@ -1,7 +1,9 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { RefreshCw } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
+import { buildTriggerCorrelationId, isSessionOutcome } from './github-event-session';
 
 /* ── Time-range presets ────────────────────────────────────────────── */
 const RANGE_PRESETS = [
@@ -15,7 +17,7 @@ const RANGE_PRESETS = [
 // (a protection layer did its job on purpose, not an error), digest =
 // info (bundled, not lost), no matching trigger = warning (worth an
 // admin's attention — "nobody's listening" per issue #469 AC #4).
-function OutcomeChip({ outcome }) {
+function OutcomeChip({ outcome, eventId, onOpenSession }) {
   let bg, color, label;
   if (outcome.status === 'delivered') {
     bg = 'var(--eb-status-success-bg)';
@@ -30,20 +32,43 @@ function OutcomeChip({ outcome }) {
     color = 'var(--eb-text-secondary)';
     label = `dropped (${outcome.reason || 'unknown'}) → ${outcome.agentName || outcome.agentId}`;
   }
-  return (
-    <span style={{
-      display: 'inline-block',
-      padding: '1px 6px',
-      borderRadius: 'var(--eb-radius-full)',
-      fontSize: 'var(--eb-text-xs)',
-      fontWeight: 'var(--eb-font-medium)',
-      background: bg, color,
-      border: `1px solid ${color}`,
-      whiteSpace: 'nowrap',
-    }}>
-      {label}
-    </span>
-  );
+
+  const baseStyle = {
+    display: 'inline-block',
+    padding: '1px 6px',
+    borderRadius: 'var(--eb-radius-full)',
+    fontSize: 'var(--eb-text-xs)',
+    fontWeight: 'var(--eb-font-medium)',
+    background: bg, color,
+    border: `1px solid ${color}`,
+    whiteSpace: 'nowrap',
+  };
+
+  // Only a `delivered` outcome that carries a triggerId maps to a real Claude
+  // session, so only those become an activatable control (AC1/AC2). Everything
+  // else stays a plain, non-interactive status chip.
+  const correlationId = buildTriggerCorrelationId(outcome.triggerId, eventId);
+  if (isSessionOutcome(outcome) && correlationId && onOpenSession) {
+    return (
+      <button
+        type="button"
+        onClick={() => onOpenSession(outcome.agentId, correlationId)}
+        aria-label={`Open session for ${outcome.agentName || outcome.agentId}`}
+        title={`Open the session this event triggered for ${outcome.agentName || outcome.agentId}`}
+        style={{
+          ...baseStyle,
+          cursor: 'pointer',
+          fontFamily: 'inherit',
+          textDecoration: 'underline',
+          textUnderlineOffset: 2,
+        }}
+      >
+        {label}
+      </button>
+    );
+  }
+
+  return <span style={baseStyle}>{label}</span>;
 }
 
 function NoMatchBadge() {
@@ -66,7 +91,16 @@ function NoMatchBadge() {
 
 /* ── Main page ─────────────────────────────────────────────────────── */
 export default function GithubEventLog() {
+  const navigate = useNavigate();
   const [rangeKey, setRangeKey] = useState('24h');
+
+  // Deep-link into the agent chat's Sessions tab, preselecting the session the
+  // delivered event triggered (reconstructed correlationId passed via `?session`).
+  // Cold-nav safe: AgentChat reads the query param once agents have loaded (#642).
+  const openSession = useCallback((agentId, correlationId) => {
+    if (!agentId || !correlationId) return;
+    navigate(`/chats/${encodeURIComponent(agentId)}?session=${encodeURIComponent(correlationId)}`);
+  }, [navigate]);
 
   const since = useMemo(() => {
     const preset = RANGE_PRESETS.find(r => r.key === rangeKey) || RANGE_PRESETS[0];
@@ -92,7 +126,9 @@ export default function GithubEventLog() {
       const list = Array.isArray(v) ? v : [];
       return (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-          {list.map((o, i) => <OutcomeChip key={i} outcome={o} />)}
+          {list.map((o, i) => (
+            <OutcomeChip key={i} outcome={o} eventId={row.eventId} onOpenSession={openSession} />
+          ))}
         </div>
       );
     } },

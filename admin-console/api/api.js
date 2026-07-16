@@ -39,6 +39,7 @@ const skillTransfer = require('./skill-transfer');
 const skillDeletion = require('./skill-deletion');
 const skillMerge = require('./skill-merge');
 const skillImport = require('./skill-import');
+const skillGrantValidate = require('./skill-grant-validate');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -1209,6 +1210,22 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
   const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, dataFlow, parentMemberId, stage, github, channels } = req.body;
+
+  // Reject a newly-introduced unknown skill name on a grant save (#633) — a
+  // typo can no longer become a silent dead grant. Names already present in the
+  // construct's prior grant are preserved (flagged in the UI, never dropped).
+  // Validate before any mutation so a bad grant can't half-apply.
+  {
+    const known = knownSkillNamesFor(cfg.teamId);
+    if (Array.isArray(skills) && cfg.role !== 'team-member') {
+      const v = skillGrantValidate.validateGrantNames(skills, known, cfg.skills);
+      if (!v.ok) return res.status(400).json({ error: `Unknown skill(s): ${v.unknown.join(', ')} — pick from the list or create them first.` });
+    }
+    if (Array.isArray(skillsOverride) && cfg.role === 'team-member') {
+      const v = skillGrantValidate.validateGrantNames(skillsOverride, known, cfg.skillsOverride);
+      if (!v.ok) return res.status(400).json({ error: `Unknown skill(s): ${v.unknown.join(', ')} — pick from the list or create them first.` });
+    }
+  }
 
   // Enable/disable goes through the orchestrator so stubs (no token yet)
   // get fully materialized — Matrix user, workspace seeding, agent-runner
@@ -4783,6 +4800,16 @@ function skillManifestSummary(dir) {
   } catch { return {}; }
 }
 
+// The skill's one-line frontmatter description (#633) for the grant-picker
+// tooltip. Best-effort — returns {} when there's no SKILL.md or no description.
+function skillDescriptionSummary(skillMdPath) {
+  try {
+    const md = fs.readFileSync(skillMdPath, 'utf8');
+    const desc = skillImport.parseFrontmatterField(md, 'description');
+    return desc ? { description: desc } : {};
+  } catch { return {}; }
+}
+
 // Resolve the CURRENT on-disk directory of a skill's source at the given tier
 // (#629). tier `global` → the global pool; tier `team` → the owning team's pool.
 // Returns the path even when the dir no longer exists (the caller / drift glue
@@ -4881,6 +4908,22 @@ function listTeamSkills(filterTeamId) {
     }
   }
   return out;
+}
+
+// The set of skill names grantable to a construct owned by `teamId` (#633):
+// the global pool plus that team's own team-tier pool (team-first resolution).
+// Used to reject a newly-introduced unknown name on a grant save.
+function knownSkillNamesFor(teamId) {
+  const names = new Set();
+  try {
+    for (const name of fs.readdirSync(path.join(POOL_DIR, 'skills'))) {
+      if (fs.existsSync(path.join(POOL_DIR, 'skills', name, 'SKILL.md'))) names.add(name);
+    }
+  } catch { /* no pool skills dir */ }
+  if (teamId) {
+    for (const s of listTeamSkills(teamId)) names.add(s.name);
+  }
+  return names;
 }
 
 // Resolve the on-disk target of an "extend an existing skill" (#553) at the given
@@ -5002,7 +5045,7 @@ app.get('/api/skills', (req, res) => {
       const skillMd = path.join(poolSkillsDir, name, 'SKILL.md');
       if (fs.existsSync(skillMd) && !seen.has(name)) {
         seen.add(name);
-        skills.push({ name, source: 'pool', path: skillMd, ...skillManifestSummary(path.dirname(skillMd)), ...skillProvenanceSummary(path.dirname(skillMd)) });
+        skills.push({ name, source: 'pool', path: skillMd, ...skillDescriptionSummary(skillMd), ...skillManifestSummary(path.dirname(skillMd)), ...skillProvenanceSummary(path.dirname(skillMd)) });
       }
     });
   } catch { /* no pool skills dir */ }
@@ -5017,7 +5060,7 @@ app.get('/api/skills', (req, res) => {
       const dir = path.dirname(s.path);
       let origin = null;
       try { const man = skillManifest.readManifest(dir); origin = man && man.origin; } catch { /* none */ }
-      return { ...s, ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), ...skillDriftSummary(dir, origin) };
+      return { ...s, ...skillDescriptionSummary(s.path), ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), ...skillDriftSummary(dir, origin) };
     }));
 
   // Agent skills — visible only when the owning agent is visible (#302), so an
@@ -5043,7 +5086,7 @@ app.get('/api/skills', (req, res) => {
             const origin = seeded && seeded.tier
               ? { tier: seeded.tier, teamId: seeded.tier === 'team' ? cfg.teamId : undefined, sourceHash: seeded.contentHash }
               : null;
-            skills.push({ name, source: 'agent', agentId, path: skillMd, ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), ...skillDriftSummary(dir, origin) });
+            skills.push({ name, source: 'agent', agentId, path: skillMd, ...skillDescriptionSummary(skillMd), ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), ...skillDriftSummary(dir, origin) });
           }
         }
       });
@@ -8377,6 +8420,14 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   if (typeof teamName !== 'string' || !teamName.trim()) {
     return res.status(400).json({ error: 'teamName required' });
   }
+  // Reject unknown initial skill names (#633) — in create mode the team pool
+  // does not exist yet, so this validates against the global pool only, which
+  // is exactly the create-mode picker contract (global-only). No prior grant to
+  // preserve on a fresh team, so every name must be a real skill.
+  {
+    const v = skillGrantValidate.validateGrantNames(initialSkills, knownSkillNamesFor(teamId), []);
+    if (!v.ok) return res.status(400).json({ error: `Unknown skill(s): ${v.unknown.join(', ')} — pick from the list or create them first.` });
+  }
 
   // Resolve a reused Working Environment (if any) into the repository +
   // credential inputs the rest of the pipeline expects. The env was validated
@@ -8865,6 +8916,13 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   }
   if (typeof teamName !== 'string' || !teamName.trim()) {
     return fail(400, 'teamName required');
+  }
+  // Reject unknown initial skill names (#633) — create-mode team pool doesn't
+  // exist yet, so this validates against the global pool only (create-mode
+  // picker contract). No prior grant on a fresh team.
+  {
+    const v = skillGrantValidate.validateGrantNames(initialSkills, knownSkillNamesFor(teamId), []);
+    if (!v.ok) return fail(400, `Unknown skill(s): ${v.unknown.join(', ')} — pick from the list or create them first.`);
   }
 
   // Reuse an existing Working Environment when environmentId is supplied.

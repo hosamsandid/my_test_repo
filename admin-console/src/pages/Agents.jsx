@@ -752,8 +752,11 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
   });
   const { data: environments } = useApi('/api/environments');
   const envs = environments || [];
+  // Create form has no team context yet, so only the global pool is offered
+  // (grant-aware picker, #633 — team skills appear once the agent belongs to a
+  // team and is edited).
   const { data: skillsData } = useApi('/api/skills');
-  const poolSkills = (skillsData || []).filter(s => s.source === 'pool').map(s => s.name);
+  const poolSkills = (skillsData || []).filter(s => s.source === 'pool');
 
   const repoDirs = useMemo(() => {
     const env = envs.find(e => e.id === form.environmentId);
@@ -905,7 +908,7 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           The agent's active skills, copied into its workspace at (re)seed time. For team agents this is the whole team's set — members inherit it unless they override.
         </div>
         <SkillPicker
-          allSkills={poolSkills}
+          skills={poolSkills}
           selected={form.skills}
           onChange={v => update('skills', v)}
         />
@@ -1153,8 +1156,8 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
 
   // MCP overrides are stored as [{serverId, credentialId|null}, ...]. We
   // serialize them for editing as one entry per line — `serverId:credentialId`,
-  // or just `serverId` when no credential is bound. Same idea as the
-  // skillsOverrideText field above; trades polish for less form scaffolding.
+  // or just `serverId` when no credential is bound; trades polish for less form
+  // scaffolding.
   const initialMcpText = Array.isArray(agent.mcpServersOverride)
     ? agent.mcpServersOverride.map(m => m.credentialId ? `${m.serverId}:${m.credentialId}` : m.serverId).join('\n')
     : '';
@@ -1170,9 +1173,9 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
     inheritPrompt: initialInheritPrompt,
     promptOverride: agent.systemPrompt || '',
     inheritSkills: initialInheritSkills,
-    skillsOverrideText: Array.isArray(agent.skillsOverride)
-      ? agent.skillsOverride.join(', ')
-      : '',
+    skillsOverride: Array.isArray(agent.skillsOverride)
+      ? agent.skillsOverride
+      : [],
     inheritMcp: initialInheritMcp,
     mcpOverrideText: initialMcpText,
   });
@@ -1181,8 +1184,14 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
 
   // Skills live on the agent construct itself for non-member roles.
   const hasOwnSkills = agent.role === 'team' || agent.role === 'agent' || agent.role === 'orchestrator';
-  const { data: skillsData } = useApi('/api/skills');
-  const poolSkills = (skillsData || []).filter(s => s.source === 'pool').map(s => s.name);
+  // Grant-aware picker (#633): scope the pool to the agent's own team so its
+  // team-tier skills are grantable, not just the global pool. Team-first
+  // resolution and shadowing markers are rendered by the picker.
+  const skillsUrl = agent.teamId
+    ? `/api/skills?teamId=${encodeURIComponent(agent.teamId)}`
+    : '/api/skills';
+  const { data: skillsData } = useApi(skillsUrl);
+  const grantSkills = (skillsData || []).filter(s => s.source === 'pool' || s.source === 'team');
 
   const { data: environments } = useApi('/api/environments');
   const repoDirs = useMemo(() => {
@@ -1221,10 +1230,7 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
       submit.systemPrompt = form.inheritPrompt ? null : form.promptOverride;
       submit.skillsOverride = form.inheritSkills
         ? null
-        : form.skillsOverrideText
-            .split(',')
-            .map(s => s.trim())
-            .filter(Boolean);
+        : form.skillsOverride;
       // MCP override: parse "serverId[:credentialId]" lines into the
       // {serverId, credentialId} array shape the API expects. Empty / bare
       // server lines are kept (credentialId null) so the API can return a
@@ -1281,7 +1287,7 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
             The agent's active skills, copied into its workspace at (re)seed time. For team agents this is the whole team's set — members inherit it unless they override.
           </div>
           <SkillPicker
-            allSkills={poolSkills}
+            skills={grantSkills}
             selected={form.skills}
             onChange={v => update('skills', v)}
           />
@@ -1374,9 +1380,13 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
                 : '(team has no skills yet)'
             }
             inheritedLabel="Inherited from the team"
-            customValue={form.skillsOverrideText}
-            onCustomChange={v => update('skillsOverrideText', v)}
-            customPlaceholder="comma-separated skill names, e.g. cobol-analysis, jcl-converter"
+            renderCustom={() => (
+              <SkillPicker
+                skills={grantSkills}
+                selected={form.skillsOverride}
+                onChange={v => update('skillsOverride', v)}
+              />
+            )}
           />
 
           <InheritOrCustom
@@ -1414,6 +1424,7 @@ function InheritOrCustom({
   label, inherit, onToggle,
   inheritedPreview, inheritedLabel,
   customValue, onCustomChange, customMultiline, customPlaceholder,
+  renderCustom,
 }) {
   return (
     <div>
@@ -1438,6 +1449,8 @@ function InheritOrCustom({
         }}>
           {inheritedPreview ? inheritedPreview : <em>({inheritedLabel || 'inheriting'})</em>}
         </div>
+      ) : renderCustom ? (
+        renderCustom()
       ) : customMultiline ? (
         <textarea
           value={customValue}

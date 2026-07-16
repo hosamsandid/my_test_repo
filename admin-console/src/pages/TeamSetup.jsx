@@ -418,11 +418,13 @@ function StepKnowledgeSummary({ form, setForm, poolSkills, environments, mcpServ
         <div>
           <div style={labelStyle}>Initial team skills ({(form.skills || []).length})</div>
           <div style={{ ...hintStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
-            Skills from the pool the whole team starts with — placed on the team agent, so every member
-            inherits them unless it overrides. You can adjust them later on the team's card on the Agents page.
+            Skills from the global pool the whole team starts with — placed on the team agent, so every member
+            inherits them unless it overrides. Only global skills are offered here because the team's own
+            skill pool does not exist yet; a team-tier pool appears once the team is created, and you can then
+            grant from it on the team's card on the Agents page.
           </div>
           <SkillPicker
-            allSkills={poolSkills || []}
+            skills={poolSkills || []}
             selected={form.skills || []}
             onChange={v => setForm(f => ({ ...f, skills: v }))}
           />
@@ -696,8 +698,11 @@ export default function TeamSetup() {
   const { data: mcpServers } = useApi('/api/mcp-servers');
   const { data: mcpCredentials } = useApi('/api/mcp-credentials');
   const { data: skillsData } = useApi('/api/skills');
+  // Create-only wizard: the team pool does not exist yet, so only global skills
+  // are grantable here (Proposal 3, #633). A team-tier pool appears once the
+  // team exists and can then be granted from the team card on the Agents page.
   const poolSkills = useMemo(
-    () => (Array.isArray(skillsData) ? skillsData : []).filter(s => s.source === 'pool').map(s => s.name),
+    () => (Array.isArray(skillsData) ? skillsData : []).filter(s => s.source === 'pool'),
     [skillsData],
   );
 

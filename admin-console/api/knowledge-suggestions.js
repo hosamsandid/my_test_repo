@@ -54,6 +54,7 @@ function slugifySkillName(text, kind = 'fact') {
 // Aggregated candidates (source "related" — the collector's thematic grouping —
 // or "manual" — an operator's multi-select combine) get a synthesis-flavoured
 // rationale instead of the same-lesson-N-times one.
+const KIND_HEADINGS = { fact: 'Facts', convention: 'Conventions', entity: 'Entities' };
 function buildHeuristicSkillDraft(candidate) {
   const c = candidate && typeof candidate === 'object' ? candidate : {};
   const name = slugifySkillName(c.text, c.kind);
@@ -62,24 +63,49 @@ function buildHeuristicSkillDraft(candidate) {
   const convergence = Array.isArray(c.convergence) ? c.convergence : [];
   const aggregated = c.source === 'related' || c.source === 'manual';
 
+  // Deduplicate statements, remembering each one's kind so an aggregated draft
+  // can be lightly grouped (the best a dependency-free, no-LLM path can do —
+  // true theme/pattern detection is LLM-only; see issue #686 Q1).
   const statements = [];
   const seen = new Set();
   for (const m of members) {
     const t = (m && typeof m.text === 'string' ? m.text.trim() : '');
     if (t && !seen.has(t.toLowerCase())) {
       seen.add(t.toLowerCase());
-      statements.push(t);
+      statements.push({ text: t, kind: (m && m.kind) || c.kind || 'fact' });
     }
   }
-  if (statements.length === 0 && c.text) statements.push(String(c.text).trim());
+  if (statements.length === 0 && c.text) statements.push({ text: String(c.text).trim(), kind: c.kind || 'fact' });
 
+  const distinctKinds = [...new Set(statements.map((s) => s.kind))];
   const lines = [];
   lines.push(`# ${title}`);
   lines.push('');
+  // An aggregated draft is an UN-SYNTHESISED starting point: the statements are
+  // grouped, not woven into themes. Say so, so the operator (or "Draft with AI")
+  // knows to synthesise it.
+  if (aggregated && statements.length > 1) {
+    lines.push(
+      `*Un-synthesised draft — ${statements.length} related lesson(s) grouped below. ` +
+      'Use "Draft with AI" to synthesise them into pattern-based thematic sections.*',
+    );
+    lines.push('');
+  }
   lines.push('## What');
   lines.push('');
-  for (const s of statements) lines.push(`- ${s}`);
-  lines.push('');
+  if (aggregated && distinctKinds.length > 1) {
+    // Light grouping by kind (proportional: only when the set actually spans
+    // more than one kind — a single-kind or tiny set stays a flat list, AC8).
+    for (const k of distinctKinds) {
+      lines.push(`### ${KIND_HEADINGS[k] || k}`);
+      lines.push('');
+      for (const s of statements) if (s.kind === k) lines.push(`- ${s.text}`);
+      lines.push('');
+    }
+  } else {
+    for (const s of statements) lines.push(`- ${s.text}`);
+    lines.push('');
+  }
   lines.push('## Why this is a skill');
   lines.push('');
   if (aggregated) {
@@ -131,6 +157,7 @@ function candidateFromEntries(entries, { teamId, source = 'manual', now } = {}) 
       id: e.id,
       originAgent: e.originAgent,
       text: e.text,
+      kind: e.kind || 'fact',
       createdAt: e.createdAt,
       correlationId: e.correlationId || null,
       sessionId: e.sessionId || null,
@@ -174,39 +201,79 @@ function candidateFromEntries(entries, { teamId, source = 'manual', now } = {}) 
 // LLM draft request (reuses api.js resolveGenerationTarget + httpPostJson)
 // ---------------------------------------------------------------------------
 
+// Output budget for an aggregated draft SCALES with the number of combined
+// lessons (issue #686): a 100+-lesson combine must be able to render several
+// thematic sections without being truncated mid-document, while a 2–3-lesson
+// combine must not be padded into many near-empty sections. Discrete tiers
+// (issue Q3 — simplest to reason about) drive both the target word range and
+// `max_tokens`. The non-aggregated single-lesson draft keeps the original small
+// budget.
+function draftBudget(lessonCount, aggregated) {
+  if (!aggregated) return { wordRange: '80–200', maxTokens: 1024, sections: 'short sections' };
+  const n = Math.max(1, Number(lessonCount) || 1);
+  if (n <= 3) return { wordRange: '120–250', maxTokens: 1024, sections: 'a single coherent section, or at most two short ones — do NOT pad a small set into many near-empty sections' };
+  if (n <= 10) return { wordRange: '250–550', maxTokens: 1536, sections: 'a few (about 2–4) thematic sections' };
+  if (n <= 30) return { wordRange: '450–950', maxTokens: 3072, sections: 'a handful (about 3–6) thematic sections' };
+  if (n <= 60) return { wordRange: '700–1500', maxTokens: 4096, sections: 'about 4–7 thematic sections' };
+  return { wordRange: '1100–2400', maxTokens: 6144, sections: 'about 5–8 thematic sections' };
+}
+
 // Meta-prompt: turn a converged cluster into a clean, reusable SKILL.md. Pure —
 // api.js supplies the model + transport, exactly like buildAgentPromptGenerationRequest.
+// For an AGGREGATED combine the prompt drives a pattern-based, categorised
+// synthesis (thematic H2 sections, overarching patterns written up explicitly)
+// rather than a flat verbatim list, and the budget scales with lesson count.
 function buildSkillDraftRequest(candidate) {
   const c = candidate && typeof candidate === 'object' ? candidate : {};
   const members = Array.isArray(c.members) ? c.members : [];
   const facts = members.map((m) => `- ${(m && m.text) || ''}`).join('\n') || `- ${c.text || ''}`;
   const aggregated = c.source === 'related' || c.source === 'manual';
-  const framing = aggregated
+  const lessonCount = c.lessonCount || members.length || 1;
+  const budget = draftBudget(lessonCount, aggregated);
+  const kinds = Array.isArray(c.kinds) && c.kinds.length ? c.kinds.join(', ') : (c.kind || 'fact');
+
+  const instruction = aggregated
     ? [
-        'The team knowledge base holds several DISTINCT but RELATED lessons about one topic.',
-        'Synthesise them into ONE coherent, reusable SKILL.md — organise, deduplicate and',
-        'generalise; do not just list the statements verbatim.',
-      ]
+        'You curate reusable skills for a team of AI software-delivery agents.',
+        `The team knowledge base holds ${lessonCount} DISTINCT but RELATED lessons about one topic.`,
+        'Synthesise them into ONE coherent, reusable SKILL.md that reads as documentation ABOUT a',
+        'topic — NOT a flat bullet dump of the individual statements.',
+        '',
+        `Kinds present: ${kinds}`,
+        'The recorded lessons:',
+        facts,
+        '',
+        'How to synthesise:',
+        '- Identify the overarching patterns/themes running across these lessons and write those patterns up EXPLICITLY.',
+        `- Organise the document into ${budget.sections}, each a "## " H2 sub-heading; sort every lesson under the theme it belongs to. Group by THEME, not by kind (fact/convention/entity).`,
+        '- Fold the individual lessons under the relevant section; generalise and deduplicate related lessons into the pattern rather than restating each one.',
+        '- Do NOT output one long verbatim or near-verbatim enumeration of the input statements.',
+        '- PRESERVE the substance: every distinct fact must remain represented somewhere (generalised into a pattern where appropriate) — do not silently drop knowledge.',
+        '',
+        'Requirements for the SKILL.md you produce:',
+        '- Start with a single H1 title line, then the thematic H2 sections described above.',
+        '- Capture the durable, reusable knowledge — no PR/issue-specific or run-specific detail.',
+        `- Practical and readable (roughly ${budget.wordRange} words) — scale the depth to the material, do not pad.`,
+        '- Do NOT invent tool names, repo names, file paths or credentials that were not stated.',
+        '- Output ONLY the Markdown of the SKILL.md — no preamble, no surrounding code fences.',
+      ].join('\n')
     : [
+        'You curate reusable skills for a team of AI software-delivery agents.',
         'Several agents independently recorded the same durable lesson in the team knowledge base.',
         'Turn it into a concise, reusable SKILL.md.',
-      ];
-  const instruction = [
-    'You curate reusable skills for a team of AI software-delivery agents.',
-    ...framing,
-    '',
-    `Kind: ${c.kind || 'fact'}`,
-    aggregated ? 'The recorded lessons:' : 'The recorded statements (deduplicate and generalise them):',
-    facts,
-    '',
-    'Requirements for the SKILL.md you produce:',
-    '- Start with a single H1 title line, then short sections.',
-    '- Capture the durable, reusable knowledge — no PR/issue-specific or run-specific detail.',
-    `- Practical and concise (roughly ${aggregated ? '120–300' : '80–200'} words).`,
-    '- Do NOT invent tool names, repo names, file paths or credentials that were not stated.',
-    '- Output ONLY the Markdown of the SKILL.md — no preamble, no surrounding code fences.',
-  ].join('\n');
-  return { max_tokens: 1024, messages: [{ role: 'user', content: instruction }] };
+        '',
+        `Kind: ${c.kind || 'fact'}`,
+        'The recorded statements (deduplicate and generalise them):',
+        facts,
+        '',
+        'Requirements for the SKILL.md you produce:',
+        '- Start with a single H1 title line, then short sections.',
+        '- Capture the durable, reusable knowledge — no PR/issue-specific or run-specific detail.',
+        `- Practical and concise (roughly ${budget.wordRange} words).`,
+        '- Do NOT invent tool names, repo names, file paths or credentials that were not stated.',
+        '- Output ONLY the Markdown of the SKILL.md — no preamble, no surrounding code fences.',
+      ].join('\n');
+  return { max_tokens: budget.maxTokens, messages: [{ role: 'user', content: instruction }] };
 }
 
 // ---------------------------------------------------------------------------

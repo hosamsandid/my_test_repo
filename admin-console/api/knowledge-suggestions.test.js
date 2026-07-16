@@ -249,6 +249,72 @@ test('buildSkillDraftRequest: aggregated candidates ask for a synthesis, not a l
   assert.match(single.messages[0].content, /same durable lesson/);
 });
 
+test('buildSkillDraftRequest: aggregated prompt drives pattern-based, categorised synthesis (#686 AC1–AC3, AC5, AC6)', () => {
+  const agg = buildSkillDraftRequest(candidate({ source: 'manual', lessonCount: 40 }));
+  const p = agg.messages[0].content;
+  // AC2 — identify + document overarching patterns/themes
+  assert.match(p, /overarching patterns\/themes/i);
+  // AC1 — organise into multiple thematic H2 sub-headings, grouped by theme not kind
+  assert.match(p, /"## " H2 sub-heading/);
+  assert.match(p, /Group by THEME, not by kind/);
+  // AC3 — explicitly forbid a verbatim enumeration
+  assert.match(p, /Do NOT output one long verbatim or near-verbatim enumeration/);
+  // AC5 — preserve substance, don't silently drop knowledge
+  assert.match(p, /every distinct fact must remain represented/);
+  // AC6 — retained guardrails
+  assert.match(p, /single H1 title line/);
+  assert.match(p, /Do NOT invent tool names/);
+  assert.match(p, /Output ONLY the Markdown/);
+});
+
+test('buildSkillDraftRequest: budget (word range + max_tokens) scales with lesson count (#686 AC4)', () => {
+  const small = buildSkillDraftRequest(candidate({ source: 'manual', lessonCount: 3 }));
+  const large = buildSkillDraftRequest(candidate({ source: 'manual', lessonCount: 109 }));
+  assert.ok(large.max_tokens > small.max_tokens, 'large combine gets a bigger token budget');
+  assert.ok(large.max_tokens >= 4096, 'a 100+-lesson combine is not squeezed into a tiny budget');
+  // word ranges differ, and the large set is told to render several sections
+  assert.notEqual(
+    small.messages[0].content.match(/roughly [^\n]+ words/)[0],
+    large.messages[0].content.match(/roughly [^\n]+ words/)[0],
+  );
+  assert.match(large.messages[0].content, /109 DISTINCT but RELATED lessons/);
+});
+
+test('buildSkillDraftRequest: small combine stays proportional, not over-structured (#686 AC8)', () => {
+  const small = buildSkillDraftRequest(candidate({ source: 'manual', lessonCount: 2 }));
+  assert.match(small.messages[0].content, /do NOT pad a small set into many near-empty sections/);
+  assert.equal(small.max_tokens, 1024);
+  // a single-lesson non-aggregated draft keeps the original small budget
+  const single = buildSkillDraftRequest(candidate());
+  assert.equal(single.max_tokens, 1024);
+  assert.match(single.messages[0].content, /roughly 80–200 words/);
+});
+
+test('buildHeuristicSkillDraft: aggregated multi-kind sets are lightly grouped + flagged un-synthesised (#686 Q1)', () => {
+  const multi = buildHeuristicSkillDraft(candidateFromEntries([
+    { id: 'aaaaaaaaaaaa', originAgent: 'x', text: 'fact one', kind: 'fact', createdAt: NOW },
+    { id: 'bbbbbbbbbbbb', originAgent: 'y', text: 'convention two', kind: 'convention', createdAt: NOW },
+  ], { teamId: 'acme', source: 'manual' }));
+  assert.match(multi.skillMd, /Un-synthesised draft/);
+  assert.match(multi.skillMd, /### Facts/);
+  assert.match(multi.skillMd, /### Conventions/);
+  assert.match(multi.skillMd, /- fact one/);
+  assert.match(multi.skillMd, /- convention two/);
+  // single-kind aggregated set stays a flat list (no kind sub-headings) — AC8
+  const oneKind = buildHeuristicSkillDraft(candidateFromEntries([
+    { id: 'aaaaaaaaaaaa', originAgent: 'x', text: 'fact one', kind: 'fact', createdAt: NOW },
+    { id: 'bbbbbbbbbbbb', originAgent: 'y', text: 'fact two', kind: 'fact', createdAt: NOW },
+  ], { teamId: 'acme', source: 'manual' }));
+  assert.doesNotMatch(oneKind.skillMd, /### Facts/);
+  assert.match(oneKind.skillMd, /- fact one/);
+});
+
+test('buildHeuristicSkillDraft: never throws on an empty/garbage candidate', () => {
+  assert.doesNotThrow(() => buildHeuristicSkillDraft(undefined));
+  assert.doesNotThrow(() => buildHeuristicSkillDraft({}));
+  assert.doesNotThrow(() => buildHeuristicSkillDraft({ source: 'manual', members: [] }));
+});
+
 test('promotionSuggestionView: passes kinds + lessonCount through', () => {
   const view = promotionSuggestionView(candidate({ source: 'related', kinds: ['convention', 'fact'], lessonCount: 3 }));
   assert.deepEqual(view.kinds, ['convention', 'fact']);

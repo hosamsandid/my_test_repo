@@ -44,6 +44,7 @@ const { readMaintenanceState } = require("./maintenance-state-reader");
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
 const skillManifest = require("./skill-manifest");
 const usageLog = require("./usage-log");
+const usageQuery = require("./usage-query");
 const prEventsLog = require("./pr-events-log");
 
 // ============================================================
@@ -7418,6 +7419,43 @@ async function main() {
           res.end(JSON.stringify({ ok: false, error: err.message }));
         }
       });
+      return;
+    }
+
+    // ── Read: agent-facing read-only usage summary (#679) ─────────────────
+    // An agent container is volume-isolated from /workspace/usage/, so it
+    // cannot read the store directly; the on-agent `usage` CLI queries here.
+    // The orchestrator (the store owner) reads the records and hands them to
+    // the pure scoping + aggregation core (usage-query.js). Fail-closed team
+    // resolution: an UNKNOWN agent (no config) resolves to teamId=null, so a
+    // team-scoped query returns an empty set — never another team's usage.
+    // Tokens only; no dollar figures ever ride along.
+    const usageSummaryMatch = req.method === 'GET' && req.url.split('?')[0].match(/^\/internal\/agents\/([^/]+)\/usage\/summary$/);
+    if (usageSummaryMatch) {
+      const id = decodeURIComponent(usageSummaryMatch[1]);
+      if (!isSafePathSeg(id)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+        return;
+      }
+      try {
+        const u = new URL(req.url, 'http://localhost');
+        const scope = u.searchParams.get('scope') || 'self';
+        const since = u.searchParams.get('since') || undefined;
+        const until = u.searchParams.get('until') || undefined;
+        const groupBy = u.searchParams.get('groupBy') || undefined;
+        // Fail-closed: only a resolvable config yields a team id. An unknown
+        // agent → null → team scope can match nothing.
+        const cfg = loadAgentConfig(id);
+        const teamId = cfg ? agentKnowledgeTeamId(cfg) : null;
+        const records = usageLog.readRecords({ since });
+        const result = usageQuery.buildUsageQuery(records, { scope, agentId: id, teamId, since, until, groupBy });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
       return;
     }
 

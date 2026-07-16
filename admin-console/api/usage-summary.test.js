@@ -55,3 +55,13 @@ test('totals are stable across groupBy (sum of turn-wide record tokens)', () => 
     assert.deepEqual(summarize(canonical, { groupBy: gb }).totals, byAgent, gb);
   }
 });
+
+// The orchestrator carries a byte-identical mirror of this module (#679) so the
+// agent-facing read-only usage query reuses one aggregation implementation.
+// This guard is the twin of orchestrator/usage-summary.test.js — either side
+// editing usage-summary.js without the other fails both suites.
+test('two-sided guard: admin-console canonical is byte-identical to orchestrator copy', () => {
+  const here = fs.readFileSync(path.join(__dirname, 'usage-summary.js'));
+  const there = fs.readFileSync(path.join(__dirname, '..', '..', 'orchestrator', 'usage-summary.js'));
+  assert.ok(here.equals(there), 'admin-console/api/usage-summary.js and orchestrator/usage-summary.js must be identical');
+});

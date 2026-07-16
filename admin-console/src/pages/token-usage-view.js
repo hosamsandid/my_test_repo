@@ -53,6 +53,17 @@ export function buildDaySeries(summary) {
   return { points, maxTotal };
 }
 
+// Build the flat-export download URL (#656) for a view. `kind` is
+// 'summary' | 'work-items', `format` is 'csv' | 'json'. Carries the current
+// time window (`since`) so the export matches what's on screen; the server
+// applies the same team scope as the view endpoints.
+export function buildExportUrl(kind, { since, format } = {}) {
+  const params = new URLSearchParams();
+  if (since) params.set('since', since);
+  params.set('format', format === 'json' ? 'json' : 'csv');
+  return `/api/usage/${kind}/export?${params.toString()}`;
+}
+
 // Stacked-bar segments (one per token class) for a single point, as height
 // percentages of `maxTotal`. Skips zero-height classes so the DOM stays lean.
 export function stackSegments(tokens, maxTotal) {

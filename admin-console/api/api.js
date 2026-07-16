@@ -17,6 +17,7 @@ const usageLog = require('./usage-log');
 const { summarize } = require('./usage-summary');
 const prEventsLog = require('./pr-events-log');
 const { buildWorkItems, workItemDetail } = require('./work-items');
+const usageExport = require('./usage-export');
 const maintenanceMode = require('./maintenance-mode');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, visibleUser, describeAuthz } = require('./scope');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
@@ -244,6 +245,27 @@ app.get('/api/usage/summary', (req, res) => {
   res.json(summarize(records, { since, until, groupBy }));
 });
 
+// Flat export of the statistics view (#656 phase 3): one row per invocation ×
+// model, CSV or JSON, so FinOps / the customer can apply their own contract
+// prices downstream. Read-side add-on over the same scoped records — tokens
+// only, four classes as separate columns. `format` = csv (default) | json.
+function sendExport(req, res, kind, records, prEvents) {
+  const { since, until } = req.query;
+  const format = req.query.format === 'json' ? 'json' : 'csv';
+  const out = usageExport.serialize(kind, format, { records, prEvents, since: since || null, until: until || null });
+  const stamp = new Date().toISOString().slice(0, 10);
+  res.setHeader('Content-Type', out.contentType);
+  res.setHeader('Content-Disposition', `attachment; filename="token-usage-${kind}-${stamp}.${out.ext}"`);
+  res.send(out.body);
+}
+
+app.get('/api/usage/summary/export', (req, res) => {
+  const scope = getScope(req);
+  let records = usageLog.readRecords({ since: req.query.since });
+  if (!scope.all) records = records.filter((r) => visibleTeam(scope, r && r.teamId));
+  sendExport(req, res, 'summary', records, null);
+});
+
 // Work-item attribution (#655, §5 view 2 of docs/cost-per-pr-concept.md).
 // Groups token usage by the issue↔PR chain a run belongs to (a connected
 // component of the artifact graph), reporting per-role cost and the always-visible
@@ -273,6 +295,16 @@ app.get('/api/usage/work-items', (req, res) => {
   const records = scopedUsageRecords(req);
   const prEvents = prEventsLog.readRecords();
   res.json(buildWorkItems(records, prEvents, { since, until }));
+});
+
+// Flat export of the work-item view (#656 phase 3): one row per work-item ×
+// model plus the always-visible unattributed remainder row; each row carries
+// the attribution-tier context so downstream numbers stay honest. Team-scoped
+// exactly like the list route. `format` = csv (default) | json.
+app.get('/api/usage/work-items/export', (req, res) => {
+  const records = scopedUsageRecords(req);
+  const prEvents = prEventsLog.readRecords();
+  sendExport(req, res, 'work-items', records, prEvents);
 });
 
 // Drill-down addressed by ANY artifact in the chain. `repo` is owner/name, so it

@@ -441,8 +441,30 @@ function buildKnowledgeGraph({ scope, entries = [], skills = [], agents = [], no
     laneSkills = skillList.filter((s) => s.tier === 'global');
   }
 
-  const byKind = {};
+  // Problem A / AC1: collapse skill records to ONE node per name. A skill
+  // promoted to global while still present in the team pool enters the team lane
+  // as TWO records (a {tier:'team'} pool file AND a {tier:'global', originTeamId}
+  // copy), and unlike item nodes skill nodes were never deduped — so the same
+  // name rendered twice. Keep one record per name, preferring the TEAM-owned card
+  // (the copy that is editable here) and flagging `alsoGlobal` so the UI can note
+  // "also promoted to global" (open question 2). Provenance entry-ids are unioned
+  // across both records so the T1→T2 promoted edge survives either source.
+  const skillByName = new Map();
   for (const s of laneSkills) {
+    let e = skillByName.get(s.name);
+    if (!e) {
+      e = { rec: s, alsoGlobal: false, entryIds: new Set() };
+      skillByName.set(s.name, e);
+    } else {
+      if (e.rec.tier !== s.tier) e.alsoGlobal = true;
+      if (e.rec.tier !== 'team' && s.tier === 'team') e.rec = s; // team-owned wins
+    }
+    for (const id of skillEntryIds(s)) e.entryIds.add(id);
+  }
+
+  const byKind = {};
+  for (const e of skillByName.values()) {
+    const s = e.rec;
     const node = {
       id: `skill:${s.name}`,
       lane: 'global',
@@ -452,10 +474,11 @@ function buildKnowledgeGraph({ scope, entries = [], skills = [], agents = [], no
     };
     if (s.originTeamId) node.originTeamId = s.originTeamId;
     if (s.teamId) node.teamId = s.teamId;
+    if (e.alsoGlobal) node.alsoGlobal = true;
     if (s.provenance && typeof s.provenance.promotedBy === 'string') node.promotedBy = s.provenance.promotedBy;
     nodes.push(node);
     // T1→T2 promoted edge — only when the referenced entry is a node here.
-    for (const entryId of skillEntryIds(s)) {
+    for (const entryId of e.entryIds) {
       if (itemIds.has(entryId)) {
         edges.push({ from: `item:${entryId}`, to: `skill:${s.name}`, kind: 'promoted' });
       }
@@ -470,7 +493,7 @@ function buildKnowledgeGraph({ scope, entries = [], skills = [], agents = [], no
   const counts = {
     agents: agentNodeCount,
     items: scopedItems.length,
-    skills: laneSkills.length,
+    skills: skillByName.size,
     byKind,
     converged: scopedItems.filter((it) => it.converged).length,
     today: scopedItems.filter((it) => isToday(it.createdAt)).length,

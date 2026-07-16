@@ -101,6 +101,29 @@ test('team scope: agents→agent lane, entries→team lane, skills→global lane
   assert.equal(g.nodes.find((n) => n.id === 'agent:acme-dev-1').label, 'Dev One');
 });
 
+test('team scope: a skill promoted-to-global while still in the team pool collapses to ONE node (issue #620)', () => {
+  const g = buildKnowledgeGraph({
+    scope: 'team:acme',
+    now: NOW,
+    entries: [],
+    agents: [{ id: 'acme-dev-1', parentTeamId: 'acme' }],
+    skills: [
+      // Same name enters the team lane as TWO records: the team-owned pool file
+      // AND its promoted-to-global copy. They must render as a single card.
+      { name: 'cobol-analysis', tier: 'team', teamId: 'acme' },
+      { name: 'cobol-analysis', tier: 'global', originTeamId: 'acme' },
+    ],
+  });
+  const skillNodes = g.nodes.filter((n) => n.kind === 'skill');
+  assert.equal(skillNodes.length, 1, 'exactly one skill node per name');
+  assert.equal(g.counts.skills, 1);
+  const node = skillNodes[0];
+  assert.equal(node.label, 'cobol-analysis');
+  // Team-owned card wins (it is the one editable here), flagged as also global.
+  assert.equal(node.tier, 'team');
+  assert.equal(node.alsoGlobal, true);
+});
+
 test('global scope collapses agents into one node per contributing team', () => {
   const g = buildKnowledgeGraph({
     scope: 'global',

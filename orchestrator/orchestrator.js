@@ -43,6 +43,7 @@ const { assembleClaudeMd, buildMemoryHint } = require("./prompt-assembly");
 const { readMaintenanceState } = require("./maintenance-state-reader");
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
 const skillManifest = require("./skill-manifest");
+const usageLog = require("./usage-log");
 
 // ============================================================
 // Config
@@ -814,6 +815,35 @@ function loadEnvironment(envId) {
     console.error(`[Orchestrator] Cannot parse environment ${envId}: ${err.message}`);
     return null;
   }
+}
+
+// Enrich a token-usage record (#654) with the authoritative control-plane
+// identity the agent can only send best-effort. The agent alone observes the
+// turn-wide token counts and stamps them; the orchestrator owns the config,
+// so it backfills teamId / roleId / provider when the record left them null.
+// agentId is forced to the posting agent (path param) — never trusted from
+// the body. Only null/absent fields are filled, so a value the agent already
+// resolved correctly is kept.
+function enrichUsageRecord(agentId, record) {
+  const out = { ...(record && typeof record === "object" ? record : {}) };
+  out.agentId = agentId;
+  const cfg = loadAgentConfig(agentId) || {};
+  const teamId = cfg.parentTeamId || cfg.teamId || null;
+  if (out.teamId == null) out.teamId = teamId;
+  if (out.roleId == null) {
+    // Team members are ided `<teamId>-<roleId>`; strip the team prefix to
+    // recover the semantic role. Otherwise fall back to the config role.
+    let roleId = cfg.roleId || null;
+    if (!roleId && teamId && agentId.startsWith(`${teamId}-`)) {
+      roleId = agentId.slice(teamId.length + 1);
+    }
+    out.roleId = roleId || cfg.role || null;
+  }
+  if (out.provider == null) {
+    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+    out.provider = env?.llmEndpointId || null;
+  }
+  return out;
 }
 
 // Apply every environment normalization in order. Repositories first (the
@@ -7309,6 +7339,42 @@ async function main() {
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, offset: recon.offset }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Ingest: agent token-usage records (#654) ─────────────────────────
+    // Agents POST one usage record per invocation (build_usage_record in
+    // agent-image/scripts/agent-entrypoint.py), delivered via their durable
+    // spool + retry push client. We enrich it with the authoritative
+    // control-plane identity (teamId/roleId/provider the agent can only
+    // guess) and append it to the day-bucketed usage log. The append is
+    // best-effort; a transient failure is covered by the agent's spool retry.
+    const usageIngestMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/usage$/);
+    if (usageIngestMatch) {
+      const id = decodeURIComponent(usageIngestMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
+      req.on('end', () => {
+        if (!isSafePathSeg(id)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+          return;
+        }
+        try {
+          const rec = JSON.parse(body || '{}');
+          if (!rec || typeof rec !== 'object' || Array.isArray(rec)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'record must be an object' }));
+            return;
+          }
+          usageLog.record(enrichUsageRecord(id, rec));
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: err.message }));

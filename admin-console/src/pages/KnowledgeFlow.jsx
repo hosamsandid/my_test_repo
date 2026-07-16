@@ -668,7 +668,7 @@ const TeamSection = React.forwardRef(function TeamSection({
     .map(n => ({ ...n, id: n.id.slice(5) })), [graph]);
   const pickedItems = useMemo(() => allItems.filter(n => picked.has(n.id)), [allItems, picked]);
   const combine = useCallback(() => {
-    if (pickedItems.length < 2) return;
+    if (pickedItems.length < 1) return;
     onCombineItems(pickedItems);
     setPicked(new Set());
   }, [pickedItems, onCombineItems]);
@@ -762,19 +762,20 @@ const TeamSection = React.forwardRef(function TeamSection({
               <Combine size={13} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
               <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)' }}>
                 {picked.size} lesson{picked.size === 1 ? '' : 's'} selected
-                {picked.size < 2 ? ' — pick at least one more to combine' : ''}
               </span>
               <InfoTip
                 size={12}
-                title="Combine related lessons into one skill"
-                text="Tick the lessons that belong to one topic — a skill is usually a synthesis of several related lessons, not a single fact. You review and edit the combined draft before anything is created."
+                title="Turn learned knowledge into a skill"
+                text={picked.size < 2
+                  ? 'One durable lesson can become a skill on its own. You review and edit the draft before anything is created.'
+                  : 'Tick the lessons that belong to one topic — a skill is usually a synthesis of several related lessons. You review and edit the combined draft before anything is created.'}
               />
               <button
                 onClick={combine}
-                disabled={picked.size < 2}
-                title={picked.size < 2 ? 'Select at least two lessons' : 'Open the review dialog with these lessons combined'}
-                style={{ ...primaryBtn, marginLeft: 'auto', padding: '2px 10px', fontSize: 'var(--eb-text-xs)', opacity: picked.size < 2 ? 0.5 : 1 }}>
-                Combine into one skill
+                disabled={picked.size < 1}
+                title={picked.size < 2 ? 'Open the review dialog with this lesson' : 'Open the review dialog with these lessons combined'}
+                style={{ ...primaryBtn, marginLeft: 'auto', padding: '2px 10px', fontSize: 'var(--eb-text-xs)', opacity: picked.size < 1 ? 0.5 : 1 }}>
+                {picked.size < 2 ? 'Turn into a skill' : 'Combine into one skill'}
               </button>
               <button onClick={() => setPicked(new Set())} style={{ ...miniBtn }}>Clear</button>
             </div>
@@ -1884,6 +1885,10 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
     }
     return out;
   }, [suggestion.members]);
+  const lessonN = suggestion.lessonCount || memberTexts.length;
+  // A single ad-hoc lesson (issue #619): the "combine" copy would read wrong
+  // ("Combine 1 lessons"), so the title/body/button switch to singular phrasing.
+  const single = aggregated && lessonN <= 1;
 
   // Skills eligible as an extend target, scoped to the chosen tier (AC2): the
   // team's own skills for a team-tier extend, the global pool for a global one.
@@ -2040,29 +2045,33 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
     <div onClick={close} style={overlay}>
       <div onClick={e => e.stopPropagation()} style={{ ...dialog, width: 640, display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-          {aggregated
+          {aggregated && !single
             ? <Combine size={18} style={{ color: 'var(--eb-status-warning)' }} />
             : <Sparkles size={18} style={{ color: 'var(--eb-status-warning)' }} />}
           <h2 style={{ margin: 0, fontSize: 'var(--eb-text-lg)', color: 'var(--eb-text-primary)' }}>
-            {aggregated
-              ? `Combine ${suggestion.lessonCount || memberTexts.length} lessons into a skill`
-              : 'Turn this knowledge into a skill'}
+            {single
+              ? 'Turn this lesson into a skill'
+              : aggregated
+                ? `Combine ${lessonN} lessons into a skill`
+                : 'Turn this knowledge into a skill'}
           </h2>
           <button onClick={close} style={{ ...btn, marginLeft: 'auto' }}><X size={14} /></button>
         </div>
 
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
           A skill is a reusable instruction file (SKILL.md) that agents load automatically at the
-          start of their work. {aggregated
+          start of their work. {aggregated && !single
             ? 'The selected lessons are synthesised into one coherent instruction — “Draft with AI” organises and generalises them for you.'
             : 'Give it a name, check the instructions — “Draft with AI” writes them from the learned knowledge — and choose who should get it.'}
         </div>
 
         <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}
-          title={aggregated ? 'The agents whose lessons are being combined' : 'Which agents learned this, independently of each other'}>
-          {aggregated
-            ? <>Combining {suggestion.lessonCount || memberTexts.length} lessons · from {(suggestion.convergence || []).join(', ') || 'unknown'}</>
-            : <>Learned {suggestion.convergenceCount}× independently · by {(suggestion.convergence || []).join(', ')}</>}
+          title={single ? 'The agent whose lesson this is' : aggregated ? 'The agents whose lessons are being combined' : 'Which agents learned this, independently of each other'}>
+          {single
+            ? <>From {(suggestion.convergence || []).join(', ') || 'unknown'}</>
+            : aggregated
+              ? <>Combining {lessonN} lessons · from {(suggestion.convergence || []).join(', ') || 'unknown'}</>
+              : <>Learned {suggestion.convergenceCount}× independently · by {(suggestion.convergence || []).join(', ')}</>}
         </div>
         <div style={{
           fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', background: 'var(--eb-bg-app)',
@@ -2176,7 +2185,7 @@ function PromotionDialog({ suggestion, teamId, onClose, onDone }) {
                     ? (mode === 'extend' ? 'Adding…' : 'Promoting…')
                     : mode === 'extend'
                       ? `Add to ${targetName || 'skill'}`
-                      : aggregated ? `Create combined ${tier} skill` : `Promote to ${tier}`
+                      : (aggregated && !single) ? `Create combined ${tier} skill` : `Promote to ${tier}`
                 }
               </button>
             </>

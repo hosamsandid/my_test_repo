@@ -159,6 +159,9 @@ function validateKnowledgeEntry(entry) {
   if (!STATUSES.includes(entry.status)) {
     errors.push(`status must be one of ${STATUSES.join('|')}`);
   }
+  if (entry.summary !== undefined && typeof entry.summary !== 'string') {
+    errors.push('summary must be a string when present');
+  }
   return { ok: errors.length === 0, errors };
 }
 
@@ -211,6 +214,11 @@ function makeKnowledgeEntry(input = {}, { idGen = defaultIdGen, now = defaultNow
   if (typeof input.updatedAt === 'string' && input.updatedAt.trim() !== '') {
     entry.updatedAt = input.updatedAt.trim();
   }
+  // Optional human-readable summary (distinct from the agent-facing `text`).
+  // Written only by the orchestrator's summary-backfill path, never the agent CLI.
+  if (typeof input.summary === 'string' && input.summary.trim() !== '') {
+    entry.summary = input.summary.trim();
+  }
 
   const { ok, errors } = validateKnowledgeEntry(entry);
   if (!ok) {
@@ -227,7 +235,7 @@ function makeKnowledgeEntry(input = {}, { idGen = defaultIdGen, now = defaultNow
 const KEY_ORDER = [
   'v', 'id', 'kind', 'text', 'originAgent', 'teamId', 'createdAt',
   'correlationId', 'sessionId', 'sourceRefs', 'convergence', 'tags',
-  'status', 'updatedAt',
+  'status', 'updatedAt', 'summary',
 ];
 
 function serializeEntry(entry) {

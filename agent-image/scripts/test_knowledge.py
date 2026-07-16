@@ -108,6 +108,25 @@ class Serialize(unittest.TestCase):
         e = _golden_entry()
         self.assertEqual(kn.parse_entry(kn.serialize_entry(e)), e)
 
+    def test_summary_optional_field(self):
+        # Absent unless supplied — byte-identical to pre-#635 output.
+        bare = kn.build_entry("fact", "x", origin_agent="a", team_id="t", correlation_id="c")
+        self.assertNotIn("summary", bare)
+        self.assertNotIn('"summary"', kn.serialize_entry(bare))
+        # Supplied → trimmed and round-trips.
+        with_s = kn.build_entry("fact", "x", origin_agent="a", team_id="t",
+                                correlation_id="c", summary="  A readable rewrite.  ")
+        self.assertEqual(with_s["summary"], "A readable rewrite.")
+        self.assertTrue(kn.validate_entry(with_s)[0])
+        self.assertEqual(kn.parse_entry(kn.serialize_entry(with_s)), with_s)
+        # Blank summary dropped, not stored.
+        blank = kn.build_entry("fact", "x", origin_agent="a", team_id="t",
+                               correlation_id="c", summary="   ")
+        self.assertNotIn("summary", blank)
+        # Non-string summary is a soft validation error.
+        bad = dict(bare); bad["summary"] = 42
+        self.assertFalse(kn.validate_entry(bad)[0])
+
 
 class Parse(unittest.TestCase):
     def test_blank_and_mangled_return_none(self):

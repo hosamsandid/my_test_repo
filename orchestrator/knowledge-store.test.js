@@ -127,6 +127,26 @@ test('serializeEntry uses a stable leading key order', () => {
   assert.ok(line.startsWith('{"v":1,"id":"a1b2c3d4e5f6","kind":"fact","text":'));
 });
 
+test('summary is an optional field: absent unless supplied, round-trips, byte-identical when omitted (#635)', () => {
+  // No summary on input → the key is not present at all (byte-identical to pre-#635 output).
+  const bare = makeKnowledgeEntry(baseInput, inject);
+  assert.equal('summary' in bare, false);
+  const bareLine = serializeEntry(bare);
+  assert.equal(bareLine.includes('"summary"'), false);
+
+  // Supplied → trimmed, validated, and it round-trips.
+  const withSummary = makeKnowledgeEntry({ ...baseInput, summary: '  A readable rewrite.  ' }, inject);
+  assert.equal(withSummary.summary, 'A readable rewrite.');
+  assert.equal(validateKnowledgeEntry(withSummary).ok, true);
+  assert.deepEqual(parseEntry(serializeEntry(withSummary)), withSummary);
+
+  // Blank/whitespace-only summary is dropped, not stored.
+  assert.equal('summary' in makeKnowledgeEntry({ ...baseInput, summary: '   ' }, inject), false);
+
+  // A non-string summary on a hand-built entry is a soft validation error.
+  assert.equal(validateKnowledgeEntry({ ...bare, summary: 42 }).ok, false);
+});
+
 test('parseEntry tolerates blank and mangled lines', () => {
   assert.equal(parseEntry(''), null);
   assert.equal(parseEntry('   '), null);

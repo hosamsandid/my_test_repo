@@ -360,20 +360,23 @@ function weaveProcess(input) {
     if (p) producing = { stage, role: p };
   }
 
-  // 4. Ensure + stagger weekly self-curation for per-invocation roles.
+  // 4. Ensure + stagger daily self-curation. Every role that already carries a
+  // self-curation cron (all catalog roles ship one as their intrinsic standard
+  // trigger) gets a unique staggered slot; per-invocation roles without one
+  // (inline roles) get it added.
   let curationIdx = 0;
   for (const stage of woven) {
     for (const role of stage.roles) {
-      if (role.sessionPolicy !== 'per-invocation') continue;
+      const existing = role.triggers.find(t => t.type === 'cron' && t.id === 'self-curation');
+      if (!existing && role.sessionPolicy !== 'per-invocation') continue;
       const minute = (5 + curationIdx * 3) % 60;
       const hour = 3 + Math.floor((5 + curationIdx * 3) / 60);
-      const cron = `${minute} ${hour} * * 1`;
-      const existing = role.triggers.find(t => t.type === 'cron' && t.id === 'self-curation');
+      const cron = `${minute} ${hour} * * *`;
       if (existing) existing.cron = cron;
       else addTrigger(role, {
         id: 'self-curation', type: 'cron', enabled: true, cron,
-        description: 'Weekly memory housekeeping',
-        prompt: 'Weekly memory curation of memory/log.md: consolidate contradictions, generalise issue-specifics, merge duplicates, prune stale entries. If nothing to do: [PASS].',
+        description: 'Daily memory housekeeping',
+        prompt: 'Daily memory curation of memory/log.md: consolidate contradictions, generalise issue-specifics, merge duplicates, prune stale entries. If nothing to do: [PASS].',
       });
       curationIdx++;
     }

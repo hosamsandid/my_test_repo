@@ -170,29 +170,42 @@ test('label registry tags gates and brakes', () => {
   assert.equal(byName['stage:build'].humanGate, false);
 });
 
-test('template level: shipped dispatcher + developer derive emits onto nodes', () => {
-  const g = buildProcessGraph([templateNode(loadTpl('dispatcher')), templateNode(loadTpl('developer'))]);
+test('template level: shipped dispatcher derives emits onto its node', () => {
+  const g = buildProcessGraph([templateNode(loadTpl('dispatcher'))]);
   const dispatcher = g.nodes.find(n => n.id === 'dispatcher');
   const dispatcherEmits = dispatcher.triggers.flatMap(t => t.emits);
-  assert.ok(dispatcherEmits.includes('{{dispatchLabel}}'),
-    'dispatcher should derive {{dispatchLabel}} as an emitted label');
-
-  const developer = g.nodes.find(n => n.id === 'developer');
-  const assigned = developer.triggers.find(t => t.id === 'developer-assigned');
-  assert.ok(assigned.emits.includes('started:{{agentId}}'));
-  assert.equal(assigned.emitsDerived, true);
+  assert.ok(dispatcherEmits.includes('dispatch'),
+    'dispatcher should carry `dispatch` as an emitted label');
 });
 
 test('template level: a synthetic listener wires to a shipped emitter', () => {
-  // Prove the mechanism end-to-end: someone listening on {{dispatchLabel}} gets
-  // an edge from the dispatcher (which emits it).
+  // Prove the mechanism end-to-end: someone listening on `dispatch` gets an
+  // edge from the dispatcher (which emits it).
+  const listener = {
+    id: 'consumer', role: 'template',
+    triggers: [{ id: 'l', type: 'github-event', labelFilter: 'dispatch' }],
+  };
+  const g = buildProcessGraph([templateNode(loadTpl('dispatcher')), listener]);
+  const e = g.edges.find(x => x.from === 'dispatcher' && x.to === 'consumer');
+  assert.ok(e, 'expected dispatcher → consumer edge on `dispatch`');
+  assert.equal(e.label, 'dispatch');
+});
+
+test('template level: {{var}} label tokens still wire emitter to listener', () => {
+  // Placeholders are matched verbatim at template level — resolved only at
+  // materialisation. The shipped catalog no longer uses them, but imported /
+  // hand-authored templates may.
+  const emitter = {
+    id: 'producer', role: 'template',
+    triggers: [{ id: 'e', type: 'github-event', events: ['issues.opened'], emits: ['{{dispatchLabel}}'] }],
+  };
   const listener = {
     id: 'consumer', role: 'template',
     triggers: [{ id: 'l', type: 'github-event', labelFilter: '{{dispatchLabel}}' }],
   };
-  const g = buildProcessGraph([templateNode(loadTpl('dispatcher')), listener]);
-  const e = g.edges.find(x => x.from === 'dispatcher' && x.to === 'consumer');
-  assert.ok(e, 'expected dispatcher → consumer edge on {{dispatchLabel}}');
+  const g = buildProcessGraph([emitter, listener]);
+  const e = g.edges.find(x => x.from === 'producer' && x.to === 'consumer');
+  assert.ok(e, 'expected producer → consumer edge on {{dispatchLabel}}');
   assert.equal(e.label, '{{dispatchLabel}}');
 });
 

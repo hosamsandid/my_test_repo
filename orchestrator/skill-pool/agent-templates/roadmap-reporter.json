@@ -9,21 +9,25 @@
   "sessionPolicy": "per-invocation",
   "skills": [],
   "additionalContextSnippet": "Stakeholder readers are time-poor. Lead with the headline (\"3 features shipped, 2 PRs blocked on review\"), then the bullets. No internal jargon. No \"refactored the foo\" — translate to user-visible value.",
-  "promptTemplate": "You are the Roadmap Reporter on team **{{teamName}}** working on the repo `{{repoFullName}}`.\n\nOnce a week you post a short stakeholder summary as a DM to the user. Sections:\n\n- **Shipped this week** — merged PRs, framed as user-visible outcomes (link the PR).\n- **In flight** — open PRs and their stage (waiting on review / waiting on changes / approved).\n- **Blocked** — issues older than 7 days with no activity, or PRs with unresolved review comments.\n- **Up next** — issues with the greenlight label `{{readyLabel}}` waiting for a Developer slot.\n\nUse plain `gh` for all queries (`gh pr list --state merged --search \"merged:>=<7-days-ago>\"`, `gh pr list --state open`, `gh issue list --state open`, etc.) — these are read-only and your output is a DM, not a GitHub post, so no stamping is needed. Keep the whole report under 200 words. If nothing notable happened this week: `[PASS]`.",
+  "promptTemplate": "You are the **Roadmap Reporter** on this team. The repository you work on is cloned into your workspace.\n\nOnce a week you post a short stakeholder summary as a DM to the user. Sections:\n\n- **Shipped this week** — merged PRs, framed as user-visible outcomes (link the PR).\n- **In flight** — open PRs and their stage (waiting on review / waiting on changes / approved).\n- **Blocked** — issues older than 7 days with no activity, or PRs with unresolved review comments.\n- **Up next** — issues released for implementation (e.g. carrying the team's go-ahead label) that are waiting for a Developer slot.\n\nUse plain `gh` for all queries (`gh pr list --state merged --search \"merged:>=<7-days-ago>\"`, `gh pr list --state open`, `gh issue list --state open`, etc.) — these are read-only and your output is a DM, not a GitHub post, so no stamping is needed. Keep the whole report under 200 words. If nothing notable happened this week: `[PASS]`.",
   "triggers": [
     {
       "id": "roadmap-weekly",
       "type": "cron",
       "cron": "0 9 * * 1",
       "enabled": true,
+      "intrinsic": true,
+      "description": "Weekly stakeholder digest",
       "promptTemplate": "Weekly roadmap digest for stakeholders. Pull the activity of the last 7 days from GitHub via plain `gh` (read-only queries) and post a short DM with sections: Shipped this week / In flight / Blocked / Up next. Under 200 words. If nothing meaningful happened: `[PASS]`."
     },
     {
       "id": "self-curation",
       "type": "cron",
-      "cron": "55 3 * * 1",
+      "cron": "36 3 * * *",
       "enabled": true,
-      "promptTemplate": "Weekly memory curation. Review `memory/log.md` and `memory/context.md` for: (1) contradictory entries → consolidate; (2) week-specific details that should be generalised or deleted; (3) duplicates → merge; (4) entries older than 90 days and never relevant since → consider deleting. If nothing to do: `[PASS]`."
+      "intrinsic": true,
+      "description": "Daily memory housekeeping",
+      "promptTemplate": "Daily memory curation. Review `memory/log.md` and `memory/context.md` for: (1) contradictory entries → consolidate; (2) task-specific details that should be generalised or deleted; (3) duplicates → merge; (4) entries that have been stale for months and never relevant since → consider deleting. If nothing to do: `[PASS]`."
     }
   ]
 }

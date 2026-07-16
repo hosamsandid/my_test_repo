@@ -334,20 +334,19 @@ All agent lifecycle operations (create / enable / disable / edit prompt / delete
 
 The step shows an inline SVG flow preview + authoritative lints (`POST /api/flows/graph`); error lints block submission. Exits: **Create team** (`POST /api/teams/stream`, which now has full `processTemplate`/`customRoles`/ports parity with `POST /api/teams`) or **Save as draft** (canvas round-trip). Bundle-path collisions stay on the bundle: the collision card re-submits with `mode: "extend"`, adding only missing members.
 
-Role templates live as JSON files under `/template-workspace/agent-templates/` (seeded from `orchestrator/skill-pool/agent-templates/` via `make seed-templates`). The catalog ships with these dispatcher-pattern roles (plus the generic pattern trio above):
+Role templates live as JSON files under `/template-workspace/agent-templates/` (seeded from `orchestrator/skill-pool/agent-templates/` via `make seed-templates`). **Templates are deliberately rudimentary** (rework 2026-07): prompts are parameter-free (no `{{teamName}}`/`{{repoFullName}}`/`{{dispatchLabel}}` tokens — only the weave-time `{{stageName}}`/`{{stagePrefix}}` in the `pattern` trio remain), and every template ships at most **one** role-specific trigger plus a daily self-curation cron (staggered minutes in the 03:00 hour, `intrinsic: true`) that reviews and prunes the agent's `memory/`. The old bidding/safety-net/monitoring trigger sets from the retired all-roles mega-flow are gone; extra wiring is authored in the Flow Editor / Composer. Core SDLC roles (BA, Developer, Code Reviewer, Reworker) carry the more mature prompts from the `core-sdlc` process template. Sample of the catalog (24 roles total):
 
-| Role | Session | Trigger |
+| Role | Session | Role-specific trigger |
 |---|---|---|
-| `business-analyst` | persistent | — (DM only) |
-| `developer` | per-invocation | `issues.labeled` (`assigned:<agentId>`) |
+| `business-analyst` | persistent | `issues.labeled` (`req:refine`, intrinsic — intake pair with `issue-triage`) |
+| `developer` | per-invocation | — (wiring comes from the flow) |
 | `code-reviewer` | per-invocation | `pull_request.opened/reopened` |
-| `security-reviewer` | per-invocation | `pull_request.opened/reopened` |
-| `test-reviewer` | per-invocation | `pull_request.opened/reopened` |
-| `documentation-sync` | per-invocation | `pull_request.closed` (merged) |
-| `issue-triage` | per-invocation | `issues.opened` |
-| `generic` | persistent | — (DM only) |
-
-Each `per-invocation` role also ships a weekly self-curation cron (staggered 5min apart) that reviews and prunes the agent's `memory/`.
+| `reworker` | per-invocation | `pull_request.labeled` (`revisions-required`) |
+| `security-/test-/performance-reviewer` | per-invocation | `pull_request.opened/reopened` |
+| `documentation-sync` | per-invocation | `pull_request.closed` (merged-guard in prompt) |
+| `issue-triage` | per-invocation | `issues.opened` (intrinsic, emits `req:refine`) |
+| `dispatcher` | per-invocation | `issues.labeled` (`ready`) — releases via `dispatch` label |
+| `generic` | persistent | — (blank slate, also no curation cron) |
 
 **Materialisation flow:**
 1. One shared Working Environment: the reused env when `environmentId` is supplied (kept untouched, keeps its own id), else auto-created under id `<teamId>` carrying the repo, SSH key, PAT, and an empty skill set.

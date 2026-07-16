@@ -85,4 +85,24 @@ function planSkillSync({ members = [], skillName, includeMembers = [] } = {}) {
     });
 }
 
-module.exports = { effectiveSkills, hasSkillGrant, migrateSkillGrant, planSkillSync };
+// Plan the grant edit for a single-agent (de)activation (#630, install/activate
+// on one agent). Pure: returns the config field to write and its new value —
+// the orchestrator persists it. A team-member writes its own `skillsOverride`
+// (which REPLACES the inherited team set, so the current effective grant is
+// materialized first to preserve inherited skills); any other construct
+// (standalone / orchestrator / bp-instance) writes its own `skills[]`.
+// Idempotent set insert (activate) / remove (deactivate). This is what makes
+// `install` a true activation-equivalent: the grant now survives a full re-seed.
+function planAgentGrantEdit(cfg, skillName, active, loadCfg = null) {
+  const name = String(skillName == null ? "" : skillName).trim();
+  const field = cfg && cfg.role === "team-member" ? "skillsOverride" : "skills";
+  const base = field === "skillsOverride"
+    ? (Array.isArray(cfg.skillsOverride) ? cfg.skillsOverride : effectiveSkills(cfg, loadCfg))
+    : (cfg && Array.isArray(cfg.skills) ? cfg.skills : []);
+  const list = active
+    ? (base.includes(name) ? [...base] : [...base, name])
+    : base.filter((s) => s !== name);
+  return { field, list };
+}
+
+module.exports = { effectiveSkills, hasSkillGrant, migrateSkillGrant, planSkillSync, planAgentGrantEdit };

@@ -40,7 +40,7 @@ const agentGitOps = require("./agent-git-ops");
 const { resolveCloneTarget } = require("./clone-target");
 const { assembleClaudeMd, buildMemoryHint } = require("./prompt-assembly");
 const { readMaintenanceState } = require("./maintenance-state-reader");
-const { effectiveSkills, migrateSkillGrant, planSkillSync } = require("./skill-grants");
+const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
 const skillManifest = require("./skill-manifest");
 
 // ============================================================
@@ -4852,22 +4852,22 @@ class Orchestrator {
     return { skillName, teamId, agentId, resynced, skipped, refused, total: members.length, members };
   }
 
-  // (De)activate a skill on a single non-member agent (standalone /
-  // orchestrator): same idempotent list edit + file sync, one workspace.
+  // (De)activate a skill on a single agent (standalone / orchestrator /
+  // bp-instance / team-member): idempotent grant edit + file sync, one
+  // workspace. A team-member writes its own `skillsOverride` (a per-member
+  // grant) rather than the team set, so the install reaches only that member.
   async setAgentSkillActive(id, skillName, { active = true } = {}) {
     const cfg = loadAgentConfig(id);
     if (!cfg) throw new Error(`Agent '${id}' not found`);
-    if (cfg.role === "team-member") {
-      throw new Error(`Agent '${id}' is a team-member — (de)activate on its team, or opt it in via includeMembers`);
-    }
     if (cfg.role === "team") throw new Error(`Agent '${id}' is a team — use the team route`);
     if (typeof skillName !== "string" || !skillName.trim()) throw new Error("skillName required");
     const name = skillName.trim();
 
-    const list = Array.isArray(cfg.skills) ? cfg.skills : [];
-    cfg.skills = active
-      ? (list.includes(name) ? list : [...list, name])
-      : list.filter((s) => s !== name);
+    // A team-member writes its own `skillsOverride` (a per-member grant), any
+    // other construct writes its own `skills[]` — see planAgentGrantEdit. The
+    // grant edit is what makes install/activate survive a full re-seed (AC1).
+    const { field, list } = planAgentGrantEdit(cfg, name, active, loadAgentConfig);
+    cfg[field] = list;
     saveAgentConfig(id, cfg);
     this.agentConfigs.set(id, { config: cfg });
 

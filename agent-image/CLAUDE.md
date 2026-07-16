@@ -170,6 +170,38 @@ knowledge promote <id> --to agent --name my-private-skill
 A human can later lift it to the whole team (agent→team) from the Admin Console
 when it proves broadly useful.
 
+## Token usage (`usage`)
+
+`usage` is a **read-only** view of how many tokens you — or your team — have
+consumed. The usage store is owned and written by the orchestrator, and your
+container is volume-isolated from it, so this CLI queries the orchestrator's
+read-only endpoint across that boundary (just like `knowledge`). It is
+**token counts only — never a money figure**, and it can never write or delete a
+usage record.
+
+Your own usage:
+
+```
+usage me
+usage me --since 2026-07-01 --until 2026-07-16
+usage me --group-by day
+usage me --json
+```
+
+Your team's aggregate (never another team — fail-closed):
+
+```
+usage team
+usage team --group-by agent
+```
+
+Output carries the four token classes separately (input, output, cache write,
+cache read), their total, and the invocation count that backs them. Options
+mirror the console summary: `--since` / `--until` (a half-open `[since, until)`
+window), `--group-by agent|team|model|provider|day`, and `--json` for the raw
+response. Use it to stay budget-aware; if the orchestrator is unreachable it
+fails with a clear message rather than a wrong total.
+
 ## Key Constraints
 
 - Follow the LoopScript phases strictly and sequentially.

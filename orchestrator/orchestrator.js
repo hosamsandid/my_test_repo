@@ -2943,7 +2943,7 @@ function _pushKnowledgeClone(clonePath, gitEnv, branch = knowledgeSync.KNOWLEDGE
   throw new Error(`knowledge canonical push failed: ${String(lastErr).trim().slice(0, 200)}`);
 }
 
-function runConvergenceCollector(teamId, envArg) {
+function runConvergenceCollector(teamId, envArg, opts = {}) {
   // #570: overlay the team's per-team knowledge config BEFORE reading repoRef, so
   // the repoRef used to build the push credentials and the branch resolved below
   // both come from the team's store — never a mix of the env's repoRef and the
@@ -3024,6 +3024,31 @@ function runConvergenceCollector(teamId, envArg) {
   }
   const heldCanonicalIds = new Set([...pendingCanonicalIds, ...rejectedCanonicalIds]);
 
+  // Human-readable summaries (#635) are a real field on the canonical entry, git-
+  // persisted — NOT a sidecar. buildCanonicalProjection reads shards (which never
+  // carry a summary), so a summary must be CARRIED FORWARD across re-projection:
+  // read the prior canonical files (still on disk from the last push / the refresh
+  // reset) and re-apply each entry's summary — but ONLY when the freshly-projected
+  // text is unchanged, so an entry whose text changed drops its stale summary and
+  // gets regenerated on the next backfill (AC5). `extraSummaries` (backfill's
+  // freshly-generated map) wins and is trusted for the CURRENT text. Empty extra +
+  // no prior summaries ⇒ no summary field emitted ⇒ byte-identical projection.
+  const priorSummaries = _readCanonicalSummaries(storeRoot, manifest);
+  const extraSummaries = _normalizeSummaryMap(opts && opts.extraSummaries);
+  const resolvedSummaries = new Map();
+  for (const kind of KNOWLEDGE_KINDS) {
+    const bucket = proj.byKind[kind];
+    if (!bucket) continue;
+    for (const e of bucket.canonical) {
+      if (extraSummaries.has(e.id)) {
+        resolvedSummaries.set(e.id, extraSummaries.get(e.id));
+      } else {
+        const prev = priorSummaries.get(e.id);
+        if (prev && prev.summary && prev.text === e.text) resolvedSummaries.set(e.id, prev.summary);
+      }
+    }
+  }
+
   // Write the canonical <kind>.jsonl files (single-writer merged view), applying
   // the promoted/archived/review-status overlay. Byte-identical to proj.lines when
   // all overlays are empty, so idempotency (no spurious git churn) is preserved.
@@ -3034,7 +3059,7 @@ function runConvergenceCollector(teamId, envArg) {
     try { rel = kindFilePath(manifest, kind); } catch { continue; }
     const file = path.join(storeRoot, rel);
     const lines = _serializeCanonicalKind(bucket, promotedCanonicalIds, archivedCanonicalIds, {
-      pendingIds: pendingCanonicalIds, rejectedIds: rejectedCanonicalIds,
+      pendingIds: pendingCanonicalIds, rejectedIds: rejectedCanonicalIds, summaries: resolvedSummaries,
     });
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -3145,7 +3170,7 @@ function raiseRelatedSuggestions(teamId, clusters, candidates, { relatedThreshol
 // status:"archived"; else one marked promoted is written status:"promoted"
 // (archived wins). Empty overlays ⇒ byte-identical to proj.lines[kind].
 function _serializeCanonicalKind(bucket, promotedIds, archivedIds, review = {}) {
-  const { pendingIds, rejectedIds } = review;
+  const { pendingIds, rejectedIds, summaries } = review;
   const canon = bucket.canonical.slice().sort(
     (a, b) => (a.createdAt || "").localeCompare(b.createdAt || "") || String(a.id).localeCompare(String(b.id)),
   );
@@ -3168,10 +3193,76 @@ function _serializeCanonicalKind(bucket, promotedIds, archivedIds, review = {}) 
     } else if (promotedIds && promotedIds.has(e.id) && e.status !== "promoted") {
       entry = { ...e, status: "promoted" };
     }
+    // Human-readable summary overlay (#635): a real field on the canonical entry,
+    // resolved (carried-forward or freshly backfilled) by the caller. Only applied
+    // to canonical entries, never tombstones. No summary ⇒ field omitted ⇒ line
+    // byte-identical to the pre-#635 projection.
+    if (summaries && summaries.has(e.id)) {
+      entry = { ...entry, summary: summaries.get(e.id) };
+    }
     out.push(serializeKnowledgeEntry(entry));
   }
   for (const e of tombs) out.push(serializeKnowledgeEntry(e));
   return out;
+}
+
+// Read the prior canonical <kind>.jsonl files and collect each entry's persisted
+// human-readable summary (#635) keyed by id → {text, summary}. Used to carry a
+// summary forward across a re-projection (which rebuilds canonical from shards
+// that never carry one), and to drop it when the entry's text has changed (AC5).
+// Best-effort + tolerant: a missing file or a mangled line is skipped, never throws.
+function _readCanonicalSummaries(storeRoot, manifest) {
+  const byId = new Map();
+  for (const kind of KNOWLEDGE_KINDS) {
+    let rel;
+    try { rel = kindFilePath(manifest, kind); } catch { continue; }
+    let raw;
+    try { raw = fs.readFileSync(path.join(storeRoot, rel), "utf8"); } catch { continue; }
+    for (const line of raw.split("\n")) {
+      const e = parseKnowledgeEntry(line);
+      if (!e || typeof e.id !== "string") continue;
+      if (typeof e.summary === "string" && e.summary.trim() !== "") {
+        byId.set(e.id, { text: e.text, summary: e.summary });
+      }
+    }
+  }
+  return byId;
+}
+
+// Normalize a caller-supplied summary map (id → summary text) into a validated
+// Map, keeping only 12-hex ids with a non-empty string summary.
+function _normalizeSummaryMap(input) {
+  const out = new Map();
+  if (!input) return out;
+  const entries = input instanceof Map ? [...input.entries()] : Object.entries(input);
+  for (const [id, text] of entries) {
+    if (typeof id === "string" && /^[0-9a-f]{12}$/.test(id) && typeof text === "string" && text.trim() !== "") {
+      out.set(id, text.trim());
+    }
+  }
+  return out;
+}
+
+// Persist human-readable summaries (#635) for a team's canonical KB entries. The
+// summary is a real, git-persisted field on the entry (never a sidecar): this
+// refreshes the canonical clone then re-projects with the supplied summaries
+// carried into the write, committing + pushing the change. Mirrors
+// archiveKnowledgeEntry's re-projection posture. Best-effort on the git side.
+function persistKnowledgeSummaries(teamId, summaries) {
+  const clean = _normalizeSummaryMap(summaries);
+  if (clean.size === 0) return { persisted: 0, ids: [] };
+  let env = null;
+  const resolved = resolveTeamKbRepo(teamId);
+  if (resolved) env = resolved.env;
+  const extra = {};
+  for (const [id, text] of clean.entries()) extra[id] = text;
+  try {
+    refreshKnowledgeClone(teamId, { force: true, env });
+    runConvergenceCollector(teamId, env, { extraSummaries: extra });
+  } catch (err) {
+    console.warn(`[Orchestrator] summary persist re-projection for '${teamId}' failed: ${err.message}`);
+  }
+  return { persisted: clean.size, ids: [...clean.keys()] };
 }
 
 // Archive / unarchive a canonical KB entry (Phase 4 manual curation, operator-
@@ -7861,6 +7952,26 @@ async function main() {
           const id = String(p.id || '');
           if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
           const result = archiveKnowledgeEntry(teamId, id, p.archived !== false);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+        }
+      });
+      return;
+    }
+
+    // ── Persist human-readable summaries for canonical KB entries (#635) ────────
+    if (req.method === 'POST' && req.url === '/internal/knowledge/summaries') {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const p = JSON.parse(body || '{}');
+          const teamId = String(p.teamId || '');
+          if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
+          const result = persistKnowledgeSummaries(teamId, p.summaries || {});
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {

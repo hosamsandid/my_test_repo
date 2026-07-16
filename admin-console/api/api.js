@@ -3050,8 +3050,30 @@ app.get('/api/knowledge/graph', async (req, res) => {
   augmentPendingPromotions(graph, teamIds);
   augmentSkillActivation(graph, parsed);
   await augmentDigestInclusion(graph, teamIds);
+  augmentDisplaySummary(graph, entries);
   res.json(graph);
 });
+
+// Overlay the human-readable summary (#635) on every item node: `summary` is the
+// persisted, LLM-generated field carried on the canonical entry (null when not yet
+// backfilled), and `displaySummary` is what the overview table renders — the
+// persisted summary when present, else a deterministic heuristic derived from the
+// raw `text` so a row is NEVER blank (AC4). Computed in the route (like
+// augmentDigestInclusion) so the pure graph builder stays entries+skills only.
+function augmentDisplaySummary(graph, entries) {
+  if (!graph || !Array.isArray(graph.nodes)) return;
+  const byId = new Map();
+  for (const e of Array.isArray(entries) ? entries : []) {
+    if (e && typeof e.id === 'string') byId.set(e.id, e);
+  }
+  for (const node of graph.nodes) {
+    if (node.kind !== 'item') continue;
+    const entry = byId.get(String(node.id).slice(5));
+    const persisted = entry && typeof entry.summary === 'string' && entry.summary.trim() ? entry.summary.trim() : null;
+    node.summary = persisted;
+    node.displaySummary = persisted || knowledgeSuggestions.buildHeuristicSummary(node.text || (entry && entry.text) || '');
+  }
+}
 
 // Overlay the digest-inclusion truth (memory/knowledge unification, Phase 3):
 // mark every item node that currently sits inside its team's knowledge digest
@@ -3484,6 +3506,73 @@ app.post('/api/knowledge/draft', heavyLimiter, async (req, res) => {
   const skillMd = extractMessageText(result.body);
   if (!skillMd) return fallback();
   res.json({ draft: { name: heuristic.name, skillMd, llmDrafted: true }, source: 'llm', model: target.model, entryIds: cand.entryIds });
+});
+
+// Generate-and-store human-readable summaries (#635, AC3) for a team's KB entries
+// that don't have one yet. Idempotent: entries that already carry a `summary` are
+// skipped, so a reload issues NO new LLM call. Only REAL LLM summaries are
+// persisted (via the orchestrator, which writes the field onto the canonical
+// entry) — when no LLM target exists or a call fails, nothing is persisted and the
+// overview table falls back to the deterministic heuristic at read (AC4), so a
+// backfill NEVER throws and a row is never blank. Bounded per request so a large
+// backlog can't stall one call; the client re-triggers while `remaining > 0`.
+app.post('/api/knowledge/summaries/backfill', heavyLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.body?.team === 'string' ? req.body.team
+    : (typeof req.body?.teamId === 'string' ? req.body.teamId : '');
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+
+  const MAX_PER_REQUEST = 40;
+  const { entries } = gatherTeamEntries(teamId);
+  const missing = (Array.isArray(entries) ? entries : []).filter(
+    (e) => e && typeof e.id === 'string' && /^[0-9a-f]{12}$/.test(e.id)
+      && e.status !== 'merged'
+      && typeof e.text === 'string' && e.text.trim() !== ''
+      && !(typeof e.summary === 'string' && e.summary.trim() !== ''),
+  );
+  const remaining = Math.max(0, missing.length - MAX_PER_REQUEST);
+  const batch = missing.slice(0, MAX_PER_REQUEST);
+  if (batch.length === 0) return res.json({ generated: 0, persisted: 0, remaining: 0, source: 'none' });
+
+  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  // No LLM target: persist nothing (heuristic is display-only). Report the count
+  // so the caller knows these render via the read-time fallback (AC4).
+  if (target.error) return res.json({ generated: 0, persisted: 0, remaining, source: 'heuristic', reason: target.error });
+
+  const url = buildMessagesUrl(target.baseUrl);
+  const headers = {
+    'anthropic-version': '2023-06-01',
+    ...(target.token ? { Authorization: `Bearer ${target.token}`, 'x-api-key': target.token } : {}),
+  };
+  const summaries = {};
+  let failures = 0;
+  // Sequential: one entry = one short /v1/messages call, bounded by MAX_PER_REQUEST.
+  for (const e of batch) {
+    try {
+      const payload = { model: target.model, ...knowledgeSuggestions.buildSummaryRequest(e) };
+      const result = await httpPostJson(url, headers, payload);
+      if (result.error || result.status < 200 || result.status >= 300) { failures += 1; continue; }
+      const text = extractMessageText(result.body);
+      const clean = typeof text === 'string' ? text.replace(/\s+/g, ' ').trim() : '';
+      if (clean) summaries[e.id] = clean; else failures += 1;
+    } catch { failures += 1; }
+  }
+
+  const ids = Object.keys(summaries);
+  if (ids.length === 0) return res.json({ generated: 0, persisted: 0, remaining, source: 'llm', failures });
+
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/summaries`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, summaries }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) return res.status(502).json({ error: (out && out.error) || 'summary persist failed' });
+    res.json({ generated: ids.length, persisted: out.persisted || ids.length, remaining, source: 'llm', model: target.model, failures });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
 });
 
 // Re-synthesise an EXISTING skill together with the converged knowledge (#553,

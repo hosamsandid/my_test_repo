@@ -460,3 +460,53 @@ test('normalizeWizardKnowledgeConfig: all three groups combined', () => {
     knowledgePromotionGates: { 'team>team': 'review', 'agent>team': 'auto', 'team>global': 'review' },
   });
 });
+
+/* ── Human-readable summaries (#635) ────────────────────────────────────────── */
+
+const { buildHeuristicSummary, buildSummaryRequest } = require('./knowledge-suggestions');
+
+test('buildHeuristicSummary: collapses whitespace and trims', () => {
+  assert.equal(buildHeuristicSummary('  the   build\nneeds\tNode 22  '), 'the build needs Node 22');
+});
+
+test('buildHeuristicSummary: empty / non-string input yields empty string, never throws', () => {
+  assert.equal(buildHeuristicSummary(''), '');
+  assert.equal(buildHeuristicSummary(null), '');
+  assert.equal(buildHeuristicSummary(undefined), '');
+  assert.equal(buildHeuristicSummary(42), '');
+  assert.equal(buildHeuristicSummary({}), '');
+});
+
+test('buildHeuristicSummary: short text is returned verbatim (below the cap)', () => {
+  const s = 'A concise fact about the repo.';
+  assert.equal(buildHeuristicSummary(s), s);
+});
+
+test('buildHeuristicSummary: long text is truncated on a word boundary with an ellipsis', () => {
+  const long = 'word '.repeat(80).trim(); // 400 chars, well over the default 200 cap
+  const out = buildHeuristicSummary(long);
+  assert.ok(out.length <= 201, `expected <=201, got ${out.length}`);
+  assert.ok(out.endsWith('…'), 'expected a trailing ellipsis');
+  assert.ok(!out.includes('  '), 'no double spaces');
+});
+
+test('buildHeuristicSummary: honours a custom maxLen', () => {
+  const out = buildHeuristicSummary('alpha beta gamma delta epsilon zeta', { maxLen: 10 });
+  assert.ok(out.length <= 11);
+  assert.ok(out.endsWith('…'));
+});
+
+test('buildSummaryRequest: produces a bounded single-user-message request carrying the entry text', () => {
+  const req = buildSummaryRequest({ text: 'PRs need the ready-for-review label', kind: 'convention' });
+  assert.equal(typeof req.max_tokens, 'number');
+  assert.ok(req.max_tokens > 0);
+  assert.ok(Array.isArray(req.messages) && req.messages.length === 1);
+  assert.equal(req.messages[0].role, 'user');
+  assert.ok(req.messages[0].content.includes('PRs need the ready-for-review label'));
+});
+
+test('buildSummaryRequest: tolerates a missing/blank entry without throwing', () => {
+  const req = buildSummaryRequest(null);
+  assert.ok(Array.isArray(req.messages) && req.messages.length === 1);
+  assert.equal(typeof req.messages[0].content, 'string');
+});

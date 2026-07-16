@@ -210,6 +210,55 @@ function buildSkillDraftRequest(candidate) {
 }
 
 // ---------------------------------------------------------------------------
+// Human-readable entry summary (overview table — #635)
+// ---------------------------------------------------------------------------
+
+// Deterministic, dependency-free fallback summary derived from the entry's
+// agent-facing `text` alone — used when no LLM target exists or the call fails,
+// so a row is NEVER blank (AC4, mirrors buildHeuristicSkillDraft's never-throw
+// posture). Collapses whitespace and trims to a sentence-ish length; never throws.
+function buildHeuristicSummary(text, { maxLen = 200 } = {}) {
+  let s = '';
+  try {
+    s = typeof text === 'string' ? text.replace(/\s+/g, ' ').trim() : '';
+  } catch {
+    s = '';
+  }
+  if (s === '') return '';
+  if (s.length <= maxLen) return s;
+  // Cut at the last word boundary before the cap so we don't slice mid-word.
+  const cut = s.slice(0, maxLen);
+  const lastSpace = cut.lastIndexOf(' ');
+  return `${(lastSpace > 40 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
+}
+
+// Meta-prompt: turn one KB entry's agent-facing `text` into a 1–2 sentence,
+// plain-language summary for a human reading the overview table. Pure — api.js
+// supplies the model + transport, exactly like buildSkillDraftRequest. The
+// summary is DISTINCT from `text` (no jargon-dense restatement) and never
+// invents facts not present in `text`.
+function buildSummaryRequest(entry) {
+  const e = entry && typeof entry === 'object' ? entry : {};
+  const text = typeof e.text === 'string' ? e.text.trim() : '';
+  const instruction = [
+    'You help a human skim a team knowledge base.',
+    'Rewrite the following recorded lesson as a short, plain-language summary a',
+    'non-expert teammate can understand at a glance.',
+    '',
+    `Kind: ${e.kind || 'fact'}`,
+    'The recorded lesson:',
+    text,
+    '',
+    'Requirements for the summary you produce:',
+    '- 1 to 2 plain sentences, no markdown, no code fences, no preamble.',
+    '- Convey the gist in human terms; do not just repeat the technical wording.',
+    '- Do NOT invent tool names, repo names, file paths or facts not stated above.',
+    '- Output ONLY the summary sentence(s).',
+  ].join('\n');
+  return { max_tokens: 256, messages: [{ role: 'user', content: instruction }] };
+}
+
+// ---------------------------------------------------------------------------
 // Promotion validation + provenance (decision d — provenance MANDATORY)
 // ---------------------------------------------------------------------------
 
@@ -657,6 +706,8 @@ module.exports = {
   buildHeuristicSkillDraft,
   candidateFromEntries,
   buildSkillDraftRequest,
+  buildHeuristicSummary,
+  buildSummaryRequest,
   validatePromotion,
   buildSkillProvenance,
   EXTEND_TRANSITIONS,

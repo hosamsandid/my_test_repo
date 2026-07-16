@@ -1287,6 +1287,18 @@ const MEMBER_STATE_CHIPS = {
   inactive: { label: 'inactive', color: 'var(--eb-text-muted)', tip: 'This member doesn’t have the skill in its workspace.' },
 };
 
+// Per-copy drift chip (#629). `outdated` is the only auto-resyncable state — it
+// gets an Update button; `diverged`/`conflict`/`orphaned`/`unknown` are surfaced
+// but never auto-overwritten (they point to the manual path). `in-sync` shows
+// nothing (the default healthy state).
+const DRIFT_CHIPS = {
+  outdated: { label: 'outdated', color: 'var(--eb-status-warning)', tip: 'The source skill moved on since this copy was seeded. Click Update to resync it.' },
+  diverged: { label: 'edited locally', color: 'var(--eb-status-warning)', tip: 'This copy was edited locally while the source stayed put — resync won’t overwrite it. Re-import or discard the local edit manually.' },
+  conflict: { label: 'conflict', color: 'var(--eb-status-error, #d33)', tip: 'Both this copy and the source changed — resync won’t overwrite it. Resolve manually (re-import or discard the local edit).' },
+  orphaned: { label: 'source deleted', color: 'var(--eb-status-error, #d33)', tip: 'The source skill was deleted. Restore it from the archive or detach this copy.' },
+  unknown: { label: 'no origin', color: 'var(--eb-text-muted)', tip: 'This copy predates skill manifests, so its origin is unknown — it is surfaced but never auto-synced. Re-import to establish an anchor.' },
+};
+
 function SkillCard({ skill, teamId, onShare, onReload }) {
   const auto = skill.promotedBy === 'curator';
   const act = skill.activation || null;
@@ -1335,6 +1347,29 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
       .finally(() => setBusy(null));
   };
 
+  // Drift resync (#629 AC3/AC4). `scope` is { teamId } for the bulk "Sync all
+  // outdated" or { agentId } for a single copy's Update. The backend only
+  // overwrites `outdated` copies; diverged/conflict/orphaned/unknown come back
+  // refused, which we report so the operator knows to resolve them manually.
+  const resync = (scope, busyKey) => {
+    setBusy(busyKey);
+    fetch('/api/skills/resync', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: skill.label, scope }),
+    })
+      .then(async r => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        const parts = [];
+        if (d.resynced) parts.push(`${d.resynced} updated`);
+        if (d.refused) parts.push(`${d.refused} need manual resolution`);
+        feedback(d.refused ? 'error' : 'ok', parts.length ? parts.join(' · ') : 'already up to date');
+        onReload && onReload();
+      })
+      .catch(e => feedback('error', `Resync failed: ${e.message}`))
+      .finally(() => setBusy(null));
+  };
+
   // Guarded team-skill deletion (#627, AC4) — the Knowledge page is the
   // Team-Admin-accessible surface, so a Team Admin can delete their own team's
   // skill here without the System-Admin Skills Registry. The backend guards the
@@ -1374,6 +1409,9 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
 
   const members = act ? (act.members || []) : [];
   const activeCount = members.filter(m => m.state === 'active').length;
+  // Node-level drift rollup (#629 AC2): { worst, outdated, resyncable, total, counts }.
+  const drift = skill.drift || null;
+  const driftWorst = drift && drift.worst && drift.worst !== 'in-sync' ? drift.worst : null;
   const badge = !act ? null : !act.active
     ? { text: 'promoted · not activated', color: 'var(--eb-text-muted)', border: 'var(--eb-border-default)',
         tip: 'This skill is promoted and lives in the team’s pool, but it is not in the team’s active set — no member loads it yet. Click Activate to sync it into members.' }
@@ -1446,6 +1484,29 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
         </div>
       )}
 
+      {driftWorst && (
+        <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span
+            title={(DRIFT_CHIPS[driftWorst] || {}).tip || 'Some copies of this skill have drifted from the source.'}
+            style={{
+              fontSize: 10, fontWeight: 600, padding: '1px 7px', borderRadius: 'var(--eb-radius-full)',
+              border: `1px solid ${(DRIFT_CHIPS[driftWorst] || {}).color || 'var(--eb-status-warning)'}`,
+              color: (DRIFT_CHIPS[driftWorst] || {}).color || 'var(--eb-status-warning)', cursor: 'help', whiteSpace: 'nowrap',
+            }}>
+            {drift.outdated > 0 ? `${drift.outdated} outdated` : (DRIFT_CHIPS[driftWorst] || {}).label || driftWorst}
+          </span>
+          {drift.resyncable > 0 && (
+            <button
+              disabled={!!busy}
+              onClick={() => resync({ teamId }, 'resync')}
+              title="Sync all outdated copies of this skill to the current source content (edited/conflicted copies are left untouched)"
+              style={{ ...primaryBtn, padding: '2px 10px', fontSize: 'var(--eb-text-xs)' }}>
+              {busy === 'resync' ? 'Syncing…' : `Sync all outdated (${drift.resyncable})`}
+            </button>
+          )}
+        </div>
+      )}
+
       {expanded && members.length > 0 && (
         <div style={{ marginTop: 6, borderTop: '1px dashed var(--eb-border-default)', paddingTop: 6 }}>
           {members.map(m => {
@@ -1464,6 +1525,26 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
                   }}>
                   {chip.label}
                 </span>
+                {m.drift && m.drift !== 'in-sync' && DRIFT_CHIPS[m.drift] && (
+                  <span
+                    title={DRIFT_CHIPS[m.drift].tip}
+                    style={{
+                      flexShrink: 0, fontSize: 10, fontWeight: 600, padding: '0 6px',
+                      borderRadius: 'var(--eb-radius-full)', border: `1px solid ${DRIFT_CHIPS[m.drift].color}`,
+                      color: DRIFT_CHIPS[m.drift].color, cursor: 'help', whiteSpace: 'nowrap',
+                    }}>
+                    {DRIFT_CHIPS[m.drift].label}
+                  </span>
+                )}
+                {m.drift === 'outdated' && (
+                  <button
+                    disabled={!!busy}
+                    onClick={() => resync({ agentId: m.agentId }, m.agentId)}
+                    title="Resync this copy to the current source content"
+                    style={linkBtn}>
+                    {busy === m.agentId ? 'Updating…' : 'Update'}
+                  </button>
+                )}
                 {m.state === 'excluded-override' && (
                   <button
                     disabled={!!busy}

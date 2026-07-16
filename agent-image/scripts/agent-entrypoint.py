@@ -589,6 +589,7 @@ class _StatePushClient:
         self._base = base_url.rstrip("/")
         self._q: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self._sent: dict[str, int] = {}  # roomId -> bytes acked by the orchestrator
+        self._flush_warned: set[str] = set()  # rooms with an active failure warning
         self._thread = threading.Thread(target=self._run, name="state-push", daemon=True)
         self._started = False
 
@@ -714,43 +715,100 @@ class _StatePushClient:
                 stop = True
             _write_usage_spool(remaining)
 
+    # Raw bytes per session-events POST. The orchestrator destroys request
+    # bodies over 16 MB and base64 inflates by 4/3, so an unbounded tail (e.g.
+    # the full-history resend after a restart, when `_sent` starts empty on a
+    # room whose log has grown past ~12 MB) would be dropped on every attempt
+    # and the control-plane copy would freeze permanently. Chunking bounds
+    # every POST; the probe below avoids resending history at all.
+    _SESSION_CHUNK_MAX = 4_000_000
+
     def _flush_session(self, room_id: str) -> None:
         p = _session_log_file(room_id)
         try:
             size = p.stat().st_size
         except OSError:
             return
-        base = self._sent.get(room_id, 0)
+        base = self._sent.get(room_id)
+        if base is None:
+            # First flush since process start: the control-plane copy usually
+            # already holds (most of) this room's log, so ask the orchestrator
+            # where it ends instead of resending from byte 0. An empty append
+            # at our local size either confirms sync (ok) or returns the
+            # control copy's size as `expected` — we resume from there.
+            base = self._probe_remote_offset(room_id, size)
+            if base is None:
+                return  # transient — retry on the next append
+            self._sent[room_id] = base
         if base > size:
             base = 0  # local file truncated/rotated — resend from the top
-        if base >= size:
-            return
-        try:
-            with p.open("rb") as fh:
-                fh.seek(base)
-                tail = fh.read()
-        except OSError:
-            return
-        body = json.dumps({
-            "roomId": room_id,
-            "baseOffset": base,
-            "dataB64": base64.b64encode(tail).decode("ascii"),
-        }).encode("utf-8")
-        status, resp = self._post(
-            f"/internal/agents/{self._agent_id}/session-events", body,
-        )
+        # Chunked catch-up: bounded POSTs so a large backlog can never exceed
+        # the orchestrator's body cap.
+        while base < size:
+            try:
+                with p.open("rb") as fh:
+                    fh.seek(base)
+                    tail = fh.read(self._SESSION_CHUNK_MAX)
+            except OSError:
+                return
+            if not tail:
+                break
+            status, resp = self._post_session_events(room_id, base, tail)
+            if status != 200:
+                self._warn_flush_failure(room_id, f"HTTP {status or 'unreachable'}")
+                return  # transient — retry on the next append
+            try:
+                j = json.loads(resp)
+            except Exception:
+                return
+            if j.get("ok"):
+                base = int(j.get("offset", base + len(tail)))
+                self._sent[room_id] = base
+            elif "expected" in j:
+                # Gap: control file is behind us — rewind and resend next tick.
+                self._sent[room_id] = int(j["expected"])
+                self._q.put(("session", room_id))
+                return
+            else:
+                return
+        self._flush_warned.discard(room_id)
+
+    def _probe_remote_offset(self, room_id: str, local_size: int) -> int | None:
+        """Where does the control-plane copy of this room's log end?
+        Returns None on a transient error (caller retries next tick)."""
+        status, resp = self._post_session_events(room_id, local_size, b"")
         if status != 200:
-            return  # transient — retry on the next append
+            self._warn_flush_failure(room_id, f"probe HTTP {status or 'unreachable'}")
+            return None
         try:
             j = json.loads(resp)
         except Exception:
-            return
+            return None
         if j.get("ok"):
-            self._sent[room_id] = int(j.get("offset", base + len(tail)))
-        elif "expected" in j:
-            # Gap: control file is behind us — rewind and resend next tick.
-            self._sent[room_id] = int(j["expected"])
-            self._q.put(("session", room_id))
+            return local_size  # in sync (or control is ahead of a truncated local)
+        if "expected" in j:
+            return int(j["expected"])
+        return None
+
+    def _post_session_events(self, room_id: str, base: int, data: bytes) -> tuple[int, str]:
+        body = json.dumps({
+            "roomId": room_id,
+            "baseOffset": base,
+            "dataB64": base64.b64encode(data).decode("ascii"),
+        }).encode("utf-8")
+        return self._post(f"/internal/agents/{self._agent_id}/session-events", body)
+
+    def _warn_flush_failure(self, room_id: str, detail: str) -> None:
+        # Once per room until the next successful flush — visible in the
+        # container log without spamming a line per debounce tick while the
+        # orchestrator is down.
+        if room_id in self._flush_warned:
+            return
+        self._flush_warned.add(room_id)
+        print(
+            f"[Runner] session-log push to control plane failing for {room_id}: {detail}",
+            file=sys.stderr,
+        )
 
     def _post(self, route: str, body: bytes) -> tuple[int, str]:
         url = f"{self._base}{route}"

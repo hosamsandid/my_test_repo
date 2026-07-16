@@ -15,16 +15,24 @@ set -euo pipefail
 #
 # Compatible with bash 3.2 (macOS default).
 
-# Source .env from repo root if present (picks up ADMIN_USER, HOMESERVER, etc.)
+# Source the env file from repo root if present (picks up ADMIN_USER,
+# HOMESERVER, etc.). ENV_FILE is overridable so the E2E harness can bootstrap
+# against a generated .env.e2e without touching the developer's real .env
+# (defaults to ../.env — unchanged behaviour when unset).
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [ -f "${SCRIPT_DIR}/../.env" ]; then
-  set -a; . "${SCRIPT_DIR}/../.env"; set +a
+ENV_FILE="${ENV_FILE:-${SCRIPT_DIR}/../.env}"
+if [ -f "${ENV_FILE}" ]; then
+  set -a; . "${ENV_FILE}"; set +a
 fi
 
 HOMESERVER="${HOMESERVER:-http://localhost:${CONDUWUIT_PORT:-8448}}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASS="${ADMIN_PASS:-}"
 COMPOSE_FILE="${SCRIPT_DIR}/../docker-compose.yml"
+# The compose invocation prefix (files + project + env-file). Overridable so the
+# E2E harness can point it at the e2e overlay/project; defaults to the base file
+# alone — unchanged behaviour when unset.
+COMPOSE_CMD="${COMPOSE_CMD:-podman compose -f ${COMPOSE_FILE}}"
 
 echo "=== Stack Bootstrap (admin user) ==="
 
@@ -57,7 +65,7 @@ YAML
 trap "rm -f '$BOOTSTRAP_OVERRIDE'" EXIT
 
 echo "Creating admin Matrix user via conduwuit admin console ..."
-podman compose -f "${COMPOSE_FILE}" -f "${BOOTSTRAP_OVERRIDE}" up -d --no-deps conduwuit >/dev/null 2>&1
+${COMPOSE_CMD} -f "${BOOTSTRAP_OVERRIDE}" up -d --no-deps conduwuit >/dev/null 2>&1
 
 echo -n "Waiting for Conduwuit to be ready ..."
 for i in $(seq 1 30); do
@@ -76,7 +84,7 @@ done
 
 # Restart without --execute immediately to avoid crash loop (user already exists on restart)
 echo "Restarting Conduwuit (normal mode) ..."
-podman compose -f "${COMPOSE_FILE}" up -d --no-deps conduwuit >/dev/null 2>&1
+${COMPOSE_CMD} up -d --no-deps conduwuit >/dev/null 2>&1
 echo -n "Waiting for Conduwuit to be ready ..."
 for i in $(seq 1 30); do
   if curl -sf "${HOMESERVER}/_matrix/client/versions" >/dev/null 2>&1; then
@@ -153,8 +161,7 @@ if [ -z "$ADMIN_ROOM" ]; then
   exit 1
 fi
 
-# --- Persist values to .env ---
-ENV_FILE="${SCRIPT_DIR}/../.env"
+# --- Persist values to the env file (ENV_FILE, resolved at the top) ---
 if [ ! -f "$ENV_FILE" ]; then
   echo "ERROR: ${ENV_FILE} not found. Run: cp .env.example .env" >&2
   exit 1

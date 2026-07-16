@@ -1,0 +1,39 @@
+# E2E overlay (#666, docs/e2e-testing-concept.md §4.1). Layered on top of
+# docker-compose.yml to bring up a parallel, disposable stack under the
+# `aee-e2e` project. Everything runs real except the LLM, which is stubbed at
+# the `claude`-binary seam inside agent containers (AEE_FAKE_CLAUDE=1).
+#
+# Usage (see the Makefile e2e* targets):
+#   podman compose -f docker-compose.yml -f docker-compose.e2e.yml \
+#     -p aee-e2e --env-file .env.e2e up -d
+#
+# Isolation comes from COMPOSE_PROJECT_NAME=aee-e2e (in .env.e2e): every named
+# volume and container is project-prefixed, so this stack can never touch the
+# developer's normal `vgh-claw` stack. Teardown is `-p aee-e2e down -v` plus
+# label-scoped agent-container/volume cleanup (make e2e-down).
+
+services:
+  conduwuit:
+    # Pin the Matrix server tag — the base file floats `:latest`, which lets an
+    # upstream change break E2E unrelated to our code (concept §9). Override via
+    # CONDUWUIT_IMAGE in .env.e2e if a newer pin is needed.
+    image: ${CONDUWUIT_IMAGE:-ghcr.io/continuwuity/continuwuity:v0.5.5}
+
+  orchestrator:
+    environment:
+      # THE one product-behaviour flag for E2E. The orchestrator spreads its own
+      # process.env into every agent container's env (orchestrator.js
+      # startAgentProcess → spawnContainer), so setting it here once turns on the
+      # fake `claude` shim stack-wide. The agent entrypoint prepends the shim dir
+      # to PATH only when this equals "1"; unset ⇒ production-identical.
+      AEE_FAKE_CLAUDE: "${AEE_FAKE_CLAUDE:-1}"
+      # Belt-and-suspenders: even with the shim on PATH the CLI never dials out,
+      # but point the proxy vars at a dead address so a regression that bypassed
+      # the shim fails fast/offline instead of reaching a real endpoint.
+      ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-http://127.0.0.1:1}"
+      ANTHROPIC_AUTH_TOKEN: "${ANTHROPIC_AUTH_TOKEN:-e2e-dead-token}"
+
+  admin-console:
+    environment:
+      ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-http://127.0.0.1:1}"
+      ANTHROPIC_AUTH_TOKEN: "${ANTHROPIC_AUTH_TOKEN:-e2e-dead-token}"

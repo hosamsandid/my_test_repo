@@ -349,7 +349,7 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
         />
         <ModeButton
           icon={<GitCompare size={11} />}
-          label="Diff"
+          label="Git"
           active={mode === 'diff'}
           onClick={() => setMode('diff')}
         />

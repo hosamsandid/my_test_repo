@@ -89,7 +89,7 @@ DEFAULT_TEAM_ID = "default"
 KEY_ORDER = (
     "v", "id", "kind", "text", "originAgent", "teamId", "createdAt",
     "correlationId", "sessionId", "sourceRefs", "convergence", "tags",
-    "status", "updatedAt",
+    "status", "updatedAt", "summary",
 )
 
 
@@ -191,12 +191,14 @@ def validate_entry(entry):
         errors.append("convergence must be a non-empty array")
     if entry.get("status") not in STATUSES:
         errors.append("status must be one of " + "|".join(STATUSES))
+    if entry.get("summary") is not None and not isinstance(entry.get("summary"), str):
+        errors.append("summary must be a string when present")
     return len(errors) == 0, errors
 
 
 def build_entry(kind, text, *, origin_agent="", team_id="", correlation_id=None,
                 session_id=None, source_refs=None, tags=None, status="active",
-                convergence=None, entry_id=None, created_at=None,
+                convergence=None, entry_id=None, created_at=None, summary=None,
                 now=_default_now, id_gen=_default_id_gen):
     """Build a validated KB entry with defaults + provenance filled in.
 
@@ -236,6 +238,10 @@ def build_entry(kind, text, *, origin_agent="", team_id="", correlation_id=None,
     tag_list = _norm_str_array(tags)
     if tag_list:
         entry["tags"] = tag_list
+    # Optional human-readable summary (distinct from the agent-facing text);
+    # written only by the orchestrator backfill path, never the agent CLI.
+    if isinstance(summary, str) and summary.strip() != "":
+        entry["summary"] = summary.strip()
 
     ok, errors = validate_entry(entry)
     if not ok:

@@ -33,6 +33,7 @@ const { membersOfTeam } = require('./agent-team-cascade');
 const skillManifest = require('./skill-manifest');
 const skillTransfer = require('./skill-transfer');
 const skillDeletion = require('./skill-deletion');
+const skillImport = require('./skill-import');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -5027,10 +5028,15 @@ app.get('/api/skills/:name/export', heavyLimiter, (req, res) => {
   }
 });
 
-// Accepts a ZIP (field: "file") of a skill directory and creates a new pool
-// skill from it. The ZIP may carry the files at its root or nested under a
-// single top-level folder (as produced by /export). An optional `name` form
-// field overrides the skill name; otherwise the top-level folder name is used.
+// Accepts a ZIP (field: "file") of a skill directory and imports it into a pool
+// tier with an identity round-trip (#628, concept §3.5). The ZIP may carry the
+// files at its root or nested under a single top-level folder (as produced by
+// /export). Form fields: `tier` (global | team, default global), `teamId` (for
+// the team tier), `name` (overrides the inferred skill name), `onCollision`
+// (reject | overwrite | rename, default reject — aligned with the transfer
+// engine). The target tier is permission-gated like a transfer (Team Admin →
+// own team pool, System Admin → global). The pure validator/planner lives in
+// skill-import.js; this endpoint does the file work.
 const _skillImportUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024 },
@@ -5091,27 +5097,66 @@ app.post('/api/skills/import', heavyLimiter, _skillImportUpload.single('file'), 
       return res.status(400).json({ error: 'Archive does not contain a SKILL.md (at the root or in a single top-level folder)' });
     }
 
+    // AC2: validate the archive's SKILL.md — frontmatter must carry a non-empty
+    // name + description. (Zip-slip + the 50 MB multer cap are the other AC2
+    // guards, enforced above / by the upload middleware.)
+    let skillMd = '';
+    try { skillMd = fs.readFileSync(path.join(skillRoot, 'SKILL.md'), 'utf8'); } catch { /* handled below */ }
+    const md = skillImport.validateSkillMd(skillMd);
+    if (!md.ok) return res.status(400).json({ error: md.error });
+
+    // Validate + plan the import target (tier / name / collision + permission).
     const rawName = (typeof req.body?.name === 'string' && req.body.name.trim()) || inferredName;
-    if (!rawName || !SKILL_NAME_RE.test(rawName)) {
-      return res.status(400).json({ error: 'Could not determine a valid skill name — provide a "name" field' });
+    const plan = skillImport.planImport(
+      { tier: req.body?.tier, teamId: req.body?.teamId, onCollision: req.body?.onCollision, name: rawName },
+      { skillNameRe: SKILL_NAME_RE, teamIdRe: POOL_TEAM_ID_RE },
+    );
+    if (!plan.ok) return res.status(400).json({ error: plan.error });
+
+    // Permission gate — the transfer rules (Team Admin for a team pool, System
+    // Admin for global). Reuses the shared permit checker.
+    const scope = getScope(req);
+    const permit = skillTransfer.permitTransfer(plan.permission, {
+      systemAdmin: !!scope.all,
+      isTeamAdmin: (teamId) => canManageTeam(scope, teamId),
+    });
+    if (!permit.ok) return res.status(403).json({ error: permit.error });
+
+    if (plan.tier === 'team' && !resolveTeamExists(plan.teamId)) {
+      return res.status(400).json({ error: `Team '${plan.teamId}' not found` });
     }
 
-    // Containment check for the pool target.
-    const poolSkillsBaseDir = path.resolve(POOL_DIR, 'skills');
-    const targetDir = path.resolve(poolSkillsBaseDir, rawName);
-    const rel = path.relative(poolSkillsBaseDir, targetDir);
-    if (rel.startsWith('..') || path.isAbsolute(rel) || !rel) {
-      return res.status(400).json({ error: 'Invalid skill name' });
+    // Resolve the destination honouring the collision mode (containment-guarded
+    // via the shared resolver, so CodeQL sees the guard in-flow).
+    let destName = plan.name;
+    if (plan.onCollision === 'rename') {
+      destName = skillTransfer.resolveCollisionName(plan.name, (n) => transferSkillExistsAt(plan, n));
+    } else if (plan.onCollision === 'reject' && transferSkillExistsAt(plan, plan.name)) {
+      return res.status(409).json({ error: `Skill '${plan.name}' already exists at the destination`, exists: true });
     }
-    if (fs.existsSync(targetDir)) {
-      return res.status(409).json({ error: `Skill '${rawName}' already exists in the pool`, exists: true });
-    }
+    const dst = resolveTransferSkillDir(plan, destName);
+    if (dst.error) return res.status(400).json({ error: dst.error });
 
-    fs.cpSync(skillRoot, targetDir, { recursive: true });
-    // Honor an embedded skill.json: the foreign version chain continues, and we
-    // append an `origin: {tier: 'external'}` + `imported` marker (concept §3.5).
-    stampSkill(targetDir, { name: rawName, by: skillActor(req), action: 'imported', origin: { tier: 'external' } });
-    res.status(201).json({ name: rawName, source: 'pool' });
+    // Copy the whole skill dir (embedded skill.json + provenance.json carried
+    // forward by cpSync).
+    if (plan.onCollision === 'overwrite') fs.rmSync(dst.dir, { recursive: true, force: true });
+    fs.mkdirSync(path.dirname(dst.dir), { recursive: true });
+    fs.cpSync(skillRoot, dst.dir, { recursive: true });
+
+    // Identity round-trip (AC3/AC4): honour an embedded skill.json — the version
+    // chain continues and an `imported` event is appended (forceHistory records
+    // it even when the content is byte-identical), origin becomes external. A
+    // foreign archive with no manifest is stamped fresh at v1, action `imported`.
+    stampSkill(dst.dir, {
+      name: destName, by: skillActor(req), action: 'imported',
+      origin: { tier: 'external' }, forceHistory: true,
+    });
+    appendSkillFeedEvent({ type: 'skill-imported', ref: plan, name: destName, by: skillActor(req) });
+
+    const source = plan.tier === 'team' ? 'team' : 'pool';
+    const out = { name: destName, source };
+    if (plan.tier === 'team') out.teamId = plan.teamId;
+    res.status(201).json(out);
   } catch (err) {
     console.error(`[API] Skill import failed: ${err.message}`);
     res.status(500).json({ error: `Import failed: ${err.message}` });

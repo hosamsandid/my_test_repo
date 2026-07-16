@@ -598,12 +598,20 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
     setTab('content');
     setLineage(null);
     setLineageError(null);
+    setLineageLoading(false);
   }, [skillKey]);
 
   useEffect(() => {
-    if (tab === 'content' || lineage || lineageLoading) return;
+    // Fetch the shared lineage payload once, lazily, when a lineage-backed tab
+    // is first opened. `lineageLoading` must NOT be a dependency here: the effect
+    // sets it, so listing it would tear the effect down mid-flight and cancel the
+    // in-flight fetch before it resolves (its cleanup flips `cancelled`), leaving
+    // the panel stuck on "Loading…". Guard on the resolved states instead — once
+    // we have data or an error, switching between lineage tabs reuses it (no
+    // refetch), and the fetch never self-cancels.
+    if (tab === 'content' || lineage || lineageError) return;
     let cancelled = false;
-    setLineageLoading(true); setLineageError(null);
+    setLineageLoading(true);
     const params = withScope(new URLSearchParams({ source: skill.source }));
     fetch(`/api/skills/${encodeURIComponent(skill.name)}/lineage?${params}`)
       .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`); return d; })
@@ -611,7 +619,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
       .catch(e => { if (!cancelled) setLineageError(e.message); })
       .finally(() => { if (!cancelled) setLineageLoading(false); });
     return () => { cancelled = true; };
-  }, [tab, skillKey, lineage, lineageLoading]);
+  }, [tab, skillKey, lineage, lineageError]);
 
   // Load the file list whenever the selected skill changes.
   useEffect(() => {

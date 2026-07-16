@@ -30,6 +30,7 @@ const { weaveProcess } = require('./flow-weaver');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
 const { membersOfTeam } = require('./agent-team-cascade');
+const skillManifest = require('./skill-manifest');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -3612,6 +3613,12 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     } catch (err) {
       return res.status(500).json({ error: `Failed to write skill: ${err.message}` });
     }
+    // #625: fold-in edits an EXISTING skill — continue its chain with an
+    // `extended` marker noting how many entries were folded (concept §2.2).
+    stampSkill(target.dir, {
+      name: v.targetName, by: skillActor(req), action: 'extended',
+      note: `folded ${Array.isArray(v.entryIds) ? v.entryIds.length : 0} converged ${(Array.isArray(v.entryIds) && v.entryIds.length === 1) ? 'lesson' : 'lessons'}`,
+    });
 
     // Best-effort: orchestrator flips the candidate lifecycle, emits a distinct
     // "extension" feed event, and (team tier) re-syncs the refreshed content to
@@ -3642,6 +3649,7 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
   // pre-fill skillMd + entryIds from its SKILL.md / provenance.json, so the caller
   // only names the source and provenance is carried forward (still mandatory).
   let liftProv = null;
+  let liftSrcId = null;
   if (req.body?.from === 'agent') {
     const agentId = typeof req.body.agentId === 'string' ? req.body.agentId : '';
     if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'agentId is required for an agent→team lift' });
@@ -3653,6 +3661,7 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     if (srcRel.startsWith('..') || path.isAbsolute(srcRel)) return res.status(400).json({ error: 'invalid agent id or skill name' });
     const srcSkill = path.join(srcDir, 'SKILL.md');
     if (!fs.existsSync(srcSkill)) return res.status(404).json({ error: `agent skill '${name}' not found for '${agentId}'` });
+    liftSrcId = skillSourceIdentity(srcDir);
     liftProv = readSkillProvenance(srcDir) || {};
     if (!req.body.skillMd) { try { req.body.skillMd = fs.readFileSync(srcSkill, 'utf8'); } catch { /* validated below */ } }
     if (!Array.isArray(req.body.entryIds) || req.body.entryIds.length === 0) {
@@ -3712,6 +3721,17 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     fs.writeFileSync(path.join(dstDir, 'provenance.json'), JSON.stringify(prov, null, 2));
   } catch (err) {
     return res.status(500).json({ error: `Failed to write skill: ${err.message}` });
+  }
+  // #625: an agent→team lift records the agent origin; a KB→skill promote is
+  // authored here (no origin). SKILL.md is (re)written by content, so this is a
+  // fresh instance chain — discard any stale copied manifest.
+  if (v.from === 'agent') {
+    stampSkillCopy(dstDir, {
+      name: v.name, by: skillActor(req), action: 'lifted',
+      origin: skillOrigin({ tier: 'agent', agentId: req.body.agentId, sourceVersion: liftSrcId && liftSrcId.sourceVersion, sourceHash: liftSrcId && liftSrcId.sourceHash }),
+    });
+  } else {
+    stampSkillCopy(dstDir, { name: v.name, by: skillActor(req), action: 'promoted' });
   }
 
   // Best-effort: orchestrator flips the candidate lifecycle + emits the feed event.
@@ -4151,6 +4171,7 @@ app.post('/api/knowledge/share-to-team', apiLimiter, async (req, res) => {
     from: v.from, sourceTeamId: v.sourceTeamId, targetTeamId: v.targetTeamId, name: v.name,
     sourceProvenance: readSkillProvenance(srcDir), sharedBy,
   });
+  const shareSrcId = skillSourceIdentity(srcDir);
   try {
     let md;
     try { md = fs.readFileSync(srcSkill, 'utf8'); } catch { md = ''; }
@@ -4161,6 +4182,11 @@ app.post('/api/knowledge/share-to-team', apiLimiter, async (req, res) => {
   } catch (err) {
     return res.status(500).json({ error: `Failed to write shared skill: ${err.message}` });
   }
+  // #625: a cross-tier share is a fresh copy recording where it came from.
+  stampSkillCopy(dstDir, {
+    name: v.name, by: skillActor(req), action: 'shared',
+    origin: skillOrigin({ tier: v.from, teamId: v.from === 'team' ? v.sourceTeamId : undefined, sourceVersion: shareSrcId.sourceVersion, sourceHash: shareSrcId.sourceHash }),
+  });
   res.status(201).json({ name: v.name, tier: 'team', teamId: v.targetTeamId, from: v.from, sourceTeamId: v.sourceTeamId, provenance: prov });
 });
 
@@ -4505,6 +4531,70 @@ app.post('/api/process/drafts/import-briefings', apiLimiter, async (req, res) =>
 
 /* ─── Skills ────────────────────────────────────────────────────────── */
 
+// ── Skill identity manifest (#625, docs/skill-lifecycle-concept.md §2) ──
+// Best-effort `skill.json` stamping helpers. Stamping is never allowed to break
+// the primary skill write, so every call is wrapped and swallows errors.
+
+// "operator:<sub>" actor string for a human-driven write (concept §2.2).
+function skillActor(req) {
+  const sub = req && req.user && (req.user.sub || req.user.username);
+  return sub ? 'operator:' + sub : 'operator';
+}
+
+// Stamp (or update) a skill dir's manifest. Continues the dir's existing chain.
+function stampSkill(dir, opts) {
+  try { return skillManifest.stampSkillDir(dir, opts); } catch { return null; }
+}
+
+// Capture a source skill's identity ({sourceVersion, sourceHash}) for recording
+// an `origin` on a copy. Prefers the source manifest's stamped values; falls
+// back to a freshly computed hash when the source is not yet stamped.
+function skillSourceIdentity(srcDir) {
+  let man = null;
+  try { man = skillManifest.readManifest(srcDir); } catch { /* none */ }
+  let sourceHash = man && man.contentHash;
+  if (!sourceHash) { try { sourceHash = skillManifest.hashSkillDir(srcDir); } catch { sourceHash = undefined; } }
+  return { sourceVersion: man && man.version, sourceHash };
+}
+
+// Build an `origin` object, dropping absent (undefined/null) fields so the
+// serialized manifest stays clean.
+function skillOrigin(fields) {
+  const out = {};
+  for (const k of Object.keys(fields)) {
+    if (fields[k] !== undefined && fields[k] !== null) out[k] = fields[k];
+  }
+  return out;
+}
+
+// The additive identity fields (#625, AC6) surfaced on Skills API responses.
+function skillManifestSummary(dir) {
+  try {
+    const man = skillManifest.readManifest(dir);
+    if (!man) return {};
+    return { version: man.version, contentHash: man.contentHash, updatedAt: man.updatedAt };
+  } catch { return {}; }
+}
+
+// Agent-tier dirs are stamped lazily on first API read (agents own those dirs,
+// so the backfill deliberately skips them — concept §2.2).
+function lazyStampAgentSkill(dir, agentId) {
+  try {
+    if (!skillManifest.readManifest(dir)) {
+      skillManifest.stampSkillDir(dir, { by: 'agent:' + agentId, action: 'created' });
+    }
+  } catch { /* best effort */ }
+}
+
+// Stamp a fresh copy: the copied source `skill.json` (dragged along by cpSync)
+// is discarded so the destination starts its own instance chain at v1 with the
+// given action + origin (concept §3.1 — every copy stamps origin + a history
+// entry). Does not touch content, so the content hash is unaffected.
+function stampSkillCopy(dstDir, opts) {
+  try { fs.rmSync(path.join(dstDir, skillManifest.MANIFEST_FILENAME), { force: true }); } catch { /* none */ }
+  return stampSkill(dstDir, opts);
+}
+
 // ── Two-tier skill pool (#306) ──────────────────────────────────────────
 // Global pool: /pool/skills (System-Admin managed, visible to all).
 // Team pool:   /workspace/teams/<teamId>/skills (Team-Admin managed, scoped
@@ -4611,7 +4701,7 @@ app.get('/api/skills', (req, res) => {
       const skillMd = path.join(poolSkillsDir, name, 'SKILL.md');
       if (fs.existsSync(skillMd) && !seen.has(name)) {
         seen.add(name);
-        skills.push({ name, source: 'pool', path: skillMd });
+        skills.push({ name, source: 'pool', path: skillMd, ...skillManifestSummary(path.dirname(skillMd)) });
       }
     });
   } catch { /* no pool skills dir */ }
@@ -4620,7 +4710,9 @@ app.get('/api/skills', (req, res) => {
   // explicit `?teamId=<id>` narrows further; a team the caller can't see is
   // dropped by visibleTeam.
   const filterTeam = typeof req.query.teamId === 'string' ? req.query.teamId : null;
-  skills.push(...listTeamSkills(filterTeam).filter(s => visibleTeam(scope, s.teamId)));
+  skills.push(...listTeamSkills(filterTeam)
+    .filter(s => visibleTeam(scope, s.teamId))
+    .map(s => ({ ...s, ...skillManifestSummary(path.dirname(s.path)) })));
 
   // Agent skills — visible only when the owning agent is visible (#302), so an
   // agent's skills don't leak its existence across teams.
@@ -4635,7 +4727,9 @@ app.get('/api/skills', (req, res) => {
           const key = `${agentId}/${name}`;
           if (!seen.has(key)) {
             seen.add(key);
-            skills.push({ name, source: 'agent', agentId, path: skillMd });
+            const dir = path.join(agentSkillsDir, name);
+            lazyStampAgentSkill(dir, agentId);
+            skills.push({ name, source: 'agent', agentId, path: skillMd, ...skillManifestSummary(dir) });
           }
         }
       });
@@ -4665,7 +4759,9 @@ app.get('/api/skills/:name/content', (req, res) => {
 
   if (!fs.existsSync(skillPath)) return res.status(404).json({ error: 'Skill not found' });
   const content = fs.readFileSync(skillPath, 'utf8');
-  res.json({ content });
+  const dir = path.dirname(skillPath);
+  if (source === 'agent') lazyStampAgentSkill(dir, path.basename(agentId));
+  res.json({ content, ...skillManifestSummary(dir) });
 });
 
 /* ─── Skill directory contents (multi-file browser/editor) ───────────── */
@@ -4802,6 +4898,7 @@ app.put('/api/skills/:name/file', (req, res) => {
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
+  stampSkill(root, { name, by: skillActor(req), action: 'edited' });
   res.json({ path: String(file), source: 'pool' });
 });
 
@@ -4920,6 +5017,9 @@ app.post('/api/skills/import', heavyLimiter, _skillImportUpload.single('file'), 
     }
 
     fs.cpSync(skillRoot, targetDir, { recursive: true });
+    // Honor an embedded skill.json: the foreign version chain continues, and we
+    // append an `origin: {tier: 'external'}` + `imported` marker (concept §3.5).
+    stampSkill(targetDir, { name: rawName, by: skillActor(req), action: 'imported', origin: { tier: 'external' } });
     res.status(201).json({ name: rawName, source: 'pool' });
   } catch (err) {
     console.error(`[API] Skill import failed: ${err.message}`);
@@ -4945,6 +5045,7 @@ app.post('/api/skills', (req, res) => {
     }
     fs.mkdirSync(skillDir, { recursive: true });
     fs.writeFileSync(skillPath, typeof content === 'string' ? content : '', 'utf8');
+    stampSkill(skillDir, { name, by: skillActor(req), action: 'created' });
     return res.status(201).json({ name, source: 'team', teamId });
   }
   const skillDir = path.join(POOL_DIR, 'skills', path.basename(name));
@@ -4954,6 +5055,7 @@ app.post('/api/skills', (req, res) => {
   }
   fs.mkdirSync(skillDir, { recursive: true });
   fs.writeFileSync(skillPath, typeof content === 'string' ? content : '', 'utf8');
+  stampSkill(skillDir, { name, by: skillActor(req), action: 'created' });
   res.status(201).json({ name, source: 'pool' });
 });
 
@@ -4993,12 +5095,17 @@ app.post('/api/skills/promote', (req, res) => {
     return res.status(409).json({ error: `Skill '${name}' already exists in the pool`, exists: true });
   }
 
+  const srcId = skillSourceIdentity(srcDir);
   try {
     if (overwrite) fs.rmSync(dstDir, { recursive: true, force: true });
     fs.cpSync(srcDir, dstDir, { recursive: true });
   } catch (err) {
     return res.status(500).json({ error: `Failed to promote skill: ${err.message}` });
   }
+  stampSkillCopy(dstDir, {
+    name, by: skillActor(req), action: 'promoted',
+    origin: skillOrigin({ tier: 'agent', agentId, sourceVersion: srcId.sourceVersion, sourceHash: srcId.sourceHash }),
+  });
   res.status(201).json({ name, source: 'pool', overwritten: !!overwrite });
 });
 
@@ -5061,7 +5168,11 @@ app.post('/api/skills/install', (req, res) => {
   try {
     const manifestPath = path.join(agentDirPath, '.aee', 'seeded-skills.json');
     const manifest = readJsonFile(manifestPath, {}) || {};
-    manifest[name] = { tier: 'global', seededAt: new Date().toISOString() };
+    const srcId = skillSourceIdentity(srcDir);
+    manifest[name] = {
+      tier: 'global', seededAt: new Date().toISOString(),
+      contentHash: srcId.sourceHash, sourceVersion: srcId.sourceVersion,
+    };
     fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
     writeJsonAtomic(manifestPath, manifest);
   } catch { /* best effort */ }
@@ -5086,11 +5197,14 @@ app.put('/api/skills/:name', (req, res) => {
     const teamSkillPath = path.join(dir, 'SKILL.md');
     if (!fs.existsSync(teamSkillPath)) return res.status(404).json({ error: 'Skill not found' });
     fs.writeFileSync(teamSkillPath, content, 'utf8');
+    stampSkill(dir, { name, by: skillActor(req), action: 'edited' });
     return res.json({ name, source: 'team', teamId: req.query.teamId });
   }
-  const skillPath = path.join(POOL_DIR, 'skills', path.basename(name), 'SKILL.md');
+  const skillDir = path.join(POOL_DIR, 'skills', path.basename(name));
+  const skillPath = path.join(skillDir, 'SKILL.md');
   if (!fs.existsSync(skillPath)) return res.status(404).json({ error: 'Skill not found' });
   fs.writeFileSync(skillPath, content, 'utf8');
+  stampSkill(skillDir, { name, by: skillActor(req), action: 'edited' });
   res.json({ name, source: 'pool' });
 });
 
@@ -5159,12 +5273,17 @@ app.post('/api/skills/promote-to-global', (req, res) => {
   if (fs.existsSync(dstDir) && !overwrite) {
     return res.status(409).json({ error: `Skill '${name}' already exists in the global pool`, exists: true });
   }
+  const srcId = skillSourceIdentity(srcDir);
   try {
     if (overwrite) fs.rmSync(dstDir, { recursive: true, force: true });
     fs.cpSync(srcDir, dstDir, { recursive: true });
   } catch (err) {
     return res.status(500).json({ error: `Failed to promote skill: ${err.message}` });
   }
+  stampSkillCopy(dstDir, {
+    name, by: skillActor(req), action: 'promoted',
+    origin: skillOrigin({ tier: 'team', teamId, sourceVersion: srcId.sourceVersion, sourceHash: srcId.sourceHash }),
+  });
   res.status(201).json({ name, source: 'pool', fromTeam: teamId, overwritten: !!overwrite });
 });
 
@@ -10620,4 +10739,44 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(STATIC_DIR, 'index.html'));
 });
 
-app.listen(4000, '0.0.0.0', () => console.log('[Admin] Listening on :4000'));
+// One-time idempotent backfill (concept §2, AC5): stamp every existing global
+// and team skill that has no skill.json yet with version:1, action:"created".
+// Agent-tier skills are stamped lazily on first API read. Re-runs are no-ops —
+// a skill that already carries a manifest is skipped. Best-effort per skill so
+// it can never block or break startup. This MUST live in the admin-console: it
+// is the only side with RW access to the global pool (the orchestrator mounts
+// /template-workspace read-only).
+function backfillSkillManifests() {
+  let stamped = 0;
+  const stampDir = (dir) => {
+    try {
+      if (skillManifest.readManifest(dir)) return; // already stamped
+      if (!fs.existsSync(path.join(dir, 'SKILL.md'))) return;
+      skillManifest.stampSkillDir(dir, { by: 'operator', action: 'created' });
+      stamped++;
+    } catch { /* best effort per skill */ }
+  };
+  try {
+    const globalRoot = path.join(POOL_DIR, 'skills');
+    for (const name of fs.readdirSync(globalRoot)) {
+      if (SKILL_NAME_RE.test(name)) stampDir(path.join(globalRoot, name));
+    }
+  } catch { /* no global pool */ }
+  try {
+    const teamsRoot = path.join(WORKSPACE, 'teams');
+    for (const teamId of fs.readdirSync(teamsRoot)) {
+      if (!POOL_TEAM_ID_RE.test(teamId)) continue;
+      let names;
+      try { names = fs.readdirSync(path.join(teamsRoot, teamId, 'skills')); } catch { continue; }
+      for (const name of names) {
+        if (SKILL_NAME_RE.test(name)) stampDir(path.join(teamsRoot, teamId, 'skills', name));
+      }
+    }
+  } catch { /* no team pools */ }
+  if (stamped > 0) console.log(`[Admin] Skill manifest backfill stamped ${stamped} skill(s)`);
+}
+
+app.listen(4000, '0.0.0.0', () => {
+  console.log('[Admin] Listening on :4000');
+  try { backfillSkillManifests(); } catch (err) { console.error(`[Admin] Skill manifest backfill failed: ${err.message}`); }
+});

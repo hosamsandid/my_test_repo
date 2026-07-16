@@ -36,6 +36,18 @@ for (const c of FIXTURE.driftCases) {
   });
 }
 
+for (const c of FIXTURE.copyDriftCases) {
+  test(`golden copy-drift: ${c.name}`, () => {
+    assert.equal(m.classifyCopyDrift(c.input), c.expected);
+  });
+}
+
+for (const c of FIXTURE.resyncableCases) {
+  test(`golden resyncable: ${c.state} → ${c.expected}`, () => {
+    assert.equal(m.isResyncable(c.state), c.expected);
+  });
+}
+
 test('two-sided guard: orchestrator copy is byte-identical to admin-console canonical', () => {
   const here = fs.readFileSync(path.join(__dirname, 'skill-manifest.js'));
   const there = fs.readFileSync(path.join(__dirname, '..', 'admin-console', 'api', 'skill-manifest.js'));

@@ -58,6 +58,13 @@ const DEFAULT_RELATED_THRESHOLD = 0.3;
 const PROMOTION_TRANSITIONS = ['team>team', 'team>global', 'agent>team'];
 const GATE_MODES = ['auto', 'review'];
 const DEFAULT_PROMOTION_GATES = { 'team>team': 'auto', 'team>global': 'review', 'agent>team': 'review' };
+// Auto-resync gate (#629, concept §3.6): the per-team policy for what happens to
+// a team's dependent skill copies when a pool skill they descend from is edited.
+// `review` (default) = surface a drift badge and wait for an explicit resync;
+// `auto` = fan the pool edit out to member workspaces immediately (best-effort,
+// event-logged). Conservative default keeps existing teams unchanged — nothing
+// enters an agent's context without a human unless the team opts into `auto`.
+const DEFAULT_SKILL_RESYNC_MODE = 'review';
 // #449 burst-cap parity: at most this many clusters auto-promote in one collector
 // pass; the overflow is deferred to review cards (lossless), so flipping the dial
 // to level 3 over a large backlog can't emit a flood of skills at once.
@@ -450,6 +457,19 @@ function resolvePromotionGates(env) {
   return out;
 }
 
+// Resolve the per-team skill auto-resync gate (#629 AC5), read off the
+// environment the team shares — a sibling of resolvePromotionGates and, like it,
+// fail-safe: a present-but-invalid mode falls back to the conservative default
+// (`review`). `review` (the default) means editing a source skill only FLIPS the
+// dependent copies to `outdated` and waits for a human to resync; `auto` lets the
+// edit fan out to `outdated` copies in the same pass. Only the `outdated` state
+// is ever touched (see skill-manifest.isResyncable) — `diverged`/`conflict`
+// copies are never auto-overwritten regardless of this mode.
+function resolveSkillResyncMode(env) {
+  const raw = env && typeof env.skillResyncMode === 'string' ? env.skillResyncMode : null;
+  return GATE_MODES.includes(raw) ? raw : DEFAULT_SKILL_RESYNC_MODE;
+}
+
 // Curation config (Phase 4), read off the environment the team shares — so it is
 // per-team (each team has its own shared env), exactly like maxAutoPromotionsPerPass.
 // Clamped with safe defaults so any legacy env (no `knowledgeCuration`) behaves as
@@ -503,7 +523,7 @@ function buildHarvestHint(autonomyLevel) {
 // onto one set of values. They now live in a per-team overrides document; this
 // list is the single authority for which keys are team-owned (used by both the
 // orchestrator writers and the admin-console read path).
-const TEAM_KNOWLEDGE_KEYS = ['knowledgeAutonomy', 'knowledgeReview', 'knowledgePromotionGates', 'knowledgeStore'];
+const TEAM_KNOWLEDGE_KEYS = ['knowledgeAutonomy', 'knowledgeReview', 'knowledgePromotionGates', 'knowledgeStore', 'skillResyncMode'];
 
 // Overlay a team's knowledge-config overrides onto its environment, producing an
 // env-shaped object the existing pure readers (knowledgeAutonomyLevel,
@@ -547,6 +567,7 @@ module.exports = {
   knowledgeReviewEnabled,
   knowledgeConvergenceConfig,
   resolvePromotionGates,
+  resolveSkillResyncMode,
   knowledgeCurationConfig,
   buildHarvestHint,
   TEAM_KNOWLEDGE_KEYS,
@@ -557,4 +578,5 @@ module.exports = {
   PROMOTION_TRANSITIONS,
   GATE_MODES,
   DEFAULT_PROMOTION_GATES,
+  DEFAULT_SKILL_RESYNC_MODE,
 };

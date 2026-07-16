@@ -757,5 +757,74 @@
       },
       "expected": null
     }
+  ],
+  "copyDriftCases": [
+    {
+      "name": "copy in-sync",
+      "input": {
+        "copyHash": "A",
+        "sourceHash": "A",
+        "sourceCurrentHash": "A"
+      },
+      "expected": "in-sync"
+    },
+    {
+      "name": "copy outdated",
+      "input": {
+        "copyHash": "A",
+        "sourceHash": "A",
+        "sourceCurrentHash": "B"
+      },
+      "expected": "outdated"
+    },
+    {
+      "name": "copy diverged",
+      "input": {
+        "copyHash": "C",
+        "sourceHash": "A",
+        "sourceCurrentHash": "A"
+      },
+      "expected": "diverged"
+    },
+    {
+      "name": "copy conflict",
+      "input": {
+        "copyHash": "C",
+        "sourceHash": "A",
+        "sourceCurrentHash": "B"
+      },
+      "expected": "conflict"
+    },
+    {
+      "name": "copy orphaned",
+      "input": {
+        "copyHash": "A",
+        "sourceHash": "A",
+        "sourceCurrentHash": null
+      },
+      "expected": "orphaned"
+    },
+    {
+      "name": "pre-manifest copy (no sourceHash recorded) → unknown, not null",
+      "input": {
+        "copyHash": "A",
+        "sourceHash": null,
+        "sourceCurrentHash": "A"
+      },
+      "expected": "unknown"
+    },
+    {
+      "name": "no-arg copy → unknown",
+      "input": {},
+      "expected": "unknown"
+    }
+  ],
+  "resyncableCases": [
+    { "state": "outdated", "expected": true },
+    { "state": "in-sync", "expected": false },
+    { "state": "diverged", "expected": false },
+    { "state": "conflict", "expected": false },
+    { "state": "orphaned", "expected": false },
+    { "state": "unknown", "expected": false }
   ]
 }

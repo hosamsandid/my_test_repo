@@ -12,6 +12,7 @@ const {
   buildShareProvenance,
   promotionSuggestionView,
   resolvePromotionGates,
+  resolveSkillResyncMode,
   validateExtension,
   buildSkillExtensionRequest,
   buildHeuristicSkillExtension,
@@ -141,6 +142,15 @@ test('resolvePromotionGates: defaults + team>global forced review + fail-safe cl
   assert.equal(g['team>team'], 'review'); // invalid → review
   assert.equal(g['team>global'], 'review'); // forced
   assert.equal(g['agent>team'], 'auto');
+});
+
+test('resolveSkillResyncMode: default review + valid pass-through + fail-safe clamp (#629 AC5)', () => {
+  assert.equal(resolveSkillResyncMode(null), 'review');
+  assert.equal(resolveSkillResyncMode({}), 'review');
+  assert.equal(resolveSkillResyncMode({ skillResyncMode: 'auto' }), 'auto');
+  assert.equal(resolveSkillResyncMode({ skillResyncMode: 'review' }), 'review');
+  assert.equal(resolveSkillResyncMode({ skillResyncMode: 'nope' }), 'review');
+  assert.equal(resolveSkillResyncMode({ skillResyncMode: 42 }), 'review');
 });
 
 // ── validateShareToTeam / buildShareProvenance (directed cross-team sharing) ────
@@ -337,10 +347,10 @@ test('matchExistingSkill: entry-id lineage beats name overlap; null when no sign
 // never cross-require). These assertions mirror knowledge-store.test.js so the
 // two copies can't silently drift — the read path (api.js) consumes THIS one.
 
-test('TEAM_KNOWLEDGE_KEYS covers exactly the four per-team groups', () => {
+test('TEAM_KNOWLEDGE_KEYS covers exactly the per-team groups', () => {
   assert.deepEqual(
     [...TEAM_KNOWLEDGE_KEYS].sort(),
-    ['knowledgeAutonomy', 'knowledgePromotionGates', 'knowledgeReview', 'knowledgeStore'],
+    ['knowledgeAutonomy', 'knowledgePromotionGates', 'knowledgeReview', 'knowledgeStore', 'skillResyncMode'],
   );
 });
 

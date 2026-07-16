@@ -1282,7 +1282,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, dataFlow, parentMemberId, stage, github, channels } = req.body;
+  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, dataFlow, parentMemberId, stage, stages, github, channels } = req.body;
 
   // Reject a newly-introduced unknown skill name on a grant save (#633) — a
   // typo can no longer become a silent dead grant. Names already present in the
@@ -1432,6 +1432,17 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   if (stage !== undefined) {
     if (typeof stage === 'string' && stage.trim()) fresh.stage = stage.trim();
     else delete fresh.stage;
+  }
+
+  // Ordered stage list, team-agent only (#674). Mirrors the draft bundle's
+  // `stages[]`; live stage-management writes it via liveOps. Display-only —
+  // no runtime side-effect. Trimmed + de-duplicated, order preserved; an empty
+  // array clears the list (the "no stages defined" state). Ignored for
+  // non-team agents (per-agent bands stay on the singular `stage` above).
+  if (stages !== undefined && fresh.role === 'team') {
+    fresh.stages = Array.isArray(stages)
+      ? [...new Set(stages.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim()))]
+      : [];
   }
 
   // ── GitHub artifact ports (#380) ──────────────────────────────────────────

@@ -176,6 +176,16 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   );
   const ops = isDraft ? draftOps : liveOps;
 
+  // Live stage-management ops (#674): bind the team id (= scope) so StageManager
+  // keeps its name-only contract (addStage(name)/renameStage(old,new)/…) — the
+  // same shape draftOps exposes. Live scope only; unused for drafts/imports.
+  const liveStageOps = useMemo(() => ({
+    addStage: (name) => liveOps.addStage(scope, name),
+    renameStage: (oldName, newName) => liveOps.renameStage(scope, oldName, newName),
+    removeStage: (name) => liveOps.removeStage(scope, name),
+    reorderStages: (names) => liveOps.reorderStages(scope, names),
+  }), [scope]);
+
   const displayGraph = imported ? imported.graph : isDraft ? draftGraph : graph;
 
   const [selectedId, setSelectedId] = useState(null);
@@ -351,6 +361,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         {isTeamScope && !imported && (
           <>
             <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus}>Add agent</ToolbarButton>
+            <ToolbarButton onClick={() => setStagesOpen(true)} icon={Layers}>Stages</ToolbarButton>
             <ToolbarButton onClick={editAsDraft} icon={Boxes}>Edit as draft</ToolbarButton>
           </>
         )}
@@ -427,6 +438,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           key={selectedNode.id}
           node={selectedNode}
           nodes={displayGraph?.nodes || []}
+          stages={displayGraph?.stages || []}
+          teamId={isTeamScope && !imported ? scope : undefined}
           level={imported ? 'template' : displayGraph?.level}
           onClose={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
           onChanged={() => refetch()}
@@ -484,16 +497,21 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         />
       )}
 
-      {stagesOpen && isDraft && (
+      {stagesOpen && (isDraft || (isTeamScope && !imported)) && (
         <StageManager
-          stages={draftBundle?.stages || []}
-          counts={(draftBundle?.roles || []).reduce((m, r) => {
-            if (r.stage) m[r.stage] = (m[r.stage] || 0) + 1;
-            return m;
-          }, {})}
-          ops={draftOps}
+          stages={isDraft ? (draftBundle?.stages || []) : (displayGraph?.stages || [])}
+          counts={isDraft
+            ? (draftBundle?.roles || []).reduce((m, r) => {
+                if (r.stage) m[r.stage] = (m[r.stage] || 0) + 1;
+                return m;
+              }, {})
+            : (displayGraph?.nodes || []).reduce((m, n) => {
+                if (n.stage) m[n.stage] = (m[n.stage] || 0) + 1;
+                return m;
+              }, {})}
+          ops={isDraft ? draftOps : liveStageOps}
           onClose={() => setStagesOpen(false)}
-          onChanged={() => {}}
+          onChanged={() => { if (!isDraft) refetch(); }}
         />
       )}
 

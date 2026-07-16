@@ -8,6 +8,9 @@
 
 import { apiCall } from '../../hooks/useApi';
 import { wouldCreateCycle } from './hierarchy-utils';
+import {
+  stagesAfterAdd, stagesAfterRename, stagesAfterRemove, stagesAfterReorder, membersToCascade,
+} from './stage-list-ops';
 
 // Read the current data-flow port block off a live agent's config as a plain
 // {inputs, outputs, dependsOn} shape (read-modify-write helper). The PUT replaces
@@ -52,6 +55,23 @@ async function liveDataFlow(roleId) {
     outputs: Array.isArray(df.outputs) ? df.outputs.slice() : [],
     dependsOn: Array.isArray(df.dependsOn) ? df.dependsOn.slice() : [],
   };
+}
+
+// Cascade a live stage rename/remove to every member whose per-agent `stage`
+// equals `oldName` (#674, AC4). `newStage=''` clears it (remove → inherit/none).
+// Best-effort + sequential (AC8): a failed member write is swallowed so the
+// rest still apply; a stranded reference renders as inherit/none in the picker.
+async function cascadeMemberStage(teamId, oldName, newStage) {
+  if (!oldName) return;
+  let members = [];
+  try {
+    const all = await apiCall('GET', '/api/agents');
+    members = membersToCascade(all, teamId, oldName);
+  } catch { return; /* can't enumerate — leave refs to self-heal in the picker */ }
+  for (const m of members) {
+    try { await apiCall('PUT', `/api/agents/${m.id}`, { stage: newStage || '' }); }
+    catch { /* best-effort: dangling ref self-heals to inherit/none */ }
+  }
 }
 
 // Live mode — every op is an HTTP call against the running agent. Its surface is
@@ -122,6 +142,41 @@ export const liveOps = {
     apiCall('PUT', `/api/agents/${roleId}`, { parentMemberId: parentId || null }),
   // Process stage band — empty clears (inherits from parent).
   setStage: (roleId, stage) => apiCall('PUT', `/api/agents/${roleId}`, { stage: stage || '' }),
+
+  // ── stages (live, #674): the ordered list drives the layered-DAG layout. It
+  // lives on the TEAM agent config (role 'team'); members carry a per-agent
+  // `stage`. These ops take the teamId as the first arg (bound by ProcessCanvas
+  // into a name-only wrapper for StageManager, so its contract is unchanged)
+  // and mirror makeDraftOps' semantics. rename/remove cascade to members via a
+  // BEST-EFFORT sequential loop (AC8): a per-member write failure is swallowed
+  // so the remaining members still update — a stranded `stage` reference simply
+  // renders as inherit/none in the dropdown (self-healing, display-only, no
+  // respawn — see AC6/AC8). Reorder never touches a member's stage (AC edge).
+  listStages: async (teamId) => {
+    const a = await apiCall('GET', `/api/agents/${teamId}`);
+    return Array.isArray(a?.stages) ? a.stages.slice() : [];
+  },
+  addStage: async (teamId, name) => {
+    const cur = await liveOps.listStages(teamId);
+    const next = stagesAfterAdd(cur, name);
+    if (next.length === cur.length) return; // no-op (blank or already present)
+    await apiCall('PUT', `/api/agents/${teamId}`, { stages: next });
+  },
+  renameStage: async (teamId, oldName, newName) => {
+    const cur = await liveOps.listStages(teamId);
+    const next = stagesAfterRename(cur, oldName, newName);
+    await apiCall('PUT', `/api/agents/${teamId}`, { stages: next });
+    await cascadeMemberStage(teamId, oldName, String(newName || '').trim());
+  },
+  removeStage: async (teamId, name) => {
+    const cur = await liveOps.listStages(teamId);
+    await apiCall('PUT', `/api/agents/${teamId}`, { stages: stagesAfterRemove(cur, name) });
+    await cascadeMemberStage(teamId, name, '');
+  },
+  reorderStages: async (teamId, names) => {
+    const cur = await liveOps.listStages(teamId);
+    await apiCall('PUT', `/api/agents/${teamId}`, { stages: stagesAfterReorder(cur, names) });
+  },
 
   // ── GitHub artifact ports (#380): produce flags + consumed channels ──
   // Produce flags drive the node badge/ports + the producer prompt block.

@@ -3,7 +3,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   Brain, RefreshCw, X, ExternalLink, GitBranch, Sparkles, Check, Wand2,
   Archive, Share2, ShieldCheck, Ban, MessageSquare, Search, ArrowRight, Users,
-  HelpCircle, BookOpen, Combine,
+  HelpCircle, BookOpen, Combine, Trash2,
 } from 'lucide-react';
 import InfoTip from '../components/InfoTip';
 import SidePanel from '../components/SidePanel';
@@ -1335,6 +1335,43 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
       .finally(() => setBusy(null));
   };
 
+  // Guarded team-skill deletion (#627, AC4) — the Knowledge page is the
+  // Team-Admin-accessible surface, so a Team Admin can delete their own team's
+  // skill here without the System-Admin Skills Registry. The backend guards the
+  // DELETE (409 + blocking constructs) and gates permission per tier; global
+  // deletion stays on the Skills Registry. An in-use skill 409s, so we offer the
+  // one-click cascade (deactivate the grants, then delete) the same way the
+  // Registry does. A restorable snapshot is archived either way.
+  const runDelete = (cascade) => {
+    setBusy('delete');
+    const params = new URLSearchParams({ source: 'team', teamId });
+    if (cascade) params.set('cascade', 'true');
+    fetch(`/api/skills/${encodeURIComponent(skill.label)}?${params}`, { method: 'DELETE' })
+      .then(async r => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          if (r.status === 409 && Array.isArray(d.agents) && !cascade) {
+            if (window.confirm(`"${skill.label}" is still active for: ${d.agents.join(', ')}.\nDeactivate those grants and delete anyway? A restorable snapshot is archived first.`)) {
+              runDelete(true); // keeps busy = 'delete' through the cascade
+            } else {
+              setBusy(null);
+            }
+            return;
+          }
+          throw new Error(d.error || `HTTP ${r.status}`);
+        }
+        feedback('ok', 'deleted');
+        setBusy(null);
+        onReload && onReload();
+      })
+      .catch(e => { feedback('error', `Delete failed: ${e.message}`); setBusy(null); });
+  };
+
+  const deleteSkill = () => {
+    if (!window.confirm(`Delete team skill "${skill.label}"? A restorable snapshot is archived, then the skill is removed from the team pool.`)) return;
+    runDelete(false);
+  };
+
   const members = act ? (act.members || []) : [];
   const activeCount = members.filter(m => m.state === 'active').length;
   const badge = !act ? null : !act.active
@@ -1387,6 +1424,14 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
           style={{ display: 'inline-flex', flexShrink: 0, cursor: 'pointer', color: 'var(--eb-text-muted)' }}>
           <Share2 size={13} />
         </span>
+        {skill.tier === 'team' && (
+          <span
+            title="Delete this team skill — archives a restorable snapshot, then removes it from the team pool (Team Admin)"
+            onClick={() => { if (!busy) deleteSkill(); }}
+            style={{ display: 'inline-flex', flexShrink: 0, cursor: busy ? 'default' : 'pointer', color: 'var(--eb-status-error, #d33)', opacity: busy ? 0.5 : 1 }}>
+            <Trash2 size={13} />
+          </span>
+        )}
       </div>
 
       {act && !act.active && (

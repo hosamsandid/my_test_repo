@@ -4020,6 +4020,43 @@ function teamKnowledgeEnv(teamId) {
   return knowledgeSuggestions.mergeTeamKnowledgeConfig(teamEnvironment(teamId), loadTeamKnowledgeOverrides(teamId));
 }
 
+// Auto-resync gate (#629 AC5): after a source skill is EDITED, fan the drift-
+// gated resync out to every affected team whose resync mode is `auto`. The
+// default `review` changes nothing (dependent copies simply show `outdated`
+// until an operator resyncs them). Best-effort + fire-and-forget: an edit must
+// never fail or block because auto-resync could not fan out. The orchestrator's
+// resyncSkill is itself drift-gated (only `outdated` copies are overwritten;
+// diverged/conflict/orphaned/unknown are refused), so this is safe to fire even
+// for a team that also carries its own team-tier copy of the name.
+function autoResyncOnEdit(skillName, { tier, teamId } = {}) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  let targetTeams = [];
+  if (tier === 'team') {
+    if (teamId) targetTeams = [teamId];
+  } else {
+    // Global edit: every team agent that grants the skill (members resolve it
+    // team-first, so a team with its own copy is a no-op resync — see above).
+    let ids;
+    try { ids = fs.readdirSync(AGENTS_DIR); } catch { ids = []; }
+    for (const id of ids) {
+      const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+      if (cfg && cfg.role === 'team' && Array.isArray(cfg.skills) && cfg.skills.includes(skillName)) {
+        targetTeams.push(cfg.id || id);
+      }
+    }
+  }
+  for (const tid of targetTeams) {
+    let mode;
+    try { mode = knowledgeSuggestions.resolveSkillResyncMode(teamKnowledgeEnv(tid)); } catch { mode = null; }
+    if (mode !== 'auto') continue; // default `review`: leave copies outdated
+    fetch(`${orchestratorUrl}/internal/skills/resync`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skillName, teamId: tid }),
+    }).catch(() => { /* best-effort */ });
+  }
+}
+
 // Team autonomy level (0..3, default 1). Local read — api.js does not import the
 // orchestrator's knowledge-store; the clamp mirrors knowledgeAutonomyLevel.
 // NOTE the `env ? … : undefined` shape: `Number(null)` is 0, so the previous
@@ -5097,6 +5134,7 @@ app.put('/api/skills/:name/file', (req, res) => {
     return res.status(500).json({ error: err.message });
   }
   stampSkill(root, { name, by: skillActor(req), action: 'edited' });
+  autoResyncOnEdit(name, source === 'team' ? { tier: 'team', teamId } : { tier: 'global' });
   res.json({ path: String(file), source: 'pool' });
 });
 
@@ -5443,6 +5481,7 @@ app.put('/api/skills/:name', (req, res) => {
     if (!fs.existsSync(teamSkillPath)) return res.status(404).json({ error: 'Skill not found' });
     fs.writeFileSync(teamSkillPath, content, 'utf8');
     stampSkill(dir, { name, by: skillActor(req), action: 'edited' });
+    autoResyncOnEdit(name, { tier: 'team', teamId: req.query.teamId });
     return res.json({ name, source: 'team', teamId: req.query.teamId });
   }
   const skillDir = path.join(POOL_DIR, 'skills', path.basename(name));
@@ -5450,6 +5489,7 @@ app.put('/api/skills/:name', (req, res) => {
   if (!fs.existsSync(skillPath)) return res.status(404).json({ error: 'Skill not found' });
   fs.writeFileSync(skillPath, content, 'utf8');
   stampSkill(skillDir, { name, by: skillActor(req), action: 'edited' });
+  autoResyncOnEdit(name, { tier: 'global' });
   res.json({ name, source: 'pool' });
 });
 

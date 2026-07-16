@@ -41,6 +41,7 @@ const { resolveCloneTarget } = require("./clone-target");
 const { assembleClaudeMd, buildMemoryHint } = require("./prompt-assembly");
 const { readMaintenanceState } = require("./maintenance-state-reader");
 const { effectiveSkills, migrateSkillGrant, planSkillSync } = require("./skill-grants");
+const skillManifest = require("./skill-manifest");
 
 // ============================================================
 // Config
@@ -1006,6 +1007,22 @@ function skillTierForSource(src) {
   return src.includes(`${path.sep}teams${path.sep}`) ? "team" : "agent";
 }
 
+// Source skill identity for the seeded-skills manifest (#625, AC4): the source
+// skill's stamped {version, contentHash} at seed time — the anchor for later
+// drift classification (concept §2.4). Falls back to a freshly computed hash
+// when the source is not yet stamped. Best-effort; returns {} on any error.
+function skillSourceIdentity(srcDir) {
+  try {
+    const man = skillManifest.readManifest(srcDir);
+    let contentHash = man && man.contentHash;
+    if (!contentHash) { try { contentHash = skillManifest.hashSkillDir(srcDir); } catch { contentHash = undefined; } }
+    const out = {};
+    if (contentHash !== undefined) out.contentHash = contentHash;
+    if (man && man.version !== undefined) out.sourceVersion = man.version;
+    return out;
+  } catch { return {}; }
+}
+
 function seedAgentWorkspace(id, env, opts = {}) {
   const dest = agentDir(id);
   fs.mkdirSync(dest, { recursive: true });
@@ -1072,7 +1089,7 @@ function seedAgentWorkspace(id, env, opts = {}) {
           continue;
         }
       }
-      seededManifest[skillName] = { tier: skillTierForSource(src), seededAt };
+      seededManifest[skillName] = { tier: skillTierForSource(src), seededAt, ...skillSourceIdentity(src) };
     }
   }
   // Always write the manifest (even empty): its absence means "pre-manifest
@@ -1504,7 +1521,7 @@ function seedAgentWorkspaceForInstance(id, env, blueprintId, skills = []) {
       if (!fs.existsSync(skillSrc)) { warnings.push(`skill not found: ${skillName}`); continue; }
       try { fs.cpSync(skillSrc, skillDst, { recursive: true }); }
       catch (err) { warnings.push(`skill ${skillName}: ${err.message}`); continue; }
-      seededManifest[skillName] = { tier: "global", seededAt };
+      seededManifest[skillName] = { tier: "global", seededAt, ...skillSourceIdentity(skillSrc) };
     }
   }
   try { writeSeededSkills(id, seededManifest); }
@@ -3308,6 +3325,10 @@ function autoPromoteStep(teamId, env, clusters, candidates, { convergenceThresho
       console.warn(`[Orchestrator] auto-promote: writing skill '${item.name}' failed: ${err.message}`);
       continue;
     }
+    // #625: stamp the curator-authored team skill (fresh chain, no origin — its
+    // knowledge lineage lives in provenance.json). Best-effort: never rolls back.
+    try { skillManifest.stampSkillDir(dir, { name: item.name, by: "curator", action: "promoted", now }); }
+    catch (err) { console.warn(`[Orchestrator] auto-promote: stamp '${item.name}' failed: ${err.message}`); }
     byId.set(item.candidate.id, promotedCand);
     promotedSkills.push({ name: item.name, entryIds: item.candidate.entryIds });
   }
@@ -3412,6 +3433,9 @@ function autoPromoteThemesStep(teamId, env, clusters, candidates, { relatedThres
       console.warn(`[Orchestrator] auto-promote theme: writing skill '${item.name}' failed: ${err.message}`);
       continue;
     }
+    // #625: stamp the curator-authored theme skill (fresh chain, no origin).
+    try { skillManifest.stampSkillDir(dir, { name: item.name, by: "curator", action: "promoted", now }); }
+    catch (err) { console.warn(`[Orchestrator] auto-promote theme: stamp '${item.name}' failed: ${err.message}`); }
     byId.set(item.candidate.id, promotedCand);
     promotedSkills.push({ name: item.name, entryIds: item.candidate.entryIds });
   }
@@ -4499,7 +4523,7 @@ class Orchestrator {
         try { fs.cpSync(src, dst, { recursive: true, force: true }); }
         catch (err) { return { agentId: id, status: "error", error: err.message }; }
       }
-      manifest[skillName] = { tier: skillTierForSource(src), seededAt: new Date().toISOString() };
+      manifest[skillName] = { tier: skillTierForSource(src), seededAt: new Date().toISOString(), ...skillSourceIdentity(src) };
     }
     try { writeSeededSkills(id, manifest); } catch { /* best effort */ }
     // Rebuild CLAUDE.md from the (already saved) config so the Skills section

@@ -103,6 +103,15 @@ test('copyDriftState: unknown when there is no recorded anchor (pre-manifest cop
   }
 });
 
+test('resyncDecision: only outdated resyncs, in-sync skips, the rest refuse (#629 AC3/AC4)', () => {
+  assert.equal(drift.resyncDecision('outdated'), 'resync');
+  assert.equal(drift.resyncDecision('in-sync'), 'skip');
+  assert.equal(drift.resyncDecision('diverged'), 'refuse');
+  assert.equal(drift.resyncDecision('conflict'), 'refuse');
+  assert.equal(drift.resyncDecision('orphaned'), 'refuse');
+  assert.equal(drift.resyncDecision('unknown'), 'refuse');
+});
+
 test('worstDrift: severity order (conflict outranks outdated; in-sync is weakest)', () => {
   assert.equal(drift.worstDrift([]), null);
   assert.equal(drift.worstDrift(['in-sync', 'outdated']), 'outdated');

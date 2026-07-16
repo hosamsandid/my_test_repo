@@ -51,6 +51,18 @@ function copyDriftState({ copyDir, sourceHash, sourceDir } = {}, io = {}) {
   return { state, copyHash, sourceCurrentHash };
 }
 
+// The resync decision for ONE copy state (#629 AC3/AC4), the three-way gate the
+// resync engine applies per copy:
+//   'resync'  the copy is `outdated` (isResyncable) — deliver the new content.
+//   'skip'    the copy is already `in-sync` — a no-op (keeps resync idempotent).
+//   'refuse'  everything else (diverged/conflict/orphaned/unknown) — never
+//             auto-overwritten; the operator is pointed at the manual path.
+function resyncDecision(state) {
+  if (skillManifest.isResyncable(state)) return 'resync';
+  if (state === 'in-sync') return 'skip';
+  return 'refuse';
+}
+
 // The single worst state across a list of copy states (or null for an empty
 // list) — drives the one badge a skill node shows for its fan-out.
 function worstDrift(states) {
@@ -80,6 +92,7 @@ function rollupDrift(states) {
 module.exports = {
   DRIFT_SEVERITY,
   copyDriftState,
+  resyncDecision,
   worstDrift,
   rollupDrift,
 };

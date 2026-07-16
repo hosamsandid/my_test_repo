@@ -43,6 +43,7 @@ const skillDeletion = require('./skill-deletion');
 const skillMerge = require('./skill-merge');
 const skillImport = require('./skill-import');
 const skillGrantValidate = require('./skill-grant-validate');
+const { buildSetupStatus } = require('./setup-status');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -1004,21 +1005,12 @@ app.get('/api/setup/status', (req, res) => {
   const llmEndpoints = readJsonFile(LLM_ENDPOINTS_INDEX, []);
   const sshKeys      = readJsonFile(SSH_KEYS_INDEX, []);
   const ghTokens     = readJsonFile(GH_TOKENS_INDEX, []);
-  const envIds       = listEnvironmentIds();
-  const agentIds     = listAgentDirs();
 
-  const steps = [
-    { id: 'llm',         label: 'LLM Endpoint',        done: llmEndpoints.length > 0, required: true },
-    { id: 'ssh-key',     label: 'SSH Key',              done: sshKeys.length > 0,      required: false },
-    { id: 'gh-token',    label: 'GitHub Token',         done: ghTokens.length > 0,     required: false },
-    { id: 'environment', label: 'Working Environment',  done: envIds.length > 0,       required: false },
-    { id: 'agent',       label: 'First Agent',          done: agentIds.length > 0,     required: false },
-  ];
-
-  const isComplete = steps.filter(s => s.required).every(s => s.done);
-  const doneCount  = steps.filter(s => s.done).length;
-
-  res.json({ isComplete, steps, completionPercent: Math.round((doneCount / steps.length) * 100) });
+  res.json(buildSetupStatus({
+    llmCount: llmEndpoints.length,
+    sshCount: sshKeys.length,
+    ghCount: ghTokens.length,
+  }));
 });
 
 /* ─── Agents ────────────────────────────────────────────────────────── */

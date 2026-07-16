@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 
-const { effectiveSkills, hasSkillGrant, migrateSkillGrant, planSkillSync } = require("./skill-grants");
+const { effectiveSkills, hasSkillGrant, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
 
 // ---- effectiveSkills --------------------------------------------------------
 
@@ -120,4 +120,70 @@ test("planSkillSync: an override that already carries the name syncs like an inh
   assert.deepEqual(planSkillSync({ members, skillName: "s" }), [
     { agentId: "t-rev", action: "sync" },
   ]);
+});
+
+// ---- planAgentGrantEdit (#630 AC1: install/activate writes the grant) -------
+
+test("planAgentGrantEdit: a standalone agent activates onto its own skills[]", () => {
+  assert.deepEqual(
+    planAgentGrantEdit({ role: "agent", skills: ["a"] }, "b", true),
+    { field: "skills", list: ["a", "b"] },
+  );
+  // No skills field yet → materializes a fresh list.
+  assert.deepEqual(
+    planAgentGrantEdit({ role: "agent" }, "b", true),
+    { field: "skills", list: ["b"] },
+  );
+});
+
+test("planAgentGrantEdit: activation is idempotent (no duplicate), returns a copy", () => {
+  const cfg = { role: "agent", skills: ["a"] };
+  const { list } = planAgentGrantEdit(cfg, "a", true);
+  assert.deepEqual(list, ["a"]);
+  assert.notStrictEqual(list, cfg.skills); // never aliases the input
+});
+
+test("planAgentGrantEdit: deactivation removes the name from skills[]", () => {
+  assert.deepEqual(
+    planAgentGrantEdit({ role: "agent", skills: ["a", "b"] }, "a", false),
+    { field: "skills", list: ["b"] },
+  );
+});
+
+test("planAgentGrantEdit: a bp-instance writes its own skills[] (never inherits into the edit)", () => {
+  // Even though it would inherit at read time, the edit materializes its own grant.
+  assert.deepEqual(
+    planAgentGrantEdit({ role: "bp-instance", parentOrchestratorId: "orch" }, "s", true),
+    { field: "skills", list: ["s"] },
+  );
+});
+
+test("planAgentGrantEdit: a team-member writes skillsOverride, materializing the inherited grant", () => {
+  const load = (id) => (id === "squad" ? { role: "team", skills: ["team-a", "team-b"] } : null);
+  const member = { role: "team-member", parentTeamId: "squad" };
+  // Inherited skills are preserved so the override doesn't drop them.
+  assert.deepEqual(
+    planAgentGrantEdit(member, "extra", true, load),
+    { field: "skillsOverride", list: ["team-a", "team-b", "extra"] },
+  );
+});
+
+test("planAgentGrantEdit: a team-member with an existing override edits that list", () => {
+  const member = { role: "team-member", parentTeamId: "squad", skillsOverride: ["own"] };
+  assert.deepEqual(
+    planAgentGrantEdit(member, "extra", true, () => ({ role: "team", skills: ["team-a"] })),
+    { field: "skillsOverride", list: ["own", "extra"] },
+  );
+  // Deactivation off the override.
+  assert.deepEqual(
+    planAgentGrantEdit(member, "own", false, () => null),
+    { field: "skillsOverride", list: [] },
+  );
+});
+
+test("planAgentGrantEdit: trims the skill name", () => {
+  assert.deepEqual(
+    planAgentGrantEdit({ role: "agent", skills: [] }, "  spaced  ", true),
+    { field: "skills", list: ["spaced"] },
+  );
 });

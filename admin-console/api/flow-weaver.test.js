@@ -87,12 +87,13 @@ test('extended-SDLC-like composition is valid, complete and lint-clean', () => {
   assert.ok(notes.some(n => n.rule === 'no-scout' && n.stage === 'Build'));
   assert.ok(notes.some(n => n.rule === 'passive-stage' && n.stage === 'Release'));
 
-  // Self-curation crons are staggered and unique across per-invocation roles.
+  // Self-curation crons are staggered and unique. Every catalog role ships one
+  // (the intrinsic standard trigger), so all woven roles carry a distinct slot.
   const crons = bundle.roles
     .map(r => (r.triggers || []).find(t => t.id === 'self-curation'))
     .filter(Boolean).map(t => t.cron);
   assert.equal(new Set(crons).size, crons.length);
-  assert.equal(crons.length, bundle.roles.filter(r => r.sessionPolicy === 'per-invocation').length);
+  assert.equal(crons.length, bundle.roles.length);
 
   // The human-gated boundary labels are registered as such.
   const labelMap = new Map(bundle.labels.map(l => [l.name, l]));

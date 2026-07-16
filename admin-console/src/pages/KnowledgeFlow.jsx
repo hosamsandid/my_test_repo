@@ -1332,7 +1332,9 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
   };
 
   const deactivate = () => {
-    if (!window.confirm(`Remove "${skill.label}" from the team's active skills? The skill file stays in the pool and can be reactivated.`)) return;
+    // Symmetric with Activate (#630): neither light action prompts. Deactivation
+    // is reversible — the skill file stays in the pool and Activate undoes it —
+    // so no confirm; only destructive actions (delete) still confirm.
     setBusy('deactivate');
     fetch('/api/knowledge/deactivate', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2293,6 +2295,10 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [activateNow, setActivateNow] = useState(true);
+  // #630 AC3: extending a global/adopted skill from a team-framed dialog is a
+  // write to EVERY team's copy — require an explicit acknowledgment (not just a
+  // soft warning) before it can proceed. Reset whenever the target changes.
+  const [ackGlobal, setAckGlobal] = useState(false);
   // #559: pre-ticked "remove the source knowledge, now captured in this skill".
   // Default = remove, so the KB stays lean; the operator can untick to keep it.
   const [removeSource, setRemoveSource] = useState(true);
@@ -2379,6 +2385,9 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
   useEffect(() => {
     setTargetName(t => (eligible.some(s => s.name === t) ? t : ''));
   }, [eligible]);
+  // #630 AC3: a fresh global write must be re-acknowledged — never carry a stale
+  // tick across a target/tier/mode change.
+  useEffect(() => { setAckGlobal(false); }, [targetName, tier, mode]);
 
   // Re-synthesise the chosen existing skill + the new knowledge into an editable
   // preview (AC5). Heuristic by default (instant); `useLLM` runs the LLM merge.
@@ -2448,8 +2457,10 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
   const promote = () => {
     setBusy('promote'); setError('');
     // Extend an existing skill: the backend re-synthesises provenance (union) and
-    // auto-syncs the refreshed content to agents that already have it (AC10), so
-    // there is no separate activation step here.
+    // auto-syncs the refreshed content to agents that already have it (AC10).
+    // #630 AC2: when "Activate immediately" is ticked, additionally activate for
+    // the team so members that don't yet have the skill get it too (idempotent
+    // for already-active members). Activation failure never rolls back the extend.
     if (mode === 'extend') {
       fetch('/api/knowledge/promote', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2460,9 +2471,18 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
         }),
       })
         .then(async r => { if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`); return r.json(); })
-        .then(d => setResult(cleanupResult(d, `Extended “${targetName}” — active agents pick up the update automatically.`)))
-        .catch(e => setError(e.message))
-        .finally(() => setBusy(''));
+        .then(d => {
+          if (!activateNow) {
+            setResult(cleanupResult(d, `Extended “${targetName}” — active agents pick up the update automatically.`));
+            setBusy('');
+            return;
+          }
+          return activateSkill(teamId, targetName.trim())
+            .then(a => setResult(cleanupResult(d, `Extended “${targetName}” and ${activationSummary(a)} — including members that didn't have it yet.`)))
+            .catch(e => setResult({ kind: 'warn', text: `Extended “${targetName}” — but activation failed: ${e.message}. Use the Activate button on the skill card.` }))
+            .finally(() => setBusy(''));
+        })
+        .catch(e => { setError(e.message); setBusy(''); });
       return;
     }
     fetch('/api/knowledge/promote', {
@@ -2584,9 +2604,14 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
                 fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', lineHeight: 1.5,
                 background: 'var(--eb-bg-app)', border: '1px solid var(--eb-status-warning)',
                 borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)',
+                display: 'flex', gap: 8, alignItems: 'flex-start',
               }}>
-                <strong>“{targetName}” is a global skill</strong> — shared with every team. Extending it here
-                updates it for <strong>all teams</strong>, not just this one.
+                <input type="checkbox" id="kf-promote-ack-global" checked={ackGlobal}
+                  onChange={e => setAckGlobal(e.target.checked)} style={{ marginTop: 3, flexShrink: 0 }} />
+                <label htmlFor="kf-promote-ack-global" style={{ cursor: 'pointer' }}>
+                  <strong>“{targetName}” is a global skill</strong> — shared with every team. I understand that
+                  extending it here updates it for <strong>all teams</strong>, not just this one.
+                </label>
               </div>
             )}
           </>
@@ -2601,22 +2626,24 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
         <textarea value={skillMd} onChange={e => setSkillMd(e.target.value)} rows={12}
           style={{ ...inp, fontFamily: 'var(--eb-font-mono, monospace)', fontSize: 'var(--eb-text-xs)', resize: 'vertical' }} />
 
-        {/* Activation is the default last step of a CREATE promotion. An extend
-            re-synthesises an already-pooled skill; its refreshed content is
-            auto-synced to every agent that currently has it active (AC10), so
-            there is no activation choice to make. */}
-        {mode === 'create' && (tier === 'team' || tier === 'global') && !result && (
+        {/* Activation is the default last step of every pool-filling flow. In
+            CREATE it adds the new skill to the team. In EXTEND (#630 AC2) the
+            refreshed content is already auto-synced to agents that HAVE the skill;
+            activating additionally reaches members that don't have it yet (added
+            since, or a team that adopted but never activated) — otherwise they
+            stay stale with no hint. */}
+        {(tier === 'team' || tier === 'global') && !result && (
           <ActivateNowCheckbox
             id="kf-promote-activate"
             checked={activateNow}
             onChange={setActivateNow}
             label="Activate for the team immediately"
+            description={mode === 'extend'
+              ? <>Agents that already have “{targetName || 'this skill'}” pick up the refreshed content automatically.
+                  Activating also copies it to members that don't have it yet and adds it to the team's active skills.
+                  Members with their own skill list are excluded — add them afterwards from the skill card.</>
+              : undefined}
           />
-        )}
-        {mode === 'extend' && !result && (
-          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
-            The refreshed skill is synced automatically to agents that already have “{targetName || 'this skill'}” active.
-          </div>
         )}
 
         {/* #559: pre-ticked cleanup — remove the source knowledge from the team KB
@@ -2649,7 +2676,7 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
               )}
               <button
                 onClick={promote}
-                disabled={!!busy || !skillMd.trim() || (mode === 'extend' ? !targetName : !name.trim())}
+                disabled={!!busy || !skillMd.trim() || (mode === 'extend' ? !targetName : !name.trim()) || (globalScopeWarning && !ackGlobal)}
                 style={primaryBtn}
               >
                 <Check size={14} /> {

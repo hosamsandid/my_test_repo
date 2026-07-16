@@ -44,6 +44,7 @@ const { readMaintenanceState } = require("./maintenance-state-reader");
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
 const skillManifest = require("./skill-manifest");
 const usageLog = require("./usage-log");
+const prEventsLog = require("./pr-events-log");
 
 // ============================================================
 // Config
@@ -3639,6 +3640,22 @@ function agentGitPush(id, env, body = {}) {
 
   try {
     const stdout = run(pushArgs);
+    // PR-link record (#655 §4.2): a bare branch push carries no PR number, but
+    // the correlationId↔branch binding corroborates the branch-tier (C) join if a
+    // PR is later opened on this head another way. Best-effort, never blocks.
+    const cfg = loadAgentConfig(id) || {};
+    prEventsLog.record({
+      ts: new Date().toISOString(),
+      kind: "branch-pushed",
+      agentId: id,
+      teamId: cfg.parentTeamId || cfg.teamId || null,
+      // Normalize to owner/name so artifact keys match the poller's github.repo
+      // (tier B) — the git remote URL carries the owner; repo.name is the short
+      // clone-dir name only.
+      repo: prEventsLog.repoFullName(repo.url) || repo.name,
+      branch,
+      correlationId: body.correlationId != null ? String(body.correlationId) : null,
+    });
     return {
       ok: true,
       repo: repo.name,
@@ -3735,6 +3752,27 @@ function agentCreatePr(id, env, body = {}) {
       timeout: 30_000,
     }).toString();
     const url = (out.match(/https?:\/\/\S+/) || [])[0] || null;
+    // PR-link record (#655 §4.2, tier A): the exact "which run created this PR"
+    // fact. prNumber from the URL just parsed; closes[] for the artifact graph
+    // (§3.1) from the PR body (which we stamped above) + the head branch name;
+    // correlationId via the AEE_CORRELATION_ID passthrough (null when absent, then
+    // tier C covers attribution). Best-effort — a log hiccup must not fail the PR.
+    const cfg = loadAgentConfig(id) || {};
+    prEventsLog.record({
+      ts: new Date().toISOString(),
+      kind: "pr-created",
+      agentId: id,
+      teamId: cfg.parentTeamId || cfg.teamId || null,
+      // owner/name (tier B artifact-key parity) — prefer the created PR URL, which
+      // always carries the owner, then the git remote URL, then the short name.
+      repo: prEventsLog.repoFullName(url) || prEventsLog.repoFullName(repo.url) || repo.name,
+      prNumber: prEventsLog.parsePrNumber(url),
+      url,
+      branch: head,
+      base: base || null,
+      closes: prEventsLog.parseCloses(prBody, head),
+      correlationId: body.correlationId != null ? String(body.correlationId) : null,
+    });
     return { ok: true, repo: repo.name, branch: head, base: base || null, url };
   } catch (err) {
     const detail = agentGitOps

@@ -29,6 +29,13 @@ export function formatInt(n) {
   return v.toLocaleString('en-US');
 }
 
+// A 0..1 fraction as a whole-number percent (attribution coverage, #655).
+// Non-finite / out-of-range → '0%'.
+export function formatPct(f) {
+  const v = typeof f === 'number' && Number.isFinite(f) ? Math.max(0, Math.min(1, f)) : 0;
+  return `${Math.round(v * 100)}%`;
+}
+
 // Build a chronological time series from a groupBy=day summary. The API sorts
 // groups by total desc; the chart needs them by day ascending. Returns the
 // ordered points plus the largest per-day total, so the caller can scale bar

@@ -4,7 +4,7 @@ import {
   Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight,
   Boxes, Key, MessageCircle, Github, Layers, GitBranch,
-  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2, Brain, History, Wrench, UserCog,
+  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2, Brain, History, Wrench, UserCog, BarChart3,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
@@ -66,6 +66,7 @@ const NAV = [
     { path: '/role-templates', label: 'Agent Templates',    Icon: UserCog, adminOnly: true },
     { path: '/jobs',         label: 'Triggers',            Icon: Clock },
     { path: '/github-events', label: 'GitHub Event Log',   Icon: History },
+    { path: '/token-usage',  label: 'Token Usage',         Icon: BarChart3 },
     { path: '/models',       label: 'Model Providers',     Icon: Sparkles, adminOnly: true },
     { path: '/mcp',          label: 'MCP Servers',         Icon: Server,  adminOnly: true },
     { path: '/patterns',     label: 'Patterns Catalog',    Icon: BookOpen },
@@ -87,6 +88,7 @@ const BREADCRUMBS = {
   '/role-templates': 'Agent Templates',
   '/jobs':         'Triggers',
   '/github-events': 'GitHub Event Log',
+  '/token-usage':  'Token Usage',
   '/models':       'Model Providers',
   '/mcp':          'MCP Servers',
   '/teams':        'Teams',

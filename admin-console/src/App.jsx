@@ -46,6 +46,7 @@ const SkillsRegistry      = lazy(() => import('./pages/SkillsRegistry'));
 const RoleTemplates       = lazy(() => import('./pages/RoleTemplates'));
 const ScheduledJobs       = lazy(() => import('./pages/ScheduledJobs'));
 const GithubEventLog      = lazy(() => import('./pages/GithubEventLog'));
+const TokenUsage          = lazy(() => import('./pages/TokenUsage'));
 const ModelRegistry       = lazy(() => import('./pages/ModelRegistry'));
 const McpServers          = lazy(() => import('./pages/McpServers'));
 const MaintenanceMode     = lazy(() => import('./pages/MaintenanceMode'));
@@ -124,6 +125,7 @@ export default function App() {
           <Route path="/role-templates" element={<AdminRoute><RoleTemplates /></AdminRoute>} />
           <Route path="/jobs"         element={<ScheduledJobs />} />
           <Route path="/github-events" element={<GithubEventLog />} />
+          <Route path="/token-usage"  element={<TokenUsage />} />
           <Route path="/models"       element={<AdminRoute><ModelRegistry /></AdminRoute>} />
           <Route path="/mcp"          element={<AdminRoute><McpServers /></AdminRoute>} />
           <Route path="/maintenance-mode" element={<AdminRoute><MaintenanceMode /></AdminRoute>} />

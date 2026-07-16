@@ -45,6 +45,7 @@ const skillMerge = require('./skill-merge');
 const skillImport = require('./skill-import');
 const skillGrantValidate = require('./skill-grant-validate');
 const { buildSetupStatus } = require('./setup-status');
+const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archives');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -65,6 +66,25 @@ function controlOrAgentPath(...segs) {
   const ctrl = path.join(CONTROL_DIR, ...segs);
   if (fs.existsSync(ctrl)) return ctrl;
   return path.join(AGENTS_DIR, ...segs);
+}
+
+// Rotated session-log archives of `roomId` (#673), oldest→newest, parsed to
+// events via `parse`. Archives are immutable and read WHOLESALE, so a finished
+// session's rows survive rotation. The live file is NOT included — callers
+// concatenate it after these. Best-effort: an unreadable archive is skipped.
+function readSessionArchiveEvents(agentId, roomId, parse) {
+  const dir = controlOrAgentPath(agentId, 'sessions');
+  let names;
+  try { names = fs.readdirSync(dir); } catch { return []; }
+  const out = [];
+  for (const name of orderedArchiveNames(names, roomId)) {
+    let raw;
+    try { raw = fs.readFileSync(path.join(dir, name), 'utf8'); } catch { continue; }
+    for (const line of raw.split('\n')) {
+      if (line.trim()) out.push(parse(line));
+    }
+  }
+  return out;
 }
 const ENVIRONMENTS_DIR = path.join(WORKSPACE, 'environments');
 const SSH_KEYS_DIR = path.join(ENVIRONMENTS_DIR, '_keys');
@@ -3419,7 +3439,8 @@ app.post('/api/knowledge/item/:id/nominate', apiLimiter, async (req, res) => {
 });
 
 // Locate which of an agent's session logs holds a row with `correlationId`.
-// Returns the roomId (log filename sans .jsonl) or null. Capped read per file.
+// Returns the roomId or null. A hit in a rotated archive (`<room>.<seq>.jsonl`,
+// #673) resolves back to its base room, not the archive stem. Capped read/file.
 function findRoomForCorrelation(agentId, correlationId) {
   if (!AGENT_ID_RE.test(agentId)) return null;
   const dir = controlOrAgentPath(agentId, 'sessions');
@@ -3432,7 +3453,7 @@ function findRoomForCorrelation(agentId, correlationId) {
     for (const line of raw.split('\n')) {
       if (!line.trim()) continue;
       const row = kbParseLine(line);
-      if (row && row.correlationId === correlationId) return name.replace(/\.jsonl$/, '');
+      if (row && row.correlationId === correlationId) return baseRoomOfSessionFile(name, files);
     }
   }
   return null;
@@ -10781,19 +10802,23 @@ app.get('/api/agents/:agentId/sessions/history', apiLimiter, (req, res) => {
   } catch { /* best-effort: a missing/corrupt registry just means nothing active */ }
 
   const filepath = controlOrAgentPath(agentId, 'sessions', roomId + '.jsonl'); // pushed copy preferred (#185)
-  if (!fs.existsSync(filepath)) return res.json({ sessions: [], total: 0, truncated: false });
 
-  let raw;
-  try {
-    raw = fs.readFileSync(filepath, 'utf8');
-  } catch (err) {
-    return res.status(500).json({ error: 'read failed: ' + err.message });
+  // Span rotated archives (#673): finished sessions may have rotated out of the
+  // live file, so read archives (oldest→newest) then the live file. Either may
+  // be absent (a freshly-rotated room has no live file until its next append).
+  const events = readSessionArchiveEvents(agentId, roomId, parseJsonlLine);
+  if (fs.existsSync(filepath)) {
+    let raw;
+    try {
+      raw = fs.readFileSync(filepath, 'utf8');
+    } catch (err) {
+      return res.status(500).json({ error: 'read failed: ' + err.message });
+    }
+    for (const line of raw.split('\n')) {
+      if (line.trim()) events.push(parseJsonlLine(line));
+    }
   }
-
-  const events = [];
-  for (const line of raw.split('\n')) {
-    if (line.trim()) events.push(parseJsonlLine(line));
-  }
+  if (!events.length) return res.json({ sessions: [], total: 0, truncated: false });
   res.json(buildSessionHistory(events, activeCorrelationIds, { limit, offset }));
 });
 
@@ -11962,10 +11987,6 @@ app.get('/api/agents/:agentId/session/:roomId', (req, res) => {
   }
   const filepath = controlOrAgentPath(agentId, 'sessions', roomId + '.jsonl'); // pushed copy preferred (#185)
 
-  if (!fs.existsSync(filepath)) {
-    return res.json({ events: [], cursor: 0 });
-  }
-
   const since = Math.max(0, parseInt(req.query.since, 10) || 0);
   const limit = Math.max(1, parseInt(req.query.limit, 10) || 1000);
   // Optional server-side scope to one session (#544, #555). A session's rows
@@ -11983,6 +12004,30 @@ app.get('/api/agents/:agentId/session/:roomId', (req, res) => {
     .filter(c => typeof c === 'string' && c && c.length <= 512);
   const correlationIds = cidList.length ? new Set(cidList) : null;
 
+  // When scoping to a session, span rotated archives (#673): the session's
+  // rows may have rotated out of the live file. Archives are immutable and
+  // read wholesale, so they carry no byte cursor — the returned cursor stays
+  // the LIVE file size (the SSE tail's offset). Byte-cursor mode (no scope)
+  // stays live-only, so plain tailing is untouched by rotation.
+  const archiveEvents = correlationIds
+    ? readSessionArchiveEvents(agentId, roomId, parseJsonlLine)
+        .filter(ev => ev && correlationIds.has(ev.correlationId))
+    : [];
+
+  // Trim a merged event list to the last `limit`, flagging truncation.
+  const respond = (evts, cursor) => {
+    let out = evts;
+    let truncated = false;
+    if (out.length > limit) { out = out.slice(out.length - limit); truncated = true; }
+    const body = { events: out, cursor };
+    if (truncated) body.truncated = true;
+    return res.json(body);
+  };
+
+  if (!fs.existsSync(filepath)) {
+    return respond(archiveEvents, 0);
+  }
+
   let size;
   try {
     size = fs.statSync(filepath).size;
@@ -11994,7 +12039,7 @@ app.get('/api/agents/:agentId/session/:roomId', (req, res) => {
   // scoping to a correlationId we always read the whole file (start 0).
   const start = correlationIds ? 0 : (since > size ? 0 : since);
   if (start >= size) {
-    return res.json({ events: [], cursor: size });
+    return respond(archiveEvents, size);
   }
 
   const stream = fs.createReadStream(filepath, { start, end: size - 1, encoding: 'utf8' });
@@ -12019,15 +12064,11 @@ app.get('/api/agents/:agentId/session/:roomId', (req, res) => {
     if (buf.trim()) events.push(parseJsonlLine(buf));
     if (correlationIds) {
       events = events.filter(ev => ev && correlationIds.has(ev.correlationId));
+      // Prepend the scoped session's rows that had rotated into archives, so a
+      // finished session reads oldest→newest across the rotation boundary.
+      events = archiveEvents.concat(events);
     }
-    let truncated = false;
-    if (events.length > limit) {
-      events = events.slice(events.length - limit);
-      truncated = true;
-    }
-    const body = { events, cursor: size };
-    if (truncated) body.truncated = true;
-    res.json(body);
+    respond(events, size);
   });
 });
 

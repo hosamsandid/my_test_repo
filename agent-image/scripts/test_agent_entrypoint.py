@@ -1069,5 +1069,101 @@ class MaybeEnableFakeClaude(unittest.TestCase):
             self.assertNotIn(str(shim_dir), result)
 
 
+class SessionRotation(unittest.TestCase):
+    """Pure session-log rotation helpers (#673) — must stay behaviour-compatible
+    with orchestrator/session-rotation.js."""
+
+    ROOM = "!abc:host.name"
+
+    def test_archive_name(self):
+        self.assertEqual(entrypoint._archive_name(self.ROOM, 1), "!abc:host.name.1.jsonl")
+        self.assertEqual(entrypoint._archive_name("!r:local", 42), "!r:local.42.jsonl")
+
+    def test_parse_archive_seq_matches_only_real_archives(self):
+        p = entrypoint._parse_archive_seq
+        self.assertEqual(p("!abc:host.name.1.jsonl", self.ROOM), 1)
+        self.assertEqual(p("!abc:host.name.12.jsonl", self.ROOM), 12)
+        self.assertIsNone(p("!abc:host.name.jsonl", self.ROOM))         # live file
+        self.assertIsNone(p("!abc:host.name.current.json", self.ROOM))  # pointer
+        self.assertIsNone(p("!other:host.name.1.jsonl", self.ROOM))     # other room
+        self.assertIsNone(p("!abc:host.name.0.jsonl", self.ROOM))       # seq 0
+        self.assertIsNone(p("!abc:host.name.01.jsonl", self.ROOM))      # leading zero
+
+    def test_parse_archive_seq_numeric_homeserver_tail(self):
+        room = "!r:1.2.3"
+        self.assertEqual(entrypoint._parse_archive_seq("!r:1.2.3.5.jsonl", room), 5)
+        self.assertIsNone(entrypoint._parse_archive_seq("!r:1.2.3.jsonl", room))
+        self.assertIsNone(entrypoint._parse_archive_seq("!r:9.9.9.5.jsonl", room))
+
+    def test_list_and_next_archive_seq(self):
+        names = [
+            "!abc:host.name.jsonl", "!abc:host.name.3.jsonl",
+            "!abc:host.name.1.jsonl", "!abc:host.name.10.jsonl",
+            "unrelated.jsonl", "!abc:host.name.current.json",
+        ]
+        self.assertEqual([s for s, _ in entrypoint._list_archives(names, self.ROOM)],
+                         [1, 3, 10])
+        self.assertEqual(entrypoint._next_archive_seq(names, self.ROOM), 11)
+        self.assertEqual(entrypoint._next_archive_seq([], self.ROOM), 1)
+        self.assertEqual(entrypoint._next_archive_seq(["!abc:host.name.jsonl"], self.ROOM), 1)
+
+    def test_should_rotate(self):
+        self.assertFalse(entrypoint._should_rotate(7_999_999, 8_000_000))
+        self.assertTrue(entrypoint._should_rotate(8_000_000, 8_000_000))
+        self.assertTrue(entrypoint._should_rotate(9_000_000, 8_000_000))
+        self.assertFalse(entrypoint._should_rotate(9_000_000, 0))
+
+    def test_plan_prune_by_count(self):
+        archives = [(s, entrypoint._archive_name(self.ROOM, s), 1000 + s) for s in range(1, 7)]
+        doomed = entrypoint._plan_prune(archives, 3, 0, 10_000)
+        self.assertEqual(doomed, [entrypoint._archive_name(self.ROOM, s) for s in (1, 2, 3)])
+
+    def test_plan_prune_by_age(self):
+        now = 1_000_000
+        day = 24 * 60 * 60 * 1000
+        archives = [
+            (1, entrypoint._archive_name(self.ROOM, 1), now - 40 * day),
+            (2, entrypoint._archive_name(self.ROOM, 2), now - 10 * day),
+        ]
+        doomed = entrypoint._plan_prune(archives, 0, 30 * day, now)
+        self.assertEqual(doomed, [entrypoint._archive_name(self.ROOM, 1)])
+
+    def test_plan_prune_union_no_duplicates(self):
+        now = 1_000_000
+        day = 24 * 60 * 60 * 1000
+        archives = [
+            (1, entrypoint._archive_name(self.ROOM, 1), now - 40 * day),  # old + overflow
+            (2, entrypoint._archive_name(self.ROOM, 2), now - 1 * day),   # overflow
+            (3, entrypoint._archive_name(self.ROOM, 3), now - 1 * day),   # kept
+        ]
+        doomed = sorted(entrypoint._plan_prune(archives, 1, 30 * day, now))
+        self.assertEqual(doomed, sorted([entrypoint._archive_name(self.ROOM, 1),
+                                         entrypoint._archive_name(self.ROOM, 2)]))
+
+    def test_plan_prune_both_axes_disabled_keeps_all(self):
+        archives = [(s, entrypoint._archive_name(self.ROOM, s), 1) for s in (1, 2, 3)]
+        self.assertEqual(entrypoint._plan_prune(archives, 0, 0, 9), [])
+
+    def test_rotation_config_defaults_and_overrides(self):
+        with patch.dict("os.environ", {}, clear=False):
+            for k in ("AEE_SESSION_ROTATE_BYTES", "AEE_SESSION_ROTATE_KEEP",
+                      "AEE_SESSION_ROTATE_MAX_AGE_DAYS"):
+                entrypoint.os.environ.pop(k, None)
+            self.assertEqual(entrypoint._session_rotation_config(),
+                             {"maxBytes": 8_000_000, "maxCount": 5, "maxAgeDays": 30})
+        with patch.dict("os.environ", {
+            "AEE_SESSION_ROTATE_BYTES": "16000000",
+            "AEE_SESSION_ROTATE_KEEP": "3",
+            "AEE_SESSION_ROTATE_MAX_AGE_DAYS": "7",
+        }):
+            self.assertEqual(entrypoint._session_rotation_config(),
+                             {"maxBytes": 16_000_000, "maxCount": 3, "maxAgeDays": 7})
+
+    def test_rotation_config_refuses_nonpositive_size(self):
+        for bad in ("0", "-5", "nonsense"):
+            with patch.dict("os.environ", {"AEE_SESSION_ROTATE_BYTES": bad}):
+                self.assertEqual(entrypoint._session_rotation_config()["maxBytes"], 8_000_000)
+
+
 if __name__ == "__main__":
     unittest.main()

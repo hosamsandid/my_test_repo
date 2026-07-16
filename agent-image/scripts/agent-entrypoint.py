@@ -570,6 +570,121 @@ def _session_log_file(room_id: str) -> Path:
     return _agent_workdir() / "sessions" / f"{room_id}.jsonl"
 
 
+# ---- Size-based session-log rotation (#673) ----
+#
+# Room logs are append-only; before this they grew unbounded (one hit 18.9 MB and
+# wedged the control-plane mirror). We rotate the live file to
+# sessions/<roomId>.<seq>.jsonl once it crosses a size threshold, then bound the
+# archive count/age. These pure helpers mirror orchestrator/session-rotation.js
+# byte-for-byte (archiveName / parseArchiveSeq / nextArchiveSeq / shouldRotate /
+# planPrune) so both sides of the mirror rotate under the same policy.
+
+_SESSION_ROTATE_DEFAULTS = {"maxBytes": 8_000_000, "maxCount": 5, "maxAgeDays": 30}
+
+
+def _session_rotation_config() -> dict:
+    def _num(v, dflt):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return dflt
+
+    max_bytes = _num(os.environ.get("AEE_SESSION_ROTATE_BYTES"),
+                     _SESSION_ROTATE_DEFAULTS["maxBytes"])
+    if not (max_bytes > 0):
+        max_bytes = _SESSION_ROTATE_DEFAULTS["maxBytes"]
+    max_count = _num(os.environ.get("AEE_SESSION_ROTATE_KEEP"),
+                     _SESSION_ROTATE_DEFAULTS["maxCount"])
+    if not (max_count >= 0):
+        max_count = _SESSION_ROTATE_DEFAULTS["maxCount"]
+    max_age_days = _num(os.environ.get("AEE_SESSION_ROTATE_MAX_AGE_DAYS"),
+                        _SESSION_ROTATE_DEFAULTS["maxAgeDays"])
+    if not (max_age_days >= 0):
+        max_age_days = _SESSION_ROTATE_DEFAULTS["maxAgeDays"]
+    return {"maxBytes": int(max_bytes), "maxCount": int(max_count),
+            "maxAgeDays": int(max_age_days)}
+
+
+def _archive_name(room_id: str, seq: int) -> str:
+    return f"{room_id}.{seq}.jsonl"
+
+
+def _parse_archive_seq(name: str, room_id: str):
+    """Integer archive seq of `name` for `room_id`, else None. Strict: only
+    `<roomId>.<n>.jsonl` with n a canonical positive integer — never the live
+    file or the session pointer."""
+    if not isinstance(name, str):
+        return None
+    m = re.match(rf"^{re.escape(room_id)}\.(\d+)\.jsonl$", name)
+    if not m:
+        return None
+    digits = m.group(1)
+    seq = int(digits)
+    if seq < 1 or str(seq) != digits:  # reject 0 and leading-zero forms
+        return None
+    return seq
+
+
+def _list_archives(names, room_id: str) -> list:
+    """[(seq, name)] ascending by seq (oldest→newest = chronological)."""
+    out = []
+    for name in names or []:
+        seq = _parse_archive_seq(name, room_id)
+        if seq is not None:
+            out.append((seq, name))
+    out.sort(key=lambda t: t[0])
+    return out
+
+
+def _next_archive_seq(names, room_id: str) -> int:
+    archives = _list_archives(names, room_id)
+    return archives[-1][0] + 1 if archives else 1
+
+
+def _should_rotate(size: int, max_bytes: int) -> bool:
+    return max_bytes > 0 and size >= max_bytes
+
+
+def _plan_prune(archives, max_count: int, max_age_ms: float, now_ms: float) -> list:
+    """archives: [(seq, name, mtime_ms)] → list of names to delete. Union of the
+    age rule and the newest-`max_count` rule; 0 disables that axis."""
+    lst = sorted(archives, key=lambda t: t[0])  # oldest first
+    doomed = []
+    if max_age_ms > 0:
+        for seq, name, mtime_ms in lst:
+            if now_ms - mtime_ms > max_age_ms:
+                doomed.append(name)
+    if max_count > 0 and len(lst) > max_count:
+        for seq, name, mtime_ms in lst[: len(lst) - max_count]:
+            if name not in doomed:
+                doomed.append(name)
+    return doomed
+
+
+def _prune_local_session_archives(sessions_dir: Path, room_id: str, cfg: dict) -> None:
+    """Delete this room's archives that fall outside the retention policy.
+    Best-effort — one failed unlink never blocks the rest."""
+    try:
+        names = [p.name for p in sessions_dir.iterdir()]
+    except OSError:
+        return
+    archives = []
+    for seq, name in _list_archives(names, room_id):
+        try:
+            mtime_ms = (sessions_dir / name).stat().st_mtime * 1000.0
+        except OSError:
+            continue
+        archives.append((seq, name, mtime_ms))
+    doomed = _plan_prune(archives, cfg["maxCount"],
+                         cfg["maxAgeDays"] * 24 * 60 * 60 * 1000.0,
+                         time.time() * 1000.0)
+    for name in doomed:
+        try:
+            (sessions_dir / name).unlink()
+        except OSError:
+            pass
+
+
 # ---- Control-plane state push (#185) ----
 #
 # With per-agent volume isolation the orchestrator/admin-console can no longer
@@ -594,6 +709,11 @@ class _StatePushClient:
         self._q: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self._sent: dict[str, int] = {}  # roomId -> bytes acked by the orchestrator
         self._flush_warned: set[str] = set()  # rooms with an active failure warning
+        # Per-room FIFO of frozen archive sources awaiting drain+control-rotation
+        # (#673). Each entry is {path, seq, size}; the flush loop drains each
+        # fully into the control-plane live copy, commands the control rotation,
+        # then moves on — so both sides' archives end byte-identical.
+        self._rot_queue: dict[str, deque] = {}
         self._thread = threading.Thread(target=self._run, name="state-push", daemon=True)
         self._started = False
 
@@ -616,6 +736,13 @@ class _StatePushClient:
 
     def mark_session_dirty(self, room_id: str) -> None:
         self._q.put(("session", room_id))
+
+    def mark_session_rotated(self, room_id: str, archive_path: str,
+                             seq: int, size: int) -> None:
+        # The writer has frozen `archive_path` (the pre-rotation live file). Ask
+        # the push thread to drain it to control and command the matching
+        # control-plane rotation before it touches the new live file (#673).
+        self._q.put(("rotate", (room_id, archive_path, seq, size)))
 
     def push_pointer(self, room_id: str, session_id: str | None,
                      updated_at: str | None) -> None:
@@ -656,6 +783,12 @@ class _StatePushClient:
                     running_sessions = payload  # last write within the tick wins
                 elif kind == "session" and payload not in dirty:
                     dirty.append(payload)  # type: ignore[arg-type]
+                elif kind == "rotate":
+                    room_id, apath, seq, size = payload  # type: ignore[misc]
+                    self._rot_queue.setdefault(room_id, deque()).append(
+                        {"path": apath, "seq": seq, "size": size})
+                    if room_id not in dirty:
+                        dirty.append(room_id)  # flush drains the queue then live
                 elif kind == "pointer":
                     room_id, sid, upd = payload  # type: ignore[misc]
                     pointers[room_id] = (sid, upd)
@@ -727,7 +860,76 @@ class _StatePushClient:
     # every POST; the probe below avoids resending history at all.
     _SESSION_CHUNK_MAX = 4_000_000
 
+    def _drain_rotations(self, room_id: str) -> bool:
+        """Push every queued frozen archive fully into the control-plane live
+        copy, then command the matching control rotation (#673). Returns True
+        when the queue is empty (caller may proceed to the live file), False on
+        a transient failure (retry next tick — the live file is left untouched
+        so we never sync it ahead of a pending archive). Each archive is drained
+        from `_sent[room]` (control's live size) up to its frozen size, so the
+        control archive ends byte-identical to ours."""
+        q = self._rot_queue.get(room_id)
+        while q:
+            entry = q[0]
+            apath, seq, asize = entry["path"], entry["seq"], entry["size"]
+            base = self._sent.get(room_id)
+            if base is None:
+                base = self._probe_remote_offset(room_id, asize)
+                if base is None:
+                    return False  # transient
+                self._sent[room_id] = base
+            if base > asize:
+                base = 0  # control ahead of a shorter archive — resend from top
+            while base < asize:
+                try:
+                    with open(apath, "rb") as fh:
+                        fh.seek(base)
+                        tail = fh.read(self._SESSION_CHUNK_MAX)
+                except OSError:
+                    return False
+                if not tail:
+                    break
+                status, resp = self._post_session_events(room_id, base, tail)
+                if status != 200:
+                    self._warn_flush_failure(room_id, f"HTTP {status or 'unreachable'}")
+                    return False
+                try:
+                    j = json.loads(resp)
+                except Exception:
+                    return False
+                if j.get("ok"):
+                    base = int(j.get("offset", base + len(tail)))
+                    self._sent[room_id] = base
+                elif "expected" in j:
+                    self._sent[room_id] = int(j["expected"])
+                    base = self._sent[room_id]
+                else:
+                    return False
+            # Control now holds the full archive content in its live copy —
+            # command the rotation at this boundary (idempotent by seq).
+            status, resp = self._post_session_rotate(room_id, base, seq)
+            if status != 200:
+                self._warn_flush_failure(room_id, f"rotate HTTP {status or 'unreachable'}")
+                return False
+            try:
+                j = json.loads(resp)
+            except Exception:
+                return False
+            if j.get("ok"):
+                q.popleft()
+                self._sent[room_id] = 0  # control live is empty after rotation
+            elif "expected" in j:
+                self._sent[room_id] = int(j["expected"])  # drain more, then retry
+            else:
+                return False
+        return True
+
     def _flush_session(self, room_id: str) -> None:
+        # Drain any pending rotations first so we never sync the new live file
+        # ahead of a frozen archive still owed to the control plane (#673).
+        if not self._drain_rotations(room_id):
+            self._q.put(("session", room_id))  # retry next tick
+            return
         p = _session_log_file(room_id)
         try:
             size = p.stat().st_size
@@ -799,6 +1001,17 @@ class _StatePushClient:
             "roomId": room_id,
             "baseOffset": base,
             "dataB64": base64.b64encode(data).decode("ascii"),
+        }).encode("utf-8")
+        return self._post(f"/internal/agents/{self._agent_id}/session-events", body)
+
+    def _post_session_rotate(self, room_id: str, base: int, seq: int) -> tuple[int, str]:
+        # Command the control-plane rotation: archive its live copy to
+        # <roomId>.<seq>.jsonl at `base` (our fully-synced boundary), #673.
+        body = json.dumps({
+            "roomId": room_id,
+            "rotate": True,
+            "baseOffset": base,
+            "seq": seq,
         }).encode("utf-8")
         return self._post(f"/internal/agents/{self._agent_id}/session-events", body)
 
@@ -925,9 +1138,41 @@ def _append_event(room_id: str, event: dict) -> None:
               **event}
         with f.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(ev) + "\n")
+        pc = _get_push_client()
+        # Rotate once the live file crosses the size threshold (#673). We are the
+        # single writer, so an atomic rename is race-free: the push thread's next
+        # open() sees either the frozen archive or the fresh live file. We freeze
+        # the archive here (no further appends touch it), hand it to the push
+        # client to drain fully + command the control-plane rotation, then prune.
+        cfg = _session_rotation_config()
+        try:
+            size = f.stat().st_size
+        except OSError:
+            size = 0
+        if _should_rotate(size, cfg["maxBytes"]):
+            sessions_dir = f.parent
+            try:
+                names = [p.name for p in sessions_dir.iterdir()]
+            except OSError:
+                names = []
+            seq = _next_archive_seq(names, room_id)
+            archive = sessions_dir / _archive_name(room_id, seq)
+            try:
+                os.replace(f, archive)
+            except OSError as exc:
+                print(f"[Runner] session-log rotate failed: {exc}", file=sys.stderr)
+            else:
+                archived_size = 0
+                try:
+                    archived_size = archive.stat().st_size
+                except OSError:
+                    pass
+                _prune_local_session_archives(sessions_dir, room_id, cfg)
+                if pc:
+                    pc.mark_session_rotated(room_id, str(archive), seq, archived_size)
+                return
         # Mirror to the control plane (#185). The pusher re-reads this file's
         # tail, so it stays byte-exact; queued + debounced, never blocks here.
-        pc = _get_push_client()
         if pc:
             pc.mark_session_dirty(room_id)
     except Exception as exc:

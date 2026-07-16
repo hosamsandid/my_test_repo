@@ -175,6 +175,13 @@ function loadLlmBindingForEnv(env) {
 const { execFile, execFileSync } = require("child_process");
 const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume } = require("./spawn-container");
 const { reconcileSessionAppend } = require("./session-cursor");
+const {
+  rotationConfig,
+  archiveName,
+  parseArchiveSeq,
+  listArchives,
+  planPrune,
+} = require("./session-rotation");
 const crypto = require("crypto");
 
 function randomHex(bytes) {
@@ -446,6 +453,27 @@ function controlOrPoolPath(id, ...segs) {
 function isSafePathSeg(s) {
   return typeof s === 'string' && s.length > 0 && s.length <= 256 &&
     !s.includes('/') && !s.includes('\\') && !s.includes('..') && !s.includes('\0');
+}
+
+// Apply the session-log retention policy (#673) to a room's archives in `dir`.
+// Best-effort: a stat/unlink failure on one archive never blocks the rest.
+function pruneControlSessionArchives(dir, roomId, cfg) {
+  let names;
+  try { names = fs.readdirSync(dir); } catch { return; }
+  const archives = [];
+  for (const { name } of listArchives(names, roomId)) {
+    let mtimeMs = 0;
+    try { mtimeMs = fs.statSync(path.join(dir, name)).mtimeMs; } catch { continue; }
+    archives.push({ name, seq: parseArchiveSeq(name, roomId), mtimeMs });
+  }
+  const doomed = planPrune(archives, {
+    maxCount: cfg.maxCount,
+    maxAgeMs: cfg.maxAgeDays * 24 * 60 * 60 * 1000,
+    now: Date.now(),
+  });
+  for (const name of doomed) {
+    try { fs.rmSync(path.join(dir, name)); } catch { /* best-effort */ }
+  }
 }
 
 // Legacy role names used to be `expert` / `expert-group` / `expert-instance`.
@@ -7462,16 +7490,58 @@ async function main() {
       req.on('data', (d) => { body += d; if (body.length > 16_000_000) req.destroy(); });
       req.on('end', () => {
         try {
-          const { roomId, baseOffset, dataB64 } = JSON.parse(body || '{}');
+          const { roomId, baseOffset, dataB64, rotate, seq } = JSON.parse(body || '{}');
           if (!isSafePathSeg(id) || !isSafePathSeg(roomId)) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: false, error: 'bad id/roomId' }));
             return;
           }
-          const buf = Buffer.from(dataB64 || '', 'base64');
           const dir = path.join(controlAgentDir(id), 'sessions');
           fs.mkdirSync(dir, { recursive: true });
           const fp = path.join(dir, `${roomId}.jsonl`);
+
+          // ── Rotation command (#673) ──────────────────────────────────────
+          // The agent has fully synced this room's live copy up to `baseOffset`
+          // and now rotates it. We archive OUR live copy to <roomId>.<seq>.jsonl
+          // at the same boundary — so the two archives are byte-identical — then
+          // prune, and let the next append recreate the live file. The admin SSE
+          // tail sees the live file shrink and emits `_truncated` (UI re-backfills).
+          if (rotate === true) {
+            const seqN = Number(seq);
+            if (!Number.isInteger(seqN) || seqN < 1) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: 'bad seq' }));
+              return;
+            }
+            const cfg = rotationConfig(process.env);
+            const archiveFp = path.join(dir, archiveName(roomId, seqN));
+            // Idempotent: a lost-ACK retry finds the archive already written and
+            // the live file already recreated — do NOT clobber it with new data.
+            if (fs.existsSync(archiveFp)) {
+              pruneControlSessionArchives(dir, roomId, cfg);
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: true, rotated: true, seq: seqN }));
+              return;
+            }
+            let cur = 0;
+            try { cur = fs.statSync(fp).size; } catch { cur = 0; }
+            // Guard: only rotate once we hold every byte the agent archived, so
+            // the control archive can't lose the un-synced tail. If we're behind,
+            // tell the agent to resend from `cur` first (it drains, then retries).
+            const base = Number.isFinite(Number(baseOffset)) ? Number(baseOffset) : 0;
+            if (base > cur) {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, expected: cur }));
+              return;
+            }
+            if (fs.existsSync(fp)) fs.renameSync(fp, archiveFp);
+            pruneControlSessionArchives(dir, roomId, cfg);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, rotated: true, seq: seqN }));
+            return;
+          }
+
+          const buf = Buffer.from(dataB64 || '', 'base64');
           let cur = 0;
           try { cur = fs.statSync(fp).size; } catch { cur = 0; }
           // Reconcile against baseOffset (pure helper, unit-tested in

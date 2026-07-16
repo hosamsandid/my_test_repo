@@ -1,0 +1,231 @@
+{
+  "_comment": "Two-sided golden fixture for token telemetry (#654). The emitter (Python: build_usage_record in agent-image/scripts/agent-entrypoint.py) is asserted against records[].{input->expected}; the aggregator (JS: summarize in admin-console/api/usage-summary.js) is asserted against summaryCases (each references records[].expected by index). The canonical usage-record schema is the shared contract — change both sides in one commit.",
+  "records": [
+    {
+      "name": "github-triggered developer run, two models",
+      "input": {
+        "ts": "2026-07-16T10:00:00.000Z",
+        "agentId": "team-a-developer",
+        "teamId": "team-a",
+        "roleId": "developer",
+        "flowInstanceId": null,
+        "provider": "litellm-main",
+        "correlationId": "trigger:dev-on-issue:gh:41234567890",
+        "sessionId": "sess-1",
+        "trigger": { "type": "github-event", "id": "dev-on-issue", "conversationKey": "issue:654" },
+        "github": { "repo": "org/repo", "prNumber": null, "issueNumber": 654 },
+        "git": { "repo": "repo", "branch": "agent/x", "headBefore": "aaaa111", "headAfter": "bbbb222" },
+        "resultEvent": {
+          "type": "result",
+          "durationMs": 191200,
+          "sessionId": "sess-1",
+          "costUsd": 0.41,
+          "tokens": { "input": 10, "output": 42, "cacheCreationInput": 8141, "cacheReadInput": 17718 },
+          "modelUsage": {
+            "claude-sonnet-4-6": { "inputTokens": 8, "outputTokens": 40, "cacheReadInputTokens": 17718, "cacheCreationInputTokens": 8141, "costUSD": 0.40, "contextWindow": 200000 },
+            "claude-haiku-4-5": { "inputTokens": 2, "outputTokens": 2, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0, "costUSD": 0.01 }
+          }
+        }
+      },
+      "expected": {
+        "ts": "2026-07-16T10:00:00.000Z",
+        "agentId": "team-a-developer",
+        "teamId": "team-a",
+        "roleId": "developer",
+        "flowInstanceId": null,
+        "provider": "litellm-main",
+        "correlationId": "trigger:dev-on-issue:gh:41234567890",
+        "sessionId": "sess-1",
+        "trigger": { "type": "github-event", "id": "dev-on-issue", "conversationKey": "issue:654" },
+        "github": { "repo": "org/repo", "prNumber": null, "issueNumber": 654 },
+        "git": { "repo": "repo", "branch": "agent/x", "headBefore": "aaaa111", "headAfter": "bbbb222" },
+        "tokens": { "input": 10, "output": 42, "cacheCreationInput": 8141, "cacheReadInput": 17718 },
+        "modelUsage": {
+          "claude-sonnet-4-6": { "input": 8, "output": 40, "cacheCreationInput": 8141, "cacheReadInput": 17718 },
+          "claude-haiku-4-5": { "input": 2, "output": 2, "cacheCreationInput": 0, "cacheReadInput": 0 }
+        },
+        "durationMs": 191200,
+        "totalCostUsd": 0.41
+      }
+    },
+    {
+      "name": "code-reviewer run, single model, minimal context",
+      "input": {
+        "ts": "2026-07-16T14:30:00.000Z",
+        "agentId": "team-a-code-reviewer",
+        "teamId": "team-a",
+        "roleId": "code-reviewer",
+        "flowInstanceId": null,
+        "provider": "litellm-main",
+        "correlationId": "trigger:review-on-pr:gh:99887766",
+        "sessionId": "sess-2",
+        "trigger": { "type": "github-event", "id": "review-on-pr", "conversationKey": "pr:42" },
+        "github": { "repo": "org/repo", "prNumber": 42, "issueNumber": null },
+        "git": null,
+        "resultEvent": {
+          "type": "result",
+          "durationMs": 50000,
+          "sessionId": "sess-2",
+          "costUsd": 0.05,
+          "tokens": { "input": 5, "output": 20, "cacheCreationInput": 1000, "cacheReadInput": 2000 },
+          "modelUsage": {
+            "claude-sonnet-4-6": { "inputTokens": 5, "outputTokens": 20, "cacheReadInputTokens": 2000, "cacheCreationInputTokens": 1000, "costUSD": 0.05 }
+          }
+        }
+      },
+      "expected": {
+        "ts": "2026-07-16T14:30:00.000Z",
+        "agentId": "team-a-code-reviewer",
+        "teamId": "team-a",
+        "roleId": "code-reviewer",
+        "flowInstanceId": null,
+        "provider": "litellm-main",
+        "correlationId": "trigger:review-on-pr:gh:99887766",
+        "sessionId": "sess-2",
+        "trigger": { "type": "github-event", "id": "review-on-pr", "conversationKey": "pr:42" },
+        "github": { "repo": "org/repo", "prNumber": 42, "issueNumber": null },
+        "git": null,
+        "tokens": { "input": 5, "output": 20, "cacheCreationInput": 1000, "cacheReadInput": 2000 },
+        "modelUsage": {
+          "claude-sonnet-4-6": { "input": 5, "output": 20, "cacheCreationInput": 1000, "cacheReadInput": 2000 }
+        },
+        "durationMs": 50000,
+        "totalCostUsd": 0.05
+      }
+    },
+    {
+      "name": "business-analyst DM run, other team/provider, no modelUsage/cost, nulls default to 0",
+      "input": {
+        "ts": "2026-07-15T09:15:00.000Z",
+        "agentId": "team-b-ba",
+        "teamId": "team-b",
+        "roleId": null,
+        "flowInstanceId": null,
+        "provider": "anthropic-oauth",
+        "correlationId": "direct:$evt123",
+        "sessionId": null,
+        "trigger": { "type": "direct-message", "id": null, "conversationKey": "dm" },
+        "github": null,
+        "git": null,
+        "resultEvent": {
+          "type": "result",
+          "durationMs": 80000,
+          "sessionId": null,
+          "costUsd": null,
+          "tokens": { "input": 100, "output": 200, "cacheCreationInput": null, "cacheReadInput": 500 },
+          "modelUsage": null
+        }
+      },
+      "expected": {
+        "ts": "2026-07-15T09:15:00.000Z",
+        "agentId": "team-b-ba",
+        "teamId": "team-b",
+        "roleId": null,
+        "flowInstanceId": null,
+        "provider": "anthropic-oauth",
+        "correlationId": "direct:$evt123",
+        "sessionId": null,
+        "trigger": { "type": "direct-message", "id": null, "conversationKey": "dm" },
+        "github": null,
+        "git": null,
+        "tokens": { "input": 100, "output": 200, "cacheCreationInput": 0, "cacheReadInput": 500 },
+        "modelUsage": {},
+        "durationMs": 80000,
+        "totalCostUsd": null
+      }
+    }
+  ],
+  "summaryCases": [
+    {
+      "name": "groupBy agent, all records",
+      "recordIndexes": [0, 1, 2],
+      "query": { "since": null, "until": null, "groupBy": "agent" },
+      "expected": {
+        "since": null,
+        "until": null,
+        "groupBy": "agent",
+        "totals": { "input": 115, "output": 262, "cacheCreationInput": 9141, "cacheReadInput": 20218, "total": 29736, "invocations": 3 },
+        "groups": [
+          { "key": "team-a-developer", "tokens": { "input": 10, "output": 42, "cacheCreationInput": 8141, "cacheReadInput": 17718, "total": 25911 }, "invocations": 1 },
+          { "key": "team-a-code-reviewer", "tokens": { "input": 5, "output": 20, "cacheCreationInput": 1000, "cacheReadInput": 2000, "total": 3025 }, "invocations": 1 },
+          { "key": "team-b-ba", "tokens": { "input": 100, "output": 200, "cacheCreationInput": 0, "cacheReadInput": 500, "total": 800 }, "invocations": 1 }
+        ]
+      }
+    },
+    {
+      "name": "groupBy team, all records",
+      "recordIndexes": [0, 1, 2],
+      "query": { "since": null, "until": null, "groupBy": "team" },
+      "expected": {
+        "since": null,
+        "until": null,
+        "groupBy": "team",
+        "totals": { "input": 115, "output": 262, "cacheCreationInput": 9141, "cacheReadInput": 20218, "total": 29736, "invocations": 3 },
+        "groups": [
+          { "key": "team-a", "tokens": { "input": 15, "output": 62, "cacheCreationInput": 9141, "cacheReadInput": 19718, "total": 28936 }, "invocations": 2 },
+          { "key": "team-b", "tokens": { "input": 100, "output": 200, "cacheCreationInput": 0, "cacheReadInput": 500, "total": 800 }, "invocations": 1 }
+        ]
+      }
+    },
+    {
+      "name": "groupBy model, split across modelUsage, record without modelUsage contributes no model group",
+      "recordIndexes": [0, 1, 2],
+      "query": { "since": null, "until": null, "groupBy": "model" },
+      "expected": {
+        "since": null,
+        "until": null,
+        "groupBy": "model",
+        "totals": { "input": 115, "output": 262, "cacheCreationInput": 9141, "cacheReadInput": 20218, "total": 29736, "invocations": 3 },
+        "groups": [
+          { "key": "claude-sonnet-4-6", "tokens": { "input": 13, "output": 60, "cacheCreationInput": 9141, "cacheReadInput": 19718, "total": 28932 }, "invocations": 2 },
+          { "key": "claude-haiku-4-5", "tokens": { "input": 2, "output": 2, "cacheCreationInput": 0, "cacheReadInput": 0, "total": 4 }, "invocations": 1 }
+        ]
+      }
+    },
+    {
+      "name": "groupBy provider, all records",
+      "recordIndexes": [0, 1, 2],
+      "query": { "since": null, "until": null, "groupBy": "provider" },
+      "expected": {
+        "since": null,
+        "until": null,
+        "groupBy": "provider",
+        "totals": { "input": 115, "output": 262, "cacheCreationInput": 9141, "cacheReadInput": 20218, "total": 29736, "invocations": 3 },
+        "groups": [
+          { "key": "litellm-main", "tokens": { "input": 15, "output": 62, "cacheCreationInput": 9141, "cacheReadInput": 19718, "total": 28936 }, "invocations": 2 },
+          { "key": "anthropic-oauth", "tokens": { "input": 100, "output": 200, "cacheCreationInput": 0, "cacheReadInput": 500, "total": 800 }, "invocations": 1 }
+        ]
+      }
+    },
+    {
+      "name": "groupBy day, time series",
+      "recordIndexes": [0, 1, 2],
+      "query": { "since": null, "until": null, "groupBy": "day" },
+      "expected": {
+        "since": null,
+        "until": null,
+        "groupBy": "day",
+        "totals": { "input": 115, "output": 262, "cacheCreationInput": 9141, "cacheReadInput": 20218, "total": 29736, "invocations": 3 },
+        "groups": [
+          { "key": "2026-07-16", "tokens": { "input": 15, "output": 62, "cacheCreationInput": 9141, "cacheReadInput": 19718, "total": 28936 }, "invocations": 2 },
+          { "key": "2026-07-15", "tokens": { "input": 100, "output": 200, "cacheCreationInput": 0, "cacheReadInput": 500, "total": 800 }, "invocations": 1 }
+        ]
+      }
+    },
+    {
+      "name": "date-filtered half-open [since, until), groupBy agent",
+      "recordIndexes": [0, 1, 2],
+      "query": { "since": "2026-07-16T00:00:00.000Z", "until": "2026-07-17T00:00:00.000Z", "groupBy": "agent" },
+      "expected": {
+        "since": "2026-07-16T00:00:00.000Z",
+        "until": "2026-07-17T00:00:00.000Z",
+        "groupBy": "agent",
+        "totals": { "input": 15, "output": 62, "cacheCreationInput": 9141, "cacheReadInput": 19718, "total": 28936, "invocations": 2 },
+        "groups": [
+          { "key": "team-a-developer", "tokens": { "input": 10, "output": 42, "cacheCreationInput": 8141, "cacheReadInput": 17718, "total": 25911 }, "invocations": 1 },
+          { "key": "team-a-code-reviewer", "tokens": { "input": 5, "output": 20, "cacheCreationInput": 1000, "cacheReadInput": 2000, "total": 3025 }, "invocations": 1 }
+        ]
+      }
+    }
+  ]
+}

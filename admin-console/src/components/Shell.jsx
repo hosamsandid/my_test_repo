@@ -4,7 +4,7 @@ import {
   Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight,
   Boxes, Key, MessageCircle, Github, Layers, GitBranch,
-  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2, History,
+  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2, Brain, History, Wrench, UserCog, BarChart3,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
@@ -52,21 +52,25 @@ const NAV = [
     { path: '/team-setup',   label: 'Team Wizard',         Icon: Users2 },
     { path: '/agents',       label: 'Agents',              Icon: Layers },
     { path: '/flows',         label: 'Flows',               Icon: GitBranch },
+    { path: '/knowledge',    label: 'Knowledge',           Icon: Brain },
     // { path: '/orchestrator-wizard', label: 'Orchestrator Wizard', Icon: Wand2 },
   ]},
   { section: 'WORKSPACES', items: [
-    { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key },
-    { path: '/github-tokens', label: 'GitHub Tokens',        Icon: Github },
+    { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key,    adminOnly: true },
+    { path: '/github-tokens', label: 'GitHub Tokens',        Icon: Github, adminOnly: true },
     { path: '/environments',  label: 'Working Environments', Icon: Boxes },
   ]},
   { section: 'CONFIGURATION', items: [
     { path: '/teams',        label: 'Teams',               Icon: Building2 },
-    { path: '/skills',       label: 'Skills Registry',     Icon: Zap },
+    { path: '/skills',       label: 'Skills',              Icon: Zap },
+    { path: '/role-templates', label: 'Agent Templates',    Icon: UserCog, adminOnly: true },
     { path: '/jobs',         label: 'Triggers',            Icon: Clock },
     { path: '/github-events', label: 'GitHub Event Log',   Icon: History },
-    { path: '/models',       label: 'Model Providers',     Icon: Sparkles },
-    { path: '/mcp',          label: 'MCP Servers',         Icon: Server },
+    { path: '/token-usage',  label: 'Token Usage',         Icon: BarChart3 },
+    { path: '/models',       label: 'Model Providers',     Icon: Sparkles, adminOnly: true },
+    { path: '/mcp',          label: 'MCP Servers',         Icon: Server,  adminOnly: true },
     { path: '/patterns',     label: 'Patterns Catalog',    Icon: BookOpen },
+    { path: '/maintenance-mode', label: 'Maintenance Mode', Icon: Wrench, adminOnly: true },
   ]},
 ];
 
@@ -75,13 +79,16 @@ const BREADCRUMBS = {
   '/team-setup':   'Team Wizard',
   '/agents':       'Agents',
   '/flows':        'Flows',
+  '/knowledge':    'Knowledge',
   '/chats':        'Agent Chat',
   '/environments': 'Working Environments',
   '/ssh-keys':     'SSH Keys',
   '/github-tokens': 'GitHub Tokens',
   '/skills':       'Skills Registry',
+  '/role-templates': 'Agent Templates',
   '/jobs':         'Triggers',
   '/github-events': 'GitHub Event Log',
+  '/token-usage':  'Token Usage',
   '/models':       'Model Providers',
   '/mcp':          'MCP Servers',
   '/teams':        'Teams',
@@ -89,6 +96,7 @@ const BREADCRUMBS = {
   '/patterns/sdlc':          'Patterns Catalog / SDLC',
   '/patterns/mainframe':     'Patterns Catalog / Mainframe Modernization',
   '/orchestrator-wizard': 'Orchestrator Wizard',
+  '/maintenance-mode': 'Maintenance Mode',
 };
 
 function breadcrumbFor(pathname) {
@@ -134,6 +142,17 @@ export default function Shell({ children }) {
   }, []);
 
   const sidebarWidth = collapsed ? 'var(--eb-sidebar-collapsed)' : 'var(--eb-sidebar-width)';
+
+  // Hide admin-only nav entries (SSH Keys, GitHub Tokens, Skills, Models, MCP,
+  // Maintenance Mode) from non-System-Admins (#584 AC8). Backend route guards
+  // (App.jsx) and the scoped API back this up — this is defence-in-depth, not
+  // the only enforcement. Drop sections that end up empty.
+  const nav = NAV
+    .map(section => ({
+      ...section,
+      items: section.items.filter(item => user?.admin || !item.adminOnly),
+    }))
+    .filter(section => section.items.length > 0);
 
   return (
     <div style={{ display: 'flex', width: '100%', minHeight: '100vh' }}>
@@ -204,7 +223,7 @@ export default function Shell({ children }) {
 
         {/* Nav sections */}
         <nav style={{ flex: 1, overflowY: 'auto', padding: 'var(--eb-space-2) 0' }}>
-          {NAV.map((section, sectionIndex) => (
+          {nav.map((section, sectionIndex) => (
             <div key={section.section || sectionIndex} style={{ marginBottom: 'var(--eb-space-2)' }}>
               {!collapsed && section.section && (
                 <div style={{

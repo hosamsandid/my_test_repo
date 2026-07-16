@@ -170,29 +170,42 @@ test('label registry tags gates and brakes', () => {
   assert.equal(byName['stage:build'].humanGate, false);
 });
 
-test('template level: shipped dispatcher + developer derive emits onto nodes', () => {
-  const g = buildProcessGraph([templateNode(loadTpl('dispatcher')), templateNode(loadTpl('developer'))]);
+test('template level: shipped dispatcher derives emits onto its node', () => {
+  const g = buildProcessGraph([templateNode(loadTpl('dispatcher'))]);
   const dispatcher = g.nodes.find(n => n.id === 'dispatcher');
   const dispatcherEmits = dispatcher.triggers.flatMap(t => t.emits);
-  assert.ok(dispatcherEmits.includes('{{dispatchLabel}}'),
-    'dispatcher should derive {{dispatchLabel}} as an emitted label');
-
-  const developer = g.nodes.find(n => n.id === 'developer');
-  const assigned = developer.triggers.find(t => t.id === 'developer-assigned');
-  assert.ok(assigned.emits.includes('started:{{agentId}}'));
-  assert.equal(assigned.emitsDerived, true);
+  assert.ok(dispatcherEmits.includes('dispatch'),
+    'dispatcher should carry `dispatch` as an emitted label');
 });
 
 test('template level: a synthetic listener wires to a shipped emitter', () => {
-  // Prove the mechanism end-to-end: someone listening on {{dispatchLabel}} gets
-  // an edge from the dispatcher (which emits it).
+  // Prove the mechanism end-to-end: someone listening on `dispatch` gets an
+  // edge from the dispatcher (which emits it).
+  const listener = {
+    id: 'consumer', role: 'template',
+    triggers: [{ id: 'l', type: 'github-event', labelFilter: 'dispatch' }],
+  };
+  const g = buildProcessGraph([templateNode(loadTpl('dispatcher')), listener]);
+  const e = g.edges.find(x => x.from === 'dispatcher' && x.to === 'consumer');
+  assert.ok(e, 'expected dispatcher → consumer edge on `dispatch`');
+  assert.equal(e.label, 'dispatch');
+});
+
+test('template level: {{var}} label tokens still wire emitter to listener', () => {
+  // Placeholders are matched verbatim at template level — resolved only at
+  // materialisation. The shipped catalog no longer uses them, but imported /
+  // hand-authored templates may.
+  const emitter = {
+    id: 'producer', role: 'template',
+    triggers: [{ id: 'e', type: 'github-event', events: ['issues.opened'], emits: ['{{dispatchLabel}}'] }],
+  };
   const listener = {
     id: 'consumer', role: 'template',
     triggers: [{ id: 'l', type: 'github-event', labelFilter: '{{dispatchLabel}}' }],
   };
-  const g = buildProcessGraph([templateNode(loadTpl('dispatcher')), listener]);
-  const e = g.edges.find(x => x.from === 'dispatcher' && x.to === 'consumer');
-  assert.ok(e, 'expected dispatcher → consumer edge on {{dispatchLabel}}');
+  const g = buildProcessGraph([emitter, listener]);
+  const e = g.edges.find(x => x.from === 'producer' && x.to === 'consumer');
+  assert.ok(e, 'expected producer → consumer edge on {{dispatchLabel}}');
   assert.equal(e.label, '{{dispatchLabel}}');
 });
 
@@ -301,6 +314,46 @@ test('channel-label listener: extra emitters wire feedback edges, pinned produce
   // The pinned producer is not redrawn as a label edge here (it is the github edge).
   assert.ok(!pairs.includes('intake->author'));
   // `go` is listened on (via the channel) so it is not a dead-end.
+  assert.ok(!g.lints.some(l => l.code === 'dead-end-emitter' && l.label === 'go'));
+});
+
+test('channel-label + labelFilter trigger on the same label draws ONE edge, not two (#537)', () => {
+  // The Core-SDLC shape: reworker emits `ready-for-review`; code-reviewer both
+  // consumes developer's PR channel on that label AND has an explicit
+  // `pull_request.labeled` labelFilter trigger for it. The trigger loop already
+  // wires reworker→code-reviewer, so the #401 channel back-emitter loop must not
+  // draw a second, trigger-less duplicate.
+  const g = buildProcessGraph([
+    { id: 'developer', triggers: [], github: { producesPr: true } },
+    { id: 'reworker', triggers: [], emits: ['ready-for-review'] },
+    { id: 'code-reviewer', channels: [{ artifact: 'pr', from: 'developer', label: 'ready-for-review' }], triggers: [
+      { id: 't1783952055673966', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review' },
+    ] },
+  ]);
+  const edges = edgesBetween(g, 'reworker', 'code-reviewer').filter(e => e.kind === 'agent');
+  assert.equal(edges.length, 1);
+  // The surviving edge is the trigger-backed one (carries the triggerId + events),
+  // not the trigger-less channel duplicate.
+  assert.equal(edges[0].triggerId, 't1783952055673966');
+  assert.deepEqual(edges[0].events, ['pull_request.labeled']);
+  // The channel back-emitter loop drew nothing trigger-less for this pair.
+  assert.ok(!edges.some(e => e.triggerId == null));
+});
+
+test('#401 still holds when the same consumer has an unrelated labelFilter trigger (#537 regression guard)', () => {
+  // code-reviewer listens on `go` ONLY via a channel (no labelFilter trigger for
+  // it), while also carrying a labelFilter trigger for a DIFFERENT label. The
+  // #537 guard must be per-label: the `go` feedback edge from a third emitter
+  // must still be drawn.
+  const g = buildProcessGraph([
+    { id: 'intake', triggers: [], github: { producesIssue: true }, emits: ['go'] },
+    { id: 'router', triggers: [], emits: ['go'] },
+    { id: 'code-reviewer', channels: [{ artifact: 'issue', from: 'intake', label: 'go' }], triggers: [
+      { id: 't', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review' },
+    ] },
+  ]);
+  const goEdges = g.edges.filter(e => e.label === 'go' && e.kind === 'agent');
+  assert.deepEqual(goEdges.map(e => `${e.from}->${e.to}`).sort(), ['router->code-reviewer']);
   assert.ok(!g.lints.some(l => l.code === 'dead-end-emitter' && l.label === 'go'));
 });
 

@@ -2,27 +2,42 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
+import { useMaintenanceMode } from '../../context/MaintenanceModeContext';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import HandoffDialog from './HandoffDialog';
 import Message from './Message';
 import MessageInput from './MessageInput';
+import LearningBadge from '../../components/LearningBadge';
 import { resolveContextWindowTokens, computeContextFillLevel, formatTokenCountK } from './context-window';
+import { maintenanceBannerText } from './maintenance-banner';
+import { RESUME_MESSAGE } from './resume-session';
 
-// Default prompt sent when the user clicks "Reset & learn". The agent
+// Default prompt sent when the user clicks "Full Learn". The agent
 // continues in its current Claude session (so it has full conversational
-// context), is asked to consolidate that context into the memory files,
-// and replies with a short summary. After the reply lands, the UI clears
-// the session pointer so the next message starts fresh.
+// context), is asked to consolidate that context into the memory files
+// AND to share durable, team-useful lessons via the knowledge CLI, then
+// replies with a short summary. The knowledge paragraph's wording is kept
+// aligned with build_harvest_hint() in agent-image/scripts/agent-entrypoint.py
+// so the two instructions can't drift apart; "skip if the team knowledge
+// base is not available" covers autonomy-0 agents without a KB checkout.
 const LEARN_PROMPT =
   'Before we end this conversation: please summarize the key insights, ' +
   'decisions and open points from our discussion so far ' +
   'and update your memory/ files accordingly, routing each piece to the right file:\n' +
   '- memory/context.md — current session state (keep slim)\n' +
   '- memory/log.md — one summary entry for this conversation\n' +
-  '- memory/facts.md — atomic, deduplicated facts (one per line, with date)\n' +
-  '- memory/entities.md — rich knowledge about projects, systems, frameworks\n' +
   '- memory/users.md — per-user interaction profiles\n' +
-  'Then briefly reply with what you have saved.';
+  '- memory/facts.md / memory/entities.md — only if your Memory System instructions still use ' +
+  'these files (legacy model); on the unified model semantic knowledge goes to the team ' +
+  'knowledge base instead, never to these files\n' +
+  'In addition to your memory files, share durable lessons with your teammates ' +
+  'through the team knowledge base: for each insight that would help ANY teammate ' +
+  'on this repo (a project convention, an environment fact, a key entity) run: ' +
+  'knowledge add fact|entity|convention "<one-line statement>". ' +
+  'First run knowledge search "<topic>" to avoid restating something already recorded; ' +
+  'record only lessons that hold beyond this one conversation. ' +
+  'Skip this step if the team knowledge base is not available.\n' +
+  'Then briefly reply with what you have saved and what you shared with the team.';
 
 /**
  * The middle column: header + scrollable message list + input.
@@ -53,10 +68,16 @@ const LEARN_PROMPT =
  *        session boundary just occurred — sending a message, resetting the
  *        session, or a trigger-started run's first message arriving — so the
  *        pinned To-Do panel from a previous session gets dismissed (#273).
+ * @param {()=>void} [onOpenKnowledge] Open the right rail on its Knowledge tab
+ *        (wired to the "N learned" badge in the header).
+ * @param {()=>void} [onKnowledgeChanged] Notify parent after the agent replied
+ *        to the Full-Learn prompt (which may have added KB entries), so the
+ *        right rail's Knowledge tab refreshes and the user sees the button
+ *        feeding the pipeline.
  */
 export default function ChatPanel({
   agent, roomId, onRoomCreated, hoveredCorrelationId, onHoverCorrelation, sessionCost, contextFill,
-  onWorkspaceChanged, onTodoBoundary,
+  onWorkspaceChanged, onTodoBoundary, onOpenKnowledge, onKnowledgeChanged, resumeRequest,
 }) {
   const [messages, setMessages]      = useState([]);
   const [loading, setLoading]        = useState(false);
@@ -85,6 +106,7 @@ export default function ChatPanel({
   const [sessionId, setSessionId]     = useState(null);
   const [sessionUpdatedAt, setSessionUpdatedAt] = useState(null);
   const [resetting, setResetting]     = useState(false);
+  const [resuming, setResuming]       = useState(false);
   const [learnPending, setLearnPending] = useState(false);
   const [clearingHistory, setClearingHistory] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
@@ -97,16 +119,20 @@ export default function ChatPanel({
   const [modelOptions, setModelOptions] = useState(null);
   const [modelSwitching, setModelSwitching] = useState(false);
   // Context-window fill for the last completed request (#471, cache-tokens
-  // fix #490). `contextFill` (from the parent, fed by SessionLogPanel) carries
-  // the token count actually held in context — input + cache-creation +
-  // cache-read tokens, since a `--resume`d session runs on prompt caching and
-  // most of its held context lives in the cache fields, not `input` — plus
-  // the model actually used. Resolve that model's window size against the
-  // agent's catalog (falling back to the known-Claude-family table) and
-  // derive the warning level from the (corrected) ratio; the toolbar renders
-  // it as a rounded "<used>K / <limit>K" token count rather than a
-  // percentage. Hidden entirely when the window size can't be determined
-  // (AC 7) rather than showing a misleading value.
+  // fix #490, overcounting fix #509). `contextFill` (from the parent, fed by
+  // SessionLogPanel) carries a plausible estimate of the tokens actually held
+  // in context — input + cache-creation + cache-read of the turn's *last
+  // individual* API call (`result.contextTokens`, #509), since a `--resume`d
+  // session runs on prompt caching and most of its held context lives in the
+  // cache fields, not `input`, and a turn's own `result.tokens` aggregate
+  // sums/duplicates across every internal tool-call round-trip rather than
+  // reflecting a single context snapshot — plus the model actually used.
+  // Resolve that model's window size against the agent's catalog (falling
+  // back to the known-Claude-family table) and derive the warning level from
+  // the (corrected) ratio; the toolbar renders it as a rounded
+  // "<used>K / <limit>K" token count rather than a percentage. Hidden
+  // entirely when the window size can't be determined (AC 7) rather than
+  // showing a misleading value.
   const contextWindowTokens = useMemo(() => {
     if (!contextFill?.model) return null;
     const modelEntry = (modelOptions?.models || []).find(m => m.id === contextFill.model);
@@ -472,6 +498,42 @@ export default function ChatPanel({
     }
   }
 
+  // Resume a finished session (#574): re-point the room at the chosen Claude
+  // session-ID (PUT the pointer with `resumeRequested`), then send the fixed
+  // predefined message down the normal DM path so the agent runs with --resume
+  // and the message is visible in history (AC2/AC3/AC5). The message-send is
+  // what makes the resumed session show as active (AC4). The `resuming` guard
+  // + ts dedup below stop rapid double-activation from spawning duplicate runs.
+  const handleResumeSession = useCallback(async (resumeSessionId) => {
+    if (!sessionApiBase || !resumeSessionId || resuming) return;
+    onTodoBoundary?.();
+    setResuming(true);
+    setError(null);
+    try {
+      await apiCall('POST', sessionApiBase, { sessionId: resumeSessionId });
+      // Optimistically reflect the re-pointed session so the badge updates
+      // without waiting for the post-run refetch.
+      setSessionId(resumeSessionId);
+      setSessionUpdatedAt(new Date().toISOString());
+      await handleSend(RESUME_MESSAGE);
+    } catch (err) {
+      setError(`Resume failed: ${err.message}`);
+    } finally {
+      setResuming(false);
+    }
+  }, [sessionApiBase, resuming, onTodoBoundary]);
+
+  // Fire when the parent (AgentChat) signals a resume from the Sessions tab.
+  // `ts` disambiguates repeat activations; the ref guards against re-firing on
+  // unrelated re-renders.
+  const lastResumeTsRef = useRef(0);
+  useEffect(() => {
+    if (!resumeRequest || !resumeRequest.ts) return;
+    if (resumeRequest.ts === lastResumeTsRef.current) return;
+    lastResumeTsRef.current = resumeRequest.ts;
+    handleResumeSession(resumeRequest.sessionId);
+  }, [resumeRequest, handleResumeSession]);
+
   async function handleClearHistory() {
     if (!roomId || clearingHistory) return;
     setClearingHistory(true);
@@ -531,7 +593,9 @@ export default function ChatPanel({
     }
   }
 
-  // Clear learnPending once the agent has replied to the learn prompt.
+  // Clear learnPending once the agent has replied to the learn prompt, and
+  // let the parent refresh the Knowledge tab — the learn run may have added
+  // entries to the team KB.
   useEffect(() => {
     if (!learnPending) return;
     if (!messages.length || !agent?.userId) return;
@@ -540,7 +604,8 @@ export default function ChatPanel({
     if (last?.isOptimistic) return;
     if ((last?.ts || 0) < learnTriggeredAtRef.current) return;
     setLearnPending(false);
-  }, [messages, learnPending, agent?.userId]);
+    onKnowledgeChanged?.();
+  }, [messages, learnPending, agent?.userId, onKnowledgeChanged]);
 
   /* ─── 5. Send ────────────────────────────────────────────────────── */
   async function handleSend(text) {
@@ -655,6 +720,8 @@ export default function ChatPanel({
 
   /* ─── Render ─────────────────────────────────────────────────────── */
   const disabled = agent.enabled === false;
+  const maintenance = useMaintenanceMode();
+  const maintenanceBanner = maintenanceBannerText(maintenance);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, position: 'relative' }}>
@@ -704,6 +771,12 @@ export default function ChatPanel({
                 </span>
               </div>
             )}
+            <LearningBadge
+              scope={`agent:${agent.id}`}
+              refreshKey={sessionUpdatedAt}
+              onClick={onOpenKnowledge}
+              title="Show what this agent has learned (Knowledge tab)"
+            />
           </div>
           {gitInfo && gitInfo.length > 0 && (
             <div
@@ -763,9 +836,9 @@ export default function ChatPanel({
         <button
           type="button"
           onClick={handleFullLearn}
-          disabled={!sessionId || learnPending || disabled}
-          title="Agent summarizes this conversation and saves key insights to its memory files — the session stays open afterwards"
-          style={sessionBtnStyle(!sessionId || learnPending || disabled)}
+          disabled={!sessionId || learnPending || disabled || maintenance.active}
+          title="Agent summarizes this conversation, saves session state to its memory files and shares durable lessons with the team knowledge base — the session stays open afterwards"
+          style={sessionBtnStyle(!sessionId || learnPending || disabled || maintenance.active)}
         >
           {learnPending
             ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
@@ -886,6 +959,19 @@ export default function ChatPanel({
         </div>
       )}
 
+      {maintenanceBanner && (
+        <div style={{
+          padding: 'var(--eb-space-3) var(--eb-space-4)',
+          background: 'var(--eb-status-warning-bg)',
+          borderBottom: '1px solid var(--eb-status-warning)',
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-primary)',
+          flexShrink: 0,
+        }}>
+          {maintenanceBanner}
+        </div>
+      )}
+
       {error && (
         <div role="alert" style={{
           padding: 'var(--eb-space-2) var(--eb-space-4)',
@@ -983,7 +1069,7 @@ export default function ChatPanel({
             gap: 'var(--eb-space-2)',
           }}>
             <Loader2 size={20} style={{ animation: 'spin 1s linear infinite' }} />
-            <div>{creating ? 'Opening DM with agent…' : 'Loading conversation…'}</div>
+            <div>{creating ? 'Opening conversation with agent…' : 'Loading conversation…'}</div>
           </div>
         )}
 
@@ -1064,7 +1150,7 @@ export default function ChatPanel({
       {/* Input */}
       <MessageInput
         onSend={handleSend}
-        disabled={disabled || !roomId || sending}
+        disabled={disabled || !roomId || sending || maintenance.active}
         agentDisplayName={agent.displayName || agent.id}
         onUpload={handleUpload}
         uploading={uploading}

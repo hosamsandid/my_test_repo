@@ -56,6 +56,13 @@ RUN pip install --no-cache-dir -r /opt/ace/requirements.txt
 COPY scripts/ /opt/ace/scripts/
 COPY CLAUDE.md /opt/ace/CLAUDE.md
 
+# Fake `claude` shim for end-to-end tests (#666, docs/e2e-testing-concept.md
+# §4.2). Shipped in every image but inert: the entrypoint only prepends this
+# dir to PATH when AEE_FAKE_CLAUDE=1, so with the flag unset the real Claude
+# Code CLI installed above wins and production behaviour is byte-identical.
+COPY e2e/ /opt/ace/e2e/
+RUN chmod +x /opt/ace/e2e/claude
+
 # `aee-artifact` — register/resolve mission artifacts by logical name via the
 # git-committed manifest (.aee/artifacts.jsonl). On PATH so agents call it
 # directly to record what they produced and to resolve an upstream's outputs
@@ -74,6 +81,21 @@ RUN chmod +x /opt/ace/scripts/aee-artifact \
 # `gh pr create`, which is impossible in an unattended run.
 RUN chmod +x /opt/ace/scripts/gh-as-agent \
     && ln -sf /opt/ace/scripts/gh-as-agent /usr/local/bin/gh-as-agent
+
+# `knowledge` — record + query the shared team Knowledge Base (Shared Agent
+# Learning). On PATH so agents call it directly: `knowledge search` (offline
+# search over the synced working copy) and `knowledge add` (append a durable,
+# provenance-stamped fact to the agent's own shard, commit, and push via the
+# orchestrator to the shared agent-knowledge branch).
+RUN chmod +x /opt/ace/scripts/knowledge \
+    && ln -sf /opt/ace/scripts/knowledge /usr/local/bin/knowledge
+
+# `usage` — read-only view of this agent's / its team's token usage (#679). On
+# PATH so agents call it directly: `usage me` / `usage team` query the
+# orchestrator's read-only usage endpoint across the volume-isolation boundary
+# (the agent can't read /workspace/usage/ itself). Token counts only, never money.
+RUN chmod +x /opt/ace/scripts/usage \
+    && ln -sf /opt/ace/scripts/usage /usr/local/bin/usage
 
 ENV NODE_ENV=production
 

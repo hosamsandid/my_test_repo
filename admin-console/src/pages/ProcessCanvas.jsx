@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
-import { AlertTriangle, Download, Upload, Boxes, X, Plus, Layers, Sparkles, Pencil } from 'lucide-react';
+import { AlertTriangle, Download, Boxes, X, Plus, Layers, Sparkles, Pencil } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { initFlowGraph } from './process/flow-graph-render';
 import ProcessNodeInspector from './process/ProcessNodeInspector';
@@ -8,6 +8,7 @@ import StageManager from './process/StageManager';
 import { EditHandoffDialog, CreateEdgeDialog } from './process/EdgeDialogs';
 import MaterializeDialog from './process/MaterializeDialog';
 import SidePanel from '../components/SidePanel';
+import { roleIcon } from '../components/role-icons';
 import { liveOps, makeDraftOps } from './process/edit-adapters';
 import { capabilitiesFor, processMode, createTypesFor, sourceKindOf } from './process/connection-capabilities';
 
@@ -17,9 +18,10 @@ import { capabilitiesFor, processMode, createTypesFor, sourceKindOf } from './pr
 // render inside the agent card.)
 const ACTOR_NAMES = { '@github': 'GitHub', '@external': 'External system', '@timer': 'Schedule' };
 
-// Inline-editable process name for the draft toolbar. Click to edit; Enter or
-// blur commits, Escape reverts. Renaming only touches the bundle's display
-// `name` — the storage id is fixed at creation.
+// Inline-editable process name for the draft toolbar — the single rename
+// control for a draft (#581). Click to edit; Enter or blur commits, Escape
+// reverts. The backend re-derives the draft's storage id from the new name, and
+// the panel follows the re-keyed id (see persistDraft).
 function EditableDraftTitle({ name, onRename }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(name || '');
@@ -70,7 +72,7 @@ function EditableDraftTitle({ name, onRename }) {
       }}
     >
       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {name || 'Untitled process'}
+        {name || 'Untitled flow'}
       </span>
       <Pencil size={13} style={{ flexShrink: 0, color: 'var(--eb-text-muted)' }} />
     </button>
@@ -79,15 +81,22 @@ function EditableDraftTitle({ name, onRename }) {
 
 // Process graph panel (#330) — data-driven view of the agent orchestration:
 // which agent reacts to which label, in what order. Embedded into the Flows
-// view; the scope (a team id, 'templates', or 'draft:<id>') is supplied by the
+// view; the scope (a team id or 'draft:<id>') is supplied by the
 // parent, which also owns the scope picker (the left Flows list). The node
 // inspector (#331) and edge modeling (#332) build on the same renderer.
 //
 // Props:
-//   scope           — '<teamId>' | 'templates' | 'draft:<id>'
-//   onNavigate(s)   — switch scope (e.g. after creating/opening a draft)
-//   onDraftsChanged — notify the parent that the drafts list changed (counts)
-export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
+//   scope             — '<teamId>' | 'draft:<id>' | 'import'
+//   onNavigate(s)     — switch scope (e.g. after creating/opening a draft)
+//   onDraftsChanged   — notify the parent that the drafts list changed (counts)
+//   pendingImport     — { bundle, graph } from the Flows sidebar's Import button
+//                        (#512) — seeds the read-only preview when scope is 'import'
+//   onImportConsumed  — tell the parent the pendingImport has been loaded, so it
+//                        can clear it and avoid re-processing on re-render
+//   onImportClosed    — tell the parent the import preview was closed without
+//                        continuing/materializing (scope 'import' has no
+//                        underlying graph to fall back to)
+export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingImport, onImportConsumed, onImportClosed }) {
   const navigate = useCallback((s) => { if (onNavigate) onNavigate(s); }, [onNavigate]);
 
   const { data: agents } = useApi('/api/agents');
@@ -99,20 +108,24 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
   // Drafts (#345): a process being authored from scratch. Scope `draft:<id>`.
   const draftId = scope && scope.startsWith('draft:') ? scope.slice(6) : null;
   const isDraft = !!draftId;
+  // A sidebar-triggered import (#512) has no underlying team/draft to fetch —
+  // its graph comes from `pendingImport` instead, same as a draft's does from
+  // its bundle.
+  const isImportPreview = scope === 'import';
   const isTeamScope = useMemo(
     () => Array.isArray(teams) && teams.some(t => t.id === scope),
     [teams, scope],
   );
 
-  // Scope is always one of: a team id (live graph), 'templates' (blueprint),
-  // or 'draft:<id>' (derived client-side from the bundle, so no fetch).
+  // Scope is always one of: a team id (live graph), 'draft:<id>' (derived
+  // client-side from the bundle, so no fetch), or 'import' (derived
+  // client-side from pendingImport, so no fetch either). A null url skips the
+  // fetch for the client-derived scopes.
   // All scopes feed the unified rich renderer (#362 UI rework C3).
-  const graphUrl = scope === 'templates'
-    ? '/api/flows/graph?templates=1'
-    : isDraft
-      ? null
-      : `/api/flows/graph?team=${encodeURIComponent(scope)}`;
-  const { data: graph, loading, error, refetch } = useApi(graphUrl || '/api/flows/graph?templates=__none__');
+  const graphUrl = (isDraft || isImportPreview)
+    ? null
+    : `/api/flows/graph?team=${encodeURIComponent(scope)}`;
+  const { data: graph, loading, error, refetch } = useApi(graphUrl);
 
   // An imported bundle (#334) overrides the fetched graph until closed — shown
   // as a read-only blueprint that can be materialised into a real team.
@@ -121,7 +134,6 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
   const [materializeOpen, setMaterializeOpen] = useState(false);
   const [addRoleOpen, setAddRoleOpen] = useState(false);
   const [stagesOpen, setStagesOpen] = useState(false);
-  const fileInputRef = useRef(null);
 
   // Draft bundle + its derived graph. The bundle is the source of truth; the
   // graph is recomputed server-side from it on every change.
@@ -153,13 +165,26 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
     draftBundleRef.current = saved;
     setDraftBundle(saved);
     if (onDraftsChanged) onDraftsChanged();
-  }, [draftId, onDraftsChanged]);
+    // A rename re-keys the draft (#581): follow the new id so the open selection,
+    // the URL scope param and every subsequent save target the live id (AC6).
+    if (saved.id && saved.id !== draftId) navigate(`draft:${saved.id}`);
+  }, [draftId, onDraftsChanged, navigate]);
 
   const draftOps = useMemo(
     () => makeDraftOps(() => draftBundleRef.current, persistDraft),
     [persistDraft],
   );
   const ops = isDraft ? draftOps : liveOps;
+
+  // Live stage-management ops (#674): bind the team id (= scope) so StageManager
+  // keeps its name-only contract (addStage(name)/renameStage(old,new)/…) — the
+  // same shape draftOps exposes. Live scope only; unused for drafts/imports.
+  const liveStageOps = useMemo(() => ({
+    addStage: (name) => liveOps.addStage(scope, name),
+    renameStage: (oldName, newName) => liveOps.renameStage(scope, oldName, newName),
+    removeStage: (name) => liveOps.removeStage(scope, name),
+    reorderStages: (names) => liveOps.reorderStages(scope, names),
+  }), [scope]);
 
   const displayGraph = imported ? imported.graph : isDraft ? draftGraph : graph;
 
@@ -207,6 +232,18 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
   useEffect(() => { setSelectedId(null); setConnectPair(null); setSelectedEdge(null); }, [scope, imported]);
   useEffect(() => { setImported(null); setImportError(null); }, [scope]);
 
+  // Sidebar-triggered import (#512): seed the read-only preview from the
+  // parent-supplied bundle instead of the (now-removed) in-editor file picker.
+  // Runs after the scope-reset effect above so it isn't immediately cleared.
+  useEffect(() => {
+    if (isImportPreview && pendingImport) {
+      setImported(pendingImport);
+      setImportError(null);
+      setSelectedId(null);
+      if (onImportConsumed) onImportConsumed();
+    }
+  }, [isImportPreview, pendingImport, onImportConsumed]);
+
   const nodeName = (id) =>
     (displayGraph?.nodes || []).find(n => n.id === id)?.displayName || ACTOR_NAMES[id] || id;
   const selectedNode = useMemo(
@@ -234,6 +271,29 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
     } catch (e) { setImportError(e.message); }
   }
 
+  // Live team: materialize a new role as a team-member immediately (#585) via the
+  // existing member-create path — no draft round-trip. The member id mirrors the
+  // wizard's `<teamId>-<roleId>` scheme so a name that resolves to an existing
+  // member surfaces as a clear 409 (E1) instead of silently overwriting. Skills
+  // and MCP are left to inherit from the team/env — no overrides (AC4).
+  async function addLiveRole({ displayName, systemPrompt, templateId }) {
+    const slug = String(displayName || 'role').toLowerCase()
+      .replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'role';
+    const body = { id: `${scope}-${slug}`, displayName: displayName.trim() };
+    if (templateId) {
+      // Template-based add (#586, AC-5): the backend loads the template, resolves
+      // the team's `{{vars}}` from its env, and materializes a member with the
+      // template's session policy + triggers substituted per-member.
+      body.templateId = templateId;
+    } else {
+      const prompt = (systemPrompt || '').trim();
+      if (prompt) body.systemPromptOverride = prompt;
+    }
+    const created = await apiCall('POST', `/api/agents/${encodeURIComponent(scope)}/members`, body);
+    refetch(); // the graph now shows the new member as a live node (AC5)
+    return (created && created.id) || body.id;
+  }
+
   // Continue an imported blueprint as an editable draft instead of materializing
   // straight away — turns the read-only preview into a real draft you can keep
   // building on before creating a team.
@@ -242,7 +302,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
     try {
       const tpl = imported.bundle;
       const d = await apiCall('POST', '/api/process/drafts', {
-        name: tpl.name || 'Imported process',
+        name: tpl.name || 'Imported flow',
         processTemplate: tpl,
       });
       if (onDraftsChanged) onDraftsChanged();
@@ -260,8 +320,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
     if (isDraft) {
       bundle = draftBundle;
     } else {
-      const url = scope === 'templates' ? '/api/process/template?templates=1'
-        : `/api/process/template?team=${encodeURIComponent(scope)}`;
+      const url = `/api/process/template?team=${encodeURIComponent(scope)}`;
       const res = await fetch(url);
       if (!res.ok) { setImportError(`Export failed: HTTP ${res.status}`); return; }
       bundle = await res.json();
@@ -275,28 +334,6 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
     URL.revokeObjectURL(a.href);
   }
 
-  async function onImportFile(e) {
-    setImportError(null);
-    const file = e.target.files?.[0];
-    e.target.value = ''; // allow re-importing the same file
-    if (!file) return;
-    let bundle;
-    try { bundle = JSON.parse(await file.text()); }
-    catch { setImportError('Not valid JSON.'); return; }
-    try {
-      const res = await fetch('/api/flows/graph', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ processTemplate: bundle }),
-      });
-      const g = await res.json();
-      if (!res.ok) { setImportError(g.error || `HTTP ${res.status}`); return; }
-      setImported({ bundle, graph: g });
-      setSelectedId(null);
-    } catch (err) {
-      setImportError(err.message);
-    }
-  }
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       {/* Toolbar — the scope picker lives in the Flows left list, not here. */}
@@ -307,25 +344,27 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
           )}
           <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
             {caps.readOnlyHint
-              ? `${caps.readOnlyHint}${scope === 'templates' ? ' Select a team or draft on the left to model.' : ''}`
+              ? caps.readOnlyHint
               : isDraft
-                ? 'Draft — design from scratch: + Add role, drag the ● port (roles and sources) to wire, click nodes/edges to edit. Nothing is created until you materialize.'
-                : 'Click a node to edit · drag the ● port (roles and sources) to wire a connection · click an edge to edit it.'}
+                ? 'Draft — design from scratch: + Add agent, drag the ● port (agents and sources) to wire, click nodes/edges to edit. Nothing is created until you materialize.'
+                : 'Click a node to edit · drag the ● port (agents and sources) to wire a connection · click an edge to edit it.'}
           </div>
         </div>
         {isDraft && (
           <>
-            <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus}>Add role</ToolbarButton>
+            <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus}>Add agent</ToolbarButton>
             <ToolbarButton onClick={() => setStagesOpen(true)} icon={Layers}>Stages</ToolbarButton>
             <ToolbarButton onClick={() => setMaterializeOpen(true)} icon={Boxes}
               disabled={!draftBundle?.roles?.length}>Materialize…</ToolbarButton>
           </>
         )}
         {isTeamScope && !imported && (
-          <ToolbarButton onClick={editAsDraft} icon={Boxes}>Edit as draft</ToolbarButton>
+          <>
+            <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus}>Add agent</ToolbarButton>
+            <ToolbarButton onClick={() => setStagesOpen(true)} icon={Layers}>Stages</ToolbarButton>
+            <ToolbarButton onClick={editAsDraft} icon={Boxes}>Edit as draft</ToolbarButton>
+          </>
         )}
-        <input ref={fileInputRef} type="file" accept="application/json,.json" onChange={onImportFile} style={{ display: 'none' }} />
-        <ToolbarButton onClick={() => fileInputRef.current?.click()} icon={Upload}>Import</ToolbarButton>
         <ToolbarButton onClick={exportBundle} icon={Download} disabled={!!imported}>Export</ToolbarButton>
       </div>
 
@@ -338,7 +377,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
         }}>
           <Boxes size={16} style={{ color: 'var(--eb-accent-primary)' }} />
           <span style={{ flex: 1, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-            Imported blueprint <strong>{imported.bundle?.name}</strong> ({imported.graph?.nodes?.length || 0} roles) — read-only preview.
+            Imported blueprint <strong>{imported.bundle?.name}</strong> ({imported.graph?.nodes?.length || 0} agents) — read-only preview.
           </span>
           <button onClick={continueImportAsDraft} style={{
             background: 'none', color: 'var(--eb-accent-primary)', border: '1px solid var(--eb-accent-primary)',
@@ -350,7 +389,12 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
             borderRadius: 'var(--eb-radius-md)', padding: '4px 12px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
             fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
           }}>Materialize as team…</button>
-          <button onClick={() => { setImported(null); setSelectedId(null); }} title="Close blueprint" style={{
+          <button onClick={() => {
+            setImported(null); setSelectedId(null);
+            // A sidebar-triggered import (#512) has no underlying team/draft to
+            // fall back to — send the parent back to the empty selection state.
+            if (isImportPreview && onImportClosed) onImportClosed();
+          }} title="Close blueprint" style={{
             background: 'none', border: 'none', color: 'var(--eb-text-secondary)', cursor: 'pointer', display: 'flex',
           }}><X size={16} /></button>
         </div>
@@ -394,6 +438,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
           key={selectedNode.id}
           node={selectedNode}
           nodes={displayGraph?.nodes || []}
+          stages={displayGraph?.stages || []}
+          teamId={isTeamScope && !imported ? scope : undefined}
           level={imported ? 'template' : displayGraph?.level}
           onClose={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
           onChanged={() => refetch()}
@@ -433,27 +479,39 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged }) {
         />
       )}
 
-      {addRoleOpen && isDraft && (
+      {addRoleOpen && (isDraft || (isTeamScope && !imported)) && (
         <AddRoleDialog
           onClose={() => setAddRoleOpen(false)}
-          onCreate={async ({ displayName, systemPrompt }) => {
-            const id = await draftOps.addRole({ displayName, systemPrompt });
+          onCreate={async ({ displayName, systemPrompt, templateId, template }) => {
+            // Draft: append the role to the bundle — from scratch (free-form
+            // prompt) or from a template (fields copied, {{vars}} raw, E2/AC-4).
+            // Live team: materialize as a team-member immediately (#585), passing
+            // the templateId so the backend substitutes per-member (AC-5). Errors
+            // propagate so the dialog can surface them and stay open (AC7 / E1).
+            const id = isDraft
+              ? await draftOps.addRole({ displayName, systemPrompt, template })
+              : await addLiveRole({ displayName, systemPrompt, templateId });
             setAddRoleOpen(false);
             setSelectedId(id);
           }}
         />
       )}
 
-      {stagesOpen && isDraft && (
+      {stagesOpen && (isDraft || (isTeamScope && !imported)) && (
         <StageManager
-          stages={draftBundle?.stages || []}
-          counts={(draftBundle?.roles || []).reduce((m, r) => {
-            if (r.stage) m[r.stage] = (m[r.stage] || 0) + 1;
-            return m;
-          }, {})}
-          ops={draftOps}
+          stages={isDraft ? (draftBundle?.stages || []) : (displayGraph?.stages || [])}
+          counts={isDraft
+            ? (draftBundle?.roles || []).reduce((m, r) => {
+                if (r.stage) m[r.stage] = (m[r.stage] || 0) + 1;
+                return m;
+              }, {})
+            : (displayGraph?.nodes || []).reduce((m, n) => {
+                if (n.stage) m[n.stage] = (m[n.stage] || 0) + 1;
+                return m;
+              }, {})}
+          ops={isDraft ? draftOps : liveStageOps}
           onClose={() => setStagesOpen(false)}
-          onChanged={() => {}}
+          onChanged={() => { if (!isDraft) refetch(); }}
         />
       )}
 
@@ -473,13 +531,86 @@ function AddRoleDialog({ onClose, onCreate }) {
   const [systemPrompt, setSystemPrompt] = useState('');
   const [notes, setNotes] = useState('');
   const [busy, setBusy] = useState(false);
+  // Surfaced when onCreate rejects (e.g. a live-team id collision, E1) so the
+  // dialog stays open with the error instead of failing silently (AC7).
+  const [submitError, setSubmitError] = useState(null);
   // LLM-assisted prompt authoring (see POST /api/agent-prompt/generate).
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState(null);
+  // Template picker (#586). `mode` toggles between picking a predefined role
+  // template and authoring one from scratch (AC-3 keeps the scratch path
+  // unchanged). Templates are loaded once; a load failure / empty catalog is
+  // non-blocking — the dialog falls back to scratch with a notice (E1).
+  const [mode, setMode] = useState('scratch');
+  const [templates, setTemplates] = useState([]);
+  const [templatesError, setTemplatesError] = useState(null);
+  const [selectedTemplateId, setSelectedTemplateId] = useState(null);
+  const [fullTemplate, setFullTemplate] = useState(null);
+  const [loadingTemplate, setLoadingTemplate] = useState(false);
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const resp = await apiCall('GET', '/api/agent-templates');
+        if (!live) return;
+        const list = Array.isArray(resp?.templates) ? resp.templates : [];
+        setTemplates(list);
+        // Lead with the picker when templates are available (AC-1); otherwise
+        // stay on the scratch path so the dialog is never blocked (E1).
+        if (list.length) setMode('template');
+      } catch (e) {
+        if (live) setTemplatesError(e.message || 'Could not load agent templates');
+      }
+    })();
+    return () => { live = false; };
+  }, []);
+  // Select a template → fetch its full definition and pre-fill the editable
+  // name + prompt (AC-2/AC-6). {{vars}} stay raw in the prompt preview — they
+  // are resolved per-member at materialise time.
+  const selectTemplate = async (id) => {
+    setSelectedTemplateId(id);
+    setSubmitError(null);
+    setLoadingTemplate(true);
+    setFullTemplate(null);
+    try {
+      const resp = await apiCall('GET', `/api/agent-templates/${encodeURIComponent(id)}`);
+      const t = resp?.template;
+      if (!t) throw new Error('Template not found');
+      setFullTemplate(t);
+      setDisplayName(t.displayName || '');
+      setSystemPrompt(t.promptTemplate || '');
+    } catch (e) {
+      setSubmitError(e.message || 'Could not load template');
+    } finally {
+      setLoadingTemplate(false);
+    }
+  };
+  // Switching template → from-scratch clears the template-derived fields (E3).
+  const switchMode = (next) => {
+    if (next === mode) return;
+    setMode(next);
+    setSubmitError(null);
+    if (next === 'scratch') {
+      setSelectedTemplateId(null);
+      setFullTemplate(null);
+      setDisplayName('');
+      setSystemPrompt('');
+    }
+  };
   const submit = async () => {
     if (!displayName.trim()) return;
+    if (mode === 'template' && (!selectedTemplateId || !fullTemplate)) {
+      setSubmitError('Pick an agent template first, or switch to “From scratch”.');
+      return;
+    }
     setBusy(true);
-    try { await onCreate({ displayName: displayName.trim(), systemPrompt }); }
+    setSubmitError(null);
+    try {
+      await onCreate(mode === 'template'
+        ? { displayName: displayName.trim(), templateId: selectedTemplateId, template: fullTemplate }
+        : { displayName: displayName.trim(), systemPrompt });
+    }
+    catch (e) { setSubmitError(e.message || 'Failed to add agent'); }
     finally { setBusy(false); }
   };
   const generate = async () => {
@@ -502,26 +633,84 @@ function AddRoleDialog({ onClose, onCreate }) {
     borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
     boxSizing: 'border-box', width: '100%', outline: 'none',
   };
+  const hasTemplates = templates.length > 0;
   return (
-    <SidePanel open onClose={onClose} title="Add role" width="480px">
+    <SidePanel open onClose={onClose} title="Add agent" width="480px">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+        {/* Source toggle (#586): pick a predefined role template or author one
+            from scratch. Hidden when no templates are available — the dialog
+            then behaves exactly as the pre-#586 from-scratch form (E1/AC-3). */}
+        {hasTemplates && (
+          <div style={{ display: 'flex', gap: 'var(--eb-space-1)', background: 'var(--eb-bg-app)',
+            border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: 2 }}>
+            {[['template', 'From a template'], ['scratch', 'From scratch']].map(([m, label]) => (
+              <button key={m} type="button" onClick={() => switchMode(m)} style={{
+                flex: 1, padding: '6px 10px', border: 'none', borderRadius: 'var(--eb-radius-sm)',
+                fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', cursor: 'pointer',
+                background: mode === m ? 'var(--eb-accent-primary)' : 'transparent',
+                color: mode === m ? 'var(--eb-text-inverted)' : 'var(--eb-text-secondary)',
+                fontWeight: mode === m ? 'var(--eb-font-medium)' : 'normal',
+              }}>{label}</button>
+            ))}
+          </div>
+        )}
+        {templatesError && (
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
+            Agent templates could not be loaded ({templatesError}). You can still add an agent from scratch.
+          </div>
+        )}
+
+        {/* Template picker (AC-1): icon, name, description, category. */}
+        {mode === 'template' && hasTemplates && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Agent template</span>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 220, overflowY: 'auto' }}>
+              {templates.map(t => {
+                const sel = t.id === selectedTemplateId;
+                const Icon = roleIcon(t.icon);
+                return (
+                  <button key={t.id} type="button" onClick={() => selectTemplate(t.id)} style={{
+                    textAlign: 'left', display: 'flex', flexDirection: 'column', gap: 2, cursor: 'pointer',
+                    background: sel ? 'var(--eb-bg-surface)' : 'var(--eb-bg-app)',
+                    border: `1px solid ${sel ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+                    borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)',
+                  }}>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <Icon size={16} style={{ color: 'var(--eb-text-secondary)', flexShrink: 0 }} />
+                      <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>{t.displayName}</span>
+                      {t.category && (
+                        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
+                          border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)', padding: '0 6px' }}>{t.category}</span>
+                      )}
+                    </span>
+                    {t.description && (
+                      <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.4 }}>{t.description}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Role name</span>
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Agent name</span>
           <input autoFocus value={displayName} onChange={e => setDisplayName(e.target.value)}
             placeholder="e.g. Business Analyst" style={field}
             onKeyDown={e => { if (e.key === 'Enter') submit(); }} />
         </label>
-        {/* Notes → LLM → agent prompt. The operator jots a few keywords and
-            lets the model draft a full prompt; the role name alone is often
-            enough context (e.g. "Business Analyst"). The draft lands in the
-            editable Agent-prompt field below, so it can be tweaked or replaced. */}
+
+        {/* Scratch path (AC-3, unchanged): Notes → LLM → editable agent prompt.
+            The operator jots a few keywords and lets the model draft a full
+            prompt; the role name alone is often enough context. */}
+        {mode === 'scratch' && (<>
         <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Notes for prompt generation (optional)</span>
           <textarea value={notes} onChange={e => setNotes(e.target.value)}
             placeholder="A few keywords — e.g. reviews COBOL, flags risky changes, hands off to the migration lead"
             style={{ ...field, minHeight: 64, resize: 'vertical' }} />
           <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
-            Generate uses the role name and these notes to draft an agent prompt via the configured LLM.
+            Generate uses the agent name and these notes to draft an agent prompt via the configured LLM.
             You can edit the result below.
           </span>
         </label>
@@ -544,9 +733,30 @@ function AddRoleDialog({ onClose, onCreate }) {
         <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Agent prompt (optional now)</span>
           <textarea value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)}
-            placeholder="What this role does… — or use Generate above to draft it"
+            placeholder="What this agent does… — or use Generate above to draft it"
             style={{ ...field, minHeight: 160, resize: 'vertical', fontFamily: 'var(--eb-font-mono)' }} />
         </label>
+        </>)}
+
+        {/* Template path (AC-2): read-only preview of the template's prompt with
+            `{{vars}}` kept raw — they resolve per-member at materialise time. */}
+        {mode === 'template' && (
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Agent prompt (from template)</span>
+            <textarea readOnly value={loadingTemplate ? 'Loading…' : (systemPrompt || (selectedTemplateId ? '' : 'Select an agent template above.'))}
+              style={{ ...field, minHeight: 160, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', opacity: 0.85 }} />
+            {fullTemplate && Array.isArray(fullTemplate.triggers) && fullTemplate.triggers.length > 0 && (
+              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
+                Includes {fullTemplate.triggers.length} trigger{fullTemplate.triggers.length === 1 ? '' : 's'}
+                {fullTemplate.sessionPolicy === 'per-invocation' ? ' · per-invocation session' : ''}. You can edit the agent name above.
+              </span>
+            )}
+          </label>
+        )}
+
+        {submitError && (
+          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error, #d33)' }}>{submitError}</div>
+        )}
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)' }}>
           <button onClick={onClose} disabled={busy} style={{
             background: 'none', color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',
@@ -555,7 +765,7 @@ function AddRoleDialog({ onClose, onCreate }) {
           <button onClick={submit} disabled={busy || !displayName.trim()} style={{
             background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
             borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
-          }}>Add role</button>
+          }}>Add agent</button>
         </div>
       </div>
     </SidePanel>

@@ -8,6 +8,9 @@
 
 import { apiCall } from '../../hooks/useApi';
 import { wouldCreateCycle } from './hierarchy-utils';
+import {
+  stagesAfterAdd, stagesAfterRename, stagesAfterRemove, stagesAfterReorder, membersToCascade,
+} from './stage-list-ops';
 
 // Read the current data-flow port block off a live agent's config as a plain
 // {inputs, outputs, dependsOn} shape (read-modify-write helper). The PUT replaces
@@ -52,6 +55,23 @@ async function liveDataFlow(roleId) {
     outputs: Array.isArray(df.outputs) ? df.outputs.slice() : [],
     dependsOn: Array.isArray(df.dependsOn) ? df.dependsOn.slice() : [],
   };
+}
+
+// Cascade a live stage rename/remove to every member whose per-agent `stage`
+// equals `oldName` (#674, AC4). `newStage=''` clears it (remove → inherit/none).
+// Best-effort + sequential (AC8): a failed member write is swallowed so the
+// rest still apply; a stranded reference renders as inherit/none in the picker.
+async function cascadeMemberStage(teamId, oldName, newStage) {
+  if (!oldName) return;
+  let members = [];
+  try {
+    const all = await apiCall('GET', '/api/agents');
+    members = membersToCascade(all, teamId, oldName);
+  } catch { return; /* can't enumerate — leave refs to self-heal in the picker */ }
+  for (const m of members) {
+    try { await apiCall('PUT', `/api/agents/${m.id}`, { stage: newStage || '' }); }
+    catch { /* best-effort: dangling ref self-heals to inherit/none */ }
+  }
 }
 
 // Live mode — every op is an HTTP call against the running agent. Its surface is
@@ -122,6 +142,41 @@ export const liveOps = {
     apiCall('PUT', `/api/agents/${roleId}`, { parentMemberId: parentId || null }),
   // Process stage band — empty clears (inherits from parent).
   setStage: (roleId, stage) => apiCall('PUT', `/api/agents/${roleId}`, { stage: stage || '' }),
+
+  // ── stages (live, #674): the ordered list drives the layered-DAG layout. It
+  // lives on the TEAM agent config (role 'team'); members carry a per-agent
+  // `stage`. These ops take the teamId as the first arg (bound by ProcessCanvas
+  // into a name-only wrapper for StageManager, so its contract is unchanged)
+  // and mirror makeDraftOps' semantics. rename/remove cascade to members via a
+  // BEST-EFFORT sequential loop (AC8): a per-member write failure is swallowed
+  // so the remaining members still update — a stranded `stage` reference simply
+  // renders as inherit/none in the dropdown (self-healing, display-only, no
+  // respawn — see AC6/AC8). Reorder never touches a member's stage (AC edge).
+  listStages: async (teamId) => {
+    const a = await apiCall('GET', `/api/agents/${teamId}`);
+    return Array.isArray(a?.stages) ? a.stages.slice() : [];
+  },
+  addStage: async (teamId, name) => {
+    const cur = await liveOps.listStages(teamId);
+    const next = stagesAfterAdd(cur, name);
+    if (next.length === cur.length) return; // no-op (blank or already present)
+    await apiCall('PUT', `/api/agents/${teamId}`, { stages: next });
+  },
+  renameStage: async (teamId, oldName, newName) => {
+    const cur = await liveOps.listStages(teamId);
+    const next = stagesAfterRename(cur, oldName, newName);
+    await apiCall('PUT', `/api/agents/${teamId}`, { stages: next });
+    await cascadeMemberStage(teamId, oldName, String(newName || '').trim());
+  },
+  removeStage: async (teamId, name) => {
+    const cur = await liveOps.listStages(teamId);
+    await apiCall('PUT', `/api/agents/${teamId}`, { stages: stagesAfterRemove(cur, name) });
+    await cascadeMemberStage(teamId, name, '');
+  },
+  reorderStages: async (teamId, names) => {
+    const cur = await liveOps.listStages(teamId);
+    await apiCall('PUT', `/api/agents/${teamId}`, { stages: stagesAfterReorder(cur, names) });
+  },
 
   // ── GitHub artifact ports (#380): produce flags + consumed channels ──
   // Produce flags drive the node badge/ports + the producer prompt block.
@@ -221,6 +276,51 @@ function slugRole(name, taken) {
   return id;
 }
 
+// Map a raw role TEMPLATE (from GET /api/agent-templates/:id) into a draft
+// bundle role (#586). The bundle role shape mirrors the template almost 1:1 —
+// both express triggers with `promptTemplate` — so this is a verbatim field
+// copy that deliberately KEEPS `{{vars}}` raw (E2): a draft has no team/repo
+// bound yet, so substitution is deferred to materialise time (parity with the
+// wizard path). `id`/`displayName` come from the user's (possibly edited) input.
+function templateToDraftRole(t, { id, displayName }) {
+  const role = {
+    id,
+    displayName: displayName || t.displayName || id,
+    role: 'team-member',
+    sessionPolicy: t.sessionPolicy === 'per-invocation' ? 'per-invocation' : 'persistent',
+    systemPrompt: t.promptTemplate || '',
+    triggers: (Array.isArray(t.triggers) ? t.triggers : []).map(tr => ({
+      id: tr.id,
+      type: tr.type,
+      enabled: tr.enabled !== false,
+      ...(tr.events ? { events: tr.events } : {}),
+      ...(tr.labelFilter ? { labelFilter: tr.labelFilter } : {}),
+      ...(tr.cron ? { cron: tr.cron } : {}),
+      ...(tr.at ? { at: tr.at } : {}),
+      ...(Array.isArray(tr.emits) ? { emits: tr.emits } : {}),
+      ...(tr.dataFlow ? { dataFlow: tr.dataFlow } : {}),
+      ...(tr.channel ? { channel: tr.channel } : {}),
+      ...(tr.description ? { description: tr.description } : {}),
+      // Bundle triggers store the prompt under `promptTemplate` (see
+      // templateToCustomRoles) — the template already uses that key.
+      promptTemplate: tr.promptTemplate || '',
+      ...(tr.preCheckScript ? { preCheckScript: tr.preCheckScript } : {}),
+      ...(tr.preCheckEnv ? { preCheckEnv: tr.preCheckEnv } : {}),
+    })),
+  };
+  // Declarative ports — carried verbatim so the draft graph renders the
+  // template's wiring and materialise reproduces it (parity with the wizard).
+  if (Array.isArray(t.inputs) && t.inputs.length) role.inputs = t.inputs;
+  if (Array.isArray(t.outputs) && t.outputs.length) role.outputs = t.outputs;
+  if (Array.isArray(t.dependsOn) && t.dependsOn.length) role.dependsOn = t.dependsOn;
+  if (typeof t.parent === 'string' && t.parent) role.parent = t.parent;
+  if (typeof t.stage === 'string' && t.stage) role.stage = t.stage;
+  if (Array.isArray(t.emits) && t.emits.length) role.emits = t.emits;
+  if (t.github && (t.github.producesPr || t.github.producesIssue)) role.github = t.github;
+  if (Array.isArray(t.channels) && t.channels.length) role.channels = t.channels;
+  return role;
+}
+
 /**
  * Draft mode — every op mutates the bundle and persists it.
  * @param {() => object} getBundle  returns the *current* bundle (use a ref to avoid staleness)
@@ -234,7 +334,8 @@ export function makeDraftOps(getBundle, persist) {
 
     // ── the draft itself ──
     // Rename the whole process (the bundle's top-level `name`). The backend
-    // slug/id is fixed at creation, so this only changes the display name.
+    // re-derives the draft's storage id from the new name (#581); the caller
+    // (persistDraft) follows the re-keyed id.
     renameDraft: async (name) => {
       const trimmed = String(name || '').trim();
       if (!trimmed) return;
@@ -291,18 +392,30 @@ export function makeDraftOps(getBundle, persist) {
     },
 
     // ── roles (draft-only; no live equivalent) ──
-    addRole: async ({ displayName, systemPrompt, sessionPolicy, github }) => {
+    // Free-form OR template-based (#586). When `template` (a full role template
+    // fetched from GET /api/agent-templates/:id) is supplied, its prompt,
+    // session policy, triggers and declarative ports are copied into the bundle
+    // role VERBATIM — `{{vars}}` (repoFullName/agentId/readyLabel/…) are kept
+    // RAW (E2), resolved per-member only at materialise time (the same point the
+    // wizard resolves them). The user-edited `displayName` still drives identity
+    // (AC-6): the id is slugged from it and uniqueness-resolved within the
+    // bundle (AC-7).
+    addRole: async ({ displayName, systemPrompt, sessionPolicy, github, template }) => {
       const b = clone(getBundle());
       b.roles = b.roles || [];
       const id = slugRole(displayName, new Set(b.roles.map(r => r.id)));
-      b.roles.push({
-        id, displayName: displayName || id, role: 'team-member',
-        sessionPolicy: sessionPolicy || 'persistent',
-        // A PR-reviewer role (#380) is a plain per-invocation agent that consumes a
-        // PR channel — the caller wires the channel after creation.
-        ...(github && (github.producesPr || github.producesIssue) ? { github } : {}),
-        systemPrompt: systemPrompt || '', triggers: [],
-      });
+      if (template && typeof template === 'object') {
+        b.roles.push(templateToDraftRole(template, { id, displayName }));
+      } else {
+        b.roles.push({
+          id, displayName: displayName || id, role: 'team-member',
+          sessionPolicy: sessionPolicy || 'persistent',
+          // A PR-reviewer role (#380) is a plain per-invocation agent that consumes a
+          // PR channel — the caller wires the channel after creation.
+          ...(github && (github.producesPr || github.producesIssue) ? { github } : {}),
+          systemPrompt: systemPrompt || '', triggers: [],
+        });
+      }
       await persist(b);
       return id;
     },

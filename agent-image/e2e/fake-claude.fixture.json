@@ -1,0 +1,25 @@
+{
+  "description": "Two-sided contract for the E2E fake `claude` shim (#666, docs/e2e-testing-concept.md §4.2). The PRODUCER is agent-image/e2e/claude; the CONSUMER is _map_stream_json_line in agent-image/scripts/agent-entrypoint.py (the live runtime parser). test_agent_entrypoint.py::FakeClaudeShim runs the shim as a subprocess for each case, feeds its stdout line-by-line through the real parser (threading one usage_sink like the runtime does), and asserts the normalized events equal expectedEvents. If either side changes shape, this fixture must change with it — the shim's stream-json can never silently drift from what the runtime accepts.",
+  "correlationId": "corr-fixture",
+  "sessionId": "e2e-fixture-session",
+  "cases": [
+    {
+      "name": "default reply",
+      "argv": ["-p", "hello there", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits"],
+      "expectedEvents": [
+        {"type": "system_init", "sessionId": "e2e-fixture-session", "model": "claude-fake-e2e", "correlationId": "corr-fixture"},
+        {"type": "assistant_text", "text": "Hello from the fake claude shim.", "correlationId": "corr-fixture"},
+        {"type": "result", "durationMs": 5, "tokens": {"input": 12, "output": 7, "cacheCreationInput": 0, "cacheReadInput": 3}, "contextTokens": {"input": 12, "output": 7, "cacheCreationInput": 0, "cacheReadInput": 3}, "modelUsage": null, "costUsd": 0.0, "sessionId": "e2e-fixture-session", "result": "Hello from the fake claude shim.", "correlationId": "corr-fixture"}
+      ]
+    },
+    {
+      "name": "marker echoed back for unambiguous assertion",
+      "argv": ["-p", "please answer [[E2E:tok-9]] now", "--output-format", "stream-json", "--verbose"],
+      "expectedEvents": [
+        {"type": "system_init", "sessionId": "e2e-fixture-session", "model": "claude-fake-e2e", "correlationId": "corr-fixture"},
+        {"type": "assistant_text", "text": "E2E-ACK:tok-9 Hello from the fake claude shim.", "correlationId": "corr-fixture"},
+        {"type": "result", "durationMs": 5, "tokens": {"input": 12, "output": 7, "cacheCreationInput": 0, "cacheReadInput": 3}, "contextTokens": {"input": 12, "output": 7, "cacheCreationInput": 0, "cacheReadInput": 3}, "modelUsage": null, "costUsd": 0.0, "sessionId": "e2e-fixture-session", "result": "E2E-ACK:tok-9 Hello from the fake claude shim.", "correlationId": "corr-fixture"}
+      ]
+    }
+  ]
+}

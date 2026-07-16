@@ -41,7 +41,7 @@ GIT_DIRTY  := $(shell git status --porcelain 2>/dev/null | grep -q . && echo dir
 # back to "unknown".
 export GIT_COMMIT GIT_DIRTY
 
-.PHONY: up down restart build agent-image update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers
+.PHONY: up down restart build agent-image update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers e2e e2e-up e2e-down
 
 # `up` depends on `agent-image` so a fresh bring-up always has the per-agent
 # runtime image built (the agent image is NOT a compose service — it's pulled
@@ -164,5 +164,25 @@ seed-mcp-servers:
 	@echo "Done. Pool mcp-servers contents:"
 	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/mcp-servers/
 
+# ── E2E (Playwright) ────────────────────────────────────────────────────────
+# The disposable `aee-e2e` compose project (#666, docs/e2e-testing-concept.md).
+# `make e2e` is the one-shot lane: Playwright's global-setup/teardown own the
+# full stack lifecycle (build images -> seed -> bootstrap -> up -> down -v), so
+# this just installs deps + the browser and runs the suite from a clean state.
+# `make e2e-up` / `make e2e-down` keep the stack alive for authoring (drive
+# Playwright UI mode against it with E2E_SKIP_STACK=1).
+e2e:
+	cd e2e && npm ci && npx playwright install --with-deps chromium && npx playwright test
+
+e2e-up:
+	./e2e/scripts/stack-up.sh
+	@echo ""
+	@echo "aee-e2e stack is up. Author tests with:"
+	@echo "  cd e2e && E2E_SKIP_STACK=1 npx playwright test --ui"
+	@echo "Tear down with: make e2e-down"
+
+e2e-down:
+	./e2e/scripts/stack-down.sh
+
 help:
-	@echo "Targets: up, down, restart, build, agent-image, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers"
+	@echo "Targets: up, down, restart, build, agent-image, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, e2e, e2e-up, e2e-down"

@@ -13,10 +13,15 @@ import { X, Plus } from 'lucide-react';
 //   siblings    — [{ id, displayName }] other nodes (parent options + names)
 //   inheritedStage — string shown as the placeholder when stage is empty
 //   showStage   — render the stage field here (false when the host owns stage)
+//   stages      — ordered defined stages; when the host owns a stage list (live
+//                 team, #674) the field is a dropdown of these + inherit/none +
+//                 an inline "type a new stage" that registers via ops.addStage
+//                 before assigning (so free-text can't create a phantom stage)
 //   ops         — edit adapter (liveOps | draftOps)
 //   onChanged   — called after any successful mutation
-export default function ConnectionsSection({ node, siblings = [], inheritedStage = '', showStage = true, ops, onChanged }) {
+export default function ConnectionsSection({ node, siblings = [], inheritedStage = '', showStage = true, stages = [], ops, onChanged }) {
   const [stage, setStage] = useState(node.stage || '');
+  const [newStage, setNewStage] = useState('');
   const gh = node.github || {};
   const [producesPr, setPr] = useState(!!gh.producesPr);
   const [producesIssue, setIssue] = useState(!!gh.producesIssue);
@@ -42,9 +47,23 @@ export default function ConnectionsSection({ node, siblings = [], inheritedStage
   const setParent = (v) => run(() => ops.setParent(node.id, v || null));
   const saveProduces = (pr, issue) => { setPr(pr); setIssue(issue); run(() => ops.setGithubProduces(node.id, { pr, issue })); };
   const chLabel = (c) => `${c.artifact === 'pr' ? 'PR' : 'Issue'} ${c.gate === 'human' ? '👤 ' : ''}${nameOf(c.from)}${c.label ? ` [${c.label}]` : ''}`;
-  const saveStage = () => {
-    if ((stage || '') === (node.stage || '') || !ops.setStage) return;
-    run(() => ops.setStage(node.id, stage));
+  const pickStage = (v) => {
+    setNewStage('');
+    setStage(v);
+    if ((v || '') === (node.stage || '') || !ops.setStage) return;
+    run(() => ops.setStage(node.id, v));
+  };
+  // A brand-new stage typed inline is registered on the ordered list first
+  // (ops.addStage) then assigned — so it appears in the layout, never a phantom.
+  const addNewStage = () => {
+    const s = newStage.trim();
+    if (!s || !ops.setStage) return;
+    setNewStage('');
+    setStage(s);
+    run(async () => {
+      if (ops.addStage) await ops.addStage(s);
+      await ops.setStage(node.id, s);
+    });
   };
 
   return (
@@ -60,15 +79,26 @@ export default function ConnectionsSection({ node, siblings = [], inheritedStage
 
       {showStage && ops.setStage && (
         <Field label="Stage (optional)">
-          <input value={stage} onChange={e => setStage(e.target.value)} onBlur={saveStage}
-            placeholder={!stage && inheritedStage ? `inherits: ${inheritedStage}` : 'e.g. Build'}
-            style={input}
-            onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
-          {!stage && inheritedStage && (
-            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-              Inherited from parent — leave empty to keep, or type to override.
-            </span>
-          )}
+          <select value={stages.includes(stage) ? stage : ''}
+            onChange={e => pickStage(e.target.value)} style={input}>
+            <option value="">{inheritedStage ? `— inherit (${inheritedStage}) —` : '— none —'}</option>
+            {stages.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+          <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+            <input value={newStage} onChange={e => setNewStage(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addNewStage(); } }}
+              placeholder="＋ or type a new stage name…" style={input} />
+            <button onClick={addNewStage} disabled={!newStage.trim()} style={{
+              display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0,
+              background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
+              borderRadius: 'var(--eb-radius-md)', padding: '6px 12px', fontFamily: 'inherit',
+              fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+              cursor: newStage.trim() ? 'pointer' : 'not-allowed',
+            }}><Plus size={13} /> Add</button>
+          </div>
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            Stages are the ordered columns of the flow — manage the order under <strong>Stages</strong> in the toolbar.
+          </span>
         </Field>
       )}
 
@@ -121,7 +151,7 @@ export default function ConnectionsSection({ node, siblings = [], inheritedStage
         </div>
       ) : (
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-          No dependencies or data flow yet — drag a role's ● port on the canvas to add one.
+          No dependencies or data flow yet — drag an agent's ● port on the canvas to add one.
         </div>
       )}
     </div>

@@ -15,8 +15,12 @@
 #
 # Usage:
 #   gh-as-agent commit [git-commit-args ...]
-#       runs `git commit --author="$AGENT_ID <$AGENT_ID@agents.local>" ...`
-#       (committer stays as the system identity)
+#       runs `git -c user.name=agent-$AGENT_ID -c user.email=agent-$AGENT_ID@ace.local
+#              commit --author="$AGENT_ID <$AGENT_ID@agents.local>" ...`
+#       Both author and committer are set inline, so the commit works even in a
+#       fresh context with no ambient git identity (Claude Code harness, manual
+#       shells). The author email keeps the poller's loop-protection marker;
+#       the committer mirrors the orchestrator's configure_git_identity().
 #
 #   gh-as-agent push [--repo <name>] [--branch <b>] [--no-set-upstream]
 #       push the current (or --branch) branch via the orchestrator
@@ -71,8 +75,18 @@ _post() {
       echo "gh-as-agent: done (branch $(printf '%s' "$body" | jq -r '.branch // "?"'))"
       return 0
     fi
-    local err
+    local err code branch_pushed
     err="$(printf '%s' "$body" | jq -r '.error // empty' 2>/dev/null || true)"
+    code="$(printf '%s' "$body" | jq -r '.code // empty' 2>/dev/null || true)"
+    branch_pushed="$(printf '%s' "$body" | jq -r '.branchPushed // empty' 2>/dev/null || true)"
+    # A missing GitHub token (HTTP 424, code=no-github-token) is not a git
+    # conflict — the branch is already pushed. Report it distinctly so the
+    # agent surfaces "no PAT in this environment" to the user, and does not
+    # retry with a raw 'git push'.
+    if [[ "$code" == "no-github-token" ]]; then
+      [[ -n "$branch_pushed" ]] && echo "gh-as-agent: branch '$branch_pushed' pushed OK; PR step skipped." >&2
+      die "no-github-token: ${err:-this environment has no GitHub token to open a PR}"
+    fi
     die "${err:-HTTP $http_code}"
   fi
   [[ "$http_code" == "200" ]] && { echo "$body"; return 0; }
@@ -113,7 +127,13 @@ case "${1:-}" in
           ;;
       esac
     done
-    exec git commit --author="${AGENT_ID} <${AGENT_ID}@agents.local>" "$@"
+    # Set committer identity inline (mirrors orchestrator's configure_git_identity)
+    # so the commit succeeds without an ambient git identity. The author keeps the
+    # @agents.local marker the poller reads for loop protection.
+    exec git \
+      -c user.name="agent-${AGENT_ID}" \
+      -c user.email="agent-${AGENT_ID}@ace.local" \
+      commit --author="${AGENT_ID} <${AGENT_ID}@agents.local>" "$@"
     ;;
 
   push)
@@ -130,6 +150,9 @@ case "${1:-}" in
     pairs=(setUpstream="$set_upstream")
     [[ -n "$repo" ]] && pairs+=(repo="$repo")
     [[ -n "$branch" ]] && pairs+=(branch="$branch")
+    # Forward the invocation's correlation id (#655 tier A) when the runtime set
+    # it, so the orchestrator can tie the resulting pr-events record to this run.
+    [[ -n "${AEE_CORRELATION_ID:-}" ]] && pairs+=(correlationId="$AEE_CORRELATION_ID")
     _post "/internal/agents/${AGENT_ID}/git/push" "$(_json "${pairs[@]}")"
     ;;
 
@@ -156,6 +179,10 @@ case "${1:-}" in
     [[ -n "$repo" ]] && pairs+=(repo="$repo")
     [[ -n "$base" ]] && pairs+=(base="$base")
     [[ -n "$body_text" ]] && pairs+=(body="$body_text")
+    # Forward the invocation's correlation id (#655 tier A) when the runtime set
+    # it, so the orchestrator can tie the pr-created record to the run that opened
+    # the PR (the exact "which run created this PR" signal).
+    [[ -n "${AEE_CORRELATION_ID:-}" ]] && pairs+=(correlationId="$AEE_CORRELATION_ID")
     _post "/internal/agents/${AGENT_ID}/git/pr" "$(_json "${pairs[@]}")"
     ;;
 

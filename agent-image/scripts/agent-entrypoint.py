@@ -37,7 +37,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from datetime import datetime
+from collections import deque, namedtuple
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -48,6 +49,10 @@ from zoneinfo import ZoneInfo
 REPO_DIR = Path("/repo")
 ACE_DIR = Path("/opt/ace")
 SCRIPTS_DIR = ACE_DIR / "scripts"
+# E2E only: a fake `claude` shim lives here. It is prepended to PATH exclusively
+# when AEE_FAKE_CLAUDE=1 (see _maybe_enable_fake_claude), so with the flag unset
+# the real Claude Code CLI wins and production behaviour is unchanged (#666).
+FAKE_CLAUDE_DIR = ACE_DIR / "e2e"
 SKILLS_DIR = ACE_DIR / "skills"
 MENTORSCRIPTS_DIR = ACE_DIR / "mentorscripts"
 CLAUDE_MD = ACE_DIR / "CLAUDE.md"
@@ -258,6 +263,43 @@ def _resolve_loopscript(value: str | None, rigor: str | None) -> Path | None:
 # Prompt assembly
 # ---------------------------------------------------------------------------
 
+def _expand_claude_imports(text: str, base_dir: Path, _depth: int = 0) -> str:
+    """Inline Claude Code `@path` imports the way cwd-discovery would.
+
+    The DM / trigger path runs `claude` with cwd set to the agent workspace, so
+    the CLI auto-discovers CLAUDE.md and expands its `@AGENT-PROMPT.md` import
+    natively. The BP dispatch path instead reads CLAUDE.md and passes it via
+    `--system-prompt`, where no import expansion happens — so we replicate it
+    here (#510). A `@path` token (line-leading or preceded by whitespace, and
+    not email-like — the char before `@` must be start-of-line or whitespace) is
+    replaced by the referenced file's content, resolved relative to the file that
+    contains it. Recurses up to 5 hops like the CLI; a missing target is left
+    verbatim.
+
+    Note: unlike the real CLI, this does NOT skip `@path` tokens inside fenced
+    code spans — it has no fence awareness. That is safe for the #510 use here
+    (the `## Agent Role` reference lives in prose, and incidental `@token`s that
+    would need skipping — e.g. `@cobol-agent:local` — don't resolve to a real
+    file and are therefore left verbatim anyway).
+    """
+    if _depth >= 5:
+        return text
+
+    def _replace(match: "re.Match[str]") -> str:
+        rel = match.group("path")
+        target = (base_dir / rel).resolve()
+        try:
+            body = target.read_text(encoding="utf-8")
+        except OSError:
+            return match.group(0)  # unresolved — leave the token as written
+        return match.group("lead") + _expand_claude_imports(body, target.parent, _depth + 1)
+
+    # Leading whitespace/start-of-line, then @<relative-path> (no scheme, not an
+    # email — require the char before @ to be start or whitespace).
+    pattern = re.compile(r"(?P<lead>^|\s)@(?P<path>[^\s@`]+)", re.MULTILINE)
+    return pattern.sub(_replace, text)
+
+
 def build_agent_prompt(context: dict, agent_id: str, bp_hash: str) -> tuple[str, str]:
     """Build system prompt and user prompt from loaded context.
 
@@ -265,11 +307,14 @@ def build_agent_prompt(context: dict, agent_id: str, bp_hash: str) -> tuple[str,
     """
     system_parts: list[str] = []
 
-    # CLAUDE.md
+    # CLAUDE.md — expand `@`-imports (e.g. `@AGENT-PROMPT.md`) up front because
+    # this path feeds the text to `--system-prompt`, which does not expand them.
     if CLAUDE_MD.exists():
+        claude_md = _expand_claude_imports(
+            CLAUDE_MD.read_text(encoding="utf-8"), CLAUDE_MD.parent
+        )
         system_parts.append(
-            f"# Project Instructions (CLAUDE.md)\n\n"
-            f"{CLAUDE_MD.read_text(encoding='utf-8')}"
+            f"# Project Instructions (CLAUDE.md)\n\n{claude_md}"
         )
 
     # LoopScript
@@ -420,36 +465,86 @@ def _load_dm_agent_config() -> dict:
         return {}
 
 
+def _knowledge_team_id() -> str:
+    """The KB team for knowledge writes from this runtime. An explicit
+    KNOWLEDGE_TEAM_ID (orchestrator spawn injection) wins; otherwise fall back to
+    config.json with the orchestrator's agentKnowledgeTeamId precedence
+    (parentTeamId → id when role=='team' → teamId → 'default'), mirroring the
+    `knowledge` CLI so the digest and CLI agree on scope outside the spawn env."""
+    env = os.environ.get("KNOWLEDGE_TEAM_ID", "")
+    if isinstance(env, str) and env.strip():
+        return env
+    cfg = _load_dm_agent_config()
+    parent = cfg.get("parentTeamId")
+    if isinstance(parent, str) and parent.strip():
+        return parent
+    if cfg.get("role") == "team":
+        cid = cfg.get("id")
+        if isinstance(cid, str) and cid.strip():
+            return cid
+    team = cfg.get("teamId")
+    if isinstance(team, str) and team.strip():
+        return team
+    return "default"
+
+
 # ---- per-room session pointer (drop-in compat with agent-runner.js) ----
+
+# Shown to the user when an explicit resume (#574) can't be honoured because the
+# Claude snapshot is gone (pruned / incompatible after a CLI upgrade / lost with
+# the container). AC6: never silently start a fresh empty session in its place.
+RESUME_UNAVAILABLE_NOTICE = (
+    "This session can't be resumed: the saved conversation snapshot is no "
+    "longer available (it may have been pruned, become incompatible after an "
+    "update, or been lost with the container). No new, empty session was "
+    "started in its place — please start a new conversation if you need one."
+)
+
 
 def _session_pointer_file(room_id: str) -> Path:
     return _agent_workdir() / "sessions" / f"{room_id}.current.json"
 
 
 def _read_session_pointer(room_id: str) -> str | None:
+    return _read_session_pointer_full(room_id)[0]
+
+
+def _read_session_pointer_full(room_id: str) -> tuple[str | None, bool]:
+    """Return (sessionId, resumeRequested) from the pointer.
+
+    `resumeRequested` (#574) is the one-shot flag set by the Sessions-tab resume
+    action: when True and `--resume` fails, the caller must surface an error
+    rather than silently start a fresh session (AC6). It defaults False for the
+    normal run-end pointer the runner writes, so ordinary DM continuity is
+    unaffected.
+    """
     p = _session_pointer_file(room_id)
     if not p.exists():
-        return None
+        return None, False
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
         sid = data.get("sessionId")
-        return sid if isinstance(sid, str) and sid else None
+        sid = sid if isinstance(sid, str) and sid else None
+        return sid, bool(data.get("resumeRequested"))
     except Exception as exc:
         print(f"[Runner] readSessionPointer {room_id}: {exc}", file=sys.stderr)
-        return None
+        return None, False
 
 
-def _write_session_pointer(room_id: str, session_id: str) -> None:
+def _write_session_pointer(room_id: str, session_id: str,
+                           resume_requested: bool = False) -> None:
     if not session_id:
         return
     p = _session_pointer_file(room_id)
     updated_at = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    record = {"sessionId": session_id, "updatedAt": updated_at}
+    # Persist the flag only while it's set; a normal run-end write omits it,
+    # which naturally clears a prior resume-intent once the resume has landed.
+    if resume_requested:
+        record["resumeRequested"] = True
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(
-            json.dumps({"sessionId": session_id, "updatedAt": updated_at}, indent=2),
-            encoding="utf-8",
-        )
+        p.write_text(json.dumps(record, indent=2), encoding="utf-8")
     except Exception as exc:
         print(f"[Runner] writeSessionPointer: {exc}", file=sys.stderr)
     # Mirror to the control plane (#185) so the admin reads it under per-agent
@@ -475,6 +570,121 @@ def _session_log_file(room_id: str) -> Path:
     return _agent_workdir() / "sessions" / f"{room_id}.jsonl"
 
 
+# ---- Size-based session-log rotation (#673) ----
+#
+# Room logs are append-only; before this they grew unbounded (one hit 18.9 MB and
+# wedged the control-plane mirror). We rotate the live file to
+# sessions/<roomId>.<seq>.jsonl once it crosses a size threshold, then bound the
+# archive count/age. These pure helpers mirror orchestrator/session-rotation.js
+# byte-for-byte (archiveName / parseArchiveSeq / nextArchiveSeq / shouldRotate /
+# planPrune) so both sides of the mirror rotate under the same policy.
+
+_SESSION_ROTATE_DEFAULTS = {"maxBytes": 8_000_000, "maxCount": 5, "maxAgeDays": 30}
+
+
+def _session_rotation_config() -> dict:
+    def _num(v, dflt):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return dflt
+
+    max_bytes = _num(os.environ.get("AEE_SESSION_ROTATE_BYTES"),
+                     _SESSION_ROTATE_DEFAULTS["maxBytes"])
+    if not (max_bytes > 0):
+        max_bytes = _SESSION_ROTATE_DEFAULTS["maxBytes"]
+    max_count = _num(os.environ.get("AEE_SESSION_ROTATE_KEEP"),
+                     _SESSION_ROTATE_DEFAULTS["maxCount"])
+    if not (max_count >= 0):
+        max_count = _SESSION_ROTATE_DEFAULTS["maxCount"]
+    max_age_days = _num(os.environ.get("AEE_SESSION_ROTATE_MAX_AGE_DAYS"),
+                        _SESSION_ROTATE_DEFAULTS["maxAgeDays"])
+    if not (max_age_days >= 0):
+        max_age_days = _SESSION_ROTATE_DEFAULTS["maxAgeDays"]
+    return {"maxBytes": int(max_bytes), "maxCount": int(max_count),
+            "maxAgeDays": int(max_age_days)}
+
+
+def _archive_name(room_id: str, seq: int) -> str:
+    return f"{room_id}.{seq}.jsonl"
+
+
+def _parse_archive_seq(name: str, room_id: str):
+    """Integer archive seq of `name` for `room_id`, else None. Strict: only
+    `<roomId>.<n>.jsonl` with n a canonical positive integer — never the live
+    file or the session pointer."""
+    if not isinstance(name, str):
+        return None
+    m = re.match(rf"^{re.escape(room_id)}\.(\d+)\.jsonl$", name)
+    if not m:
+        return None
+    digits = m.group(1)
+    seq = int(digits)
+    if seq < 1 or str(seq) != digits:  # reject 0 and leading-zero forms
+        return None
+    return seq
+
+
+def _list_archives(names, room_id: str) -> list:
+    """[(seq, name)] ascending by seq (oldest→newest = chronological)."""
+    out = []
+    for name in names or []:
+        seq = _parse_archive_seq(name, room_id)
+        if seq is not None:
+            out.append((seq, name))
+    out.sort(key=lambda t: t[0])
+    return out
+
+
+def _next_archive_seq(names, room_id: str) -> int:
+    archives = _list_archives(names, room_id)
+    return archives[-1][0] + 1 if archives else 1
+
+
+def _should_rotate(size: int, max_bytes: int) -> bool:
+    return max_bytes > 0 and size >= max_bytes
+
+
+def _plan_prune(archives, max_count: int, max_age_ms: float, now_ms: float) -> list:
+    """archives: [(seq, name, mtime_ms)] → list of names to delete. Union of the
+    age rule and the newest-`max_count` rule; 0 disables that axis."""
+    lst = sorted(archives, key=lambda t: t[0])  # oldest first
+    doomed = []
+    if max_age_ms > 0:
+        for seq, name, mtime_ms in lst:
+            if now_ms - mtime_ms > max_age_ms:
+                doomed.append(name)
+    if max_count > 0 and len(lst) > max_count:
+        for seq, name, mtime_ms in lst[: len(lst) - max_count]:
+            if name not in doomed:
+                doomed.append(name)
+    return doomed
+
+
+def _prune_local_session_archives(sessions_dir: Path, room_id: str, cfg: dict) -> None:
+    """Delete this room's archives that fall outside the retention policy.
+    Best-effort — one failed unlink never blocks the rest."""
+    try:
+        names = [p.name for p in sessions_dir.iterdir()]
+    except OSError:
+        return
+    archives = []
+    for seq, name in _list_archives(names, room_id):
+        try:
+            mtime_ms = (sessions_dir / name).stat().st_mtime * 1000.0
+        except OSError:
+            continue
+        archives.append((seq, name, mtime_ms))
+    doomed = _plan_prune(archives, cfg["maxCount"],
+                         cfg["maxAgeDays"] * 24 * 60 * 60 * 1000.0,
+                         time.time() * 1000.0)
+    for name in doomed:
+        try:
+            (sessions_dir / name).unlink()
+        except OSError:
+            pass
+
+
 # ---- Control-plane state push (#185) ----
 #
 # With per-agent volume isolation the orchestrator/admin-console can no longer
@@ -498,6 +708,12 @@ class _StatePushClient:
         self._base = base_url.rstrip("/")
         self._q: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self._sent: dict[str, int] = {}  # roomId -> bytes acked by the orchestrator
+        self._flush_warned: set[str] = set()  # rooms with an active failure warning
+        # Per-room FIFO of frozen archive sources awaiting drain+control-rotation
+        # (#673). Each entry is {path, seq, size}; the flush loop drains each
+        # fully into the control-plane live copy, commands the control rotation,
+        # then moves on — so both sides' archives end byte-identical.
+        self._rot_queue: dict[str, deque] = {}
         self._thread = threading.Thread(target=self._run, name="state-push", daemon=True)
         self._started = False
 
@@ -505,6 +721,9 @@ class _StatePushClient:
         if not self._started:
             self._started = True
             self._thread.start()
+            # Flush any usage records left on the spool by a previous run that
+            # crashed / was killed while the orchestrator was unreachable (#654).
+            self._q.put(("usage", None))
 
     def push_status(self, data: dict) -> None:
         self._q.put(("status", dict(data)))
@@ -518,11 +737,24 @@ class _StatePushClient:
     def mark_session_dirty(self, room_id: str) -> None:
         self._q.put(("session", room_id))
 
+    def mark_session_rotated(self, room_id: str, archive_path: str,
+                             seq: int, size: int) -> None:
+        # The writer has frozen `archive_path` (the pre-rotation live file). Ask
+        # the push thread to drain it to control and command the matching
+        # control-plane rotation before it touches the new live file (#673).
+        self._q.put(("rotate", (room_id, archive_path, seq, size)))
+
     def push_pointer(self, room_id: str, session_id: str | None,
                      updated_at: str | None) -> None:
         # session_id="" / None means "clear" (drops the admin's Session-aktiv
         # badge after a reset). Last write per room wins within a debounce tick.
         self._q.put(("pointer", (room_id, session_id or "", updated_at or "")))
+
+    def drain_usage(self) -> None:
+        # Nudge the push thread to flush the durable usage spool (#654). The
+        # records themselves are already on disk (survive an orchestrator
+        # outage / container restart); this only asks the thread to try sending.
+        self._q.put(("usage", None))
 
     def _run(self) -> None:
         while True:
@@ -543,6 +775,7 @@ class _StatePushClient:
             running_sessions = None
             dirty: list[str] = []
             pointers: dict[str, tuple[str, str]] = {}
+            drain_usage = False
             for kind, payload in items:
                 if kind == "status":
                     status_data = payload
@@ -550,9 +783,17 @@ class _StatePushClient:
                     running_sessions = payload  # last write within the tick wins
                 elif kind == "session" and payload not in dirty:
                     dirty.append(payload)  # type: ignore[arg-type]
+                elif kind == "rotate":
+                    room_id, apath, seq, size = payload  # type: ignore[misc]
+                    self._rot_queue.setdefault(room_id, deque()).append(
+                        {"path": apath, "seq": seq, "size": size})
+                    if room_id not in dirty:
+                        dirty.append(room_id)  # flush drains the queue then live
                 elif kind == "pointer":
                     room_id, sid, upd = payload  # type: ignore[misc]
                     pointers[room_id] = (sid, upd)
+                elif kind == "usage":
+                    drain_usage = True  # coalesce many nudges into one drain
             try:
                 if status_data is not None:
                     self._post_status(status_data)
@@ -562,6 +803,8 @@ class _StatePushClient:
                     self._flush_session(room_id)
                 for room_id, (sid, upd) in pointers.items():
                     self._post_pointer(room_id, sid, upd)
+                if drain_usage:
+                    self._drain_usage_spool()
             except Exception as exc:  # never let the push thread die
                 print(f"[Runner] state-push tick failed: {exc}", file=sys.stderr)
 
@@ -581,43 +824,208 @@ class _StatePushClient:
         }).encode("utf-8")
         self._post(f"/internal/agents/{self._agent_id}/session-pointer", body)
 
+    def _post_usage(self, record: dict) -> tuple[int, str]:
+        body = json.dumps(record).encode("utf-8")
+        return self._post(f"/internal/agents/{self._agent_id}/usage", body)
+
+    def _drain_usage_spool(self) -> None:
+        """Send every spooled usage record; keep the ones that fail for the next
+        drain (#654). The spool is the durable buffer — records survive an
+        orchestrator outage or a container restart here, so this is at-least-once
+        delivery. Runs under the spool lock so it can't race a concurrent append."""
+        with _usage_spool_lock:
+            records = _read_usage_spool()
+            if not records:
+                return
+            remaining: list[dict] = []
+            stop = False
+            for i, rec in enumerate(records):
+                if stop:
+                    remaining.append(rec)
+                    continue
+                status, _resp = self._post_usage(rec)
+                if status == 200:
+                    continue  # acked — drop from the spool
+                # First failure: orchestrator down/erroring. Keep this and every
+                # later record and stop hammering until the next drain nudge.
+                remaining.append(rec)
+                stop = True
+            _write_usage_spool(remaining)
+
+    # Raw bytes per session-events POST. The orchestrator destroys request
+    # bodies over 16 MB and base64 inflates by 4/3, so an unbounded tail (e.g.
+    # the full-history resend after a restart, when `_sent` starts empty on a
+    # room whose log has grown past ~12 MB) would be dropped on every attempt
+    # and the control-plane copy would freeze permanently. Chunking bounds
+    # every POST; the probe below avoids resending history at all.
+    _SESSION_CHUNK_MAX = 4_000_000
+
+    def _drain_rotations(self, room_id: str) -> bool:
+        """Push every queued frozen archive fully into the control-plane live
+        copy, then command the matching control rotation (#673). Returns True
+        when the queue is empty (caller may proceed to the live file), False on
+        a transient failure (retry next tick — the live file is left untouched
+        so we never sync it ahead of a pending archive). Each archive is drained
+        from `_sent[room]` (control's live size) up to its frozen size, so the
+        control archive ends byte-identical to ours."""
+        q = self._rot_queue.get(room_id)
+        while q:
+            entry = q[0]
+            apath, seq, asize = entry["path"], entry["seq"], entry["size"]
+            base = self._sent.get(room_id)
+            if base is None:
+                base = self._probe_remote_offset(room_id, asize)
+                if base is None:
+                    return False  # transient
+                self._sent[room_id] = base
+            if base > asize:
+                base = 0  # control ahead of a shorter archive — resend from top
+            while base < asize:
+                try:
+                    with open(apath, "rb") as fh:
+                        fh.seek(base)
+                        tail = fh.read(self._SESSION_CHUNK_MAX)
+                except OSError:
+                    return False
+                if not tail:
+                    break
+                status, resp = self._post_session_events(room_id, base, tail)
+                if status != 200:
+                    self._warn_flush_failure(room_id, f"HTTP {status or 'unreachable'}")
+                    return False
+                try:
+                    j = json.loads(resp)
+                except Exception:
+                    return False
+                if j.get("ok"):
+                    base = int(j.get("offset", base + len(tail)))
+                    self._sent[room_id] = base
+                elif "expected" in j:
+                    self._sent[room_id] = int(j["expected"])
+                    base = self._sent[room_id]
+                else:
+                    return False
+            # Control now holds the full archive content in its live copy —
+            # command the rotation at this boundary (idempotent by seq).
+            status, resp = self._post_session_rotate(room_id, base, seq)
+            if status != 200:
+                self._warn_flush_failure(room_id, f"rotate HTTP {status or 'unreachable'}")
+                return False
+            try:
+                j = json.loads(resp)
+            except Exception:
+                return False
+            if j.get("ok"):
+                q.popleft()
+                self._sent[room_id] = 0  # control live is empty after rotation
+            elif "expected" in j:
+                self._sent[room_id] = int(j["expected"])  # drain more, then retry
+            else:
+                return False
+        return True
+
     def _flush_session(self, room_id: str) -> None:
+        # Drain any pending rotations first so we never sync the new live file
+        # ahead of a frozen archive still owed to the control plane (#673).
+        if not self._drain_rotations(room_id):
+            self._q.put(("session", room_id))  # retry next tick
+            return
         p = _session_log_file(room_id)
         try:
             size = p.stat().st_size
         except OSError:
             return
-        base = self._sent.get(room_id, 0)
+        base = self._sent.get(room_id)
+        if base is None:
+            # First flush since process start: the control-plane copy usually
+            # already holds (most of) this room's log, so ask the orchestrator
+            # where it ends instead of resending from byte 0. An empty append
+            # at our local size either confirms sync (ok) or returns the
+            # control copy's size as `expected` — we resume from there.
+            base = self._probe_remote_offset(room_id, size)
+            if base is None:
+                return  # transient — retry on the next append
+            self._sent[room_id] = base
         if base > size:
             base = 0  # local file truncated/rotated — resend from the top
-        if base >= size:
-            return
-        try:
-            with p.open("rb") as fh:
-                fh.seek(base)
-                tail = fh.read()
-        except OSError:
-            return
-        body = json.dumps({
-            "roomId": room_id,
-            "baseOffset": base,
-            "dataB64": base64.b64encode(tail).decode("ascii"),
-        }).encode("utf-8")
-        status, resp = self._post(
-            f"/internal/agents/{self._agent_id}/session-events", body,
-        )
+        # Chunked catch-up: bounded POSTs so a large backlog can never exceed
+        # the orchestrator's body cap.
+        while base < size:
+            try:
+                with p.open("rb") as fh:
+                    fh.seek(base)
+                    tail = fh.read(self._SESSION_CHUNK_MAX)
+            except OSError:
+                return
+            if not tail:
+                break
+            status, resp = self._post_session_events(room_id, base, tail)
+            if status != 200:
+                self._warn_flush_failure(room_id, f"HTTP {status or 'unreachable'}")
+                return  # transient — retry on the next append
+            try:
+                j = json.loads(resp)
+            except Exception:
+                return
+            if j.get("ok"):
+                base = int(j.get("offset", base + len(tail)))
+                self._sent[room_id] = base
+            elif "expected" in j:
+                # Gap: control file is behind us — rewind and resend next tick.
+                self._sent[room_id] = int(j["expected"])
+                self._q.put(("session", room_id))
+                return
+            else:
+                return
+        self._flush_warned.discard(room_id)
+
+    def _probe_remote_offset(self, room_id: str, local_size: int) -> int | None:
+        """Where does the control-plane copy of this room's log end?
+        Returns None on a transient error (caller retries next tick)."""
+        status, resp = self._post_session_events(room_id, local_size, b"")
         if status != 200:
-            return  # transient — retry on the next append
+            self._warn_flush_failure(room_id, f"probe HTTP {status or 'unreachable'}")
+            return None
         try:
             j = json.loads(resp)
         except Exception:
-            return
+            return None
         if j.get("ok"):
-            self._sent[room_id] = int(j.get("offset", base + len(tail)))
-        elif "expected" in j:
-            # Gap: control file is behind us — rewind and resend next tick.
-            self._sent[room_id] = int(j["expected"])
-            self._q.put(("session", room_id))
+            return local_size  # in sync (or control is ahead of a truncated local)
+        if "expected" in j:
+            return int(j["expected"])
+        return None
+
+    def _post_session_events(self, room_id: str, base: int, data: bytes) -> tuple[int, str]:
+        body = json.dumps({
+            "roomId": room_id,
+            "baseOffset": base,
+            "dataB64": base64.b64encode(data).decode("ascii"),
+        }).encode("utf-8")
+        return self._post(f"/internal/agents/{self._agent_id}/session-events", body)
+
+    def _post_session_rotate(self, room_id: str, base: int, seq: int) -> tuple[int, str]:
+        # Command the control-plane rotation: archive its live copy to
+        # <roomId>.<seq>.jsonl at `base` (our fully-synced boundary), #673.
+        body = json.dumps({
+            "roomId": room_id,
+            "rotate": True,
+            "baseOffset": base,
+            "seq": seq,
+        }).encode("utf-8")
+        return self._post(f"/internal/agents/{self._agent_id}/session-events", body)
+
+    def _warn_flush_failure(self, room_id: str, detail: str) -> None:
+        # Once per room until the next successful flush — visible in the
+        # container log without spamming a line per debounce tick while the
+        # orchestrator is down.
+        if room_id in self._flush_warned:
+            return
+        self._flush_warned.add(room_id)
+        print(
+            f"[Runner] session-log push to control plane failing for {room_id}: {detail}",
+            file=sys.stderr,
+        )
 
     def _post(self, route: str, body: bytes) -> tuple[int, str]:
         url = f"{self._base}{route}"
@@ -638,6 +1046,75 @@ class _StatePushClient:
 
 
 _push_client: _StatePushClient | None = None
+
+# ---- durable usage-record spool (#654) ----
+#
+# One record per claude invocation is written here at result time and drained to
+# the orchestrator's ingest endpoint by the push thread. The spool is the
+# durability boundary: if the orchestrator is unreachable the record stays on
+# disk and is retried on the next drain nudge and on process start, so a token
+# record is never lost to a transient outage. Capped so a long outage can't grow
+# it without bound (oldest records win the cap — they are the ones already tried).
+_usage_spool_lock = threading.Lock()
+_USAGE_SPOOL_MAX = 5000
+
+
+def _usage_spool_file() -> Path:
+    return _agent_workdir() / "usage-spool.jsonl"
+
+
+def _read_usage_spool() -> list[dict]:
+    p = _usage_spool_file()
+    try:
+        if not p.exists():
+            return []
+        out: list[dict] = []
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue  # skip a corrupt line rather than lose the whole spool
+            if isinstance(rec, dict):
+                out.append(rec)
+        return out
+    except Exception as exc:
+        print(f"[Runner] usage spool read failed: {exc}", file=sys.stderr)
+        return []
+
+
+def _write_usage_spool(records: list[dict]) -> None:
+    p = _usage_spool_file()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if not records:
+            p.unlink(missing_ok=True)
+            return
+        if len(records) > _USAGE_SPOOL_MAX:
+            records = records[-_USAGE_SPOOL_MAX:]
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+        tmp.replace(p)
+    except Exception as exc:
+        print(f"[Runner] usage spool write failed: {exc}", file=sys.stderr)
+
+
+def _spool_usage_record(record: dict) -> None:
+    """Durably append one usage record and nudge the push thread to drain it.
+    Best-effort: a spool failure is logged but never breaks the claude run."""
+    try:
+        with _usage_spool_lock:
+            records = _read_usage_spool()
+            records.append(record)
+            _write_usage_spool(records)
+    except Exception as exc:
+        print(f"[Runner] usage spool append failed: {exc}", file=sys.stderr)
+        return
+    pc = _get_push_client()
+    if pc:
+        pc.drain_usage()
 
 
 def _get_push_client() -> _StatePushClient | None:
@@ -661,9 +1138,41 @@ def _append_event(room_id: str, event: dict) -> None:
               **event}
         with f.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(ev) + "\n")
+        pc = _get_push_client()
+        # Rotate once the live file crosses the size threshold (#673). We are the
+        # single writer, so an atomic rename is race-free: the push thread's next
+        # open() sees either the frozen archive or the fresh live file. We freeze
+        # the archive here (no further appends touch it), hand it to the push
+        # client to drain fully + command the control-plane rotation, then prune.
+        cfg = _session_rotation_config()
+        try:
+            size = f.stat().st_size
+        except OSError:
+            size = 0
+        if _should_rotate(size, cfg["maxBytes"]):
+            sessions_dir = f.parent
+            try:
+                names = [p.name for p in sessions_dir.iterdir()]
+            except OSError:
+                names = []
+            seq = _next_archive_seq(names, room_id)
+            archive = sessions_dir / _archive_name(room_id, seq)
+            try:
+                os.replace(f, archive)
+            except OSError as exc:
+                print(f"[Runner] session-log rotate failed: {exc}", file=sys.stderr)
+            else:
+                archived_size = 0
+                try:
+                    archived_size = archive.stat().st_size
+                except OSError:
+                    pass
+                _prune_local_session_archives(sessions_dir, room_id, cfg)
+                if pc:
+                    pc.mark_session_rotated(room_id, str(archive), seq, archived_size)
+                return
         # Mirror to the control plane (#185). The pusher re-reads this file's
         # tail, so it stays byte-exact; queued + debounced, never blocks here.
-        pc = _get_push_client()
         if pc:
             pc.mark_session_dirty(room_id)
     except Exception as exc:
@@ -671,9 +1180,97 @@ def _append_event(room_id: str, event: dict) -> None:
         print(f"[Runner] session-log append failed: {exc}", file=sys.stderr)
 
 
-def _map_stream_json_line(line: str, correlation_id: str) -> list[dict]:
+def _normalize_usage_tokens(usage: dict) -> dict:
+    """Shape a Claude Code stream-json `usage` object (assistant-message or
+    result-event, same field names either way) into the token-count dict used
+    throughout the log/session pipeline. `input`/`output` pass through as-is
+    (may be None); the cache fields default to 0 since prompt caching often
+    omits them entirely on a cache-miss call."""
+    return {
+        "input": usage.get("input_tokens"),
+        "output": usage.get("output_tokens"),
+        "cacheCreationInput": usage.get("cache_creation_input_tokens") or 0,
+        "cacheReadInput": usage.get("cache_read_input_tokens") or 0,
+    }
+
+
+def _normalize_model_usage(model_usage: dict | None) -> dict:
+    """Shape the CLI result-event `modelUsage` (a per-model map with camelCase
+    `inputTokens`/`outputTokens`/`cacheCreationInputTokens`/`cacheReadInputTokens`
+    — plus cost/window fields we drop) into the same four-class token dict used
+    everywhere else, keyed by model name. Cost is intentionally NOT carried:
+    view 1 is tokens-only (#654 AC4). Preserves model insertion order."""
+    out: dict = {}
+    if not isinstance(model_usage, dict):
+        return out
+    for model, u in model_usage.items():
+        if not isinstance(u, dict):
+            continue
+        out[model] = {
+            "input": u.get("inputTokens") or 0,
+            "output": u.get("outputTokens") or 0,
+            "cacheCreationInput": u.get("cacheCreationInputTokens") or 0,
+            "cacheReadInput": u.get("cacheReadInputTokens") or 0,
+        }
+    return out
+
+
+def build_usage_record(ctx: dict) -> dict:
+    """Pure assembler for a §4.1 token-usage record (#654). Takes a run-context
+    dict (identity + trigger/github/git provenance + the captured `resultEvent`
+    from _map_stream_json_line) and returns the canonical record. This schema is
+    the shared emitter↔aggregator contract, asserted from both this suite and
+    admin-console/api/usage-summary.test.js via usage-summary.fixture.json —
+    change both sides in one commit.
+
+    `totalCostUsd` is stored opaque for possible future use but is never
+    surfaced by the aggregator/UI (tokens-only, AC4). Missing token counts
+    default to 0 so downstream summation never sees None."""
+    result = ctx.get("resultEvent") or {}
+    tokens = result.get("tokens") or {}
+    return {
+        "ts": ctx.get("ts"),
+        "agentId": ctx.get("agentId"),
+        "teamId": ctx.get("teamId"),
+        "roleId": ctx.get("roleId"),
+        "flowInstanceId": ctx.get("flowInstanceId"),
+        "provider": ctx.get("provider"),
+        "correlationId": ctx.get("correlationId"),
+        "sessionId": ctx.get("sessionId"),
+        "trigger": ctx.get("trigger"),
+        "github": ctx.get("github"),
+        "git": ctx.get("git"),
+        "tokens": {
+            "input": tokens.get("input") or 0,
+            "output": tokens.get("output") or 0,
+            "cacheCreationInput": tokens.get("cacheCreationInput") or 0,
+            "cacheReadInput": tokens.get("cacheReadInput") or 0,
+        },
+        "modelUsage": _normalize_model_usage(result.get("modelUsage")),
+        "durationMs": result.get("durationMs"),
+        "totalCostUsd": result.get("costUsd"),
+    }
+
+
+def _map_stream_json_line(line: str, correlation_id: str,
+                          usage_sink: dict | None = None) -> list[dict]:
     """Translate one NDJSON line from `claude --output-format stream-json --verbose`
     into normalized event objects. Mirrors session-log.js mapStreamJsonLine.
+
+    `usage_sink`, when given, is mutated in place with the normalized usage of
+    the most recent `assistant` message seen (#509): a single user-visible
+    turn commonly drives several internal API round-trips (one per tool call
+    in the agentic loop), and each shows up as its own `assistant` stream-json
+    event carrying that individual call's `message.usage` — the closest
+    available signal to "what the model actually holds in context" at a given
+    point, unlike the turn-wide `result` event's `usage`, which is an
+    aggregate/duplicate across every one of those round-trips (confirmed
+    against a live `claude --output-format stream-json` invocation of this
+    repo's pinned CLI version; see anthropics/claude-code #6805 for the same
+    behavior reported upstream). The caller threads one `usage_sink` dict
+    through an entire `claude` invocation so that by the time the `result`
+    event arrives, it holds the last individual call's usage rather than the
+    turn's summed total.
     """
     try:
         parsed = json.loads(line)
@@ -708,6 +1305,9 @@ def _map_stream_json_line(line: str, correlation_id: str) -> list[dict]:
 
     elif ptype == "assistant":
         msg = parsed.get("message") or {}
+        if usage_sink is not None and isinstance(msg.get("usage"), dict):
+            usage_sink.clear()
+            usage_sink.update(_normalize_usage_tokens(msg["usage"]))
         for block in (msg.get("content") or []):
             if not isinstance(block, dict):
                 continue
@@ -754,10 +1354,21 @@ def _map_stream_json_line(line: str, correlation_id: str) -> list[dict]:
         events.append({
             "type": "result",
             "durationMs": parsed.get("duration_ms"),
-            "tokens": {"input": usage.get("input_tokens"),
-                       "output": usage.get("output_tokens"),
-                       "cacheCreationInput": usage.get("cache_creation_input_tokens") or 0,
-                       "cacheReadInput": usage.get("cache_read_input_tokens") or 0},
+            # Turn-wide aggregate — correct for cost accounting (#494's
+            # costTotals legitimately sums this across turns) but NOT a
+            # context-size snapshot; see contextTokens below and #509.
+            "tokens": _normalize_usage_tokens(usage),
+            # #509: the last individual assistant-message usage observed this
+            # invocation (see usage_sink docs above) — a plausible estimate of
+            # what the model actually held in context at the end of the turn,
+            # unlike `tokens` above. None if no assistant message carried
+            # usage before this result (defensive; shouldn't normally happen).
+            "contextTokens": dict(usage_sink) if usage_sink else None,
+            # Raw per-model usage map from the CLI (#654). Kept verbatim on the
+            # event; build_usage_record normalizes it into the four-class split.
+            # A single invocation aggregates every model / sub-agent it drove,
+            # so this is the per-invocation model breakdown.
+            "modelUsage": parsed.get("modelUsage"),
             "costUsd": parsed.get("total_cost_usd"),
             "sessionId": parsed.get("session_id"),
             "result": parsed.get("result"),
@@ -854,7 +1465,10 @@ _active_invocations_lock = threading.Lock()
 # the admin-console can't read the agent's own volume.
 #
 # Persisted entry shape (matches the legacy Node writer + RunningSessionsPanel):
-#   { id, type, triggerType, triggerId, label, roomId, startedAt }
+#   { id, type, triggerType, triggerId, label, roomId, startedAt, correlationId }
+# `correlationId` ties the session to its own rows in the room's session-log
+# JSONL, so the admin console can render one session's log in isolation even
+# when several sessions share a room (#543).
 _running_sessions: dict[str, dict] = {}
 _running_sessions_lock = threading.Lock()
 
@@ -875,9 +1489,14 @@ def _persist_running_sessions() -> None:
 
 
 def _new_session(session_type: str, *, room_id: str | None = None, label: str = "",
-                 trigger_type: str | None = None, trigger_id: str | None = None) -> dict:
+                 trigger_type: str | None = None, trigger_id: str | None = None,
+                 correlation_id: str | None = None) -> dict:
     """Build a running-session descriptor for _bump_active. Fields mirror the
-    legacy Node writer so RunningSessionsPanel renders them unchanged."""
+    legacy Node writer so RunningSessionsPanel renders them unchanged.
+
+    `correlation_id` is the id stamped on this run's session-log rows, letting
+    the admin console scope one session's log even when sessions share a room
+    (#543)."""
     return {
         "id": uuid.uuid4().hex,
         "type": session_type,
@@ -886,6 +1505,7 @@ def _new_session(session_type: str, *, room_id: str | None = None, label: str = 
         "label": label,
         "roomId": room_id,
         "startedAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+        "correlationId": correlation_id,
     }
 
 
@@ -987,9 +1607,446 @@ def _save_next_batch(token: str) -> None:
         pass
 
 
+# ---- Knowledge harvest hint (Shared Agent Learning, Phase 1) ----
+
+def _knowledge_autonomy_level() -> int:
+    """Resolve the 0..3 autonomy dial the orchestrator injected (default 1)."""
+    raw = os.environ.get("KNOWLEDGE_AUTONOMY")
+    try:
+        n = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 1
+    return 0 if n < 0 else 3 if n > 3 else n
+
+
+def build_harvest_hint(autonomy_level: int) -> str:
+    """The per-session harvest instruction, gated on the autonomy dial.
+
+    Pure: level 0 (or a non-int) returns "" so the surrounding hint is exactly
+    today's text — this is autonomy level 0 == today. Level >= 1 asks Claude to
+    also record durable, team-useful lessons in the shared KB via the CLI.
+    Woven into the shared memory hint, so it reaches BOTH DM and per-invocation
+    runs (decision #2). Mirrored in orchestrator/agent-runner.js buildHarvestHint.
+    """
+    if not isinstance(autonomy_level, int) or autonomy_level < 1:
+        return ""
+    return (
+        " In addition to your memory files, share durable lessons with your "
+        "teammates through the team knowledge base. For each insight that would "
+        "help ANY teammate on this repo (a project convention, an environment "
+        "fact, a key entity) run: knowledge add fact|entity|convention "
+        '"<one-line statement>". Provenance is attached automatically — record '
+        "only lessons that hold beyond this one run, no PR/issue-specific "
+        'detail. First run knowledge search "<topic>" to avoid restating '
+        "something already recorded. Nothing durable to add: skip it."
+    )
+
+
+# ---- Structured harvest block (Auto-learning A, issue #602) ----
+#
+# Byte-for-byte mirror of orchestrator/harvest-block.js. A per-invocation run
+# ends its reply with a fenced ```knowledge block (one JSON object per line);
+# the RUNTIME parses it here and records each lesson in the shared KB via
+# `knowledge add`, instead of depending on the model choosing to run the CLI
+# mid-task. The same two-sided contract as build_knowledge_digest() <->
+# knowledge-digest.js: given the same reply text, this port and the JS builder
+# MUST return the identical entries and the identical stripped text. If you
+# change one side, change the other in the same commit; the shared golden
+# fixture orchestrator/harvest-block.fixture.json is asserted by both test
+# suites. Robust to a missing/malformed block (-> 0 entries, never raises).
+
+_HARVEST_KINDS = frozenset(("fact", "entity", "convention"))
+
+
+def _harvest_fence_label(line):
+    """Info string after a fence's opening backticks, trimmed — or None if the
+    line is not a ``` fence. '```knowledge' -> 'knowledge'; '```' -> '' (a
+    closing fence); '```json' -> 'json' (unrelated fence, ignored)."""
+    s = ("" if line is None else str(line)).strip()
+    if not s.startswith("```"):
+        return None
+    return s[3:].strip()
+
+
+def _harvest_is_open_fence(line) -> bool:
+    return _harvest_fence_label(line) == "knowledge"
+
+
+def _harvest_is_close_fence(line) -> bool:
+    return _harvest_fence_label(line) == ""
+
+
+def _harvest_locate_block(lines):
+    """Locate the LAST ```knowledge block. Returns (start, end) line indices —
+    start is the opening-fence line, end is one past the closing fence (or
+    len(lines) when the block runs to EOF) — or None if there is no block."""
+    start = -1
+    for i, line in enumerate(lines):
+        if _harvest_is_open_fence(line):
+            start = i
+    if start == -1:
+        return None
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if _harvest_is_close_fence(lines[i]):
+            end = i + 1
+            break
+    return (start, end)
+
+
+def parse_harvest_block(text):
+    """Parse the fenced ```knowledge block into a list of {kind, text} lessons.
+    Every line inside that is a JSON object with a valid kind and a non-empty
+    string text becomes one entry; blank/malformed/invalid lines are skipped.
+    No block -> []. Mirrors parseHarvestBlock() in harvest-block.js."""
+    if not isinstance(text, str) or text == "":
+        return []
+    lines = text.split("\n")
+    loc = _harvest_locate_block(lines)
+    if loc is None:
+        return []
+    start, end = loc
+    out = []
+    for i in range(start + 1, end):
+        raw = lines[i]
+        if _harvest_is_close_fence(raw):
+            break
+        line = raw.strip()
+        if line == "":
+            continue
+        try:
+            obj = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        kind = obj.get("kind")
+        if kind not in _HARVEST_KINDS:
+            continue
+        t = obj.get("text")
+        if not isinstance(t, str):
+            continue
+        trimmed = t.strip()
+        if trimmed == "":
+            continue
+        out.append({"kind": kind, "text": trimmed})
+    return out
+
+
+def strip_harvest_block(text):
+    """Return the reply with its ```knowledge block removed (trailing whitespace
+    left by the removal trimmed). No block -> unchanged. Mirrors
+    stripHarvestBlock() in harvest-block.js."""
+    if not isinstance(text, str) or text == "":
+        return text if isinstance(text, str) else ""
+    lines = text.split("\n")
+    loc = _harvest_locate_block(lines)
+    if loc is None:
+        return text
+    start, end = loc
+    kept = lines[:start] + lines[end:]
+    return re.sub(r"\s+$", "", "\n".join(kept))
+
+
+# ---- Knowledge digest (Memory/Knowledge unification, Phase 1) ----
+#
+# Byte-for-byte mirror of orchestrator/knowledge-digest.js — the same
+# two-sided contract as the memory hint (_build_memory_hint <->
+# buildMemoryHint): given the same entries/teamId/generatedAt/budget, the JS
+# builder (post-KB-change fan-out) and this port (pre-invocation rebuild) MUST
+# produce the identical markdown, so the two writers of knowledge-digest.md
+# can never disagree about what the agent sees. If you change one side, change
+# the other in the same commit; the shared golden fixture
+# orchestrator/knowledge-digest.fixture.json is asserted by both test suites.
+
+DIGEST_FILENAME = "knowledge-digest.md"
+DEFAULT_DIGEST_TOKEN_BUDGET = 3000
+# Mirrors HIDDEN_STATUSES in the `knowledge` CLI / knowledge-digest.js.
+_DIGEST_HIDDEN_STATUSES = frozenset(("merged", "archived", "pending", "rejected"))
+
+
+def _digest_entry_time(e) -> str:
+    """Sort key for last-writer-wins: updatedAt, else createdAt, else ''."""
+    if not isinstance(e, dict):
+        return ""
+    return e.get("updatedAt") or e.get("createdAt") or ""
+
+
+def _digest_convergence_count(e) -> int:
+    c = e.get("convergence") if isinstance(e, dict) else None
+    return len(c) if isinstance(c, list) and c else 1
+
+
+def fold_visible_entries(entries) -> list:
+    """Collapse copies by id (last writer wins; ties keep the last seen, which
+    is the canonical file since callers read shards before canonical), drop
+    hidden statuses. Mirrors foldVisibleEntries() in knowledge-digest.js."""
+    latest: dict = {}
+    order: list = []
+    for e in entries if isinstance(entries, list) else []:
+        eid = e.get("id") if isinstance(e, dict) else None
+        if not isinstance(eid, str) or eid == "":
+            continue
+        if eid not in latest:
+            order.append(eid)
+            latest[eid] = e
+        elif _digest_entry_time(e) >= _digest_entry_time(latest[eid]):
+            latest[eid] = e
+    out = [latest[eid] for eid in order
+           if latest[eid].get("status") not in _DIGEST_HIDDEN_STATUSES]
+    # Same concatenated-string sort key as the JS comparator.
+    out.sort(key=lambda e: f"{e.get('createdAt') or ''} {e.get('id') or ''}")
+    return out
+
+
+def _digest_entry_date(e) -> str:
+    c = e.get("createdAt") if isinstance(e, dict) else ""
+    return (c if isinstance(c, str) else "")[:10]
+
+
+def _digest_one_line(text) -> str:
+    return re.sub(r"\s*\n\s*", " ", "" if text is None else str(text)).strip()
+
+
+def _digest_convention_line(e) -> str:
+    n = _digest_convergence_count(e)
+    conf = f", {n}× confirmed" if n > 1 else ""
+    return f"- {_digest_one_line(e.get('text'))} ({_digest_entry_date(e)}{conf})"
+
+
+def _digest_converged_line(e) -> str:
+    return (f"- {e.get('kind')}: {_digest_one_line(e.get('text'))} "
+            f"({_digest_convergence_count(e)}×, {_digest_entry_date(e)})")
+
+
+def _digest_recent_line(e) -> str:
+    return f"- {e.get('kind')}: {_digest_one_line(e.get('text'))} ({_digest_entry_date(e)})"
+
+
+def _utf16_len(s: str) -> int:
+    """JS String.length counts UTF-16 code units — mirror it for budget parity."""
+    return len(s.encode("utf-16-le")) // 2
+
+
+def build_knowledge_digest(*, team_id="", generated_at="", entries=None,
+                           budget_tokens=DEFAULT_DIGEST_TOKEN_BUDGET) -> dict:
+    """Compose the digest markdown. Pure; mirrors buildKnowledgeDigest() (JS)."""
+    budget = (budget_tokens
+              if isinstance(budget_tokens, int) and not isinstance(budget_tokens, bool)
+              and budget_tokens > 0 else DEFAULT_DIGEST_TOKEN_BUDGET)
+    visible = fold_visible_entries(entries if entries is not None else [])
+
+    # Tier 1: all conventions, chronological (fold order is (createdAt, id)).
+    conventions = [e for e in visible if e.get("kind") == "convention"]
+    # Tier 2: converged non-conventions, strongest first. Stable multi-pass
+    # sorts == the JS comparator (count desc, then createdAt desc, then id asc).
+    converged = [e for e in visible
+                 if e.get("kind") != "convention" and _digest_convergence_count(e) >= 2]
+    converged.sort(key=lambda e: e.get("id") or "")
+    converged.sort(key=lambda e: e.get("createdAt") or "", reverse=True)
+    converged.sort(key=lambda e: -_digest_convergence_count(e))
+    # Tier 3: the rest, newest first.
+    recent = [e for e in visible
+              if e.get("kind") != "convention" and _digest_convergence_count(e) < 2]
+    recent.sort(key=lambda e: e.get("id") or "")
+    recent.sort(key=lambda e: e.get("createdAt") or "", reverse=True)
+
+    budget_chars = budget * 4
+    used = {"chars": 0, "full": False}
+
+    def take(lst, render):
+        lines = []
+        for e in lst:
+            if used["full"]:
+                break
+            line = render(e)
+            if used["chars"] + _utf16_len(line) + 1 > budget_chars:
+                used["full"] = True
+                break
+            used["chars"] += _utf16_len(line) + 1
+            lines.append((e, line))
+        return lines
+
+    conv_lines = take(conventions, _digest_convention_line)
+    converged_lines = take(converged, _digest_converged_line)
+    recent_lines = take(recent, _digest_recent_line)
+
+    included = len(conv_lines) + len(converged_lines) + len(recent_lines)
+    total = len(visible)
+    omitted = total - included
+    tokens_used = (used["chars"] + 3) // 4
+
+    def count_by_kind(kind):
+        return sum(1 for e in visible if e.get("kind") == kind)
+
+    def included_by_kind(kind):
+        return sum(1 for e, _ in conv_lines + converged_lines + recent_lines
+                   if e.get("kind") == kind)
+
+    blocks = ["# Team Knowledge Digest"]
+    team_part = f" (team `{team_id}`)" if team_id else ""
+    blocks.append(
+        "> GENERATED — do not edit. Auto-built from the team knowledge base"
+        + team_part + ";\n"
+        "> regenerated before every run and whenever the team's knowledge changes.\n"
+        '> Contribute with `knowledge add fact|entity|convention "<one-line statement>"`;\n'
+        '> everything beyond this digest is searchable with `knowledge search "<topic>"`.\n'
+        ">\n"
+        f"> Generated: {generated_at} · Included: {included} of {total} entries "
+        f"(conventions {included_by_kind('convention')}/{count_by_kind('convention')}, "
+        f"facts {included_by_kind('fact')}/{count_by_kind('fact')}, "
+        f"entities {included_by_kind('entity')}/{count_by_kind('entity')}) "
+        f"· ~{tokens_used} of {budget} tokens"
+    )
+
+    if total == 0:
+        blocks.append("_No team knowledge recorded yet. Lessons recorded with "
+                      "`knowledge add` will appear here automatically._")
+    else:
+        if conv_lines:
+            blocks.append("## Conventions — how we do things here\n\n"
+                          + "\n".join(line for _, line in conv_lines))
+        if converged_lines:
+            blocks.append("## Validated lessons — independently learned by several agents\n\n"
+                          + "\n".join(line for _, line in converged_lines))
+        if recent_lines:
+            blocks.append("## Recent lessons\n\n"
+                          + "\n".join(line for _, line in recent_lines))
+        if omitted > 0:
+            blocks.append(f"_…and {omitted} more entries beyond the digest budget "
+                          f'— find them with `knowledge search "<topic>"`._')
+
+    return {
+        "markdown": "\n\n".join(blocks) + "\n",
+        "includedCount": included,
+        "totalCount": total,
+        "omittedCount": omitted,
+        "tokensUsed": tokens_used,
+        # Entry ids inside the digest budget, render order — mirrors the JS
+        # builder ("in digest" indicator in the Knowledge views).
+        "includedIds": [e.get("id") for e, _ in conv_lines + converged_lines + recent_lines],
+    }
+
+
+# ---- Knowledge digest IO (pre-invocation rebuild) ----
+
+def _knowledge_checkout_root() -> Path:
+    explicit = os.environ.get("KNOWLEDGE_DIR")
+    return Path(explicit) if explicit else _agent_workdir() / "knowledge"
+
+
+def _knowledge_store_root() -> Path:
+    rel = os.environ.get("KNOWLEDGE_STORE_PATH", "docs/agent-knowledge/").strip("/")
+    root = _knowledge_checkout_root()
+    return root / rel if rel else root
+
+
+def _read_kb_entries() -> list:
+    """All raw KB lines from the local checkout, shards before canonical (so
+    the fold's last-writer tie-break keeps the curated canonical copy)."""
+    root = _knowledge_store_root()
+    kinds = {
+        "fact": {"dir": "facts", "file": "facts.jsonl"},
+        "entity": {"dir": "entities", "file": "entities.jsonl"},
+        "convention": {"dir": "conventions", "file": "conventions.jsonl"},
+    }
+    mp = root / "knowledge.manifest.json"
+    if mp.exists():
+        try:
+            m = json.loads(mp.read_text(encoding="utf-8"))
+            if isinstance(m, dict) and isinstance(m.get("kinds"), dict):
+                kinds = m["kinds"]
+        except (OSError, ValueError):
+            pass
+    out = []
+    for spec in kinds.values():
+        if not isinstance(spec, dict):
+            continue
+        kdir = str(spec.get("dir") or "").rstrip("/")
+        if not kdir:
+            continue
+        files = sorted((root / kdir / "shards").glob("*.jsonl"))
+        fname = spec.get("file")
+        if isinstance(fname, str) and fname and (root / kdir / fname).exists():
+            files.append(root / kdir / fname)
+        for fpath in files:
+            try:
+                text = fpath.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for line in text.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(e, dict):
+                    out.append(e)
+    return out
+
+
+# Best-effort checkout freshness before a rebuild: fetch + ff-only merge (NEVER
+# a reset — un-pushed local shard commits must survive), throttled so DM
+# traffic doesn't hammer the remote. A failed/slow fetch just means the digest
+# reflects the local view — self-consistent with `knowledge search`, and
+# self-healing on the next successful sync.
+_DIGEST_FETCH_THROTTLE_SEC = 300
+_digest_last_fetch = 0.0
+
+
+def _rebuild_knowledge_digest() -> None:
+    """Regenerate knowledge-digest.md in the workspace root from the local KB
+    checkout — the pre-invocation half of the digest writer contract (the
+    orchestrator's post-KB-change fan-out is the other). Best-effort: any
+    failure leaves the previous digest in place and never blocks the run."""
+    global _digest_last_fetch
+    try:
+        if _knowledge_autonomy_level() < 1:
+            return
+        root = _knowledge_checkout_root()
+        if not (root / ".git").is_dir():
+            return
+        now_mono = time.monotonic()
+        if now_mono - _digest_last_fetch > _DIGEST_FETCH_THROTTLE_SEC:
+            _digest_last_fetch = now_mono
+            branch = os.environ.get("KNOWLEDGE_BRANCH", "agent-knowledge")
+            try:
+                subprocess.run(["git", "-C", str(root), "fetch", "origin", branch],
+                               capture_output=True, timeout=10)
+                subprocess.run(["git", "-C", str(root), "merge", "--ff-only",
+                                f"origin/{branch}"], capture_output=True, timeout=10)
+            except (subprocess.SubprocessError, OSError):
+                pass
+        res = build_knowledge_digest(
+            team_id=_knowledge_team_id(),
+            generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            entries=_read_kb_entries(),
+        )
+        target = _agent_workdir() / DIGEST_FILENAME
+        tmp = target.with_suffix(".md.tmp")
+        tmp.write_text(res["markdown"], encoding="utf-8")
+        tmp.replace(target)
+    except Exception as exc:  # noqa: BLE001 — never break an invocation
+        print(f"[Runner] knowledge digest rebuild failed: {exc}", file=sys.stderr)
+
+
 # ---- Memory hint (port from agent-runner.js) ----
 
+def _memory_model_unified() -> bool:
+    """Is the unified semantic/episodic memory model active for this agent?
+
+    True iff the team KB is on (autonomy >= 1) AND the local checkout was
+    provisioned — the SAME gate that drives the knowledge-digest @-import in
+    the seeded CLAUDE.md (saveAgentPrompt/knowledgeDigestRef on the
+    orchestrator side), so the runtime hint and the seeded instructions can
+    never disagree about which memory model the agent is on."""
+    return _knowledge_autonomy_level() >= 1 and (_knowledge_checkout_root() / ".git").is_dir()
+
+
 def _build_memory_hint(blueprint_id: str | None) -> str:
+    harvest = build_harvest_hint(_knowledge_autonomy_level())
     if blueprint_id:
         return (
             f"This agent is an instance of blueprint '{blueprint_id}'. "
@@ -1004,18 +2061,109 @@ def _build_memory_hint(blueprint_id: str | None) -> str:
             f"curl -s -X PUT -H 'Content-Type: text/plain' --data-binary @memory/context.md http://localhost:4002/internal/blueprints/{blueprint_id}/memory/context.md; "
             f"curl -s -X PUT -H 'Content-Type: text/plain' --data-binary @memory/log.md http://localhost:4002/internal/blueprints/{blueprint_id}/memory/log.md. "
             f"IMPORTANT: Your workspace root is the current working directory."
+            + harvest
         )
-    # NOTE: kept byte-identical to buildMemoryHint() in
-    # orchestrator/prompt-assembly.js (used by the prompt-preview endpoint). The
-    # /workspace path-translation example now lives ONCE in the CLAUDE.md
-    # Workspace section, and this no longer names a 2-file subset that
-    # contradicts the 5-file Memory System.
+    # NOTE: both non-blueprint variants are kept byte-identical to
+    # buildMemoryHint() in orchestrator/prompt-assembly.js (used by the
+    # prompt-preview endpoint). The /workspace path-translation example lives
+    # ONCE in the CLAUDE.md Workspace section.
+    if _memory_model_unified():
+        # Unified semantic/episodic model (Memory/Knowledge unification,
+        # Phase 2): the knowledge-add routing is part of the text itself, so
+        # NO separate harvest hint is appended — it would duplicate it.
+        return (
+            "Before responding, read your episodic memory files: memory/context.md and memory/log.md, "
+            "and consult memory/users.md when the interaction involves a specific person. "
+            "Semantic team knowledge (facts, entities, conventions) does not live in private memory files: "
+            "the current team digest is already in your context via knowledge-digest.md, and anything "
+            'beyond it is found with knowledge search "<topic>". '
+            "When you learn something durable that would help ANY teammate (a project convention, an "
+            "environment fact, a key entity), record it with: knowledge add fact|entity|convention "
+            '"<one-line statement>". Provenance is attached automatically — record only lessons that hold '
+            "beyond this one run, no PR/issue-specific detail. "
+            "If the user asks you to remember something, route it: session state and personal or "
+            "user-specific details go to your memory files; durable team-relevant lessons go to "
+            "knowledge add. "
+            "IMPORTANT: Your workspace root is the current working directory."
+        )
     return (
         "Before responding, read your memory files: start with memory/context.md and memory/log.md, "
         "and consult memory/facts.md, memory/entities.md and memory/users.md when the topic calls for it. "
         "If the user asks you to remember something, update the relevant memory files. "
         "IMPORTANT: Your workspace root is the current working directory."
+        + harvest
     )
+
+
+# ---- Deterministic KB harvest of the structured block (issue #602) ----
+
+def build_harvest_block_hint(autonomy_level: int) -> str:
+    """The per-invocation instruction that asks the run to END its reply with a
+    fenced ```knowledge block the runtime harvests deterministically. Empty at
+    autonomy 0 (KB off) — nothing to route to a shared KB that isn't there."""
+    if not isinstance(autonomy_level, int) or autonomy_level < 1:
+        return ""
+    return (
+        "\n\nTo share a durable lesson with your teammates through the team "
+        "knowledge base, END your reply with a fenced ```knowledge block — one "
+        "JSON object per line, like:\n\n"
+        "```knowledge\n"
+        '{"kind": "fact", "text": "<one-line reusable lesson>"}\n'
+        '{"kind": "convention", "text": "<another lesson>"}\n'
+        "```\n\n"
+        "`kind` is one of fact|convention|entity. The runtime records each line "
+        "for you, so do NOT run the knowledge CLI yourself. Record only durable, "
+        "team-useful lessons (a project convention, an environment fact, a key "
+        "entity), never PR/issue-specific detail. If there is nothing durable to "
+        "share, omit the block. It is stripped from what the user sees."
+    )
+
+
+def _knowledge_add_entry(kind: str, text: str, correlation_id: str) -> bool:
+    """Record one harvested lesson via the `knowledge` CLI. Best-effort: returns
+    True on rc 0, logs and returns False otherwise. Never raises. Provenance
+    (correlationId/sessionId, team id, store paths) rides in from the container
+    env the orchestrator injected; push happens via the orchestrator as today."""
+    try:
+        env = {**os.environ}
+        if correlation_id:
+            env["KNOWLEDGE_CORRELATION_ID"] = correlation_id
+        proc = subprocess.run(
+            ["knowledge", "add", kind, text],
+            cwd=str(_agent_workdir()),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if proc.returncode != 0:
+            print(f"[Runner] knowledge add failed (rc={proc.returncode}): "
+                  f"{(proc.stderr or '').strip()}", file=sys.stderr)
+            return False
+        return True
+    except (subprocess.SubprocessError, OSError) as exc:
+        print(f"[Runner] knowledge add error: {exc}", file=sys.stderr)
+        return False
+
+
+def _harvest_shared_lessons(text: str, correlation_id: str) -> str:
+    """Deterministic structured-block harvest (issue #602): parse the fenced
+    ```knowledge block the per-invocation run emitted, record each lesson in the
+    shared KB via `knowledge add` (only when the team KB is on), and return the
+    reply with the block removed so the user never sees it. Best-effort: any
+    failure leaves the original reply intact and never breaks the run."""
+    try:
+        if _knowledge_autonomy_level() >= 1:
+            entries = parse_harvest_block(text)
+            for entry in entries:
+                _knowledge_add_entry(entry["kind"], entry["text"], correlation_id)
+            if entries:
+                print(f"[Runner] harvested {len(entries)} KB lesson(s) from the "
+                      "structured block", file=sys.stderr)
+        return strip_harvest_block(text)
+    except Exception as exc:  # noqa: BLE001 — never break an invocation
+        print(f"[Runner] harvest failed: {exc}", file=sys.stderr)
+        return text
 
 
 # ---- Claude invocation (stream-json + session resumption) ----
@@ -1044,9 +2192,93 @@ def _base_claude_args(prompt: str, memory_hint: str, model_arg: str | None) -> l
     return args
 
 
+# ---- usage-record run context + git capture (#654) ----
+
+def _base_run_context() -> dict:
+    """Identity block for a usage record, from env + config. roleId/provider are
+    best-effort here (config `role`, AEE_LLM_PROVIDER_ID) — the orchestrator's
+    ingest enriches them authoritatively (roleId from the <team>-<role> agent id,
+    provider from the agent's resolved Model-Provider binding)."""
+    cfg = _load_dm_agent_config()
+    role = cfg.get("role")
+    return {
+        "agentId": os.environ.get("AGENT_ID"),
+        "teamId": _knowledge_team_id(),
+        "roleId": role if isinstance(role, str) and role else None,
+        "provider": os.environ.get("AEE_LLM_PROVIDER_ID") or None,
+        "flowInstanceId": None,
+    }
+
+
+def _usage_github_and_key(gh: dict | None) -> tuple[dict | None, str | None]:
+    """From a poller github ctx block ({repo, event, eventId, payload, ...}) derive
+    the usage record's `github` block ({repo, prNumber, issueNumber}) and the
+    trigger `conversationKey` (pr:N / issue:N / push:<ref>), mirroring the poller's
+    grouping. Returns (None, None) for a non-github (DM/cron) run."""
+    if not isinstance(gh, dict) or not gh:
+        return None, None
+    payload = gh.get("payload") if isinstance(gh.get("payload"), dict) else {}
+    pr = payload.get("pull_request") if isinstance(payload.get("pull_request"), dict) else None
+    issue = payload.get("issue") if isinstance(payload.get("issue"), dict) else None
+    pr_number = pr.get("number") if pr else None
+    issue_number = issue.get("number") if issue else None
+    block = {
+        "repo": gh.get("repo"),
+        "prNumber": pr_number,
+        "issueNumber": issue_number,
+    }
+    if pr_number is not None:
+        key = f"pr:{pr_number}"
+    elif issue_number is not None:
+        key = f"issue:{issue_number}"
+    else:
+        ref = payload.get("ref") if isinstance(payload.get("ref"), str) else None
+        key = f"push:{ref}" if ref else None
+    return block, key
+
+
+def _resolve_repo_dir() -> Path | None:
+    """Best-effort single git repo for the git-context block. /repo when it is a
+    git repo (bind/clone/image modes), else the sole git repo directly under the
+    agent workspace (Agent-Studio clone layout), else None (none / ambiguous)."""
+    try:
+        if (REPO_DIR / ".git").exists():
+            return REPO_DIR
+    except Exception:
+        pass
+    try:
+        candidates = [d for d in _agent_workdir().iterdir()
+                      if d.is_dir() and (d / ".git").exists()]
+        if len(candidates) == 1:
+            return candidates[0]
+    except Exception:
+        pass
+    return None
+
+
+def _git_short_head(repo_dir: Path | None) -> str | None:
+    if repo_dir is None:
+        return None
+    try:
+        r = _git_run(["rev-parse", "--short", "HEAD"], check=False, cwd=str(repo_dir))
+        return (r.stdout or "").strip() or None
+    except Exception:
+        return None
+
+
+def _git_branch(repo_dir: Path | None) -> str | None:
+    if repo_dir is None:
+        return None
+    try:
+        r = _git_run(["rev-parse", "--abbrev-ref", "HEAD"], check=False, cwd=str(repo_dir))
+        return (r.stdout or "").strip() or None
+    except Exception:
+        return None
+
+
 def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
                       resume_id: str | None, blueprint_id: str | None,
-                      timeout_sec: int) -> tuple[str, str | None]:
+                      timeout_sec: int, run_context: dict | None = None) -> tuple[str, str | None]:
     """Run claude once. Returns (final_text, observed_session_id).
 
     Raises CalledProcessError on non-zero exit. Sets module-level
@@ -1074,6 +2306,26 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     # $HOME/.claude/projects/...) survive container restarts. The default
     # /root path is wiped every time podman recreates the container.
     env = {**os.environ, "HOME": str(_agent_workdir())}
+    # Provenance for `knowledge add` calls the agent makes during this run: the
+    # CLI stamps every KB entry with these (correlationId ties it to the session
+    # log; sessionId is best-effort). Team id / autonomy / store paths ride in
+    # from the container env the orchestrator injected, so they need no per-run
+    # override here. (Shared Agent Learning, Phase 1.)
+    env["KNOWLEDGE_CORRELATION_ID"] = correlation_id or ""
+    # Tier-A attribution passthrough (#655, §3.2 of docs/cost-per-pr-concept.md):
+    # `gh-as-agent push`/`pr` runs inside this Claude invocation and forwards this
+    # id in its POST body, so the orchestrator can stamp the correlation id of the
+    # run that opened the PR onto the pr-created record. Empty when unknown — the
+    # record then lands with correlationId:null and tier C covers attribution.
+    env["AEE_CORRELATION_ID"] = correlation_id or ""
+    if resume_id:
+        env["KNOWLEDGE_SESSION_ID"] = resume_id
+
+    # Git context for the usage record (#654): capture HEAD before the run so the
+    # record can show what this invocation moved. Best-effort — never blocks the run.
+    _usage_repo_dir = _resolve_repo_dir()
+    _usage_head_before = _git_short_head(_usage_repo_dir)
+
     proc = subprocess.Popen(
         ["claude", *args],
         cwd=str(_agent_workdir()),
@@ -1088,17 +2340,20 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
 
     final_result: str | None = None
     observed_session: str | None = None
+    result_event: dict | None = None  # full result event for the usage record (#654)
     assistant_chunks: list[str] = []
     stderr_chunks: list[str] = []
     ask_question_input: dict | None = None  # first AskUserQuestion tool input (#447)
+    context_usage: dict = {}  # last assistant-message usage this invocation (#509)
 
     def handle_line(line: str) -> None:
-        nonlocal final_result, observed_session, ask_question_input
-        for ev in _map_stream_json_line(line, correlation_id):
+        nonlocal final_result, observed_session, ask_question_input, result_event
+        for ev in _map_stream_json_line(line, correlation_id, context_usage):
             _append_event(room_id, ev)  # log tab is unchanged (#447 AC6)
             if ev.get("type") == "system_init" and isinstance(ev.get("sessionId"), str):
                 observed_session = ev["sessionId"]
             elif ev.get("type") == "result":
+                result_event = ev
                 if isinstance(ev.get("sessionId"), str):
                     observed_session = ev["sessionId"]
                 if isinstance(ev.get("result"), str):
@@ -1144,6 +2399,34 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     rc = proc.returncode
     stderr_blob = "".join(stderr_chunks)
 
+    # Emit one usage record per invocation that produced a result event (#654).
+    # Aborted/crashed runs with no result event emit nothing — there are no token
+    # counts to report. Runs into their own error handling (rc != 0, e.g. an
+    # AskUserQuestion pause) still get a record when the CLI reported a result.
+    if result_event is not None:
+        try:
+            ctx = dict(run_context) if isinstance(run_context, dict) else _base_run_context()
+            ctx.setdefault("flowInstanceId", None)
+            head_after = _git_short_head(_usage_repo_dir)
+            git_block = None
+            if _usage_repo_dir is not None:
+                git_block = {
+                    "repo": _usage_repo_dir.name,
+                    "branch": _git_branch(_usage_repo_dir),
+                    "headBefore": _usage_head_before,
+                    "headAfter": head_after,
+                }
+            ctx.update({
+                "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "correlationId": correlation_id,
+                "sessionId": observed_session,
+                "git": git_block,
+                "resultEvent": result_event,
+            })
+            _spool_usage_record(build_usage_record(ctx))
+        except Exception as exc:  # telemetry must never break the run
+            print(f"[Runner] usage-record emit failed: {exc}", file=sys.stderr)
+
     # An agent that called AskUserQuestion is pausing for human input. The tool
     # is denied (non-interactive run) and the CLI may or may not exit non-zero,
     # but for the user this is a question, not a crash — surface the rendered
@@ -1172,13 +2455,18 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
 
 
 def _call_claude(prompt: str, room_id: str, correlation_id: str,
-                 blueprint_id: str | None, timeout_sec: int = CLAUDE_TIMEOUT_SEC) -> str:
+                 blueprint_id: str | None, timeout_sec: int = CLAUDE_TIMEOUT_SEC,
+                 run_context: dict | None = None) -> str:
     """Drive _call_claude_once with --resume retry-on-stale-session logic."""
-    resume_id = _read_session_pointer(room_id)
+    # Pyramid level 1 guarantee: the digest CLAUDE.md @-imports is current for
+    # this run (per-invocation agents see the team state on every run).
+    _rebuild_knowledge_digest()
+    resume_id, resume_requested = _read_session_pointer_full(room_id)
     if resume_id:
         try:
             text, observed = _call_claude_once(
-                prompt, room_id, correlation_id, resume_id, blueprint_id, timeout_sec
+                prompt, room_id, correlation_id, resume_id, blueprint_id, timeout_sec,
+                run_context,
             )
             if observed:
                 _write_session_pointer(room_id, observed)
@@ -1188,13 +2476,25 @@ def _call_claude(prompt: str, room_id: str, correlation_id: str,
                 raise
             blob = (str(err.stderr or "") + " " + str(err)).lower()
             if "session" in blob or "resume" in blob or "not found" in blob:
+                _clear_session_pointer(room_id)
+                # An explicit resume (#574) must NOT silently fall back to a
+                # fresh empty session (AC6) — the user chose *this* snapshot, so
+                # tell them it's gone and let them decide, rather than answering
+                # a resume request from a blank context.
+                if resume_requested:
+                    print(
+                        f"[Runner] --resume {resume_id} failed on an explicit resume; "
+                        "surfacing to user (no silent fresh session)",
+                        file=sys.stderr,
+                    )
+                    return RESUME_UNAVAILABLE_NOTICE
                 print(
                     f"[Runner] --resume {resume_id} failed; retrying without resume",
                     file=sys.stderr,
                 )
-                _clear_session_pointer(room_id)
                 text, observed = _call_claude_once(
-                    prompt, room_id, correlation_id, None, blueprint_id, timeout_sec
+                    prompt, room_id, correlation_id, None, blueprint_id, timeout_sec,
+                    run_context,
                 )
                 if observed:
                     _write_session_pointer(room_id, observed)
@@ -1202,7 +2502,8 @@ def _call_claude(prompt: str, room_id: str, correlation_id: str,
             raise
 
     text, observed = _call_claude_once(
-        prompt, room_id, correlation_id, None, blueprint_id, timeout_sec
+        prompt, room_id, correlation_id, None, blueprint_id, timeout_sec,
+        run_context,
     )
     if observed:
         _write_session_pointer(room_id, observed)
@@ -1370,6 +2671,135 @@ def _clamp_event_deep(value, depth: int = 0):
     return value
 
 
+def _under_test_harness() -> bool:
+    """True when a test runner is loaded (``unittest``/``pytest``) or
+    ``AEE_TEST_MODE`` is set in the environment.
+
+    Used as a hard safety net (#606) to disable real side effects — spawning a
+    Claude subprocess, posting to Matrix, writing the live session log — while a
+    test harness is active. Production never imports ``unittest``/``pytest``, so
+    this is False in the live runtime; but if a test is non-hermetic (or an agent
+    runs this repo's own suite via ``python3 -m unittest`` inside a live
+    container), it prevents that test from firing real triggered work. Without
+    this guard a single un-mocked ``_execute`` once caused a self-amplifying fork
+    bomb of Claude sessions."""
+    if os.environ.get("AEE_TEST_MODE"):
+        return True
+    return "unittest" in sys.modules or "pytest" in sys.modules
+
+
+def _int_env(name: str, default: int) -> int:
+    """Read a non-negative int from the environment, falling back to `default`
+    on absence or a malformed value."""
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+# ---- triggered-session backstop (#611) ----
+#
+# A per-agent blast-radius cap on *triggered* Claude sessions. The 2026-07-15
+# fork-bomb (#606) showed a self-triggering loop can spawn many concurrent
+# Claude runs (17 in ~17 min, one OOM-killed) with nothing throttling the
+# growth: the per-trigger `_running` guard only stops one trigger overlapping
+# itself, and `_bump_active` merely tracks status — neither caps fan-out. This
+# is a hard concurrency ceiling plus a sliding-window spawn-rate limit that
+# `_execute` — the single chokepoint for triggered work — consults before it
+# spawns. It is deliberately independent of the #606 test-harness guard: that
+# removed one *cause*; this bounds the blast radius of *any* future loop.
+#
+# Defaults sit well above normal single-agent operation (1–2 concurrent
+# triggered runs) and well below the incident (17). A limit of 0 disables that
+# check, so an operator can opt out per agent via the environment.
+_MAX_TRIGGERED_SESSIONS = _int_env("AEE_MAX_TRIGGERED_SESSIONS", 4)
+_TRIGGERED_SPAWN_LIMIT = _int_env("AEE_TRIGGERED_SPAWN_LIMIT", 12)
+_TRIGGERED_SPAWN_WINDOW_SEC = _int_env("AEE_TRIGGERED_SPAWN_WINDOW_SEC", 300)
+
+
+BackstopDecision = namedtuple(
+    "BackstopDecision",
+    ["allowed", "reason", "warn", "active", "window_count"],
+)
+
+
+class TriggerBackstop:
+    """Per-agent blast-radius cap on triggered Claude sessions (#611).
+
+    Two independent limits, both per agent-container:
+      - a concurrency ceiling (`max_concurrent`): at most N triggered sessions
+        may run at once;
+      - a sliding-window spawn-rate limit (`max_per_window` in `window_sec`):
+        at most M triggered sessions may *start* within any window.
+
+    `try_acquire()` is the gate `_execute` calls before spawning. A caller that
+    is allowed MUST pair it with exactly one `release()` when the session ends;
+    a denied caller must not. A limit set to 0 (or negative) disables that
+    check. `warn` is True only on the *first* denial of a runaway episode and
+    resets once a spawn succeeds again — so the runtime emits one DM per episode
+    and then drops silently, mirroring the GitHub poller's throttle warning.
+    `clock` is injectable for tests; a lock keeps the counters consistent since
+    the session registry callbacks run on other threads.
+    """
+
+    def __init__(self, *, max_concurrent: int, max_per_window: int,
+                 window_sec: float, clock=time.monotonic):
+        self._max_concurrent = max_concurrent
+        self._max_per_window = max_per_window
+        self._window_sec = window_sec
+        self._clock = clock
+        self._active = 0
+        self._spawns: deque[float] = deque()
+        self._warned = False
+        self._lock = threading.Lock()
+
+    def _prune(self, now: float) -> None:
+        if self._window_sec <= 0 or self._max_per_window <= 0:
+            self._spawns.clear()
+            return
+        cutoff = now - self._window_sec
+        while self._spawns and self._spawns[0] <= cutoff:
+            self._spawns.popleft()
+
+    def try_acquire(self) -> BackstopDecision:
+        now = self._clock()
+        with self._lock:
+            self._prune(now)
+            reason = None
+            if self._max_concurrent > 0 and self._active >= self._max_concurrent:
+                reason = "concurrency"
+            elif self._max_per_window > 0 and len(self._spawns) >= self._max_per_window:
+                reason = "rate"
+            if reason is not None:
+                warn = not self._warned
+                self._warned = True
+                return BackstopDecision(
+                    False, reason, warn, self._active, len(self._spawns))
+            self._active += 1
+            if self._max_per_window > 0:
+                self._spawns.append(now)
+            self._warned = False
+            return BackstopDecision(
+                True, None, False, self._active, len(self._spawns))
+
+    def release(self) -> None:
+        with self._lock:
+            if self._active > 0:
+                self._active -= 1
+
+    def snapshot(self) -> dict:
+        now = self._clock()
+        with self._lock:
+            self._prune(now)
+            return {
+                "active": self._active,
+                "windowCount": len(self._spawns),
+                "maxConcurrent": self._max_concurrent,
+                "maxPerWindow": self._max_per_window,
+                "windowSec": self._window_sec,
+            }
+
+
 class TriggerScheduler:
     """Schedules cron / once / http triggers for an agent container.
 
@@ -1400,6 +2830,13 @@ class TriggerScheduler:
         self._cron_tasks: dict[str, dict] = {}  # triggerId -> {"task": Task, "expr": str}
         self._running: set[str] = set()
         self._fired_once: set[str] = set()  # once-triggers already fired this lifetime (#185)
+        # Blast-radius backstop (#611): caps concurrent + per-window triggered
+        # Claude spawns so a self-triggering loop can't fan out unbounded.
+        self._backstop = TriggerBackstop(
+            max_concurrent=_MAX_TRIGGERED_SESSIONS,
+            max_per_window=_TRIGGERED_SPAWN_LIMIT,
+            window_sec=_TRIGGERED_SPAWN_WINDOW_SEC,
+        )
         self._reload_event = asyncio.Event()
         self._shutdown_event = asyncio.Event()
         self._sync_task: asyncio.Task | None = None
@@ -1640,6 +3077,9 @@ class TriggerScheduler:
         await self._pull_config_dm()
         triggers = _load_triggers()
         active_ids: set[str] = set()
+        # Checked once per tick (not per overdue once-trigger) — a single
+        # HTTP round-trip to the orchestrator covers the whole batch.
+        maintenance_active = await self._maintenance_active()
 
         for trigger in triggers:
             if not isinstance(trigger, dict):
@@ -1691,6 +3131,13 @@ class TriggerScheduler:
                     continue
                 now = datetime.now(tz=_TRIGGER_TZ)
                 if now >= fire_at:
+                    # AC1 (#504): don't fire while Maintenance Mode is active.
+                    # No catch-up bookkeeping needed — the trigger is left in
+                    # place (overdue), so the next 60 s sync tick fires it as
+                    # soon as maintenance ends, same self-healing path this
+                    # already relies on across container restarts.
+                    if maintenance_active:
+                        continue
                     # Guard against a re-fire if a pull re-introduces this once
                     # (e.g. the consumed-report below lagged or failed). #185
                     if tid in self._fired_once:
@@ -1754,6 +3201,22 @@ class TriggerScheduler:
                     raise
                 if self._shutdown_event.is_set():
                     return
+                if await self._maintenance_active():
+                    # AC1/AC3 (#504): this fire time fell inside a Maintenance
+                    # Mode window — skip it, then wait out the window and run
+                    # exactly one catch-up execution once it ends (no matter
+                    # how many further fire times would have landed while we
+                    # waited — croniter's next_fire recompute below always
+                    # looks forward from "now" again, so no backlog flood).
+                    print(f"[Runner:{self._agent_id}] cron {tid} fire skipped "
+                          f"(maintenance mode active) — will catch up once it ends",
+                          file=sys.stderr)
+                    while not self._shutdown_event.is_set() and await self._maintenance_active():
+                        await asyncio.sleep(5.0)
+                    if self._shutdown_event.is_set():
+                        return
+                    print(f"[Runner:{self._agent_id}] cron {tid} catching up "
+                          f"after maintenance mode ended", file=sys.stderr)
                 try:
                     await self._execute(trigger)
                 except Exception as exc:
@@ -1800,12 +3263,39 @@ class TriggerScheduler:
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             return 0, str(exc)
 
+    # -- maintenance mode (#504) ----------------------------------------------
+
+    async def _maintenance_active(self) -> bool:
+        """Best-effort check of the platform-wide Maintenance Mode flag (#501).
+
+        The state file (`/workspace/maintenance/state.json`) lives outside this
+        agent's own workspace subtree, which the default SubPath / per-agent-
+        volume isolation (Seam #3) does not mount — so we ask the orchestrator
+        (which always mounts the full pool volume) over the same internal HTTP
+        channel used for trigger/config pulls, rather than reading the file
+        directly. Any failure (unreachable, malformed) reads as "not active",
+        matching the admin-console module's own fail-open-to-inactive posture.
+        """
+        status, body = await asyncio.to_thread(self._orch_get, "/internal/maintenance-mode")
+        if status != 200:
+            return False
+        try:
+            data = json.loads(body)
+        except Exception:
+            return False
+        return bool(isinstance(data, dict) and data.get("active"))
+
     # -- pending queue (http / github-event) ---------------------------------
 
     async def _pending_loop(self) -> None:
         while not self._shutdown_event.is_set():
             try:
-                await self._process_pending()
+                # AC2/AC4 (#504): during Maintenance Mode, http/github-event
+                # entries keep queuing on the orchestrator/pending-file side
+                # (unaffected by this check) but are left undrained here, so
+                # they're processed normally once maintenance ends.
+                if not await self._maintenance_active():
+                    await self._process_pending()
             except Exception as exc:
                 print(f"[Runner:{self._agent_id}] pending error: {exc}",
                       file=sys.stderr)
@@ -1886,6 +3376,19 @@ class TriggerScheduler:
                     if rid:
                         _clear_session_pointer(rid)
                         print(f"[Runner:{self._agent_id}] session-reset for {rid}",
+                              file=sys.stderr)
+                    continue
+                if kind == "session-set":
+                    # Control→agent resume command (#574): the admin can't write our
+                    # pointer on an isolated volume, so it asks us to re-point the
+                    # room at a chosen finished session. resumeRequested is persisted
+                    # so a failed resume surfaces an error instead of a fresh session.
+                    rid = entry.get("roomId")
+                    sid = entry.get("sessionId")
+                    if rid and isinstance(sid, str) and sid:
+                        _write_session_pointer(
+                            rid, sid, resume_requested=bool(entry.get("resumeRequested")))
+                        print(f"[Runner:{self._agent_id}] session-set {rid} -> {sid}",
                               file=sys.stderr)
                     continue
                 if kind == "handover-dm":
@@ -1993,7 +3496,8 @@ class TriggerScheduler:
             print(f"[Runner:{self._agent_id}] session-log warning: {exc}",
                   file=sys.stderr)
 
-        session = _new_session("handover", room_id=room_id, label="Hand-off")
+        session = _new_session("handover", room_id=room_id, label="Hand-off",
+                               correlation_id=correlation_id)
         _bump_active(+1, session)
         try:
             result = await asyncio.to_thread(
@@ -2195,9 +3699,43 @@ class TriggerScheduler:
 
     async def _execute(self, trigger: dict, ctx: dict | None = None) -> None:
         tid = trigger.get("id", "?")
+        if _under_test_harness():
+            # Safety net (#606): never spawn a real Claude run, post to Matrix,
+            # or write the live session log while a test harness is loaded. This
+            # is the single chokepoint for triggered work, so guarding it here
+            # neutralises any non-hermetic test — including this repo's own suite
+            # run by an agent inside a live container — before it can fire.
+            print(
+                f"[Runner:{self._agent_id}] Trigger {tid} suppressed: "
+                f"test harness detected (see #606)",
+                file=sys.stderr,
+            )
+            return
         if tid in self._running:
             print(f"[Runner:{self._agent_id}] Trigger {tid} still running — skipping",
                   file=sys.stderr)
+            return
+        # Blast-radius backstop (#611): drop the spawn if this agent is already
+        # at its concurrency ceiling or over its spawn-rate for the window, so a
+        # self-triggering loop can't grow unbounded. Surfaced once per episode
+        # (log always, one DM), then silent until the pressure eases.
+        decision = self._backstop.try_acquire()
+        if not decision.allowed:
+            print(
+                f"[Runner:{self._agent_id}] Trigger {tid} dropped by backstop "
+                f"(reason={decision.reason}, active={decision.active}, "
+                f"window={decision.window_count}) — see #611",
+                file=sys.stderr,
+            )
+            if decision.warn:
+                try:
+                    await self._post_backstop_warning(trigger, decision)
+                except Exception as exc:
+                    print(
+                        f"[Runner:{self._agent_id}] backstop warning post failed: "
+                        f"{exc}",
+                        file=sys.stderr,
+                    )
             return
         self._running.add(tid)
         try:
@@ -2207,6 +3745,56 @@ class TriggerScheduler:
                   file=sys.stderr)
         finally:
             self._running.discard(tid)
+            self._backstop.release()
+
+    async def _post_backstop_warning(self, trigger: dict,
+                                     decision: BackstopDecision) -> None:
+        """Post one plain DM notice when the backstop first drops a triggered
+        run (#611). Best-effort, no Claude call — mirrors the throttle/burst
+        warnings. Further drops of the same episode stay silent until a spawn
+        succeeds again."""
+        raw_room_id = trigger.get("roomId") or _load_dm_room_id()
+        room_id = (
+            raw_room_id
+            if isinstance(raw_room_id, str) and _MATRIX_ROOM_ID_RE.match(raw_room_id)
+            else None
+        )
+        if not room_id:
+            return
+        snap = self._backstop.snapshot()
+        if decision.reason == "rate":
+            window_min = max(1, int(round(snap["windowSec"] / 60)))
+            detail = (
+                f"mehr als {snap['maxPerWindow']} getriggerte Sessions in "
+                f"{window_min} min gestartet"
+            )
+        else:
+            detail = (
+                f"bereits {snap['maxConcurrent']} getriggerte Sessions laufen "
+                f"parallel"
+            )
+        body = (
+            f"⚠️ **Trigger-Backstop aktiv** — {detail}. Weitere getriggerte "
+            f"Läufe werden vorerst verworfen (Schutz gegen Runaway-Schleifen, "
+            f"#611). Ich melde das einmal und unterdrücke weitere Meldungen, "
+            f"bis sich die Lage entspannt."
+        )
+        content = {
+            "msgtype": "m.notice",
+            "body": body,
+            "io.aee.backstop": {
+                "reason": decision.reason,
+                "active": snap["active"],
+                "windowCount": snap["windowCount"],
+                "maxConcurrent": snap["maxConcurrent"],
+                "maxPerWindow": snap["maxPerWindow"],
+            },
+        }
+        await self._client.room_send(
+            room_id=room_id,
+            message_type="m.room.message",
+            content=content,
+        )
 
     async def _execute_and_clear_marker(self, trigger: dict, marker_id: str,
                                         ctx: dict | None = None) -> None:
@@ -2255,6 +3843,17 @@ class TriggerScheduler:
         else:
             correlation_id = f"trigger:{tid}:{int(time.time() * 1000)}"
 
+        # Usage-record run context (#654): identity + trigger/github provenance,
+        # threaded into the claude call so the emitted record can attribute tokens.
+        github_block, conversation_key = _usage_github_and_key(gh)
+        run_context = _base_run_context()
+        run_context["trigger"] = {
+            "type": trigger.get("type"),
+            "id": tid,
+            "conversationKey": conversation_key,
+        }
+        run_context["github"] = github_block
+
         cfg = _load_dm_agent_config()
         session_policy = cfg.get("sessionPolicy")
         is_per_invocation = session_policy == "per-invocation"
@@ -2279,14 +3878,18 @@ class TriggerScheduler:
 
         learn_hint = ""
         if is_per_invocation:
+            # memory/log.md stays the PRIVATE episodic notebook (behaviour
+            # unchanged); the shared-KB routing now goes through the structured
+            # block, harvested deterministically by the runtime (issue #602).
             learn_hint = (
                 "\n\n---\nAfter finishing the task, before you send your final reply:\n"
                 "- If this run produced a REUSABLE insight (project convention, "
                 "recurring pattern, recurring pitfall that matters for future runs of your role), "
-                "append a brief note to memory/log.md.\n"
+                "append a brief note to memory/log.md — your private episodic notebook.\n"
                 "- No PR/issue-specific details — only lessons that hold *beyond* this single run.\n"
                 "- One or two lines per lesson, no code dump.\n"
                 "- If there is nothing to learn: skip, write nothing."
+                + build_harvest_block_hint(_knowledge_autonomy_level())
             )
 
         prompt = (
@@ -2320,6 +3923,7 @@ class TriggerScheduler:
         session = _new_session(
             "trigger", room_id=room_id, label=str(tid),
             trigger_type=trigger.get("type"), trigger_id=tid,
+            correlation_id=correlation_id,
         )
         _bump_active(+1, session)
         try:
@@ -2341,12 +3945,13 @@ class TriggerScheduler:
                     result, _observed = await asyncio.to_thread(
                         _call_claude_once,
                         prompt, room_id, correlation_id, None,
-                        self._blueprint_id, timeout_sec,
+                        self._blueprint_id, timeout_sec, run_context,
                     )
                 else:
                     result = await asyncio.to_thread(
                         _call_claude,
                         prompt, room_id, correlation_id, self._blueprint_id, timeout_sec,
+                        run_context,
                     )
             except subprocess.CalledProcessError as err:
                 try:
@@ -2362,10 +3967,24 @@ class TriggerScheduler:
         finally:
             _bump_active(-1, session)
 
+        # Deterministic KB harvest (issue #602): record the structured
+        # ```knowledge block the run emitted, then drop it from the reply. Only
+        # per-invocation runs carry the block instruction.
+        if is_per_invocation:
+            result = await asyncio.to_thread(
+                _harvest_shared_lessons, result, correlation_id
+            )
+
         # [PASS] means "nothing to report" — do not post to Matrix, just log.
         if result and result.strip().startswith("[PASS]"):
             print(f"[Runner:{self._agent_id}] Trigger {tid}: [PASS]",
                   file=sys.stderr)
+            return
+
+        # A reply that was ONLY a harvest block is now empty — nothing to post.
+        if not result or not result.strip():
+            print(f"[Runner:{self._agent_id}] Trigger {tid}: nothing to post "
+                  "after harvest", file=sys.stderr)
             return
 
         try:
@@ -2777,7 +4396,8 @@ async def run_dm_listener() -> None:
                 "promptChars": len(body),
             })
 
-            session = _new_session("dm", room_id=room_id, label="Direct message")
+            session = _new_session("dm", room_id=room_id, label="Direct message",
+                                   correlation_id=correlation_id)
             _bump_active(+1, session)
             try:
                 # claude invocation is blocking — run it off the event loop so
@@ -3025,8 +4645,25 @@ def _run_bp_dispatch(args) -> None:
     sys.exit(exit_code)
 
 
+def _maybe_enable_fake_claude() -> None:
+    """E2E seam (#666): when AEE_FAKE_CLAUDE=1, prepend the fake-claude shim dir
+    to PATH so bare `claude` invocations resolve to the deterministic shim
+    instead of the real CLI. No-op (and thus production-identical) otherwise."""
+    if os.environ.get("AEE_FAKE_CLAUDE") != "1":
+        return
+    if not (FAKE_CLAUDE_DIR / "claude").exists():
+        print(f"[agent] AEE_FAKE_CLAUDE=1 but {FAKE_CLAUDE_DIR}/claude is missing",
+              file=sys.stderr)
+        return
+    os.environ["PATH"] = f"{FAKE_CLAUDE_DIR}{os.pathsep}{os.environ.get('PATH', '')}"
+    print(f"[agent] AEE_FAKE_CLAUDE=1 — using fake claude shim at {FAKE_CLAUDE_DIR}",
+          file=sys.stderr)
+
+
 def main() -> None:
     global _args
+
+    _maybe_enable_fake_claude()
 
     parser = argparse.ArgumentParser(
         description="Agent Execution Environment entrypoint",

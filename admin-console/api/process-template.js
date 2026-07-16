@@ -146,13 +146,37 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
 function emptyDraftBundle(name) {
   return {
     processTemplateVersion: VERSION,
-    name: name || 'Untitled process',
+    name: name || 'Untitled flow',
     level: 'template',
     roles: [],
     gates: [],
     labels: [],
     stages: [],
   };
+}
+
+// Draft storage id (slug) derivation. A draft's id is a name-derived, mutable
+// slug — re-keyed whenever the name changes (#581), not a permanent external
+// identifier. Kept identical to the original creation-time behaviour: lower-case,
+// collapse non-`[a-z0-9-]` runs to `-`, trim leading/trailing `-`, 48-char cap,
+// empty result falls back to `process`.
+const DRAFT_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+function slugifyDraft(name) {
+  const base = String(name || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
+  return base || 'process';
+}
+
+// Derive a unique draft id from a name. `exists(id)` reports whether an id is
+// already taken; `currentId` (when re-deriving on rename) is treated as free so
+// a name whose slug already equals the draft's own id is a no-op — never
+// spuriously suffixed. Collisions reuse the creation-time `-2`/`-3` suffix loop.
+function deriveUniqueDraftId(name, { currentId = null, exists } = {}) {
+  let base = slugifyDraft(name);
+  if (!DRAFT_ID_RE.test(base)) base = 'process';
+  let id = base;
+  let n = 2;
+  while (id !== currentId && exists(id)) { id = `${base}-${n++}`; }
+  return id;
 }
 
 // Transform a bundle's roles into the `customRoles` shape consumed by
@@ -547,10 +571,116 @@ function expandDataFlowSteps(bundle) {
   return { ...bundle, roles };
 }
 
+// Substitute `{{varname}}` placeholders. Unknown vars stay literal so a rogue
+// template field doesn't silently disappear into "undefined" — mirrors
+// api.js's applyTemplateVars (kept local so this module stays dependency-free).
+function substituteVars(s, vars) {
+  if (typeof s !== 'string') return s;
+  return s.replace(/\{\{(\w+)\}\}/g, (_m, k) =>
+    vars && vars[k] !== undefined ? String(vars[k]) : `{{${k}}}`);
+}
+
+/**
+ * Build the orchestrator member-create body from a role TEMPLATE, applying
+ * per-member `{{var}}` substitution. This is the single source of truth shared
+ * by the Team-Setup wizard (POST /api/teams[/stream]) and the Flow Editor's
+ * "add role from a template" flow (#586), so both express a template's fields
+ * — prompt, sessionPolicy, triggers, and the catalog-v2 declarative ports —
+ * identically. Pure; the caller supplies the resolved substitution `vars`
+ * (repoFullName, teamName, agentId, readyLabel, …) and the target ids.
+ *
+ * @param {object} template - a raw agent template ({ promptTemplate, triggers, … })
+ * @param {object} opts
+ * @param {string} opts.teamId          - owning team agent id (for `<teamId>-<roleId>` refs)
+ * @param {string} opts.memberId        - the new member's id
+ * @param {string} opts.memberDisplayName - the new member's display name
+ * @param {object} opts.vars            - substitution variables
+ * @param {boolean} [opts.materialize]  - when defined, passed through to the orchestrator
+ * @returns {object} the member-create body for POST /internal/teams/:teamId/members
+ */
+function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName, vars, materialize } = {}) {
+  const t = template && typeof template === 'object' ? template : {};
+  const subst = (s) => substituteVars(s, vars);
+
+  const triggers = (Array.isArray(t.triggers) ? t.triggers : []).map((tr) => {
+    const out = {
+      id: tr.id,
+      type: tr.type,
+      enabled: tr.enabled !== false,
+      description: tr.description || `${t.displayName} — ${tr.id}`,
+      prompt: subst(tr.promptTemplate || ''),
+    };
+    if (tr.type === 'github-event') {
+      out.events = tr.events || [];
+      out.repo = vars ? vars.repoFullName : undefined;
+      if (typeof tr.labelFilter === 'string' && tr.labelFilter.trim()) {
+        out.labelFilter = subst(tr.labelFilter);
+      }
+      // Data-flow (agent dependency) marker so the trigger UI renders it as an
+      // editable "push from <upstream>" hand-off rather than a raw push (#379).
+      if (tr.dataFlow) out.dataFlow = true;
+      // GitHub-channel marker (#380) so reconciliation can regenerate it and the
+      // graph builders skip it (the on:'github' edge comes from the port).
+      if (tr.channel) out.channel = true;
+      // Stamp the history horizon (#320/#446) on EVERY github-event trigger so
+      // the poller starts a fresh member from "now", not the triggers.json mtime.
+      const now = new Date().toISOString();
+      out.createdAt = now;
+      out.activatedAt = now;
+    } else if (tr.type === 'cron') {
+      out.cron = tr.cron;
+    }
+    if (tr.preCheckScript) out.preCheckScript = tr.preCheckScript;
+    if (tr.preCheckEnv && typeof tr.preCheckEnv === 'object') {
+      out.preCheckEnv = Object.fromEntries(
+        Object.entries(tr.preCheckEnv).map(([k, v]) => [k, subst(v)]));
+    }
+    // Optional declarative `emits` (#328) — labels this trigger's run sets;
+    // template tokens (e.g. `started:{{agentId}}`) resolved per-member.
+    if (Array.isArray(tr.emits)) out.emits = tr.emits.map((e) => subst(String(e)));
+    return out;
+  });
+
+  const inputs = Array.isArray(t.inputs) ? t.inputs : [];
+  const outputs = Array.isArray(t.outputs) ? t.outputs : [];
+  const dependsOn = Array.isArray(t.dependsOn) ? t.dependsOn : [];
+  const dataFlow = (inputs.length || outputs.length || dependsOn.length)
+    ? {
+      ...(inputs.length ? { inputs } : {}),
+      ...(outputs.length ? { outputs } : {}),
+      // dependsOn role ids → member ids so the live graph connects members.
+      ...(dependsOn.length ? { dependsOn: dependsOn.map((d) => `${teamId}-${d}`) } : {}),
+    }
+    : null;
+
+  return {
+    id: memberId,
+    displayName: memberDisplayName,
+    systemPromptOverride: subst(t.promptTemplate || ''),
+    // skillsOverride deliberately omitted — members inherit the team agent's
+    // `skills[]` (team-owned grant).
+    sessionPolicy: t.sessionPolicy === 'per-invocation' ? 'per-invocation' : undefined,
+    triggers,
+    // Declarative ports (parity with POST /api/teams): data-flow (#379),
+    // hierarchy (#377), agent-level emits, stage band, GitHub ports (#380).
+    ...(dataFlow ? { dataFlow } : {}),
+    ...(typeof t.parent === 'string' && t.parent ? { parentMemberId: `${teamId}-${t.parent}` } : {}),
+    ...(Array.isArray(t.emits) && t.emits.length ? { emits: t.emits } : {}),
+    ...(typeof t.stage === 'string' && t.stage ? { stage: t.stage } : {}),
+    ...(t.github && (t.github.producesPr || t.github.producesIssue) ? { github: t.github } : {}),
+    ...(Array.isArray(t.channels) && t.channels.length
+      ? { channels: t.channels.map((c) => ({ ...c, from: `${teamId}-${c.from}` })) }
+      : {}),
+    ...(materialize !== undefined ? { materialize } : {}),
+  };
+}
+
 module.exports = {
   buildProcessTemplate, validateProcessTemplate, templateToCustomRoles,
+  buildMemberFromTemplate,
   expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview,
   channelTriggerId, isChannelTrigger, stampDerivedActivation,
   emptyDraftBundle, roleKeyOf, VERSION,
   artifactKey, artifactHint, artifactIsNamed,
+  slugifyDraft, deriveUniqueDraftId,
 };

@@ -134,16 +134,19 @@ in `admin-console/api/port-suggestion.js` as offline fallback). Suggestions are
 confirmed custom role rides the weave request inline and is wired exactly like
 a catalog role.
 
-## Extend mode & the legacy roles path
+## Create-only wizard & the legacy roles path
 
-- **Create mode** builds teams exclusively through the Process step — the flat
-  role-checkbox list is retired there.
-- **Extend mode** (`/team-setup?team=<id>&mode=extend`, and the collision
-  recovery flow) keeps the role-card UI: adding *instances* of catalog roles
-  (`count` steppers) is a roles-array concept that a process bundle does not
-  express. A collision hit while submitting a bundle stays on the bundle path:
-  the collision card re-submits the same bundle with `mode: "extend"`, adding
-  only the missing members.
+- The wizard is **create-only**: it builds teams exclusively through the Process
+  step, and the flat role-checkbox list is retired.
+- The **Extend Team UI has been removed** (#588) — growing an existing team now
+  happens in the Flow Editor (Edit-as-draft → Materialize). Old
+  `/team-setup?team=<id>&mode=extend` deep links redirect to
+  `/flows?proc=<team>`.
+- The backend `mode: "extend"` path is **retained**. The wizard still uses it in
+  one place: an id collision hit while submitting a bundle stays on the bundle
+  path, and the collision card re-submits the *same* bundle with
+  `mode: "extend"`, adding only the missing members. The Flow Editor's
+  Materialize round-trip drives the same path.
 - `POST /api/teams` (and `/stream`) continue to accept plain `roles` +
   `customRoles` for API compatibility — the retirement is UI-only.
 

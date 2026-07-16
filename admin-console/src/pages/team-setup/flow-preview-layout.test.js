@@ -45,9 +45,10 @@ test('bundleEdges: channels + label hand-offs, deduped, no self-edges', () => {
     ['author→reviewer:PR', 'author→reviewer:done']);
 });
 
-// Two rework loops within one stage column: each back edge gets its own lane
-// below the grid, so each label sits on its own line.
-test('back edges get one label line per edge', () => {
+// Two rework loops within one stage column route as brackets in that column's
+// right gutter (local to the stage, not dragged into a band below the whole
+// grid), each with its own staggered label line.
+test('intra-column loops route in the column gutter with one label line each', () => {
   const bundle = {
     stages: ['Build'],
     roles: [
@@ -58,13 +59,16 @@ test('back edges get one label line per edge', () => {
   const layout = computePreviewLayout(bundle);
   assert.equal(layout.back.length, 2);
   assert.equal(layout.forward.length, 0);
+  // labels sit in the gutter to the right of the single column's boxes, not in
+  // a lane band below the grid
+  const boxRight = PAD + NODE_W;
+  for (const e of layout.back) {
+    assert.ok(e.labelX > boxRight, `label ${e.labelText} not in the gutter`);
+    assert.ok(typeof e.d === 'string' && e.d.startsWith('M'), 'edge has a bracket path');
+  }
+  // each loop gets its own staggered label line
   const ys = layout.back.map(e => e.labelY).sort((a, b) => a - b);
-  assert.equal(ys[1] - ys[0], LANE_STEP);
-  // lanes live below the node grid
-  const gridBottom = PAD + HEADER + ROW_H + NODE_H;
-  assert.ok(ys[0] > gridBottom);
-  // svg is tall enough to hold both lanes
-  assert.ok(layout.height >= ys[1] + 4);
+  assert.ok(ys[1] - ys[0] >= LABEL_GAP, `labels ${ys[0]}/${ys[1]} not staggered`);
 });
 
 // Two hand-offs sharing the corridor between the same two columns are
@@ -127,6 +131,44 @@ test('extended-sdlc preview: labels neither overlap nor cover node boxes', () =>
     assert.ok(l.bottom <= layout.height && l.top >= 0, `label "${l.text}" clipped vertically`);
     assert.ok(l.left >= 0 && l.right <= layout.width, `label "${l.text}" clipped horizontally`);
   }
+});
+
+// Forward edge paths must start ≥3 px past the source box right edge and end
+// ≥6 px before the target box left edge (acceptance criteria, #548).
+// Back edge paths must also end ≥6 px before the target box left edge.
+test('forward and back edge endpoints respect required gaps', () => {
+  const bundle = {
+    stages: ['S1', 'S2'],
+    roles: [
+      role('a', 'S1', { emits: ['go'] }),
+      role('b', 'S2', { triggers: [{ labelFilter: 'go' }], emits: ['back'] }),
+      role('c', 'S1', { triggers: [{ labelFilter: 'back' }] }),
+    ],
+  };
+  const layout = computePreviewLayout(bundle);
+  const aNode = layout.nodes.find(n => n.role.id === 'a');
+  const bNode = layout.nodes.find(n => n.role.id === 'b');
+  const fwd = layout.forward[0];
+  const bkEdge = layout.back[0];
+
+  // Extract the start point of the forward edge (M x y).
+  const fwdStart = fwd.d.match(/^M\s+([\d.]+)\s+([\d.]+)/);
+  const fwdStartX = parseFloat(fwdStart[1]);
+  assert.ok(fwdStartX >= aNode.x + NODE_W + 3,
+    `forward start gap too small: ${fwdStartX} vs box right ${aNode.x + NODE_W}`);
+
+  // Extract the last coordinate of the forward edge cubic bezier (... x2 y2).
+  const fwdEnd = fwd.d.match(/([\d.]+)\s+([\d.]+)$/);
+  const fwdEndX = parseFloat(fwdEnd[1]);
+  assert.ok(bNode.x - fwdEndX >= 6,
+    `forward end gap too small: box.x=${bNode.x}, path ends at ${fwdEndX}`);
+
+  // Back edge: last segment ends at [e.b.x - offset, entryY]; extract last L point.
+  const bkEnd = bkEdge.d.match(/([\d.]+)\s+([\d.]+)$/);
+  const bkEndX = parseFloat(bkEnd[1]);
+  const cNode = layout.nodes.find(n => n.role.id === 'c');
+  assert.ok(cNode.x - bkEndX >= 6,
+    `back edge end gap too small: box.x=${cNode.x}, path ends at ${bkEndX}`);
 });
 
 // Column geometry is unchanged in spirit: one column per stage, unstaged roles

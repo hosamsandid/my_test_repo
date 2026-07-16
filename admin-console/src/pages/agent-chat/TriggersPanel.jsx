@@ -737,8 +737,14 @@ function generateSecret() {
 }
 
 /* ── Trigger form (create & edit) ───────────────────────────────────── */
-function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, ops = liveOps }) {
+// Shared by the agent-chat Triggers panel and the Flow-Editor schedule edge
+// editor (EdgeDialogs) — one source of truth for editing every trigger type.
+// `onRemove` renders a delete affordance (the flow editor's ⏰ edge needs it);
+// `allowTypeChange` unlocks the Type selector on edit (the flow editor permits
+// turning a schedule into a different trigger kind, re-deriving the edge).
+export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues, agentId, ops = liveOps, allowTypeChange = false }) {
   const isEdit = !!initialValues;
+  const typeLocked = isEdit && !allowTypeChange;
   // Draft mode (process-canvas drafts): there is no live agent/environment yet,
   // so the repo is unknown by design — it is applied at materialise time.
   const isDraftMode = ops.mode === 'draft';
@@ -900,13 +906,13 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, ops = l
         <select
           value={form.type}
           onChange={e => changeType(e.target.value)}
-          disabled={isEdit}
+          disabled={typeLocked}
           style={{
             width: '100%', padding: 'var(--eb-space-2) var(--eb-space-3)',
             background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
             borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)',
             fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', outline: 'none',
-            opacity: isEdit ? 0.6 : 1,
+            opacity: typeLocked ? 0.6 : 1,
           }}
         >
           <option value="cron">Cron (recurring)</option>
@@ -1185,6 +1191,21 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, ops = l
       )}
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+        {onRemove && (
+          <button
+            onClick={onRemove}
+            disabled={saving}
+            style={{
+              marginRight: 'auto',
+              padding: 'var(--eb-space-2) var(--eb-space-4)',
+              background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-status-error)',
+              borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-status-error)',
+              cursor: saving ? 'not-allowed' : 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+            }}
+          >
+            Remove
+          </button>
+        )}
         <button
           onClick={submit}
           disabled={saving}

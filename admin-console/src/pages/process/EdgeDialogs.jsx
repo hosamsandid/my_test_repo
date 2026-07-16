@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
 import { liveOps } from './edit-adapters';
+import { TriggerForm } from '../agent-chat/TriggersPanel';
 
 // Only these GitHub events carry a label name, so a labelFilter is meaningful.
 const LABEL_EVENTS = [
@@ -845,15 +846,19 @@ function RemoveArtifactEdgeDialog({ edge, fromName, ops = liveOps, onClose, onDo
 
 /* ── Actor-edge editors (#412): same shell, per-type properties + delete ──── */
 
-// ⏰ → agent: edit the cron expression / one-shot timestamp, or delete.
+// ⏰ → agent: edit the schedule trigger via the shared chat TriggerForm (#600) —
+// the single source of truth for editing every trigger type. The form is
+// pre-filled from the clicked edge's trigger and covers the schedule builder,
+// one-shot picker, prompt, description and enabled toggle. `allowTypeChange`
+// lets the user turn the schedule into a different trigger kind (the graph
+// re-derives the edge on refresh); Save patches the trigger through the ops
+// adapter, so unrelated fields (emits, dataFlow, channel markers) stay intact.
 function EditTimerDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
   const { to, triggerId } = edge;
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
-  const [kind, setKind] = useState('cron');
-  const [cron, setCron] = useState('');
-  const [at, setAt] = useState('');
+  const [initialValues, setInitialValues] = useState(null);
 
   useEffect(() => {
     let alive = true;
@@ -862,26 +867,19 @@ function EditTimerDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
         const tt = await ops.listTriggers(to);
         if (!alive) return;
         const t = (Array.isArray(tt) ? tt : []).find(x => x.id === triggerId);
-        if (t) {
-          setKind(t.type === 'once' ? 'once' : 'cron');
-          setCron(t.cron || '');
-          setAt(t.at || '');
-        }
+        setInitialValues(t || null);
       } catch (e) { if (alive) setError(e.message); }
       finally { if (alive) setLoading(false); }
     })();
     return () => { alive = false; };
   }, [to, triggerId]);
 
-  async function save() {
+  async function handleSave(body) {
     setSaving(true); setError(null);
-    try {
-      if (kind === 'cron') await ops.updateTrigger(to, triggerId, { cron: cron.trim() });
-      else await ops.updateTrigger(to, triggerId, { at });
-      onDone?.();
-    } catch (e) { setError(e.message); setSaving(false); }
+    try { await ops.updateTrigger(to, triggerId, body); onDone?.(); }
+    catch (e) { setError(e.message); setSaving(false); }
   }
-  async function remove() {
+  async function handleRemove() {
     setSaving(true); setError(null);
     try { await ops.deleteTrigger(to, triggerId); onDone?.(); }
     catch (e) { setError(e.message); setSaving(false); }
@@ -890,25 +888,23 @@ function EditTimerDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
   return (
     <SidePanel open onClose={onClose} title="Schedule" width="520px">
       <p style={hint}>⏰ Schedule → <strong>{toName || to}</strong></p>
-      {loading ? <Center><Loader2 size={14} style={spin} /> Loading…</Center> : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-          {kind === 'cron' ? (
-            <Field label="Cron expression (min hour dom mon dow)">
-              <input value={cron} onChange={e => setCron(e.target.value)} style={{ ...input, fontFamily: 'var(--eb-font-mono)' }} />
-              <small style={small}>{cronPreview(cron)}</small>
-            </Field>
-          ) : (
-            <Field label="Run at (ISO timestamp)">
-              <input value={at} onChange={e => setAt(e.target.value)} style={{ ...input, fontFamily: 'var(--eb-font-mono)' }} />
-            </Field>
-          )}
+      {loading ? (
+        <Center><Loader2 size={14} style={spin} /> Loading…</Center>
+      ) : !initialValues ? (
+        <span style={errStyle}>{error || 'Trigger not found.'}</span>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
           {error && <span style={errStyle}>{error}</span>}
-          <div style={actions}>
-            <button onClick={remove} disabled={saving}
-              style={{ ...ghost, color: 'var(--eb-status-error)', borderColor: 'var(--eb-status-error)', marginRight: 'auto' }}>Remove</button>
-            <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
-            <button onClick={save} disabled={saving} style={primary}>{saving ? 'Saving…' : 'Save'}</button>
-          </div>
+          <TriggerForm
+            initialValues={initialValues}
+            agentId={to}
+            ops={ops}
+            allowTypeChange
+            saving={saving}
+            onSave={handleSave}
+            onCancel={onClose}
+            onRemove={handleRemove}
+          />
         </div>
       )}
       <style>{`@keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}`}</style>
@@ -1264,26 +1260,6 @@ export function WebhookForm({ to, toName, ops = liveOps, onBack, onClose, onDone
       </div>
     </SidePanel>
   );
-}
-
-// Human-readable cron summary — used by the schedule edit dialog (opened from
-// the ⏰ row inside the agent card; new schedules are added in the inspector's
-// Triggers tab).
-export function cronPreview(expr) {
-  const p = String(expr || '').trim().split(/\s+/);
-  if (p.length !== 5) return 'Expected 5 fields: minute hour day-of-month month day-of-week';
-  const [min, hr, dom, mon, dow] = p;
-  const DAYS = { 0: 'Sunday', 1: 'Monday', 2: 'Tuesday', 3: 'Wednesday', 4: 'Thursday', 5: 'Friday', 6: 'Saturday', 7: 'Sunday' };
-  const two = (s) => String(s).padStart(2, '0');
-  if (/^\d+$/.test(min) && /^\d+$/.test(hr)) {
-    const time = `${two(hr)}:${two(min)}`;
-    if (dom === '*' && mon === '*' && dow === '*') return `every day at ${time}`;
-    if (dom === '*' && mon === '*' && DAYS[dow]) return `every ${DAYS[dow]} at ${time}`;
-    if (/^\d+$/.test(dom) && mon === '*' && dow === '*') return `on day ${dom} of every month at ${time}`;
-  }
-  if (/^\*\/\d+$/.test(min) && hr === '*') return `every ${min.slice(2)} minutes`;
-  if (min === '0' && /^\*\/\d+$/.test(hr)) return `every ${hr.slice(2)} hours`;
-  return 'custom schedule';
 }
 
 /* ── shared bits ───────────────────────────────────────────────────────── */

@@ -99,6 +99,27 @@ class FormatAskUserQuestion(unittest.TestCase):
         self.assertNotIn("no label", out)
 
 
+class BuildHarvestHint(unittest.TestCase):
+    fn = staticmethod(entrypoint.build_harvest_hint)
+
+    def test_level_0_is_empty(self):
+        self.assertEqual(self.fn(0), "")
+
+    def test_negative_or_noninteger_is_empty(self):
+        self.assertEqual(self.fn(-1), "")
+        self.assertEqual(self.fn("1"), "")  # not an int -> today's behaviour
+        self.assertEqual(self.fn(None), "")
+
+    def test_level_1_mentions_knowledge_add(self):
+        out = self.fn(1)
+        self.assertIn("knowledge add", out)
+        self.assertIn("knowledge search", out)
+
+    def test_higher_levels_still_harvest(self):
+        for lvl in (2, 3):
+            self.assertIn("knowledge add", self.fn(lvl))
+
+
 class GithubEventDetail(unittest.TestCase):
     def test_issues_event_includes_number_title_url(self):
         detail = github_event_detail("issues.labeled", {
@@ -432,6 +453,906 @@ class ResultEventTokens(unittest.TestCase):
         })
         self.assertEqual(tokens["cacheCreationInput"], 0)
         self.assertEqual(tokens["cacheReadInput"], 0)
+
+
+class ResultEventModelUsage(unittest.TestCase):
+    """#654: the result-event wrapper must now also surface the raw per-model
+    `modelUsage` map (previously dropped) so the usage-record emitter can build
+    the per-model four-class split."""
+
+    def test_model_usage_passed_through_raw(self):
+        line = __import__("json").dumps({
+            "type": "result",
+            "usage": {"input_tokens": 10, "output_tokens": 42},
+            "modelUsage": {"claude-sonnet-4-6": {"inputTokens": 8, "outputTokens": 40}},
+        })
+        ev = next(e for e in map_stream_json_line(line, "corr-1")
+                  if e["type"] == "result")
+        self.assertEqual(ev["modelUsage"],
+                         {"claude-sonnet-4-6": {"inputTokens": 8, "outputTokens": 40}})
+
+    def test_model_usage_none_when_absent(self):
+        line = __import__("json").dumps({"type": "result", "usage": {}})
+        ev = next(e for e in map_stream_json_line(line, "corr-1")
+                  if e["type"] == "result")
+        self.assertIsNone(ev["modelUsage"])
+
+
+class BuildUsageRecord(unittest.TestCase):
+    """Two-sided contract with admin-console/api/usage-summary.js: build_usage_record
+    (emitter) is asserted against the SAME golden fixture the JS aggregator uses
+    (admin-console/api/usage-summary.fixture.json), so the canonical usage-record
+    schema cannot drift between the Python emitter and the JS aggregator."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        fixture_path = (Path(__file__).resolve().parents[2]
+                        / "admin-console" / "api" / "usage-summary.fixture.json")
+        cls.fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    def test_golden_records(self):
+        for case in self.fixture["records"]:
+            with self.subTest(case=case["name"]):
+                self.assertEqual(
+                    entrypoint.build_usage_record(case["input"]),
+                    case["expected"],
+                )
+
+    def test_normalize_model_usage_ignores_non_dict_and_defaults(self):
+        self.assertEqual(entrypoint._normalize_model_usage(None), {})
+        self.assertEqual(entrypoint._normalize_model_usage({"m": "bad"}), {})
+        self.assertEqual(
+            entrypoint._normalize_model_usage({"m": {"inputTokens": 3}}),
+            {"m": {"input": 3, "output": 0,
+                   "cacheCreationInput": 0, "cacheReadInput": 0}},
+        )
+
+
+class MaintenanceModeGating(unittest.IsolatedAsyncioTestCase):
+    """#504: cron/once triggers must not fire while Maintenance Mode (#501) is
+    active, http/github-event pending entries must not be drained/processed
+    while active, and a cron trigger whose fire fell inside the window gets
+    exactly one catch-up run once it ends."""
+
+    def _scheduler(self):
+        client = AsyncMock()
+        return entrypoint.TriggerScheduler(
+            client=client, agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=None, blueprint_id=None,
+        )
+
+    async def test_maintenance_active_true_when_orchestrator_reports_active(self):
+        scheduler = self._scheduler()
+        with patch.object(entrypoint.TriggerScheduler, "_orch_get",
+                           return_value=(200, '{"ok": true, "active": true}')):
+            self.assertTrue(await scheduler._maintenance_active())
+
+    async def test_maintenance_active_false_when_orchestrator_reports_inactive(self):
+        scheduler = self._scheduler()
+        with patch.object(entrypoint.TriggerScheduler, "_orch_get",
+                           return_value=(200, '{"ok": true, "active": false}')):
+            self.assertFalse(await scheduler._maintenance_active())
+
+    async def test_maintenance_active_false_when_orchestrator_unreachable(self):
+        scheduler = self._scheduler()
+        with patch.object(entrypoint.TriggerScheduler, "_orch_get",
+                           return_value=(0, "connection refused")):
+            self.assertFalse(await scheduler._maintenance_active())
+
+    async def test_maintenance_active_false_on_malformed_body(self):
+        scheduler = self._scheduler()
+        with patch.object(entrypoint.TriggerScheduler, "_orch_get",
+                           return_value=(200, "not json")):
+            self.assertFalse(await scheduler._maintenance_active())
+
+    async def test_once_trigger_not_fired_while_maintenance_active(self):
+        scheduler = self._scheduler()
+        past = (entrypoint.datetime.now(entrypoint._TRIGGER_TZ)
+                - timedelta(minutes=1)).isoformat()
+        trigger = {"id": "o1", "type": "once", "at": past, "enabled": True}
+        with patch.object(entrypoint, "_load_triggers", return_value=[trigger]), \
+             patch.object(entrypoint, "_save_triggers") as save_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=True)):
+            await scheduler._sync()
+        save_mock.assert_not_called()
+        self.assertNotIn("o1", scheduler._fired_once)
+
+    async def test_once_trigger_fires_when_maintenance_inactive(self):
+        scheduler = self._scheduler()
+        past = (entrypoint.datetime.now(entrypoint._TRIGGER_TZ)
+                - timedelta(minutes=1)).isoformat()
+        trigger = {"id": "o1", "type": "once", "at": past, "enabled": True}
+        # _execute MUST be mocked (#606): the once-firing path calls the real
+        # _execute via asyncio.create_task, which would spawn a real Claude run /
+        # write the live session log when this suite is run inside a live agent
+        # container. Patching it here is the correct unit boundary — firing the
+        # once trigger means "call _execute once".
+        with patch.object(entrypoint, "_load_triggers", return_value=[trigger]), \
+             patch.object(entrypoint, "_save_triggers") as save_mock, \
+             patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._sync()
+            # Let the create_task-scheduled coroutine run so no task is left
+            # pending at teardown.
+            await entrypoint.asyncio.sleep(0)
+        execute_mock.assert_called_once()
+        save_mock.assert_called_once()
+        self.assertIn("o1", scheduler._fired_once)
+
+    async def test_under_test_harness_suppresses_execute(self):
+        # Defense in depth (#606): even if a test forgets to mock _execute, the
+        # real _execute must be inert under a test harness — it must never spawn
+        # a Claude run, post to Matrix, or write the live session log.
+        self.assertTrue(entrypoint._under_test_harness())
+        scheduler = self._scheduler()
+        trigger = {"id": "o1", "type": "once", "at": "2020-01-01T00:00:00Z",
+                   "enabled": True}
+        with patch.object(entrypoint, "_load_dm_room_id",
+                          return_value="!room:local") as room_mock, \
+             patch.object(entrypoint, "_call_claude_once") as claude_mock, \
+             patch.object(entrypoint, "_append_event") as append_mock:
+            await scheduler._execute(trigger)
+        claude_mock.assert_not_called()
+        append_mock.assert_not_called()
+        room_mock.assert_not_called()
+        self.assertNotIn("o1", scheduler._running)
+
+    async def test_pending_loop_skips_processing_during_maintenance(self):
+        scheduler = self._scheduler()
+        process_mock = AsyncMock()
+
+        async def fake_maintenance_active():
+            scheduler._shutdown_event.set()
+            return True
+
+        with patch.object(scheduler, "_process_pending", process_mock), \
+             patch.object(scheduler, "_maintenance_active", fake_maintenance_active):
+            await scheduler._pending_loop()
+        process_mock.assert_not_called()
+
+    async def test_pending_loop_processes_when_maintenance_inactive(self):
+        scheduler = self._scheduler()
+
+        async def fake_process_pending():
+            scheduler._shutdown_event.set()
+
+        maintenance_mock = AsyncMock(return_value=False)
+        with patch.object(scheduler, "_process_pending", fake_process_pending), \
+             patch.object(scheduler, "_maintenance_active", maintenance_mock):
+            await scheduler._pending_loop()
+        maintenance_mock.assert_called_once()
+
+    async def test_cron_runner_skips_and_catches_up_exactly_once(self):
+        scheduler = self._scheduler()
+
+        async def fake_execute(_trigger):
+            scheduler._shutdown_event.set()
+
+        execute_mock = AsyncMock(side_effect=fake_execute)
+        maintenance_calls = []
+
+        async def fake_maintenance_active():
+            maintenance_calls.append(None)
+            # Active on the trigger's scheduled fire; inactive on the
+            # follow-up check inside the wait-it-out loop (maintenance ended).
+            return len(maintenance_calls) == 1
+
+        with patch.object(scheduler, "_execute", execute_mock), \
+             patch.object(scheduler, "_maintenance_active", fake_maintenance_active), \
+             patch.object(entrypoint.asyncio, "sleep", AsyncMock(return_value=None)):
+            await scheduler._cron_runner({"id": "c1", "type": "cron"}, "* * * * *")
+        execute_mock.assert_called_once()
+        self.assertEqual(len(maintenance_calls), 2)
+
+
+class TriggerBackstopUnit(unittest.TestCase):
+    """#611: the pure per-agent backstop that caps concurrent + per-window
+    triggered Claude spawns so a self-triggering loop can't fan out unbounded."""
+
+    def _clock(self):
+        # A mutable, injectable monotonic clock.
+        state = {"t": 1000.0}
+        return state, (lambda: state["t"])
+
+    def test_concurrency_ceiling_denies_when_full(self):
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=2, max_per_window=0, window_sec=0)
+        self.assertTrue(b.try_acquire().allowed)
+        self.assertTrue(b.try_acquire().allowed)
+        d = b.try_acquire()
+        self.assertFalse(d.allowed)
+        self.assertEqual(d.reason, "concurrency")
+        self.assertEqual(d.active, 2)
+
+    def test_release_frees_a_slot(self):
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=1, max_per_window=0, window_sec=0)
+        self.assertTrue(b.try_acquire().allowed)
+        self.assertFalse(b.try_acquire().allowed)
+        b.release()
+        self.assertTrue(b.try_acquire().allowed)
+
+    def test_release_never_goes_negative(self):
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=1, max_per_window=0, window_sec=0)
+        b.release()
+        b.release()
+        self.assertEqual(b.snapshot()["active"], 0)
+        self.assertTrue(b.try_acquire().allowed)
+
+    def test_rate_limit_denies_after_window_full(self):
+        state, clock = self._clock()
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=0, max_per_window=3, window_sec=300, clock=clock)
+        # Three spawns fit in the window; the fourth is dropped.
+        for _ in range(3):
+            self.assertTrue(b.try_acquire().allowed)
+            b.release()  # concurrency disabled, but release keeps active honest
+        d = b.try_acquire()
+        self.assertFalse(d.allowed)
+        self.assertEqual(d.reason, "rate")
+
+    def test_rate_limit_recovers_after_window_slides(self):
+        state, clock = self._clock()
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=0, max_per_window=2, window_sec=300, clock=clock)
+        self.assertTrue(b.try_acquire().allowed)
+        self.assertTrue(b.try_acquire().allowed)
+        self.assertFalse(b.try_acquire().allowed)
+        # Advance past the window — the old spawns age out.
+        state["t"] += 301
+        self.assertTrue(b.try_acquire().allowed)
+
+    def test_zero_limits_disable_the_backstop(self):
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=0, max_per_window=0, window_sec=0)
+        for _ in range(50):
+            self.assertTrue(b.try_acquire().allowed)
+
+    def test_warn_fires_once_per_episode_then_resets_on_success(self):
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=1, max_per_window=0, window_sec=0)
+        self.assertTrue(b.try_acquire().allowed)  # at ceiling
+        first = b.try_acquire()
+        self.assertFalse(first.allowed)
+        self.assertTrue(first.warn)            # first drop warns
+        second = b.try_acquire()
+        self.assertFalse(second.allowed)
+        self.assertFalse(second.warn)          # subsequent drops stay silent
+        b.release()
+        self.assertTrue(b.try_acquire().allowed)  # pressure eased → episode ends
+        b.release()
+        b.try_acquire()  # back to ceiling
+        self.assertTrue(b.try_acquire().warn)  # a fresh episode warns again
+
+
+class TriggerBackstopExecuteIntegration(unittest.IsolatedAsyncioTestCase):
+    """#611: `_execute` — the single chokepoint for triggered work — consults
+    the backstop before spawning, drops over-limit runs without calling
+    `_execute_inner`, and pairs every allowed spawn with a release."""
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=None, blueprint_id=None,
+        )
+
+    async def test_execute_dropped_when_backstop_denies(self):
+        scheduler = self._scheduler()
+        scheduler._backstop = entrypoint.TriggerBackstop(
+            max_concurrent=1, max_per_window=0, window_sec=0)
+        scheduler._backstop.try_acquire()  # fill to ceiling
+        inner = AsyncMock()
+        warn = AsyncMock()
+        trigger = {"id": "t1", "type": "cron"}
+        with patch.object(entrypoint, "_under_test_harness", return_value=False), \
+             patch.object(scheduler, "_execute_inner", inner), \
+             patch.object(scheduler, "_post_backstop_warning", warn):
+            await scheduler._execute(trigger)
+        inner.assert_not_called()
+        warn.assert_called_once()
+        self.assertNotIn("t1", scheduler._running)
+
+    async def test_execute_allowed_then_released(self):
+        scheduler = self._scheduler()
+        inner = AsyncMock()
+        trigger = {"id": "t1", "type": "cron"}
+        with patch.object(entrypoint, "_under_test_harness", return_value=False), \
+             patch.object(scheduler, "_execute_inner", inner):
+            await scheduler._execute(trigger)
+        inner.assert_called_once()
+        # Released after completion, so the slot is free again.
+        self.assertEqual(scheduler._backstop.snapshot()["active"], 0)
+        self.assertNotIn("t1", scheduler._running)
+
+    async def test_execute_releases_even_when_inner_raises(self):
+        scheduler = self._scheduler()
+        inner = AsyncMock(side_effect=RuntimeError("boom"))
+        trigger = {"id": "t1", "type": "cron"}
+        with patch.object(entrypoint, "_under_test_harness", return_value=False), \
+             patch.object(scheduler, "_execute_inner", inner):
+            await scheduler._execute(trigger)  # error is swallowed + logged
+        self.assertEqual(scheduler._backstop.snapshot()["active"], 0)
+
+    async def test_only_first_drop_posts_a_warning(self):
+        scheduler = self._scheduler()
+        scheduler._backstop = entrypoint.TriggerBackstop(
+            max_concurrent=1, max_per_window=0, window_sec=0)
+        scheduler._backstop.try_acquire()  # fill to ceiling
+        trigger = {"id": "t1", "type": "cron"}
+        with patch.object(entrypoint, "_under_test_harness", return_value=False), \
+             patch.object(scheduler, "_execute_inner", AsyncMock()), \
+             patch.object(scheduler, "_post_backstop_warning", AsyncMock()) as warn:
+            await scheduler._execute(trigger)
+            await scheduler._execute(trigger)
+            await scheduler._execute(trigger)
+        warn.assert_called_once()
+
+
+class ResultEventContextTokens(unittest.TestCase):
+    """#509: `result.usage` is a turn-wide aggregate across every internal
+    API round-trip in the agentic tool-call loop (confirmed against a live
+    `claude --output-format stream-json` invocation of this repo's pinned CLI
+    version, matching anthropics/claude-code #6805) — it can be a large
+    multiple of the model's actual context size once a turn makes several
+    tool calls. `result.contextTokens` must instead reflect only the *last*
+    individual assistant-message's usage, threaded via the `usage_sink`
+    argument shared across every line of one `claude` invocation."""
+
+    def _assistant_line(self, usage):
+        import json
+        return json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}],
+                        "usage": usage},
+        })
+
+    def _result_line(self, usage):
+        import json
+        return json.dumps({"type": "result", "usage": usage})
+
+    def test_context_tokens_reflects_last_assistant_call_not_the_sum(self):
+        sink = {}
+        # Three internal round-trips within one turn, each reporting a growing
+        # cache-read count (as prompt caching would for a stable, resumed
+        # session) — the turn-wide `result.usage` sums all of them, but
+        # `contextTokens` must land on only the last one.
+        map_stream_json_line(self._assistant_line({
+            "input_tokens": 10, "output_tokens": 5,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 50_000,
+        }), "corr-1", sink)
+        map_stream_json_line(self._assistant_line({
+            "input_tokens": 10, "output_tokens": 5,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 60_000,
+        }), "corr-1", sink)
+        map_stream_json_line(self._assistant_line({
+            "input_tokens": 10, "output_tokens": 5,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 70_000,
+        }), "corr-1", sink)
+        events = map_stream_json_line(self._result_line({
+            # Simulates the CLI's turn-wide aggregate: ~3x a single call.
+            "input_tokens": 30, "output_tokens": 15,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 180_000,
+        }), "corr-1", sink)
+        result = next(e for e in events if e["type"] == "result")
+        self.assertEqual(result["tokens"]["cacheReadInput"], 180_000)  # aggregate, unchanged
+        self.assertEqual(result["contextTokens"], {
+            "input": 10, "output": 5, "cacheCreationInput": 0, "cacheReadInput": 70_000,
+        })
+
+    def test_context_tokens_none_when_no_sink_provided(self):
+        events = map_stream_json_line(self._result_line({"input_tokens": 10, "output_tokens": 5}), "corr-1")
+        result = next(e for e in events if e["type"] == "result")
+        self.assertIsNone(result["contextTokens"])
+
+    def test_context_tokens_none_when_no_assistant_message_seen(self):
+        sink = {}
+        events = map_stream_json_line(self._result_line({"input_tokens": 10, "output_tokens": 5}), "corr-1", sink)
+        result = next(e for e in events if e["type"] == "result")
+        self.assertIsNone(result["contextTokens"])
+
+    def test_assistant_message_without_usage_does_not_touch_sink(self):
+        import json
+        sink = {"input": 1, "output": 1, "cacheCreationInput": 0, "cacheReadInput": 1}
+        line = json.dumps({"type": "assistant",
+                            "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}})
+        map_stream_json_line(line, "corr-1", sink)
+        self.assertEqual(sink, {"input": 1, "output": 1, "cacheCreationInput": 0, "cacheReadInput": 1})
+
+
+class BuildMemoryHint(unittest.TestCase):
+    """Variant selection of the two-sided memory-hint contract (unification
+    Phase 2). Byte-identity with buildMemoryHint() in prompt-assembly.js is
+    guarded from the JS side (source-scan on the literals); here we pin the
+    gating behaviour: unified drops the fact/entity write instructions AND the
+    separate harvest hint (absorbed into the text), legacy stays byte-stable."""
+
+    def setUp(self):
+        self._orig_unified = entrypoint._memory_model_unified
+        self._orig_level = entrypoint._knowledge_autonomy_level
+
+    def tearDown(self):
+        entrypoint._memory_model_unified = self._orig_unified
+        entrypoint._knowledge_autonomy_level = self._orig_level
+
+    def test_unified_hint_routes_semantic_learning_to_the_kb(self):
+        entrypoint._memory_model_unified = lambda: True
+        entrypoint._knowledge_autonomy_level = lambda: 2
+        hint = entrypoint._build_memory_hint(None)
+        self.assertIn("episodic memory files: memory/context.md and memory/log.md", hint)
+        self.assertIn("knowledge-digest.md", hint)
+        self.assertIn("knowledge add fact|entity|convention", hint)
+        # No fact/entity write targets, and no duplicated harvest sentence.
+        self.assertNotIn("memory/facts.md", hint)
+        self.assertNotIn("memory/entities.md", hint)
+        self.assertNotIn("In addition to your memory files", hint)
+
+    def test_legacy_hint_unchanged_with_harvest(self):
+        entrypoint._memory_model_unified = lambda: False
+        entrypoint._knowledge_autonomy_level = lambda: 1
+        hint = entrypoint._build_memory_hint(None)
+        self.assertIn("memory/facts.md, memory/entities.md and memory/users.md", hint)
+        self.assertIn("In addition to your memory files", hint)  # harvest hint appended
+        self.assertNotIn("knowledge-digest.md", hint)
+
+    def test_legacy_hint_autonomy0_is_todays_text(self):
+        entrypoint._memory_model_unified = lambda: False
+        entrypoint._knowledge_autonomy_level = lambda: 0
+        hint = entrypoint._build_memory_hint(None)
+        self.assertIn("memory/facts.md, memory/entities.md and memory/users.md", hint)
+        self.assertNotIn("In addition to your memory files", hint)
+
+    def test_blueprint_hint_ignores_unified(self):
+        entrypoint._memory_model_unified = lambda: True
+        entrypoint._knowledge_autonomy_level = lambda: 2
+        hint = entrypoint._build_memory_hint("bp-x")
+        self.assertIn("instance of blueprint 'bp-x'", hint)
+        self.assertNotIn("knowledge-digest.md", hint)
+
+
+class BuildKnowledgeDigest(unittest.TestCase):
+    """Two-sided contract with orchestrator/knowledge-digest.js: both test
+    suites assert byte-identical markdown against the SAME golden fixture
+    (orchestrator/knowledge-digest.fixture.json), so the JS builder (post-KB-
+    change fan-out) and this port (pre-invocation rebuild) cannot drift."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        fixture_path = (Path(__file__).resolve().parents[2]
+                        / "orchestrator" / "knowledge-digest.fixture.json")
+        cls.fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    def test_golden_fixture_cases(self):
+        for case in self.fixture["cases"]:
+            with self.subTest(case=case["name"]):
+                kwargs = {
+                    "team_id": case["teamId"],
+                    "generated_at": case["generatedAt"],
+                    "entries": self.fixture["entries"] if case["useEntries"] else [],
+                }
+                if case["budgetTokens"] is not None:
+                    kwargs["budget_tokens"] = case["budgetTokens"]
+                res = entrypoint.build_knowledge_digest(**kwargs)
+                self.assertEqual(res["markdown"], case["expectedMarkdown"])
+                self.assertEqual(res["includedCount"], case["expectedIncluded"])
+                self.assertEqual(res["totalCount"], case["expectedTotal"])
+                self.assertEqual(res["omittedCount"], case["expectedOmitted"])
+                self.assertEqual(res["tokensUsed"], case["expectedTokensUsed"])
+
+    def test_fold_last_writer_wins_and_hides_statuses(self):
+        folded = entrypoint.fold_visible_entries(self.fixture["entries"])
+        self.assertEqual(
+            [e["id"] for e in folded],
+            ["ddd000000004", "aaa000000001", "bbb000000002", "ccc000000003"],
+        )
+        conv = next(e for e in folded if e["id"] == "aaa000000001")
+        self.assertEqual(entrypoint._digest_convergence_count(conv), 3)
+
+    def test_included_ids_render_order(self):
+        res = entrypoint.build_knowledge_digest(
+            team_id="demo-team", generated_at="2026-07-13T09:00:00Z",
+            entries=self.fixture["entries"],
+        )
+        self.assertEqual(res["includedIds"], [
+            "aaa000000001", "bbb000000002", "ccc000000003", "ddd000000004",
+        ])
+
+    def test_multiline_text_flattened(self):
+        res = entrypoint.build_knowledge_digest(
+            team_id="t", generated_at="2026-07-13T09:00:00Z",
+            entries=[{"id": "abc000000001", "kind": "fact", "text": "line one\nline two",
+                      "createdAt": "2026-07-01T00:00:00Z", "convergence": ["a"],
+                      "status": "active"}],
+        )
+        self.assertIn("- fact: line one line two (2026-07-01)", res["markdown"])
+
+
+class HarvestBlock(unittest.TestCase):
+    """Two-sided contract with orchestrator/harvest-block.js: both test suites
+    assert identical entries + stripped text against the SAME golden fixture
+    (orchestrator/harvest-block.fixture.json), so the JS anchor and this Python
+    runtime (the only side that harvests at run end) cannot drift (issue #602)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        fixture_path = (Path(__file__).resolve().parents[2]
+                        / "orchestrator" / "harvest-block.fixture.json")
+        cls.fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    def test_golden_fixture_cases(self):
+        for case in self.fixture["cases"]:
+            with self.subTest(case=case["name"]):
+                self.assertEqual(
+                    entrypoint.parse_harvest_block(case["input"]),
+                    case["expectedEntries"],
+                )
+                self.assertEqual(
+                    entrypoint.strip_harvest_block(case["input"]),
+                    case["expectedStripped"],
+                )
+
+    def test_malformed_input_never_raises(self):
+        for bad in (None, 42, {}, [], True):
+            self.assertEqual(entrypoint.parse_harvest_block(bad), [])
+        # strip returns non-str as "" and a plain string unchanged.
+        self.assertEqual(entrypoint.strip_harvest_block(None), "")
+        self.assertEqual(entrypoint.strip_harvest_block(42), "")
+        self.assertEqual(entrypoint.strip_harvest_block("plain text"), "plain text")
+
+    def test_unknown_kind_dropped_valid_sibling_kept(self):
+        text = "\n".join([
+            "ok",
+            "```knowledge",
+            '{"kind":"story","text":"nope"}',
+            '{"kind":"fact","text":"yes"}',
+            "```",
+        ])
+        self.assertEqual(entrypoint.parse_harvest_block(text),
+                         [{"kind": "fact", "text": "yes"}])
+
+
+class BuildHarvestBlockHint(unittest.TestCase):
+    fn = staticmethod(entrypoint.build_harvest_block_hint)
+
+    def test_level_0_is_empty(self):
+        self.assertEqual(self.fn(0), "")
+        self.assertEqual(self.fn(-1), "")
+        self.assertEqual(self.fn("1"), "")
+
+    def test_level_1_plus_asks_for_block(self):
+        for lvl in (1, 2, 3):
+            out = self.fn(lvl)
+            self.assertIn("```knowledge", out)
+            self.assertIn("fact|convention|entity", out)
+            self.assertIn("do NOT run the knowledge CLI", out)
+
+
+class KnowledgeTeamId(unittest.TestCase):
+    """_knowledge_team_id mirrors the `knowledge` CLI / orchestrator precedence so
+    the runtime digest is scoped to the same team even without the spawn-time env
+    var (issue #538): KNOWLEDGE_TEAM_ID → parentTeamId → id (role team) → teamId →
+    default."""
+
+    def test_env_override_wins(self):
+        with patch.dict(entrypoint.os.environ, {"KNOWLEDGE_TEAM_ID": "explicit"}), \
+             patch.object(entrypoint, "_load_dm_agent_config",
+                          return_value={"parentTeamId": "agent-studio"}):
+            self.assertEqual(entrypoint._knowledge_team_id(), "explicit")
+
+    def test_config_fallback_precedence(self):
+        cases = [
+            ({"parentTeamId": "agent-studio", "teamId": "default"}, "agent-studio"),
+            ({"role": "team", "id": "squad-a", "teamId": "default"}, "squad-a"),
+            ({"role": "team-member", "id": "acme-dev-1", "teamId": "acme"}, "acme"),
+            ({"teamId": "acme"}, "acme"),
+            ({}, "default"),
+        ]
+        env = dict(entrypoint.os.environ)
+        env.pop("KNOWLEDGE_TEAM_ID", None)
+        for cfg, expected in cases:
+            with patch.dict(entrypoint.os.environ, env, clear=True), \
+                 patch.object(entrypoint, "_load_dm_agent_config", return_value=cfg):
+                self.assertEqual(entrypoint._knowledge_team_id(), expected)
+
+
+class NewSession(unittest.TestCase):
+    """The running-session descriptor must carry the correlationId so the admin
+    console can scope one session's log even when sessions share a room (#543)."""
+
+    def test_correlation_id_recorded(self):
+        s = entrypoint._new_session("trigger", room_id="!r:local", label="t1",
+                                    trigger_type="github-event", trigger_id="t1",
+                                    correlation_id="trigger:t1:gh:42")
+        self.assertEqual(s["correlationId"], "trigger:t1:gh:42")
+        self.assertEqual(s["type"], "trigger")
+        self.assertEqual(s["roomId"], "!r:local")
+        self.assertIn("id", s)
+        self.assertIn("startedAt", s)
+
+    def test_correlation_id_defaults_to_none(self):
+        s = entrypoint._new_session("dm", room_id="!r:local")
+        self.assertIsNone(s["correlationId"])
+
+
+class SessionPointerResumeFlag(unittest.TestCase):
+    """The one-shot resumeRequested flag (#574) round-trips through the pointer
+    and is cleared by a normal run-end write, so ordinary DM continuity is
+    unaffected."""
+
+    def _run(self, body):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            ptr = Path(d) / "!room:local.current.json"
+            with patch.object(entrypoint, "_session_pointer_file", return_value=ptr), \
+                 patch.object(entrypoint, "_get_push_client", return_value=None):
+                return body(ptr)
+
+    def test_normal_write_has_no_flag_and_reads_false(self):
+        def body(ptr):
+            entrypoint._write_session_pointer("!room:local", "sess-A")
+            sid, requested = entrypoint._read_session_pointer_full("!room:local")
+            self.assertEqual(sid, "sess-A")
+            self.assertFalse(requested)
+        self._run(body)
+
+    def test_resume_write_sets_flag_and_reads_true(self):
+        def body(ptr):
+            entrypoint._write_session_pointer("!room:local", "sess-A", resume_requested=True)
+            sid, requested = entrypoint._read_session_pointer_full("!room:local")
+            self.assertEqual(sid, "sess-A")
+            self.assertTrue(requested)
+        self._run(body)
+
+    def test_run_end_write_clears_a_prior_resume_flag(self):
+        def body(ptr):
+            entrypoint._write_session_pointer("!room:local", "sess-A", resume_requested=True)
+            # A successful resume writes the observed id with the default flag.
+            entrypoint._write_session_pointer("!room:local", "sess-A")
+            _, requested = entrypoint._read_session_pointer_full("!room:local")
+            self.assertFalse(requested)
+        self._run(body)
+
+    def test_missing_pointer_reads_none_false(self):
+        def body(ptr):
+            sid, requested = entrypoint._read_session_pointer_full("!room:local")
+            self.assertIsNone(sid)
+            self.assertFalse(requested)
+        self._run(body)
+
+    def test_simple_reader_still_returns_session_id(self):
+        def body(ptr):
+            entrypoint._write_session_pointer("!room:local", "sess-A", resume_requested=True)
+            self.assertEqual(entrypoint._read_session_pointer("!room:local"), "sess-A")
+        self._run(body)
+
+
+class FakeClaudeShim(unittest.TestCase):
+    """Two-sided contract for the E2E fake `claude` shim (#666): the shim
+    (agent-image/e2e/claude) is the PRODUCER, _map_stream_json_line is the
+    CONSUMER, and agent-image/e2e/fake-claude.fixture.json is the shared golden.
+    Each case runs the shim as a subprocess, feeds its stdout line-by-line
+    through the real parser (threading one usage_sink like the runtime's
+    handle_line does), and asserts the normalized events. Guarantees the shim's
+    stream-json can never silently drift from what the runtime accepts."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        cls.shim = Path(__file__).resolve().parents[1] / "e2e" / "claude"
+        fixture_path = (Path(__file__).resolve().parents[1]
+                        / "e2e" / "fake-claude.fixture.json")
+        cls.fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    def _run_shim(self, argv, extra_env=None):
+        import os
+        import subprocess
+        env = dict(os.environ)
+        env["AEE_FAKE_CLAUDE_SESSION_ID"] = self.fixture["sessionId"]
+        if extra_env:
+            env.update(extra_env)
+        proc = subprocess.run(
+            ["python3", str(self.shim), *argv],
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        return proc.stdout
+
+    def _parse(self, stdout):
+        """Mirror the runtime's handle_line: one usage_sink across the whole
+        invocation so the result event's contextTokens is populated."""
+        usage_sink: dict = {}
+        events = []
+        for line in stdout.splitlines():
+            if not line.strip():
+                continue
+            events.extend(map_stream_json_line(
+                line, self.fixture["correlationId"], usage_sink))
+        return events
+
+    def test_golden_fixture_cases(self):
+        for case in self.fixture["cases"]:
+            with self.subTest(case=case["name"]):
+                stdout = self._run_shim(case["argv"])
+                events = self._parse(stdout)
+                self.assertEqual(events, case["expectedEvents"])
+
+    def test_fixtures_rule_match_overrides_default(self):
+        import json
+        import tempfile
+        rules = [{"match": "COBOL", "reply": "Converted the COBOL program."}]
+        with tempfile.NamedTemporaryFile(
+                "w", suffix=".json", delete=False, encoding="utf-8") as fh:
+            json.dump(rules, fh)
+            rules_path = fh.name
+        stdout = self._run_shim(
+            ["-p", "please migrate this COBOL job", "--output-format", "stream-json"],
+            extra_env={"AEE_FAKE_CLAUDE_FIXTURES": rules_path})
+        events = self._parse(stdout)
+        text = next(e for e in events if e["type"] == "assistant_text")["text"]
+        self.assertEqual(text, "Converted the COBOL program.")
+
+    def test_resume_id_used_as_session_when_no_env_override(self):
+        import os
+        import subprocess
+        env = {k: v for k, v in os.environ.items()
+               if k != "AEE_FAKE_CLAUDE_SESSION_ID"}
+        proc = subprocess.run(
+            ["python3", str(self.shim), "-p", "hi", "--resume", "resumed-sess",
+             "--output-format", "stream-json"],
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        events = self._parse(proc.stdout)
+        init = next(e for e in events if e["type"] == "system_init")
+        self.assertEqual(init["sessionId"], "resumed-sess")
+
+
+class MaybeEnableFakeClaude(unittest.TestCase):
+    """The PATH seam (#666) must be a strict no-op unless AEE_FAKE_CLAUDE=1, so
+    a production container (flag unset) never resolves `claude` to the shim."""
+
+    def _run(self, env_flag, shim_dir=None):
+        # Point FAKE_CLAUDE_DIR at a caller-supplied dir so the positive path is
+        # exercised deterministically (the baked-in /opt/ace/e2e path doesn't
+        # exist in a repo checkout). Default: the real dir, i.e. the guard path.
+        import os
+        path_before = "/usr/local/bin:/usr/bin"
+        with patch.dict(os.environ, {"PATH": path_before}, clear=False):
+            if env_flag is None:
+                os.environ.pop("AEE_FAKE_CLAUDE", None)
+            else:
+                os.environ["AEE_FAKE_CLAUDE"] = env_flag
+            if shim_dir is not None:
+                with patch.object(entrypoint, "FAKE_CLAUDE_DIR", shim_dir):
+                    entrypoint._maybe_enable_fake_claude()
+            else:
+                entrypoint._maybe_enable_fake_claude()
+            return os.environ["PATH"]
+
+    def test_flag_unset_leaves_path_untouched(self):
+        self.assertNotIn(str(entrypoint.FAKE_CLAUDE_DIR), self._run(None))
+
+    def test_flag_not_one_leaves_path_untouched(self):
+        self.assertNotIn(str(entrypoint.FAKE_CLAUDE_DIR), self._run("0"))
+
+    def test_flag_one_prepends_existing_shim_dir(self):
+        # Positive path: flag set AND a shim present -> the dir is prepended.
+        import os, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            shim_dir = Path(d)
+            (shim_dir / "claude").write_text("#!/bin/sh\n")
+            result = self._run("1", shim_dir=shim_dir)
+            self.assertTrue(
+                result.startswith(str(shim_dir) + os.pathsep),
+                f"expected {shim_dir} prepended to PATH, got {result!r}",
+            )
+
+    def test_flag_one_missing_shim_is_noop(self):
+        # Flag set but no shim on disk -> log and leave PATH untouched.
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            shim_dir = Path(d)  # empty: no `claude` file
+            result = self._run("1", shim_dir=shim_dir)
+            self.assertNotIn(str(shim_dir), result)
+
+
+class SessionRotation(unittest.TestCase):
+    """Pure session-log rotation helpers (#673) — must stay behaviour-compatible
+    with orchestrator/session-rotation.js."""
+
+    ROOM = "!abc:host.name"
+
+    def test_archive_name(self):
+        self.assertEqual(entrypoint._archive_name(self.ROOM, 1), "!abc:host.name.1.jsonl")
+        self.assertEqual(entrypoint._archive_name("!r:local", 42), "!r:local.42.jsonl")
+
+    def test_parse_archive_seq_matches_only_real_archives(self):
+        p = entrypoint._parse_archive_seq
+        self.assertEqual(p("!abc:host.name.1.jsonl", self.ROOM), 1)
+        self.assertEqual(p("!abc:host.name.12.jsonl", self.ROOM), 12)
+        self.assertIsNone(p("!abc:host.name.jsonl", self.ROOM))         # live file
+        self.assertIsNone(p("!abc:host.name.current.json", self.ROOM))  # pointer
+        self.assertIsNone(p("!other:host.name.1.jsonl", self.ROOM))     # other room
+        self.assertIsNone(p("!abc:host.name.0.jsonl", self.ROOM))       # seq 0
+        self.assertIsNone(p("!abc:host.name.01.jsonl", self.ROOM))      # leading zero
+
+    def test_parse_archive_seq_numeric_homeserver_tail(self):
+        room = "!r:1.2.3"
+        self.assertEqual(entrypoint._parse_archive_seq("!r:1.2.3.5.jsonl", room), 5)
+        self.assertIsNone(entrypoint._parse_archive_seq("!r:1.2.3.jsonl", room))
+        self.assertIsNone(entrypoint._parse_archive_seq("!r:9.9.9.5.jsonl", room))
+
+    def test_list_and_next_archive_seq(self):
+        names = [
+            "!abc:host.name.jsonl", "!abc:host.name.3.jsonl",
+            "!abc:host.name.1.jsonl", "!abc:host.name.10.jsonl",
+            "unrelated.jsonl", "!abc:host.name.current.json",
+        ]
+        self.assertEqual([s for s, _ in entrypoint._list_archives(names, self.ROOM)],
+                         [1, 3, 10])
+        self.assertEqual(entrypoint._next_archive_seq(names, self.ROOM), 11)
+        self.assertEqual(entrypoint._next_archive_seq([], self.ROOM), 1)
+        self.assertEqual(entrypoint._next_archive_seq(["!abc:host.name.jsonl"], self.ROOM), 1)
+
+    def test_should_rotate(self):
+        self.assertFalse(entrypoint._should_rotate(7_999_999, 8_000_000))
+        self.assertTrue(entrypoint._should_rotate(8_000_000, 8_000_000))
+        self.assertTrue(entrypoint._should_rotate(9_000_000, 8_000_000))
+        self.assertFalse(entrypoint._should_rotate(9_000_000, 0))
+
+    def test_plan_prune_by_count(self):
+        archives = [(s, entrypoint._archive_name(self.ROOM, s), 1000 + s) for s in range(1, 7)]
+        doomed = entrypoint._plan_prune(archives, 3, 0, 10_000)
+        self.assertEqual(doomed, [entrypoint._archive_name(self.ROOM, s) for s in (1, 2, 3)])
+
+    def test_plan_prune_by_age(self):
+        now = 1_000_000
+        day = 24 * 60 * 60 * 1000
+        archives = [
+            (1, entrypoint._archive_name(self.ROOM, 1), now - 40 * day),
+            (2, entrypoint._archive_name(self.ROOM, 2), now - 10 * day),
+        ]
+        doomed = entrypoint._plan_prune(archives, 0, 30 * day, now)
+        self.assertEqual(doomed, [entrypoint._archive_name(self.ROOM, 1)])
+
+    def test_plan_prune_union_no_duplicates(self):
+        now = 1_000_000
+        day = 24 * 60 * 60 * 1000
+        archives = [
+            (1, entrypoint._archive_name(self.ROOM, 1), now - 40 * day),  # old + overflow
+            (2, entrypoint._archive_name(self.ROOM, 2), now - 1 * day),   # overflow
+            (3, entrypoint._archive_name(self.ROOM, 3), now - 1 * day),   # kept
+        ]
+        doomed = sorted(entrypoint._plan_prune(archives, 1, 30 * day, now))
+        self.assertEqual(doomed, sorted([entrypoint._archive_name(self.ROOM, 1),
+                                         entrypoint._archive_name(self.ROOM, 2)]))
+
+    def test_plan_prune_both_axes_disabled_keeps_all(self):
+        archives = [(s, entrypoint._archive_name(self.ROOM, s), 1) for s in (1, 2, 3)]
+        self.assertEqual(entrypoint._plan_prune(archives, 0, 0, 9), [])
+
+    def test_rotation_config_defaults_and_overrides(self):
+        with patch.dict("os.environ", {}, clear=False):
+            for k in ("AEE_SESSION_ROTATE_BYTES", "AEE_SESSION_ROTATE_KEEP",
+                      "AEE_SESSION_ROTATE_MAX_AGE_DAYS"):
+                entrypoint.os.environ.pop(k, None)
+            self.assertEqual(entrypoint._session_rotation_config(),
+                             {"maxBytes": 8_000_000, "maxCount": 5, "maxAgeDays": 30})
+        with patch.dict("os.environ", {
+            "AEE_SESSION_ROTATE_BYTES": "16000000",
+            "AEE_SESSION_ROTATE_KEEP": "3",
+            "AEE_SESSION_ROTATE_MAX_AGE_DAYS": "7",
+        }):
+            self.assertEqual(entrypoint._session_rotation_config(),
+                             {"maxBytes": 16_000_000, "maxCount": 3, "maxAgeDays": 7})
+
+    def test_rotation_config_refuses_nonpositive_size(self):
+        for bad in ("0", "-5", "nonsense"):
+            with patch.dict("os.environ", {"AEE_SESSION_ROTATE_BYTES": bad}):
+                self.assertEqual(entrypoint._session_rotation_config()["maxBytes"], 8_000_000)
 
 
 if __name__ == "__main__":

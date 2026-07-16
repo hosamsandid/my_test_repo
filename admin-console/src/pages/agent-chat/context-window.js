@@ -53,6 +53,23 @@ export function sumContextTokens(tokens) {
   return tokens.input + cacheCreation + cacheRead;
 }
 
+// #509: a `result` event's own `tokens` is a turn-wide aggregate — the
+// entrypoint's stream-json mapper sums/duplicates usage across every internal
+// API round-trip in the agentic tool-call loop (one assistant message per
+// tool call before the turn's final reply), not a snapshot of what the model
+// held in context at any single point. It can therefore be a large multiple
+// of the model's real context size once a turn makes several tool calls
+// (e.g. the "2240K / 200K" report). `contextTokens` is the entrypoint's
+// separate per-call usage snapshot (the last individual assistant message's
+// usage this turn) and is the value that should drive the context-fill
+// indicator; `tokens` remains correct for cumulative cost/spend tracking
+// (#494's costTotals) and is used here only as a fallback for log entries
+// written before this fix existed (no `contextTokens` field yet).
+export function resolveContextTokensForResult(resultEvent) {
+  if (!resultEvent) return null;
+  return sumContextTokens(resultEvent.contextTokens) ?? sumContextTokens(resultEvent.tokens);
+}
+
 // Toolbar display format (#490): a raw token count rounded to whole
 // thousands, e.g. 34_300 -> "34K". Deliberately no "M" abbreviation, even for
 // six-figure-plus limits (1_000_000 -> "1000K") — the issue asks for a flat

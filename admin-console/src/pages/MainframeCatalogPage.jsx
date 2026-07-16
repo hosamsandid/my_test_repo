@@ -32,7 +32,7 @@ export default function MainframeCatalogPage() {
           </p>
         </div>
         <a
-          href="/modernization-pattern-catalog.html"
+          href="/pattern-catalog.html"
           target="_blank"
           rel="noopener noreferrer"
           style={openTabStyle}
@@ -47,7 +47,7 @@ export default function MainframeCatalogPage() {
         <iframe
           ref={iframeRef}
           onLoad={handleLoad}
-          src="/modernization-pattern-catalog.html"
+          src="/pattern-catalog.html"
           title="Mainframe Modernization Pattern Catalog"
           style={iframeStyle}
         />
@@ -60,7 +60,6 @@ const pageStyle = {
   display: 'flex',
   flexDirection: 'column',
   height: '100%',
-  padding: 'var(--eb-space-6)',
   gap: 'var(--eb-space-4)',
   boxSizing: 'border-box',
 };

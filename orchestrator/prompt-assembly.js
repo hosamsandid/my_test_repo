@@ -111,6 +111,31 @@ const TRIGGER_SECTION =
   "- `timeoutSeconds` — max execution time (default: 3600)\n\n" +
   "If a scheduled run has nothing to report, reply with `[PASS]`.";
 
+// Unified Memory System variant (Memory/Knowledge unification, Phase 2).
+// Replaces the base template's five-file Memory System section for agents on
+// the unified semantic/episodic model — the SAME gate as the knowledge-digest
+// `@`-import (knowledgeDigestRef), so the seeded instructions and the digest
+// always flip together. Semantic knowledge (facts, entities, conventions) is
+// routed to the team KB; only the episodic files stay private. The legacy
+// five-file section in the base template remains the autonomy-0 / KB-less
+// fallback. users.md is personal data — never shared, never migrated.
+const MEMORY_SECTION_UNIFIED =
+  "## Memory System\n\n" +
+  "You maintain three episodic files in `memory/` — your private notebook. Durable team " +
+  "knowledge (facts, entities, conventions) does NOT live here: it belongs to the shared " +
+  "team knowledge base (see Team Knowledge below).\n\n" +
+  "| File | Purpose |\n" +
+  "|---|---|\n" +
+  "| `context.md` | Active session state — what's currently happening. Keep slim. |\n" +
+  "| `log.md` | One conversation summary per entry (date + 1–2 sentences). |\n" +
+  "| `users.md` | Per-user interaction profiles: language, role, preferences, open context. Personal data — never shared, never written to the team knowledge base. |\n\n" +
+  "### Rules\n\n" +
+  "1. **Session start:** Read `context.md` and `log.md`; consult `users.md` when the interaction involves a specific person.\n" +
+  "2. **During conversation:** Session state goes to `context.md`; new user signals to `users.md`. A durable fact, entity or convention is NOT memory — record it with `knowledge add fact|entity|convention \"<one-line statement>\"`.\n" +
+  "3. **Wrap-up / \"remember this\":** Update the relevant episodic files; share durable team-relevant lessons via `knowledge add`.\n" +
+  "4. **No duplicates.** Update existing entries instead of appending.\n" +
+  "5. **Legacy files:** If `memory/facts.md` or `memory/entities.md` still exist, treat them as read-only legacy — consult them when the topic calls for it, but write new semantic knowledge to the knowledge base, never to these files.";
+
 // Canonical section headings the assembler pulls out of the base template and
 // re-orders. Anything else in the template is preserved verbatim (see below).
 const KNOWN_BASE_HEADINGS = [
@@ -183,12 +208,15 @@ function interactionNote(autonomous) {
   );
 }
 
-function workingEnvironmentSection(env) {
-  if (!env) return "";
+// `skills` is the agent's RESOLVED grant (team-owned skills — see
+// skill-grants.js), not an environment field: the env is a pure infrastructure
+// template and no longer carries skills.
+function workingEnvironmentSection(env, skills = []) {
+  if (!env && !(Array.isArray(skills) && skills.length > 0)) return "";
   const parts = [];
-  if (env.name) parts.push(`**Working Environment:** ${env.name}`);
-  if (env.description) parts.push(env.description);
-  const repos = Array.isArray(env.repositories) ? env.repositories : [];
+  if (env && env.name) parts.push(`**Working Environment:** ${env.name}`);
+  if (env && env.description) parts.push(env.description);
+  const repos = env && Array.isArray(env.repositories) ? env.repositories : [];
   if (repos.length === 1) {
     const repoName = (repos[0].url.split("/").pop() || "repo").replace(/\.git$/, "");
     parts.push(`**Repository:** \`${repos[0].url}\` — cloned to \`./${repoName}/\``);
@@ -199,12 +227,32 @@ function workingEnvironmentSection(env) {
     });
     parts.push(`**Repositories:**\n${lines.join("\n")}`);
   }
-  if (Array.isArray(env.skills) && env.skills.length > 0) {
-    parts.push(`**Skills:** ${env.skills.map((s) => `\`${s}\``).join(", ")}`);
+  if (Array.isArray(skills) && skills.length > 0) {
+    parts.push(`**Skills:** ${skills.map((s) => `\`${s}\``).join(", ")}`);
   }
-  if (env.additionalContext) parts.push(env.additionalContext);
+  if (env && env.additionalContext) parts.push(env.additionalContext);
   if (parts.length === 0) return "";
   return `## Working Environment\n\n${parts.join("\n\n")}`;
+}
+
+// Team-knowledge digest section (Memory/Knowledge unification, Phase 1).
+// Emits the native `@`-import of the generated knowledge-digest.md — the
+// guaranteed "knowledge is there at session start" injection path. Injected
+// only when the agent actually has a provisioned KB checkout (the caller
+// gates), so an autonomy-0 / KB-less agent never sees a dangling import.
+// Transparency (concept §4): the import line is visible in the seeded
+// CLAUDE.md, and the digest itself is a real, browsable workspace file.
+function knowledgeDigestSection(digestRef) {
+  if (!digestRef) return "";
+  return (
+    `## Team Knowledge (digest)\n\n` +
+    `@${digestRef}\n\n` +
+    "The import above inlines the generated digest of your team's shared knowledge base, " +
+    "so it is part of your context from the start of every session (regenerated before every " +
+    "run and whenever the team's knowledge changes — never edit the file itself). Anything " +
+    'beyond the digest budget is reachable with `knowledge search "<topic>"`; record new ' +
+    "durable lessons with `knowledge add`."
+  );
 }
 
 function blueprintSection(blueprintId) {
@@ -242,9 +290,37 @@ function envHasRepository(env) {
   return !!(env && Array.isArray(env.repositories) && env.repositories.length > 0);
 }
 
-// Does this environment grant skills? Drives the Skills section gate.
-function envHasSkills(env) {
-  return !!(env && Array.isArray(env.skills) && env.skills.length > 0);
+// Does this agent's resolved grant contain skills? Drives the Skills section
+// gate. Skills are team-owned (skill-grants.js) — the caller passes the
+// resolved list; the environment no longer carries a skill grant.
+function hasSkillGrant(skills) {
+  return Array.isArray(skills) && skills.length > 0;
+}
+
+// Compose the Skills section: the base template's "how skills work" guidance
+// (preserved verbatim, AC3) followed by one line per granted skill carrying its
+// name and — mirroring the knowledge digest's guaranteed-in-context injection —
+// the one-line `description` from its SKILL.md frontmatter (#617). The
+// descriptions are supplied by the caller (`buildAgentClaudeMd` reads them via
+// skill-source.js), so this module stays pure/fs-free (AC5).
+//
+// Fail-soft (AC7): a skill with no resolved description is still listed by name.
+// Whitespace is collapsed defensively (AC8); no truncation is applied (AC9).
+// Returns null when the resolved grant is empty (AC4) — the caller drops the
+// whole section.
+function skillsSection(baseSkillsText, skills, skillDescriptions = {}) {
+  if (!hasSkillGrant(skills)) return null;
+  const base = String(baseSkillsText == null ? '' : baseSkillsText).trim();
+  const descs = skillDescriptions && typeof skillDescriptions === 'object' ? skillDescriptions : {};
+  const items = skills.map((name) => {
+    const raw = descs[name];
+    const desc = typeof raw === 'string' ? raw.replace(/\s+/g, ' ').trim() : '';
+    return desc ? `- **${name}** — ${desc}` : `- **${name}**`;
+  });
+  const granted =
+    'Skills granted to you (open the full `skills/<name>/SKILL.md` before relying on one):\n\n' +
+    items.join('\n');
+  return base ? `${base}\n\n${granted}` : `## Skills\n\n${granted}`;
 }
 
 // Compose the full CLAUDE.md from the base template + per-agent inputs.
@@ -256,13 +332,30 @@ function envHasSkills(env) {
 //   4. ## Workspace             (single home for the path-translation rule)
 //   5. ## Response Formatting   (from base)
 //   6. ## Memory System         (from base)
-//   7. ## Skills                (from base) — only if the env grants skills
-//   8. ## GitHub Actions        (relocated) — only if the env has a repository
-//   9. ## Trigger management    (relocated) — only if the agent is autonomous
-//  10. ## Important Notes       (from base)
-//  11. any other base sections an operator added (preserved verbatim)
-//  12. ## Memory System (Shared — Blueprint Instance) (if a blueprint instance)
-function assembleClaudeMd({ base, agentPrompt, role, env, blueprintId = null, autonomous = false } = {}) {
+//   7. ## Team Knowledge        (digest `@`-import) — only if a KB checkout is provisioned
+//   8. ## Skills                (from base) — only if the agent's resolved skill grant is non-empty
+//   9. ## GitHub Actions        (relocated) — only if the env has a repository
+//  10. ## Trigger management    (relocated) — only if the agent is autonomous
+//  11. ## Important Notes       (from base)
+//  12. any other base sections an operator added (preserved verbatim)
+//  13. ## Memory System (Shared — Blueprint Instance) (if a blueprint instance)
+//
+// `promptRef` (e.g. "AGENT-PROMPT.md"): when set, the Agent Role block emits a
+// native Claude Code `@`-import that references the prompt file instead of
+// inlining its text. The seeded CLAUDE.md then stays constant while the authored
+// prompt lives in AGENT-PROMPT.md alone, so an edited prompt takes effect on the
+// next session with no CLAUDE.md rebuild and no duplicated copy to drift (#510).
+// Left null (the default) the prompt is inlined — the form the prompt-preview
+// endpoint uses so the operator sees the fully-resolved text.
+// `skills`: the agent's resolved skill grant (team-owned — skill-grants.js).
+// `skillDescriptions`: optional `{ <skillName>: description }` map the caller
+// reads from each granted skill's SKILL.md frontmatter (#617). Supplied as data
+// so this module stays fs-free; skills without an entry are listed by name only.
+// `knowledgeDigestRef` (e.g. "knowledge-digest.md"): when set, a Team
+// Knowledge section `@`-imports the generated digest (Memory/Knowledge
+// unification, Phase 1). Callers pass it only when the agent's KB checkout is
+// actually provisioned, so the import never dangles.
+function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDescriptions = {}, blueprintId = null, autonomous = false, promptRef = null, knowledgeDigestRef = null } = {}) {
   const { preamble, sections } = splitSections(base);
   const byHeading = new Map(sections.map((s) => [s.heading, s.text]));
   const consumed = new Set();
@@ -277,11 +370,16 @@ function assembleClaudeMd({ base, agentPrompt, role, env, blueprintId = null, au
   const intro = [preamble, interactionNote(autonomous)].filter(Boolean).join("\n\n");
   if (intro) blocks.push(intro);
 
-  // 2. Agent Role — hoisted to the top
-  blocks.push(`## Agent Role\n\n${String(agentPrompt == null ? "" : agentPrompt).trim()}`);
+  // 2. Agent Role — hoisted to the top. In reference mode emit the `@`-import
+  //    so the file, not its content, is the source of truth for the prompt.
+  if (promptRef) {
+    blocks.push(`## Agent Role\n\n@${promptRef}`);
+  } else {
+    blocks.push(`## Agent Role\n\n${String(agentPrompt == null ? "" : agentPrompt).trim()}`);
+  }
 
   // 3. Working Environment
-  const envBlock = workingEnvironmentSection(env);
+  const envBlock = workingEnvironmentSection(env, skills);
   if (envBlock) blocks.push(envBlock);
 
   // 4. Workspace (single home for the path rule)
@@ -291,25 +389,40 @@ function assembleClaudeMd({ base, agentPrompt, role, env, blueprintId = null, au
   const fmt = take("Response Formatting");
   if (fmt) blocks.push(fmt);
 
-  // 6. Memory System
+  // 6. Memory System — the base template carries the legacy five-file model;
+  //    agents on the unified semantic/episodic model (same gate as the digest
+  //    import) get the code-owned three-file variant instead. take() still
+  //    consumes the base section so it can't leak through the pass-through.
   const mem = take("Memory System");
-  if (mem) blocks.push(mem);
+  if (knowledgeDigestRef) {
+    blocks.push(MEMORY_SECTION_UNIFIED);
+  } else if (mem) {
+    blocks.push(mem);
+  }
 
-  // 7. Skills — only when the env actually grants skills
-  const skills = take("Skills");
-  if (skills && envHasSkills(env)) blocks.push(skills);
+  // 7. Team Knowledge digest — only when a KB checkout is provisioned
+  const kd = knowledgeDigestSection(knowledgeDigestRef);
+  if (kd) blocks.push(kd);
 
-  // 8. Git — only when the env has a repository
+  // 8. Skills — only when the agent's resolved grant actually contains skills.
+  //    The base "how skills work" text is enriched with each granted skill's
+  //    name + one-line description (#617); take() still consumes the base
+  //    section so it can't also leak through the pass-through below.
+  const skillsBlock = take("Skills");
+  const enrichedSkills = skillsSection(skillsBlock, skills, skillDescriptions);
+  if (enrichedSkills) blocks.push(enrichedSkills);
+
+  // 9. Git — only when the env has a repository
   if (envHasRepository(env)) blocks.push(GIT_SECTION);
 
-  // 9. Trigger management — only for autonomous agents
+  // 10. Trigger management — only for autonomous agents
   if (autonomous) blocks.push(TRIGGER_SECTION);
 
-  // 10. Important Notes
+  // 11. Important Notes
   const notes = take("Important Notes");
   if (notes) blocks.push(notes);
 
-  // 11. Preserve any operator-added sections we don't reorder explicitly —
+  // 12. Preserve any operator-added sections we don't reorder explicitly —
   //     but drop stale copies of the now-code-owned relocated sections.
   for (const s of sections) {
     if (consumed.has(s.heading)) continue;
@@ -318,7 +431,7 @@ function assembleClaudeMd({ base, agentPrompt, role, env, blueprintId = null, au
     blocks.push(s.text);
   }
 
-  // 12. Blueprint shared-memory workflow
+  // 13. Blueprint shared-memory workflow
   const bp = blueprintSection(blueprintId);
   if (bp) blocks.push(bp);
 
@@ -335,7 +448,14 @@ function assembleClaudeMd({ base, agentPrompt, role, env, blueprintId = null, au
 // once in the CLAUDE.md Workspace section) and no longer names a 2-file subset
 // that contradicts the 5-file Memory System — it points at the same files the
 // Memory System section describes.
-function buildMemoryHint(blueprintId) {
+//
+// `unified` (Memory/Knowledge unification, Phase 2) selects the semantic/
+// episodic variant — same gate as the knowledge-digest `@`-import (the runtime
+// resolves it via _memory_model_unified(): autonomy >= 1 AND a provisioned KB
+// checkout). The unified text absorbs the knowledge-add routing, so the
+// runtime appends NO separate harvest hint to it; the legacy and blueprint
+// variants keep today's text (+ harvest hint on the Python side).
+function buildMemoryHint(blueprintId, { unified = false } = {}) {
   if (blueprintId) {
     return (
       `This agent is an instance of blueprint '${blueprintId}'. ` +
@@ -350,6 +470,23 @@ function buildMemoryHint(blueprintId) {
       `curl -s -X PUT -H 'Content-Type: text/plain' --data-binary @memory/context.md http://localhost:4002/internal/blueprints/${blueprintId}/memory/context.md; ` +
       `curl -s -X PUT -H 'Content-Type: text/plain' --data-binary @memory/log.md http://localhost:4002/internal/blueprints/${blueprintId}/memory/log.md. ` +
       `IMPORTANT: Your workspace root is the current working directory.`
+    );
+  }
+  if (unified) {
+    return (
+      "Before responding, read your episodic memory files: memory/context.md and memory/log.md, " +
+      "and consult memory/users.md when the interaction involves a specific person. " +
+      "Semantic team knowledge (facts, entities, conventions) does not live in private memory files: " +
+      "the current team digest is already in your context via knowledge-digest.md, and anything " +
+      'beyond it is found with knowledge search "<topic>". ' +
+      "When you learn something durable that would help ANY teammate (a project convention, an " +
+      'environment fact, a key entity), record it with: knowledge add fact|entity|convention ' +
+      '"<one-line statement>". Provenance is attached automatically — record only lessons that hold ' +
+      "beyond this one run, no PR/issue-specific detail. " +
+      "If the user asks you to remember something, route it: session state and personal or " +
+      "user-specific details go to your memory files; durable team-relevant lessons go to " +
+      "knowledge add. " +
+      "IMPORTANT: Your workspace root is the current working directory."
     );
   }
   return (
@@ -368,9 +505,11 @@ module.exports = {
   workingEnvironmentSection,
   blueprintSection,
   envHasRepository,
-  envHasSkills,
+  hasSkillGrant,
+  skillsSection,
   WORKSPACE_SECTION,
   GIT_SECTION,
   TRIGGER_SECTION,
+  MEMORY_SECTION_UNIFIED,
   KNOWN_BASE_HEADINGS,
 };

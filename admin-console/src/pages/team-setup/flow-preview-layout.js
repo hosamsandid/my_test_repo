@@ -1,17 +1,23 @@
 // Pure layout math for the wizard's mini flow preview (BundleFlowPreview,
-// #427). Kept React-free so the label-placement rules are unit-testable:
-//   • every back edge (rework/escalation loop) gets its own orthogonal lane
-//     below the grid — one label line per edge, nothing overprints
-//   • forward-edge labels sit in the column corridor left of their target and
-//     are staggered vertically when several share a corridor; labels that are
-//     displaced or wider than the corridor are nudged off the node rows
+// #427). Kept React-free so the edge-routing rules are unit-testable. Edges
+// fall into three classes, each routed to stay next to the boxes it connects:
+//   • forward (target in a later column) — a cubic bezier in the column
+//     corridor; labels staggered when several share a corridor
+//   • intra-column (rework/escalation loops between roles stacked in one
+//     stage) — a short orthogonal bracket in that column's right gutter, with
+//     the label beside it; the loops stay local to their stage instead of
+//     being dragged into a band below the whole grid
+//   • cross-column back (target in an earlier column) — one orthogonal lane
+//     per edge below the grid, one label line each
 // The renderer stays a light, read-only SVG — not flow-graph-render.js.
 
 export const PREVIEW = {
-  NODE_W: 168, NODE_H: 40, COL_W: 236, ROW_H: 62, PAD: 16, HEADER: 26,
+  NODE_W: 168, NODE_H: 40, COL_W: 264, ROW_H: 62, PAD: 16, HEADER: 26,
   LANE_START: 26,  // gap between the grid bottom and the first back-edge lane
   LANE_STEP: 14,   // one label line per back-edge lane
-  LABEL_GAP: 10,   // min vertical distance between staggered corridor labels
+  LABEL_GAP: 12,   // min vertical distance between staggered labels
+  BUS_INSET: 10,   // gutter offset of the first intra-column loop bracket
+  BUS_STEP: 8,     // extra offset per nested intra-column loop
   CHAR_W: 5.3,     // rough px per char at the 9.5px label font
 };
 
@@ -75,7 +81,7 @@ export function bundleEdges(bundle) {
 
 export function computePreviewLayout(bundle) {
   if (!bundle || !Array.isArray(bundle.roles) || bundle.roles.length === 0) return null;
-  const { NODE_W, NODE_H, COL_W, ROW_H, PAD, HEADER, LANE_START, LANE_STEP, LABEL_GAP } = PREVIEW;
+  const { NODE_W, NODE_H, COL_W, ROW_H, PAD, HEADER, LANE_START, LANE_STEP, LABEL_GAP, BUS_INSET, BUS_STEP } = PREVIEW;
   const GAP = COL_W - NODE_W;
 
   const stages = Array.isArray(bundle.stages) && bundle.stages.length ? bundle.stages : [''];
@@ -101,13 +107,19 @@ export function computePreviewLayout(bundle) {
   const gridBottom = PAD + HEADER + (maxRows - 1) * ROW_H + NODE_H;
 
   const fw = [];
-  const bk = [];
+  const intra = [];
+  const cross = [];
   for (const e of bundleEdges(bundle)) {
     if (!pos.has(e.from) || !pos.has(e.to)) continue;
+    const cf = pos.get(e.from).col;
+    const ct = pos.get(e.to).col;
     const a = xy(e.from);
     const b = xy(e.to);
     const labelText = e.gate ? `⛔ ${e.label}` : e.label;
-    (b.x <= a.x + NODE_W ? bk : fw).push({ ...e, a, b, labelText });
+    const rec = { ...e, a, b, labelText, cf, ct };
+    if (ct > cf) fw.push(rec);            // forward: target in a later column
+    else if (ct === cf) intra.push(rec);  // rework/escalation loop within a stage
+    else cross.push(rec);                 // back: target in an earlier column
   }
 
   // A label baseline sitting on a node row is pushed into the gap below it.
@@ -122,21 +134,49 @@ export function computePreviewLayout(bundle) {
   // Forward edges: cubic bezier; the label is clamped into the free corridor
   // left of the target column, its y taken from the curve at that x.
   const forward = fw.map(e => {
-    const x1 = e.a.x + NODE_W; const y1 = e.a.y + NODE_H / 2;
+    const x1 = e.a.x + NODE_W + 4; const y1 = e.a.y + NODE_H / 2;
     const x2 = e.b.x; const y2 = e.b.y + NODE_H / 2;
     const midX = (x1 + x2) / 2;
-    const d = `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2 - 3} ${y2}`;
+    const d = `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2 - 9} ${y2}`;
     const labelX = e.b.x - GAP / 2;
     const t = Math.min(1, Math.max(0, (labelX - x1) / (x2 - x1 || 1)));
     const curveY = y1 + (y2 - y1) * (3 * t * t - 2 * t * t * t);
     return { ...e, d, labelX, prefY: curveY - 5 };
   });
 
-  // Stagger labels sharing a corridor; a label keeps its near-line spot only
-  // while it fits the corridor and nothing pushed it — otherwise it moves
-  // into the row gap below the box band it would cross.
+  // Intra-column loops: a short orthogonal bracket in the column's right
+  // gutter, one bus lane per loop so nested loops sit side by side instead of
+  // overprinting. The label rides the gutter centre — the same corridor as the
+  // forward labels entering the next column — so both are staggered together.
+  const byCol = new Map();
+  for (const e of intra) {
+    if (!byCol.has(e.cf)) byCol.set(e.cf, []);
+    byCol.get(e.cf).push(e);
+  }
+  const intraEdges = [];
+  for (const group of byCol.values()) {
+    group.sort((p, q) => Math.abs(p.b.y - p.a.y) - Math.abs(q.b.y - q.a.y));
+    const gx = group[0].a.x + NODE_W; // right edge of this column's boxes
+    const exitSeen = new Map();
+    const entrySeen = new Map();
+    group.forEach((e, k) => {
+      const busX = gx + BUS_INSET + k * BUS_STEP;
+      const kOut = exitSeen.get(e.from) || 0; exitSeen.set(e.from, kOut + 1);
+      const kIn = entrySeen.get(e.to) || 0; entrySeen.set(e.to, kIn + 1);
+      const exitY = e.a.y + 10 + (kOut % 3) * 9;
+      const entryY = e.b.y + NODE_H - 10 - (kIn % 3) * 9;
+      const d = roundedPath([
+        [gx, exitY], [busX, exitY], [busX, entryY], [gx + 4, entryY],
+      ]);
+      intraEdges.push({ ...e, d, busX, labelX: gx + GAP / 2, prefY: (exitY + entryY) / 2 - 5 });
+    });
+  }
+
+  // Stagger labels sharing a corridor (forward + intra loops); a label keeps its
+  // near-line spot only while it fits the corridor and nothing pushed it —
+  // otherwise it moves into the row gap below the box band it would cross.
   const corridors = new Map();
-  for (const e of forward) {
+  for (const e of [...forward, ...intraEdges]) {
     const key = Math.round(e.labelX);
     if (!corridors.has(key)) corridors.set(key, []);
     corridors.get(key).push(e);
@@ -152,12 +192,12 @@ export function computePreviewLayout(bundle) {
     }
   }
 
-  // Back edges: one orthogonal lane per edge below the grid, narrow loops on
-  // the lanes closest to the boxes so wider loops nest around them.
-  bk.sort((p, q) => ((p.a.x + NODE_W) - p.b.x) - ((q.a.x + NODE_W) - q.b.x));
+  // Cross-column back edges: one orthogonal lane per edge below the grid, narrow
+  // loops on the lanes closest to the boxes so wider loops nest around them.
+  cross.sort((p, q) => ((p.a.x + NODE_W) - p.b.x) - ((q.a.x + NODE_W) - q.b.x));
   const entrySeen = new Map();
   const exitSeen = new Map();
-  const back = bk.map((e, i) => {
+  const backCross = cross.map((e, i) => {
     const laneY = gridBottom + LANE_START + i * LANE_STEP;
     const xr = e.a.x + NODE_W + 5 + (i % 3) * 5;
     const xl = Math.max(3, e.b.x - 5 - (i % 3) * 5);
@@ -169,16 +209,28 @@ export function computePreviewLayout(bundle) {
     const entryY = Math.max(e.b.y + 8, e.b.y + NODE_H - 10 - (kIn % 3) * 7);
     const d = roundedPath([
       [e.a.x + NODE_W, exitY], [xr, exitY], [xr, laneY],
-      [xl, laneY], [xl, entryY], [e.b.x - 3, entryY],
+      [xl, laneY], [xl, entryY], [e.b.x - 9, entryY],
     ]);
     return { ...e, d, labelX: (xr + xl) / 2, labelY: laneY - 4 };
   });
 
-  // Lane verticals of loops leaving the last column may reach past the grid.
-  const laneMaxX = back.reduce((m, e) => Math.max(m, e.a.x + NODE_W + 5 + 10), 0);
+  // The renderer draws forward + back; intra loops ride in `back` (before the
+  // cross lanes) so they need no separate render pass.
+  const back = [...intraEdges, ...backCross];
+
+  // Size the svg to whatever the nodes, paths and labels actually occupy, so
+  // nothing clips regardless of how the labels staggered or nudged.
+  let maxX = PAD + (nCols - 1) * COL_W + NODE_W;
+  let maxY = gridBottom;
+  for (const e of [...forward, ...back]) {
+    maxX = Math.max(maxX, e.labelX + estimateLabelWidth(e.labelText) / 2 + 2);
+    maxY = Math.max(maxY, e.labelY + 2);
+  }
+  for (const e of intraEdges) maxX = Math.max(maxX, e.busX + 4);
+  for (const e of backCross) maxX = Math.max(maxX, e.a.x + NODE_W + 5 + 10);
   return {
     stages, nodes, forward, back,
-    width: Math.max(PAD * 2 + (nCols - 1) * COL_W + NODE_W, laneMaxX + 6),
-    height: (back.length ? gridBottom + LANE_START + (back.length - 1) * LANE_STEP : gridBottom) + PAD,
+    width: maxX + PAD,
+    height: maxY + PAD,
   };
 }

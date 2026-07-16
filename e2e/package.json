@@ -1,0 +1,14 @@
+{
+  "name": "aee-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "End-to-end browser tests for the AEE stack (issue #666, phase 1). Playwright drives the real admin console against a disposable `aee-e2e` compose stack whose only stubbed dependency is the LLM (fake `claude` shim).",
+  "scripts": {
+    "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0"
+  }
+}

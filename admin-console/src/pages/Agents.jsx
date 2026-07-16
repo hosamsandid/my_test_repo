@@ -5,7 +5,7 @@ import remarkGfm from 'remark-gfm';
 import {
   Plus, Trash2, Layers, ChevronDown, ChevronRight,
   Edit, MessageCircle, RefreshCw, Power, PowerOff, FileText,
-  User, Users, Workflow, Info, GitMerge, Download, Upload, Copy,
+  User, Users, Workflow, Info, Download, Upload, Copy,
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import SidePanel from '../components/SidePanel';
@@ -13,6 +13,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import IconButton from '../components/IconButton';
+import SkillPicker from '../components/SkillPicker';
 import useAutoDerivedId, { sanitizeId } from '../hooks/useAutoDerivedId';
 
 // Mirrors AGENT_ID_RE in admin-console/api/api.js — used only to give inline
@@ -741,7 +742,7 @@ function MissionDirectoryField({ value, onChange, repoDirs }) {
 function AgentCreateForm({ onSave, onCancel, saving, error }) {
   const [form, setForm] = useState({
     id: '', displayName: '', role: 'agent', environmentId: '', systemPrompt: '',
-    briefingsPath: '',
+    briefingsPath: '', skills: [],
   });
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
   const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
@@ -751,6 +752,11 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
   });
   const { data: environments } = useApi('/api/environments');
   const envs = environments || [];
+  // Create form has no team context yet, so only the global pool is offered
+  // (grant-aware picker, #633 — team skills appear once the agent belongs to a
+  // team and is edited).
+  const { data: skillsData } = useApi('/api/skills');
+  const poolSkills = (skillsData || []).filter(s => s.source === 'pool');
 
   const repoDirs = useMemo(() => {
     const env = envs.find(e => e.id === form.environmentId);
@@ -812,12 +818,11 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
             <option key={env.id} value={env.id}>
               {env.name} ({env.id})
               {hasRepos(env) ? ' · Git' : ''}
-              {Array.isArray(env.skills) && env.skills.length > 0 ? ` · ${env.skills.length} Skills` : ''}
             </option>
           ))}
         </select>
         <div style={helpTextStyle}>
-          Defines the skills, repositories, GitHub token and model provider the agent receives at creation time.
+          Defines the repositories, GitHub token and model provider the agent receives at creation time.
           Manage these on the <em>Working Environments</em> page. Each agent gets its own isolated workspace,
           but the recipe is shared.
         </div>
@@ -896,6 +901,18 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           repoDirs={repoDirs}
         />
       )}
+
+      <div>
+        <div style={labelStyle}>Skills</div>
+        <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
+          The agent's active skills, copied into its workspace at (re)seed time. For team agents this is the whole team's set — members inherit it unless they override.
+        </div>
+        <SkillPicker
+          skills={poolSkills}
+          selected={form.skills}
+          onChange={v => update('skills', v)}
+        />
+      </div>
 
       {form.role !== 'orchestrator' && (
       <div>
@@ -1139,8 +1156,8 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
 
   // MCP overrides are stored as [{serverId, credentialId|null}, ...]. We
   // serialize them for editing as one entry per line — `serverId:credentialId`,
-  // or just `serverId` when no credential is bound. Same idea as the
-  // skillsOverrideText field above; trades polish for less form scaffolding.
+  // or just `serverId` when no credential is bound; trades polish for less form
+  // scaffolding.
   const initialMcpText = Array.isArray(agent.mcpServersOverride)
     ? agent.mcpServersOverride.map(m => m.credentialId ? `${m.serverId}:${m.credentialId}` : m.serverId).join('\n')
     : '';
@@ -1148,20 +1165,33 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
   const [form, setForm] = useState({
     displayName: agent.displayName || '',
     briefingsPath: agent.briefingsPath || '',
+    // non-member roles: the agent's own skill grant
+    skills: Array.isArray(agent.skills) ? agent.skills : [],
     // team-only field
     systemPromptTemplate: agent.systemPromptTemplate || '',
     // team-member override fields
     inheritPrompt: initialInheritPrompt,
     promptOverride: agent.systemPrompt || '',
     inheritSkills: initialInheritSkills,
-    skillsOverrideText: Array.isArray(agent.skillsOverride)
-      ? agent.skillsOverride.join(', ')
-      : '',
+    skillsOverride: Array.isArray(agent.skillsOverride)
+      ? agent.skillsOverride
+      : [],
     inheritMcp: initialInheritMcp,
     mcpOverrideText: initialMcpText,
   });
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
   const canSubmit = !!form.displayName;
+
+  // Skills live on the agent construct itself for non-member roles.
+  const hasOwnSkills = agent.role === 'team' || agent.role === 'agent' || agent.role === 'orchestrator';
+  // Grant-aware picker (#633): scope the pool to the agent's own team so its
+  // team-tier skills are grantable, not just the global pool. Team-first
+  // resolution and shadowing markers are rendered by the picker.
+  const skillsUrl = agent.teamId
+    ? `/api/skills?teamId=${encodeURIComponent(agent.teamId)}`
+    : '/api/skills';
+  const { data: skillsData } = useApi(skillsUrl);
+  const grantSkills = (skillsData || []).filter(s => s.source === 'pool' || s.source === 'team');
 
   const { data: environments } = useApi('/api/environments');
   const repoDirs = useMemo(() => {
@@ -1189,6 +1219,9 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
       displayName: form.displayName,
       briefingsPath: form.briefingsPath,
     };
+    if (hasOwnSkills) {
+      submit.skills = form.skills;
+    }
     if (agent.role === 'team') {
       submit.systemPromptTemplate = form.systemPromptTemplate;
     }
@@ -1197,10 +1230,7 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
       submit.systemPrompt = form.inheritPrompt ? null : form.promptOverride;
       submit.skillsOverride = form.inheritSkills
         ? null
-        : form.skillsOverrideText
-            .split(',')
-            .map(s => s.trim())
-            .filter(Boolean);
+        : form.skillsOverride;
       // MCP override: parse "serverId[:credentialId]" lines into the
       // {serverId, credentialId} array shape the API expects. Empty / bare
       // server lines are kept (credentialId null) so the API can return a
@@ -1250,6 +1280,20 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
 
       <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} />
 
+      {hasOwnSkills && (
+        <div>
+          <div style={labelStyle}>Skills</div>
+          <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
+            The agent's active skills, copied into its workspace at (re)seed time. For team agents this is the whole team's set — members inherit it unless they override.
+          </div>
+          <SkillPicker
+            skills={grantSkills}
+            selected={form.skills}
+            onChange={v => update('skills', v)}
+          />
+        </div>
+      )}
+
       {agent.role === 'orchestrator' && (
         <MissionDirectoryField
           value={form.briefingsPath}
@@ -1271,6 +1315,9 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
             onChange={e => update('systemPromptTemplate', e.target.value)}
             style={{ ...inputStyle, minHeight: 160, fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-sm)' }}
           />
+          <div style={{ marginTop: 'var(--eb-space-1)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            Prompt changes take effect from each member's next session.
+          </div>
         </div>
       )}
 
@@ -1319,20 +1366,27 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
             onCustomChange={v => update('promptOverride', v)}
             customMultiline
           />
+          <div style={{ marginTop: 'calc(-1 * var(--eb-space-2))', marginBottom: 'var(--eb-space-3)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            Prompt changes take effect from this agent's next session.
+          </div>
 
           <InheritOrCustom
             label="Skills"
             inherit={form.inheritSkills}
             onToggle={v => update('inheritSkills', v)}
             inheritedPreview={
-              parentTeam && parentTeam.environmentId
-                ? `(team env: ${parentTeam.environmentId})`
-                : ''
+              parentTeam && Array.isArray(parentTeam.skills) && parentTeam.skills.length
+                ? `(team skills: ${parentTeam.skills.join(', ')})`
+                : '(team has no skills yet)'
             }
-            inheritedLabel="Inherited from team's environment"
-            customValue={form.skillsOverrideText}
-            onCustomChange={v => update('skillsOverrideText', v)}
-            customPlaceholder="comma-separated skill names, e.g. cobol-analysis, jcl-converter"
+            inheritedLabel="Inherited from the team"
+            renderCustom={() => (
+              <SkillPicker
+                skills={grantSkills}
+                selected={form.skillsOverride}
+                onChange={v => update('skillsOverride', v)}
+              />
+            )}
           />
 
           <InheritOrCustom
@@ -1370,6 +1424,7 @@ function InheritOrCustom({
   label, inherit, onToggle,
   inheritedPreview, inheritedLabel,
   customValue, onCustomChange, customMultiline, customPlaceholder,
+  renderCustom,
 }) {
   return (
     <div>
@@ -1394,6 +1449,8 @@ function InheritOrCustom({
         }}>
           {inheritedPreview ? inheritedPreview : <em>({inheritedLabel || 'inheriting'})</em>}
         </div>
+      ) : renderCustom ? (
+        renderCustom()
       ) : customMultiline ? (
         <textarea
           value={customValue}
@@ -1794,7 +1851,8 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
             {children.length} member{children.length !== 1 ? 's' : ''}
           </span>
           <button
-            onClick={() => navigate(`/team-setup?team=${encodeURIComponent(agent.id)}&mode=extend`)}
+            onClick={() => navigate(`/flows?proc=${encodeURIComponent(agent.id)}`)}
+            title="Grow this team by adding agents in the Flow Editor"
             style={{
               background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
               borderRadius: 'var(--eb-radius-md)', cursor: 'pointer',
@@ -1802,7 +1860,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
               display: 'flex', alignItems: 'center', gap: 4, color: 'var(--eb-text-secondary)',
             }}
           >
-            <GitMerge size={13} /> Extend team
+            <Workflow size={13} /> Open in Flow Editor
           </button>
           <button
             onClick={() => onAddMember(agent)}
@@ -2414,7 +2472,7 @@ export default function Agents() {
                   Orphaned agents ({orphans.length})
                 </div>
                 <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 2 }}>
-                  These agents reference a parent that no longer exists. Delete each one to remove its workspace and Matrix user.
+                  These agents reference a parent that no longer exists. Delete each one to remove its workspace and chat account.
                 </div>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
@@ -2671,13 +2729,26 @@ function renderDeleteMessage(target) {
     const childNounPlural = target.role === 'team' ? 'members' : 'missions';
     const parentNoun = target.role === 'team' ? 'team' : 'orchestrator';
 
+    // Deleting a team purges its locally cached / curated knowledge on this
+    // stack (#532) — the honest counterpart to actually purging the data on the
+    // backend. Knowledge shared via the team's repository is NOT touched (that
+    // is the sanctioned sharing channel), so the note must say so explicitly.
+    const knowledgeNote = target.role === 'team' ? (
+      <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-text-primary)' }}>
+        <strong>This team's locally cached and curated knowledge will be permanently removed</strong> —
+        its local Knowledge Base copy, promotion suggestions, archive, review decisions and team skill pool.
+        Knowledge shared via the team's repository is <strong>not affected</strong>.
+      </p>
+    ) : null;
+
     if (children.length === 0) {
       return (
         <>
           <p style={{ margin: 0 }}>
             Delete this {parentNoun}? It currently has no {childNounPlural} attached.
-            The workspace, configuration and Matrix user will be removed permanently.
+            The workspace, configuration and chat account will be removed permanently.
           </p>
+          {knowledgeNote}
         </>
       );
     }
@@ -2694,7 +2765,7 @@ function renderDeleteMessage(target) {
           fontSize: 'var(--eb-text-sm)',
         }}>
           ⚠ This will permanently delete the {parentNoun} <strong>and all {children.length} {children.length === 1 ? childNoun : childNounPlural}</strong> below.
-          Workspaces, session histories and Matrix users for every listed agent will be removed. This cannot be undone.
+          Workspaces, session histories and chat accounts for every listed agent will be removed. This cannot be undone.
         </div>
         <p style={{ margin: 'var(--eb-space-3) 0 var(--eb-space-1)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
           {childNounPlural[0].toUpperCase() + childNounPlural.slice(1)} that will be deleted:
@@ -2738,6 +2809,7 @@ function renderDeleteMessage(target) {
             </li>
           ))}
         </ul>
+        {knowledgeNote}
       </>
     );
   }

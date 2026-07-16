@@ -75,17 +75,23 @@ test('non-label backtick blocks (commands, paths) are ignored', () => {
   assert.deepEqual(out, []);
 });
 
-test('shipped dispatcher template: emits {{dispatchLabel}} (high)', () => {
+test('shipped dispatcher template: emits `dispatch` (high)', () => {
   const tpl = loadTemplate('dispatcher');
   const out = deriveEmits(tpl.promptTemplate);
-  assert.equal(confidenceOf(out, '{{dispatchLabel}}'), 'high',
-    'dispatcher applies {{dispatchLabel}} — must be a high-confidence emission');
+  assert.equal(confidenceOf(out, 'dispatch'), 'high',
+    'dispatcher applies the `dispatch` label — must be a high-confidence emission');
+  // The dispatcher consumes `ready` (and is prohibited from setting it) — must
+  // NOT be emitted.
+  assert.equal(confidenceOf(out, 'ready'), undefined);
 });
 
-test('shipped developer template: assigned trigger emits started:{{agentId}} (high)', () => {
-  const tpl = loadTemplate('developer');
-  const trigger = tpl.triggers.find(t => t.id === 'developer-assigned');
-  const out = deriveEmitsForTrigger(trigger, tpl.promptTemplate);
+test('templated tokens in trigger prompts are preserved verbatim (high)', () => {
+  // Templates with {{var}} placeholders are still supported by the mechanism
+  // even though the shipped catalog no longer uses them.
+  const trigger = {
+    promptTemplate: 'Add `started:{{agentId}}` to the issue. Remove the `{{readyLabel}}` label from the issue.',
+  };
+  const out = deriveEmitsForTrigger(trigger, '');
   assert.equal(confidenceOf(out, 'started:{{agentId}}'), 'high');
   // The trigger consumes {{readyLabel}} (it removes it) — must NOT be emitted.
   assert.equal(confidenceOf(out, '{{readyLabel}}'), undefined);

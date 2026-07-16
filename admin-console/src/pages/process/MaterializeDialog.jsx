@@ -86,9 +86,9 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
   return (
     <SidePanel open onClose={onClose} title="Materialize as team" width="520px">
       <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 0 }}>
-        Creates a team and one member per role in
-        <strong> {bundle?.name}</strong> ({bundle?.roles?.length || 0} roles) on the selected
-        working environment. Each role keeps its prompt and triggers;
+        Creates a team and one member per agent in
+        <strong> {bundle?.name}</strong> ({bundle?.roles?.length || 0} agents) on the selected
+        working environment. Each agent keeps its prompt and triggers;
         <code>{'{{vars}}'}</code> and the environment's repository are applied per member.
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
@@ -152,7 +152,7 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
 
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
           <input type="checkbox" checked={extend} onChange={e => setExtend(e.target.checked)} />
-          Add to an existing team (extend) — only the missing roles are created
+          Add to an existing team (extend) — only the missing agents are created
         </label>
 
         <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>

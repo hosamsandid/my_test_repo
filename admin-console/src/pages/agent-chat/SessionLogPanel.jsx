@@ -3,7 +3,7 @@ import { Loader2, PanelRightClose } from 'lucide-react';
 import { useSSE } from '../../hooks/useSSE';
 import LogEvent from './LogEvent';
 import PinnedTodoPanel from './PinnedTodoPanel';
-import { sumContextTokens } from './context-window';
+import { sumContextTokens, resolveContextTokensForResult } from './context-window';
 
 /**
  * Right-rail panel showing the structured timeline of internal agent
@@ -23,7 +23,18 @@ import { sumContextTokens } from './context-window';
  * LogEvent → ToolBlock. Orphan results (result without a prior use) and
  * pending uses (use without a result yet) render as single-sided blocks.
  *
- * Filter chips: All | Tool Calls | Errors | Posted.
+ * When `scopeCorrelationId` is set the panel renders only that session's rows
+ * — used by the merged Sessions tab (#543). It may be a single correlationId
+ * (one running sub-tab) or, for a finished session that groups several runs
+ * (#555), an array of every correlationId in that Claude session; the combined
+ * log then reads oldest-first across runs. In scoped mode the per-correlation
+ * left border is dropped (the rows are one logical session), and the backfill
+ * is filtered server-side by correlationId so the full session is returned even
+ * when its rows sit outside the last-`limit` tail of a busy room.
+ *
+ * When `staticOnly` is set (historical/finished session viewing, #544) the
+ * panel does a one-shot backfill and skips the live SSE tail — a finished
+ * session receives no new rows, so there is nothing to stream.
  *
  * Cross-panel hover correlation: `hoveredCorrelationId` (from parent) dims
  * non-matching rows; mouseEnter/Leave on a row calls
@@ -34,10 +45,14 @@ import { sumContextTokens } from './context-window';
  *   hoveredCorrelationId       — what the chat panel is currently hovering
  *   onHoverCorrelation(id|null)
  *   onClose()                  — parent toggles `logOpen` to false
- *   onContextUpdate({tokensIn, model}|null) — last completed request's input
- *     tokens (input + cache-creation + cache-read, #490) + the model reported
- *     by its preceding `system_init` event, fed up so the chat toolbar can
- *     render the context-window fill indicator (#471)
+ *   onContextUpdate({tokensIn, model}|null) — a plausible estimate of the
+ *     tokens actually held in context as of the last completed turn (input +
+ *     cache-creation + cache-read of the turn's *last individual* API call,
+ *     `result.contextTokens` from the entrypoint, #509 — NOT `result.tokens`,
+ *     which sums/duplicates across every internal tool-call round-trip in the
+ *     turn and can wildly overcount) + the model reported by its preceding
+ *     `system_init` event, fed up so the chat toolbar can render the
+ *     context-window fill indicator (#471)
  *   todoCloseSignal            — bumped by the parent (AgentChat.jsx) whenever
  *     a session boundary occurs elsewhere in the UI (new message sent, Reset
  *     Session clicked, or a trigger-started run's first message arrives, see
@@ -47,16 +62,26 @@ import { sumContextTokens } from './context-window';
  */
 export default function SessionLogPanel({
   agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate,
-  todoCloseSignal = 0, embedded = false,
+  todoCloseSignal = 0, embedded = false, scopeCorrelationId = null, staticOnly = false,
 }) {
   const [events, setEvents]       = useState([]);
   const [cursor, setCursor]       = useState(0);
-  const [filter, setFilter]       = useState('all'); // all | tools | errors | posted
   const [loading, setLoading]     = useState(false);
   const [error, setError]         = useState(null);
 
   const scrollerRef = useRef(null);
   const [atBottom, setAtBottom]   = useState(true);
+
+  // `scopeCorrelationId` may be a single id (a running sub-tab) or an array of
+  // every run in a finished Claude session (#555). Normalise to an array (or
+  // null when unscoped) so the backfill query, event filter and accent colour
+  // all treat the two shapes the same.
+  const scopeCids = useMemo(() => {
+    if (scopeCorrelationId == null) return null;
+    const arr = Array.isArray(scopeCorrelationId) ? scopeCorrelationId : [scopeCorrelationId];
+    const clean = arr.filter(c => typeof c === 'string' && c);
+    return clean.length ? clean : null;
+  }, [scopeCorrelationId]);
 
   // Backfill bumps a generation counter so a slow response from the previous
   // (agent, room) can't clobber the current state.
@@ -75,7 +100,10 @@ export default function SessionLogPanel({
     setEvents([]);
     setCursor(0);
 
-    fetch(`/api/agents/${encodeURIComponent(agentId)}/session/${encodeURIComponent(roomId)}?limit=500`)
+    const scopeQuery = scopeCids
+      ? scopeCids.map(c => `&correlationId=${encodeURIComponent(c)}`).join('')
+      : '';
+    fetch(`/api/agents/${encodeURIComponent(agentId)}/session/${encodeURIComponent(roomId)}?limit=500${scopeQuery}`)
       .then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
@@ -96,7 +124,7 @@ export default function SessionLogPanel({
       .finally(() => {
         if (reqId === reqIdRef.current) setLoading(false);
       });
-  }, [agentId, roomId]);
+  }, [agentId, roomId, scopeCids]);
 
   useEffect(() => { loadBackfill(); }, [loadBackfill]);
 
@@ -118,7 +146,9 @@ export default function SessionLogPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, agentId, roomId]);
 
-  const sseUrl = (agentId && roomId && sseSince !== null)
+  // A finished session receives no new rows, so skip the live tail entirely
+  // (#544) — one-shot backfill is enough and avoids a dangling SSE connection.
+  const sseUrl = (!staticOnly && agentId && roomId && sseSince !== null)
     ? `/api/agents/${encodeURIComponent(agentId)}/session/${encodeURIComponent(roomId)}/stream?since=${sseSince}`
     : null;
 
@@ -172,17 +202,24 @@ export default function SessionLogPanel({
     setAtBottom(distance < 100);
   }
 
-  /* ─── 4. Tool-pair merging + filtering ─────────────────────────────── */
-  const renderable = useMemo(() => {
-    const merged = mergeToolPairs(events);
-    if (filter === 'all') return merged;
-    return merged.filter(ev => matchesFilter(ev, filter));
-  }, [events, filter]);
+  /* ─── 4. Scope to a single session + tool-pair merging ─────────────────
+   * When `scopeCids` is set (merged Sessions tab, #543/#555) only the runs of
+   * the viewed session are shown; internal `_truncated` markers carry no
+   * correlationId, so they're kept so the truncation banner still renders.
+   * `scopedEvents` also feeds the cost/context/todo aggregations below so the
+   * chat toolbar reflects the viewed session rather than the whole room. */
+  const scopedEvents = useMemo(() => {
+    if (!scopeCids) return events;
+    const set = new Set(scopeCids);
+    return events.filter(ev => set.has(ev?.correlationId) || ev?.type === '_truncated');
+  }, [events, scopeCids]);
+
+  const renderable = useMemo(() => mergeToolPairs(scopedEvents), [scopedEvents]);
 
   /* ─── 5. Session cost aggregation ──────────────────────────────────── */
   const costTotals = useMemo(() => {
     let usd = 0, tokIn = 0, tokOut = 0;
-    for (const ev of events) {
+    for (const ev of scopedEvents) {
       if (ev.type === 'result' && typeof ev.costUsd === 'number') {
         usd += ev.costUsd;
         // #494: same undercount as #490 (context-window fill) — "tokens in"
@@ -192,32 +229,40 @@ export default function SessionLogPanel({
       }
     }
     return { usd, tokIn, tokOut };
-  }, [events]);
+  }, [scopedEvents]);
 
   useEffect(() => {
     if (onCostUpdate) onCostUpdate(costTotals.usd, costTotals.tokIn, costTotals.tokOut);
   }, [costTotals, onCostUpdate]);
 
-  /* ─── 5b. Last-request context-window snapshot (#471) ──────────────────
+  /* ─── 5b. Last-request context-window snapshot (#471, #509) ────────────
    * Walks events in order, remembering the model from the most recent
-   * `system_init` and the input tokens from the most recent `result` — the
+   * `system_init` and the context tokens from the most recent `result` — the
    * `system_init` for a turn always precedes that turn's `result`, so this
    * single pass naturally pairs the two without needing correlationId
    * matching. Unlike costTotals this is NOT cumulative: it reflects only the
    * last completed request, per the issue's scope.
+   *
+   * #509: reads `result.contextTokens` (the entrypoint's per-call usage
+   * snapshot from the turn's last internal assistant message), NOT
+   * `result.tokens` (the turn-wide aggregate, still correct for costTotals
+   * above) — the latter sums/duplicates across every internal tool-call
+   * round-trip in the turn and can overcount by a large multiple. Falls back
+   * to `result.tokens` only for log entries written before this fix (no
+   * `contextTokens` field yet), so old sessions don't just go blank.
    */
   const lastContext = useMemo(() => {
     let model = null;
     let tokensIn = null;
-    for (const ev of events) {
+    for (const ev of scopedEvents) {
       if (ev.type === 'system_init' && ev.model) model = ev.model;
-      if (ev.type === 'result' && ev.tokens) {
-        const summed = sumContextTokens(ev.tokens);
+      if (ev.type === 'result') {
+        const summed = resolveContextTokensForResult(ev);
         if (summed != null) tokensIn = summed;
       }
     }
     return tokensIn == null ? null : { tokensIn, model };
-  }, [events]);
+  }, [scopedEvents]);
 
   useEffect(() => {
     if (onContextUpdate) onContextUpdate(lastContext);
@@ -229,8 +274,8 @@ export default function SessionLogPanel({
    * panel re-renders in place as new TodoWrites arrive.
    */
   const latestTodoWrite = useMemo(() => {
-    for (let i = events.length - 1; i >= 0; i--) {
-      const ev = events[i];
+    for (let i = scopedEvents.length - 1; i >= 0; i--) {
+      const ev = scopedEvents[i];
       if (
         ev?.type === 'tool_use' &&
         ev?.tool === 'TodoWrite' &&
@@ -240,7 +285,7 @@ export default function SessionLogPanel({
       }
     }
     return null;
-  }, [events]);
+  }, [scopedEvents]);
 
   /* User-controlled dismissal. The panel is hidden only after the user
    * clicks ×; it re-appears automatically when the next TodoWrite arrives
@@ -320,22 +365,6 @@ export default function SessionLogPanel({
         </div>
       )}
 
-      {/* Filter chips */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 4,
-        padding: 'var(--eb-space-2) var(--eb-space-3)',
-        borderBottom: '1px solid var(--eb-border-default)',
-        background: 'var(--eb-bg-surface)',
-        flexShrink: 0,
-      }}>
-        <Chip label="All"        active={filter === 'all'}     onClick={() => setFilter('all')} />
-        <Chip label="Tool Calls" active={filter === 'tools'}   onClick={() => setFilter('tools')} />
-        <Chip label="Errors"     active={filter === 'errors'}  onClick={() => setFilter('errors')} />
-        <Chip label="Posted"     active={filter === 'posted'}  onClick={() => setFilter('posted')} />
-      </div>
-
       {error && (
         <div role="alert" style={{
           padding: 'var(--eb-space-2) var(--eb-space-3)',
@@ -411,16 +440,16 @@ export default function SessionLogPanel({
             textAlign: 'center',
             lineHeight: 1.5,
           }}>
-            {events.length === 0
-              ? 'No agent activity yet. Send a message to see what’s happening.'
-              : 'No entries match the current filter.'}
+            No agent activity yet.
           </div>
         )}
 
         {renderable.map((ev, i) => {
           const cid = ev.correlationId || null;
           const dimmed = !!hoveredCorrelationId && cid !== hoveredCorrelationId;
-          const accentColor = cid ? colorForCorrelation(cid) : 'transparent';
+          // In single-session (scoped) mode every row is the same session, so
+          // the per-correlation colour adds no information — drop the border.
+          const accentColor = (!scopeCids && cid) ? colorForCorrelation(cid) : 'transparent';
           return (
             <div
               key={ev._key ?? i}
@@ -457,37 +486,6 @@ export default function SessionLogPanel({
 }
 
 /* ─── Helpers ─────────────────────────────────────────────────────────── */
-
-function Chip({ label, active, onClick }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      style={{
-        padding: '3px 10px',
-        fontSize: 'var(--eb-text-xs)',
-        fontWeight: 'var(--eb-font-medium)',
-        background: active ? 'var(--eb-accent-muted)' : 'transparent',
-        color: active ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)',
-        border: `1px solid ${active ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
-        borderRadius: 'var(--eb-radius-full)',
-        cursor: 'pointer',
-        fontFamily: 'inherit',
-        transition: 'background var(--eb-transition-fast), color var(--eb-transition-fast)',
-      }}
-    >
-      {label}
-    </button>
-  );
-}
-
-function matchesFilter(ev, filter) {
-  if (filter === 'all') return true;
-  if (filter === 'tools')  return ev.kind === 'tool' || ev.type === 'tool_use' || ev.type === 'tool_result';
-  if (filter === 'errors') return ev.type === 'error' || ev.type === 'parse_error';
-  if (filter === 'posted') return ev.type === 'message.posted';
-  return true;
-}
 
 /**
  * Walk the event list once and pair each `tool_use` with its matching

@@ -53,6 +53,15 @@ const AGENT_PIDS_LIMIT = Number(process.env.AEE_AGENT_PIDS_LIMIT || 512);
 // Label stamped on every agent container so the orchestrator can reconcile
 // live container state against its in-memory process map (source of truth).
 const AGENT_LABEL_KEY = 'aee.agent.id';
+// Instance identity — stamped on every agent/helper container (`aee.instance`
+// label) so eviction & reconcile can scope to THIS stack's own containers.
+// Without it, two stacks sharing one Podman store (parallel instances on the
+// same socket) would evict each other's agent containers on boot.
+// Configured via AEE_INSTANCE_ID in .env; defaults to COMPOSE_PROJECT_NAME
+// (which already namespaces the per-agent volumes/networks) so single-instance
+// setups need no config change. The label KEY is a fixed schema constant.
+const INSTANCE_LABEL_KEY = 'aee.instance';
+const INSTANCE_ID = process.env.AEE_INSTANCE_ID || COMPOSE_PROJECT;
 // Legacy: the compose stack creates the bridge network as ${project}_default.
 // Used as a fallback when per-agent network isolation is disabled. Override
 // with AGENT_NETWORK if the compose project renames the network.
@@ -295,7 +304,7 @@ async function seedPerAgentVolume(id) {
       { Name: WORKSPACE_VOLUME, Dest: '/src', SubPath: `agents/${id}` },
       { Name: volName, Dest: '/dst' },
     ],
-    labels: { [AGENT_LABEL_KEY]: `seed-${id}` },
+    labels: { [AGENT_LABEL_KEY]: `seed-${id}`, [INSTANCE_LABEL_KEY]: INSTANCE_ID },
     security_opt: ['label=disable'],
     no_new_privileges: true,
     remove: true,
@@ -480,7 +489,7 @@ async function reseedPerAgentVolume(id, paths) {
       { Name: WORKSPACE_VOLUME, Dest: '/src', SubPath: `agents/${id}` },
       { Name: volName, Dest: '/dst' },
     ],
-    labels: { [AGENT_LABEL_KEY]: `reseed-${id}` },
+    labels: { [AGENT_LABEL_KEY]: `reseed-${id}`, [INSTANCE_LABEL_KEY]: INSTANCE_ID },
     security_opt: ['label=disable'],
     no_new_privileges: true,
     remove: true,
@@ -608,7 +617,7 @@ function spawnContainer({ id, env }) {
         netns: { nsmode: 'bridge' },
         volumes,
         Networks: { [networkName]: {} },
-        labels: { [AGENT_LABEL_KEY]: String(id) },
+        labels: { [AGENT_LABEL_KEY]: String(id), [INSTANCE_LABEL_KEY]: INSTANCE_ID },
         no_new_privileges: true,
         remove: true,
       };

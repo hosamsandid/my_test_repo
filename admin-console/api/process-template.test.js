@@ -3,7 +3,54 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId } = require('./process-template');
+
+// A tiny stand-in for the on-disk draft store: an id is "taken" iff present.
+const existsIn = (set) => (id) => set.has(id);
+
+test('slugifyDraft normalizes name → slug (unchanged rules)', () => {
+  assert.equal(slugifyDraft('Q3 Roadmap'), 'q3-roadmap');
+  assert.equal(slugifyDraft('  Hello, World!  '), 'hello-world');
+  assert.equal(slugifyDraft('--Trim--'), 'trim');
+  assert.equal(slugifyDraft(''), 'process');
+  assert.equal(slugifyDraft('💥🚀'), 'process');
+  assert.equal(slugifyDraft('x'.repeat(60)).length, 48);
+});
+
+test('deriveUniqueDraftId derives a fresh slug when nothing is taken', () => {
+  assert.equal(deriveUniqueDraftId('Q3 Roadmap', { exists: existsIn(new Set()) }), 'q3-roadmap');
+});
+
+test('deriveUniqueDraftId appends -2/-3 on collision (AC4)', () => {
+  const taken = new Set(['q3-roadmap', 'q3-roadmap-2']);
+  assert.equal(deriveUniqueDraftId('Q3 Roadmap', { exists: existsIn(taken) }), 'q3-roadmap-3');
+});
+
+test('deriveUniqueDraftId keeps distinct slugs distinct for similar names', () => {
+  const taken = new Set(['q3-roadmap']);
+  // "Q3 – Roadmap" slugifies to the same base, so it must get a suffix.
+  assert.equal(deriveUniqueDraftId('Q3 – Roadmap', { exists: existsIn(taken) }), 'q3-roadmap-2');
+});
+
+test('deriveUniqueDraftId treats the draft own id as free — no spurious -2 (AC8)', () => {
+  const taken = new Set(['q3-roadmap']); // only this draft exists
+  // Renaming to a name whose slug equals its own current id is a no-op.
+  assert.equal(deriveUniqueDraftId('Q3 Roadmap', { currentId: 'q3-roadmap', exists: existsIn(taken) }), 'q3-roadmap');
+});
+
+test('deriveUniqueDraftId re-keys off a suffixed id back to the clean base when free', () => {
+  const taken = new Set(['q3-roadmap-2']); // the other q3-roadmap draft is gone
+  assert.equal(deriveUniqueDraftId('Q3 Roadmap', { currentId: 'q3-roadmap-2', exists: existsIn(taken) }), 'q3-roadmap');
+});
+
+test('deriveUniqueDraftId keeps a suffix when the clean base is taken by another draft', () => {
+  const taken = new Set(['q3-roadmap', 'q3-roadmap-2']); // base owned by another draft; self is -2
+  assert.equal(deriveUniqueDraftId('Q3 Roadmap', { currentId: 'q3-roadmap-2', exists: existsIn(taken) }), 'q3-roadmap-2');
+});
+
+test('deriveUniqueDraftId falls back to process for an empty slug and stays unique', () => {
+  assert.equal(deriveUniqueDraftId('💥', { exists: existsIn(new Set(['process'])) }), 'process-2');
+});
 
 const sampleRoles = [
   {
@@ -396,6 +443,13 @@ test('emptyDraftBundle seeds an empty stages array', () => {
   assert.deepEqual(emptyDraftBundle('x').stages, []);
 });
 
+// #522: the default (unnamed) draft is labelled with the standardised "Flow"
+// terminology, not the legacy "Process" wording.
+test('emptyDraftBundle defaults an unnamed draft to "Untitled flow"', () => {
+  assert.equal(emptyDraftBundle().name, 'Untitled flow');
+  assert.equal(emptyDraftBundle('').name, 'Untitled flow');
+});
+
 // ── stampDerivedActivation (#446): preserve horizon across regeneration ────────
 
 const T0 = '2026-01-01T00:00:00.000Z';
@@ -446,4 +500,112 @@ test('stampDerivedActivation: preserves other fields and is non-mutating', () =>
 test('stampDerivedActivation: non-array inputs yield []', () => {
   assert.deepEqual(stampDerivedActivation(null, null, NOW), []);
   assert.deepEqual(stampDerivedActivation(undefined, undefined, NOW), []);
+});
+
+// ─── buildMemberFromTemplate (#586: add role from a template) ─────────────────
+
+// A role template shaped like the on-disk agent-templates catalog: prompt +
+// per-invocation policy + a github-event trigger and a self-curation cron, plus
+// declarative ports (emits, dependsOn, parent, stage, github, channels).
+const devTemplate = {
+  id: 'developer',
+  displayName: 'Developer',
+  sessionPolicy: 'per-invocation',
+  promptTemplate: 'You build for {{repoFullName}} as {{agentId}}.',
+  emits: ['started:{{agentId}}'],
+  dependsOn: ['business-analyst'],
+  parent: 'lead',
+  stage: 'build',
+  github: { producesPr: true },
+  channels: [{ artifact: 'issue', from: 'business-analyst', label: 'assigned:{{agentId}}' }],
+  triggers: [
+    { id: 'dev-assigned', type: 'github-event', enabled: true,
+      events: ['issues.labeled'], labelFilter: 'assigned:{{agentId}}',
+      emits: ['started:{{agentId}}'], dataFlow: false,
+      promptTemplate: 'Implement the issue for {{repoFullName}}.',
+      preCheckEnv: { REPO: '{{repoFullName}}' } },
+    { id: 'dev-curate', type: 'cron', enabled: true, cron: '5 3 * * 1',
+      promptTemplate: 'Tidy memory.' },
+  ],
+};
+
+const devVars = { repoFullName: 'acme/app', agentId: 'acme-developer', readyLabel: 'ready' };
+
+test('buildMemberFromTemplate: substitutes {{vars}} in prompt, labelFilter, emits, preCheckEnv', () => {
+  const m = buildMemberFromTemplate(devTemplate, {
+    teamId: 'acme', memberId: 'acme-developer', memberDisplayName: 'Developer', vars: devVars,
+  });
+  assert.equal(m.systemPromptOverride, 'You build for acme/app as acme-developer.');
+  const gh = m.triggers.find(t => t.id === 'dev-assigned');
+  assert.equal(gh.labelFilter, 'assigned:acme-developer');
+  assert.deepEqual(gh.emits, ['started:acme-developer']);
+  assert.equal(gh.prompt, 'Implement the issue for acme/app.');
+  assert.deepEqual(gh.preCheckEnv, { REPO: 'acme/app' });
+  // agent-level emits substituted too
+  assert.deepEqual(m.emits, ['started:{{agentId}}']); // raw template value passthrough
+});
+
+test('buildMemberFromTemplate: github-event trigger gets repo + fresh activation stamps', () => {
+  const before = Date.now();
+  const m = buildMemberFromTemplate(devTemplate, {
+    teamId: 'acme', memberId: 'acme-developer', memberDisplayName: 'Developer', vars: devVars,
+  });
+  const gh = m.triggers.find(t => t.id === 'dev-assigned');
+  assert.equal(gh.repo, 'acme/app');
+  assert.deepEqual(gh.events, ['issues.labeled']);
+  // horizon stamps present + parseable + recent (#320/#446)
+  assert.ok(gh.createdAt && gh.activatedAt);
+  assert.equal(gh.createdAt, gh.activatedAt);
+  assert.ok(Date.parse(gh.createdAt) >= before);
+  // a cron trigger carries its schedule, no repo/horizon stamps
+  const cron = m.triggers.find(t => t.id === 'dev-curate');
+  assert.equal(cron.cron, '5 3 * * 1');
+  assert.equal('repo' in cron, false);
+  assert.equal('activatedAt' in cron, false);
+});
+
+test('buildMemberFromTemplate: carries session policy + declarative ports (parent/stage/github/channels)', () => {
+  const m = buildMemberFromTemplate(devTemplate, {
+    teamId: 'acme', memberId: 'acme-developer', memberDisplayName: 'Developer', vars: devVars,
+  });
+  assert.equal(m.id, 'acme-developer');
+  assert.equal(m.displayName, 'Developer');
+  assert.equal(m.sessionPolicy, 'per-invocation');
+  // dependsOn role ids → member ids
+  assert.deepEqual(m.dataFlow.dependsOn, ['acme-business-analyst']);
+  // hierarchy parent → member id
+  assert.equal(m.parentMemberId, 'acme-lead');
+  assert.equal(m.stage, 'build');
+  assert.deepEqual(m.github, { producesPr: true });
+  // channel `from` role id → member id; other channel fields preserved
+  assert.deepEqual(m.channels, [{ artifact: 'issue', from: 'acme-business-analyst', label: 'assigned:{{agentId}}' }]);
+  // skillsOverride is never set — members inherit the team grant
+  assert.equal('skillsOverride' in m, false);
+});
+
+test('buildMemberFromTemplate: a persistent DM-only template yields no sessionPolicy and no ports', () => {
+  const ba = {
+    id: 'business-analyst', displayName: 'Business Analyst',
+    sessionPolicy: 'persistent', promptTemplate: 'Analyse for {{teamName}}.', triggers: [],
+  };
+  const m = buildMemberFromTemplate(ba, {
+    teamId: 'acme', memberId: 'acme-business-analyst', memberDisplayName: 'Business Analyst',
+    vars: { teamName: 'Acme' },
+  });
+  assert.equal(m.systemPromptOverride, 'Analyse for Acme.');
+  assert.equal(m.sessionPolicy, undefined); // only per-invocation is emitted
+  assert.deepEqual(m.triggers, []);
+  assert.equal('dataFlow' in m, false);
+  assert.equal('parentMemberId' in m, false);
+  assert.equal('github' in m, false);
+  assert.equal('channels' in m, false);
+  assert.equal('materialize' in m, false);
+});
+
+test('buildMemberFromTemplate: unknown {{vars}} stay literal; materialize passes through', () => {
+  const m = buildMemberFromTemplate(
+    { id: 'x', displayName: 'X', promptTemplate: 'Hi {{missing}}.', triggers: [] },
+    { teamId: 'acme', memberId: 'acme-x', memberDisplayName: 'X', vars: {}, materialize: true });
+  assert.equal(m.systemPromptOverride, 'Hi {{missing}}.'); // no silent "undefined"
+  assert.equal(m.materialize, true);
 });

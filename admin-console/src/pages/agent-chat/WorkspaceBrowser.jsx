@@ -798,9 +798,11 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
       <div style={{
         display: 'flex', alignItems: 'center', gap: 6,
         paddingLeft: depth * 12 + 16,
+        paddingRight: 8,
+        paddingTop: 3,
+        paddingBottom: 3,
         color: 'var(--eb-text-muted)',
         fontSize: 'var(--eb-text-xs)',
-        padding: '3px 8px',
       }}>
         <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
         Loading…
@@ -812,9 +814,11 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
       <div style={{
         display: 'flex', alignItems: 'center', gap: 6,
         paddingLeft: depth * 12 + 16,
+        paddingRight: 8,
+        paddingTop: 3,
+        paddingBottom: 3,
         color: 'var(--eb-status-error)',
         fontSize: 'var(--eb-text-xs)',
-        padding: '3px 8px',
       }}>
         <AlertCircle size={11} />
         {cache.error}
@@ -825,10 +829,12 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
     return (
       <div style={{
         paddingLeft: depth * 12 + 16,
+        paddingRight: 8,
+        paddingTop: 3,
+        paddingBottom: 3,
         color: 'var(--eb-text-muted)',
         fontSize: 'var(--eb-text-xs)',
         fontStyle: 'italic',
-        padding: '3px 8px',
       }}>
         (empty)
       </div>
@@ -924,7 +930,11 @@ function Row({ indent, icon, label, secondary, dim, active, onClick, gitBranch, 
             : (dim ? 'var(--eb-text-muted)' : 'var(--eb-text-secondary)'),
         }}
       >
-        <span style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0 }}>
+        {/* Reserve the same chevron gutter folders carry (Caret 11px + 2px gap)
+            so a file's icon lines up with its sibling folders' icons instead of
+            their expand-chevron — this also steps nested files one level in. */}
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2, flexShrink: 0 }}>
+          <span style={{ width: 11, flexShrink: 0 }} aria-hidden="true" />
           {icon}
         </span>
         <span style={{

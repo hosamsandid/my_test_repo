@@ -32,6 +32,7 @@ const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unified
 const { membersOfTeam } = require('./agent-team-cascade');
 const skillManifest = require('./skill-manifest');
 const skillDrift = require('./skill-drift');
+const skillLineage = require('./skill-lineage');
 const skillTransfer = require('./skill-transfer');
 const skillDeletion = require('./skill-deletion');
 const skillMerge = require('./skill-merge');
@@ -4912,6 +4913,64 @@ function eligibleExtendSkills(scope, teamId, tier) {
   return out;
 }
 
+// A compact provenance summary (#632, AC2) surfaced on Skills list rows so the
+// UI can render provenance chips (auto/shared-from-team/imported) without a
+// second fetch. Absent for hand-authored skills (no provenance.json). Full
+// provenance lives on the lineage endpoint's `provenance` field.
+function skillProvenanceSummary(dir) {
+  const prov = readSkillProvenance(dir);
+  if (!prov) return {};
+  const out = { provenance: true };
+  if (prov.originTeamId) out.originTeamId = prov.originTeamId;
+  if (Array.isArray(prov.entryIds)) out.entryCount = prov.entryIds.length;
+  return out;
+}
+
+// Gather EVERY known copy of a skill name across the tiers the caller can see
+// (#632, AC2) — the global pool copy, every visible team copy, every visible
+// agent copy — each tagged with its display identity, version summary, and
+// per-copy drift state. This is the fs-bound half (reads manifests + hashes
+// dirs); the pure assembler (skill-lineage.js) dedups, sorts, marks the viewed
+// copy, and summarizes. A copy with no recorded origin simply carries no drift.
+function gatherSkillCopies(name, scope) {
+  const copies = [];
+  if (!SKILL_NAME_RE.test(String(name || ''))) return copies;
+
+  const globalDir = path.join(POOL_DIR, 'skills', name);
+  if (fs.existsSync(path.join(globalDir, 'SKILL.md'))) {
+    let origin = null;
+    try { const man = skillManifest.readManifest(globalDir); origin = man && man.origin; } catch { /* none */ }
+    const d = skillDriftSummary(globalDir, origin);
+    copies.push({ tier: 'global', ...skillManifestSummary(globalDir), ...skillProvenanceSummary(globalDir), drift: d.drift, resyncable: d.resyncable, sourceVersion: d.sourceVersion });
+  }
+
+  for (const ts of listTeamSkills(null)) {
+    if (ts.name !== name || !visibleTeam(scope, ts.teamId)) continue;
+    const dir = safeTeamSkillDir(ts.teamId, name);
+    if (!dir) continue;
+    let origin = null;
+    try { const man = skillManifest.readManifest(dir); origin = man && man.origin; } catch { /* none */ }
+    const d = skillDriftSummary(dir, origin);
+    copies.push({ tier: 'team', teamId: ts.teamId, ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), drift: d.drift, resyncable: d.resyncable, sourceVersion: d.sourceVersion });
+  }
+
+  for (const agentId of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), {});
+    if (!visibleAgent(scope, cfg)) continue;
+    const dir = path.join(AGENTS_DIR, agentId, 'skills', name);
+    if (!fs.existsSync(path.join(dir, 'SKILL.md'))) continue;
+    lazyStampAgentSkill(dir, agentId);
+    const seededManifest = readJsonFile(path.join(AGENTS_DIR, agentId, '.aee', 'seeded-skills.json'), {}) || {};
+    const seeded = seededManifest[name];
+    const origin = seeded && seeded.tier
+      ? { tier: seeded.tier, teamId: seeded.tier === 'team' ? cfg.teamId : undefined, sourceHash: seeded.contentHash }
+      : null;
+    const d = skillDriftSummary(dir, origin);
+    copies.push({ tier: 'agent', agentId, teamId: cfg.teamId, ...skillManifestSummary(dir), drift: d.drift, resyncable: d.resyncable, sourceVersion: d.sourceVersion });
+  }
+  return copies;
+}
+
 app.get('/api/skills', (req, res) => {
   const scope = getScope(req);
   const skills = [];
@@ -4924,7 +4983,7 @@ app.get('/api/skills', (req, res) => {
       const skillMd = path.join(poolSkillsDir, name, 'SKILL.md');
       if (fs.existsSync(skillMd) && !seen.has(name)) {
         seen.add(name);
-        skills.push({ name, source: 'pool', path: skillMd, ...skillManifestSummary(path.dirname(skillMd)) });
+        skills.push({ name, source: 'pool', path: skillMd, ...skillManifestSummary(path.dirname(skillMd)), ...skillProvenanceSummary(path.dirname(skillMd)) });
       }
     });
   } catch { /* no pool skills dir */ }
@@ -4939,7 +4998,7 @@ app.get('/api/skills', (req, res) => {
       const dir = path.dirname(s.path);
       let origin = null;
       try { const man = skillManifest.readManifest(dir); origin = man && man.origin; } catch { /* none */ }
-      return { ...s, ...skillManifestSummary(dir), ...skillDriftSummary(dir, origin) };
+      return { ...s, ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), ...skillDriftSummary(dir, origin) };
     }));
 
   // Agent skills — visible only when the owning agent is visible (#302), so an
@@ -4965,7 +5024,7 @@ app.get('/api/skills', (req, res) => {
             const origin = seeded && seeded.tier
               ? { tier: seeded.tier, teamId: seeded.tier === 'team' ? cfg.teamId : undefined, sourceHash: seeded.contentHash }
               : null;
-            skills.push({ name, source: 'agent', agentId, path: skillMd, ...skillManifestSummary(dir), ...skillDriftSummary(dir, origin) });
+            skills.push({ name, source: 'agent', agentId, path: skillMd, ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), ...skillDriftSummary(dir, origin) });
           }
         }
       });
@@ -4998,6 +5057,48 @@ app.get('/api/skills/:name/content', (req, res) => {
   const dir = path.dirname(skillPath);
   if (source === 'agent') lazyStampAgentSkill(dir, path.basename(agentId));
   res.json({ content, ...skillManifestSummary(dir) });
+});
+
+// Full lineage view for one skill copy (#632, epic #624 phase 5) — the data the
+// Skills detail panel's Versions + Lineage tabs render: the viewed copy's
+// version history + origin (its skill.json), its knowledge provenance
+// (provenance.json), and every known copy of the same name across tiers with
+// drift. `?source=pool|team|agent` (+ `teamId`/`agentId`) identifies the viewed
+// copy; visibility is scope-gated per tier. The pure assembler shapes the view.
+app.get('/api/skills/:name/lineage', (req, res) => {
+  const { name } = req.params;
+  if (!SKILL_NAME_RE.test(name)) return res.status(400).json({ error: 'Invalid skill name' });
+  const scope = getScope(req);
+
+  const source = typeof req.query.source === 'string' ? req.query.source : 'pool';
+  const qTeamId = typeof req.query.teamId === 'string' ? req.query.teamId : undefined;
+  const qAgentId = typeof req.query.agentId === 'string' ? req.query.agentId : undefined;
+
+  let viewed;
+  let viewedDir;
+  if (source === 'agent') {
+    if (!qAgentId || !AGENT_ID_RE.test(qAgentId)) return res.status(400).json({ error: 'Invalid agent id' });
+    const cfg = readJsonFile(path.join(AGENTS_DIR, qAgentId, 'config.json'), null);
+    if (!cfg || !visibleAgent(scope, cfg)) return res.status(404).json({ error: 'Skill not found' });
+    viewed = { tier: 'agent', agentId: qAgentId, teamId: cfg.teamId };
+    viewedDir = path.join(AGENTS_DIR, path.basename(qAgentId), 'skills', name);
+  } else if (source === 'team') {
+    viewedDir = safeTeamSkillDir(qTeamId, name);
+    if (!viewedDir) return res.status(400).json({ error: 'Invalid team id or skill name' });
+    if (!visibleTeam(scope, qTeamId)) return res.status(404).json({ error: 'Skill not found' });
+    viewed = { tier: 'team', teamId: qTeamId };
+  } else {
+    viewed = { tier: 'global' };
+    viewedDir = path.join(POOL_DIR, 'skills', name);
+  }
+  if (!fs.existsSync(path.join(viewedDir, 'SKILL.md'))) return res.status(404).json({ error: 'Skill not found' });
+
+  let manifest = null;
+  try { manifest = skillManifest.readManifest(viewedDir); } catch { manifest = null; }
+  const provenance = readSkillProvenance(viewedDir);
+  const copies = gatherSkillCopies(name, scope);
+
+  res.json(skillLineage.assembleLineage({ name, viewed, manifest, provenance, copies }));
 });
 
 /* ─── Skill directory contents (multi-file browser/editor) ───────────── */

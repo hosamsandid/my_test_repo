@@ -5,9 +5,20 @@
 const { expect } = require('@playwright/test');
 const { resolveMemberIds } = require('./member-ids');
 
-// UI: the team card and every member row are present on the Agents page. Member
-// ids follow `<teamId>-<roleId>` and are unique text, so we assert on them
-// directly (the team card is expanded by default).
+/**
+ * UI: the team card and every member row are present on the Agents page. Member
+ * ids follow `<teamId>-<roleId>` and are unique text, so we assert on them
+ * directly (the team card is expanded by default).
+ *
+ * @param {string} params.teamId - Team slug id shown on the team card.
+ * @param {string[]} [params.roleIds] - Role ids to derive member ids (`<teamId>-<roleId>`).
+ * @param {string[]} [params.memberIds] - Explicit member ids (alternative to roleIds).
+ * @example
+ * - assert:
+ *     do: agents.expectTeamCard
+ *     teamId: agentic-demos
+ *     roleIds: [business-analyst, developer]
+ */
 async function expectTeamCard(ctx, params) {
   const { page } = ctx;
   const { teamId } = params;
@@ -22,9 +33,20 @@ async function expectTeamCard(ctx, params) {
   }
 }
 
-// API: every member exists and is enabled (the orchestrator spawns a container
-// for each enabled member — the UI shows this as the "Active" state). Polled
-// because container spawn + Matrix provisioning settle shortly after `complete`.
+/**
+ * API: every member exists and is enabled (the orchestrator spawns a container
+ * for each enabled member — the UI shows this as the "Active" state). Polled
+ * because container spawn + Matrix provisioning settle shortly after `complete`.
+ *
+ * @param {string} params.teamId - Team slug id (with roleIds) to derive member ids.
+ * @param {string[]} [params.roleIds] - Role ids to derive member ids.
+ * @param {string[]} [params.memberIds] - Explicit member ids (alternative to roleIds).
+ * @example
+ * - assert:
+ *     do: agents.expectMembersRunning
+ *     teamId: agentic-demos
+ *     roleIds: [business-analyst, developer]
+ */
 async function expectMembersRunning(ctx, params) {
   const memberIds = resolveMemberIds(params);
   await expect
@@ -43,8 +65,19 @@ async function expectMembersRunning(ctx, params) {
     .toEqual(memberIds);
 }
 
-// API: a DM room was created per member (the wizard's `dms` step). The room id
-// round-trips through GET /api/matrix/agents.
+/**
+ * API: a DM room was created per member (the wizard's `dms` step). The room id
+ * round-trips through GET /api/matrix/agents.
+ *
+ * @param {string} params.teamId - Team slug id (with roleIds) to derive member ids.
+ * @param {string[]} [params.roleIds] - Role ids to derive member ids.
+ * @param {string[]} [params.memberIds] - Explicit member ids (alternative to roleIds).
+ * @example
+ * - assert:
+ *     do: agents.expectDmRooms
+ *     teamId: agentic-demos
+ *     roleIds: [business-analyst, developer]
+ */
 async function expectDmRooms(ctx, params) {
   const memberIds = resolveMemberIds(params);
   await expect

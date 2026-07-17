@@ -90,6 +90,21 @@ jobs:
       - name: Run E2E (F0) — builds images, brings up aee-e2e, tears down
         run: make e2e
 
+      - name: Dump orchestrator container logs on failure
+        if: failure()
+        run: |
+          set -uo pipefail
+          # Capture the orchestrator's logs while the stack is still up (the
+          # teardown step below removes the containers). A missing admin client
+          # or the M_FORBIDDEN provisioning race (#719) shows up here — without
+          # this, diagnosing a red F1 needs a local repro.
+          mkdir -p e2e/test-results
+          for c in $(podman ps -a --filter "name=orchestrator" --format '{{.Names}}'); do
+            echo "=== podman logs ${c} ===" >> e2e/test-results/orchestrator.log
+            podman logs "${c}" >> e2e/test-results/orchestrator.log 2>&1 || true
+          done
+          ls -l e2e/test-results/orchestrator.log || true
+
       - name: Upload Playwright artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4

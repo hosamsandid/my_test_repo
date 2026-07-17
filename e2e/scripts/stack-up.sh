@@ -46,6 +46,13 @@ ENV_FILE="$ENV_FILE" \
   ADMIN_PASS="${ADMIN_PASSWORD}" \
   "$REPO_ROOT/orchestrator/setup.sh"
 
+# Re-read the env file: setup.sh has just written MATRIX_ACCESS_TOKEN /
+# CONDUWUIT_ADMIN_ROOM, and the shell exports from step 1 (empty on a fresh CI
+# runner, stale locally) would otherwise take precedence over --env-file in
+# compose variable substitution at step 5 — so the orchestrator would start
+# with no admin credentials, silently disabling Matrix user provisioning (#719).
+set -a; . "$ENV_FILE"; set +a
+
 # --- 4b. Seed the in-stack git-remote fixture repo (#667) ---
 # Host-side git builds the bare repo at the git-remote bind-mount root BEFORE
 # `up`, so the static file server has it to serve the moment it starts. The dev

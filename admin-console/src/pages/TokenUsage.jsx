@@ -79,19 +79,23 @@ function TimeSeries({ summary }) {
   }
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 'var(--eb-space-2)', height: 180, paddingTop: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 'var(--eb-space-2)', paddingTop: 8 }}>
         {points.map((p) => {
           const segs = stackSegments(p.tokens, maxTotal);
           const colHeightPct = maxTotal > 0 ? ((p.tokens.total || 0) / maxTotal) * 100 : 0;
           return (
             <div key={p.day} style={{ flex: '1 1 0', display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 24 }}>
-              <div
-                title={`${p.day}: ${formatInt(p.tokens.total)} tokens, ${formatInt(p.invocations)} invocations`}
-                style={{ width: '100%', maxWidth: 48, height: `${colHeightPct}%`, minHeight: colHeightPct > 0 ? 2 : 0, display: 'flex', flexDirection: 'column-reverse', borderRadius: 'var(--eb-radius-sm)', overflow: 'hidden' }}
-              >
-                {segs.map((s) => (
-                  <div key={s.key} style={{ height: `${(s.value / (p.tokens.total || 1)) * 100}%`, background: CLASS_COLOR[s.key] }} />
-                ))}
+              {/* Definite-height plotting area: bars use `%` heights, which only
+                  resolve against an ancestor with a fixed height (#696). */}
+              <div style={{ width: '100%', height: 180, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', alignItems: 'center' }}>
+                <div
+                  title={`${p.day}: ${formatInt(p.tokens.total)} tokens, ${formatInt(p.invocations)} invocations`}
+                  style={{ width: '100%', maxWidth: 48, height: `${colHeightPct}%`, minHeight: colHeightPct > 0 ? 2 : 0, display: 'flex', flexDirection: 'column-reverse', borderRadius: 'var(--eb-radius-sm)', overflow: 'hidden' }}
+                >
+                  {segs.map((s) => (
+                    <div key={s.key} style={{ height: `${(s.value / (p.tokens.total || 1)) * 100}%`, background: CLASS_COLOR[s.key] }} />
+                  ))}
+                </div>
               </div>
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginTop: 4, whiteSpace: 'nowrap', transform: 'rotate(-45deg)', transformOrigin: 'top left', height: 40 }}>
                 {p.day.slice(5)}

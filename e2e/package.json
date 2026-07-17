@@ -6,9 +6,13 @@
   "scripts": {
     "test": "playwright test",
     "test:ui": "playwright test --ui",
+    "test:unit": "node --test journey-runner/",
     "report": "playwright show-report"
   },
   "devDependencies": {
     "@playwright/test": "^1.48.0"
+  },
+  "dependencies": {
+    "js-yaml": "^4.3.0"
   }
 }

@@ -92,8 +92,20 @@ jobs:
           done
           echo "PODMAN_HOST_SOCKET=${SOCK}" >> "$GITHUB_ENV"
 
-      - name: Run E2E (full suite F0–F4) — builds images, brings up aee-e2e, tears down
+      - name: Run E2E (full suite F0–F4 + journeys) — builds images, brings up aee-e2e, tears down
         run: make e2e
+
+      - name: Upload journey screenshots + manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          # Captured only by a passing journey run (#705, §2.3) — the doc/deck
+          # and PR before/after evidence source. Ignored when the journey failed
+          # (nothing published) so the step never breaks the job.
+          name: journey-artifacts
+          path: e2e/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Dump orchestrator container logs on failure
         if: failure()

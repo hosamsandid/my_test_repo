@@ -40,7 +40,25 @@ module.exports = defineConfig({
   projects: [
     {
       name: 'chromium',
+      testDir: './tests',
       use: { ...devices['Desktop Chrome'] },
+    },
+    {
+      // Journey runner (#705, docs/journey-spec-concept.md §3.1). A normal
+      // Playwright project beside the specs — journeys are just tests, so
+      // trace/retries/reporters work unchanged. Screenshot determinism (§7) is
+      // pinned here: fixed viewport, light scheme, reduced motion; the recorder
+      // adds an animation-killing stylesheet + volatile masks at capture time.
+      name: 'journeys',
+      testDir: './journey-runner',
+      testMatch: /.*\.spec\.js$/,
+      use: {
+        ...devices['Desktop Chrome'],
+        viewport: { width: 1440, height: 900 },
+        deviceScaleFactor: 1,
+        colorScheme: 'light',
+        reducedMotion: 'reduce',
+      },
     },
   ],
 });

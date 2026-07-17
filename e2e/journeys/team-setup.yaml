@@ -1,0 +1,137 @@
+journeyVersion: 1
+id: team-setup
+title: Team Setup
+order: 10
+# CI lane only for now: fake-claude, in-stack git remote, no external GitHub.
+lanes: [ci]
+
+# Precondition: a credential-less Working Environment pointing at the in-stack
+# git remote, so the wizard materialises a team with zero external deps (#667).
+# Fixed ids keep screenshots deterministic (§7); the fixture pre-/post-cleans so
+# re-runs on the same stack stay isolated.
+fixtures:
+  - fixture: teamEnv
+    params:
+      teamId: agentic-demos
+      envId: agentic-demos-env
+      envName: Agentic Demos
+      repoUrl: "http://git-remote/e2e/fixture.git"
+      branch: main
+
+steps:
+  # ── Slide 1: chapter intro + "what is a team" (narrative-only) ──────────────
+  - kind: narrative-only
+    narrative: |
+      Let's walk through the Team Setup wizard. This is where the Agent Studio really shows what it's about: it doesn't just run a single agent, it lets you stand up a whole team of agents that work together on the same repository.
+
+      So what exactly is a team here? A team is a coordinated group of AI agents — think of a Business Analyst, a Developer, a Code Reviewer — each with its own role, its own system prompt. They all share one working environment, which means they all work against the same GitHub repository with the same credentials and the same knowledge sources. What makes it a team rather than just a collection of agents is that they're wired together: one agent's output becomes the next agent's trigger. The Business Analyst writes an issue, a human approves it, the Developer picks it up, opens a pull request, the Code Reviewer reacts to that pull request, and so on. The hand-offs happen automatically over GitHub labels and events.
+
+      The wizard guides us through this in five steps: first we pick the process — the actual workflow and the roles in it; then the working environment the team operates in; then we name the team; then, optionally, we configure knowledge — the skills and learning behaviour; and finally we review everything before it's created. The nice thing is that the whole team is created in one atomic transaction — if anything fails, it rolls back cleanly, so you never end up with a half-built team.
+
+      Let's go through the steps one by one.
+
+  # Open the wizard (pure plumbing — no narrative, no capture).
+  - action:
+      do: wizard.open
+
+  # ── Slide 2: Process step ───────────────────────────────────────────────────
+  - id: process-step
+    narrative: |
+      The first step is the Process step — and it comes first on purpose, because the process is the central decision. Everything after it — the environment, the name, the knowledge — just qualifies this choice.
+
+      Here you have three ways to start: you can use a curated template, you can compose a process from stages yourself, or you can start with a blank canvas and design it free-form in the Flow editor. In this demo we take the simplest, most powerful path: we pick a ready-made template — the Core SDLC flow.
+
+      Core SDLC gives us four agents that cover a complete build-and-review loop: the Business Analyst turns ideas into well-defined GitHub issues, the Developer implements a ready issue and opens a pull request, the Code Reviewer checks the change against every acceptance criterion, and the Reworker addresses review feedback and loops until the change is clean. The agents do the heavy lifting, but the human stays in control of the two decisions that matter — what gets built, by approving the issue, and the final merge. Below the selection you also see a small live preview of the flow and a wiring check, so you can confirm the hand-offs actually connect before moving on.
+    action:
+      do: wizard.selectProcessTemplate
+      templateName: Core SDLC
+    assert:
+      do: wizard.expectFlowPreview
+    screenshot: process-step-core-sdlc
+
+  - action:
+      do: wizard.next
+
+  # ── Slide 3: Working Environment step ───────────────────────────────────────
+  - id: working-environment
+    narrative: |
+      The second step is the Working Environment. If the process defines what the team does, the environment defines where it does it.
+
+      A Working Environment is a reusable infrastructure template. It bundles the GitHub repository the team works on, the branch, the SSH deploy key and the GitHub token used for git operations and API access, plus any knowledge sources. The key point is that we don't reassemble all of that here from raw credentials — the environment already packages it. So on this step we simply pick one from a card grid. Each card shows the environment's name, its repository, and warns us if something essential is missing — for example, if there's no repository configured, the card can't be selected, because a team needs a repository to work on.
+
+      This separation is deliberate: the same environment can be reused across many teams, and credentials live in their own store, so you can rotate a token without touching every team. If we don't have a suitable environment yet, there's a direct link to create one — but for the demo we just select the one that points at our target repository and move on.
+    assert:
+      do: wizard.expectEnvironmentStep
+      envName: Agentic Demos
+    screenshot: working-environment-step
+
+  # Selecting the env card auto-advances to the Team step (product behaviour).
+  - action:
+      do: wizard.selectEnvironment
+      envName: Agentic Demos
+
+  # ── Slide 4: Team identity step ─────────────────────────────────────────────
+  - id: team-step
+    narrative: |
+      Step three is where we give the team its identity — really just two fields: a team name and a team ID.
+
+      The wizard is helpful here: both fields are pre-filled and suggested from the working environment we just picked, and the ID is a slug — lowercase, dashes only — that gets derived automatically from the name as we type. You can override either one, but you usually don't have to.
+
+      Why does the ID matter? Because it becomes the prefix for every resource the team creates. So a team with the ID "agentic-demos" will produce agents like agentic-demos-developer, agentic-demos-code-reviewer, and so on. The wizard also checks the ID against everything that already exists — if it collides with an existing agent or team, it tells you right away and asks for a different one. That naming scheme is what keeps a multi-team setup clean and predictable.
+    action:
+      do: wizard.setTeamIdentity
+      teamName: Agentic Demos
+      teamId: agentic-demos
+    assert:
+      do: wizard.expectTeamIdentity
+      teamName: Agentic Demos
+      teamId: agentic-demos
+    screenshot: team-step
+
+  - action:
+      do: wizard.next
+
+  # ── Slide 5: Knowledge step (optional) ──────────────────────────────────────
+  - id: knowledge-step
+    narrative: |
+      The fourth step is Knowledge — and it's explicitly optional. This is where we decide what the team knows and how it learns.
+
+      There are three parts to it. First, the initial team skills: curated capability packs from the pool that are placed on the team as a whole, so every member inherits them automatically. Second, the knowledge sources: MCP servers the team can query at runtime — a wiki, a vector store, a graph database — inherited from the working environment and shown here read-only. The third part is how the team learns and shares knowledge: at the lower autonomy levels, learnings are proposed and a human reviews them before they become shared team knowledge; at the highest level, the team curates and promotes its own knowledge automatically. These are just sensible defaults every team starts on, and you can change all of them later on the Knowledge page — so for the demo we simply accept the defaults and continue.
+    assert:
+      do: wizard.expectKnowledgeStep
+    screenshot: knowledge-step
+
+  - action:
+      do: wizard.skipKnowledge
+
+  # ── Slide 6: Review & create ────────────────────────────────────────────────
+  - id: review-step
+    narrative: |
+      The final step is Review — the confirmation before anything is created. Nothing has been built yet; this is our last chance to check the whole picture in one place.
+
+      Here we see it all laid out: the team name and ID, the working environment and repository, the exact list of agents that will be created — each with its concrete ID — plus the skills and the learning configuration. When we hit create, the wizard materialises everything in one atomic-with-rollback transaction: it sets up the shared environment, creates the team, spawns each member agent with its role-specific prompt and triggers, and provisions a Matrix user and a chat room for each. A few seconds later, we have a fully wired, running team of agents ready to react to the first issue.
+    assert:
+      do: wizard.expectReviewStep
+      teamName: Agentic Demos
+      teamId: agentic-demos
+    screenshot: review-step
+
+  # Submit and verify the per-step NDJSON progress (plumbing — navigates away).
+  - action:
+      do: wizard.createTeamAndExpectProgress
+      teamId: agentic-demos
+      roleIds: [business-analyst, developer, code-reviewer, reworker]
+
+  # Verify the materialised team is real (UI + API) — no capture, pure assertion.
+  - assert:
+      do: agents.expectTeamCard
+      teamId: agentic-demos
+      roleIds: [business-analyst, developer, code-reviewer, reworker]
+  - assert:
+      do: agents.expectMembersRunning
+      teamId: agentic-demos
+      roleIds: [business-analyst, developer, code-reviewer, reworker]
+  - assert:
+      do: agents.expectDmRooms
+      teamId: agentic-demos
+      roleIds: [business-analyst, developer, code-reviewer, reworker]

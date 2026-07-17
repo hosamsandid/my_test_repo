@@ -252,6 +252,61 @@ app.get('/api/github-events', (req, res) => {
   })));
 });
 
+// Pending-triggers dispatch queue — operator visibility & control (#724).
+// Distinct from /api/github-events above (that is the history of already-
+// PROCESSED events); this surfaces the UPSTREAM live queue of entries enqueued
+// but not yet drained by the agent. All three are thin proxies to the
+// orchestrator, which owns the per-agent pending-triggers.json files and runs
+// the read/cancel in its single event loop (race-free, no file lock). Gated by
+// the auth gate mounted above, consistent with the other agent-internal
+// endpoints (AC11).
+//
+//  - GET  /api/pending-queue                    → aggregated, read-only view (AC1/AC3)
+//  - GET  /api/agents/:id/pending/:entryId       → full entry incl. payload (detail on demand)
+//  - DELETE /api/agents/:id/pending/:entryId     → cancel one entry (AC5/AC7)
+const PENDING_ENTRY_ID_RE = /^[a-zA-Z0-9_-]+$/;
+
+app.get('/api/pending-queue', async (req, res) => {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const r = await fetch(`${orchestratorUrl}/internal/pending-queue`);
+    const body = await r.json().catch(() => ({ ok: false, error: 'invalid orchestrator response' }));
+    return res.status(r.status).json(body);
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+app.get('/api/agents/:id/pending/:entryId', async (req, res) => {
+  const { id, entryId } = req.params;
+  if (!AGENT_ID_RE.test(id) || !PENDING_ENTRY_ID_RE.test(entryId)) {
+    return res.status(400).json({ ok: false, error: 'Invalid agent id or entry id' });
+  }
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/pending/${encodeURIComponent(entryId)}`);
+    const body = await r.json().catch(() => ({ ok: false, error: 'invalid orchestrator response' }));
+    return res.status(r.status).json(body);
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+app.delete('/api/agents/:id/pending/:entryId', async (req, res) => {
+  const { id, entryId } = req.params;
+  if (!AGENT_ID_RE.test(id) || !PENDING_ENTRY_ID_RE.test(entryId)) {
+    return res.status(400).json({ ok: false, error: 'Invalid agent id or entry id' });
+  }
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/pending/${encodeURIComponent(entryId)}`, { method: 'DELETE' });
+    const body = await r.json().catch(() => ({ ok: false, error: 'invalid orchestrator response' }));
+    return res.status(r.status).json(body);
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
 // Token-usage statistics (#654, §5 view 1 of docs/cost-per-pr-concept.md).
 // Reads the day-bucketed usage records the orchestrator ingested and runs the
 // pure aggregator. Tokens only — dollar figures are never surfaced (AC4).

@@ -214,7 +214,7 @@ YAML only), M (needs a new fixture/mock), L (needs new product seam + playbooks)
 
 | Deck chapter | Journey | Feasibility / prerequisites | Effort |
 |---|---|---|---|
-| Team Setup wizard (slides 1–6) | `team-setup` | ✅ = F1 (repo-less env now; with-repo variant needs the local git remote) | S |
+| Team Setup wizard (slides 1–6) | `team-setup` | ✅ = F1 (env pointing at the in-stack git remote — repo-less envs can't create teams per the #586 guardrail; see #667 / e2e concept v1.1) | S |
 | Agent Chat tour (slide 8) | `agent-chat` | ✅ = F2; fake-claude exists | S |
 | **Working with agents — IBAN story** (9–15) | `iban-story` | ⚠️ The crown jewel. Needs fake-GitHub (§6.1) + fake-claude playbooks (§6.2) + local git remote. CI variant proves the wiring; live lane produces the showable content | L |
 | Triggers (16–21) | `triggers` | ✅ CRUD + `once` (near-future timestamp) + `http` (curl :4003) now; `github-event` step needs fake-GitHub | S→M |
@@ -258,8 +258,10 @@ three call sites in `admin-console/api/api.js`. Introduce `GITHUB_API_BASE`
 (default `https://api.github.com`), read at those seams. Flag absent ⇒ byte-identical
 production behaviour. Agent-side, `gh` already supports `GH_HOST`/`GH_ENTERPRISE_TOKEN`
 env routing; git I/O does **not** go through fake-GitHub at all — it uses the local
-**git remote container** (bare repo over HTTP) already foreseen as phase-4 option in
-the E2E concept. Fake-GitHub fakes the *API*, the git remote is *real* git.
+**git remote container** (bare repo over HTTP), which lands with E2E phase 2 (#667,
+option B: the wizard's #586 guardrail requires a repository, so the F1 fixture env
+already needs the in-stack remote — see e2e concept §0 item 1, v1.1). Fake-GitHub
+fakes the *API*, the git remote is *real* git.
 
 ### 6.2 Scriptable fake-claude (playbooks)
 
@@ -311,7 +313,7 @@ the mock provider is registered explicitly by the fixture.)
 | **J2** | *Doc generator: markdown + coverage report* | `docgen` → `docs/user-guide/`, generated-header convention, nav-coverage report; `make docs-journeys`. | J1 |
 | **J3** | *PPTX generator* | pptxgenjs deck from all journeys (notes = narrative, screenshots = visuals); replaces hand-maintained deck for covered chapters. | J2 |
 | **J4** | *PR before/after screenshots* | Baseline publication on main, PR workflow (path filter/`ui` label), pixel diff, sticky comment with before/after grid. Evidence, not a gate. | J1 (can start parallel to J2/J3) |
-| **J5** | *Fake GitHub + `GITHUB_API_BASE` seam + local git remote* | The compose service (§6.1), the one product change, the bare-repo container; `triggers` journey gains the github-event step; `flows-draft` journey lands (with §6.3 mock). | J1 |
+| **J5** | *Fake GitHub + `GITHUB_API_BASE` seam* | The fake-GitHub compose service (§6.1) + the one product change; `triggers` journey gains the github-event step; `flows-draft` journey lands (with §6.3 mock). (The local git remote is **not** in this phase — it ships with E2E phase 2 / #667, which J0 depends on.) | J1 |
 | **J6** | *IBAN story journey* | fake-claude playbooks (§6.2); the full BA→issue→`ready`→Developer→PR→review→`ready-to-merge` loop as a nightly CI journey; live-lane variant for showable content. | J5 |
 | **J7** | *Video lane (stretch)* | slowMo project, ffmpeg assembly, title cards; TTS narration parked behind it. | J1, nice after J6 |
 

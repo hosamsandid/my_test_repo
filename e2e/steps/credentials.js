@@ -113,7 +113,9 @@ async function renameEnv(ctx, { envId, newName }) {
   await page.goto('/environments');
   await page.getByRole('row').filter({ hasText: envId }).getByRole('button', { name: 'Edit' }).click();
   await expect(page.getByRole('heading', { name: /^Edit:/ })).toBeVisible();
-  const nameInput = page.getByPlaceholder('COBOL Migration');
+  // exact — see createEnv: the Project-context textarea placeholder also
+  // contains "COBOL migration" and getByPlaceholder matches substrings.
+  const nameInput = page.getByPlaceholder('COBOL Migration', { exact: true });
   await nameInput.fill(newName);
   await page.getByRole('button', { name: 'Save changes' }).click();
   await expect(page.getByRole('row').filter({ hasText: newName })).toBeVisible();

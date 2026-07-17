@@ -43,6 +43,7 @@ const { assembleClaudeMd, buildMemoryHint } = require("./prompt-assembly");
 const { readMaintenanceState } = require("./maintenance-state-reader");
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
 const { buildEnsureUserCommands } = require("./matrix-admin-commands");
+const matrixLoginRetry = require("./matrix-login-retry");
 const skillManifest = require("./skill-manifest");
 const usageLog = require("./usage-log");
 const usageQuery = require("./usage-query");
@@ -1744,6 +1745,17 @@ function listAgentIds() {
 // ============================================================
 // Matrix helpers (admin operations only — no routing identity)
 // ============================================================
+
+// Total time budget for the login retry that absorbs the cold-stack
+// provisioning race (issue #719). Overridable via env for slow CI stacks; a
+// non-positive/NaN value falls back to the module default.
+const MATRIX_LOGIN_RETRY_CEILING_MS = (() => {
+  const raw = Number(process.env.AEE_MATRIX_LOGIN_RETRY_CEILING_MS);
+  return Number.isFinite(raw) && raw > 0
+    ? raw
+    : matrixLoginRetry.DEFAULT_CEILING_MS;
+})();
+
 async function ensureMatrixUser(adminClient, username, password) {
   // Ordered create → reset-password(--convert-to-local-account) → enable-login.
   // The convert flag lets re-creation recover a previously deactivated account
@@ -1754,7 +1766,10 @@ async function ensureMatrixUser(adminClient, username, password) {
   }
 }
 
-async function loginMatrixUser(username, password) {
+// A single login attempt: one /login round-trip, throwing on any non-success
+// response (the error body — including an `M_FORBIDDEN` errcode — is preserved
+// in the message so the retry classifier can read it).
+async function attemptLoginMatrixUser(username, password) {
   const res = await fetch(`${HOMESERVER}/_matrix/client/v3/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1767,6 +1782,18 @@ async function loginMatrixUser(username, password) {
   const data = await res.json();
   if (!data.access_token) throw new Error(`Login failed: ${JSON.stringify(data)}`);
   return data.access_token;
+}
+
+// Log in, tolerating the cold-stack provisioning race (issue #719). On a fast
+// system the first attempt succeeds and returns immediately; on a slow one the
+// admin bot may not have finished create-user/enable-login by the time we try,
+// yielding a transient M_FORBIDDEN — we retry the login with bounded backoff up
+// to MATRIX_LOGIN_RETRY_CEILING_MS. Non-M_FORBIDDEN errors propagate at once.
+async function loginMatrixUser(username, password) {
+  return matrixLoginRetry.retryWhile(
+    () => attemptLoginMatrixUser(username, password),
+    { ceilingMs: MATRIX_LOGIN_RETRY_CEILING_MS }
+  );
 }
 
 async function setDisplayName(token, userId, displayName) {

@@ -27,6 +27,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const githubEventLog = require('./github-event-log');
+const { resolveGithubApiTarget } = require('./github-api-base');
 
 const POLL_INTERVAL_MS = 30_000;
 const STATE_DIR = '/workspace/github-poller';
@@ -831,8 +832,13 @@ class GitHubPoller {
         reject(err);
         return;
       }
-      const req = https.request({
+      // #710: follow the URL's own protocol so enrichment GETs work against a
+      // fake-github base served over plain HTTP. Production payload URLs are
+      // https://api.github.com/... ⇒ https, unchanged.
+      const transport = u.protocol === 'http:' ? require('http') : https;
+      const req = transport.request({
         hostname: u.hostname,
+        port: u.port || undefined,
         path: u.pathname + u.search,
         method: 'GET',
         headers: {
@@ -911,9 +917,14 @@ class GitHubPoller {
       // The stored ETag is page 1's; the caller passes it only for page 1 and
       // null for backfill pages (#449).
       if (etag) headers['If-None-Match'] = etag;
-      const req = https.request({
-        hostname: 'api.github.com',
-        path: `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/events?per_page=${PER_PAGE}&page=${page}`,
+      // #710: honour GITHUB_API_BASE (default api.github.com). Absent ⇒ the
+      // resolved target is https://api.github.com with an empty path prefix,
+      // i.e. byte-identical to the previous hardcoded request.
+      const api = resolveGithubApiTarget();
+      const req = api.transport.request({
+        hostname: api.hostname,
+        port: api.port,
+        path: `${api.basePath}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/events?per_page=${PER_PAGE}&page=${page}`,
         method: 'GET',
         headers,
         timeout: 15_000,

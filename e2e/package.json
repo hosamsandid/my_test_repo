@@ -13,12 +13,15 @@
     "journeys:dryrun": "node journey-runner/bin/dry-run.js",
     "docs:journeys": "node docgen/bin/docgen.js",
     "docs:journeys:check": "node docgen/bin/docgen.js --check",
+    "docs:deck": "node docgen/bin/deck.js",
     "report": "playwright show-report"
   },
   "devDependencies": {
     "@playwright/test": "^1.48.0"
   },
   "dependencies": {
-    "js-yaml": "^4.3.0"
+    "js-yaml": "^4.3.0",
+    "jszip": "^3.10.1",
+    "pptxgenjs": "^4.0.1"
   }
 }

@@ -6,7 +6,7 @@
   "scripts": {
     "test": "playwright test",
     "test:ui": "playwright test --ui",
-    "test:unit": "node --test journey-runner/",
+    "test:unit": "node --test journey-runner/*.test.js",
     "journeys:catalog": "node journey-runner/bin/gen-catalog.js",
     "journeys:catalog:check": "node journey-runner/bin/gen-catalog.js --check",
     "journeys:lint": "node journey-runner/bin/lint.js",

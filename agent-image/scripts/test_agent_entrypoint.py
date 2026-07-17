@@ -515,6 +515,18 @@ class MaintenanceModeGating(unittest.IsolatedAsyncioTestCase):
     while active, and a cron trigger whose fire fell inside the window gets
     exactly one catch-up run once it ends."""
 
+    def setUp(self):
+        # The once-fire path writes a durable in-flight marker (#506) via
+        # _agent_workdir(), which reads os.environ["AGENT_ID"]. Point it at a
+        # throwaway dir so the firing test is hermetic — same pattern as
+        # InFlightMarkerReconciliation.
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir",
+                               return_value=Path(self._tmpdir.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _scheduler(self):
         client = AsyncMock()
         return entrypoint.TriggerScheduler(

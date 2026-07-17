@@ -9,12 +9,28 @@
 const env = require('../steps/env');
 const teardown = require('../steps/teardown');
 
-// teamEnv: the Team-Setup pilot's precondition. Seeds a credential-less Working
-// Environment pointing at the in-stack git remote, so the wizard can materialise
-// a team with zero external dependencies. Because the journey uses FIXED ids
-// (for screenshot determinism, §7), setup first tears down any leftover team+env
-// from a crashed prior run, and teardown removes the team this journey creates
-// plus the fixture env — one deterministic, idempotent surface.
+/**
+ * teamEnv: the Team-Setup pilot's precondition. Seeds a credential-less Working
+ * Environment pointing at the in-stack git remote, so the wizard can materialise
+ * a team with zero external dependencies. Because the journey uses FIXED ids
+ * (for screenshot determinism, §7), setup first tears down any leftover team+env
+ * from a crashed prior run, and teardown removes the team this journey creates
+ * plus the fixture env — one deterministic, idempotent surface.
+ *
+ * @param {string} params.teamId - Team slug id the journey will create (pre-cleaned).
+ * @param {string} params.envId - Fixture environment id to create.
+ * @param {string} params.envName - Fixture environment display name.
+ * @param {string} params.repoUrl - Git URL the environment points at.
+ * @param {string} [params.branch=main] - Branch to track.
+ * @example
+ * fixtures:
+ *   - fixture: teamEnv
+ *     params:
+ *       teamId: agentic-demos
+ *       envId: agentic-demos-env
+ *       envName: Agentic Demos
+ *       repoUrl: "http://git-remote/e2e/fixture.git"
+ */
 const teamEnv = {
   async setup(ctx, params = {}) {
     const { teamId, envId, envName, repoUrl, branch = 'main' } = params;

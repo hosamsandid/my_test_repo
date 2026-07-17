@@ -1,0 +1,402 @@
+{
+  "catalogVersion": 1,
+  "generatedFrom": [
+    "env",
+    "wizard",
+    "agents",
+    "teardown",
+    "templates"
+  ],
+  "steps": [
+    {
+      "name": "agents.expectDmRooms",
+      "module": "agents",
+      "description": "API: a DM room was created per member (the wizard's `dms` step). The room id round-trips through GET /api/matrix/agents.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team slug id (with roleIds) to derive member ids."
+        },
+        {
+          "name": "roleIds",
+          "required": false,
+          "type": "string[]",
+          "description": "Role ids to derive member ids."
+        },
+        {
+          "name": "memberIds",
+          "required": false,
+          "type": "string[]",
+          "description": "Explicit member ids (alternative to roleIds)."
+        }
+      ],
+      "example": "- assert:\n    do: agents.expectDmRooms\n    teamId: agentic-demos\n    roleIds: [business-analyst, developer]"
+    },
+    {
+      "name": "agents.expectMembersRunning",
+      "module": "agents",
+      "description": "API: every member exists and is enabled (the orchestrator spawns a container for each enabled member — the UI shows this as the \"Active\" state). Polled because container spawn + Matrix provisioning settle shortly after `complete`.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team slug id (with roleIds) to derive member ids."
+        },
+        {
+          "name": "roleIds",
+          "required": false,
+          "type": "string[]",
+          "description": "Role ids to derive member ids."
+        },
+        {
+          "name": "memberIds",
+          "required": false,
+          "type": "string[]",
+          "description": "Explicit member ids (alternative to roleIds)."
+        }
+      ],
+      "example": "- assert:\n    do: agents.expectMembersRunning\n    teamId: agentic-demos\n    roleIds: [business-analyst, developer]"
+    },
+    {
+      "name": "agents.expectTeamCard",
+      "module": "agents",
+      "description": "UI: the team card and every member row are present on the Agents page. Member ids follow `<teamId>-<roleId>` and are unique text, so we assert on them directly (the team card is expanded by default).",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team slug id shown on the team card."
+        },
+        {
+          "name": "roleIds",
+          "required": false,
+          "type": "string[]",
+          "description": "Role ids to derive member ids (`<teamId>-<roleId>`)."
+        },
+        {
+          "name": "memberIds",
+          "required": false,
+          "type": "string[]",
+          "description": "Explicit member ids (alternative to roleIds)."
+        }
+      ],
+      "example": "- assert:\n    do: agents.expectTeamCard\n    teamId: agentic-demos\n    roleIds: [business-analyst, developer]"
+    },
+    {
+      "name": "env.createFixtureEnv",
+      "module": "env",
+      "description": "Create a Working Environment pointing at the in-stack git-remote fixture repo. Credential-less on purpose: no sshKeyId, no githubTokenId — the orchestrator clones `http://git-remote/…` anonymously and the poller ignores a token-less env, so the team materialises with zero external dependencies.",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "string",
+          "description": "Slug id for the new environment."
+        },
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Human-readable environment name."
+        },
+        {
+          "name": "repoUrl",
+          "required": true,
+          "type": "string",
+          "description": "Git URL the environment points at."
+        },
+        {
+          "name": "branch",
+          "required": false,
+          "type": "string",
+          "default": "main",
+          "description": "Branch to track."
+        }
+      ],
+      "example": "- action:\n    do: env.createFixtureEnv\n    id: agentic-demos-env\n    name: Agentic Demos\n    repoUrl: \"http://git-remote/e2e/fixture.git\""
+    },
+    {
+      "name": "env.deleteEnv",
+      "module": "env",
+      "description": "Idempotent teardown — 204 (deleted) and 404 (already gone) are both success, so a re-run or a partially-failed spec leaves no environment behind.",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "string",
+          "description": "Id of the environment to delete."
+        }
+      ],
+      "example": "- action:\n    do: env.deleteEnv\n    id: agentic-demos-env"
+    },
+    {
+      "name": "teardown.deleteEnv",
+      "module": "teardown",
+      "description": "Idempotent teardown — 204 (deleted) and 404 (already gone) are both success, so a re-run or a partially-failed spec leaves no environment behind.",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "string",
+          "description": "Id of the environment to delete."
+        }
+      ],
+      "example": "- action:\n    do: env.deleteEnv\n    id: agentic-demos-env"
+    },
+    {
+      "name": "teardown.teardownTeam",
+      "module": "teardown",
+      "description": "A team is a `role: team` agent; deleting it cascades to every member (containers stopped, Matrix users deactivated, volumes/networks torn down) in the orchestrator. Then the now-unreferenced fixture env can be removed.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team slug id to delete (cascades to members)."
+        },
+        {
+          "name": "envId",
+          "required": true,
+          "type": "string",
+          "description": "Fixture environment id to delete afterwards."
+        }
+      ],
+      "example": "- action:\n    do: teardown.teardownTeam\n    teamId: agentic-demos\n    envId: agentic-demos-env"
+    },
+    {
+      "name": "templates.expectTemplateCatalog",
+      "module": "templates",
+      "description": "Assert the template catalog: the New-template action, the ID/Category/Session/ Source columns, and a row for each expected built-in template. Capture point for the template-library screenshot (slide 35 of the walkthrough).",
+      "params": [
+        {
+          "name": "templateNames",
+          "required": true,
+          "type": "string[]",
+          "description": "Built-in template display names each expected as a table row."
+        }
+      ],
+      "example": "- assert:\n    do: templates.expectTemplateCatalog\n    templateNames: [Business Analyst, Developer, Code Reviewer]"
+    },
+    {
+      "name": "templates.openTemplatesPage",
+      "module": "templates",
+      "description": "Open the Agent Templates management page and confirm it rendered (its h1).",
+      "params": [],
+      "example": "- action:\n    do: templates.openTemplatesPage"
+    },
+    {
+      "name": "wizard.createTeamAndExpectProgress",
+      "module": "wizard",
+      "description": "Journey-friendly wrapper: submit the wizard and assert the per-step NDJSON progress (plan lists team+members+dms, every step reaches `done`, complete carries the teamId + all members). Encapsulates the F1 inline assertions so a journey can express \"create and verify\" as a single step-library call. Accepts { teamId, memberIds } or { teamId, roleIds }.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team slug id the complete event must carry."
+        },
+        {
+          "name": "roleIds",
+          "required": false,
+          "type": "string[]",
+          "description": "Role ids to derive member ids (`<teamId>-<roleId>`)."
+        },
+        {
+          "name": "memberIds",
+          "required": false,
+          "type": "string[]",
+          "description": "Explicit member ids (alternative to roleIds)."
+        }
+      ],
+      "example": "- action:\n    do: wizard.createTeamAndExpectProgress\n    teamId: agentic-demos\n    roleIds: [business-analyst, developer, code-reviewer, reworker]"
+    },
+    {
+      "name": "wizard.expectEnvironmentStep",
+      "module": "wizard",
+      "description": "Assert the Working-Environment step: the named fixture env card (a role=radio) is present and selectable (repo-bearing). Used as the capture point for the env-step screenshot, since selection auto-advances (see selectEnvironment).",
+      "params": [
+        {
+          "name": "envName",
+          "required": true,
+          "type": "string",
+          "description": "Visible name of the environment card."
+        }
+      ],
+      "example": "- assert:\n    do: wizard.expectEnvironmentStep\n    envName: Agentic Demos"
+    },
+    {
+      "name": "wizard.expectFlowPreview",
+      "module": "wizard",
+      "description": "Assert the Process step's live flow preview + wiring check rendered lint-clean (StepProcess.jsx: \"Flow preview — N agents\" + \"Wiring is clean\").",
+      "params": [],
+      "example": "- assert:\n    do: wizard.expectFlowPreview"
+    },
+    {
+      "name": "wizard.expectKnowledgeStep",
+      "module": "wizard",
+      "description": "Assert the (optional) Knowledge step rendered — the initial-team-skills picker (capture point for the knowledge-step screenshot).",
+      "params": [],
+      "example": "- assert:\n    do: wizard.expectKnowledgeStep"
+    },
+    {
+      "name": "wizard.expectReviewStep",
+      "module": "wizard",
+      "description": "Assert the Review step's summary shows the team identity we are about to create (capture point for the review-step screenshot).",
+      "params": [
+        {
+          "name": "teamName",
+          "required": true,
+          "type": "string",
+          "description": "Team display name to expect in the summary."
+        },
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team slug id to expect in the summary."
+        }
+      ],
+      "example": "- assert:\n    do: wizard.expectReviewStep\n    teamName: Agentic Demos\n    teamId: agentic-demos"
+    },
+    {
+      "name": "wizard.expectTeamIdentity",
+      "module": "wizard",
+      "description": "Assert the Team step shows the identity we set (capture point for the screenshot).",
+      "params": [
+        {
+          "name": "teamName",
+          "required": true,
+          "type": "string",
+          "description": "Team display name to expect."
+        },
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team slug id to expect."
+        }
+      ],
+      "example": "- assert:\n    do: wizard.expectTeamIdentity\n    teamName: Agentic Demos\n    teamId: agentic-demos"
+    },
+    {
+      "name": "wizard.next",
+      "module": "wizard",
+      "description": "Advance to the next wizard step. Explicit so the runner can screenshot the current step before moving on.",
+      "params": [],
+      "example": "- action:\n    do: wizard.next"
+    },
+    {
+      "name": "wizard.open",
+      "module": "wizard",
+      "description": "Open the wizard and confirm the Process step (step 0) is showing.",
+      "params": [],
+      "example": "- action:\n    do: wizard.open"
+    },
+    {
+      "name": "wizard.selectEnvironment",
+      "module": "wizard",
+      "description": "Working-Environment step: select the fixture env card (a role=radio). The wizard auto-advances to the Team step on selection, so we wait for the team-name input rather than clicking Next.",
+      "params": [
+        {
+          "name": "envName",
+          "required": true,
+          "type": "string",
+          "description": "Visible name of the environment card to select."
+        }
+      ],
+      "example": "- action:\n    do: wizard.selectEnvironment\n    envName: Agentic Demos"
+    },
+    {
+      "name": "wizard.selectProcessTemplate",
+      "module": "wizard",
+      "description": "Process step: pick a curated template (e.g. \"Core SDLC\"). Waits for the authoritative lint pass (POST /api/flows/graph) so the bundle is loaded and error-free before the caller advances. Does NOT click Next (see header note).",
+      "params": [
+        {
+          "name": "templateName",
+          "required": true,
+          "type": "string",
+          "description": "Visible name of the process template."
+        }
+      ],
+      "example": "- action:\n    do: wizard.selectProcessTemplate\n    templateName: Core SDLC"
+    },
+    {
+      "name": "wizard.setTeamIdentity",
+      "module": "wizard",
+      "description": "Team step: name + slug id. Filling the id last makes it a manual edit, so the name→slug auto-derivation won't clobber our id. Does NOT advance.",
+      "params": [
+        {
+          "name": "teamName",
+          "required": true,
+          "type": "string",
+          "description": "Team display name."
+        },
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team slug id."
+        }
+      ],
+      "example": "- action:\n    do: wizard.setTeamIdentity\n    teamName: Agentic Demos\n    teamId: agentic-demos"
+    },
+    {
+      "name": "wizard.skipKnowledge",
+      "module": "wizard",
+      "description": "Knowledge step is optional — accept defaults and advance to Review.",
+      "params": [],
+      "example": "- action:\n    do: wizard.skipKnowledge"
+    },
+    {
+      "name": "wizard.submitAndCaptureProgress",
+      "module": "wizard",
+      "description": "Review step: submit and capture the NDJSON progress stream the wizard renders. Returns the parsed event list (plan/step/complete) so the spec can assert the per-step progress, and waits for the wizard to consume `complete` (it redirects to the BA chat, or /agents).",
+      "params": [],
+      "example": "- action:\n    do: wizard.submitAndCaptureProgress"
+    }
+  ],
+  "fixtures": [
+    {
+      "name": "teamEnv",
+      "description": "teamEnv: the Team-Setup pilot's precondition. Seeds a credential-less Working Environment pointing at the in-stack git remote, so the wizard can materialise a team with zero external dependencies. Because the journey uses FIXED ids (for screenshot determinism, §7), setup first tears down any leftover team+env from a crashed prior run, and teardown removes the team this journey creates plus the fixture env — one deterministic, idempotent surface.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team slug id the journey will create (pre-cleaned)."
+        },
+        {
+          "name": "envId",
+          "required": true,
+          "type": "string",
+          "description": "Fixture environment id to create."
+        },
+        {
+          "name": "envName",
+          "required": true,
+          "type": "string",
+          "description": "Fixture environment display name."
+        },
+        {
+          "name": "repoUrl",
+          "required": true,
+          "type": "string",
+          "description": "Git URL the environment points at."
+        },
+        {
+          "name": "branch",
+          "required": false,
+          "type": "string",
+          "default": "main",
+          "description": "Branch to track."
+        }
+      ],
+      "example": "fixtures:\n  - fixture: teamEnv\n    params:\n      teamId: agentic-demos\n      envId: agentic-demos-env\n      envName: Agentic Demos\n      repoUrl: \"http://git-remote/e2e/fixture.git\""
+    }
+  ]
+}

@@ -5,6 +5,7 @@
 #   admin-api             — admin-console/api/*.test.js       (node --test)
 #   admin-console-build   — admin-console Vite production build (no frontend test runner yet, see #651)
 #   agent-image           — agent-image/scripts/test_*.py     (pytest, python 3.12)
+#   e2e-journeys          — journey unit tests + lint + dry-run + catalog freshness (#706, podman-free)
 #
 # Deliberately minimal (issue #665 / e2e-testing-concept §1): no lint, no coverage —
 # just make the suites that already exist run automatically. Recommend promoting these
@@ -92,3 +93,34 @@ jobs:
       - name: Run unit tests
         working-directory: agent-image/scripts
         run: python -m pytest test_agent_entrypoint.py test_knowledge.py -q
+
+  # The journey tooling (#706) is deliberately podman-free: schema/catalog/lint
+  # and dry-run resolution are pure Node, so they belong on the fast PR lane
+  # (this workflow), NOT the nightly podman e2e lane. `npm install` (not `npm ci`
+  # — the e2e workspace has no committed lockfile for @playwright/test) pulls the
+  # @playwright/test PACKAGE so the registry + dry-run resolve; no browser is
+  # downloaded and no stack is started.
+  e2e-journeys:
+    name: e2e journeys (lint + dry-run + catalog)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        working-directory: e2e
+        run: npm install --no-audit --no-fund
+      - name: Journey unit tests (node --test)
+        working-directory: e2e
+        run: npm run test:unit
+      - name: Catalog freshness
+        working-directory: e2e
+        run: npm run journeys:catalog:check
+      - name: Lint journeys
+        working-directory: e2e
+        run: npm run journeys:lint
+      - name: Dry-run journeys
+        working-directory: e2e
+        run: npm run journeys:dryrun

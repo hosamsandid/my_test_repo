@@ -53,6 +53,7 @@ const { workItemDetail } = require("./work-items");
 const prTokenComment = require("./pr-token-comment");
 const prCommentConfig = require("./pr-comment-config");
 const { parseRepoFullName: ghParseRepoFullName } = require("./github-poller");
+const pendingQueue = require("./pending-queue");
 
 // ============================================================
 // Config
@@ -4310,13 +4311,83 @@ function enqueuePending(agentId, entry) {
     if (fs.existsSync(p)) pending = JSON.parse(fs.readFileSync(p, "utf8"));
     if (!Array.isArray(pending)) pending = [];
   } catch { /* corrupt file — start over */ }
-  pending.push({ receivedAt: new Date().toISOString(), ...entry });
+  // Stamp a stable, unique per-entry id (#724 D1) so an operator can cancel one
+  // entry unambiguously. Additive: a caller that already set `id` keeps it, and
+  // every other consumer (the agent's drain) simply ignores the extra field.
+  pending.push({ receivedAt: new Date().toISOString(), id: crypto.randomUUID(), ...entry });
   try {
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, JSON.stringify(pending, null, 2));
   } catch (err) {
     console.error(`[Orchestrator] Cannot enqueue pending for ${agentId}: ${err.message}`);
   }
+}
+
+// Read one agent's pending queue as a raw array WITHOUT draining it (#724 AC1).
+// Corrupt / missing / non-array → [] (mirrors enqueue/drain; AC10). Every entry
+// is returned with a guaranteed `id` (legacy entries get a deterministic one)
+// but the file itself is left untouched — the view must never mutate it.
+function readPendingEntries(agentId) {
+  const p = pendingPath(agentId);
+  let raw = [];
+  try {
+    if (fs.existsSync(p)) raw = JSON.parse(fs.readFileSync(p, "utf8"));
+    if (!Array.isArray(raw)) raw = [];
+  } catch { raw = []; }
+  return pendingQueue.withIds(raw);
+}
+
+// Aggregate every agent's pending queue into one operator view (#724 AC3):
+// per-agent groups with a count and summarised entries (no webhook payloads —
+// AC "large payloads"). An agent with no/empty/corrupt queue contributes an
+// empty group is skipped (AC10 — it's simply not a backlog). Ordered by agent
+// id for a stable render.
+function aggregatePendingQueue() {
+  const groups = [];
+  let total = 0;
+  for (const agentId of listAgentIds().sort()) {
+    const entries = readPendingEntries(agentId);
+    if (!entries.length) continue;
+    const cfg = loadAgentConfig(agentId);
+    groups.push({
+      agentId,
+      agentName: (cfg && cfg.name) || agentId,
+      count: entries.length,
+      entries: entries.map((e) => pendingQueue.summarizeEntry(e)),
+    });
+    total += entries.length;
+  }
+  return { agents: groups, total };
+}
+
+// The full (un-summarised) entry for on-demand detail — includes the GitHub
+// webhook payload the list view omits. Returns null when the id isn't present.
+function readPendingEntry(agentId, entryId) {
+  return readPendingEntries(agentId).find((e) => e.id === entryId) || null;
+}
+
+// Cancel exactly one entry by id, preserving the rest (#724 AC5). Race-free:
+// the read-modify-write runs in this single event loop alongside enqueue/drain,
+// so no file lock is needed (AC6). No-op (writes nothing) when the id is gone —
+// e.g. the agent drained the file between view and cancel (AC7). Clearing the
+// last entry leaves a valid `[]` (AC8), identical to the post-drain state.
+function cancelPendingEntry(agentId, entryId) {
+  const p = pendingPath(agentId);
+  let raw = [];
+  try {
+    if (fs.existsSync(p)) raw = JSON.parse(fs.readFileSync(p, "utf8"));
+    if (!Array.isArray(raw)) raw = [];
+  } catch { raw = []; }
+  const { entries, removed, changed } = pendingQueue.removeEntryById(raw, entryId);
+  if (!changed) return { removed: false };
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(entries, null, 2));
+  } catch (err) {
+    console.error(`[Orchestrator] Cannot cancel pending entry for ${agentId}: ${err.message}`);
+    throw err;
+  }
+  return { removed: true, entry: pendingQueue.summarizeEntry(removed) };
 }
 
 // Atomic read-and-clear for the agent's HTTP drain. Single-event-loop atomic.
@@ -7752,6 +7823,57 @@ async function main() {
           res.end(JSON.stringify({ ok: false, error: err.message }));
         }
       });
+      return;
+    }
+
+    // ── Pending-queue operator view (#724) ────────────────────────────────
+    // Read-only, aggregated across every agent — does NOT drain (AC1). Used by
+    // the admin console's GitHub Event Log "pending queue" section.
+    if (req.method === 'GET' && req.url.split('?')[0] === '/internal/pending-queue') {
+      try {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, ...aggregatePendingQueue() }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+      return;
+    }
+
+    // ── Pending-queue single-entry detail + cancel (#724) ─────────────────
+    // GET returns the full entry (incl. the GitHub payload the list omits);
+    // DELETE cancels exactly one entry by id, race-free in this event loop and
+    // a graceful no-op when the entry is already gone (AC5/AC6/AC7).
+    const pendingEntryMatch = req.url.split('?')[0].match(/^\/internal\/agents\/([^/]+)\/pending\/([^/]+)$/);
+    if (pendingEntryMatch && (req.method === 'GET' || req.method === 'DELETE')) {
+      const id = decodeURIComponent(pendingEntryMatch[1]);
+      const entryId = decodeURIComponent(pendingEntryMatch[2]);
+      if (!isSafePathSeg(id)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+        return;
+      }
+      try {
+        if (req.method === 'GET') {
+          const entry = readPendingEntry(id, entryId);
+          if (!entry) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'entry not found' }));
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, entry }));
+          return;
+        }
+        const result = cancelPendingEntry(id, entryId);
+        // Not-found is a clear no-op, not an error (AC7): report removed:false
+        // with a 200 so the UI can refresh and show the entry already gone.
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, ...result }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
       return;
     }
 

@@ -42,6 +42,7 @@ const { resolveCloneTarget } = require("./clone-target");
 const { assembleClaudeMd, buildMemoryHint } = require("./prompt-assembly");
 const { readMaintenanceState } = require("./maintenance-state-reader");
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
+const { buildEnsureUserCommands } = require("./matrix-admin-commands");
 const skillManifest = require("./skill-manifest");
 const usageLog = require("./usage-log");
 const usageQuery = require("./usage-query");
@@ -1744,22 +1745,13 @@ function listAgentIds() {
 // Matrix helpers (admin operations only — no routing identity)
 // ============================================================
 async function ensureMatrixUser(adminClient, username, password) {
-  await adminClient.sendMessage(CONDUWUIT_ADMIN_ROOM, {
-    msgtype: "m.text",
-    body: `!admin users create-user ${username} ${password}`,
-  });
-  await new Promise((r) => setTimeout(r, 3000));
-
-  await adminClient.sendMessage(CONDUWUIT_ADMIN_ROOM, {
-    msgtype: "m.text",
-    body: `!admin users reset-password @${username}:local ${password}`,
-  });
-  await new Promise((r) => setTimeout(r, 1000));
-  await adminClient.sendMessage(CONDUWUIT_ADMIN_ROOM, {
-    msgtype: "m.text",
-    body: `!admin users enable-login @${username}:local`,
-  });
-  await new Promise((r) => setTimeout(r, 1000));
+  // Ordered create → reset-password(--convert-to-local-account) → enable-login.
+  // The convert flag lets re-creation recover a previously deactivated account
+  // (issue #715) — see matrix-admin-commands.js for the rationale.
+  for (const { body, delayMs } of buildEnsureUserCommands(username, password)) {
+    await adminClient.sendMessage(CONDUWUIT_ADMIN_ROOM, { msgtype: "m.text", body });
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
 }
 
 async function loginMatrixUser(username, password) {

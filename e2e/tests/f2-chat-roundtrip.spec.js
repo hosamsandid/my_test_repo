@@ -69,6 +69,10 @@ test.describe('F2: agent DM chat round-trip', () => {
 
     const roomId = await chat.ensureDmRoom(ctx, { agentId });
 
+    await test.step('wait for the agent runtime to be ready (first-sync guard)', async () => {
+      await chat.waitForAgentReady(ctx, { agentId });
+    });
+
     await test.step('open the chat and send a marker message', async () => {
       await chat.open(ctx, { agentId });
       await chat.send(ctx, { text: `Ping from F2 ${chat.marker(token)}` });

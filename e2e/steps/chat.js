@@ -41,6 +41,30 @@ async function ensureDmRoom(ctx, { agentId }) {
   return body.roomId;
 }
 
+// Wait until the agent's RUNTIME is demonstrably up before sending the first
+// message. The runtime drops any m.room.message whose origin_server_ts predates
+// its own process start (agent-entrypoint.py, `ts < start_time_ms`) — so a send
+// that races the container boot is silently ignored BY DESIGN, and F2 would
+// time out without any product bug. `/api/agents/statuses` flips the agent from
+// `offline` to `idle` exactly when the runtime has booted and pushed its
+// status.json (#185) — after that point, a fresh message is inside the
+// processing contract. Bounded poll, no sleeps beyond the interval tick.
+async function waitForAgentReady(ctx, { agentId, timeoutMs = 90_000 }) {
+  const deadline = Date.now() + timeoutMs;
+  let last = 'unknown';
+  while (Date.now() < deadline) {
+    const res = await ctx.request.get('/api/agents/statuses');
+    if (res.ok()) {
+      const list = await res.json();
+      const entry = Array.isArray(list) ? list.find((a) => a.id === agentId) : null;
+      last = entry?.activityState || 'missing';
+      if (last === 'idle' || last === 'busy') return;
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  expect(false, `agent ${agentId} runtime not ready after ${timeoutMs}ms (last state: ${last})`).toBeTruthy();
+}
+
 // Open an agent's DM chat and wait for the composer to be ready.
 async function open(ctx, { agentId }) {
   const { page } = ctx;
@@ -110,4 +134,4 @@ async function expectSessionLogResult(ctx, { agentId, roomId, token }) {
   expect(found.result, 'session-log result event carries the marker echo').toMatch(ackPattern(token));
 }
 
-module.exports = { marker, ensureDmRoom, open, send, expectReplyBubble, expectSessionLogResult };
+module.exports = { marker, ensureDmRoom, waitForAgentReady, open, send, expectReplyBubble, expectSessionLogResult };

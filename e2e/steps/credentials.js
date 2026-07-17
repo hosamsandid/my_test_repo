@@ -92,7 +92,9 @@ async function createEnv(ctx, { envId, name, repoUrl, branch = 'main' }) {
   await expect(page.getByRole('heading', { name: 'Working Environments' })).toBeVisible();
   await page.getByRole('button', { name: 'New Environment' }).click();
 
-  await page.getByPlaceholder('COBOL Migration').fill(name);
+  // exact — the Project-context textarea's long placeholder also contains the
+  // words "COBOL migration", and getByPlaceholder matches substrings by default.
+  await page.getByPlaceholder('COBOL Migration', { exact: true }).fill(name);
   await page.getByPlaceholder('e.g. cobol-migration').fill(envId);
   await expect(page.getByPlaceholder('e.g. cobol-migration')).toHaveValue(envId);
 

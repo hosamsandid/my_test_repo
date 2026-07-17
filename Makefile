@@ -41,7 +41,7 @@ GIT_DIRTY  := $(shell git status --porcelain 2>/dev/null | grep -q . && echo dir
 # back to "unknown".
 export GIT_COMMIT GIT_DIRTY
 
-.PHONY: up down restart build agent-image update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers e2e e2e-gate e2e-up e2e-down
+.PHONY: up down restart build agent-image update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers e2e e2e-gate e2e-up e2e-down docs-journeys docs-journeys-check docs-deck
 
 # `up` depends on `agent-image` so a fresh bring-up always has the per-agent
 # runtime image built (the agent image is NOT a compose service — it's pulled
@@ -193,5 +193,34 @@ e2e-up:
 e2e-down:
 	./e2e/scripts/stack-down.sh
 
+# ── Journey documentation (docs/journey-spec-concept.md §3.2, #707) ─────────
+# Turn the journeys + a green run's screenshot artifacts into the Markdown user
+# guide under docs/user-guide/ plus a coverage report. Pure Node — no browser,
+# no podman. The input artifacts dir is parameterisable so this works the same on
+# a local `make e2e` run and on CI-downloaded artifacts:
+#   make docs-journeys                         # uses e2e/artifacts (default)
+#   E2E_ARTIFACTS_DIR=/path/to/artifacts make docs-journeys
+# Committing the regenerated docs stays a human step for now; `docs-journeys-check`
+# fails if the committed guide is stale or hand-edited.
+docs-journeys:
+	cd e2e && npm install --no-audit --no-fund --silent && npm run docs:journeys
+
+docs-journeys-check:
+	cd e2e && npm install --no-audit --no-fund --silent && npm run docs:journeys:check
+
+# ── Journey walkthrough deck (docs/journey-spec-concept.md §3.2 item 2, #708) ──
+# Build one PPTX walkthrough deck from all journeys (ordered by `order`) plus a
+# green run's screenshot artifacts — section slide per journey, one slide per
+# step with the narrative in the speaker notes and the screenshot as the visual.
+# Pure Node (pptxgenjs) — no PowerPoint, browser or podman — and structurally
+# validated (unzip + OOXML part checks) after generation; the CLI exits non-zero
+# if validation fails. Same parameterisable artifacts dir as docs-journeys:
+#   make docs-deck                             # uses e2e/artifacts (default)
+#   E2E_ARTIFACTS_DIR=/path/to/artifacts make docs-deck
+# Output: artifacts/agent-studio-walkthrough.pptx (a build artifact — CI-uploaded
+# and human-visual-QA'd, never committed; see .gitignore).
+docs-deck:
+	cd e2e && npm install --no-audit --no-fund --silent && npm run docs:deck
+
 help:
-	@echo "Targets: up, down, restart, build, agent-image, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, e2e, e2e-gate, e2e-up, e2e-down"
+	@echo "Targets: up, down, restart, build, agent-image, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, e2e, e2e-gate, e2e-up, e2e-down, docs-journeys, docs-journeys-check, docs-deck"

@@ -24,21 +24,41 @@ const CREATE = { name: 'Create team', exact: true };
 // it — match the heading as a substring (Playwright's default, case-insensitive).
 const TEMPLATE_ENTRY = { name: 'Use a template' };
 
-// Open the wizard and confirm the Process step (step 0) is showing.
+/**
+ * Open the wizard and confirm the Process step (step 0) is showing.
+ *
+ * @example
+ * - action:
+ *     do: wizard.open
+ */
 async function open(ctx) {
   await ctx.page.goto('/team-setup');
   await expect(ctx.page.getByRole('button', TEMPLATE_ENTRY)).toBeVisible();
 }
 
-// Advance to the next wizard step. Explicit so the runner can screenshot the
-// current step before moving on.
+/**
+ * Advance to the next wizard step. Explicit so the runner can screenshot the
+ * current step before moving on.
+ *
+ * @example
+ * - action:
+ *     do: wizard.next
+ */
 async function next(ctx) {
   await ctx.page.getByRole('button', NEXT).click();
 }
 
-// Process step: pick a curated template (e.g. "Core SDLC"). Waits for the
-// authoritative lint pass (POST /api/flows/graph) so the bundle is loaded and
-// error-free before the caller advances. Does NOT click Next (see header note).
+/**
+ * Process step: pick a curated template (e.g. "Core SDLC"). Waits for the
+ * authoritative lint pass (POST /api/flows/graph) so the bundle is loaded and
+ * error-free before the caller advances. Does NOT click Next (see header note).
+ *
+ * @param {string} params.templateName - Visible name of the process template.
+ * @example
+ * - action:
+ *     do: wizard.selectProcessTemplate
+ *     templateName: Core SDLC
+ */
 async function selectProcessTemplate(ctx, { templateName }) {
   const { page } = ctx;
   await page.getByRole('button', TEMPLATE_ENTRY).click();
@@ -50,26 +70,48 @@ async function selectProcessTemplate(ctx, { templateName }) {
   await lint;
 }
 
-// Assert the Process step's live flow preview + wiring check rendered lint-clean
-// (StepProcess.jsx: "Flow preview — N agents" + "Wiring is clean").
+/**
+ * Assert the Process step's live flow preview + wiring check rendered lint-clean
+ * (StepProcess.jsx: "Flow preview — N agents" + "Wiring is clean").
+ *
+ * @example
+ * - assert:
+ *     do: wizard.expectFlowPreview
+ */
 async function expectFlowPreview(ctx) {
   const { page } = ctx;
   await expect(page.getByText(/Flow preview —/)).toBeVisible();
   await expect(page.getByText('Wiring is clean')).toBeVisible();
 }
 
-// Assert the Working-Environment step: the named fixture env card (a role=radio)
-// is present and selectable (repo-bearing). Used as the capture point for the
-// env-step screenshot, since selection auto-advances (see selectEnvironment).
+/**
+ * Assert the Working-Environment step: the named fixture env card (a role=radio)
+ * is present and selectable (repo-bearing). Used as the capture point for the
+ * env-step screenshot, since selection auto-advances (see selectEnvironment).
+ *
+ * @param {string} params.envName - Visible name of the environment card.
+ * @example
+ * - assert:
+ *     do: wizard.expectEnvironmentStep
+ *     envName: Agentic Demos
+ */
 async function expectEnvironmentStep(ctx, { envName }) {
   const card = ctx.page.getByRole('radio').filter({ hasText: envName });
   await expect(card).toBeVisible();
   await expect(card).toHaveAttribute('aria-disabled', 'false');
 }
 
-// Working-Environment step: select the fixture env card (a role=radio). The
-// wizard auto-advances to the Team step on selection, so we wait for the
-// team-name input rather than clicking Next.
+/**
+ * Working-Environment step: select the fixture env card (a role=radio). The
+ * wizard auto-advances to the Team step on selection, so we wait for the
+ * team-name input rather than clicking Next.
+ *
+ * @param {string} params.envName - Visible name of the environment card to select.
+ * @example
+ * - action:
+ *     do: wizard.selectEnvironment
+ *     envName: Agentic Demos
+ */
 async function selectEnvironment(ctx, { envName }) {
   const { page } = ctx;
   const card = page.getByRole('radio').filter({ hasText: envName });
@@ -79,8 +121,18 @@ async function selectEnvironment(ctx, { envName }) {
   await expect(page.locator('#ts-team-name')).toBeVisible();
 }
 
-// Team step: name + slug id. Filling the id last makes it a manual edit, so the
-// name→slug auto-derivation won't clobber our id. Does NOT advance.
+/**
+ * Team step: name + slug id. Filling the id last makes it a manual edit, so the
+ * name→slug auto-derivation won't clobber our id. Does NOT advance.
+ *
+ * @param {string} params.teamName - Team display name.
+ * @param {string} params.teamId - Team slug id.
+ * @example
+ * - action:
+ *     do: wizard.setTeamIdentity
+ *     teamName: Agentic Demos
+ *     teamId: agentic-demos
+ */
 async function setTeamIdentity(ctx, { teamName, teamId }) {
   const { page } = ctx;
   await page.locator('#ts-team-name').fill(teamName);
@@ -89,37 +141,74 @@ async function setTeamIdentity(ctx, { teamName, teamId }) {
   await expect(idInput).toHaveValue(teamId);
 }
 
-// Assert the Team step shows the identity we set (capture point for the screenshot).
+/**
+ * Assert the Team step shows the identity we set (capture point for the screenshot).
+ *
+ * @param {string} params.teamName - Team display name to expect.
+ * @param {string} params.teamId - Team slug id to expect.
+ * @example
+ * - assert:
+ *     do: wizard.expectTeamIdentity
+ *     teamName: Agentic Demos
+ *     teamId: agentic-demos
+ */
 async function expectTeamIdentity(ctx, { teamName, teamId }) {
   const { page } = ctx;
   await expect(page.locator('#ts-team-name')).toHaveValue(teamName);
   await expect(page.locator('#ts-team-id')).toHaveValue(teamId);
 }
 
-// Assert the (optional) Knowledge step rendered — the initial-team-skills picker
-// (capture point for the knowledge-step screenshot).
+/**
+ * Assert the (optional) Knowledge step rendered — the initial-team-skills picker
+ * (capture point for the knowledge-step screenshot).
+ *
+ * @example
+ * - assert:
+ *     do: wizard.expectKnowledgeStep
+ */
 async function expectKnowledgeStep(ctx) {
   await expect(ctx.page.getByText(/Initial team skills/)).toBeVisible();
 }
 
-// Knowledge step is optional — accept defaults and advance to Review.
+/**
+ * Knowledge step is optional — accept defaults and advance to Review.
+ *
+ * @example
+ * - action:
+ *     do: wizard.skipKnowledge
+ */
 async function skipKnowledge(ctx) {
   await next(ctx);
 }
 
-// Assert the Review step's summary shows the team identity we are about to
-// create (capture point for the review-step screenshot).
+/**
+ * Assert the Review step's summary shows the team identity we are about to
+ * create (capture point for the review-step screenshot).
+ *
+ * @param {string} params.teamName - Team display name to expect in the summary.
+ * @param {string} params.teamId - Team slug id to expect in the summary.
+ * @example
+ * - assert:
+ *     do: wizard.expectReviewStep
+ *     teamName: Agentic Demos
+ *     teamId: agentic-demos
+ */
 async function expectReviewStep(ctx, { teamName, teamId }) {
   const { page } = ctx;
   await expect(page.getByText(`${teamName} (${teamId})`)).toBeVisible();
   await expect(page.getByRole('button', CREATE)).toBeVisible();
 }
 
-// Review step: submit and capture the NDJSON progress stream the wizard renders.
-// Returns the parsed event list (plan/step/complete) so the spec can assert the
-// per-step progress, and waits for the wizard to consume `complete` (it redirects
-// to the BA chat, or /agents).
-//
+/**
+ * Review step: submit and capture the NDJSON progress stream the wizard renders.
+ * Returns the parsed event list (plan/step/complete) so the spec can assert the
+ * per-step progress, and waits for the wizard to consume `complete` (it redirects
+ * to the BA chat, or /agents).
+ *
+ * @example
+ * - action:
+ *     do: wizard.submitAndCaptureProgress
+ */
 // We must NOT call resp.text()/resp.body() on this response: the wizard consumes
 // it as a live stream via res.body.getReader() (TeamSetup.jsx), so by the time
 // the response settles the browser has already drained the ReadableStream and CDP
@@ -169,11 +258,22 @@ async function submitAndCaptureProgress(ctx) {
     .map((line) => JSON.parse(line));
 }
 
-// Journey-friendly wrapper: submit the wizard and assert the per-step NDJSON
-// progress (plan lists team+members+dms, every step reaches `done`, complete
-// carries the teamId + all members). Encapsulates the F1 inline assertions so a
-// journey can express "create and verify" as a single step-library call. Accepts
-// { teamId, memberIds } or { teamId, roleIds }.
+/**
+ * Journey-friendly wrapper: submit the wizard and assert the per-step NDJSON
+ * progress (plan lists team+members+dms, every step reaches `done`, complete
+ * carries the teamId + all members). Encapsulates the F1 inline assertions so a
+ * journey can express "create and verify" as a single step-library call. Accepts
+ * { teamId, memberIds } or { teamId, roleIds }.
+ *
+ * @param {string} params.teamId - Team slug id the complete event must carry.
+ * @param {string[]} [params.roleIds] - Role ids to derive member ids (`<teamId>-<roleId>`).
+ * @param {string[]} [params.memberIds] - Explicit member ids (alternative to roleIds).
+ * @example
+ * - action:
+ *     do: wizard.createTeamAndExpectProgress
+ *     teamId: agentic-demos
+ *     roleIds: [business-analyst, developer, code-reviewer, reworker]
+ */
 async function createTeamAndExpectProgress(ctx, params) {
   const { teamId } = params;
   const memberIds = resolveMemberIds(params);

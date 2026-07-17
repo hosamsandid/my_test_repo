@@ -6,13 +6,22 @@
   "scripts": {
     "test": "playwright test",
     "test:ui": "playwright test --ui",
-    "test:unit": "node --test journey-runner/",
+    "test:unit": "node --test journey-runner/*.test.js docgen/*.test.js",
+    "journeys:catalog": "node journey-runner/bin/gen-catalog.js",
+    "journeys:catalog:check": "node journey-runner/bin/gen-catalog.js --check",
+    "journeys:lint": "node journey-runner/bin/lint.js",
+    "journeys:dryrun": "node journey-runner/bin/dry-run.js",
+    "docs:journeys": "node docgen/bin/docgen.js",
+    "docs:journeys:check": "node docgen/bin/docgen.js --check",
+    "docs:deck": "node docgen/bin/deck.js",
     "report": "playwright show-report"
   },
   "devDependencies": {
     "@playwright/test": "^1.48.0"
   },
   "dependencies": {
-    "js-yaml": "^4.3.0"
+    "js-yaml": "^4.3.0",
+    "jszip": "^3.10.1",
+    "pptxgenjs": "^4.0.1"
   }
 }

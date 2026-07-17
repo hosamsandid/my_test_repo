@@ -5,9 +5,19 @@
 const { expect } = require('@playwright/test');
 const { deleteEnv } = require('./env');
 
-// A team is a `role: team` agent; deleting it cascades to every member
-// (containers stopped, Matrix users deactivated, volumes/networks torn down)
-// in the orchestrator. Then the now-unreferenced fixture env can be removed.
+/**
+ * A team is a `role: team` agent; deleting it cascades to every member
+ * (containers stopped, Matrix users deactivated, volumes/networks torn down)
+ * in the orchestrator. Then the now-unreferenced fixture env can be removed.
+ *
+ * @param {string} params.teamId - Team slug id to delete (cascades to members).
+ * @param {string} params.envId - Fixture environment id to delete afterwards.
+ * @example
+ * - action:
+ *     do: teardown.teardownTeam
+ *     teamId: agentic-demos
+ *     envId: agentic-demos-env
+ */
 async function teardownTeam(ctx, { teamId, envId }) {
   // 1. Delete the team agent — cascades to members. 204 / 404 both fine.
   const del = await ctx.request.delete(`/api/agents/${encodeURIComponent(teamId)}`);

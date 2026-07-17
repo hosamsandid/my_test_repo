@@ -1,0 +1,10 @@
+{
+  "journeyId": "sample",
+  "title": "Sample Journey",
+  "commitSha": "0000000000000000000000000000000000000000",
+  "timestamp": "2026-07-17T00:00:00.000Z",
+  "viewport": { "width": 1440, "height": 900 },
+  "screenshots": [
+    { "stepId": "landing", "file": "landing.png", "viewport": { "width": 1440, "height": 900 } }
+  ]
+}

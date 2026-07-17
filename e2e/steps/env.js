@@ -6,10 +6,23 @@
 // ctx bundles at least { page, request } (Playwright's authenticated fixtures).
 const { expect } = require('@playwright/test');
 
-// Create a Working Environment pointing at the in-stack git-remote fixture repo.
-// Credential-less on purpose: no sshKeyId, no githubTokenId — the orchestrator
-// clones `http://git-remote/…` anonymously and the poller ignores a token-less
-// env, so the team materialises with zero external dependencies.
+/**
+ * Create a Working Environment pointing at the in-stack git-remote fixture repo.
+ * Credential-less on purpose: no sshKeyId, no githubTokenId — the orchestrator
+ * clones `http://git-remote/…` anonymously and the poller ignores a token-less
+ * env, so the team materialises with zero external dependencies.
+ *
+ * @param {string} params.id - Slug id for the new environment.
+ * @param {string} params.name - Human-readable environment name.
+ * @param {string} params.repoUrl - Git URL the environment points at.
+ * @param {string} [params.branch=main] - Branch to track.
+ * @example
+ * - action:
+ *     do: env.createFixtureEnv
+ *     id: agentic-demos-env
+ *     name: Agentic Demos
+ *     repoUrl: "http://git-remote/e2e/fixture.git"
+ */
 async function createFixtureEnv(ctx, { id, name, repoUrl, branch = 'main' }) {
   const res = await ctx.request.post('/api/environments', {
     data: { id, name, repositories: [{ url: repoUrl, branch }] },
@@ -21,8 +34,16 @@ async function createFixtureEnv(ctx, { id, name, repoUrl, branch = 'main' }) {
   return res.json();
 }
 
-// Idempotent teardown — 204 (deleted) and 404 (already gone) are both success,
-// so a re-run or a partially-failed spec leaves no environment behind.
+/**
+ * Idempotent teardown — 204 (deleted) and 404 (already gone) are both success,
+ * so a re-run or a partially-failed spec leaves no environment behind.
+ *
+ * @param {string} id - Id of the environment to delete.
+ * @example
+ * - action:
+ *     do: env.deleteEnv
+ *     id: agentic-demos-env
+ */
 async function deleteEnv(ctx, id) {
   const res = await ctx.request.delete(`/api/environments/${encodeURIComponent(id)}`);
   expect(

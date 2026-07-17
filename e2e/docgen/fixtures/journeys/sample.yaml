@@ -1,0 +1,34 @@
+journeyVersion: 1
+id: sample
+title: Sample Journey
+order: 10
+# Golden-test fixture only (docs/docgen, #707): exercises every rendering branch
+# docgen has — a narrative-only intro, a step with narrative + a captured
+# screenshot, a step with narrative but no capture, and a narrative-only outro —
+# so the committed expected page proves the interleaving end-to-end without a
+# browser or podman. The `do` names are never resolved by docgen.
+lanes: [ci]
+
+steps:
+  - kind: narrative-only
+    narrative: |
+      This is the chapter introduction. It sets the scene before any screen is shown.
+
+      A second paragraph, to prove paragraph breaks survive rendering.
+
+  - id: landing
+    narrative: |
+      Here is the landing page. The screenshot below was captured on the green run.
+    action:
+      do: sample.open
+    screenshot: landing
+
+  - id: no-shot
+    narrative: |
+      This step has narrative but no screenshot, so only prose renders here.
+    action:
+      do: sample.poke
+
+  - kind: narrative-only
+    narrative: |
+      And that wraps up the sample journey.

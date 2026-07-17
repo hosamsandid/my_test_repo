@@ -1,10 +1,15 @@
 name: E2E (Playwright)
 
-# Phase 1 of #651 / #666 (docs/e2e-testing-concept.md §6). Deliberately NOT run
-# on pull_request during the burn-in period (§6: "nightly + manual dispatch,
-# non-blocking" first; promote the F0+F1 smoke lane to a required PR check only
-# after a clean streak). Runs on podman — Docker is NOT a drop-in for the
-# libpod spawn path (§4.3).
+# Phases 1–3 of #651 / #666 / #668 (docs/e2e-testing-concept.md §6, §8).
+# The nightly + manual-dispatch lane runs the FULL suite (F0–F4) via `make e2e`.
+# Deliberately NOT run on pull_request during the burn-in period (§6/§8: "nightly
+# + manual dispatch, non-blocking" first; promote the smoke lane to a required
+# PR check only after a clean streak). When that promotion happens, the PR gate
+# scope STAYS F0+F1 — run `make e2e-gate` there, never the full suite, so the
+# blocking check excludes the slower F3/F4 flows and F2 (which is expected red
+# until #253, the SSE stream-miss bug it exists to catch, is fixed — a red F2 in
+# the nightly full suite is the test doing its job, not a regression).
+# Runs on podman — Docker is NOT a drop-in for the libpod spawn path (§4.3).
 on:
   schedule:
     - cron: '17 3 * * *'   # nightly, off the :00 mark
@@ -58,7 +63,7 @@ jobs:
           podman --remote --url "unix://${PODMAN_HOST_SOCKET}" \
             run --rm docker.io/library/alpine:3.20 echo "libpod spawn OK"
 
-  # ── F0: login + navigation smoke ───────────────────────────────────────────
+  # ── Full E2E suite (F0–F4) ──────────────────────────────────────────────────
   e2e:
     needs: podman-preflight
     runs-on: ubuntu-24.04
@@ -87,7 +92,7 @@ jobs:
           done
           echo "PODMAN_HOST_SOCKET=${SOCK}" >> "$GITHUB_ENV"
 
-      - name: Run E2E (F0 + F1 + journeys) — builds images, brings up aee-e2e, tears down
+      - name: Run E2E (full suite F0–F4 + journeys) — builds images, brings up aee-e2e, tears down
         run: make e2e
 
       - name: Upload journey screenshots + manifest

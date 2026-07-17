@@ -29,6 +29,21 @@ for c in $(podman ps -a --format '{{.Names}}' 2>/dev/null | grep "^${PROJECT}.*o
   podman logs "$c" >> "$REPO_ROOT/e2e/test-results/orchestrator.log" 2>&1 || true
 done
 
+# 0b. Same for the orchestrator-spawned agent containers (labelled, not compose-
+# managed) plus every session JSONL — the F2 diagnosis was blind without them:
+# orchestrator logs alone can't distinguish "agent never saw the message" from
+# "claude invocation failed inside the container".
+for c in $(podman ps -aq --filter "label=aee.instance=e2e" 2>/dev/null || true); do
+  cname=$(podman inspect "$c" --format '{{.Name}}' 2>/dev/null || echo "$c")
+  echo "=== podman logs agent ${cname} ($(date -u +%Y-%m-%dT%H:%M:%SZ)) ===" >> "$REPO_ROOT/e2e/test-results/agent-containers.log"
+  podman logs "$c" >> "$REPO_ROOT/e2e/test-results/agent-containers.log" 2>&1 || true
+done
+for oc in $(podman ps --format '{{.Names}}' 2>/dev/null | grep "^${PROJECT}.*orchestrator" || true); do
+  podman exec "$oc" sh -c \
+    'for f in $(find /workspace/agents /control/agents -name "*.jsonl" 2>/dev/null); do echo "=== $f ==="; cat "$f"; done' \
+    >> "$REPO_ROOT/e2e/test-results/session-logs.jsonl.txt" 2>/dev/null || true
+done
+
 # 1. Compose down + named volumes + orphans. --env-file only if it still exists
 # (a failed gen-env leaves none); compose still resolves the project by -p.
 if [ -f "$ENV_FILE" ]; then

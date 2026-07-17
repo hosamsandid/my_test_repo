@@ -904,6 +904,10 @@ const TeamSection = React.forwardRef(function TeamSection({
               text: 'Knowledge that proved important, packaged as a reusable instruction file agents load automatically when they work. Team skills serve this team; a skill can also be shared with other teams.',
             }}
           />
+          {/* Existing team skills first — they are more important than the suggestions below (#728). */}
+          {skills.map(sk => (
+            <SkillCard key={sk.id} skill={sk} teamId={team.id} onShare={() => onShareSkill(sk)} onReload={onControlsChanged} />
+          ))}
           {suggestions.map(s => (
             <SuggestionCard key={s.id} suggestion={s} onReview={() => onReviewSuggestion(s, skills)} />
           ))}
@@ -924,9 +928,6 @@ const TeamSection = React.forwardRef(function TeamSection({
                 : 'Set Autonomy to “2 Suggest” and you’ll get a suggestion here whenever several agents learn the same thing.'}
             </div>
           )}
-          {skills.map(sk => (
-            <SkillCard key={sk.id} skill={sk} teamId={team.id} onShare={() => onShareSkill(sk)} onReload={onControlsChanged} />
-          ))}
           {privateSkills.length > 0 && (
             <PrivateSkillsBlock teamId={team.id} skills={privateSkills} onLifted={onLifted} />
           )}

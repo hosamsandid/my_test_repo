@@ -803,7 +803,11 @@ const TeamSection = React.forwardRef(function TeamSection({
       {gates && <ControlStrip teamId={team.id} gates={gates} onChanged={onControlsChanged} />}
 
       {/* The flow: three columns joined by arrows */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(180px, 220px) 20px minmax(0, 1fr) 20px minmax(200px, 260px)', gap: 0, padding: 'var(--eb-space-3) var(--eb-space-4) var(--eb-space-4)' }}>
+      {/* Column ratio (#727): the middle "Team knowledge" column is capped so it
+          no longer grows unbounded on wide screens, and the Skills column takes a
+          flexible share (min 300px, well past the old hard 260px cap) so skill
+          names stay readable at typical/wide viewports. */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(180px, 220px) 20px minmax(0, 720px) 20px minmax(300px, 1fr)', gap: 0, padding: 'var(--eb-space-3) var(--eb-space-4) var(--eb-space-4)' }}>
         {/* Agents */}
         <div>
           <ColHeader
@@ -916,8 +920,8 @@ const TeamSection = React.forwardRef(function TeamSection({
             return s ? null : (
               <div key={p.id} style={amberCard} title="This promotion stopped at a gate that requires your review — it won’t proceed on its own.">
                 <Sparkles size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
-                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)' }}>{p.label}</span>
-                <span style={{ fontSize: 10, color: 'var(--eb-status-warning)', marginLeft: 'auto' }}>waiting for your review</span>
+                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)', minWidth: 0, overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{p.label}</span>
+                <span style={{ fontSize: 10, color: 'var(--eb-status-warning)', marginLeft: 'auto', flexShrink: 0 }}>waiting for your review</span>
               </div>
             );
           })}
@@ -1429,55 +1433,65 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
       borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-elevated)',
       padding: 'var(--eb-space-2) var(--eb-space-3)', marginBottom: 'var(--eb-space-2)',
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <GitBranch size={13} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{skill.label}</div>
-          <div
-            style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', cursor: 'help' }}
-            title={`${skill.tier === 'global' ? 'Global skill — agents in every team load it' : 'Team skill — only this team’s agents load it'}${skill.alsoGlobal ? '. Also promoted to the global pool — the team keeps its own copy.' : ''}${auto ? '. Promoted automatically by the team’s curator (autonomy 3).' : ''}${skill.adopted ? '. Adopted from the global pool into this team’s active set.' : ''}`}>
-            {skill.tier} skill{skill.alsoGlobal ? ' · also global' : ''}{auto ? ' · auto-promoted' : ''}{skill.adopted ? ' · adopted' : ''}
+      {/* Header redesign (#727): the skill name gets its own wrapping line (no
+          more single-line ellipsis truncation), the action icons sit top-right on
+          the same row without squeezing it, and the status badge drops to its own
+          line below — so name, actions and badge no longer compete in one row. */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+          <GitBranch size={13} style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2 }} />
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{skill.label}</div>
+            <div
+              style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', cursor: 'help' }}
+              title={`${skill.tier === 'global' ? 'Global skill — agents in every team load it' : 'Team skill — only this team’s agents load it'}${skill.alsoGlobal ? '. Also promoted to the global pool — the team keeps its own copy.' : ''}${auto ? '. Promoted automatically by the team’s curator (autonomy 3).' : ''}${skill.adopted ? '. Adopted from the global pool into this team’s active set.' : ''}`}>
+              {skill.tier} skill{skill.alsoGlobal ? ' · also global' : ''}{auto ? ' · auto-promoted' : ''}{skill.adopted ? ' · adopted' : ''}
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+            {act && act.active && (
+              <span
+                title="Deactivate — remove this skill from the team's active set (the file stays in the pool)"
+                onClick={deactivate}
+                style={{ display: 'inline-flex', cursor: 'pointer', color: 'var(--eb-text-muted)' }}>
+                <X size={13} />
+              </span>
+            )}
+            <span
+              title="Share this skill into another team"
+              onClick={onShare}
+              style={{ display: 'inline-flex', cursor: 'pointer', color: 'var(--eb-text-muted)' }}>
+              <Share2 size={13} />
+            </span>
+            <a
+              href={`/skills?team=${encodeURIComponent(teamId)}`}
+              title="Manage this skill in the Skills surface — files, version history, lineage & usage"
+              style={{ display: 'inline-flex', color: 'var(--eb-text-muted)' }}>
+              <ExternalLink size={13} />
+            </a>
+            {skill.tier === 'team' && (
+              <span
+                title="Delete this team skill — archives a restorable snapshot, then removes it from the team pool (Team Admin)"
+                onClick={() => { if (!busy) deleteSkill(); }}
+                style={{ display: 'inline-flex', cursor: busy ? 'default' : 'pointer', color: 'var(--eb-status-error, #d33)', opacity: busy ? 0.5 : 1 }}>
+                <Trash2 size={13} />
+              </span>
+            )}
           </div>
         </div>
         {badge && (
-          <span
-            onClick={() => members.length > 0 && setExpanded(x => !x)}
-            title={badge.tip}
-            style={{
-              flexShrink: 0, fontSize: 10, fontWeight: 600, padding: '1px 7px',
-              borderRadius: 'var(--eb-radius-full)', border: `1px solid ${badge.border}`,
-              color: badge.color, cursor: members.length > 0 ? 'pointer' : 'help', whiteSpace: 'nowrap',
-            }}>
-            {badge.text}
-          </span>
-        )}
-        {act && act.active && (
-          <span
-            title="Deactivate — remove this skill from the team's active set (the file stays in the pool)"
-            onClick={deactivate}
-            style={{ display: 'inline-flex', flexShrink: 0, cursor: 'pointer', color: 'var(--eb-text-muted)' }}>
-            <X size={13} />
-          </span>
-        )}
-        <span
-          title="Share this skill into another team"
-          onClick={onShare}
-          style={{ display: 'inline-flex', flexShrink: 0, cursor: 'pointer', color: 'var(--eb-text-muted)' }}>
-          <Share2 size={13} />
-        </span>
-        <a
-          href={`/skills?team=${encodeURIComponent(teamId)}`}
-          title="Manage this skill in the Skills surface — files, version history, lineage & usage"
-          style={{ display: 'inline-flex', flexShrink: 0, color: 'var(--eb-text-muted)' }}>
-          <ExternalLink size={13} />
-        </a>
-        {skill.tier === 'team' && (
-          <span
-            title="Delete this team skill — archives a restorable snapshot, then removes it from the team pool (Team Admin)"
-            onClick={() => { if (!busy) deleteSkill(); }}
-            style={{ display: 'inline-flex', flexShrink: 0, cursor: busy ? 'default' : 'pointer', color: 'var(--eb-status-error, #d33)', opacity: busy ? 0.5 : 1 }}>
-            <Trash2 size={13} />
-          </span>
+          <div>
+            <span
+              onClick={() => members.length > 0 && setExpanded(x => !x)}
+              title={badge.tip}
+              style={{
+                display: 'inline-block', fontSize: 10, fontWeight: 600, padding: '1px 7px',
+                borderRadius: 'var(--eb-radius-full)', border: `1px solid ${badge.border}`,
+                color: badge.color, cursor: members.length > 0 ? 'pointer' : 'help', whiteSpace: 'nowrap',
+              }}>
+              {badge.text}
+            </span>
+          </div>
         )}
       </div>
 
@@ -1658,7 +1672,7 @@ function GlobalSkillPicker({ teamId, activeNames, onReload }) {
                 borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-app)',
                 padding: '4px var(--eb-space-3)', marginBottom: 4,
               }}>
-                <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', flex: 1, minWidth: 0, overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
                   {nm}
                 </span>
                 <button
@@ -1771,7 +1785,7 @@ function PrivateSkillsBlock({ teamId, skills, onLifted }) {
             padding: 'var(--eb-space-2) var(--eb-space-3)', marginBottom: 'var(--eb-space-2)',
           }}>
             <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{sk.name}</div>
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{sk.name}</div>
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{sk.agentId}</div>
             </div>
             <button

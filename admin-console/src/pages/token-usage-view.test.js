@@ -5,6 +5,8 @@ import {
   TOKEN_CLASSES,
   GROUP_OPTIONS,
   formatInt,
+  formatCompact,
+  niceScale,
   buildDaySeries,
   stackSegments,
   buildExportUrl,
@@ -27,6 +29,50 @@ test('formatInt separates thousands and coerces junk to 0', () => {
   assert.equal(formatInt(0), '0');
   assert.equal(formatInt(undefined), '0');
   assert.equal(formatInt(NaN), '0');
+});
+
+test('formatCompact abbreviates with k/M/B, one decimal only when it adds info', () => {
+  assert.equal(formatCompact(156_000_000), '156M');
+  assert.equal(formatCompact(9_300_000), '9.3M');
+  assert.equal(formatCompact(500_000), '500k');
+  assert.equal(formatCompact(1_500), '1.5k');
+  assert.equal(formatCompact(1_000), '1k');
+  assert.equal(formatCompact(2_500_000_000), '2.5B');
+  // Under 1,000 → plain integer; junk → 0.
+  assert.equal(formatCompact(999), '999');
+  assert.equal(formatCompact(0), '0');
+  assert.equal(formatCompact(undefined), '0');
+  assert.equal(formatCompact(NaN), '0');
+});
+
+test('niceScale picks a round top ≥ max with ~3–5 evenly spaced ticks from 0', () => {
+  for (const max of [800, 28936, 156_000_000, 7, 250000, 9_300_000]) {
+    const { top, ticks } = niceScale(max);
+    assert.ok(top >= max, `top ${top} must be ≥ max ${max} (a bar can never overflow)`);
+    assert.equal(ticks[0], 0, 'axis starts at 0');
+    assert.equal(ticks[ticks.length - 1], top, 'axis ends at the top tick');
+    assert.ok(ticks.length >= 3 && ticks.length <= 6, `tick count ${ticks.length} in range`);
+    // Evenly spaced.
+    const step = ticks[1] - ticks[0];
+    for (let i = 1; i < ticks.length; i++) {
+      assert.equal(ticks[i] - ticks[i - 1], step, 'ticks evenly spaced');
+    }
+  }
+});
+
+test('niceScale produces recognisable round scales for known ranges', () => {
+  assert.deepEqual(niceScale(28936), { top: 30000, ticks: [0, 10000, 20000, 30000] });
+  assert.deepEqual(niceScale(800), { top: 800, ticks: [0, 200, 400, 600, 800] });
+  assert.deepEqual(niceScale(156_000_000), {
+    top: 200_000_000, ticks: [0, 50_000_000, 100_000_000, 150_000_000, 200_000_000],
+  });
+});
+
+test('niceScale renders a flat 0-baseline axis for zero/near-zero/junk (no divide-by-zero)', () => {
+  assert.deepEqual(niceScale(0), { top: 0, ticks: [0] });
+  assert.deepEqual(niceScale(-5), { top: 0, ticks: [0] });
+  assert.deepEqual(niceScale(NaN), { top: 0, ticks: [0] });
+  assert.deepEqual(niceScale(undefined), { top: 0, ticks: [0] });
 });
 
 test('buildDaySeries orders points by day ascending and finds the max total', () => {

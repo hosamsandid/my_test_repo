@@ -36,6 +36,51 @@ export function formatPct(f) {
   return `${Math.round(v * 100)}%`;
 }
 
+// Abbreviated token count for chart axis ticks (#699): thousands as `k`,
+// millions as `M`, billions as `B`, with at most one decimal (dropped when it
+// adds nothing, e.g. `156M` not `156.0M`); values under 1,000 are plain
+// integers. Non-finite → '0'.
+export function formatCompact(n) {
+  const v = typeof n === 'number' && Number.isFinite(n) ? n : 0;
+  const abs = Math.abs(v);
+  if (abs < 1000) return String(Math.round(v));
+  const units = [[1e9, 'B'], [1e6, 'M'], [1e3, 'k']];
+  for (const [factor, suffix] of units) {
+    if (abs >= factor) {
+      const scaled = Math.round((v / factor) * 10) / 10;
+      const str = Number.isInteger(scaled) ? String(scaled) : scaled.toFixed(1);
+      return `${str}${suffix}`;
+    }
+  }
+  return String(Math.round(v));
+}
+
+// Round `x` up to a "nice" 1/2/2.5/5/10 × 10ⁿ number (used for the axis step).
+function niceCeil(x) {
+  if (!(x > 0)) return 0;
+  const mag = Math.pow(10, Math.floor(Math.log10(x)));
+  const frac = x / mag; // in [1, 10)
+  const niceFrac = frac <= 1 ? 1 : frac <= 2 ? 2 : frac <= 2.5 ? 2.5 : frac <= 5 ? 5 : 10;
+  return niceFrac * mag;
+}
+
+// Build a dynamically-scaled y-axis for the "Tokens per day" chart (#699).
+// Returns the "nice" round `top` tick (always ≥ `max`, so a bar can never
+// overflow the plot) and an ascending `ticks` array (0 … top) of ~3–5 evenly
+// spaced values. A zero/negative/non-finite max yields a flat 0-baseline axis
+// (no divide-by-zero, no collapse).
+export function niceScale(max, tickCount = 4) {
+  const m = typeof max === 'number' && Number.isFinite(max) ? max : 0;
+  if (!(m > 0)) return { top: 0, ticks: [0] };
+  // Token counts are integers, so never let the step fall below 1 (which would
+  // produce fractional, duplicate-after-rounding ticks for a tiny max).
+  const step = Math.max(1, niceCeil(m / tickCount));
+  const top = step * Math.ceil(m / step);
+  const ticks = [];
+  for (let v = 0; v <= top + step / 2; v += step) ticks.push(Math.round(v));
+  return { top, ticks };
+}
+
 // Build a chronological time series from a groupBy=day summary. The API sorts
 // groups by total desc; the chart needs them by day ascending. Returns the
 // ordered points plus the largest per-day total, so the caller can scale bar

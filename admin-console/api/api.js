@@ -20,6 +20,7 @@ const { buildWorkItems, workItemDetail } = require('./work-items');
 const usageExport = require('./usage-export');
 const maintenanceMode = require('./maintenance-mode');
 const { detectRasterImageType, imageContentType } = require('./image-type');
+const { githubApiBase } = require('./github-api-base');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, visibleUser, describeAuthz } = require('./scope');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { deriveEmitsForTrigger } = require('./emits-derivation');
@@ -9847,7 +9848,7 @@ app.post('/api/github/probe', heavyLimiter, async (req, res) => {
     'User-Agent': 'e-vgh-claw-wizard',
     'X-GitHub-Api-Version': '2022-11-28',
   };
-  const apiBase = `https://api.github.com/repos/${encodeURIComponent(parsed.org)}/${encodeURIComponent(parsed.repo)}`;
+  const apiBase = `${githubApiBase()}/repos/${encodeURIComponent(parsed.org)}/${encodeURIComponent(parsed.repo)}`;
   try {
     const repoResp = await fetch(apiBase, { headers });
     if (repoResp.status === 404) {
@@ -9918,7 +9919,7 @@ app.get('/api/repos/coordinator-workflow', coordinatorWorkflowLimiter, async (re
     'User-Agent': 'e-vgh-claw-wizard',
     'X-GitHub-Api-Version': '2022-11-28',
   };
-  const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/contents/.github/workflows/coordinator.yml`;
+  const url = `${githubApiBase()}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/contents/.github/workflows/coordinator.yml`;
   try {
     const r = await fetch(url, { headers });
     if (r.status === 404) return res.json({ exists: false });
@@ -9961,7 +9962,7 @@ app.post('/api/repos/coordinator-workflow', coordinatorWorkflowLimiter, async (r
     'User-Agent': 'e-vgh-claw-wizard',
     'X-GitHub-Api-Version': '2022-11-28',
   };
-  const contentsUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/contents/.github/workflows/coordinator.yml`;
+  const contentsUrl = `${githubApiBase()}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/contents/.github/workflows/coordinator.yml`;
 
   // AC 5: Workflow content — functionally equivalent to #147 AC 2.
   const workflowYaml = `name: Multi-agent Coordinator

@@ -106,6 +106,23 @@ if [ "$agents_code" != "200" ]; then
   echo "ERROR: GET /api/agents returned ${agents_code} (orchestrator proxy not ready)" >&2; exit 1
 fi
 
+# --- 7. Register the mock LLM Model Provider (#710, journey-spec §6.3) ---
+# `resolveGenerationTarget` picks the first registered (non-oauth) endpoint, so
+# POST /api/agent-prompt/generate reaches fake-github's canned /v1/messages
+# instead of the deliberately-dead ANTHROPIC_BASE_URL. Idempotent: a fixed id
+# means a re-run returns 409, which we treat as already-present.
+MOCK_LLM_BASE_URL="${MOCK_LLM_BASE_URL:-http://fake-github}"
+echo -n "Registering mock LLM provider "
+llm_code=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" \
+  -X POST "${ADMIN_BASE}/api/llm-endpoints" \
+  -H 'Content-Type: application/json' \
+  -d "{\"id\":\"e2e-mock\",\"name\":\"E2E Mock (fake-github)\",\"baseUrl\":\"${MOCK_LLM_BASE_URL}\",\"authToken\":\"e2e-mock-token\",\"models\":[{\"id\":\"claude-fake-e2e\",\"displayName\":\"claude-fake-e2e\",\"kind\":\"sonnet\"}],\"defaultModelId\":\"claude-fake-e2e\"}" || true)
+if [ "$llm_code" = "201" ] || [ "$llm_code" = "409" ]; then
+  echo " ok (HTTP ${llm_code})"
+else
+  echo " WARNING: mock LLM provider registration returned HTTP ${llm_code} (flows-draft prompt gen may fail)" >&2
+fi
+
 echo
 echo "=========================================="
 echo "  aee-e2e stack ready"

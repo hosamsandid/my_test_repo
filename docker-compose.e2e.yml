@@ -27,6 +27,11 @@ services:
       # fake `claude` shim stack-wide. The agent entrypoint prepends the shim dir
       # to PATH only when this equals "1"; unset ⇒ production-identical.
       AEE_FAKE_CLAUDE: "${AEE_FAKE_CLAUDE:-1}"
+      # #710: point the GitHub poller at the in-stack fake-github service instead
+      # of api.github.com. Unset ⇒ byte-identical production behaviour. Because
+      # the orchestrator spreads its env into agent containers, agents inherit it
+      # too — pair with GH_HOST for the `gh` CLI (concept §6.1).
+      GITHUB_API_BASE: "${GITHUB_API_BASE:-http://fake-github}"
       # Belt-and-suspenders: even with the shim on PATH the CLI never dials out,
       # but point the proxy vars at a dead address so a regression that bypassed
       # the shim fails fast/offline instead of reaching a real endpoint.
@@ -37,6 +42,9 @@ services:
     environment:
       ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-http://127.0.0.1:1}"
       ANTHROPIC_AUTH_TOKEN: "${ANTHROPIC_AUTH_TOKEN:-e2e-dead-token}"
+      # #710: the wizard repo-probe / coordinator-workflow endpoints hit the
+      # fake-github REST surface. Unset ⇒ api.github.com (production-identical).
+      GITHUB_API_BASE: "${GITHUB_API_BASE:-http://fake-github}"
 
   # In-stack git remote (#667, docs/e2e-testing-concept.md §2 v1.1 — option B).
   # Serves a bare fixture repository over anonymous, read-only HTTP so the
@@ -61,3 +69,25 @@ services:
     volumes:
       - ./e2e/git-remote/srv:/srv:ro,z
     command: ["python", "-m", "http.server", "80", "--directory", "/srv"]
+
+  # Fake GitHub (#710, docs/journey-spec-concept.md §6.1/§6.3). A dependency-free
+  # Node HTTP server implementing the minimal GitHub REST surface the stack
+  # touches — Events API (ETag/304), issues/PRs/labels CRUD, label→event
+  # emission — plus a mock Anthropic /v1/messages so the "generate agent prompt"
+  # flow works offline. State is in memory, reset per run via POST /_reset, with
+  # an inspection endpoint (GET /_state) for test assertions. The orchestrator
+  # and admin-console reach it via GITHUB_API_BASE=http://fake-github; git I/O
+  # never touches it (that is the real git-remote container above). e2e-only.
+  fake-github:
+    build:
+      context: ./e2e/fake-github
+    container_name: ${COMPOSE_PROJECT_NAME}-fake-github
+    restart: unless-stopped
+    environment:
+      PORT: "80"
+    # Publish a host port so the Playwright runner (on the host) can act as
+    # "the human on GitHub" and assert against fake-github's inspection endpoint
+    # (e2e/steps/gh.js → E2E_FAKE_GITHUB_URL). In-network, the orchestrator and
+    # admin-console reach it as http://fake-github (GITHUB_API_BASE) regardless.
+    ports:
+      - "${FAKE_GITHUB_PORT:-4014}:80"

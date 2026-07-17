@@ -11,10 +11,16 @@ const { expect } = require('@playwright/test');
 const NEXT = { name: 'Next', exact: true };
 const CREATE = { name: 'Create team', exact: true };
 
+// "Use a template" is the first Process-step entry card (#671 wizard). It renders
+// as an <button> whose accessible name is the heading *plus* its body copy
+// ("Use a template Start from a curated process…"), so an exact match never hits
+// it — match the heading as a substring (Playwright's default, case-insensitive).
+const TEMPLATE_ENTRY = { name: 'Use a template' };
+
 // Open the wizard and confirm the Process step (step 0) is showing.
 async function open(ctx) {
   await ctx.page.goto('/team-setup');
-  await expect(ctx.page.getByRole('button', { name: 'Use a template', exact: true })).toBeVisible();
+  await expect(ctx.page.getByRole('button', TEMPLATE_ENTRY)).toBeVisible();
 }
 
 // Process step: pick a curated template (e.g. "Core SDLC"). Waits for the
@@ -22,7 +28,7 @@ async function open(ctx) {
 // error-free before advancing — the step gates on a lint-clean bundle.
 async function selectProcessTemplate(ctx, { templateName }) {
   const { page } = ctx;
-  await page.getByRole('button', { name: 'Use a template', exact: true }).click();
+  await page.getByRole('button', TEMPLATE_ENTRY).click();
 
   const lint = page.waitForResponse(
     (r) => r.url().includes('/api/flows/graph') && r.request().method() === 'POST',

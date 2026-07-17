@@ -50,6 +50,15 @@ ANTHROPIC_DEFAULT_SONNET_MODEL=claude-fake-e2e
 ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-fake-e2e
 CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
 
+# --- Fake GitHub (#710, journey-spec §6.1) ---
+# Point the poller + wizard GitHub-API calls at the in-stack fake-github
+# service. Absent ⇒ api.github.com (production behaviour). Server-side prompt
+# generation (POST /api/agent-prompt/generate) uses a Model Provider that
+# stack-up.sh registers explicitly, pointing at fake-github's mock /v1/messages
+# (§6.3) — NOT the dead ANTHROPIC_BASE_URL above.
+GITHUB_API_BASE=http://fake-github
+MOCK_LLM_BASE_URL=http://fake-github
+
 # --- Pinned Matrix server (no :latest drift) ---
 CONDUWUIT_IMAGE=ghcr.io/continuwuity/continuwuity:v0.5.5
 

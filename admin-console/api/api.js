@@ -30,6 +30,7 @@ const knowledgeLinks = require('./knowledge-links');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
+const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
 const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
 const { weaveProcess } = require('./flow-weaver');
@@ -2069,7 +2070,7 @@ function resolveTeamMemberVars(teamId, overrides = {}) {
   if (!primary?.url) return { error: `Team '${teamId}' environment has no repository configured` };
   let parsed;
   try {
-    parsed = parseGitHubUrl(primary.url);
+    parsed = deriveRepoIdentity(primary.url);
   } catch (err) {
     return { error: `Team repository URL is not parseable: ${err.message}` };
   }
@@ -7943,40 +7944,8 @@ app.post('/api/repositories/check', heavyLimiter, async (req, res) => {
 
 /* ─── Quick-Start Wizard ────────────────────────────────────────────── */
 
-// Parse a GitHub URL in any of the common forms and normalize to both an SSH
-// and an HTTPS clone URL. Returns { sshUrl, httpsUrl, org, repo } or throws.
-function parseGitHubUrl(input) {
-  const raw = String(input || '').trim();
-  if (!raw) throw new Error('GitHub URL is required');
-
-  // git@github.com:org/repo(.git)
-  let m = raw.match(/^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?\/?$/i);
-  if (!m) {
-    // ssh://git@github.com/org/repo(.git)
-    m = raw.match(/^ssh:\/\/git@github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/i);
-  }
-  if (!m) {
-    // https://github.com/org/repo(.git) or http(s) with optional trailing path
-    m = raw.match(/^https?:\/\/(?:www\.)?github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/i);
-  }
-  if (!m) {
-    // Bare github.com/org/repo
-    m = raw.match(/^github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/i);
-  }
-  if (!m) throw new Error('Could not parse a GitHub repository URL (expected github.com/<org>/<repo>)');
-
-  const org = m[1];
-  const repo = m[2];
-  if (!/^[A-Za-z0-9._-]+$/.test(org) || !/^[A-Za-z0-9._-]+$/.test(repo)) {
-    throw new Error('GitHub URL contains unexpected characters');
-  }
-  return {
-    org,
-    repo,
-    sshUrl: `git@github.com:${org}/${repo}.git`,
-    httpsUrl: `https://github.com/${org}/${repo}.git`,
-  };
-}
+// parseGitHubUrl / deriveRepoIdentity are extracted to ./repo-identity (required
+// at the top of this file) so the URL parsing is unit-testable in isolation.
 
 // Reduce any GitHub URL form to a canonical "<org>/<repo>" string for
 // equality checks across SSH/HTTPS variants. Returns null for unparseable
@@ -8607,7 +8576,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   }
   let parsed;
   try {
-    parsed = parseGitHubUrl(repository.url);
+    parsed = deriveRepoIdentity(repository.url);
   } catch (err) {
     return res.status(400).json({ error: `Invalid repository URL: ${err.message}` });
   }
@@ -9098,7 +9067,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   }
   let parsed;
   try {
-    parsed = parseGitHubUrl(repository.url);
+    parsed = deriveRepoIdentity(repository.url);
   } catch (err) {
     return fail(400, `Invalid repository URL: ${err.message}`);
   }

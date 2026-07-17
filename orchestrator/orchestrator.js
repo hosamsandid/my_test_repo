@@ -4561,6 +4561,15 @@ class Orchestrator {
         CONDUWUIT_ADMIN_TOKEN,
         new SimpleFsStorageProvider(path.join(WORKSPACE, ".admin-state.json"))
       );
+    } else {
+      // A silent null here disables Matrix user provisioning entirely
+      // (ensureMatrixUser is skipped at every call site), so members never get
+      // a Matrix user and the first member login fails with M_FORBIDDEN. Log it
+      // loudly — an unconfigured admin client cost a full diagnostic round trip
+      // on the cold-stack e2e race (#719).
+      console.warn(
+        "[Orchestrator] WARNING: CONDUWUIT_ADMIN_TOKEN/ROOM missing — Matrix user provisioning disabled"
+      );
     }
 
     fs.mkdirSync(AGENTS_DIR, { recursive: true });

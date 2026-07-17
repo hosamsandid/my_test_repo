@@ -41,7 +41,7 @@ GIT_DIRTY  := $(shell git status --porcelain 2>/dev/null | grep -q . && echo dir
 # back to "unknown".
 export GIT_COMMIT GIT_DIRTY
 
-.PHONY: up down restart build agent-image update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers e2e e2e-up e2e-down
+.PHONY: up down restart build agent-image update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers e2e e2e-gate e2e-up e2e-down
 
 # `up` depends on `agent-image` so a fresh bring-up always has the per-agent
 # runtime image built (the agent image is NOT a compose service — it's pulled
@@ -171,8 +171,17 @@ seed-mcp-servers:
 # this just installs deps + the browser and runs the suite from a clean state.
 # `make e2e-up` / `make e2e-down` keep the stack alive for authoring (drive
 # Playwright UI mode against it with E2E_SKIP_STACK=1).
+#
+# `make e2e`      → FULL suite (F0–F4) — the nightly lane (#668).
+# `make e2e-gate` → F0+F1 only — the burn-in PR gate scope (concept §8 phase 2/3:
+#                   "PR gate stays F0+F1"). Kept a separate target so promoting
+#                   the gate to a required PR check never drags in F2 (expected
+#                   red until #253) or the slower F3/F4 flows.
 e2e:
 	cd e2e && npm ci && npx playwright install --with-deps chromium && npx playwright test
+
+e2e-gate:
+	cd e2e && npm ci && npx playwright install --with-deps chromium && npx playwright test tests/f0-*.spec.js tests/f1-*.spec.js
 
 e2e-up:
 	./e2e/scripts/stack-up.sh
@@ -185,4 +194,4 @@ e2e-down:
 	./e2e/scripts/stack-down.sh
 
 help:
-	@echo "Targets: up, down, restart, build, agent-image, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, e2e, e2e-up, e2e-down"
+	@echo "Targets: up, down, restart, build, agent-image, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, e2e, e2e-gate, e2e-up, e2e-down"

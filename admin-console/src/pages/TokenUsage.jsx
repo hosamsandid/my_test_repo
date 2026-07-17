@@ -3,7 +3,7 @@ import { RefreshCw, Download } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useApi } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
-import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, buildDaySeries, stackSegments, buildExportUrl } from './token-usage-view.js';
+import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, niceScale, buildDaySeries, stackSegments, buildExportUrl } from './token-usage-view.js';
 
 // Trigger a browser download of an export URL. The endpoints are behind the
 // auth-cookie gate, so a same-origin anchor navigation carries the session.
@@ -72,37 +72,87 @@ function StatCard({ label, value, accent }) {
 }
 
 /* ── Stacked time-series (by day) ──────────────────────────────────── */
+// Chart geometry (#699). The y-axis gutter and x-axis label row are fixed so
+// the plot area has a definite height (bar `%` heights need it, #696) and the
+// date labels sit in their own row beneath the plot, never over the bars.
+const PLOT_HEIGHT = 180;
+const Y_AXIS_WIDTH = 48;
+const X_LABEL_HEIGHT = 44;
+
 function TimeSeries({ summary }) {
   const { points, maxTotal } = useMemo(() => buildDaySeries(summary), [summary]);
+  const { top, ticks } = useMemo(() => niceScale(maxTotal), [maxTotal]);
   if (points.length === 0) {
     return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>No usage in this range.</div>;
   }
+  // Thin the x labels so a wide range (e.g. 30 days) never crowds — show at
+  // most ~12, always including the first, each still centered under its bar.
+  const labelStride = Math.max(1, Math.ceil(points.length / 12));
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 'var(--eb-space-2)', paddingTop: 8 }}>
-        {points.map((p) => {
-          const segs = stackSegments(p.tokens, maxTotal);
-          const colHeightPct = maxTotal > 0 ? ((p.tokens.total || 0) / maxTotal) * 100 : 0;
-          return (
-            <div key={p.day} style={{ flex: '1 1 0', display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 24 }}>
-              {/* Definite-height plotting area: bars use `%` heights, which only
-                  resolve against an ancestor with a fixed height (#696). */}
-              <div style={{ width: '100%', height: 180, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', alignItems: 'center' }}>
-                <div
-                  title={`${p.day}: ${formatInt(p.tokens.total)} tokens, ${formatInt(p.invocations)} invocations`}
-                  style={{ width: '100%', maxWidth: 48, height: `${colHeightPct}%`, minHeight: colHeightPct > 0 ? 2 : 0, display: 'flex', flexDirection: 'column-reverse', borderRadius: 'var(--eb-radius-sm)', overflow: 'hidden' }}
-                >
-                  {segs.map((s) => (
-                    <div key={s.key} style={{ height: `${(s.value / (p.tokens.total || 1)) * 100}%`, background: CLASS_COLOR[s.key] }} />
-                  ))}
-                </div>
-              </div>
-              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginTop: 4, whiteSpace: 'nowrap', transform: 'rotate(-45deg)', transformOrigin: 'top left', height: 40 }}>
-                {p.day.slice(5)}
-              </div>
+      <div style={{ display: 'flex', paddingTop: 8 }}>
+        {/* Y-axis: dynamically-scaled tick labels aligned to the gridlines. */}
+        <div style={{ position: 'relative', width: Y_AXIS_WIDTH, height: PLOT_HEIGHT, flex: '0 0 auto' }}>
+          {ticks.map((t) => (
+            <div
+              key={t}
+              style={{
+                position: 'absolute', right: 6, bottom: `${top > 0 ? (t / top) * 100 : 0}%`,
+                transform: 'translateY(50%)', fontSize: 'var(--eb-text-xs)',
+                color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)', whiteSpace: 'nowrap',
+              }}
+            >
+              {formatCompact(t)}
             </div>
-          );
-        })}
+          ))}
+        </div>
+        {/* Plot area: gridlines behind, bars in front. */}
+        <div style={{ position: 'relative', flex: '1 1 0', height: PLOT_HEIGHT, borderLeft: '1px solid var(--eb-border-default)', borderBottom: '1px solid var(--eb-border-default)' }}>
+          {ticks.map((t) => (
+            <div
+              key={t}
+              aria-hidden="true"
+              style={{
+                position: 'absolute', left: 0, right: 0, bottom: `${top > 0 ? (t / top) * 100 : 0}%`,
+                borderTop: '1px solid var(--eb-border-default)', opacity: t === 0 ? 0 : 0.5,
+              }}
+            />
+          ))}
+          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'flex-end', gap: 'var(--eb-space-2)', padding: '0 var(--eb-space-1)' }}>
+            {points.map((p) => {
+              const segs = stackSegments(p.tokens, top);
+              const colHeightPct = top > 0 ? ((p.tokens.total || 0) / top) * 100 : 0;
+              return (
+                <div key={p.day} style={{ flex: '1 1 0', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', alignItems: 'center', minWidth: 8, height: '100%' }}>
+                  <div
+                    title={`${p.day}: ${formatInt(p.tokens.total)} tokens, ${formatInt(p.invocations)} invocations`}
+                    style={{ width: '100%', maxWidth: 48, height: `${colHeightPct}%`, minHeight: colHeightPct > 0 ? 2 : 0, display: 'flex', flexDirection: 'column-reverse', borderRadius: 'var(--eb-radius-sm)', overflow: 'hidden' }}
+                  >
+                    {segs.map((s) => (
+                      <div key={s.key} style={{ height: `${(s.value / (p.tokens.total || 1)) * 100}%`, background: CLASS_COLOR[s.key] }} />
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+      {/* X-axis: date labels in a dedicated row beneath the plot, each cell
+          matching a bar cell (same left gutter + gap) so labels stay centered. */}
+      <div style={{ display: 'flex', height: X_LABEL_HEIGHT }}>
+        <div style={{ width: Y_AXIS_WIDTH, flex: '0 0 auto' }} />
+        <div style={{ display: 'flex', flex: '1 1 0', gap: 'var(--eb-space-2)', padding: '0 var(--eb-space-1)' }}>
+          {points.map((p, i) => (
+            <div key={p.day} style={{ flex: '1 1 0', minWidth: 8, display: 'flex', justifyContent: 'center' }}>
+              {i % labelStride === 0 ? (
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginTop: 6, whiteSpace: 'nowrap', transform: 'rotate(-45deg)', transformOrigin: 'top right' }}>
+                  {p.day.slice(5)}
+                </div>
+              ) : null}
+            </div>
+          ))}
+        </div>
       </div>
       <Legend />
     </div>

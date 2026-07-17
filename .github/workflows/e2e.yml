@@ -107,6 +107,24 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      - name: Generate journey user guide (docgen)
+        if: always()
+        # Turns the journeys + this run's screenshot artifacts into the Markdown
+        # user guide + coverage report (#707, §3.2). Pure Node (no podman); reads
+        # e2e/artifacts (the default), so journeys not captured by a green run
+        # render narrative-only. Committing the guide stays a human step for now —
+        # here we only build it and upload it as a run artifact.
+        run: make docs-journeys
+
+      - name: Upload generated user guide
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: journey-user-guide
+          path: docs/user-guide/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Dump orchestrator container logs on failure
         if: failure()
         run: |

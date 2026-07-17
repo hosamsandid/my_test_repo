@@ -70,30 +70,56 @@ async function skipKnowledge(ctx) {
 // Review step: submit and capture the NDJSON progress stream the wizard renders.
 // Returns the parsed event list (plan/step/complete) so the spec can assert the
 // per-step progress, and waits for the wizard to consume `complete` (it redirects
-// to the BA chat, or /agents). Reading response.text() resolves once the stream
-// closes, giving the full NDJSON deterministically (no racing the DOM).
+// to the BA chat, or /agents).
+//
+// We must NOT call resp.text()/resp.body() on this response: the wizard consumes
+// it as a live stream via res.body.getReader() (TeamSetup.jsx), so by the time
+// the response settles the browser has already drained the ReadableStream and CDP
+// has nothing left to hand back — Playwright then throws "No data found for
+// resource with given identifier" (#720). Instead we intercept the stream at the
+// network layer, buffer the full NDJSON body exactly once, forward the identical
+// bytes to the wizard, and keep our own copy to parse. This is pure test-harness
+// plumbing — no product code changes, and every downstream assertion (plan/step/
+// complete, team card, members, DM rooms) is preserved.
 async function submitAndCaptureProgress(ctx) {
   const { page } = ctx;
-  const streamResp = page.waitForResponse(
-    (r) => r.url().includes('/api/teams/stream') && r.request().method() === 'POST',
-  );
-  await page.getByRole('button', CREATE).click();
 
-  // The wizard renders the plan as a "Materializing team…" progress card.
-  await expect(page.getByText('Materializing team…')).toBeVisible();
+  let streamBody = null;
+  const STREAM_GLOB = '**/api/teams/stream';
+  await page.route(STREAM_GLOB, async (route) => {
+    if (route.request().method() !== 'POST') {
+      return route.fallback();
+    }
+    // timeout:0 → no per-fetch cap; the per-test timeout (playwright.config.js)
+    // is the real ceiling for how long materialisation may take.
+    const response = await route.fetch({ timeout: 0 });
+    streamBody = await response.text();
+    await route.fulfill({ response, body: streamBody });
+  });
 
-  const resp = await streamResp;
-  const body = await resp.text();
-  const events = body
+  try {
+    await page.getByRole('button', CREATE).click();
+
+    // Because the interception buffers the whole stream, the wizard receives
+    // `plan` and `complete` in one React batch, so the transient "Materializing
+    // team…" progress card may never paint — we assert on the durable outcome
+    // instead: the wizard consumes `complete` and navigates away ~1.5s later, to
+    // the BA chat (else /agents). The NDJSON assertions below still verify every
+    // per-step transition the card would have shown.
+    await page.waitForURL(/\/(chats\/.*business-analyst|agents)\b/, { timeout: 60_000 });
+  } finally {
+    await page.unroute(STREAM_GLOB);
+  }
+
+  if (streamBody === null) {
+    throw new Error('team-setup: /api/teams/stream response body was not captured');
+  }
+
+  return streamBody
     .trim()
     .split('\n')
     .filter(Boolean)
     .map((line) => JSON.parse(line));
-
-  // The wizard navigates away ~1.5s after `complete` — to the BA chat, else /agents.
-  await page.waitForURL(/\/(chats\/.*business-analyst|agents)\b/, { timeout: 60_000 });
-
-  return events;
 }
 
 module.exports = {

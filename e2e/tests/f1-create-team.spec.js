@@ -54,9 +54,13 @@ test.describe('F1: create a team through the wizard', () => {
 
     await test.step('drive the wizard: process → env → team → knowledge → review', async () => {
       await wizard.open(ctx);
+      // Advancing is explicit since #705: the act-on-step primitives no longer
+      // click Next themselves (so the journey runner can screenshot between).
       await wizard.selectProcessTemplate(ctx, { templateName: 'Core SDLC' });
-      await wizard.selectEnvironment(ctx, { envName: `${teamId} fixture env` });
+      await wizard.next(ctx);
+      await wizard.selectEnvironment(ctx, { envName: `${teamId} fixture env` }); // auto-advances
       await wizard.setTeamIdentity(ctx, { teamName: teamId, teamId });
+      await wizard.next(ctx);
       await wizard.skipKnowledge(ctx);
     });
 

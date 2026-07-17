@@ -16,6 +16,19 @@ COMPOSE_FILES="-f docker-compose.yml -f docker-compose.e2e.yml"
 
 echo "=== Tearing down ${PROJECT} ==="
 
+# 0. Capture orchestrator logs BEFORE the containers are removed. The workflow's
+# dump-on-failure step runs after `make e2e`, but Playwright's global-teardown
+# calls this script inside `make e2e` — so by then the containers are gone and
+# that step only covers the crash-before-teardown case. Diagnosing #719 needed
+# a local repro precisely because CI had no server-side logs; this closes that
+# gap for the normal teardown path. Best-effort, lands in e2e/test-results/
+# which CI already uploads on failure.
+mkdir -p "$REPO_ROOT/e2e/test-results"
+for c in $(podman ps -a --format '{{.Names}}' 2>/dev/null | grep "^${PROJECT}.*orchestrator" || true); do
+  echo "=== podman logs ${c} ($(date -u +%Y-%m-%dT%H:%M:%SZ)) ===" >> "$REPO_ROOT/e2e/test-results/orchestrator.log"
+  podman logs "$c" >> "$REPO_ROOT/e2e/test-results/orchestrator.log" 2>&1 || true
+done
+
 # 1. Compose down + named volumes + orphans. --env-file only if it still exists
 # (a failed gen-env leaves none); compose still resolves the project by -p.
 if [ -f "$ENV_FILE" ]; then

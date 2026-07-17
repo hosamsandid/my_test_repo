@@ -85,3 +85,9 @@ services:
     restart: unless-stopped
     environment:
       PORT: "80"
+    # Publish a host port so the Playwright runner (on the host) can act as
+    # "the human on GitHub" and assert against fake-github's inspection endpoint
+    # (e2e/steps/gh.js → E2E_FAKE_GITHUB_URL). In-network, the orchestrator and
+    # admin-console reach it as http://fake-github (GITHUB_API_BASE) regardless.
+    ports:
+      - "${FAKE_GITHUB_PORT:-4014}:80"

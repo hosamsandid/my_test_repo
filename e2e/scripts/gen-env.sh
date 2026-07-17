@@ -41,6 +41,9 @@ AEE_INSTANCE_ID=e2e
 ADMIN_PORT=4010
 CONDUWUIT_PORT=8449
 HOOK_PORT=4013
+# #710: host-published fake-github port so the Playwright runner can act as the
+# human on GitHub + assert against fake-github's inspection endpoint.
+FAKE_GITHUB_PORT=4014
 
 # --- LLM: stubbed at the claude-binary seam ---
 AEE_FAKE_CLAUDE=1

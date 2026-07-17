@@ -46,6 +46,13 @@ ENV_FILE="$ENV_FILE" \
   ADMIN_PASS="${ADMIN_PASSWORD}" \
   "$REPO_ROOT/orchestrator/setup.sh"
 
+# --- 4b. Seed the in-stack git-remote fixture repo (#667) ---
+# Host-side git builds the bare repo at the git-remote bind-mount root BEFORE
+# `up`, so the static file server has it to serve the moment it starts. The dev
+# stack never references this path.
+echo "=== Seeding git-remote fixture repo ==="
+"$SCRIPT_DIR/seed-fixture-repo.sh"
+
 # --- 5. Bring the full stack up ---
 echo "=== Starting stack (${PROJECT}) ==="
 ${COMPOSE} up -d --build

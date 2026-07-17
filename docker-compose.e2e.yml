@@ -37,3 +37,27 @@ services:
     environment:
       ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-http://127.0.0.1:1}"
       ANTHROPIC_AUTH_TOKEN: "${ANTHROPIC_AUTH_TOKEN:-e2e-dead-token}"
+
+  # In-stack git remote (#667, docs/e2e-testing-concept.md §2 v1.1 — option B).
+  # Serves a bare fixture repository over anonymous, read-only HTTP so the
+  # Team-Setup wizard (F1) can create a team with ZERO external dependencies:
+  # no github.com, no credentials, no poller noise. The orchestrator's clone
+  # path special-cases only SSH and `https://github.com/` URLs, so a plain
+  # `http://git-remote/e2e/fixture.git` clones credential-less as-is; the
+  # GitHub poller ignores the fixture env because it carries no githubTokenId.
+  #
+  # The repo is seeded onto the host bind-mount by e2e/scripts/seed-fixture-repo.sh
+  # (invoked from stack-up.sh BEFORE `up`), so this service is a dependency-free
+  # static file server — git's dumb-HTTP transport fetches the served files
+  # directly. Reusing the agent image base (python:3.12-slim) means no extra
+  # image pull. Read-only: F1 only needs the orchestrator-side clone; write
+  # access (agent pushes) is a later journey/fake-GitHub phase.
+  git-remote:
+    image: python:3.12-slim
+    container_name: ${COMPOSE_PROJECT_NAME}-git-remote
+    restart: unless-stopped
+    # `:z` relabels the bind mount for SELinux-enforcing hosts (Fedora CoreOS /
+    # the CI runner); harmless elsewhere. Contents are generated + gitignored.
+    volumes:
+      - ./e2e/git-remote/srv:/srv:ro,z
+    command: ["python", "-m", "http.server", "80", "--directory", "/srv"]

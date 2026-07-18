@@ -1,0 +1,44 @@
+{
+  "journeyId": "demo",
+  "title": "Demo Journey",
+  "commitSha": "0000000000000000000000000000000000000000",
+  "timestamp": "2026-07-17T00:00:00.000Z",
+  "viewport": {
+    "width": 200,
+    "height": 120
+  },
+  "screenshots": [
+    {
+      "stepId": "landing",
+      "file": "landing.png",
+      "viewport": {
+        "width": 200,
+        "height": 120
+      }
+    },
+    {
+      "stepId": "form",
+      "file": "form.png",
+      "viewport": {
+        "width": 200,
+        "height": 120
+      }
+    },
+    {
+      "stepId": "resized",
+      "file": "resized.png",
+      "viewport": {
+        "width": 200,
+        "height": 120
+      }
+    },
+    {
+      "stepId": "old-step",
+      "file": "old-step.png",
+      "viewport": {
+        "width": 200,
+        "height": 120
+      }
+    }
+  ]
+}

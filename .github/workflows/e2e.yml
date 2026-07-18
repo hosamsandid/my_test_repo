@@ -107,6 +107,21 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      - name: Publish journey baseline (green main run only)
+        # §3.4 item 1 / #709: every GREEN main run republishes the journey
+        # screenshot set as the BASELINE the PR before/after workflow
+        # (ui-screenshots.yml) diffs against. `success()` gates it to a passing
+        # suite so a red run never overwrites a good baseline; the main-ref guard
+        # keeps PR-branch dispatches from clobbering it. Longer retention than the
+        # per-run artifact so an in-flight PR can always resolve a recent baseline.
+        if: success() && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: journey-baseline-main
+          path: e2e/artifacts/
+          if-no-files-found: ignore
+          retention-days: 30
+
       - name: Generate journey user guide (docgen)
         if: always()
         # Turns the journeys + this run's screenshot artifacts into the Markdown

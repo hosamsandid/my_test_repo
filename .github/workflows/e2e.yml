@@ -189,21 +189,19 @@ jobs:
         if: always()
         run: ./e2e/scripts/stack-down.sh || true
 
-  # ── Journey walkthrough video (#712, docs/journey-spec-concept.md §3.3) ───────
-  # The video lane is heavier (records the journeys a second time, with slowMo)
-  # and needs ffmpeg, so it is its own job rather than bolted onto the screenshot
-  # suite — a red video assembly never blocks the F0–F4 report. Dispatched/nightly
-  # only, like the parent workflow. The `journey-video` Playwright project brings
-  # the aee-e2e stack up via global-setup, records one .webm per journey (saved on
-  # success to e2e/artifacts/<journeyId>/journey.webm), then ffmpeg concats them
-  # with generated title cards. Final watch-through is a human step (PR request).
+  # ── Journey walkthrough video (docs/journey-spec-concept.md §3.3, epic #741) ──
+  # Narrated, audio-driven walkthrough video via the Revideo lane in e2e/video/
+  # (screenshots-per-step held to the voiceover — see e2e/video/README.md). A red
+  # video render never blocks the F0–F4 report, so it is its own job.
+  #
+  # FOUNDATION (#742): renders the Team Setup demonstrator from committed fixtures
+  # (screenshots + Edge-TTS mp3s) — no stack, no recording, no network. Self-
+  # contained on purpose. The journey-driven generator (real journey screenshots +
+  # per-step `voiceover:` audio) is T5/#745, which swaps `render:team-setup` for the
+  # full walkthrough render.
   journey-video:
-    needs: podman-preflight
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      CI: 'true'
-      E2E_VIDEO: '1'
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -211,37 +209,19 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install jq (setup.sh prerequisite) + ffmpeg + fonts
-        # ffmpeg + a headless Chromium (installed via playwright below) are what the
-        # Revideo render needs; neither is assumed in agent containers, which is why
-        # the render lives in this CI job, not in the agent. fonts-dejavu-core gives
-        # the on-screen captions a real font.
-        run: sudo apt-get update && sudo apt-get install -y jq ffmpeg fonts-dejavu-core
+      - name: Install ffmpeg + fonts
+        # ffmpeg + a headless Chromium (installed below) are what the Revideo render
+        # needs; neither is assumed in agent containers, which is why the render
+        # lives in CI, not in the agent. fonts-dejavu-core gives the captions a font.
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
 
-      - name: Start rootless podman API socket
-        run: |
-          set -euo pipefail
-          systemctl --user enable --now podman.socket \
-            || podman system service --time=0 "unix://${XDG_RUNTIME_DIR}/podman/podman.sock" &
-          SOCK="${XDG_RUNTIME_DIR}/podman/podman.sock"
-          for i in $(seq 1 20); do
-            [ -S "$SOCK" ] && break
-            sleep 0.5
-          done
-          echo "PODMAN_HOST_SOCKET=${SOCK}" >> "$GITHUB_ENV"
-
-      - name: Record journey videos (journey-video project — brings up stack, tears down)
-        run: cd e2e && npm ci && npx playwright install --with-deps chromium && npm run video:journeys
-
-      - name: Render walkthrough video (Revideo)
-        # Runs even if a journey failed: it renders from whatever clips the run
-        # captured. FOUNDATION (#742): renders the reference example scene so the
-        # lane is exercised end-to-end; the journey-driven assembler is T5/#745,
-        # which swaps this for the full walkthrough render.
-        if: always()
+      - name: Render walkthrough demonstrator (Revideo, screenshots-per-step)
         # `npx puppeteer browsers install` is belt-and-braces: on npm builds that
         # block postinstall scripts the Chromium download is skipped, so we force it.
-        run: cd e2e/video && npm ci && npx puppeteer browsers install chrome && npm run render:example
+        run: |
+          cd e2e/video && npm ci && npx puppeteer browsers install chrome
+          npm run render:team-setup
+          npm run render:iban-story
 
       - name: Upload walkthrough video
         if: always()

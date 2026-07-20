@@ -234,11 +234,9 @@ docs-deck:
 # example scene so the lane stays exercised end-to-end.
 #   make video-journeys                         # record + render (needs stack + Chromium/ffmpeg)
 video-journeys:
-	cd e2e && npm install --no-audit --no-fund --silent \
-	  && E2E_VIDEO=1 npx playwright install --with-deps chromium \
-	  && npm run video:journeys
 	cd e2e/video && npm ci --no-audit --no-fund --silent \
-	  && npm run render:example
+	  && npm run render:team-setup \
+	  && npm run render:iban-story
 
 help:
 	@echo "Targets: up, down, restart, build, agent-image, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, e2e, e2e-gate, e2e-up, e2e-down, docs-journeys, docs-journeys-check, docs-deck, video-journeys"

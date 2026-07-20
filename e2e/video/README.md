@@ -1,9 +1,17 @@
-# Walkthrough video lane (Revideo, audio-driven — Variant C)
+# Walkthrough video lane (Revideo, audio-driven)
 
-Turns the journey walkthrough into a **narrated explainer video**: for each view we
-first play the real Playwright interaction, then **freeze the final frame and hold**
-— for exactly as long as the auto-generated voiceover takes. The audio, not slowMo,
-drives how long each view is shown.
+Turns the journey walkthrough into a **narrated explainer video**: for each step we
+show its **screenshot, held for exactly as long as the auto-generated voiceover
+takes**, with a gentle Ken-Burns zoom, an eyebrow (`Step N · …`) and a short caption.
+The audio — not slowMo — drives how long each view is shown, so a chapter lands at a
+readable, self-explanatory pace (Team Setup ≈ 80s over 6 beats).
+
+**Primary approach: screenshots-per-step** (`revideo/example-team-setup.tsx`). It
+reuses the screenshots the journey *screenshot* run already captures — no second
+video recording, no cut-marks, no transcode. A **continuous-clip beat** (real click
+motion, `revideo/example-variant-c.tsx`) stays available as an **optional per-step
+enhancement** for steps where showing an interaction matters (typing, dragging); it
+is not on the critical path.
 
 This lane is a **self-contained Revideo sub-project** (own `package.json`), so the
 heavy `@revideo/*` deps only install for the video job, not the normal `make e2e`
@@ -13,20 +21,41 @@ unchanged and still feeds this lane.
 
 Epic **#741**. Foundation vendored from the proven Revideo PoC (MIT).
 
-## Spike proof (#742)
+## Proof (#742)
 
-The Variant-C beat is proven end-to-end on this stack: `revideo/example-variant-c.tsx`
-renders `fixtures/sample-journey.mp4` → **real UI motion (0–3.5s) → freeze on the last
-frame → hold**, timed to a real Edge-TTS voiceover (10.84s), out to an **H.264 + AAC
-mp4** with audible narration (mean −24.7 dB) and an on-screen subtitle. Two findings
-baked into this foundation:
+Both approaches are proven end-to-end on this stack, rendered to **H.264 + AAC mp4**
+with audible Edge-TTS narration:
 
-1. **Clips must be H.264 mp4.** Revideo's frame extractor fails on VP9 `.webm` (what
-   Playwright records) with a `ffprobe: No input specified` error. So the lane
-   transcodes clips to mp4 before embedding (`ffmpeg -c:v libx264 -pix_fmt yuv420p`);
-   the committed fixture is already mp4. T3/T5 must transcode each `journey.webm`.
-2. **Video/audio assets are served from `public/`**, not vite-imported — the ffmpeg
-   bridge maps URLs back to `<outDir>/../public`. `prep:clips` copies fixtures there.
+Two chapters are built on the shared beat builder (`revideo/walkthrough.tsx`), the
+shape T5 generalises to every journey:
+
+- **Team Setup** — `revideo/example-team-setup.tsx`: 7 beats ≈ **98s** (the Process
+  step is two beats so "we pick Core SDLC" matches the screen).
+  `npm run render:team-setup` → `out/final/team-setup-walkthrough.mp4`.
+- **IBAN Story / "Working with Agents"** — `revideo/example-iban-story.tsx`: 9 beats
+  ≈ **197s**, the end-to-end idea→issue→approval→PR→review→merge story.
+  `npm run render:iban-story` → `out/final/iban-story-walkthrough.mp4`.
+
+Both are self-contained from committed fixtures (no stack, no recording, no network).
+
+- **Continuous-clip beat** (optional motion) — `revideo/example-variant-c.tsx`:
+  motion 0–3.5s → freeze → hold, `npm run render:example`.
+
+Foundation findings baked in:
+
+1. **Video/audio/image assets are served from `public/`**, not vite-imported — the
+   ffmpeg bridge maps URLs back to `<outDir>/../public`. `prep:shots` / `prep:clips`
+   copy the fixtures there.
+2. **Audio is muxed on afterwards, not played by Revideo.** Revideo mixes every
+   `<Audio>` node toward the scene end, so multiple beats' voiceovers accumulate and
+   clip (loudness grew monotonically to 0 dBFS by the last beat). The scene renders
+   **silent** (still timed to the audio durations via `audioSec`), and
+   `scripts/mux-narration.mjs` lays each MP3 at its exact beat offset with a limiter
+   → flat, clip-free loudness (verified ~−22 dB mean across the whole video).
+3. **Optional motion clips must be H.264 mp4**, not VP9 `.webm` (what Playwright
+   records): Revideo's frame extractor fails on webm (`ffprobe: No input specified`).
+   Only relevant if/when the optional clip beat is used — the screenshot path avoids
+   video entirely.
 
 ## Container feasibility — read this first
 
@@ -61,14 +90,20 @@ journeys/*.yaml ──▶ voiceover: text ──▶ extract ──▶ Edge-TTS �
 
 | Path | Role | Status |
 |---|---|---|
-| `revideo/utils/audio.tsx` | `audioSec(id)` + `playAndWait(view, audioId, visuals, pad)` — **the audio-driven timing primitive** | vendored, reuse as-is |
+| `revideo/walkthrough.tsx` | **shared beat builder** (`makeWalkthroughProject(name, beats)`) — screenshots-per-step, Ken-Burns + eyebrow + caption, audio-driven dwell | reference — T5 feeds it journey beats |
+| `revideo/example-team-setup.tsx` | Team Setup chapter (7 beats) — thin beat list over the builder | reference |
+| `revideo/example-iban-story.tsx` | IBAN Story chapter (9 beats) — thin beat list over the builder | reference |
+| `revideo/example-variant-c.tsx` | optional-motion reference — continuous clip → freeze → hold | reference (optional path) |
+| `revideo/utils/audio.tsx` | `audioSec(id)` + `audioUrl(id)` + `playAndWait(...)` — **the audio-driven timing primitive** | vendored, reuse as-is |
 | `revideo/utils/transitions.ts` | `fadeIn` / `fadeOut` / `crossFade` | vendored |
 | `revideo/render.ts` | CLI renderer (`renderVideo` + the puppeteer/outDir workarounds) | vendored |
-| `revideo/example-variant-c.tsx` | **reference scene** proving the Variant-C beat over `fixtures/sample-journey.webm` | reference — T5 replaces with a journey-driven generator |
 | `scripts/generate-tts.py` | Edge-TTS → MP3 + `data/audio-manifest.json` (real durations) | vendored, reuse as-is |
+| `scripts/team-setup.narration.json` | the demonstrator's per-step `voiceover:` text (the source of the committed mp3s) | fixture |
 | `scripts/extract-narration.mjs` | collects narration entries → `scripts/narration.json` | **reference** — T4 replaces with a journey `voiceover:` extractor |
-| `fixtures/sample-journey.mp4` | a short real UI clip (H.264) so the lane is testable without recording the stack | fixture |
-| `data/audio-manifest.json` | generated durations (seeded `{}` so the import never dangles) | generated |
+| `fixtures/shots/*.png` | the 5 Team Setup step screenshots (demonstrator) — `prep:shots` copies them to `public/shots/` | fixture |
+| `fixtures/audio/*.mp3` + `audio-manifest.json` | the demonstrator's Edge-TTS voiceovers — `prep:audio` copies them to `public/audio/` + `data/` | fixture |
+| `fixtures/sample-journey.mp4` | a short real UI clip (H.264) for the optional-motion reference | fixture |
+| `data/audio-manifest.json` | durations the scene reads (seeded `{}`; `prep:audio` regenerates it at render time) | generated |
 | `vite.config.ts` | the `@revideo/vite-plugin` config the renderer bundles with | vendored |
 | `patches/` | the three Revideo 0.10.4 fixes (see `patches/README.md`) | T2 finalises after first install |
 

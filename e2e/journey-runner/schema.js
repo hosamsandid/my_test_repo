@@ -99,6 +99,14 @@ function validateJourney(doc, { source = 'journey' } = {}) {
   if (doc.lanes != null && (!Array.isArray(doc.lanes) || doc.lanes.some((l) => typeof l !== 'string'))) {
     fail(source, 'lanes must be a list of strings when present');
   }
+  // Optional per-journey Playwright test budget (ms). Most journeys inherit the
+  // project default; a long end-to-end journey (e.g. the IBAN label chain, which
+  // materialises a team and crosses two poll boundaries) sets its own ceiling.
+  // A journey-level knob, not a step — it does not touch the action/assert
+  // vocabulary, so it does not breach the §9 anti-DSL rule.
+  if (doc.timeoutMs != null && (typeof doc.timeoutMs !== 'number' || !Number.isFinite(doc.timeoutMs) || doc.timeoutMs <= 0)) {
+    fail(source, 'timeoutMs must be a positive number of milliseconds when present');
+  }
   if (doc.fixtures != null) {
     if (!Array.isArray(doc.fixtures)) fail(source, 'fixtures must be a list when present');
     doc.fixtures.forEach((fx, i) => {

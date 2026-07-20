@@ -39,4 +39,34 @@ async function materializeTeam(ctx, { teamId, teamName, envId, roles }) {
   };
 }
 
-module.exports = { materializeTeam };
+// Materialise a team from a curated PROCESS TEMPLATE bundle (#711). Unlike
+// `materializeTeam` (bare catalog `roles`), this feeds the whole bundle under
+// `processTemplate`, so `POST /api/teams` runs `expandGithubChannels` and the
+// members get the derived github-event channel triggers that wire the label
+// chain (BA→issue, Developer reacts to `ready`, Reviewer reacts to
+// `ready-for-review`). That wiring is what the IBAN-story journey exercises —
+// bare roles would materialise the same agents WITHOUT the channels.
+async function materializeCoreSdlcTeam(ctx, { teamId, teamName, envId, templateId = 'core-sdlc' }) {
+  const tmpl = await ctx.request.get(`/api/process-templates/${encodeURIComponent(templateId)}`);
+  expect(
+    tmpl.ok(),
+    `fetch process template ${templateId} failed: HTTP ${tmpl.status()}: ${await tmpl.text()}`,
+  ).toBeTruthy();
+  const bundle = await tmpl.json();
+  const res = await ctx.request.post('/api/teams', {
+    timeout: 180_000,
+    data: { teamId, teamName: teamName || teamId, environmentId: envId, processTemplate: bundle },
+  });
+  expect(
+    res.ok(),
+    `materializeCoreSdlcTeam(${teamId}) expected 2xx, got HTTP ${res.status()}: ${await res.text()}`,
+  ).toBeTruthy();
+  const body = await res.json();
+  return {
+    teamId: body.teamId,
+    memberIds: Array.isArray(body.created) ? body.created : [],
+    dms: Array.isArray(body.dms) ? body.dms : [],
+  };
+}
+
+module.exports = { materializeTeam, materializeCoreSdlcTeam };

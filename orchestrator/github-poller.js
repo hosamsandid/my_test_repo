@@ -27,9 +27,17 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const githubEventLog = require('./github-event-log');
-const { resolveGithubApiTarget } = require('./github-api-base');
+const { resolveGithubApiTarget, githubApiBase, DEFAULT_GITHUB_API_BASE } = require('./github-api-base');
 
-const POLL_INTERVAL_MS = 30_000;
+// Poll cadence. Fixed 30s in production; overridable via
+// AEE_GITHUB_POLL_INTERVAL_MS (#711) so the E2E stack can tighten it — the
+// label-chain journey (issue.labeled→Developer→PR.labeled→Reviewer) crosses two
+// poll boundaries and must complete inside the Playwright per-test budget. A
+// non-numeric / non-positive value falls back to the production default.
+const POLL_INTERVAL_MS = (() => {
+  const raw = Number(process.env.AEE_GITHUB_POLL_INTERVAL_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 30_000;
+})();
 const STATE_DIR = '/workspace/github-poller';
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
 const THROTTLE_STATE_FILE = path.join(STATE_DIR, 'throttle-state.json');
@@ -180,13 +188,30 @@ function detectMergedPrs(ghEvents) {
 // Accepts SSH (`git@github.com:owner/repo.git`) and HTTPS
 // (`https://github.com/owner/repo[.git]`) — anything else returns null and
 // is silently ignored (non-GitHub remotes can't be polled).
-function parseRepoFullName(url) {
+function parseRepoFullName(url, { allowNonGithubHost = false } = {}) {
   if (!url) return null;
   let m = String(url).match(/^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/);
   if (m) return `${m[1]}/${m[2]}`;
   m = String(url).match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
   if (m) return `${m[1]}/${m[2]}`;
+  if (allowNonGithubHost) {
+    // #711: when the poller targets a non-github API base (the E2E fake-github),
+    // recognise the in-stack git-remote fixture repo by its last two path
+    // segments — mirroring deriveRepoIdentity (#667), so the same `owner/repo`
+    // key the fake-github events carry is derived from the env's repo URL.
+    // NEVER applied against real api.github.com (gated on a non-default base),
+    // so production repo discovery is byte-identical.
+    m = String(url).match(/^https?:\/\/[^/]+\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
+    if (m) return `${m[1]}/${m[2]}`;
+  }
   return null;
+}
+
+// True when the poller is pointed at a non-production GitHub API base (the E2E
+// fake-github). Used to relax repo-URL parsing to the in-stack fixture host
+// without ever loosening production behaviour.
+function usingNonDefaultApiBase() {
+  return githubApiBase() !== DEFAULT_GITHUB_API_BASE;
 }
 
 // #320-A: the per-subscriber history horizon. Prefer the trigger's activation
@@ -382,8 +407,9 @@ class GitHubPoller {
         continue;
       }
       const repos = Array.isArray(env.repositories) ? env.repositories : [];
+      const allowNonGithubHost = usingNonDefaultApiBase();
       for (const r of repos) {
-        const fullName = parseRepoFullName(r?.url);
+        const fullName = parseRepoFullName(r?.url, { allowNonGithubHost });
         if (!fullName) continue;
         if (!repoToToken.has(fullName)) repoToToken.set(fullName, env.githubTokenId);
       }

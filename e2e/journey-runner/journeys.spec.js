@@ -27,6 +27,9 @@ for (const journey of journeys) {
 for (const journey of journeys) {
   test.describe(`journey: ${journey.title}`, () => {
     test(journey.id, async ({ page, request }) => {
+      // A long end-to-end journey can raise the per-test budget (schema-validated
+      // positive ms); most inherit the project default.
+      if (journey.timeoutMs) test.setTimeout(journey.timeoutMs);
       const ctx = { page, request };
       const recorder = makeRecorder(journey, { registry });
 

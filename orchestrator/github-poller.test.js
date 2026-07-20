@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 
 const {
   GitHubPoller,
+  parseRepoFullName,
   effectiveHorizon,
   backfillHorizonStamps,
   passesHorizon,
@@ -18,6 +19,34 @@ const {
   PER_PAGE,
   MAX_PAGES,
 } = require("./github-poller");
+
+// ── parseRepoFullName (#711): github-only by default, fixture host when opted in ─
+
+test("parseRepoFullName: parses github.com https and ssh URLs", () => {
+  assert.equal(parseRepoFullName("https://github.com/acme/widgets"), "acme/widgets");
+  assert.equal(parseRepoFullName("https://github.com/acme/widgets.git"), "acme/widgets");
+  assert.equal(parseRepoFullName("git@github.com:acme/widgets.git"), "acme/widgets");
+});
+
+test("parseRepoFullName: non-github host is unrecognised by default (production)", () => {
+  // Byte-identical to prior behaviour: only github.com is a real repo host.
+  assert.equal(parseRepoFullName("http://git-remote/e2e/fixture.git"), null);
+});
+
+test("parseRepoFullName: non-github host resolves by last two path segments when opted in", () => {
+  // #711 E2E path (allowNonGithubHost, gated on a non-default GITHUB_API_BASE):
+  // the in-stack git-remote fixture URL maps to the same owner/repo key the
+  // fake-github events carry.
+  assert.equal(
+    parseRepoFullName("http://git-remote/e2e/fixture.git", { allowNonGithubHost: true }),
+    "e2e/fixture",
+  );
+  // github.com URLs still parse identically with the flag on.
+  assert.equal(
+    parseRepoFullName("https://github.com/acme/widgets", { allowNonGithubHost: true }),
+    "acme/widgets",
+  );
+});
 
 // ── effectiveHorizon (Baustein A): activatedAt > createdAt > mtime ─────────────
 

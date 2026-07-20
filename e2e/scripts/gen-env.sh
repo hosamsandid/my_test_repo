@@ -47,6 +47,12 @@ FAKE_GITHUB_PORT=4014
 
 # --- LLM: stubbed at the claude-binary seam ---
 AEE_FAKE_CLAUDE=1
+# #711: IBAN-story journey — fake-claude reply fixtures + role playbooks (baked
+# into the agent image at /opt/ace/e2e/), and a tight GitHub poll cadence so the
+# label chain (issue.labeled→Developer→PR.labeled→Reviewer) fits the test budget.
+AEE_FAKE_CLAUDE_FIXTURES=/opt/ace/e2e/fixtures/iban-story.fixtures.json
+AEE_FAKE_CLAUDE_PLAYBOOKS=/opt/ace/e2e/fixtures/playbooks
+AEE_GITHUB_POLL_INTERVAL_MS=2000
 ANTHROPIC_BASE_URL=http://127.0.0.1:1
 ANTHROPIC_AUTH_TOKEN=e2e-dead-token
 ANTHROPIC_DEFAULT_SONNET_MODEL=claude-fake-e2e

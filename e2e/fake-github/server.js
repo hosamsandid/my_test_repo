@@ -51,6 +51,7 @@ function getRepo(state, owner, repo) {
       name: repo,
       issues: new Map(), // number -> issue
       pulls: new Map(), // number -> pull
+      comments: new Map(), // number -> [ { id, body, user } ] (issue == PR namespace)
       labels: new Map(), // name -> { name, color }
       events: [], // newest first
       etag: 'W/"0"',
@@ -155,6 +156,26 @@ function addLabels(state, owner, repo, kind, number, names) {
   return kind === 'pulls' ? pullView(r, target) : issueView(r, target);
 }
 
+// Add a comment to an issue OR a PR (GitHub shares the issues/:n/comments
+// endpoint for both — #711, the Code Reviewer posts its verdict here). Numbers
+// come from the shared `state.seq`, so an issue and a PR never collide on `n`.
+function addComment(state, owner, repo, number, body) {
+  const r = getRepo(state, owner, repo);
+  const target = r.issues.get(number) || r.pulls.get(number);
+  if (!target) return null;
+  state.seq += 1;
+  const comment = { id: state.seq, body: body || '', user: { login: 'e2e' }, created_at: isoAt(state) };
+  const list = r.comments.get(number) || [];
+  list.push(comment);
+  r.comments.set(number, list);
+  return comment;
+}
+
+function listComments(state, owner, repo, number) {
+  const r = getRepo(state, owner, repo);
+  return r.comments.get(number) || [];
+}
+
 function removeLabel(state, owner, repo, kind, number, name) {
   const r = getRepo(state, owner, repo);
   const target = kind === 'pulls' ? r.pulls.get(number) : r.issues.get(number);
@@ -236,6 +257,9 @@ function makeHandler(state) {
         repos[key] = {
           issues: [...r.issues.values()].map((i) => issueView(r, i)),
           pulls: [...r.pulls.values()].map((p) => pullView(r, p)),
+          comments: [...r.comments.entries()].flatMap(
+            ([number, list]) => list.map((c) => ({ number, body: c.body })),
+          ),
           labels: [...r.labels.keys()],
           eventCount: r.events.length,
           events: r.events,
@@ -307,6 +331,15 @@ function makeHandler(state) {
         if (rest[2] === 'labels' && rest[3] && method === 'DELETE') {
           const out = removeLabel(state, owner, repo, 'issues', number, decodeURIComponent(rest[3]));
           return out ? send(res, 200, out.labels) : send(res, 404, { message: 'Not Found' });
+        }
+        // Comments — shared issue/PR endpoint (the Code Reviewer's verdict, #711).
+        if (rest[2] === 'comments' && method === 'POST') {
+          const body = await readBody(req);
+          const out = addComment(state, owner, repo, number, body.body);
+          return out ? send(res, 201, out) : send(res, 404, { message: 'Not Found' });
+        }
+        if (rest[2] === 'comments' && method === 'GET') {
+          return send(res, 200, listComments(state, owner, repo, number));
         }
       }
 

@@ -1206,6 +1206,69 @@ class FakeClaudeShim(unittest.TestCase):
         text = next(e for e in events if e["type"] == "assistant_text")["text"]
         self.assertEqual(text, "Converted the COBOL program.")
 
+    def test_playbook_runs_before_reply_and_keeps_stdout_clean(self):
+        """A fixtures rule may name a `playbook` (#711, §6.2): the shim executes
+        it (with the matched prompt in $AEE_FAKE_CLAUDE_PROMPT) BEFORE emitting,
+        routes the script's stdout to stderr so the stream-json stays clean, and
+        still emits the canned reply."""
+        import json
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            pb_dir = os.path.join(d, "playbooks")
+            os.makedirs(pb_dir)
+            sentinel = os.path.join(d, "ran.txt")
+            script = os.path.join(pb_dir, "developer-implement.sh")
+            with open(script, "w", encoding="utf-8") as fh:
+                fh.write('#!/bin/bash\n'
+                         'echo "noise on stdout"\n'
+                         f'printf "%s" "$AEE_FAKE_CLAUDE_PROMPT" > {sentinel}\n')
+            os.chmod(script, 0o755)
+            rules = [{"match": "labelled `ready`", "reply": "Opened PR #7.",
+                      "playbook": "developer-implement.sh"}]
+            rules_path = os.path.join(d, "fixtures.json")
+            with open(rules_path, "w", encoding="utf-8") as fh:
+                json.dump(rules, fh)
+            prompt = "An issue was labelled `ready` — go build it."
+            stdout = self._run_shim(
+                ["-p", prompt, "--output-format", "stream-json"],
+                extra_env={"AEE_FAKE_CLAUDE_FIXTURES": rules_path,
+                           "AEE_FAKE_CLAUDE_PLAYBOOKS": pb_dir})
+            # stdout is still parseable stream-json carrying the canned reply —
+            # the playbook's own stdout ("noise on stdout") never leaked in.
+            events = self._parse(stdout)
+            text = next(e for e in events if e["type"] == "assistant_text")["text"]
+            self.assertEqual(text, "Opened PR #7.")
+            self.assertNotIn("noise on stdout", stdout)
+            # The playbook actually ran, with the matched prompt handed to it.
+            self.assertTrue(os.path.isfile(sentinel), "playbook did not run")
+            with open(sentinel, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), prompt)
+
+    def test_playbook_named_but_dir_unset_is_safe_noop(self):
+        """With AEE_FAKE_CLAUDE_PLAYBOOKS unset, a rule's `playbook` is ignored —
+        the shim still emits its reply and exits 0 (never fatal)."""
+        import json
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            rules = [{"match": "COBOL", "reply": "Done.",
+                      "playbook": "nonexistent.sh"}]
+            rules_path = os.path.join(d, "fixtures.json")
+            with open(rules_path, "w", encoding="utf-8") as fh:
+                json.dump(rules, fh)
+            env = {k: v for k, v in os.environ.items()
+                   if k != "AEE_FAKE_CLAUDE_PLAYBOOKS"}
+            env["AEE_FAKE_CLAUDE_FIXTURES"] = rules_path
+            # _run_shim asserts returncode == 0; a missing playbook dir must not
+            # break that.
+            stdout = self._run_shim(
+                ["-p", "migrate the COBOL job", "--output-format", "stream-json"],
+                extra_env={"AEE_FAKE_CLAUDE_FIXTURES": rules_path})
+            events = self._parse(stdout)
+            text = next(e for e in events if e["type"] == "assistant_text")["text"]
+            self.assertEqual(text, "Done.")
+
     def test_resume_id_used_as_session_when_no_env_override(self):
         import os
         import subprocess

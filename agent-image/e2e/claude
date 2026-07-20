@@ -15,12 +15,28 @@ verbatim, so chat flows become deterministic and free of any model call.
 
 Reply selection, in order:
   1. `$AEE_FAKE_CLAUDE_FIXTURES` — path to a JSON file of rules
-     `[{"match": "<substring>", "reply": "<text>"}]`; first rule whose `match`
-     is a substring of the prompt wins.
+     `[{"match": "<substring>", "reply": "<text>", "playbook": "<script.sh>"}]`;
+     first rule whose `match` is a substring of the prompt wins.
   2. otherwise a default reply.
 Any `[[E2E:<token>]]` marker found in the prompt is echoed back as
 `E2E-ACK:<token>` at the head of the reply, so a spec can assert an
 unambiguous round-trip.
+
+Playbooks (issue #711, docs/journey-spec-concept.md §6.2). The IBAN story
+journey needs role *behaviour*, not just canned text: the Developer must
+actually branch/commit and open a PR, the Reviewer must comment + label. When a
+matched rule carries a `"playbook"`, the shim executes that shell script BEFORE
+emitting its reply — inside the agent container, as the agent user, against the
+real workspace clone and the fake GitHub REST API. The script is resolved under
+`$AEE_FAKE_CLAUDE_PLAYBOOKS` (a directory baked into the agent image alongside
+this shim), and the matched prompt is handed to it verbatim via
+`$AEE_FAKE_CLAUDE_PROMPT` so it can extract the issue/PR number. Its stdout is
+routed to *stderr* so the shim's own stdout stays a clean stream-json stream;
+its exit code is logged but never aborts the reply (the label wakes the real
+trigger machinery — only the "thinking" is scripted). With no `playbook` field,
+or `$AEE_FAKE_CLAUDE_PLAYBOOKS` unset, behaviour is byte-identical to the
+F-phase shim (the two-sided parser contract in fake-claude.fixture.json is
+unaffected).
 
 Determinism knobs (for the two-sided parser fixture test):
   - `$AEE_FAKE_CLAUDE_SESSION_ID` pins the session id (else `--resume <id>`,
@@ -32,6 +48,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 import uuid
 
@@ -48,6 +65,9 @@ _USAGE = {
 }
 _DEFAULT_REPLY = "Hello from the fake claude shim."
 _MARKER_RE = re.compile(r"\[\[E2E:([^\]]+)\]\]")
+# A scripted role playbook must finish well inside the runtime's claude timeout;
+# it only performs a handful of git + curl calls, so this is a generous ceiling.
+_PLAYBOOK_TIMEOUT_SEC = 120
 
 
 def _parse_args(argv: list[str]) -> dict:
@@ -88,19 +108,67 @@ def _load_rules() -> list[dict]:
     return data if isinstance(data, list) else []
 
 
-def _pick_reply(prompt: str) -> str:
-    reply = _DEFAULT_REPLY
+def _select_rule(prompt: str) -> dict | None:
+    """First fixtures rule whose `match` substring is in the prompt, else None."""
     for rule in _load_rules():
         if not isinstance(rule, dict):
             continue
         match = rule.get("match")
         if isinstance(match, str) and match and match in prompt:
-            reply = str(rule.get("reply", _DEFAULT_REPLY))
-            break
+            return rule
+    return None
+
+
+def _pick_reply_and_playbook(prompt: str) -> tuple[str, str | None]:
+    """Resolve the reply text (with marker echo) and the optional playbook name
+    for a prompt. Marker echo is applied regardless of which rule (if any) won,
+    exactly as the F-phase shim did."""
+    rule = _select_rule(prompt)
+    reply = str(rule.get("reply", _DEFAULT_REPLY)) if rule else _DEFAULT_REPLY
+    playbook = rule.get("playbook") if rule else None
+    if not (isinstance(playbook, str) and playbook.strip()):
+        playbook = None
     marker = _MARKER_RE.search(prompt or "")
     if marker:
         reply = f"E2E-ACK:{marker.group(1)} {reply}"
-    return reply
+    return reply, playbook
+
+
+def _run_playbook(name: str, prompt: str) -> None:
+    """Execute a role playbook before emitting the reply (issue #711). Best-effort
+    and never fatal: a missing dir/script or a non-zero exit is logged to stderr,
+    but the shim still emits its stream-json reply so the trigger machinery keeps
+    flowing. stdout of the script is merged into stderr so this process's own
+    stdout stays a clean stream-json stream."""
+    base = os.environ.get("AEE_FAKE_CLAUDE_PLAYBOOKS")
+    if not base:
+        print(
+            f"[fake-claude] rule names playbook '{name}' but "
+            f"AEE_FAKE_CLAUDE_PLAYBOOKS is unset — skipping",
+            file=sys.stderr,
+        )
+        return
+    # Contain the name to a single path segment so a fixtures file can't reach
+    # outside the playbooks dir.
+    script = os.path.join(base, os.path.basename(name))
+    if not os.path.isfile(script):
+        print(f"[fake-claude] playbook not found: {script} — skipping", file=sys.stderr)
+        return
+    print(f"[fake-claude] running playbook {script}", file=sys.stderr)
+    env = dict(os.environ)
+    env["AEE_FAKE_CLAUDE_PROMPT"] = prompt or ""
+    try:
+        proc = subprocess.run(
+            ["/bin/bash", script],
+            env=env,
+            stdout=sys.stderr,   # keep our stdout clean for stream-json
+            stderr=sys.stderr,
+            timeout=_PLAYBOOK_TIMEOUT_SEC,
+            check=False,
+        )
+        print(f"[fake-claude] playbook {name} exited {proc.returncode}", file=sys.stderr)
+    except Exception as exc:  # subprocess/OS errors, timeout — never fatal
+        print(f"[fake-claude] playbook {name} failed: {exc}", file=sys.stderr)
 
 
 def _emit(obj: dict) -> None:
@@ -116,7 +184,13 @@ def main() -> None:
         or str(uuid.uuid4())
     )
     model = args["model"] or _MODEL
-    reply = _pick_reply(args["prompt"])
+    reply, playbook = _pick_reply_and_playbook(args["prompt"])
+
+    # Run the scripted role behaviour (branch/commit/PR/label/comment) BEFORE
+    # emitting the reply, so the downstream GitHub state the reply describes
+    # already exists when the runtime posts it (issue #711, §6.2).
+    if playbook:
+        _run_playbook(playbook, args["prompt"])
 
     _emit({
         "type": "system",

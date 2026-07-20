@@ -1,0 +1,132 @@
+journeyVersion: 1
+id: iban-story
+title: The IBAN Story — the label-driven SDLC loop
+order: 30
+# CI + live (docs/journey-spec-concept.md §3.1, §6.2). Same YAML both ways:
+#   - `ci`   — runs on the fake stack (fake-claude playbooks + in-stack
+#              fake-github + git-remote). It asserts the PLATFORM WIRING: that a
+#              human `ready` label carries work hand-off to hand-off through the
+#              whole Core SDLC loop. It does NOT assert agent intelligence — the
+#              role "thinking" is scripted by the fake-claude playbooks
+#              (agent-image/e2e/fixtures/playbooks/); the diff content is arbitrary.
+#   - `live` — the SAME file, run manually against a real LLM + a sandbox repo, to
+#              produce the showable walkthrough screenshots (the storyline in
+#              docs/walkthrough/02-working-with-agents.md). Run + documented once
+#              by a human; the CI variant is the automated regression.
+lanes: [ci, live]
+
+# The label chain crosses two poll boundaries after a full team materialisation,
+# so it needs a larger per-test budget than the project default.
+timeoutMs: 480000
+
+# Precondition: reset fake-github, mint a fake GitHub token so the poller polls
+# the fixture repo, create a Working Environment on the in-stack git remote, and
+# materialise a full Core SDLC team FROM THE TEMPLATE BUNDLE so the members get
+# the derived github-event channel triggers that carry the label chain. Fixed ids
+# keep the run re-entrant on the same stack (pre-clean + teardown).
+fixtures:
+  - fixture: ibanStoryTeam
+    params:
+      teamId: iban-demo
+      teamName: IBAN Demo
+      envId: iban-demo-env
+      envName: IBAN Demo
+      repoUrl: "http://git-remote/e2e/fixture.git"
+      tokenId: iban-demo-token
+      branch: main
+
+steps:
+  # ── Slide 7: chapter intro (narrative-only) ─────────────────────────────────
+  - kind: narrative-only
+    narrative: |
+      So far we've built a team. Now let's actually work with it — end to end, from a vague idea in chat all the way to a pull request that's ready to merge.
+
+      The example is deliberately small but realistic: a SEPA bank-transfer form today accepts any text in its IBAN field and always reports success — even for an invalid account. We want the form to validate the recipient's IBAN before the transfer can go through. Watch how the four agents of our Core SDLC team — Business Analyst, Developer, Code Reviewer and Reworker — pick this up and carry it through the process, with the human staying in control at exactly two points: approving what gets built, and performing the final merge.
+
+      What this journey proves is the *wiring*: every hand-off in that loop is a GitHub label or event, and each one wakes the next agent automatically. The agents' "thinking" here is scripted so the run is deterministic — the point is that the platform carries the work from one role to the next with no one manually shuttling it.
+
+  # ── Slide 8: the Agent Chat ─────────────────────────────────────────────────
+  - id: agent-chat
+    narrative: |
+      This is the Agent Chat — where a human talks directly to any agent without leaving the Agent Studio. On the left is our team with its four members; each is a full agent with its own chat identity, and we can open a one-to-one conversation with any of them. We start with the Business Analyst.
+    # Wait for the BA runtime to have booted before the first message (a send that
+    # races container boot is silently dropped by design, agent-entrypoint.py).
+    action:
+      do: chat.waitForAgentReady
+      agentId: iban-demo-business-analyst
+    assert:
+      do: chat.open
+      agentId: iban-demo-business-analyst
+    screenshot: agent-chat
+
+  # ── Slides 9-11: the request → the BA files the issue ───────────────────────
+  # In the storyline the BA first pushes back with six clarifying questions and
+  # the human answers them; the CI variant collapses that dialogue to a single
+  # message (it proves the hand-off, not the conversation) — the fake BA playbook
+  # files the issue directly. The live lane shows the full six-question exchange.
+  - id: describe-request
+    narrative: |
+      I describe the request to the Business Analyst in plain language: the transfer form should validate the IBAN. In the live demo the BA pushes back first — it asks the six product questions that genuinely need a human decision (validate on blur or submit? block or warn? what if the service is down? …) — and only then, with my answers in hand, finalizes the work item.
+
+      The result is a GitHub issue written in two layers: a plain-language Human Section any stakeholder can read, and an Agent Section with a problem statement, scope and numbered, testable acceptance criteria. It also states the hand-off rule: add the `ready` label when you want the Developer to pick it up. Until then, nothing happens — that's the first of the two human control points.
+    action:
+      do: chat.send
+      text: "Our SEPA transfer form accepts any text in the IBAN field and always reports success. It should validate the IBAN against a public service before the transfer can go through."
+
+  # Hop 1 — BA → issue: the issue now exists on (fake) GitHub.
+  - id: issue-filed
+    assert:
+      do: gh.expectIssueExists
+      repo: e2e/fixture
+
+  # ── Slide 12: control point 1 — the human applies `ready` ───────────────────
+  - id: human-approves
+    narrative: |
+      This is the human go-signal: I open the Labels menu and apply `ready`. This label is deliberately a human gate — no agent sets it. By adding it, I'm approving what gets built. The moment I do, it becomes a GitHub event the platform is listening for — and that event is what wakes the next agent in the chain.
+    # The test acts as the human here — applying `ready` to the issue the BA just
+    # filed (number-agnostic: it labels the newest issue in the repo).
+    action:
+      do: gh.applyLabelToLatestIssue
+      repo: e2e/fixture
+      label: ready
+
+  # ── Slide 13: the Developer wakes and delivers ──────────────────────────────
+  - id: developer-wakes
+    narrative: |
+      The `ready` label fired a GitHub trigger, and the Developer agent woke up automatically — the trigger event is visible right in its chat, delivered over the session stream. No one opened this chat to prompt it; the label alone set it in motion. The Developer then does the whole implementation on its own — a feature branch, the change, tests — opens a Pull Request and labels it `ready-for-review`. The hand-off is again just a label, and that label is what will wake the Code Reviewer. The Developer never reviews or merges its own work.
+    # Hop 2 — issues.labeled woke the Developer: assert the trigger.fired event on
+    # the Developer's own session SSE stream (the "trigger visible in its chat").
+    assert:
+      do: chat.expectTriggerFired
+      agentId: iban-demo-developer
+
+  # Hop 3 — Developer → PR: a PR exists carrying `ready-for-review`.
+  - id: pr-opened
+    assert:
+      do: gh.expectPrExists
+      repo: e2e/fixture
+      hasLabel: ready-for-review
+
+  # ── Slide 14: the Code Reviewer verifies ────────────────────────────────────
+  - id: reviewer-verdict
+    narrative: |
+      Same pattern again: the `ready-for-review` label on the pull request fired a trigger, and the Code Reviewer wakes up on its own. It reviews the change against the issue's acceptance criteria, posts a structured review comment, and applies `ready-to-merge`. And here's the important line: a human performs the merge. The Code Reviewer recommends; it never merges.
+    # Hop 4 — the reviewer posted its verdict comment on the PR.
+    assert:
+      do: gh.expectComment
+      repo: e2e/fixture
+      bodyIncludes: "ready to merge"
+
+  # Hop 5 — the reviewer's `ready-to-merge` hand-off label is on the PR.
+  - id: ready-to-merge
+    assert:
+      do: gh.expectPrExists
+      repo: e2e/fixture
+      hasLabel: ready-to-merge
+
+  # ── Slide 15: control point 2 — the merge (narrative-only) ──────────────────
+  - kind: narrative-only
+    narrative: |
+      And this is where we land: a pull request marked ready to merge, carrying the `ready-to-merge` label the Code Reviewer applied, closing the issue. The merge itself is the human's second control point — deliberately out of scope for this automated loop (matching the happy path, which skips the rework loop).
+
+      Step back and look at what happened. From a one-line idea in a chat, a team of agents produced a specified issue, an implementation and a reviewed, merge-ready pull request — hand-off to hand-off, each step triggered automatically by a GitHub label, no one manually shuttling work between agents. The human stayed in control at exactly the two points that matter. That's the promise of working with agents in the Agent Studio.

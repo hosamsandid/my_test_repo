@@ -1,4 +1,4 @@
-// CLI: node --import tsx src/render.ts <project-slug> <basename.mp4>
+// CLI: node --import tsx revideo/render.ts <project-slug> <basename.mp4>
 //
 // Renders to the project's `out/` (so Revideo's `resolvePath(output, '../public', src)`
 // resolves audio assets to `./public/...` — see AUDIO-FIX-REPORT.md for the
@@ -35,7 +35,7 @@ if (!slug || !outName) {
   process.exit(1);
 }
 
-const projectFile = `./src/projects/${slug}.tsx`;
+const projectFile = `./revideo/${slug}.tsx`;
 const outRoot = join(root, "out");
 const finalDir = join(outRoot, "final");
 const intermediateDir = join(outRoot, "intermediate");

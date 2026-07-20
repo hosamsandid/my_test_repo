@@ -2,7 +2,7 @@
 
 Reads scripts/narration.json and writes:
   - public/audio/<id>.mp3
-  - public/audio/audio-manifest.json
+  - data/audio-manifest.json
 """
 from __future__ import annotations
 
@@ -19,8 +19,9 @@ RATE = "-5%"
 ROOT = Path(__file__).resolve().parent.parent
 NARRATION = ROOT / "scripts" / "narration.json"
 AUDIO_DIR = ROOT / "public" / "audio"
-# Manifest goes inside src/data/ so Vite can import it statically.
-MANIFEST = ROOT / "src" / "data" / "audio-manifest.json"
+# Manifest goes inside data/ so Vite can import it statically
+# (audio.tsx imports "../../data/audio-manifest.json").
+MANIFEST = ROOT / "data" / "audio-manifest.json"
 
 
 async def synth(entry_id: str, text: str) -> dict:

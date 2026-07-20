@@ -94,6 +94,23 @@ jobs:
         working-directory: agent-image/scripts
         run: python -m pytest test_agent_entrypoint.py test_knowledge.py -q
 
+  # The walkthrough-video chapter selection (#749) is pure ESM — no @revideo, no
+  # ffmpeg, no browser — so its unit tests run on the fast PR lane (like the
+  # journey tooling below), while the heavy render stays in the manual
+  # walkthrough-video.yml workflow. No install step: `node --test` needs nothing.
+  walkthrough-video-unit:
+    name: walkthrough video (unit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Chapter-selection unit tests (node --test)
+        working-directory: e2e/video
+        run: npm run test:unit
+
   # The journey tooling (#706) is deliberately podman-free: schema/catalog/lint
   # and dry-run resolution are pure Node, so they belong on the fast PR lane
   # (this workflow), NOT the nightly podman e2e lane. `npm install` (not `npm ci`

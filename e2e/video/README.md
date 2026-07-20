@@ -131,6 +131,23 @@ export PUPPETEER_EXECUTABLE_PATH="$(node -e "console.log(require('playwright').c
   || ls ~/Library/Caches/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-mac-arm64/chrome-headless-shell | tail -1)"
 ```
 
+## Manual CI render (`walkthrough-video.yml`, #749)
+
+The render runs as its own **manual** workflow, `.github/workflows/walkthrough-video.yml`
+(`workflow_dispatch` — never on a schedule or a PR). Start it from the Actions UI
+with:
+
+- **journeys** — `all` (default) or comma-separated chapter ids (`team-setup,iban-story`).
+- **language** — narration language; reserved for the language decision, not yet consumed.
+- **slowmo** — reserved; the audio-driven render ignores it (audio drives dwell, not slowMo).
+
+It installs ffmpeg + Chromium, runs `npm run render:walkthrough` (which renders the
+selected chapters via `scripts/render-walkthrough.mjs` + `scripts/chapters.mjs`), and
+uploads `out/final/` as the `walkthrough-video` artifact. Add a chapter by adding a
+`render:<id>` script here and an entry to `CHAPTERS` in `scripts/chapters.mjs`; the
+selection logic is unit-tested (`npm run test:unit`, dependency-free) and runs on the
+fast CI lane.
+
 ## Open tickets on this lane
 
 T1 #749 (dispatch trigger) · **T2 #742 (spike + finalise patches)** · T3 #743

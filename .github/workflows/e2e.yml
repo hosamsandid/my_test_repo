@@ -188,3 +188,65 @@ jobs:
       - name: Force teardown (safety net)
         if: always()
         run: ./e2e/scripts/stack-down.sh || true
+
+  # ── Journey walkthrough video (#712, docs/journey-spec-concept.md §3.3) ───────
+  # The video lane is heavier (records the journeys a second time, with slowMo)
+  # and needs ffmpeg, so it is its own job rather than bolted onto the screenshot
+  # suite — a red video assembly never blocks the F0–F4 report. Dispatched/nightly
+  # only, like the parent workflow. The `journey-video` Playwright project brings
+  # the aee-e2e stack up via global-setup, records one .webm per journey (saved on
+  # success to e2e/artifacts/<journeyId>/journey.webm), then ffmpeg concats them
+  # with generated title cards. Final watch-through is a human step (PR request).
+  journey-video:
+    needs: podman-preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CI: 'true'
+      E2E_VIDEO: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install jq (setup.sh prerequisite) + ffmpeg + fonts (title cards)
+        # ffmpeg is NOT assumed to exist anywhere but here (agent containers lack
+        # it); fonts-dejavu-core gives drawtext a real font for the title cards.
+        run: sudo apt-get update && sudo apt-get install -y jq ffmpeg fonts-dejavu-core
+
+      - name: Start rootless podman API socket
+        run: |
+          set -euo pipefail
+          systemctl --user enable --now podman.socket \
+            || podman system service --time=0 "unix://${XDG_RUNTIME_DIR}/podman/podman.sock" &
+          SOCK="${XDG_RUNTIME_DIR}/podman/podman.sock"
+          for i in $(seq 1 20); do
+            [ -S "$SOCK" ] && break
+            sleep 0.5
+          done
+          echo "PODMAN_HOST_SOCKET=${SOCK}" >> "$GITHUB_ENV"
+
+      - name: Record journey videos (journey-video project — brings up stack, tears down)
+        run: cd e2e && npm ci && npx playwright install --with-deps chromium && npm run video:journeys
+
+      - name: Assemble walkthrough video (ffmpeg)
+        # Runs even if a journey failed: it assembles from whatever clips the run
+        # captured (a failing journey saves none) + the always-present title cards,
+        # so a partial video is still produced and uploaded for inspection.
+        if: always()
+        run: cd e2e && npm run video:assemble
+
+      - name: Upload walkthrough video
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: walkthrough-video
+          path: artifacts/agent-studio-walkthrough.webm
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Force teardown (safety net)
+        if: always()
+        run: ./e2e/scripts/stack-down.sh || true

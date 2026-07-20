@@ -41,7 +41,7 @@ GIT_DIRTY  := $(shell git status --porcelain 2>/dev/null | grep -q . && echo dir
 # back to "unknown".
 export GIT_COMMIT GIT_DIRTY
 
-.PHONY: up down restart build agent-image update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers e2e e2e-gate e2e-up e2e-down docs-journeys docs-journeys-check docs-deck
+.PHONY: up down restart build agent-image update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers e2e e2e-gate e2e-up e2e-down docs-journeys docs-journeys-check docs-deck video-journeys
 
 # `up` depends on `agent-image` so a fresh bring-up always has the per-agent
 # runtime image built (the agent image is NOT a compose service — it's pulled
@@ -222,5 +222,26 @@ docs-journeys-check:
 docs-deck:
 	cd e2e && npm install --no-audit --no-fund --silent && npm run docs:deck
 
+# ── Journey walkthrough video (docs/journey-spec-concept.md §3.3, #712) ────────
+# Assemble ONE walkthrough .webm from the journeys: a `journey-video` Playwright
+# run records one clip per journey (video: on + slowMo, same deterministic
+# viewport as the screenshot run), then an ffmpeg script concats the clips with
+# title cards generated from each journey title + its narrative-only steps.
+# TWO steps because they have different prerequisites:
+#   1. the record step needs the full podman e2e stack (like `make e2e`);
+#   2. the assemble step needs ffmpeg — installed in CI (apt-get), NOT assumed in
+#      agent containers. `npm run video:plan` prints the ffmpeg-free build plan.
+# Reads/writes the same parameterisable artifacts dir as docs-journeys/docs-deck:
+#   make video-journeys                        # record + assemble (needs stack + ffmpeg)
+#   E2E_ARTIFACTS_DIR=/path make video-journeys # assemble from CI-downloaded clips
+# Output: artifacts/agent-studio-walkthrough.webm (a build artifact — CI-uploaded
+# and human-watched, never committed; see .gitignore). Final watch-through is a
+# human step.
+video-journeys:
+	cd e2e && npm install --no-audit --no-fund --silent \
+	  && E2E_VIDEO=1 npx playwright install --with-deps chromium \
+	  && npm run video:journeys \
+	  && npm run video:assemble
+
 help:
-	@echo "Targets: up, down, restart, build, agent-image, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, e2e, e2e-gate, e2e-up, e2e-down, docs-journeys, docs-journeys-check, docs-deck"
+	@echo "Targets: up, down, restart, build, agent-image, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, e2e, e2e-gate, e2e-up, e2e-down, docs-journeys, docs-journeys-check, docs-deck, video-journeys"

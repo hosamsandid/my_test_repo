@@ -10,7 +10,10 @@
     "tts": "npm run tts:extract && python3 scripts/generate-tts.py",
     "prep:clips": "node -e \"const fs=require('fs');fs.mkdirSync('public',{recursive:true});for(const f of fs.readdirSync('fixtures').filter(f=>f.endsWith('.mp4')))fs.copyFileSync('fixtures/'+f,'public/'+f)\"",
     "render:example": "npm run prep:clips && cross-env DISABLE_TELEMETRY=true node --import tsx revideo/render.ts example-variant-c example-variant-c.mp4",
-    "clean": "node -e \"require('fs').rmSync('out',{recursive:true,force:true})\""
+    "clean": "node -e \"require('fs').rmSync('out',{recursive:true,force:true})\"",
+    "prep:shots": "node -e \"const fs=require('fs');fs.mkdirSync('public/shots',{recursive:true});for(const f of fs.readdirSync('fixtures/shots'))fs.copyFileSync('fixtures/shots/'+f,'public/shots/'+f)\"",
+    "render:team-setup": "npm run prep:shots && npm run prep:audio && cross-env DISABLE_TELEMETRY=true node --import tsx revideo/render.ts example-team-setup team-setup-walkthrough.mp4",
+    "prep:audio": "node -e \"const fs=require('fs');fs.mkdirSync('public/audio',{recursive:true});for(const f of fs.readdirSync('fixtures/audio').filter(f=>f.endsWith('.mp3')))fs.copyFileSync('fixtures/audio/'+f,'public/audio/'+f);fs.copyFileSync('fixtures/audio/audio-manifest.json','data/audio-manifest.json')\""
   },
   "dependencies": {
     "@revideo/2d": "0.10.4",

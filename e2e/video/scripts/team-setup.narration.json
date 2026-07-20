@@ -1,0 +1,8 @@
+[
+ {"id":"ts-intro","text":"Let's set up a team of agents that work together on one repository. The wizard guides us through five steps, ending in a review before anything is created."},
+ {"id":"ts-process","text":"First, the process — the central decision. We pick the Core SDLC template: four agents that cover a full build and review loop. A Business Analyst writes issues, a Developer implements them, a Code Reviewer checks the change, and a Reworker handles feedback."},
+ {"id":"ts-env","text":"Next, the working environment — where the team operates. It bundles the repository, the branch, and the credentials into one reusable template, so we just pick one from the grid."},
+ {"id":"ts-team","text":"Step three gives the team its identity: a name and an ID, both pre-filled from the environment. The ID becomes the prefix for every agent the team creates, like agentic demos developer."},
+ {"id":"ts-knowledge","text":"Knowledge is optional. Here we choose the skills every member inherits, the sources it can query at runtime, and how learnings are shared across the team. We accept the defaults."},
+ {"id":"ts-review","text":"Finally, review — everything in one place. When we hit create, the wizard builds the whole team in one atomic transaction, each member with its own chat identity, ready for the first issue."}
+]

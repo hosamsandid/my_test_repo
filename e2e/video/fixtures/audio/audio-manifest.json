@@ -1,0 +1,26 @@
+{
+  "ts-intro": {
+    "durationSec": 10.039,
+    "mediaFile": "ts-intro.mp3"
+  },
+  "ts-process": {
+    "durationSec": 18.947,
+    "mediaFile": "ts-process.mp3"
+  },
+  "ts-env": {
+    "durationSec": 11.776,
+    "mediaFile": "ts-env.mp3"
+  },
+  "ts-team": {
+    "durationSec": 13.842,
+    "mediaFile": "ts-team.mp3"
+  },
+  "ts-knowledge": {
+    "durationSec": 11.145,
+    "mediaFile": "ts-knowledge.mp3"
+  },
+  "ts-review": {
+    "durationSec": 13.211,
+    "mediaFile": "ts-review.mp3"
+  }
+}

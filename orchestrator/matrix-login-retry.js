@@ -9,6 +9,20 @@
 // the blind sleeps (which slows every fast run), we retry the *login* with
 // bounded exponential backoff until the admin bot catches up.
 //
+// The same race also surfaces as `M_USER_DEACTIVATED` (issue #711): when a
+// same-named team is re-created (the E2E journeys tear a team down and
+// re-materialise it), `deactivateMatrixUser` has flagged each account
+// `deactivated`. `ensureMatrixUser` re-sends `reset-password
+// --convert-to-local-account` (which clears that flag — see
+// matrix-admin-commands.js) *before* the login, but on a loaded stack the admin
+// bot may not have processed the convert command by the time the fixed sleeps
+// elapse, so the login sees a still-deactivated account and returns
+// `M_USER_DEACTIVATED`. Because every login is preceded by that reactivation
+// command, a lingering `M_USER_DEACTIVATED` is always this transient race — not
+// a genuinely-permanent state — so it is retryable on exactly the same footing
+// as `M_FORBIDDEN`: the retried login succeeds once the convert lands, and a
+// truly unrecoverable account just fails after the ceiling instead of instantly.
+//
 // The clock (`now`) and the sleeper (`sleep`) are injectable so the retry
 // behaviour can be unit-tested deterministically without a real timer or a
 // live homeserver.
@@ -32,6 +46,24 @@ function isForbiddenError(err) {
   return /M_FORBIDDEN/.test(msg);
 }
 
+// Does this login error indicate the account is still flagged `deactivated`?
+// Every login is preceded by `ensureMatrixUser`'s `reset-password
+// --convert-to-local-account` reactivation command, so at login time a lingering
+// `M_USER_DEACTIVATED` means the admin bot has not processed that convert yet —
+// the same cold-stack provisioning race as `M_FORBIDDEN` (issue #711).
+function isDeactivatedError(err) {
+  if (!err) return false;
+  const msg = typeof err === "string" ? err : err.message || "";
+  return /M_USER_DEACTIVATED/.test(msg);
+}
+
+// The default retry classifier: retry a login while it fails with either flavour
+// of the provisioning race — the account not yet visible (`M_FORBIDDEN`) or not
+// yet reactivated (`M_USER_DEACTIVATED`). Any other error propagates at once.
+function isRetryableLoginError(err) {
+  return isForbiddenError(err) || isDeactivatedError(err);
+}
+
 // Exponential backoff delay (ms) for retry number `attempt` (0-indexed), capped
 // at maxDelayMs.
 function backoffDelay(
@@ -44,8 +76,8 @@ function backoffDelay(
 
 // Run `attemptFn` (async, returns the login result). On success, return it. On
 // failure:
-//   - if `shouldRetry(err)` is false → rethrow immediately (non-M_FORBIDDEN
-//     errors are never masked by the retry loop);
+//   - if `shouldRetry(err)` is false → rethrow immediately (errors outside the
+//     provisioning race are never masked by the retry loop);
 //   - otherwise back off and retry, until the next sleep would cross `ceilingMs`
 //     of total elapsed time, at which point the last error is rethrown.
 //
@@ -53,7 +85,7 @@ function backoffDelay(
 // unchanged (first-attempt success is returned immediately).
 async function retryWhile(attemptFn, options = {}) {
   const {
-    shouldRetry = isForbiddenError,
+    shouldRetry = isRetryableLoginError,
     ceilingMs = DEFAULT_CEILING_MS,
     baseDelayMs = DEFAULT_BASE_DELAY_MS,
     maxDelayMs = DEFAULT_MAX_DELAY_MS,
@@ -82,6 +114,8 @@ async function retryWhile(attemptFn, options = {}) {
 module.exports = {
   retryWhile,
   isForbiddenError,
+  isDeactivatedError,
+  isRetryableLoginError,
   backoffDelay,
   DEFAULT_CEILING_MS,
   DEFAULT_BASE_DELAY_MS,

@@ -560,6 +560,16 @@ function spawnContainer({ id, env }) {
     if (envMap.ORCHESTRATOR_INTERNAL_URL) {
       envMap.ORCHESTRATOR_INTERNAL_URL = rewriteHostname(envMap.ORCHESTRATOR_INTERNAL_URL, 'orchestrator');
     }
+    // #711: the e2e stack points agents at the in-stack fake-github via
+    // GITHUB_API_BASE=http://fake-github (spread from the orchestrator env). The
+    // role playbooks curl it directly, so the short alias must resolve on the
+    // isolated per-agent network — rewrite it to the guaranteed-resolvable full
+    // container name, exactly as for conduwuit/orchestrator above. Production is
+    // untouched: GITHUB_API_BASE is unset there (api.github.com), so `://fake-github`
+    // never matches and this is a no-op.
+    if (envMap.GITHUB_API_BASE) {
+      envMap.GITHUB_API_BASE = rewriteHostname(envMap.GITHUB_API_BASE, 'fake-github');
+    }
   }
 
   // Seam #2: provision the per-agent network up-front (with connected

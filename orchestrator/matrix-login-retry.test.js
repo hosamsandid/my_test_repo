@@ -6,6 +6,8 @@ const assert = require("node:assert");
 const {
   retryWhile,
   isForbiddenError,
+  isDeactivatedError,
+  isRetryableLoginError,
   backoffDelay,
   DEFAULT_CEILING_MS,
   DEFAULT_MAX_DELAY_MS,
@@ -34,6 +36,12 @@ function forbidden() {
   return new Error('Login failed: {"errcode":"M_FORBIDDEN","error":"unknown"}');
 }
 
+function deactivated() {
+  return new Error(
+    'Login failed: {"errcode":"M_USER_DEACTIVATED","error":"M_USER_DEACTIVATED: The user has been deactivated"}'
+  );
+}
+
 // ---- isForbiddenError --------------------------------------------------------
 
 test("isForbiddenError matches the M_FORBIDDEN login failure (Error or string)", () => {
@@ -43,6 +51,29 @@ test("isForbiddenError matches the M_FORBIDDEN login failure (Error or string)",
   assert.equal(isForbiddenError(new Error("Login failed: M_USER_DEACTIVATED")), false);
   assert.equal(isForbiddenError(null), false);
   assert.equal(isForbiddenError(undefined), false);
+});
+
+// ---- isDeactivatedError ------------------------------------------------------
+
+test("isDeactivatedError matches the M_USER_DEACTIVATED login failure (Error or string)", () => {
+  assert.equal(isDeactivatedError(deactivated()), true);
+  assert.equal(isDeactivatedError("Login failed: M_USER_DEACTIVATED"), true);
+  assert.equal(isDeactivatedError(forbidden()), false);
+  assert.equal(isDeactivatedError(new Error("network down")), false);
+  assert.equal(isDeactivatedError(null), false);
+  assert.equal(isDeactivatedError(undefined), false);
+});
+
+// ---- isRetryableLoginError (the default classifier) --------------------------
+
+test("isRetryableLoginError covers BOTH provisioning-race flavours, nothing else", () => {
+  assert.equal(isRetryableLoginError(forbidden()), true);
+  assert.equal(isRetryableLoginError(deactivated()), true);
+  assert.equal(isRetryableLoginError("Login failed: M_FORBIDDEN"), true);
+  assert.equal(isRetryableLoginError("Login failed: M_USER_DEACTIVATED"), true);
+  assert.equal(isRetryableLoginError(new Error("Login failed: M_UNKNOWN_TOKEN")), false);
+  assert.equal(isRetryableLoginError(new Error("network down")), false);
+  assert.equal(isRetryableLoginError(null), false);
 });
 
 // ---- backoffDelay ------------------------------------------------------------
@@ -93,6 +124,25 @@ test("retries M_FORBIDDEN and succeeds on the Nth attempt", async () => {
   assert.deepEqual(clock.sleeps, [500, 1000, 2000]);
 });
 
+// ---- retryWhile: M_USER_DEACTIVATED is retried too (issue #711) ---------------
+
+test("retries M_USER_DEACTIVATED (re-created same-named team race) and succeeds", async () => {
+  const clock = fakeClock();
+  let calls = 0;
+  const token = await retryWhile(
+    async () => {
+      calls += 1;
+      if (calls < 3) throw deactivated();
+      return "tok-reactivated";
+    },
+    { now: clock.now, sleep: clock.sleep, baseDelayMs: 500, maxDelayMs: 5000 }
+  );
+  assert.equal(token, "tok-reactivated");
+  assert.equal(calls, 3);
+  // Two backoffs before the 3rd (successful, post-reactivation) attempt.
+  assert.deepEqual(clock.sleeps, [500, 1000]);
+});
+
 // ---- retryWhile: respects the ceiling ----------------------------------------
 
 test("stops retrying once the ceiling is reached and rethrows the last error", async () => {
@@ -132,18 +182,18 @@ test("never sleeps past the ceiling (total virtual time stays under it)", async 
 
 // ---- retryWhile: non-retryable errors propagate immediately ------------------
 
-test("propagates a non-M_FORBIDDEN error immediately without retrying", async () => {
+test("propagates an error outside the provisioning race immediately without retrying", async () => {
   const clock = fakeClock();
   let calls = 0;
   await assert.rejects(
     retryWhile(
       async () => {
         calls += 1;
-        throw new Error("Login failed: M_USER_DEACTIVATED");
+        throw new Error("Login failed: M_UNKNOWN_TOKEN");
       },
       { now: clock.now, sleep: clock.sleep }
     ),
-    /M_USER_DEACTIVATED/
+    /M_UNKNOWN_TOKEN/
   );
   assert.equal(calls, 1); // no retry
   assert.deepEqual(clock.sleeps, []);

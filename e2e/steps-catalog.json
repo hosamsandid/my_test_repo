@@ -5,6 +5,8 @@
     "wizard",
     "agents",
     "teardown",
+    "gh",
+    "chat",
     "templates"
   ],
   "steps": [
@@ -87,6 +89,96 @@
       "example": "- assert:\n    do: agents.expectTeamCard\n    teamId: agentic-demos\n    roleIds: [business-analyst, developer]"
     },
     {
+      "name": "chat.ensureDmRoom",
+      "module": "chat",
+      "description": "",
+      "params": []
+    },
+    {
+      "name": "chat.expectReplyBubble",
+      "module": "chat",
+      "description": "",
+      "params": []
+    },
+    {
+      "name": "chat.expectSessionLogResult",
+      "module": "chat",
+      "description": "",
+      "params": []
+    },
+    {
+      "name": "chat.expectTriggerFired",
+      "module": "chat",
+      "description": "Assert that a github-event TRIGGER woke this agent, observed on the session SSE stream (#711 — \"trigger fired = the agent's chat shows the trigger event via SSE\"). The runtime appends a `trigger.fired` event to the session log at the head of every triggered run (agent-entrypoint.py `_execute_inner`); we subscribe to that agent's session stream from byte 0 and resolve on it. Self- contained: resolves the agent's DM room id itself (the trigger posts there), so the journey YAML only names the agentId. The stream endpoint holds the connection open even before the log file exists, so subscribing right after applying the label is safe (no lost event, no sleep).",
+      "params": [
+        {
+          "name": "agentId",
+          "required": true,
+          "type": "string",
+          "description": "Id of the agent expected to be woken by the trigger."
+        },
+        {
+          "name": "timeoutMs",
+          "required": false,
+          "type": "number",
+          "default": "60000",
+          "description": "Max time to wait for the trigger.fired event."
+        }
+      ]
+    },
+    {
+      "name": "chat.marker",
+      "module": "chat",
+      "description": "",
+      "params": []
+    },
+    {
+      "name": "chat.open",
+      "module": "chat",
+      "description": "Open an agent's DM chat and wait for the composer to be ready.",
+      "params": [
+        {
+          "name": "agentId",
+          "required": true,
+          "type": "string",
+          "description": "Id of the agent whose DM chat to open."
+        }
+      ]
+    },
+    {
+      "name": "chat.send",
+      "module": "chat",
+      "description": "Type a message and send it via the Send control (the same path a human uses; plain Enter is a newline, the button is disabled until the text is non-empty).",
+      "params": [
+        {
+          "name": "text",
+          "required": true,
+          "type": "string",
+          "description": "Message body to type and send."
+        }
+      ]
+    },
+    {
+      "name": "chat.waitForAgentReady",
+      "module": "chat",
+      "description": "Wait until the agent's RUNTIME is demonstrably up before sending the first message. The runtime drops any m.room.message whose origin_server_ts predates its own process start (agent-entrypoint.py, `ts < start_time_ms`) — so a send that races the container boot is silently ignored BY DESIGN, and F2 would time out without any product bug. `/api/agents/statuses` flips the agent from `offline` to `idle` exactly when the runtime has booted and pushed its status.json (#185) — after that point, a fresh message is inside the processing contract. Bounded poll, no sleeps beyond the interval tick.",
+      "params": [
+        {
+          "name": "agentId",
+          "required": true,
+          "type": "string",
+          "description": "Id of the agent whose runtime to wait for."
+        },
+        {
+          "name": "timeoutMs",
+          "required": false,
+          "type": "number",
+          "default": "90000",
+          "description": "Max time to wait for readiness."
+        }
+      ]
+    },
+    {
       "name": "env.createFixtureEnv",
       "module": "env",
       "description": "Create a Working Environment pointing at the in-stack git-remote fixture repo. Credential-less on purpose: no sshKeyId, no githubTokenId — the orchestrator clones `http://git-remote/…` anonymously and the poller ignores a token-less env, so the team materialises with zero external dependencies.",
@@ -120,6 +212,25 @@
       "example": "- action:\n    do: env.createFixtureEnv\n    id: agentic-demos-env\n    name: Agentic Demos\n    repoUrl: \"http://git-remote/e2e/fixture.git\""
     },
     {
+      "name": "env.createFixtureToken",
+      "module": "env",
+      "description": "Create a GitHub token so the poller will poll the fixture repo (#711). The value is a syntactically-valid but fake PAT — the in-stack fake-github ignores auth entirely; it only needs to EXIST so `env.githubTokenId` resolves and the repo enters the poll plan. Idempotent via a fixed id (409 = already there).",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "string",
+          "description": "Slug id for the token (referenced by the env)."
+        },
+        {
+          "name": "name",
+          "required": false,
+          "type": "string",
+          "description": "Human-readable name."
+        }
+      ]
+    },
+    {
       "name": "env.deleteEnv",
       "module": "env",
       "description": "Idempotent teardown — 204 (deleted) and 404 (already gone) are both success, so a re-run or a partially-failed spec leaves no environment behind.",
@@ -132,6 +243,165 @@
         }
       ],
       "example": "- action:\n    do: env.deleteEnv\n    id: agentic-demos-env"
+    },
+    {
+      "name": "env.deleteFixtureToken",
+      "module": "env",
+      "description": "Idempotent token teardown — 204 (deleted) and 404 (already gone) are success.",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "string",
+          "description": "Id of the GitHub token to delete."
+        }
+      ]
+    },
+    {
+      "name": "gh.applyLabel",
+      "module": "gh",
+      "description": "",
+      "params": []
+    },
+    {
+      "name": "gh.applyLabelToLatestIssue",
+      "module": "gh",
+      "description": "Apply a label to the NEWEST issue in a repo (the human control point) without the journey needing to know the issue number the BA playbook chose. Polls briefly for the issue to appear (the BA agent creates it asynchronously), then applies the label. Returns the issue number it labelled.",
+      "params": [
+        {
+          "name": "repo",
+          "required": true,
+          "type": "string",
+          "description": "\"owner/name\" of the repo on fake-github."
+        },
+        {
+          "name": "label",
+          "required": true,
+          "type": "string",
+          "description": "Label to apply (e.g. `ready`)."
+        },
+        {
+          "name": "timeoutMs",
+          "required": false,
+          "type": "number",
+          "default": "30000",
+          "description": "Max time to wait for the issue to appear."
+        }
+      ]
+    },
+    {
+      "name": "gh.createIssue",
+      "module": "gh",
+      "description": "",
+      "params": []
+    },
+    {
+      "name": "gh.expectComment",
+      "module": "gh",
+      "description": "Poll until a comment whose body includes `bodyIncludes` exists (proves the Code Reviewer posted its verdict, #711). Number-agnostic — matches any issue/PR comment on the repo.",
+      "params": [
+        {
+          "name": "repo",
+          "required": true,
+          "type": "string",
+          "description": "\"owner/name\" of the repo on fake-github."
+        },
+        {
+          "name": "bodyIncludes",
+          "required": true,
+          "type": "string",
+          "description": "Substring the comment body must contain."
+        },
+        {
+          "name": "timeoutMs",
+          "required": false,
+          "type": "number",
+          "default": "45000",
+          "description": "Max time to wait."
+        }
+      ]
+    },
+    {
+      "name": "gh.expectEvent",
+      "module": "gh",
+      "description": "",
+      "params": []
+    },
+    {
+      "name": "gh.expectIssue",
+      "module": "gh",
+      "description": "",
+      "params": []
+    },
+    {
+      "name": "gh.expectIssueExists",
+      "module": "gh",
+      "description": "Poll until an issue exists in the repo (proves the BA→issue hop) — optionally carrying a label. Number-agnostic so the journey stays declarative.",
+      "params": [
+        {
+          "name": "repo",
+          "required": true,
+          "type": "string",
+          "description": "\"owner/name\" of the repo on fake-github."
+        },
+        {
+          "name": "hasLabel",
+          "required": false,
+          "type": "string",
+          "description": "If set, require an issue carrying this label."
+        },
+        {
+          "name": "timeoutMs",
+          "required": false,
+          "type": "number",
+          "default": "30000",
+          "description": "Max time to wait."
+        }
+      ]
+    },
+    {
+      "name": "gh.expectPr",
+      "module": "gh",
+      "description": "",
+      "params": []
+    },
+    {
+      "name": "gh.expectPrExists",
+      "module": "gh",
+      "description": "Poll until a PR exists in the repo (proves the Developer→PR hop) — optionally carrying a label (e.g. ready-for-review / ready-to-merge). Number-agnostic.",
+      "params": [
+        {
+          "name": "repo",
+          "required": true,
+          "type": "string",
+          "description": "\"owner/name\" of the repo on fake-github."
+        },
+        {
+          "name": "hasLabel",
+          "required": false,
+          "type": "string",
+          "description": "If set, require a PR carrying this label."
+        },
+        {
+          "name": "timeoutMs",
+          "required": false,
+          "type": "number",
+          "default": "45000",
+          "description": "Max time to wait."
+        }
+      ]
+    },
+    {
+      "name": "gh.fakeGithubBaseUrl",
+      "module": "gh",
+      "description": "",
+      "params": []
+    },
+    {
+      "name": "gh.reset",
+      "module": "gh",
+      "description": "",
+      "params": []
     },
     {
       "name": "teardown.deleteEnv",
@@ -360,6 +630,63 @@
     }
   ],
   "fixtures": [
+    {
+      "name": "ibanStoryTeam",
+      "description": "ibanStoryTeam: the IBAN-story journey's precondition (#711). Stands up the WHOLE label-chain stack in one atomic precondition so the journey body only drives the hops: it (1) resets fake-github so the run starts from clean GitHub state, (2) creates a fake GitHub token so the poller actually polls the fixture repo (a token-less env is ignored by the poller), (3) creates a credential-carrying Working Environment pointing at the in-stack git remote, and (4) materialises a full Core SDLC team FROM THE PROCESS-TEMPLATE BUNDLE — so `POST /api/teams` runs `expandGithubChannels` and the Developer/Code-Reviewer get the derived github-event channel triggers (issues.labeled=`ready`, pull_request.labeled= `ready-for-review`) that carry the label chain. Bare `roles` would materialise the same agents WITHOUT those channels. FIXED ids keep the journey re-runnable on the same stack: setup pre-cleans any leftover team+env+token from a crashed prior run, and teardown removes the team, env and token this journey created — one deterministic, idempotent surface.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team slug id to create (also its member prefix)."
+        },
+        {
+          "name": "teamName",
+          "required": true,
+          "type": "string",
+          "description": "Team display name."
+        },
+        {
+          "name": "envId",
+          "required": true,
+          "type": "string",
+          "description": "Fixture environment id to create."
+        },
+        {
+          "name": "envName",
+          "required": true,
+          "type": "string",
+          "description": "Fixture environment display name."
+        },
+        {
+          "name": "repoUrl",
+          "required": true,
+          "type": "string",
+          "description": "Git URL the environment points at (the in-stack git remote)."
+        },
+        {
+          "name": "tokenId",
+          "required": true,
+          "type": "string",
+          "description": "Fixture GitHub-token id (referenced by the env)."
+        },
+        {
+          "name": "branch",
+          "required": false,
+          "type": "string",
+          "default": "main",
+          "description": "Branch to track."
+        },
+        {
+          "name": "templateId",
+          "required": false,
+          "type": "string",
+          "default": "core-sdlc",
+          "description": "Process template to materialise."
+        }
+      ],
+      "example": "fixtures:\n  - fixture: ibanStoryTeam\n    params:\n      teamId: iban-demo\n      teamName: IBAN Demo\n      envId: iban-demo-env\n      envName: IBAN Demo\n      repoUrl: \"http://git-remote/e2e/fixture.git\"\n      tokenId: iban-demo-token"
+    },
     {
       "name": "teamEnv",
       "description": "teamEnv: the Team-Setup pilot's precondition. Seeds a credential-less Working Environment pointing at the in-stack git remote, so the wizard can materialise a team with zero external dependencies. Because the journey uses FIXED ids (for screenshot determinism, §7), setup first tears down any leftover team+env from a crashed prior run, and teardown removes the team this journey creates plus the fixture env — one deterministic, idempotent surface.",

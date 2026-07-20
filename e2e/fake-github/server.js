@@ -27,14 +27,26 @@ function makeState() {
     repos: new Map(), // "owner/repo" -> repo record
     seq: 0, // monotonic id source for events, issues, PRs (shared, simple)
     clock: 0, // monotonic fake clock; distinct created_at per mutation
+    // Real wall-clock base captured at state creation / reset (#711). Event
+    // created_at MUST be anchored to real time, not a fixed 2023 epoch: the
+    // production GitHub poller gates every event by the subscriber's real-time
+    // history horizon (activatedAt/createdAt, widened by a 5-min grace —
+    // github-poller.js passesHorizon), so a fixed-epoch 2023 timestamp is always
+    // older than a team materialised "now" and the label-chain events get
+    // dropped before reaching the Developer/Reviewer. Anchoring to reset-time
+    // (the ibanStoryTeam fixture resets fake-github just before materialising)
+    // keeps events inside the horizon window. The monotonic `clock` increment
+    // preserves strictly-increasing, distinct timestamps for ordering assertions.
+    epoch: Date.now(),
   };
 }
 
 function isoAt(state) {
-  // Deterministic, strictly-increasing timestamps (real Date not needed and
-  // would make assertions flaky). Base epoch is arbitrary but fixed.
+  // Strictly-increasing timestamps anchored to the real wall-clock base (see
+  // makeState); the +1000ms step guarantees distinct, ordered created_at values
+  // without depending on the host clock's resolution.
   state.clock += 1000;
-  return new Date(1_700_000_000_000 + state.clock).toISOString();
+  return new Date(state.epoch + state.clock).toISOString();
 }
 
 function repoKey(owner, repo) {
@@ -51,6 +63,7 @@ function getRepo(state, owner, repo) {
       name: repo,
       issues: new Map(), // number -> issue
       pulls: new Map(), // number -> pull
+      comments: new Map(), // number -> [ { id, body, user } ] (issue == PR namespace)
       labels: new Map(), // name -> { name, color }
       events: [], // newest first
       etag: 'W/"0"',
@@ -155,6 +168,26 @@ function addLabels(state, owner, repo, kind, number, names) {
   return kind === 'pulls' ? pullView(r, target) : issueView(r, target);
 }
 
+// Add a comment to an issue OR a PR (GitHub shares the issues/:n/comments
+// endpoint for both — #711, the Code Reviewer posts its verdict here). Numbers
+// come from the shared `state.seq`, so an issue and a PR never collide on `n`.
+function addComment(state, owner, repo, number, body) {
+  const r = getRepo(state, owner, repo);
+  const target = r.issues.get(number) || r.pulls.get(number);
+  if (!target) return null;
+  state.seq += 1;
+  const comment = { id: state.seq, body: body || '', user: { login: 'e2e' }, created_at: isoAt(state) };
+  const list = r.comments.get(number) || [];
+  list.push(comment);
+  r.comments.set(number, list);
+  return comment;
+}
+
+function listComments(state, owner, repo, number) {
+  const r = getRepo(state, owner, repo);
+  return r.comments.get(number) || [];
+}
+
 function removeLabel(state, owner, repo, kind, number, name) {
   const r = getRepo(state, owner, repo);
   const target = kind === 'pulls' ? r.pulls.get(number) : r.issues.get(number);
@@ -228,6 +261,9 @@ function makeHandler(state) {
       state.repos = new Map();
       state.seq = 0;
       state.clock = 0;
+      // Re-anchor the wall-clock base so post-reset events are stamped "now"
+      // (≈ the team-materialisation horizon), not the process-start time (#711).
+      state.epoch = Date.now();
       return send(res, 200, { ok: true });
     }
     if (parts[0] === '_state' && method === 'GET') {
@@ -236,6 +272,9 @@ function makeHandler(state) {
         repos[key] = {
           issues: [...r.issues.values()].map((i) => issueView(r, i)),
           pulls: [...r.pulls.values()].map((p) => pullView(r, p)),
+          comments: [...r.comments.entries()].flatMap(
+            ([number, list]) => list.map((c) => ({ number, body: c.body })),
+          ),
           labels: [...r.labels.keys()],
           eventCount: r.events.length,
           events: r.events,
@@ -307,6 +346,15 @@ function makeHandler(state) {
         if (rest[2] === 'labels' && rest[3] && method === 'DELETE') {
           const out = removeLabel(state, owner, repo, 'issues', number, decodeURIComponent(rest[3]));
           return out ? send(res, 200, out.labels) : send(res, 404, { message: 'Not Found' });
+        }
+        // Comments — shared issue/PR endpoint (the Code Reviewer's verdict, #711).
+        if (rest[2] === 'comments' && method === 'POST') {
+          const body = await readBody(req);
+          const out = addComment(state, owner, repo, number, body.body);
+          return out ? send(res, 201, out) : send(res, 404, { message: 'Not Found' });
+        }
+        if (rest[2] === 'comments' && method === 'GET') {
+          return send(res, 200, listComments(state, owner, repo, number));
         }
       }
 

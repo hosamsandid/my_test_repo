@@ -42,6 +42,18 @@ test('accepts the full v1 shape (fixtures, narrative-only, action/assert/screens
   assert.doesNotThrow(() => validateJourney(j));
 });
 
+test('accepts an optional positive timeoutMs and rejects a non-positive one', () => {
+  assert.doesNotThrow(() => validateJourney(baseJourney({ timeoutMs: 300_000 })));
+  assert.throws(
+    () => validateJourney(baseJourney({ timeoutMs: 0 })),
+    /timeoutMs must be a positive number/,
+  );
+  assert.throws(
+    () => validateJourney(baseJourney({ timeoutMs: 'lots' })),
+    /timeoutMs must be a positive number/,
+  );
+});
+
 test('rejects a wrong journeyVersion', () => {
   assert.throws(() => validateJourney(baseJourney({ journeyVersion: 2 })), JourneyValidationError);
 });

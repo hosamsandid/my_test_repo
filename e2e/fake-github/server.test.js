@@ -180,3 +180,42 @@ test('repo metadata + branches back the wizard repo-probe', async () => {
   const branches = await j('/repos/acme/widgets/branches');
   assert.deepEqual(branches.body.map((b) => b.name), ['main']);
 });
+
+test('comments: POST issues/:n/comments stores a comment readable via GET and _state', async () => {
+  // #711: the Code Reviewer posts its verdict on the PR via the shared
+  // issues/:n/comments endpoint. Create a PR, comment on it, read it back.
+  const pr = await j('/repos/acme/widgets/pulls', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'Add IBAN validation', head: 'feature', base: 'main' }),
+  });
+  assert.equal(pr.status, 201);
+  const n = pr.body.number;
+
+  const posted = await j(`/repos/acme/widgets/issues/${n}/comments`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ body: 'All acceptance criteria met — ready to merge.' }),
+  });
+  assert.equal(posted.status, 201);
+  assert.match(posted.body.body, /ready to merge/);
+
+  const list = await j(`/repos/acme/widgets/issues/${n}/comments`);
+  assert.equal(list.status, 200);
+  assert.equal(list.body.length, 1);
+  assert.match(list.body[0].body, /acceptance criteria met/);
+
+  const state = await j('/_state');
+  const comments = state.body.repos['acme/widgets'].comments;
+  assert.equal(comments.length, 1);
+  assert.equal(comments[0].number, n);
+});
+
+test('comments: POST to a missing issue/PR number is 404', async () => {
+  const r = await j('/repos/acme/widgets/issues/999/comments', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ body: 'nope' }),
+  });
+  assert.equal(r.status, 404);
+});

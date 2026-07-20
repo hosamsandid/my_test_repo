@@ -105,12 +105,131 @@ async function expectEvent(ctx, { repo, type, action, label, timeoutMs = 30_000 
   }
 }
 
+// Read the full fake-github state (all repos). Small helper so the polling
+// finders below don't each duplicate the fetch/parse.
+async function _state(ctx) {
+  const res = await ctx.request.get(`${fakeGithubBaseUrl()}/_state`);
+  if (!res.ok()) return { repos: {} };
+  return res.json();
+}
+
+function _repoState(state, repo) {
+  return (state.repos || {})[repo] || {};
+}
+
+/**
+ * Apply a label to the NEWEST issue in a repo (the human control point) without
+ * the journey needing to know the issue number the BA playbook chose. Polls
+ * briefly for the issue to appear (the BA agent creates it asynchronously),
+ * then applies the label. Returns the issue number it labelled.
+ *
+ * @param {string} params.repo - "owner/name" of the repo on fake-github.
+ * @param {string} params.label - Label to apply (e.g. `ready`).
+ * @param {number} [params.timeoutMs=30000] - Max time to wait for the issue to appear.
+ */
+async function applyLabelToLatestIssue(ctx, { repo, label, timeoutMs = 30_000 }) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    // eslint-disable-next-line no-await-in-loop
+    const issues = _repoState(await _state(ctx), repo).issues || [];
+    if (issues.length) {
+      const number = issues[issues.length - 1].number;
+      // eslint-disable-next-line no-await-in-loop
+      await applyLabel(ctx, { repo, issueNumber: number, label });
+      return number;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`no issue appeared in ${repo} within ${timeoutMs}ms to label '${label}'`);
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
+/**
+ * Poll until an issue exists in the repo (proves the BA→issue hop) — optionally
+ * carrying a label. Number-agnostic so the journey stays declarative.
+ *
+ * @param {string} params.repo - "owner/name" of the repo on fake-github.
+ * @param {string} [params.hasLabel] - If set, require an issue carrying this label.
+ * @param {number} [params.timeoutMs=30000] - Max time to wait.
+ */
+async function expectIssueExists(ctx, { repo, hasLabel, timeoutMs = 30_000 }) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    // eslint-disable-next-line no-await-in-loop
+    const issues = _repoState(await _state(ctx), repo).issues || [];
+    const match = hasLabel
+      ? issues.find((i) => (i.labels || []).some((l) => l.name === hasLabel))
+      : issues[0];
+    if (match) return match;
+    if (Date.now() > deadline) {
+      throw new Error(`no issue${hasLabel ? ` labelled '${hasLabel}'` : ''} in ${repo} within ${timeoutMs}ms`);
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
+/**
+ * Poll until a PR exists in the repo (proves the Developer→PR hop) — optionally
+ * carrying a label (e.g. ready-for-review / ready-to-merge). Number-agnostic.
+ *
+ * @param {string} params.repo - "owner/name" of the repo on fake-github.
+ * @param {string} [params.hasLabel] - If set, require a PR carrying this label.
+ * @param {number} [params.timeoutMs=45000] - Max time to wait.
+ */
+async function expectPrExists(ctx, { repo, hasLabel, timeoutMs = 45_000 }) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    // eslint-disable-next-line no-await-in-loop
+    const pulls = _repoState(await _state(ctx), repo).pulls || [];
+    const match = hasLabel
+      ? pulls.find((p) => (p.labels || []).some((l) => l.name === hasLabel))
+      : pulls[0];
+    if (match) return match;
+    if (Date.now() > deadline) {
+      throw new Error(`no PR${hasLabel ? ` labelled '${hasLabel}'` : ''} in ${repo} within ${timeoutMs}ms`);
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
+/**
+ * Poll until a comment whose body includes `bodyIncludes` exists (proves the
+ * Code Reviewer posted its verdict, #711). Number-agnostic — matches any
+ * issue/PR comment on the repo.
+ *
+ * @param {string} params.repo - "owner/name" of the repo on fake-github.
+ * @param {string} params.bodyIncludes - Substring the comment body must contain.
+ * @param {number} [params.timeoutMs=45000] - Max time to wait.
+ */
+async function expectComment(ctx, { repo, bodyIncludes, timeoutMs = 45_000 }) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    // eslint-disable-next-line no-await-in-loop
+    const comments = _repoState(await _state(ctx), repo).comments || [];
+    const match = comments.find((c) => (c.body || '').includes(bodyIncludes || ''));
+    if (match) return match;
+    if (Date.now() > deadline) {
+      throw new Error(`no comment matching '${bodyIncludes}' in ${repo} within ${timeoutMs}ms`);
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
 module.exports = {
   fakeGithubBaseUrl,
   reset,
   createIssue,
   applyLabel,
+  applyLabelToLatestIssue,
   expectIssue,
+  expectIssueExists,
   expectPr,
+  expectPrExists,
+  expectComment,
   expectEvent,
 };

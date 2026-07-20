@@ -37,6 +37,31 @@ services:
       # the shim fails fast/offline instead of reaching a real endpoint.
       ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-http://127.0.0.1:1}"
       ANTHROPIC_AUTH_TOKEN: "${ANTHROPIC_AUTH_TOKEN:-e2e-dead-token}"
+      # #711: point the fake-claude shim at the IBAN-story reply fixtures +
+      # playbooks baked into the agent image (Dockerfile COPY e2e/ →
+      # /opt/ace/e2e/). Spread into every agent container alongside
+      # AEE_FAKE_CLAUDE, so the BA/Developer/Reviewer run their scripted role
+      # behaviour. Rules are prompt-specific, so non-IBAN agents fall through to
+      # the default reply — F2's chat round-trip is unaffected.
+      AEE_FAKE_CLAUDE_FIXTURES: "${AEE_FAKE_CLAUDE_FIXTURES:-/opt/ace/e2e/fixtures/iban-story.fixtures.json}"
+      AEE_FAKE_CLAUDE_PLAYBOOKS: "${AEE_FAKE_CLAUDE_PLAYBOOKS:-/opt/ace/e2e/fixtures/playbooks}"
+      # #711: tighten the GitHub poll cadence so the label-chain journey (which
+      # crosses two poll boundaries) completes inside the Playwright per-test
+      # budget. Read by orchestrator/github-poller.js; production default is 30s.
+      AEE_GITHUB_POLL_INTERVAL_MS: "${AEE_GITHUB_POLL_INTERVAL_MS:-2000}"
+      # #711: agents run on per-agent ISOLATED podman networks; spawn-container.js
+      # only auto-connects the orchestrator + conduwuit service containers to each
+      # (SERVICE_CONTAINERS default), so an agent can reach Matrix but NOT
+      # fake-github. The role playbooks (ba-create-issue.sh etc.) curl
+      # $GITHUB_API_BASE=http://fake-github directly, so the fake-github container
+      # must also be connected — otherwise the BA's issue-create POST fails DNS,
+      # no issue is created, and the journey's first hop (expectIssueExists) times
+      # out. Override the service list to add it (the value REPLACES the default,
+      # so orchestrator + conduwuit must be re-listed); the short `fake-github`
+      # alias is registered automatically by stripping the compose-project prefix.
+      # git-remote is deliberately NOT added — the agent-side push is best-effort/
+      # skipped (repo mounted ro) and no asserted hop depends on it.
+      AEE_PER_AGENT_NETWORK_SERVICES: "${AEE_PER_AGENT_NETWORK_SERVICES:-${COMPOSE_PROJECT_NAME}-orchestrator,${COMPOSE_PROJECT_NAME}-conduwuit,${COMPOSE_PROJECT_NAME}-fake-github}"
 
   admin-console:
     environment:

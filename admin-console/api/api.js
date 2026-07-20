@@ -3345,9 +3345,23 @@ function augmentSkillActivation(graph, parsed) {
   for (const node of skillNodes) {
     const name = node.label;
     const inList = teamSkills.includes(name);
+    // Pool availability (#739 AC4): a member stuck on `pending` most often means
+    // the skill's source file was deleted from every pool tier, so every
+    // per-member sync errors out and no retry can ever succeed. Surface it as a
+    // node-level flag the UI turns into a plain "restore from archive" recovery
+    // hint instead of a dead-end "Sync now". Team skills resolve team-first then
+    // global (the agent tier is a member's own copy, N/A for an inherited grant).
+    let sourceMissing = false;
+    if (inList) {
+      const teamSrc = resolveSkillSourceDir(name, 'team', teamId);
+      const globalSrc = resolveSkillSourceDir(name, 'global');
+      const present = (teamSrc && fs.existsSync(teamSrc)) || (globalSrc && fs.existsSync(globalSrc));
+      sourceMissing = !present;
+    }
     const driftStates = [];
     node.activation = {
       active: inList,
+      sourceMissing,
       members: members.map(m => {
         const hasOverride = Array.isArray(m.skillsOverride);
         const granted = hasOverride ? m.skillsOverride.includes(name) : inList;
@@ -4110,7 +4124,7 @@ app.get('/api/agents/:id/private-skills', (req, res) => {
 // to be a standalone agent the per-agent route is used instead. Covered by the
 // audit trail (#305) like every /api mutation.
 async function proxySkillActivation(req, res, active) {
-  const { teamId, skillName, includeMembers } = req.body || {};
+  const { teamId, skillName, includeMembers, onlyMembers } = req.body || {};
   if (typeof teamId !== 'string' || !AGENT_ID_RE.test(teamId)) {
     return res.status(400).json({ error: 'teamId (agent id of the team) required' });
   }
@@ -4132,6 +4146,7 @@ async function proxySkillActivation(req, res, active) {
       body: JSON.stringify({
         skillName,
         ...(Array.isArray(includeMembers) ? { includeMembers } : {}),
+        ...(Array.isArray(onlyMembers) ? { onlyMembers } : {}),
       }),
     });
     const data = await resp.json().catch(() => ({}));

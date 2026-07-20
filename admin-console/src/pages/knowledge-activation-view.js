@@ -1,0 +1,89 @@
+// Pure interpreters for the skill (de)activation / "Sync now" result (#739).
+//
+// The activation endpoint returns `{ members: [{ agentId, status, error?,
+// reason? }] }`. Historically the UI treated any HTTP-200 as success and flashed
+// a green "active for N/M members" even when EVERY member returned
+// `status: "error"` — so an activation that reached nobody looked like a win and
+// the failure reasons were thrown away. These helpers turn the raw member
+// results into an honest verdict the card renders faithfully:
+//
+//   kind: 'ok'   → green, something actually synced (or nothing needed syncing)
+//   kind: 'warn' → amber, a partial success (some synced, some failed)
+//   kind: 'error'→ red,   nothing synced while members were expected to
+//
+// Kept as a side-effect-free module so it can be unit-tested with node:test,
+// mirroring the pending-queue-view.js pattern.
+
+// Per-member statuses the orchestrator emits (see _syncSkillIntoWorkspace /
+// setTeamSkillActive): a real file sync succeeded, was neutral (nothing to do),
+// or failed.
+const SUCCESS_RE = /^(seeded|removed|synced|active)$/i;
+const NEUTRAL_RE = /^(stub|skipped-override|skip|excluded|excluded-override)$/i;
+
+function statusOf(m) {
+  return String((m && m.status) || '').trim();
+}
+
+// Human-readable reason for a single failed member, preferring the
+// machine-readable `reason` code over the raw error string.
+export function syncFailureReason(m) {
+  const code = String((m && m.reason) || '').trim();
+  if (code === 'source-missing') return 'skill file missing from pool';
+  if (code === 'copy-failed') {
+    const msg = String((m && m.error) || '').trim();
+    return msg ? `copy failed: ${msg}` : 'copy failed';
+  }
+  const msg = String((m && m.error) || '').trim();
+  if (/not found in pool/i.test(msg)) return 'skill file missing from pool';
+  return msg || 'sync failed';
+}
+
+// True when every failure in the set is the "pool file gone" condition — the
+// caller uses this to point at recovery (restore/re-promote) instead of a retry.
+export function isSourceMissing(members) {
+  const ms = Array.isArray(members) ? members : [];
+  const failed = ms.filter(m => !SUCCESS_RE.test(statusOf(m)) && !NEUTRAL_RE.test(statusOf(m)));
+  if (!failed.length) return false;
+  return failed.every(m =>
+    String((m && m.reason) || '') === 'source-missing' ||
+    /not found in pool/i.test(String((m && m.error) || '')));
+}
+
+// Interpret the per-member results of an activate / "Sync now" run.
+// `scoped` = a single-member "Sync now" retry (wording tweaks only, so repeated
+// clicks report that member's concrete outcome rather than an identical no-op).
+export function summarizeActivation(members, { scoped = false } = {}) {
+  const ms = Array.isArray(members) ? members : [];
+  if (!ms.length) {
+    return { kind: 'ok', text: 'activated', synced: 0, failed: 0, syncable: 0, reasons: [] };
+  }
+
+  const synced = ms.filter(m => SUCCESS_RE.test(statusOf(m))).length;
+  const neutral = ms.filter(m => NEUTRAL_RE.test(statusOf(m))).length;
+  const failedMs = ms.filter(m => !SUCCESS_RE.test(statusOf(m)) && !NEUTRAL_RE.test(statusOf(m)));
+  const failed = failedMs.length;
+  const syncable = ms.length - neutral; // members a sync was actually attempted on
+  const reasons = [...new Set(failedMs.map(syncFailureReason))].filter(Boolean);
+
+  if (scoped) {
+    const m = ms[0];
+    const st = statusOf(m);
+    if (SUCCESS_RE.test(st)) return { kind: 'ok', text: 'synced', synced: 1, failed: 0, syncable: 1, reasons: [] };
+    if (NEUTRAL_RE.test(st)) {
+      const text = /stub/i.test(st) ? 'not materialized yet' : 'member manages its own skill list';
+      return { kind: 'ok', text, synced: 0, failed: 0, syncable: 0, reasons: [] };
+    }
+    return { kind: 'error', text: `still failing — ${syncFailureReason(m)}`, synced: 0, failed: 1, syncable: 1, reasons };
+  }
+
+  // AC1/AC2: a run where no member actually synced is never a green success.
+  if (failed === 0) {
+    const text = syncable
+      ? `active for ${synced}/${syncable} member${syncable === 1 ? '' : 's'}`
+      : 'activated';
+    return { kind: 'ok', text, synced, failed, syncable, reasons: [] };
+  }
+  const head = `${synced}/${syncable} synced`;
+  const tail = reasons.length ? ` — ${reasons.join('; ')}` : '';
+  return { kind: synced > 0 ? 'warn' : 'error', text: head + tail, synced, failed, syncable, reasons };
+}

@@ -5094,10 +5094,13 @@ class Orchestrator {
       delete manifest[skillName];
     } else {
       const src = resolveSkillSourceDir(skillName, cfg.teamId || DEFAULT_TEAM_ID, { agentId: id });
-      if (!src) return { agentId: id, status: "error", error: `skill not found in pool: ${skillName}` };
+      // Machine-readable `reason` so the UI can distinguish the "pool file gone"
+      // condition (recoverable via restore/re-promote, not a retry) from a
+      // generic copy failure (#739 AC4).
+      if (!src) return { agentId: id, status: "error", error: `skill not found in pool: ${skillName}`, reason: "source-missing" };
       if (path.resolve(src) !== path.resolve(dst)) {
         try { fs.cpSync(src, dst, { recursive: true, force: true }); }
-        catch (err) { return { agentId: id, status: "error", error: err.message }; }
+        catch (err) { return { agentId: id, status: "error", error: err.message, reason: "copy-failed" }; }
       }
       manifest[skillName] = { tier: skillTierForSource(src), seededAt: new Date().toISOString(), ...skillSourceIdentity(src) };
     }
@@ -5126,7 +5129,12 @@ class Orchestrator {
   // member per planSkillSync (override members are skipped unless explicitly
   // opted in via includeMembers — opting in also records the name on their
   // skillsOverride so the grant survives the next full re-seed).
-  async setTeamSkillActive(teamId, skillName, { active = true, includeMembers = [], auto = false } = {}) {
+  // `onlyMembers` (#739) scopes the file sync to a subset of member ids — the
+  // member-aware "Sync now" retry. It never changes the team's active list edit
+  // (that stays idempotent) and never suppresses the override opt-in semantics of
+  // `includeMembers`; it only narrows which members are actually (re-)synced so
+  // the caller can report that member's concrete outcome.
+  async setTeamSkillActive(teamId, skillName, { active = true, includeMembers = [], onlyMembers = [], auto = false } = {}) {
     const teamCfg = loadAgentConfig(teamId);
     if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
     if (teamCfg.role !== "team") throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
@@ -5144,9 +5152,11 @@ class Orchestrator {
       .map((id) => loadAgentConfig(id))
       .filter((c) => c && c.role === "team-member" && c.parentTeamId === teamId);
     const plan = planSkillSync({ members, skillName: name, includeMembers: active ? includeMembers : [] });
+    const scope = Array.isArray(onlyMembers) && onlyMembers.length ? new Set(onlyMembers) : null;
+    const effectivePlan = scope ? plan.filter((s) => scope.has(s.agentId)) : plan;
 
     const results = [];
-    for (const step of plan) {
+    for (const step of effectivePlan) {
       const cfg = members.find((m) => m.id === step.agentId);
       if (step.action === "stub") {
         // Consistent by construction: the team list already carries (or no
@@ -5193,8 +5203,11 @@ class Orchestrator {
       results.map((r) => `${r.agentId}:${r.status}`).join(", ") || "no members"
     );
     // Live-feed transparency (phase 3): one lean event per (de)activation so
-    // the Knowledge page's feed shows the loop closing. Best-effort.
-    appendKnowledgeEvents([{
+    // the Knowledge page's feed shows the loop closing. Best-effort. A
+    // member-scoped "Sync now" retry (#739) is not a team-level toggle, so it
+    // does not emit an activation event (keeps the feed a record of real
+    // activate/deactivate actions, not per-member retries).
+    if (!scope) appendKnowledgeEvents([{
       type: "activation",
       ts: new Date().toISOString(),
       teamId,
@@ -9097,8 +9110,9 @@ async function main() {
     // POST /internal/teams/:teamId/skills/{activate,deactivate} — team-owned
     // skill (de)activation (phase 2): idempotent list edit on the team agent's
     // skills[] + additive file sync into every materialized member workspace.
-    // Body: { skillName, includeMembers? } (includeMembers: override members
-    // to opt in explicitly).
+    // Body: { skillName, includeMembers?, onlyMembers? } (includeMembers:
+    // override members to opt in explicitly; onlyMembers: scope the file sync to
+    // a subset — the member-aware "Sync now" retry, #739).
     const teamSkillMatch = req.method === 'POST' &&
       req.url.match(/^\/internal\/teams\/([^/]+)\/skills\/(activate|deactivate)$/);
     if (teamSkillMatch) {
@@ -9118,6 +9132,7 @@ async function main() {
           const result = await orchestrator.setTeamSkillActive(teamId, payload?.skillName, {
             active,
             includeMembers: Array.isArray(payload?.includeMembers) ? payload.includeMembers : [],
+            onlyMembers: Array.isArray(payload?.onlyMembers) ? payload.onlyMembers : [],
           });
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(result));

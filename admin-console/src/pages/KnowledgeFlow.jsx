@@ -12,6 +12,7 @@ import KnowledgeLearningSections, {
 } from '../components/KnowledgeLearningConfig';
 import useSSE from '../hooks/useSSE';
 import { parseTeamParam, resolveSelectedTeam, teamTotals, streamScopeUrl } from './knowledge-scope';
+import { summarizeActivation } from './knowledge-activation-view';
 
 /*
  * Knowledge Flow — team-scoped (#560).
@@ -1315,21 +1316,31 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
   const feedback = (kind, text) => {
     setFlash({ kind, text });
     clearTimeout(flashTimer.current);
-    flashTimer.current = setTimeout(() => setFlash(null), kind === 'error' ? 8000 : 4000);
+    // 'ok' flashes are transient; 'warn'/'error' stay long enough to read the reason.
+    flashTimer.current = setTimeout(() => setFlash(null), kind === 'ok' ? 4000 : 8000);
   };
 
-  const activate = (busyKey, includeMembers) => {
+  // `activate` handles both the team-wide Activate button and the member-scoped
+  // "Sync now"/"Add for this member" links. `opts.includeMembers` opts override
+  // members in; `opts.onlyMembers` scopes the file sync to a subset (Sync now),
+  // and `opts.scoped` switches the verdict wording to that single member (#739).
+  // The result is interpreted honestly via summarizeActivation: a run that
+  // synced nobody is never shown in the success colour (AC1/AC2/AC3).
+  const activate = (busyKey, { includeMembers, onlyMembers, scoped = false } = {}) => {
     setBusy(busyKey);
     fetch('/api/knowledge/activate', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ teamId, skillName: skill.label, ...(includeMembers ? { includeMembers } : {}) }),
+      body: JSON.stringify({
+        teamId, skillName: skill.label,
+        ...(includeMembers ? { includeMembers } : {}),
+        ...(onlyMembers ? { onlyMembers } : {}),
+      }),
     })
       .then(async r => {
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-        const ms = Array.isArray(d.members) ? d.members : [];
-        const ok = ms.filter(m => !/error|fail|excluded|stub|skip/i.test(String(m.status || ''))).length;
-        feedback('ok', ms.length ? `active for ${ok}/${ms.length} member${ms.length === 1 ? '' : 's'}` : 'activated');
+        const verdict = summarizeActivation(d.members, { scoped });
+        feedback(verdict.kind, verdict.text);
         onReload && onReload();
       })
       .catch(e => feedback('error', `Action failed: ${e.message}`))
@@ -1416,6 +1427,10 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
 
   const members = act ? (act.members || []) : [];
   const activeCount = members.filter(m => m.state === 'active').length;
+  // Pool file gone (#739 AC4): the overlay flags it node-level; we only alarm when
+  // it actually strands a member (the reported `active · 0/N` all-pending case).
+  const anyPending = members.some(m => m.state === 'pending');
+  const sourceMissing = !!(act && act.active && act.sourceMissing);
   // Node-level drift rollup (#629 AC2): { worst, outdated, resyncable, total, counts }.
   const drift = skill.drift || null;
   const driftWorst = drift && drift.worst && drift.worst !== 'in-sync' ? drift.worst : null;
@@ -1530,6 +1545,23 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
         </div>
       )}
 
+      {sourceMissing && anyPending && (
+        <div style={{
+          marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+          fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error, #d33)',
+        }}>
+          <span title="The skill is in the team’s active set, but its file is missing from the pool — so no member can be synced. This is why the badge stays at 0 and the rows stay pending; re-running the sync can’t fix it.">
+            ⚠ Skill file missing from the pool — members can’t be synced.
+          </span>
+          <a
+            href={`/skills?team=${encodeURIComponent(teamId)}`}
+            title="Open the Skills surface to restore this skill from the archive, re-promote it, or detach the grant"
+            style={{ fontWeight: 600, color: 'var(--eb-status-error, #d33)' }}>
+            Restore or manage →
+          </a>
+        </div>
+      )}
+
       {expanded && members.length > 0 && (
         <div style={{ marginTop: 6, borderTop: '1px dashed var(--eb-border-default)', paddingTop: 6 }}>
           {members.map(m => {
@@ -1571,20 +1603,29 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
                 {m.state === 'excluded-override' && (
                   <button
                     disabled={!!busy}
-                    onClick={() => activate(m.agentId, [m.agentId])}
+                    onClick={() => activate(m.agentId, { includeMembers: [m.agentId], onlyMembers: [m.agentId], scoped: true })}
                     title="This member manages its own skill list — opt it into this skill anyway"
                     style={linkBtn}>
                     {busy === m.agentId ? 'Adding…' : 'Add for this member'}
                   </button>
                 )}
                 {m.state === 'pending' && (
-                  <button
-                    disabled={!!busy}
-                    onClick={() => activate(m.agentId)}
-                    title="Re-run the workspace sync so this member gets the skill now"
-                    style={linkBtn}>
-                    {busy === m.agentId ? 'Syncing…' : 'Sync now'}
-                  </button>
+                  sourceMissing ? (
+                    // The pool file is gone — a retry can never move this member off
+                    // `pending` (#739 AC4). Point at recovery instead of a dead-end sync.
+                    <span title="The skill file is missing from the pool, so it can’t be copied into this member. Restore it from the archive, re-promote it, or detach the grant."
+                      style={{ flexShrink: 0, fontSize: 10, fontWeight: 600, color: 'var(--eb-status-error, #d33)', cursor: 'help', whiteSpace: 'nowrap' }}>
+                      source missing
+                    </span>
+                  ) : (
+                    <button
+                      disabled={!!busy}
+                      onClick={() => activate(m.agentId, { onlyMembers: [m.agentId], scoped: true })}
+                      title="Re-run the workspace sync so this member gets the skill now"
+                      style={linkBtn}>
+                      {busy === m.agentId ? 'Syncing…' : 'Sync now'}
+                    </button>
+                  )
                 )}
               </div>
             );
@@ -1595,7 +1636,9 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
       {flash && (
         <div style={{
           marginTop: 4, fontSize: 'var(--eb-text-xs)', fontWeight: 600,
-          color: flash.kind === 'ok' ? 'var(--eb-status-success)' : 'var(--eb-status-error, #d33)',
+          color: flash.kind === 'ok' ? 'var(--eb-status-success)'
+            : flash.kind === 'warn' ? 'var(--eb-status-warning)'
+            : 'var(--eb-status-error, #d33)',
         }}>
           {flash.kind === 'ok' ? '✓ ' : '⚠ '}{flash.text}
         </div>

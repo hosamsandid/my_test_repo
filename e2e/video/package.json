@@ -1,0 +1,29 @@
+{
+  "name": "aee-walkthrough-video",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Revideo-based walkthrough video lane for Agent Studio journeys (audio-driven, Variant C). Self-contained sub-project so the heavy @revideo deps only install for the video CI job, not the normal e2e run.",
+  "scripts": {
+    "postinstall": "patch-package",
+    "tts:extract": "node scripts/extract-narration.mjs",
+    "tts": "npm run tts:extract && python3 scripts/generate-tts.py",
+    "render:example": "cross-env DISABLE_TELEMETRY=true node --import tsx revideo/render.ts example-variant-c example-variant-c.mp4",
+    "clean": "node -e \"require('fs').rmSync('out',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "@revideo/2d": "0.10.4",
+    "@revideo/core": "0.10.4",
+    "@revideo/ffmpeg": "0.10.4",
+    "@revideo/renderer": "0.10.4",
+    "@revideo/vite-plugin": "0.10.4"
+  },
+  "devDependencies": {
+    "@revideo/cli": "0.10.4",
+    "@types/node": "^22.0.0",
+    "cross-env": "^7.0.3",
+    "patch-package": "^8.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "5.4.5"
+  }
+}

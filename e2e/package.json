@@ -6,7 +6,7 @@
   "scripts": {
     "test": "playwright test",
     "test:ui": "playwright test --ui",
-    "test:unit": "node --test journey-runner/*.test.js docgen/*.test.js visual-diff/*.test.js video/*.test.js",
+    "test:unit": "node --test journey-runner/*.test.js docgen/*.test.js visual-diff/*.test.js",
     "journeys:catalog": "node journey-runner/bin/gen-catalog.js",
     "journeys:catalog:check": "node journey-runner/bin/gen-catalog.js --check",
     "journeys:lint": "node journey-runner/bin/lint.js",
@@ -15,8 +15,6 @@
     "docs:journeys:check": "node docgen/bin/docgen.js --check",
     "docs:deck": "node docgen/bin/deck.js",
     "video:journeys": "E2E_VIDEO=1 playwright test --project=journey-video",
-    "video:assemble": "node video/bin/video.js",
-    "video:plan": "node video/bin/video.js --plan",
     "report": "playwright show-report"
   },
   "devDependencies": {

@@ -211,9 +211,11 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install jq (setup.sh prerequisite) + ffmpeg + fonts (title cards)
-        # ffmpeg is NOT assumed to exist anywhere but here (agent containers lack
-        # it); fonts-dejavu-core gives drawtext a real font for the title cards.
+      - name: Install jq (setup.sh prerequisite) + ffmpeg + fonts
+        # ffmpeg + a headless Chromium (installed via playwright below) are what the
+        # Revideo render needs; neither is assumed in agent containers, which is why
+        # the render lives in this CI job, not in the agent. fonts-dejavu-core gives
+        # the on-screen captions a real font.
         run: sudo apt-get update && sudo apt-get install -y jq ffmpeg fonts-dejavu-core
 
       - name: Start rootless podman API socket
@@ -231,19 +233,20 @@ jobs:
       - name: Record journey videos (journey-video project — brings up stack, tears down)
         run: cd e2e && npm ci && npx playwright install --with-deps chromium && npm run video:journeys
 
-      - name: Assemble walkthrough video (ffmpeg)
-        # Runs even if a journey failed: it assembles from whatever clips the run
-        # captured (a failing journey saves none) + the always-present title cards,
-        # so a partial video is still produced and uploaded for inspection.
+      - name: Render walkthrough video (Revideo)
+        # Runs even if a journey failed: it renders from whatever clips the run
+        # captured. FOUNDATION (#742): renders the reference example scene so the
+        # lane is exercised end-to-end; the journey-driven assembler is T5/#745,
+        # which swaps this for the full walkthrough render.
         if: always()
-        run: cd e2e && npm run video:assemble
+        run: cd e2e/video && npm ci && npm run render:example
 
       - name: Upload walkthrough video
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: walkthrough-video
-          path: artifacts/agent-studio-walkthrough.webm
+          path: e2e/video/out/final/
           if-no-files-found: ignore
           retention-days: 7
 

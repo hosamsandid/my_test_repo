@@ -6,6 +6,8 @@
   "description": "Revideo-based walkthrough video lane for Agent Studio journeys (audio-driven, Variant C). Self-contained sub-project so the heavy @revideo deps only install for the video CI job, not the normal e2e run.",
   "scripts": {
     "postinstall": "patch-package",
+    "test:unit": "node --test scripts/*.test.mjs",
+    "render:walkthrough": "node scripts/render-walkthrough.mjs",
     "tts:extract": "node scripts/extract-narration.mjs",
     "tts": "npm run tts:extract && python3 scripts/generate-tts.py",
     "prep:clips": "node -e \"const fs=require('fs');fs.mkdirSync('public',{recursive:true});for(const f of fs.readdirSync('fixtures').filter(f=>f.endsWith('.mp4')))fs.copyFileSync('fixtures/'+f,'public/'+f)\"",

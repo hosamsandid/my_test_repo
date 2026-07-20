@@ -189,49 +189,6 @@ jobs:
         if: always()
         run: ./e2e/scripts/stack-down.sh || true
 
-  # ── Journey walkthrough video (docs/journey-spec-concept.md §3.3, epic #741) ──
-  # Narrated, audio-driven walkthrough video via the Revideo lane in e2e/video/
-  # (screenshots-per-step held to the voiceover — see e2e/video/README.md). A red
-  # video render never blocks the F0–F4 report, so it is its own job.
-  #
-  # FOUNDATION (#742): renders the Team Setup demonstrator from committed fixtures
-  # (screenshots + Edge-TTS mp3s) — no stack, no recording, no network. Self-
-  # contained on purpose. The journey-driven generator (real journey screenshots +
-  # per-step `voiceover:` audio) is T5/#745, which swaps `render:team-setup` for the
-  # full walkthrough render.
-  journey-video:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Install ffmpeg + fonts
-        # ffmpeg + a headless Chromium (installed below) are what the Revideo render
-        # needs; neither is assumed in agent containers, which is why the render
-        # lives in CI, not in the agent. fonts-dejavu-core gives the captions a font.
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
-
-      - name: Render walkthrough demonstrator (Revideo, screenshots-per-step)
-        # `npx puppeteer browsers install` is belt-and-braces: on npm builds that
-        # block postinstall scripts the Chromium download is skipped, so we force it.
-        run: |
-          cd e2e/video && npm ci && npx puppeteer browsers install chrome
-          npm run render:team-setup
-          npm run render:iban-story
-
-      - name: Upload walkthrough video
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: walkthrough-video
-          path: e2e/video/out/final/
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Force teardown (safety net)
-        if: always()
-        run: ./e2e/scripts/stack-down.sh || true
+  # NOTE: the walkthrough-video render was extracted into its own MANUAL workflow
+  # (.github/workflows/walkthrough-video.yml, #749) so it can be started on its own
+  # from the Actions UI. It is no longer coupled to this nightly E2E run.

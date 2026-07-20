@@ -10,9 +10,9 @@
 //     2. FREEZE on the last frame and hold — for exactly as long as the voiceover
 //        lasts. The audio, not slowMo, decides how long the view is shown.
 //
-// The audio-driven timing is the vendored `playAndWait` (utils/audio.tsx): it plays
-// the <Audio> and waits `manifest.durationSec + pad`, running the visual generator
-// in parallel. A <Video> node plays the clip; pausing playback holds the frame.
+// The audio-driven timing is the vendored `playAndWait` primitive (utils/audio.tsx):
+// it plays the <Audio> and waits `manifest.durationSec + pad`. A <Video> node plays
+// the clip; pausing playback (`.play(false)`) holds the frame.
 //
 // NOTE (container feasibility): rendering this needs headless Chromium + ffmpeg and
 // (for real audio) a prior Edge-TTS run — none of which the agent container has.
@@ -20,21 +20,29 @@
 // Agent work (T5) is the pure segment/timing/subtitle logic + unit tests; the MP4
 // is produced by the manual CI job (T1/#749), never inside the agent container.
 
-import { Audio, Img, Rect, Txt, Video, makeScene2D } from '@revideo/2d';
-import { createRef, waitFor } from '@revideo/core';
-import { makeProject } from '@revideo/core';
-import { playAndWait, audioSec } from './utils/audio';
+import { Audio, Rect, Txt, Video, makeScene2D } from '@revideo/2d';
+import { createRef, waitFor, makeProject } from '@revideo/core';
+import { audioSec, audioUrl } from './utils/audio';
 import { fadeIn, fadeOut } from './utils/transitions';
 
-// One demo beat. In the real generator (T5) these come from a journey step:
-//   clip      = the per-journey journey.webm + [start,end] cut-marks (T3/#743)
-//   audioId   = the voiceover MP3 id for that step (T4/#744)
-//   subtitle  = the step's `voiceover:` text (T4/#744)
+// Video/audio assets are served from public/ during render (the ffmpeg bridge and
+// the audio resolver both map URLs back to files under `<outDir>/../public`). The
+// render:example script copies fixtures/*.mp4 into public/ first; the T5 generator
+// does the same per-journey clip.
+//
+// IMPORTANT (spike finding): the embedded clip must be H.264 mp4. Revideo's frame
+// extractor fails on VP9 .webm (which is what Playwright records) with a "No input
+// specified" ffprobe error — so T5/T3 must transcode each journey.webm → mp4 before
+// embedding (ffmpeg -c:v libx264 -pix_fmt yuv420p).
 const BEAT = {
-  clip: '../fixtures/sample-journey.webm',
+  // One demo beat. In the real generator (T5) these come from a journey step:
+  //   clip    = the per-journey journey.webm + [start,end] cut-marks (T3/#743)
+  //   audioId = the voiceover MP3 id for that step (T4/#744)
+  //   subtitle= the step's `voiceover:` text (T4/#744)
+  clip: '/sample-journey.mp4',
   segment: { start: 0, end: 3.5 }, // seconds into the clip: the "motion" part
-  audioId: 'example-step', // resolved from data/audio-manifest.json; falls back to 1s if absent
-  subtitle: 'The wizard opens on the Process step — the central decision comes first.',
+  audioId: 'example-step', // resolved from data/audio-manifest.json; 1s fallback if absent
+  subtitle: 'The Team Setup wizard opens on the Process step — the central decision comes first.',
 };
 
 const scene = makeScene2D('variant-c-example', function* (view) {
@@ -42,15 +50,9 @@ const scene = makeScene2D('variant-c-example', function* (view) {
   const caption = createRef<Txt>();
   const captionBg = createRef<Rect>();
 
-  view.add(<Rect ref={captionBg} width={'100%'} height={140} y={360} fill={'#0B1021'} opacity={0} bottom={[0, 480]} />);
+  view.add(<Rect ref={captionBg} width={1280} height={130} y={300} fill={'#0B1021'} opacity={0} />);
   view.add(
-    <Video
-      ref={video}
-      src={BEAT.clip}
-      size={[1280, 720]}
-      play={false}
-      time={BEAT.segment.start}
-    />,
+    <Video ref={video} src={BEAT.clip} size={[1280, 720]} play={false} time={BEAT.segment.start} />,
   );
   view.add(
     <Txt
@@ -59,10 +61,10 @@ const scene = makeScene2D('variant-c-example', function* (view) {
       fontFamily={'DejaVu Sans, Arial, sans-serif'}
       fontSize={30}
       fill={'#EDEFFA'}
-      width={1120}
+      width={1160}
       textAlign={'center'}
       textWrap
-      y={360}
+      y={300}
       opacity={0}
     />,
   );
@@ -74,7 +76,7 @@ const scene = makeScene2D('variant-c-example', function* (view) {
   const audioDur = audioSec(BEAT.audioId); // real MP3 length (or 1.0s fallback pre-TTS)
   const motion = BEAT.segment.end - BEAT.segment.start;
 
-  view.add(<Audio src={`/audio/${BEAT.audioId}.mp3`} play={true} time={0} />);
+  view.add(<Audio src={audioUrl(BEAT.audioId)} play={true} time={0} />);
 
   // 1) motion: play the real interaction from the recording
   video().play(true);
@@ -88,4 +90,7 @@ const scene = makeScene2D('variant-c-example', function* (view) {
 });
 
 // `npm run render:example` renders this project via revideo/render.ts.
-export default makeProject({ scenes: [scene] });
+export default makeProject({
+  scenes: [scene],
+  settings: { shared: { size: { x: 1280, y: 720 } } },
+});

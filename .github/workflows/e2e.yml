@@ -239,7 +239,9 @@ jobs:
         # lane is exercised end-to-end; the journey-driven assembler is T5/#745,
         # which swaps this for the full walkthrough render.
         if: always()
-        run: cd e2e/video && npm ci && npm run render:example
+        # `npx puppeteer browsers install` is belt-and-braces: on npm builds that
+        # block postinstall scripts the Chromium download is skipped, so we force it.
+        run: cd e2e/video && npm ci && npx puppeteer browsers install chrome && npm run render:example
 
       - name: Upload walkthrough video
         if: always()

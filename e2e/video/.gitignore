@@ -3,7 +3,7 @@ node_modules/
 out/
 .video-work/
 
-# Generated voiceover assets (produced by the TTS step in CI). The manifest under
-# data/ IS tracked (seeded {}), the MP3s are not.
-public/audio/*.mp3
+# Generated/served assets (TTS MP3s + clips copied from fixtures/ by prep:clips).
+# The manifest under data/ IS tracked (seeded {}); public/ is all generated.
+public/
 scripts/narration.json

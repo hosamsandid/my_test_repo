@@ -8,7 +8,8 @@
     "postinstall": "patch-package",
     "tts:extract": "node scripts/extract-narration.mjs",
     "tts": "npm run tts:extract && python3 scripts/generate-tts.py",
-    "render:example": "cross-env DISABLE_TELEMETRY=true node --import tsx revideo/render.ts example-variant-c example-variant-c.mp4",
+    "prep:clips": "node -e \"const fs=require('fs');fs.mkdirSync('public',{recursive:true});for(const f of fs.readdirSync('fixtures').filter(f=>f.endsWith('.mp4')))fs.copyFileSync('fixtures/'+f,'public/'+f)\"",
+    "render:example": "npm run prep:clips && cross-env DISABLE_TELEMETRY=true node --import tsx revideo/render.ts example-variant-c example-variant-c.mp4",
     "clean": "node -e \"require('fs').rmSync('out',{recursive:true,force:true})\""
   },
   "dependencies": {
@@ -20,6 +21,7 @@
   },
   "devDependencies": {
     "@revideo/cli": "0.10.4",
+    "@revideo/ui": "^0.10.4",
     "@types/node": "^22.0.0",
     "cross-env": "^7.0.3",
     "patch-package": "^8.0.0",

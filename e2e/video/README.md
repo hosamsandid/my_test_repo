@@ -42,7 +42,13 @@ Foundation findings baked in:
 1. **Video/audio/image assets are served from `public/`**, not vite-imported — the
    ffmpeg bridge maps URLs back to `<outDir>/../public`. `prep:shots` / `prep:clips`
    copy the fixtures there.
-2. **Optional motion clips must be H.264 mp4**, not VP9 `.webm` (what Playwright
+2. **Audio is muxed on afterwards, not played by Revideo.** Revideo mixes every
+   `<Audio>` node toward the scene end, so multiple beats' voiceovers accumulate and
+   clip (loudness grew monotonically to 0 dBFS by the last beat). The scene renders
+   **silent** (still timed to the audio durations via `audioSec`), and
+   `scripts/mux-narration.mjs` lays each MP3 at its exact beat offset with a limiter
+   → flat, clip-free loudness (verified ~−22 dB mean across the whole video).
+3. **Optional motion clips must be H.264 mp4**, not VP9 `.webm` (what Playwright
    records): Revideo's frame extractor fails on webm (`ffprobe: No input specified`).
    Only relevant if/when the optional clip beat is used — the screenshot path avoids
    video entirely.

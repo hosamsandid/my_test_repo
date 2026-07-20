@@ -27,15 +27,18 @@ function statusOf(m) {
 // Human-readable reason for a single failed member, preferring the
 // machine-readable `reason` code over the raw error string.
 export function syncFailureReason(m) {
+  // Plain language, no internal terms like "pool"/"manifest" (#750 AC4): the
+  // operator sees this in the card flash and it must make sense to a
+  // non-technical user.
   const code = String((m && m.reason) || '').trim();
-  if (code === 'source-missing') return 'skill file missing from pool';
+  if (code === 'source-missing') return 'this skill’s files are no longer available';
   if (code === 'copy-failed') {
     const msg = String((m && m.error) || '').trim();
-    return msg ? `copy failed: ${msg}` : 'copy failed';
+    return msg ? `couldn’t install it (${msg})` : 'couldn’t install it';
   }
   const msg = String((m && m.error) || '').trim();
-  if (/not found in pool/i.test(msg)) return 'skill file missing from pool';
-  return msg || 'sync failed';
+  if (/not found in pool/i.test(msg)) return 'this skill’s files are no longer available';
+  return msg || 'couldn’t install it';
 }
 
 // True when every failure in the set is the "pool file gone" condition — the

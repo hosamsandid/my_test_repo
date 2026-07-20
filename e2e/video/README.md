@@ -26,14 +26,18 @@ Epic **#741**. Foundation vendored from the proven Revideo PoC (MIT).
 Both approaches are proven end-to-end on this stack, rendered to **H.264 + AAC mp4**
 with audible Edge-TTS narration:
 
-- **Team Setup demonstrator** (primary) — `revideo/example-team-setup.tsx`: 6
-  screenshots, each held to its voiceover, Ken-Burns zoom + eyebrow + caption →
-  **≈ 87s** (the 60–90s target; the earlier one-clip spike was a too-fast 10s).
-  Reproduce:
-  ```bash
-  cp scripts/team-setup.narration.json scripts/narration.json && npm run tts
-  npm run render:team-setup      # → out/final/team-setup-walkthrough.mp4
-  ```
+Two chapters are built on the shared beat builder (`revideo/walkthrough.tsx`), the
+shape T5 generalises to every journey:
+
+- **Team Setup** — `revideo/example-team-setup.tsx`: 7 beats ≈ **98s** (the Process
+  step is two beats so "we pick Core SDLC" matches the screen).
+  `npm run render:team-setup` → `out/final/team-setup-walkthrough.mp4`.
+- **IBAN Story / "Working with Agents"** — `revideo/example-iban-story.tsx`: 9 beats
+  ≈ **197s**, the end-to-end idea→issue→approval→PR→review→merge story.
+  `npm run render:iban-story` → `out/final/iban-story-walkthrough.mp4`.
+
+Both are self-contained from committed fixtures (no stack, no recording, no network).
+
 - **Continuous-clip beat** (optional motion) — `revideo/example-variant-c.tsx`:
   motion 0–3.5s → freeze → hold, `npm run render:example`.
 
@@ -86,7 +90,9 @@ journeys/*.yaml ──▶ voiceover: text ──▶ extract ──▶ Edge-TTS �
 
 | Path | Role | Status |
 |---|---|---|
-| `revideo/example-team-setup.tsx` | **primary reference scene** — screenshots-per-step, held to the voiceover (Team Setup, 6 beats ≈ 87s) | reference — T5 generalises to all journeys |
+| `revideo/walkthrough.tsx` | **shared beat builder** (`makeWalkthroughProject(name, beats)`) — screenshots-per-step, Ken-Burns + eyebrow + caption, audio-driven dwell | reference — T5 feeds it journey beats |
+| `revideo/example-team-setup.tsx` | Team Setup chapter (7 beats) — thin beat list over the builder | reference |
+| `revideo/example-iban-story.tsx` | IBAN Story chapter (9 beats) — thin beat list over the builder | reference |
 | `revideo/example-variant-c.tsx` | optional-motion reference — continuous clip → freeze → hold | reference (optional path) |
 | `revideo/utils/audio.tsx` | `audioSec(id)` + `audioUrl(id)` + `playAndWait(...)` — **the audio-driven timing primitive** | vendored, reuse as-is |
 | `revideo/utils/transitions.ts` | `fadeIn` / `fadeOut` / `crossFade` | vendored |

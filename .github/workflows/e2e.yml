@@ -218,7 +218,10 @@ jobs:
       - name: Render walkthrough demonstrator (Revideo, screenshots-per-step)
         # `npx puppeteer browsers install` is belt-and-braces: on npm builds that
         # block postinstall scripts the Chromium download is skipped, so we force it.
-        run: cd e2e/video && npm ci && npx puppeteer browsers install chrome && npm run render:team-setup
+        run: |
+          cd e2e/video && npm ci && npx puppeteer browsers install chrome
+          npm run render:team-setup
+          npm run render:iban-story
 
       - name: Upload walkthrough video
         if: always()

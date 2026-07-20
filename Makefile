@@ -235,7 +235,8 @@ docs-deck:
 #   make video-journeys                         # record + render (needs stack + Chromium/ffmpeg)
 video-journeys:
 	cd e2e/video && npm ci --no-audit --no-fund --silent \
-	  && npm run render:team-setup
+	  && npm run render:team-setup \
+	  && npm run render:iban-story
 
 help:
 	@echo "Targets: up, down, restart, build, agent-image, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, e2e, e2e-gate, e2e-up, e2e-down, docs-journeys, docs-journeys-check, docs-deck, video-journeys"

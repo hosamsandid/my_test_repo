@@ -81,6 +81,12 @@ module.exports = defineConfig({
             name: 'journey-video',
             testDir: './journey-runner',
             testMatch: /.*\.spec\.js$/,
+            // slowMo (350 ms/interaction) inflates every step, and the afterEach
+            // hook closes the page + finalises the .webm before the test ends —
+            // both eat into the per-test budget. The default 60 s is too tight for
+            // a multi-step wizard journey recorded this way, so give the recording
+            // run a 5-min ceiling (matches the longer journeys' own timeoutMs).
+            timeout: 300_000,
             use: {
               ...devices['Desktop Chrome'],
               viewport: { width: 1440, height: 900 },

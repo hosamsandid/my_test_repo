@@ -32,15 +32,22 @@ for (const journey of journeys) {
 // there. On a PASSING journey we save the recording next to that run's screenshots
 // as artifacts/<journeyId>/journey.webm, mirroring the recorder's
 // "captures only in a passing run" contract (§2.3): a failing journey leaves no
-// clip. saveAs in afterEach is Playwright's supported pattern for a custom video
-// path (it waits for the context to close and the file to finalise).
+// clip.
+//
+// video.saveAs() blocks until the page is closed and the recording is finalised
+// (Playwright's documented contract). The `page` fixture is not torn down until
+// AFTER this afterEach hook returns, so `await video.saveAs()` on its own would
+// wait forever for a close that can't happen yet — a deadlock that hangs the test
+// until its timeout (observed as an 8-min afterEach hang in CI run 29725614841).
+// The supported fix is to close the page and save concurrently: page.close()
+// finalises the recording, which lets saveAs() resolve.
 test.afterEach(async ({ page }, testInfo) => {
   const video = page.video();
   if (!video) return;
   if (testInfo.status !== testInfo.expectedStatus) return;
   const dest = path.join(ARTIFACTS_ROOT, testInfo.title, 'journey.webm');
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  await video.saveAs(dest);
+  await Promise.all([video.saveAs(dest), page.close()]);
 });
 
 for (const journey of journeys) {

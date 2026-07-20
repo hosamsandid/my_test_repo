@@ -102,3 +102,26 @@ test('omitting agentId reproduces the pre-Phase-0 two-tier behaviour', () => {
   });
   assert.equal(r, teamPath);
 });
+
+// --- Team pool keyspace consistency (#750) -----------------------------------
+// A team skill is written under the AGENT-team id (parentTeamId — e.g.
+// "agent-studio"); the bug was that the seed/sync callers resolved it under the
+// member's HUMAN tenant teamId ("default"), so every team skill missed. These
+// tests pin the invariant at the resolver level: keying by the write id finds
+// the skill, keying by the human tenant id does not.
+test('#750: a team skill written under the agent-team id resolves when keyed by that same id', () => {
+  const teamPath = path.join(WS, 'teams', 'agent-studio', 'skills', 'reviewing-prs');
+  const r = resolveSkillSourceDir('reviewing-prs', 'agent-studio', {
+    agentId: 'agent-studio-dev', existsSync: fakeExists(new Set([teamPath])),
+  });
+  assert.equal(r, teamPath);
+});
+
+test('#750: keying the SAME skill by the human tenant id ("default") misses — the old, broken path', () => {
+  const teamPath = path.join(WS, 'teams', 'agent-studio', 'skills', 'reviewing-prs');
+  // No global fallback exists, so the wrong key resolves to null (member stays pending).
+  const r = resolveSkillSourceDir('reviewing-prs', 'default', {
+    agentId: 'agent-studio-dev', existsSync: fakeExists(new Set([teamPath])),
+  });
+  assert.equal(r, null);
+});

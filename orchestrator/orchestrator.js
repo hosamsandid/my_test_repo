@@ -45,6 +45,7 @@ const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } 
 const { buildEnsureUserCommands } = require("./matrix-admin-commands");
 const matrixLoginRetry = require("./matrix-login-retry");
 const skillManifest = require("./skill-manifest");
+const skillDelivery = require("./skill-delivery");
 const usageLog = require("./usage-log");
 const usageQuery = require("./usage-query");
 const prEventsLog = require("./pr-events-log");
@@ -828,7 +829,7 @@ function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
   const skills = effectiveSkills(cfg, loadAgentConfig);
   // #617: enrich the Skills section with each granted skill's SKILL.md
   // description, resolved from the same tier seeding would copy from.
-  const skillDescriptions = agentSkillDescriptions(id, (cfg && cfg.teamId) || DEFAULT_TEAM_ID, skills);
+  const skillDescriptions = agentSkillDescriptions(id, agentKnowledgeTeamId(cfg || {}), skills);
   // Seeding runs before every saveAgentPrompt call in all paths, so the
   // on-disk checkout the gate reads is the live truth here.
   const knowledgeDigestRef = agentKnowledgeDigestRef(id, env);
@@ -1136,12 +1137,20 @@ function seedAgentWorkspace(id, env, opts = {}) {
   fs.mkdirSync(skillsDst, { recursive: true });
   const seededManifest = {};
   if (selectedSkills.length > 0) {
-    const ownerTeamId = opts.teamId || DEFAULT_TEAM_ID;
+    // #750: team-tier skills live in the pool keyed by the AGENT team
+    // (agentKnowledgeTeamId → parentTeamId, or a team agent's own id) — the SAME
+    // key the curator writes them under (_teamSkillDir) and the activation
+    // overlay reads. The member's human tenant teamId is NOT that key; keying
+    // the seed by it resolved every inherited team skill to
+    // /workspace/teams/default/skills, missed, and left members forever
+    // `pending` (badge active·0/N). Falls back to opts.teamId for a standalone
+    // agent with no squad — identical to the pre-#750 behaviour there.
+    const poolTeamId = agentKnowledgeTeamId(loadAgentConfig(id) || { teamId: opts.teamId });
     const seededAt = new Date().toISOString();
     for (const skillName of selectedSkills) {
       // Resolve agent-first (Phase 0): an agent's own skill pool
       // (/workspace/agents/<id>/skills) shadows the team's and the global one.
-      const src = resolveSkillSourceDir(skillName, ownerTeamId, { agentId: id });
+      const src = resolveSkillSourceDir(skillName, poolTeamId, { agentId: id });
       const dst = path.join(skillsDst, skillName);
       if (!src) {
         warnings.push(`skill not found in pool: ${skillName}`);
@@ -3554,7 +3563,21 @@ function _finalizePromotedSkills(teamId, env, promotedSkills, now) {
     (async () => {
       for (const s of promotedSkills) {
         try {
-          await orchestratorSingleton.setTeamSkillActive(teamId, s.name, { active: true, auto: true });
+          const res = await orchestratorSingleton.setTeamSkillActive(teamId, s.name, { active: true, auto: true });
+          // #750 AC7: verify the auto-activation actually reached members. A pass
+          // that synced nobody (e.g. the pool-keyspace bug, or a genuinely absent
+          // source) must be surfaced as a failure in the live feed, not left as a
+          // silent `active · 0/N`.
+          const verdict = skillDelivery.deliveryVerdict(res && res.members);
+          if (!verdict.delivered) {
+            appendKnowledgeEvents([skillDelivery.buildDeliveryFailureEvent({
+              teamId, skillName: s.name, verdict, auto: true,
+            })]);
+            console.warn(
+              `[Orchestrator] auto-activate '${s.name}' for team ${teamId} delivered to 0/${verdict.syncable} member(s) ` +
+              `(${verdict.allSourceMissing ? "source missing from pool" : "sync failed"})`
+            );
+          }
         } catch (err) {
           console.warn(`[Orchestrator] auto-activate '${s.name}' for team ${teamId} failed: ${err.message}`);
         }
@@ -5093,7 +5116,10 @@ class Orchestrator {
       }
       delete manifest[skillName];
     } else {
-      const src = resolveSkillSourceDir(skillName, cfg.teamId || DEFAULT_TEAM_ID, { agentId: id });
+      // #750: resolve the team pool by the AGENT team (parentTeamId), the key
+      // the curator/overlay/seed all use — NOT the member's human tenant teamId,
+      // which pointed at /workspace/teams/default and made every sync miss.
+      const src = resolveSkillSourceDir(skillName, agentKnowledgeTeamId(cfg), { agentId: id });
       // Machine-readable `reason` so the UI can distinguish the "pool file gone"
       // condition (recoverable via restore/re-promote, not a retry) from a
       // generic copy failure (#739 AC4).
@@ -5260,7 +5286,9 @@ class Orchestrator {
   // { state, sourceVersion } — `state` is one of skillManifest.DRIFT_STATES.
   _copyDriftState(id, cfg, skillName, seeded) {
     const copyDir = path.join(agentDir(id), "skills", skillName);
-    const srcDir = resolveSkillSourceDir(skillName, cfg.teamId || DEFAULT_TEAM_ID, { agentId: id });
+    // #750: same agent-team keyspace as seed/sync so a seeded team skill's drift
+    // is compared against the source it was actually copied from.
+    const srcDir = resolveSkillSourceDir(skillName, agentKnowledgeTeamId(cfg), { agentId: id });
     const anchor = seeded && seeded.contentHash ? seeded.contentHash : null;
     let copyHash = null;
     try { if (fs.existsSync(path.join(copyDir, "SKILL.md"))) copyHash = skillManifest.hashSkillDir(copyDir); } catch { copyHash = null; }
@@ -7266,7 +7294,7 @@ async function main() {
         const skills = effectiveSkills(cfg, loadAgentConfig);
         // #617: same skill-description enrichment (and same source resolution)
         // as the seed path, so the preview's Skills section is byte-identical.
-        const skillDescriptions = agentSkillDescriptions(id, cfg.teamId || DEFAULT_TEAM_ID, skills);
+        const skillDescriptions = agentSkillDescriptions(id, agentKnowledgeTeamId(cfg || {}), skills);
         // Same live gate as saveAgentPrompt (autonomy >= 1 + provisioned
         // checkout): digest import, unified Memory System section AND the
         // unified memory hint all flip together — byte-identical to what the

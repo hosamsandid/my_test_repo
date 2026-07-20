@@ -3377,7 +3377,10 @@ function augmentSkillActivation(graph, parsed) {
         // seeded into this member's workspace — the seeded entry is the anchor.
         if (seeded) {
           const origin = seededEntry.tier
-            ? { tier: seededEntry.tier, teamId: seededEntry.tier === 'team' ? m.teamId : undefined, sourceHash: seededEntry.contentHash }
+            // #750: a team-tier copy's source lives in the AGENT team's pool
+            // (parentTeamId — the same key the overlay's sourceMissing check and
+            // the orchestrator seed/sync use), not the member's human tenant teamId.
+            ? { tier: seededEntry.tier, teamId: seededEntry.tier === 'team' ? (m.parentTeamId || m.teamId) : undefined, sourceHash: seededEntry.contentHash }
             : null;
           const copyDir = path.join(AGENTS_DIR, m.id, 'skills', name);
           const sourceDir = origin ? resolveSkillSourceDir(name, origin.tier, origin.teamId) : null;

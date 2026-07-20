@@ -1365,6 +1365,28 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
       .finally(() => setBusy(null));
   };
 
+  // #750 AC5/AC6: the one action that actually RESOLVES a genuinely-undeliverable
+  // skill from the operator's seat. The skill's files aren't available, so no
+  // agent can ever receive it and no retry helps; removing it from the team's
+  // active set cleanly clears the stuck `0/N` state with an explicit "couldn't be
+  // installed — removed" outcome (Deactivate under the hood — reversible, and it
+  // leaves any archived snapshot untouched for a later restore).
+  const removeUndeliverable = () => {
+    setBusy('deactivate');
+    fetch('/api/knowledge/deactivate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, skillName: skill.label }),
+    })
+      .then(async r => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        feedback('ok', 'This skill couldn’t be installed, so it was removed from the team.');
+        onReload && onReload();
+      })
+      .catch(e => feedback('error', `Couldn’t remove it: ${e.message}`))
+      .finally(() => setBusy(null));
+  };
+
   // Drift resync (#629 AC3/AC4). `scope` is { teamId } for the bulk "Sync all
   // outdated" or { agentId } for a single copy's Update. The backend only
   // overwrites `outdated` copies; diverged/conflict/orphaned/unknown come back
@@ -1546,19 +1568,25 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
       )}
 
       {sourceMissing && anyPending && (
+        // #750 AC4/AC5/AC6: plain-language explanation (no "pool"/"pending"
+        // jargon) plus the one action that actually resolves the state. The old
+        // "Restore or manage →" link pointed at a Skills surface with no restore
+        // UI (dead end); we offer "Remove this skill" instead, which cleanly
+        // clears the stuck state and reports an explicit outcome.
         <div style={{
           marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
           fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error, #d33)',
         }}>
-          <span title="The skill is in the team’s active set, but its file is missing from the pool — so no member can be synced. This is why the badge stays at 0 and the rows stay pending; re-running the sync can’t fix it.">
-            ⚠ Skill file missing from the pool — members can’t be synced.
+          <span title="This skill was added to the team automatically, but its files are no longer available — so no agent can receive it, and trying again won’t help. You can remove it from the team.">
+            ⚠ This skill couldn’t be installed — its files are no longer available, so no agent could receive it.
           </span>
-          <a
-            href={`/skills?team=${encodeURIComponent(teamId)}`}
-            title="Open the Skills surface to restore this skill from the archive, re-promote it, or detach the grant"
-            style={{ fontWeight: 600, color: 'var(--eb-status-error, #d33)' }}>
-            Restore or manage →
-          </a>
+          <button
+            disabled={!!busy}
+            onClick={removeUndeliverable}
+            title="Remove this undeliverable skill from the team’s active set — this clears the stuck state"
+            style={{ ...primaryBtn, padding: '2px 10px', fontSize: 'var(--eb-text-xs)' }}>
+            {busy === 'deactivate' ? 'Removing…' : 'Remove this skill'}
+          </button>
         </div>
       )}
 
@@ -1611,11 +1639,13 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
                 )}
                 {m.state === 'pending' && (
                   sourceMissing ? (
-                    // The pool file is gone — a retry can never move this member off
-                    // `pending` (#739 AC4). Point at recovery instead of a dead-end sync.
-                    <span title="The skill file is missing from the pool, so it can’t be copied into this member. Restore it from the archive, re-promote it, or detach the grant."
+                    // The skill's files are gone — a retry can never move this member
+                    // off `pending` (#750 AC4/AC6). Plain language, no dead-end link;
+                    // the team-level "Remove this skill" banner above is the resolving
+                    // action.
+                    <span title="This skill’s files are no longer available, so it can’t be installed for this agent. Use “Remove this skill” above to clear it."
                       style={{ flexShrink: 0, fontSize: 10, fontWeight: 600, color: 'var(--eb-status-error, #d33)', cursor: 'help', whiteSpace: 'nowrap' }}>
-                      source missing
+                      can’t install
                     </span>
                   ) : (
                     <button

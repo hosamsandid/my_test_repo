@@ -4,21 +4,33 @@ import { summarizeActivation, syncFailureReason, isSourceMissing } from './knowl
 
 // ── syncFailureReason ────────────────────────────────────────────────────────
 
-test('syncFailureReason maps the source-missing code to plain language', () => {
-  assert.equal(syncFailureReason({ status: 'error', reason: 'source-missing', error: 'skill not found in pool: x' }), 'skill file missing from pool');
+test('syncFailureReason maps the source-missing code to plain language (no "pool" jargon, #750 AC4)', () => {
+  assert.equal(syncFailureReason({ status: 'error', reason: 'source-missing', error: 'skill not found in pool: x' }), 'this skill’s files are no longer available');
 });
 
 test('syncFailureReason infers source-missing from the error text when no code', () => {
-  assert.equal(syncFailureReason({ status: 'error', error: 'skill not found in pool: x' }), 'skill file missing from pool');
+  assert.equal(syncFailureReason({ status: 'error', error: 'skill not found in pool: x' }), 'this skill’s files are no longer available');
 });
 
-test('syncFailureReason surfaces a copy failure with its message', () => {
-  assert.equal(syncFailureReason({ status: 'error', reason: 'copy-failed', error: 'EACCES' }), 'copy failed: EACCES');
+test('syncFailureReason surfaces a copy failure with its message in plain language', () => {
+  assert.equal(syncFailureReason({ status: 'error', reason: 'copy-failed', error: 'EACCES' }), 'couldn’t install it (EACCES)');
 });
 
 test('syncFailureReason falls back to the raw error, then a generic default', () => {
   assert.equal(syncFailureReason({ status: 'error', error: 'disk full' }), 'disk full');
-  assert.equal(syncFailureReason({ status: 'error' }), 'sync failed');
+  assert.equal(syncFailureReason({ status: 'error' }), 'couldn’t install it');
+});
+
+test('syncFailureReason never leaks internal terms like "pool"/"manifest"/"pending" (#750 AC4)', () => {
+  const cases = [
+    { status: 'error', reason: 'source-missing' },
+    { status: 'error', error: 'skill not found in pool: x' },
+    { status: 'error', reason: 'copy-failed', error: 'EACCES' },
+    { status: 'error' },
+  ];
+  for (const m of cases) {
+    assert.doesNotMatch(syncFailureReason(m), /\b(pool|manifest|pending)\b/i);
+  }
 });
 
 // ── summarizeActivation: honest team-wide feedback (AC1/AC2) ──────────────────
@@ -35,7 +47,7 @@ test('AC2: zero members synced (all errored) is an ERROR, never green', () => {
   assert.equal(r.kind, 'error');
   assert.equal(r.synced, 0);
   assert.match(r.text, /^0\/10 synced/);
-  assert.match(r.text, /skill file missing from pool/);
+  assert.match(r.text, /no longer available/);
 });
 
 test('AC1: a partial failure is a WARNING carrying count + reason', () => {
@@ -46,7 +58,7 @@ test('AC1: a partial failure is a WARNING carrying count + reason', () => {
   ]);
   assert.equal(r.kind, 'warn');
   assert.equal(r.synced, 2);
-  assert.equal(r.text, '2/3 synced — copy failed: EACCES');
+  assert.equal(r.text, '2/3 synced — couldn’t install it (EACCES)');
 });
 
 test('distinct failure reasons are de-duplicated in the message', () => {
@@ -55,7 +67,7 @@ test('distinct failure reasons are de-duplicated in the message', () => {
     { status: 'error', reason: 'source-missing' },
   ]);
   assert.equal(r.kind, 'error');
-  assert.equal(r.text, '0/2 synced — skill file missing from pool');
+  assert.equal(r.text, '0/2 synced — this skill’s files are no longer available');
 });
 
 test('neutral members (stub / skipped-override) do not count as failures or syncable', () => {
@@ -92,7 +104,7 @@ test('AC3: scoped success reports "synced" for that member', () => {
 test('AC3: scoped failure reports the concrete reason, not a silent no-op', () => {
   const r = summarizeActivation([{ agentId: 'a', status: 'error', reason: 'source-missing' }], { scoped: true });
   assert.equal(r.kind, 'error');
-  assert.equal(r.text, 'still failing — skill file missing from pool');
+  assert.equal(r.text, 'still failing — this skill’s files are no longer available');
 });
 
 test('scoped neutral outcomes explain themselves', () => {

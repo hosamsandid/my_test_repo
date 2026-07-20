@@ -14,6 +14,7 @@
     "docs:journeys": "node docgen/bin/docgen.js",
     "docs:journeys:check": "node docgen/bin/docgen.js --check",
     "docs:deck": "node docgen/bin/deck.js",
+    "video:journeys": "E2E_VIDEO=1 playwright test --project=journey-video",
     "report": "playwright show-report"
   },
   "devDependencies": {

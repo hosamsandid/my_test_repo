@@ -7,11 +7,13 @@
 // down in a finally (always), so the journey leaves no state behind and re-runs
 // cleanly on the same stack. Because it is a normal spec, trace/retries/reporters
 // all work unchanged (AC2).
+const fs = require('fs');
+const path = require('path');
 const { test, expect } = require('@playwright/test');
 const { loadJourneysDir } = require('./loader');
 const { buildRegistry } = require('./step-registry');
 const { resolveFixture } = require('./fixtures');
-const { makeRecorder } = require('./recorder');
+const { makeRecorder, ARTIFACTS_ROOT } = require('./recorder');
 const { runJourneySteps } = require('./runner');
 const { validateStepNames } = require('./schema');
 
@@ -23,6 +25,30 @@ const journeys = loadJourneysDir();
 for (const journey of journeys) {
   validateStepNames(journey, registry.names(), { source: `${journey.id}.yaml` });
 }
+
+// Video capture (#712, docs/journey-spec-concept.md §3.3 item 1). Only the
+// `journey-video` project records video (E2E_VIDEO=1 — playwright.config.js), so
+// `page.video()` is null for the screenshot `journeys` run and this is a no-op
+// there. On a PASSING journey we save the recording next to that run's screenshots
+// as artifacts/<journeyId>/journey.webm, mirroring the recorder's
+// "captures only in a passing run" contract (§2.3): a failing journey leaves no
+// clip.
+//
+// video.saveAs() blocks until the page is closed and the recording is finalised
+// (Playwright's documented contract). The `page` fixture is not torn down until
+// AFTER this afterEach hook returns, so `await video.saveAs()` on its own would
+// wait forever for a close that can't happen yet — a deadlock that hangs the test
+// until its timeout (observed as an 8-min afterEach hang in CI run 29725614841).
+// The supported fix is to close the page and save concurrently: page.close()
+// finalises the recording, which lets saveAs() resolve.
+test.afterEach(async ({ page }, testInfo) => {
+  const video = page.video();
+  if (!video) return;
+  if (testInfo.status !== testInfo.expectedStatus) return;
+  const dest = path.join(ARTIFACTS_ROOT, testInfo.title, 'journey.webm');
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  await Promise.all([video.saveAs(dest), page.close()]);
+});
 
 for (const journey of journeys) {
   test.describe(`journey: ${journey.title}`, () => {

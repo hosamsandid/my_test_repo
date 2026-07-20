@@ -14,6 +14,15 @@ const ADMIN_PORT = process.env.ADMIN_PORT || '4010';
 const BASE_URL = process.env.E2E_BASE_URL || `http://localhost:${ADMIN_PORT}`;
 const isCI = !!process.env.CI;
 
+// The `journey-video` project (#712, docs/journey-spec-concept.md §3.3) reruns the
+// journeys with video recording + slowMo to produce one .webm per journey for the
+// walkthrough video. It is opt-in via E2E_VIDEO=1 so it never runs in the default
+// suite (`make e2e`), the PR gate, or the before/after screenshot lane
+// (ui-screenshots.yml `--project=journeys`) — those would otherwise pay the video
+// + slowMo cost or run the journeys twice. `make video-journeys` / the CI video
+// step set the flag and target the project explicitly.
+const withVideo = process.env.E2E_VIDEO === '1';
+
 module.exports = defineConfig({
   testDir: './tests',
   // Global setup brings up the stack + logs in (storageState); teardown wipes it.
@@ -60,5 +69,35 @@ module.exports = defineConfig({
         reducedMotion: 'reduce',
       },
     },
+    // Video variant of the journeys project (#712, §3.3 item 1). Same spec, same
+    // deterministic viewport/scheme — plus video recording and slowMo so the
+    // walkthrough clip is watchable. journeys.spec.js saves the recording to
+    // artifacts/<journeyId>/journey.webm on success (only), alongside the
+    // screenshots from the same run. Opt-in (E2E_VIDEO=1) so it is skipped unless
+    // explicitly requested — see `withVideo` above.
+    ...(withVideo
+      ? [
+          {
+            name: 'journey-video',
+            testDir: './journey-runner',
+            testMatch: /.*\.spec\.js$/,
+            // slowMo (350 ms/interaction) inflates every step, and the afterEach
+            // hook closes the page + finalises the .webm before the test ends —
+            // both eat into the per-test budget. The default 60 s is too tight for
+            // a multi-step wizard journey recorded this way, so give the recording
+            // run a 5-min ceiling (matches the longer journeys' own timeoutMs).
+            timeout: 300_000,
+            use: {
+              ...devices['Desktop Chrome'],
+              viewport: { width: 1440, height: 900 },
+              deviceScaleFactor: 1,
+              colorScheme: 'light',
+              reducedMotion: 'reduce',
+              video: { mode: 'on', size: { width: 1440, height: 900 } },
+              launchOptions: { slowMo: Number(process.env.E2E_SLOWMO || 350) },
+            },
+          },
+        ]
+      : []),
   ],
 });

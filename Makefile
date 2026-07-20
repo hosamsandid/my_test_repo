@@ -41,7 +41,7 @@ GIT_DIRTY  := $(shell git status --porcelain 2>/dev/null | grep -q . && echo dir
 # back to "unknown".
 export GIT_COMMIT GIT_DIRTY
 
-.PHONY: up down restart build agent-image update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers e2e e2e-gate e2e-up e2e-down docs-journeys docs-journeys-check docs-deck
+.PHONY: up down restart build agent-image update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers e2e e2e-gate e2e-up e2e-down docs-journeys docs-journeys-check docs-deck video-journeys
 
 # `up` depends on `agent-image` so a fresh bring-up always has the per-agent
 # runtime image built (the agent image is NOT a compose service — it's pulled
@@ -222,5 +222,23 @@ docs-journeys-check:
 docs-deck:
 	cd e2e && npm install --no-audit --no-fund --silent && npm run docs:deck
 
+# ── Journey walkthrough video (docs/journey-spec-concept.md §3.3, epic #741) ───
+# Narrated, audio-driven walkthrough video (Variant C) via the Revideo lane in
+# e2e/video/ (see e2e/video/README.md). TWO steps, different prerequisites:
+#   1. record — a `journey-video` Playwright run records one clip per journey
+#      (video: on + slowMo); needs the full podman e2e stack (like `make e2e`).
+#   2. assemble — the Revideo sub-project renders the narrated video; needs
+#      headless Chromium + ffmpeg + (for voiceover) an Edge-TTS run. Installed in
+#      CI, NOT assumed in agent containers (see README "Container feasibility").
+# The journey-driven assembler is T5/#745; until then this renders the reference
+# example scene so the lane stays exercised end-to-end.
+#   make video-journeys                         # record + render (needs stack + Chromium/ffmpeg)
+video-journeys:
+	cd e2e && npm install --no-audit --no-fund --silent \
+	  && E2E_VIDEO=1 npx playwright install --with-deps chromium \
+	  && npm run video:journeys
+	cd e2e/video && npm ci --no-audit --no-fund --silent \
+	  && npm run render:example
+
 help:
-	@echo "Targets: up, down, restart, build, agent-image, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, e2e, e2e-gate, e2e-up, e2e-down, docs-journeys, docs-journeys-check, docs-deck"
+	@echo "Targets: up, down, restart, build, agent-image, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, e2e, e2e-gate, e2e-up, e2e-down, docs-journeys, docs-journeys-check, docs-deck, video-journeys"

@@ -27,14 +27,26 @@ function makeState() {
     repos: new Map(), // "owner/repo" -> repo record
     seq: 0, // monotonic id source for events, issues, PRs (shared, simple)
     clock: 0, // monotonic fake clock; distinct created_at per mutation
+    // Real wall-clock base captured at state creation / reset (#711). Event
+    // created_at MUST be anchored to real time, not a fixed 2023 epoch: the
+    // production GitHub poller gates every event by the subscriber's real-time
+    // history horizon (activatedAt/createdAt, widened by a 5-min grace —
+    // github-poller.js passesHorizon), so a fixed-epoch 2023 timestamp is always
+    // older than a team materialised "now" and the label-chain events get
+    // dropped before reaching the Developer/Reviewer. Anchoring to reset-time
+    // (the ibanStoryTeam fixture resets fake-github just before materialising)
+    // keeps events inside the horizon window. The monotonic `clock` increment
+    // preserves strictly-increasing, distinct timestamps for ordering assertions.
+    epoch: Date.now(),
   };
 }
 
 function isoAt(state) {
-  // Deterministic, strictly-increasing timestamps (real Date not needed and
-  // would make assertions flaky). Base epoch is arbitrary but fixed.
+  // Strictly-increasing timestamps anchored to the real wall-clock base (see
+  // makeState); the +1000ms step guarantees distinct, ordered created_at values
+  // without depending on the host clock's resolution.
   state.clock += 1000;
-  return new Date(1_700_000_000_000 + state.clock).toISOString();
+  return new Date(state.epoch + state.clock).toISOString();
 }
 
 function repoKey(owner, repo) {
@@ -249,6 +261,9 @@ function makeHandler(state) {
       state.repos = new Map();
       state.seq = 0;
       state.clock = 0;
+      // Re-anchor the wall-clock base so post-reset events are stamped "now"
+      // (≈ the team-materialisation horizon), not the process-start time (#711).
+      state.epoch = Date.now();
       return send(res, 200, { ok: true });
     }
     if (parts[0] === '_state' && method === 'GET') {

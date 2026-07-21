@@ -7,3 +7,6 @@ out/
 # The manifest under data/ IS tracked (seeded {}); public/ is all generated.
 public/
 scripts/narration.json
+# Journey-driven narration extracted from journeys/*.yaml `voiceover:` fields
+# (T4/#744, `npm run journeys:narration`). Regenerated from the YAML each render.
+scripts/generated/

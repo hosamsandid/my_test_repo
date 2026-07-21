@@ -79,6 +79,20 @@ jobs:
       - name: Install jq (setup.sh prerequisite)
         run: sudo apt-get update && sudo apt-get install -y jq
 
+      - name: Ensure ~/.gitconfig is a file (podman bind-mount guard)
+        # docker-compose.yml bind-mounts ~/.gitconfig into the orchestrator (:ro).
+        # On CI the file doesn't exist, so podman auto-creates the bind source as
+        # a DIRECTORY when the stack comes up (during the journey pass below).
+        # After that every `gh`/`git` invocation fails with "unable to access
+        # '/home/runner/.gitconfig': Is a directory" — which is what breaks the
+        # sticky-comment step. Pre-create it as a real file so podman mounts the
+        # file; the identity is harmless and matches the dev-mount intent.
+        run: |
+          set -euo pipefail
+          [ -d "$HOME/.gitconfig" ] && { rmdir "$HOME/.gitconfig" 2>/dev/null || rm -rf "$HOME/.gitconfig"; }
+          git config --global user.name  "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
       - name: Start rootless podman API socket
         run: |
           set -euo pipefail

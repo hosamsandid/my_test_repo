@@ -20,7 +20,12 @@ fixtures:
 
 steps:
   # ── Slide 1: chapter intro + "what is a team" (narrative-only) ──────────────
+  # `voiceover:` is the compact narration for the walkthrough video (epic #741) —
+  # the storyline, distinct from the fuller `narrative` above that feeds the deck.
   - kind: narrative-only
+    id: intro
+    voiceover: |
+      Let's set up a team of agents that work together on one repository. The wizard guides us through five steps, ending in a review before anything is created.
     narrative: |
       Let's walk through the Team Setup wizard. This is where the Agent Studio really shows what it's about: it doesn't just run a single agent, it lets you stand up a whole team of agents that work together on the same repository.
 
@@ -36,6 +41,8 @@ steps:
 
   # ── Slide 2: Process step ───────────────────────────────────────────────────
   - id: process-step
+    voiceover: |
+      The first step is the process — it comes first on purpose, because it's the central decision. There are three ways to start; for the demo we pick a ready-made template, the Core SDLC flow. It gives us four agents that cover a full build-and-review loop: a Business Analyst who writes issues, a Developer who implements them, a Code Reviewer, and a Reworker. The live preview on the right confirms the hand-offs connect.
     narrative: |
       The first step is the Process step — and it comes first on purpose, because the process is the central decision. Everything after it — the environment, the name, the knowledge — just qualifies this choice.
 
@@ -54,6 +61,8 @@ steps:
 
   # ── Slide 3: Working Environment step ───────────────────────────────────────
   - id: working-environment
+    voiceover: |
+      Next, the working environment — where the team operates. It bundles the repository, the branch, and the credentials into one reusable template, so we just pick one from the grid.
     narrative: |
       The second step is the Working Environment. If the process defines what the team does, the environment defines where it does it.
 
@@ -72,6 +81,8 @@ steps:
 
   # ── Slide 4: Team identity step ─────────────────────────────────────────────
   - id: team-step
+    voiceover: |
+      Step three gives the team its identity: a name and an ID, both pre-filled from the environment. The ID becomes the prefix for every agent the team creates, like agentic-demos-developer.
     narrative: |
       Step three is where we give the team its identity — really just two fields: a team name and a team ID.
 
@@ -93,6 +104,8 @@ steps:
 
   # ── Slide 5: Knowledge step (optional) ──────────────────────────────────────
   - id: knowledge-step
+    voiceover: |
+      Knowledge is optional. Here we choose the skills every member inherits, the sources it can query at runtime, and how learnings are shared across the team. We accept the defaults.
     narrative: |
       The fourth step is Knowledge — and it's explicitly optional. This is where we decide what the team knows and how it learns.
 
@@ -106,6 +119,8 @@ steps:
 
   # ── Slide 6: Review & create ────────────────────────────────────────────────
   - id: review-step
+    voiceover: |
+      Finally, review — everything in one place. When we hit create, the wizard builds the whole team in one atomic transaction, each member with its own chat identity, ready for the first issue.
     narrative: |
       The final step is Review — the confirmation before anything is created. Nothing has been built yet; this is our last chance to check the whole picture in one place.
 

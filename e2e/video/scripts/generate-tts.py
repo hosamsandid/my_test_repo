@@ -1,8 +1,12 @@
 """Generate voiceover MP3s via Microsoft Edge TTS (free, neural, no API key).
 
-Reads scripts/narration.json and writes:
+Usage:
+  python3 scripts/generate-tts.py [narration.json]
+
+Reads a narration file ([{id, text}, …]; default scripts/narration.json — the
+journey-driven path passes scripts/generated/<journeyId>.narration.json) and writes:
   - public/audio/<id>.mp3
-  - public/audio/audio-manifest.json
+  - data/audio-manifest.json   (MERGED, not overwritten — several chapters coexist)
 """
 from __future__ import annotations
 
@@ -17,7 +21,7 @@ VOICE = "en-US-AndrewMultilingualNeural"
 RATE = "-5%"
 
 ROOT = Path(__file__).resolve().parent.parent
-NARRATION = ROOT / "scripts" / "narration.json"
+DEFAULT_NARRATION = ROOT / "scripts" / "narration.json"
 AUDIO_DIR = ROOT / "public" / "audio"
 # Manifest lives in data/ (imported by revideo/utils/audio.tsx via ../../data/).
 MANIFEST = ROOT / "data" / "audio-manifest.json"
@@ -40,19 +44,30 @@ async def synth(entry_id: str, text: str) -> dict:
 
 
 async def main() -> int:
-    if not NARRATION.exists():
-        print(f"ERROR: {NARRATION} missing. Run `node scripts/extract-narration.mjs` first.")
+    narration = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else DEFAULT_NARRATION
+    if not narration.exists():
+        print(f"ERROR: {narration} missing. Run `npm run journeys:narration` (or extract-narration) first.")
         return 1
-    entries = json.loads(NARRATION.read_text(encoding="utf-8"))
+    entries = json.loads(narration.read_text(encoding="utf-8"))
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     MANIFEST.parent.mkdir(parents=True, exist_ok=True)
+    # MERGE into the existing manifest so per-journey runs don't wipe other
+    # chapters (the manifest is shared — audio.tsx reads one manifest for all).
     manifest: dict[str, dict] = {}
+    if MANIFEST.exists():
+        try:
+            existing = json.loads(MANIFEST.read_text(encoding="utf-8"))
+            if isinstance(existing, dict):
+                manifest = existing
+        except (json.JSONDecodeError, OSError):
+            manifest = {}
+    print(f"Reading narration: {narration}")
     for e in entries:
         info = await synth(e["id"], e["text"])
         manifest[e["id"]] = info
-        print(f"  {e['id']:30s} {info['durationSec']:6.2f}s  {info['mediaFile']}")
+        print(f"  {e['id']:36s} {info['durationSec']:6.2f}s  {info['mediaFile']}")
     MANIFEST.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    print(f"Wrote manifest: {MANIFEST}")
+    print(f"Wrote manifest: {MANIFEST} ({len(entries)} updated, {len(manifest)} total)")
     return 0
 
 

@@ -37,7 +37,13 @@ fixtures:
 
 steps:
   # ── Slide 7: chapter intro (narrative-only) ─────────────────────────────────
+  # `voiceover:` is the compact narration for the walkthrough video (epic #741);
+  # the fuller `narrative` below feeds the deck. Screenshot capture points for the
+  # remaining beats are added with T5/#745 — until then only `agent-chat` renders.
   - kind: narrative-only
+    id: intro
+    voiceover: |
+      Now let's actually work with the team on a real change — end to end, from a vague idea in chat to a merge-ready pull request. Our example: a bank transfer form that today accepts any text in its IBAN field and always reports success. We want it to validate the recipient's IBAN before the transfer can go through.
     narrative: |
       So far we've built a team. Now let's actually work with it — end to end, from a vague idea in chat all the way to a pull request that's ready to merge.
 
@@ -47,6 +53,8 @@ steps:
 
   # ── Slide 8: the Agent Chat ─────────────────────────────────────────────────
   - id: agent-chat
+    voiceover: |
+      This is the Agent Chat, where a human talks directly to any agent. On the left is our team with its four members: Business Analyst, Code Reviewer, Developer and Reworker. In the middle is the conversation, and on the right a live view into the agent's own workspace.
     narrative: |
       This is the Agent Chat — where a human talks directly to any agent without leaving the Agent Studio. On the left is our team with its four members; each is a full agent with its own chat identity, and we can open a one-to-one conversation with any of them. We start with the Business Analyst.
     # Wait for the BA runtime to have booted before the first message (a send that
@@ -65,6 +73,8 @@ steps:
   # message (it proves the hand-off, not the conversation) — the fake BA playbook
   # files the issue directly. The live lane shows the full six-question exchange.
   - id: describe-request
+    voiceover: |
+      I describe the request to the Business Analyst in plain language. Here's the first thing to appreciate: it doesn't just start writing a spec. It looks at the current form and pushes back with the six questions that genuinely need a human decision — when validation happens, what to do on an invalid IBAN, what if the service is down. I answer point by point, steering the outcome without writing a requirements document myself.
     narrative: |
       I describe the request to the Business Analyst in plain language: the transfer form should validate the IBAN. In the live demo the BA pushes back first — it asks the six product questions that genuinely need a human decision (validate on blur or submit? block or warn? what if the service is down? …) — and only then, with my answers in hand, finalizes the work item.
 
@@ -75,12 +85,16 @@ steps:
 
   # Hop 1 — BA → issue: the issue now exists on (fake) GitHub.
   - id: issue-filed
+    voiceover: |
+      With my decisions, the Business Analyst files the issue in GitHub. It's written in two layers: a plain-language human section any stakeholder can read, and a full agent section with the problem, scope, and numbered, testable acceptance criteria for the delivery team.
     assert:
       do: gh.expectIssueExists
       repo: e2e/fixture
 
   # ── Slide 12: control point 1 — the human applies `ready` ───────────────────
   - id: human-approves
+    voiceover: |
+      Here's the human control point. On GitHub I open the labels menu and apply ready. This label is a deliberate human gate — no agent can set it. By adding it, I approve what gets built, and the moment I do, it becomes an event the platform is listening for.
     narrative: |
       This is the human go-signal: I open the Labels menu and apply `ready`. This label is deliberately a human gate — no agent sets it. By adding it, I'm approving what gets built. The moment I do, it becomes a GitHub event the platform is listening for — and that event is what wakes the next agent in the chain.
     # The test acts as the human here — applying `ready` to the issue the BA just
@@ -92,6 +106,8 @@ steps:
 
   # ── Slide 13: the Developer wakes and delivers ──────────────────────────────
   - id: developer-wakes
+    voiceover: |
+      The ready label fired a trigger, and the Developer woke up automatically — no one opened this chat to prompt it. It implemented the whole change on its own: a testable client, the validation states wired into the form, passing tests, a green build — then opened a pull request and labelled it ready-for-review. The Developer never reviews or merges its own work.
     narrative: |
       The `ready` label fired a GitHub trigger, and the Developer agent woke up automatically — the trigger event is visible right in its chat, delivered over the session stream. No one opened this chat to prompt it; the label alone set it in motion. The Developer then does the whole implementation on its own — a feature branch, the change, tests — opens a Pull Request and labels it `ready-for-review`. The hand-off is again just a label, and that label is what will wake the Code Reviewer. The Developer never reviews or merges its own work.
     # Hop 2 — issues.labeled woke the Developer: assert the trigger.fired event on
@@ -109,6 +125,8 @@ steps:
 
   # ── Slide 14: the Code Reviewer verifies ────────────────────────────────────
   - id: reviewer-verdict
+    voiceover: |
+      Same pattern again: the ready-for-review label woke the Code Reviewer. It checked out the branch, reviewed the full diff in context, and went through the acceptance criteria one by one. Its verdict: all met, tests pass, build green — and it applies ready-to-merge, noting that a human performs the merge.
     narrative: |
       Same pattern again: the `ready-for-review` label on the pull request fired a trigger, and the Code Reviewer wakes up on its own. It reviews the change against the issue's acceptance criteria, posts a structured review comment, and applies `ready-to-merge`. And here's the important line: a human performs the merge. The Code Reviewer recommends; it never merges.
     # Hop 4 — the reviewer posted its verdict comment on the PR.
@@ -126,6 +144,9 @@ steps:
 
   # ── Slide 15: control point 2 — the merge (narrative-only) ──────────────────
   - kind: narrative-only
+    id: merge-recap
+    voiceover: |
+      And this is where we land: a pull request ready to merge, cleanly closing the issue. From a one-line idea in chat, the team produced a well-specified issue, a complete tested implementation, and a reviewed, merge-ready pull request — each hand-off triggered automatically by a label, with the human in control at exactly the two points that matter.
     narrative: |
       And this is where we land: a pull request marked ready to merge, carrying the `ready-to-merge` label the Code Reviewer applied, closing the issue. The merge itself is the human's second control point — deliberately out of scope for this automated loop (matching the happy path, which skips the rework loop).
 

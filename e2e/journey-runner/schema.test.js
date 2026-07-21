@@ -106,6 +106,49 @@ test('rejects duplicate screenshot ids', () => {
   );
 });
 
+test('accepts a voiceover on a screenshot step and on a narrative-only step', () => {
+  const j = baseJourney({
+    steps: [
+      { kind: 'narrative-only', narrative: 'intro', id: 'intro', voiceover: 'Welcome.' },
+      { action: { do: 'a.b' }, screenshot: 'shot', voiceover: 'This is the screen.' },
+    ],
+  });
+  assert.doesNotThrow(() => validateJourney(j));
+});
+
+test('rejects a non-string / empty voiceover', () => {
+  assert.throws(
+    () => validateJourney(baseJourney({ steps: [{ id: 's', action: { do: 'a.b' }, voiceover: 42 }] })),
+    /voiceover must be a non-empty string/,
+  );
+  assert.throws(
+    () => validateJourney(baseJourney({ steps: [{ id: 's', action: { do: 'a.b' }, voiceover: '   ' }] })),
+    /voiceover must be a non-empty string/,
+  );
+});
+
+test('rejects a voiceover on a step with no id or screenshot to key its audio', () => {
+  assert.throws(
+    () => validateJourney(baseJourney({ steps: [{ action: { do: 'a.b' }, voiceover: 'orphan' }] })),
+    /carries a voiceover but has no id or screenshot/,
+  );
+});
+
+test('rejects a duplicate voiceover key (screenshot vs id collision)', () => {
+  assert.throws(
+    () =>
+      validateJourney(
+        baseJourney({
+          steps: [
+            { id: 'dup', action: { do: 'a.b' }, voiceover: 'one' },
+            { action: { do: 'a.c' }, screenshot: 'dup', voiceover: 'two' },
+          ],
+        }),
+      ),
+    /duplicate voiceover key "dup"/,
+  );
+});
+
 test('rejects an empty steps list', () => {
   assert.throws(() => validateJourney(baseJourney({ steps: [] })), /steps must be a non-empty list/);
 });

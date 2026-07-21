@@ -74,17 +74,28 @@ suite + the code is the deliverable; the video is verified from the CI artifact.
 ## Pipeline
 
 ```
-journeys/*.yaml ──▶ voiceover: text ──▶ extract ──▶ Edge-TTS ──▶ public/audio/*.mp3
-   (steps + narrative)                (T4/#744)   (generate-tts.py)  + data/audio-manifest.json (durations)
-        │                                                                     │
-        ▼                                                                     ▼
-   journey.webm  +  journey.cuts.json   ─────────────────────────▶   Revideo scene (playAndWait)
-  (journey-video project)  (cut-marks, T3/#743)                       Variant C: motion → freeze
-                                                                              │
-                                                                              ▼
-                                                                     agent-studio-walkthrough.mp4
-                                                                        (Revideo assembler, T5/#745)
+journeys/*.yaml ──▶ voiceover: field ──▶ extract-narration.js ──▶ generated/<id>.narration.json
+  (per step, T4/#744)                    (journey-runner, npm run          │  [{id,text}] in beat order
+                                          journeys:narration)              ▼
+                                                              generate-tts.py <file>  (Edge-TTS)
+                                                                            │
+                                              public/audio/<id>.mp3  ◀───────┴──▶  data/audio-manifest.json
+                                                    │                                      │ (durations, merged)
+        journey screenshot run ──▶ e2e/artifacts/<id>/<name>.png                          │
+                    │                       │                                              ▼
+                    └───────────────────────┴──────────────────────▶  journey→beats (T5/#745)
+                                                                         → makeWalkthroughProject → render silent
+                                                                         → mux-narration.mjs → <id>-walkthrough.mp4
 ```
+
+**T4 (#744) live narration — done.** The storyline now lives in the journey YAML:
+each step carries a compact `voiceover:` (distinct from the deck's fuller
+`narrative`). `npm run journeys:narration` (in `e2e/`) extracts every journey's
+voiceover into `scripts/generated/<journeyId>.narration.json` (audio id
+`<journeyId>-<screenshot|id>`), which `python3 scripts/generate-tts.py
+scripts/generated/<journeyId>.narration.json` turns into `public/audio/*.mp3`
+plus a **merged** `data/audio-manifest.json`. T5 (#745) reads the same journey to
+map each beat's screenshot + audio id and replace the hardcoded example beat lists.
 
 ## Files (vendored foundation)
 
@@ -99,7 +110,10 @@ journeys/*.yaml ──▶ voiceover: text ──▶ extract ──▶ Edge-TTS �
 | `revideo/render.ts` | CLI renderer (`renderVideo` + the puppeteer/outDir workarounds) | vendored |
 | `scripts/generate-tts.py` | Edge-TTS → MP3 + `data/audio-manifest.json` (real durations) | vendored, reuse as-is |
 | `scripts/team-setup.narration.json` | the demonstrator's per-step `voiceover:` text (the source of the committed mp3s) | fixture |
-| `scripts/extract-narration.mjs` | collects narration entries → `scripts/narration.json` | **reference** — T4 replaces with a journey `voiceover:` extractor |
+| `scripts/extract-narration.mjs` | legacy tsx-scraping extractor (the demonstrator example scenes) | **superseded** by the journey `voiceover:` extractor below |
+| `../journey-runner/bin/extract-narration.js` | **journey-driven extractor** (T4/#744): `journeys/*.yaml` `voiceover:` → `scripts/generated/<id>.narration.json` | live — `npm run journeys:narration` |
+| `../journey-runner/narration.js` | pure `journeyNarration(doc)` + `stepAudioId(journeyId, step)` — the one-place journey→audio-id mapping T5 reuses | live |
+| `scripts/generated/<id>.narration.json` | per-journey narration (gitignored — regenerated from the YAML) | generated |
 | `fixtures/shots/*.png` | the 5 Team Setup step screenshots (demonstrator) — `prep:shots` copies them to `public/shots/` | fixture |
 | `fixtures/audio/*.mp3` + `audio-manifest.json` | the demonstrator's Edge-TTS voiceovers — `prep:audio` copies them to `public/audio/` + `data/` | fixture |
 | `fixtures/sample-journey.mp4` | a short real UI clip (H.264) for the optional-motion reference | fixture |

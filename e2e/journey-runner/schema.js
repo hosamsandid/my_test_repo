@@ -49,6 +49,19 @@ function validateStep(source, step, i) {
   if (step.narrative != null && typeof step.narrative !== 'string') {
     fail(source, `${at}.narrative must be a string`);
   }
+  // `voiceover` is the compact narration read aloud in the walkthrough video
+  // (epic #741) — distinct from the fuller `narrative` that feeds the deck. It
+  // is optional on any step (narrative-only title cards included). Its audio is
+  // keyed by the step's screenshot slug, or its id when there is no screenshot,
+  // so a narrated step must carry one of the two (see narration.js/stepAudioId).
+  if (step.voiceover != null) {
+    if (typeof step.voiceover !== 'string' || !step.voiceover.trim()) {
+      fail(source, `${at}.voiceover must be a non-empty string when present`);
+    }
+    if (!step.screenshot && !step.id) {
+      fail(source, `${at} carries a voiceover but has no id or screenshot to key its audio — add an "id"`);
+    }
+  }
   if (step.screenshot != null) {
     if (typeof step.screenshot !== 'string' || !SLUG_RE.test(step.screenshot)) {
       fail(source, `${at}.screenshot "${step.screenshot}" must be a slug (lowercase alnum + dashes)`);
@@ -127,6 +140,12 @@ function validateJourney(doc, { source = 'journey' } = {}) {
   const shots = doc.steps.map((s) => s.screenshot).filter(Boolean);
   const dupe = shots.find((s, i) => shots.indexOf(s) !== i);
   if (dupe) fail(source, `duplicate screenshot id "${dupe}" — every capture point must be unique`);
+
+  // Voiceover audio keys (screenshot ?? id) must be unique too — they name the
+  // generated MP3s in the shared audio manifest (narration.js/stepAudioId).
+  const voKeys = doc.steps.filter((s) => s.voiceover != null).map((s) => s.screenshot || s.id);
+  const dupeVo = voKeys.find((k, i) => voKeys.indexOf(k) !== i);
+  if (dupeVo) fail(source, `duplicate voiceover key "${dupeVo}" — each narrated step needs a unique id/screenshot`);
 
   return doc;
 }

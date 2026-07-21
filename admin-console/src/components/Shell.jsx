@@ -333,7 +333,7 @@ export default function Shell({ children }) {
             whiteSpace: 'nowrap',
           }}>
             <div>© 2026 Accenture. All rights reserved.</div>
-            <div style={{ color: 'var(--eb-text-muted)' }}>v{VERSION_LABEL}</div>
+            <div data-testid="app-version" style={{ color: 'var(--eb-text-muted)' }}>v{VERSION_LABEL}</div>
           </div>
         )}
       </aside>

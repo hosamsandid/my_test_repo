@@ -11,6 +11,7 @@ import KnowledgeLearningSections, {
   KNOWLEDGE_LEARNING_DEFAULTS, AUTONOMY_LEVELS, GATE_ORDER, GATE_LABELS,
 } from '../components/KnowledgeLearningConfig';
 import StepProcess, { BundleRolesSummary, BundleFlowPreview, LintBadges } from './team-setup/StepProcess';
+import { buildReviewFields } from './team-setup/review-fields';
 
 const inputStyle = {
   width: '100%',
@@ -495,51 +496,57 @@ function StepReview({ form, environments, sshKeys, githubTokens, mcpServers, mcp
   const sshKey = sshKeys?.find(k => k.id === form.sshKeyId);
   const ghToken = githubTokens?.find(t => t.id === form.githubTokenId);
   const knowledge = (form.mcpSelections || []).filter(s => s.serverId);
+  // Scalar summary fields (label/value + empty-state placeholders) derived by a
+  // pure, unit-tested helper; the knowledge-learning constants come from the
+  // shared React component module and are passed through as plain data.
+  const fields = buildReviewFields({
+    form, env, sshKey, ghToken,
+    knowledgeMeta: {
+      defaults: KNOWLEDGE_LEARNING_DEFAULTS,
+      autonomyLevels: AUTONOMY_LEVELS,
+      gateOrder: GATE_ORDER,
+      gateLabels: GATE_LABELS,
+    },
+  });
 
   return (
     <Card>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-        <ReviewRow label="Team" value={`${form.teamName} (${form.teamId})`} />
-        <ReviewRow label="Working Environment" value={env ? `${env.name} (${env.id})` : (form.environmentId || '—')} />
-        <ReviewRow label="Repository" value={`${form.repoUrl} @ ${form.branch || 'main'}`} />
-        <ReviewRow label="SSH Key" value={sshKey ? sshKey.name : '—'} />
-        <ReviewRow label="GitHub Token" value={ghToken ? ghToken.name : '—'} />
-        <ReviewRow label="Initial team skills" value={(form.skills || []).length ? form.skills.join(', ') : '—'} />
-        {(() => {
-          const kc = form.knowledgeConfig || KNOWLEDGE_LEARNING_DEFAULTS;
-          const lvl = AUTONOMY_LEVELS.find(l => l.level === kc.autonomy) || AUTONOMY_LEVELS[1];
-          const gateSummary = GATE_ORDER
-            .map(tr => `${GATE_LABELS[tr]}: ${tr === 'team>global' ? 'always reviewed' : ((kc.gates || {})[tr] || 'review') === 'auto' ? 'automatic' : 'needs review'}`)
-            .join(' · ');
-          return (
-            <ReviewRow
-              label="Knowledge learning"
-              value={`Autonomy ${kc.autonomy} · ${lvl.label} · Review ${kc.review ? 'on' : 'off'} · ${gateSummary}`}
-            />
-          );
-        })()}
-        <div>
-          <div style={labelStyle}>Knowledge sources ({knowledge.length})</div>
-          {knowledge.length === 0 ? (
-            <div style={{ ...hintStyle, marginTop: 0 }}>None</div>
-          ) : (
-            <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
-              {knowledge.map(k => {
-                const srv = (mcpServers || []).find(s => s.id === k.serverId);
-                const cred = (mcpCredentials || []).find(c => c.id === k.credentialId);
-                return (
-                  <li key={k.serverId}>
-                    <strong style={{ color: 'var(--eb-text-primary)' }}>{srv?.name || k.serverId}</strong>
-                    {' '}— credential {cred ? cred.name : '—'}
-                  </li>
-                );
-              })}
-            </ul>
-          )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+        {/* Compact, responsive grid (#760): the short scalar fields share the
+            available horizontal space instead of each taking a full-width,
+            two-line row, so the whole summary — fields + process block below —
+            fits on one screen without scrolling for a typical team. Auto-fit
+            columns collapse to a single column on narrow viewports. */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+          columnGap: 'var(--eb-space-5)',
+          rowGap: 'var(--eb-space-3)',
+        }}>
+          {fields.map(f => <ReviewRow key={f.key} label={f.label} value={f.value} />)}
+          <div style={{ minWidth: 0 }}>
+            <div style={compactLabelStyle}>Knowledge sources ({knowledge.length})</div>
+            {knowledge.length === 0 ? (
+              <div style={{ ...hintStyle, marginTop: 0 }}>None</div>
+            ) : (
+              <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
+                {knowledge.map(k => {
+                  const srv = (mcpServers || []).find(s => s.id === k.serverId);
+                  const cred = (mcpCredentials || []).find(c => c.id === k.credentialId);
+                  return (
+                    <li key={k.serverId} style={{ overflowWrap: 'anywhere' }}>
+                      <strong style={{ color: 'var(--eb-text-primary)' }}>{srv?.name || k.serverId}</strong>
+                      {' '}— credential {cred ? cred.name : '—'}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
         </div>
         {form.processBundle && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
-            <div style={labelStyle}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+            <div style={compactLabelStyle}>
               {/* Composed bundles are woven before the team name exists (#428) —
                   show the name the materialised bundle will carry. */}
               Process: {form.processMode === 'compose' ? (form.teamName?.trim() || form.processBundle.name) : form.processBundle.name} ({(form.processBundle.roles || []).length} agents)
@@ -555,15 +562,31 @@ function StepReview({ form, environments, sshKeys, githubTokens, mcpServers, mcp
   );
 }
 
+// Tighter variant of labelStyle for the compacted Review step (#760) — the
+// shared labelStyle keeps its larger bottom margin for the other wizard steps.
+const compactLabelStyle = {
+  ...labelStyle,
+  fontSize: 'var(--eb-text-xs)',
+  color: 'var(--eb-text-secondary)',
+  marginBottom: 'var(--eb-space-1)',
+};
+
 function ReviewRow({ label, value }) {
   return (
-    <div>
-      <div style={labelStyle}>{label}</div>
-      <div style={{
-        fontSize: 'var(--eb-text-md)',
-        color: 'var(--eb-text-primary)',
-        fontFamily: 'var(--eb-font-mono)',
-      }}>{value}</div>
+    // minWidth:0 lets the grid cell shrink so long values wrap instead of
+    // forcing the track wider; the title surfaces the full value on hover (#760 AC5).
+    <div style={{ minWidth: 0 }}>
+      <div style={compactLabelStyle}>{label}</div>
+      <div
+        title={typeof value === 'string' ? value : undefined}
+        style={{
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-primary)',
+          fontFamily: 'var(--eb-font-mono)',
+          overflowWrap: 'anywhere',
+          wordBreak: 'break-word',
+        }}
+      >{value}</div>
     </div>
   );
 }

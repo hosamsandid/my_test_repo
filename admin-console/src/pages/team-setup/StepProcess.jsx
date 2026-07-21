@@ -630,6 +630,7 @@ export default function StepProcess({ form, setForm, templates, error }) {
               <button key={`${t.kind}:${t.id}`} type="button" onClick={() => pickTemplate({ id: t.id, kind: t.kind === 'draft' ? 'draft' : 'registry' })}
                 style={{
                   ...cardStyle, padding: 'var(--eb-space-4)', textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit',
+                  display: 'flex', flexDirection: 'column', alignItems: 'stretch',
                   border: `1px solid ${selected ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
                 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>

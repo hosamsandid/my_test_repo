@@ -1,7 +1,7 @@
 # Project Sessions Index
 
 **Project**: i-sase-aee (e-vgh-claw)
-**Last Updated**: 2026-07-13T08:58:52Z
+**Last Updated**: 2026-07-20T14:08:46Z
 
 ---
 
@@ -9,6 +9,7 @@
 
 | # | Session ID | Focus Area | Date | Status | Files |
 |---|-----------|-----------|------|--------|-------|
+| 2 | 20260720-140846-walkthrough-video-live-generation | Walkthrough video lane (epic #741) | 2026-07-20 14:08 | 🚧 In Progress | [Summary](./session-20260720-140846-walkthrough-video-live-generation.md) \| [Resume](./resume-20260720-140846-walkthrough-video-live-generation.md) |
 | 1 | 20260713-085852-memory-knowledge-unification | Team-owned skills (shipped) → Memory/Knowledge unification | 2026-07-13 08:58 | ⏸️ Paused | [Summary](./session-20260713-085852-memory-knowledge-unification.md) \| [Resume](./resume-20260713-085852-memory-knowledge-unification.md) |
 
 **Status Legend**: ✅ Complete · 🚧 In Progress · ⏸️ Paused · ❌ Blocked · 🗄️ Archived
@@ -16,6 +17,13 @@
 ---
 
 ## 🔥 Active Sessions (Resumable)
+
+### Session 2: Walkthrough video — live generation (T4 + T5)
+- **ID**: `20260720-140846-walkthrough-video-live-generation`
+- **Status**: 🚧 In Progress
+- **Progress**: Narrated video lane built (Revideo, screenshots-per-step); 2 chapters render clean on PR #754; foundation merged (#751). Videos are still fixture-based.
+- **Next Action**: T4 — add `voiceover:` to `e2e/journeys/*.yaml` + TTS; then T5 — journey-driven generator using live `e2e/artifacts/` screenshots.
+- **Files**: [Summary](./session-20260720-140846-walkthrough-video-live-generation.md) | [Resume](./resume-20260720-140846-walkthrough-video-live-generation.md)
 
 ### Session 1: Memory/Knowledge Unification
 - **ID**: `20260713-085852-memory-knowledge-unification`

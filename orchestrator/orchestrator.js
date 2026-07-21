@@ -1767,9 +1767,9 @@ const MATRIX_LOGIN_RETRY_CEILING_MS = (() => {
 })();
 
 async function ensureMatrixUser(adminClient, username, password) {
-  // Ordered create → reset-password(--convert-to-local-account) → enable-login.
-  // The convert flag lets re-creation recover a previously deactivated account
-  // (issue #715) — see matrix-admin-commands.js for the rationale.
+  // Ordered create → reset-password → enable-login. Plain reset-password both
+  // sets the password and reactivates a previously deactivated account on the
+  // Continuwuity build we run (issue #715) — see matrix-admin-commands.js.
   for (const { body, delayMs } of buildEnsureUserCommands(username, password)) {
     await adminClient.sendMessage(CONDUWUIT_ADMIN_ROOM, { msgtype: "m.text", body });
     await new Promise((r) => setTimeout(r, delayMs));

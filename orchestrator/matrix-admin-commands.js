@@ -16,20 +16,22 @@ const FOLLOWUP_SETTLE_MS = 1000;
 // user exists, has the given password, and can log in — including recovery from
 // a previously *deactivated* account (issue #715).
 //
-// Why `--convert-to-local-account` on reset-password:
+// Why plain `reset-password` (no flag) recovers a deactivated account:
 //   When a team/agent is deleted, `deactivateMatrixUser` fires
 //   `!admin users deactivate @<user>:local`, which sets the account's
-//   `deactivated` flag. On re-creation with the same name the plain
-//   `reset-password` command *refuses* a deactivated (or shadow) account —
-//   Continuwuity replies "To convert it to a local account, pass the
-//   --convert-to-local-account flag." — and `enable-login` only clears the
-//   separate login-disabled flag, never the deactivated flag. The subsequent
-//   /login then returns M_USER_DEACTIVATED and team creation fails for every
-//   member.
-//   `reset-password ... --convert-to-local-account` clears the deactivated
-//   flag *and* sets the password in one command, so it both recovers a
-//   deactivated account and works unchanged for a freshly created (active)
-//   one — making re-creation of a same-named team transparent.
+//   `deactivated` flag. On re-creation with the same name the account must be
+//   reactivated before the agent can log in, or /login returns
+//   M_USER_DEACTIVATED and creation fails.
+//   In the Continuwuity version we run, `!admin users reset-password
+//   <user> <pw>` both sets the password AND clears the `deactivated` flag in a
+//   single command — verified empirically (deactivate → plain reset-password →
+//   /login succeeds). It is no-op-safe for a freshly created (active) account.
+//   NOTE: an earlier Continuwuity build refused a deactivated account here and
+//   required a `--convert-to-local-account` flag; the current build *rejects*
+//   that flag outright ("unexpected argument"), which silently defeated the
+//   reset (password never set, flag never cleared) — so the flag was removed.
+//   `enable-login` below only clears the separate login-disabled flag, never
+//   the deactivated flag, so it cannot substitute for the reset.
 //
 // Returns: Array<{ body: string, delayMs: number }> in send order.
 function buildEnsureUserCommands(username, password) {
@@ -39,11 +41,11 @@ function buildEnsureUserCommands(username, password) {
       body: `!admin users create-user ${username} ${password}`,
       delayMs: CREATE_USER_SETTLE_MS,
     },
-    // reset-password with --convert-to-local-account reactivates a previously
-    // deactivated account (issue #715) and sets the password; no-op-safe for a
-    // just-created active account.
+    // Plain reset-password reactivates a previously deactivated account (issue
+    // #715) and sets the password in one command; no-op-safe for a just-created
+    // active account.
     {
-      body: `!admin users reset-password ${userId} ${password} --convert-to-local-account`,
+      body: `!admin users reset-password ${userId} ${password}`,
       delayMs: FOLLOWUP_SETTLE_MS,
     },
     // Clear the (separate) login-disabled flag as a belt-and-braces measure.

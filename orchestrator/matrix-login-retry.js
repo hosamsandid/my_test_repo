@@ -12,15 +12,15 @@
 // The same race also surfaces as `M_USER_DEACTIVATED` (issue #711): when a
 // same-named team is re-created (the E2E journeys tear a team down and
 // re-materialise it), `deactivateMatrixUser` has flagged each account
-// `deactivated`. `ensureMatrixUser` re-sends `reset-password
-// --convert-to-local-account` (which clears that flag — see
-// matrix-admin-commands.js) *before* the login, but on a loaded stack the admin
-// bot may not have processed the convert command by the time the fixed sleeps
+// `deactivated`. `ensureMatrixUser` re-sends a plain `reset-password` (which
+// both sets the password and clears that flag on the Continuwuity build we run
+// — see matrix-admin-commands.js) *before* the login, but on a loaded stack the
+// admin bot may not have processed the reset by the time the fixed sleeps
 // elapse, so the login sees a still-deactivated account and returns
-// `M_USER_DEACTIVATED`. Because every login is preceded by that reactivation
-// command, a lingering `M_USER_DEACTIVATED` is always this transient race — not
+// `M_USER_DEACTIVATED`. Because every login is preceded by that reactivating
+// reset, a lingering `M_USER_DEACTIVATED` is always this transient race — not
 // a genuinely-permanent state — so it is retryable on exactly the same footing
-// as `M_FORBIDDEN`: the retried login succeeds once the convert lands, and a
+// as `M_FORBIDDEN`: the retried login succeeds once the reset lands, and a
 // truly unrecoverable account just fails after the ceiling instead of instantly.
 //
 // The clock (`now`) and the sleeper (`sleep`) are injectable so the retry
@@ -47,10 +47,10 @@ function isForbiddenError(err) {
 }
 
 // Does this login error indicate the account is still flagged `deactivated`?
-// Every login is preceded by `ensureMatrixUser`'s `reset-password
-// --convert-to-local-account` reactivation command, so at login time a lingering
-// `M_USER_DEACTIVATED` means the admin bot has not processed that convert yet —
-// the same cold-stack provisioning race as `M_FORBIDDEN` (issue #711).
+// Every login is preceded by `ensureMatrixUser`'s plain `reset-password`
+// reactivation command, so at login time a lingering `M_USER_DEACTIVATED` means
+// the admin bot has not processed that reset yet — the same cold-stack
+// provisioning race as `M_FORBIDDEN` (issue #711).
 function isDeactivatedError(err) {
   if (!err) return false;
   const msg = typeof err === "string" ? err : err.message || "";

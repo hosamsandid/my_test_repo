@@ -3383,7 +3383,20 @@ function augmentSkillActivation(graph, parsed) {
             ? { tier: seededEntry.tier, teamId: seededEntry.tier === 'team' ? (m.parentTeamId || m.teamId) : undefined, sourceHash: seededEntry.contentHash }
             : null;
           const copyDir = path.join(AGENTS_DIR, m.id, 'skills', name);
-          const sourceDir = origin ? resolveSkillSourceDir(name, origin.tier, origin.teamId) : null;
+          let sourceDir = origin ? resolveSkillSourceDir(name, origin.tier, origin.teamId) : null;
+          // #750 follow-up: a skill promoted/moved from the team tier into the
+          // global pool leaves the per-member manifest still pinned to
+          // `tier: "team"`, so the recorded team source dir is gone — the drift
+          // resolver would report `orphaned` ("source deleted") even though an
+          // identically-named source now lives in the global pool and the copy is
+          // in sync with it. Fall back team-first-then-global (the same order the
+          // orchestrator seed/sync and the node-level sourceMissing check use)
+          // before classifying, so a team→global move no longer looks like a
+          // deleted source.
+          if (origin && origin.tier === 'team' && !hasSkillFile(sourceDir)) {
+            const globalSrc = resolveSkillSourceDir(name, 'global');
+            if (hasSkillFile(globalSrc)) sourceDir = globalSrc;
+          }
           const d = skillDrift.copyDriftState({ copyDir, sourceHash: origin && origin.sourceHash, sourceDir });
           out.drift = d.state;
           driftStates.push(d.state);
@@ -4993,6 +5006,14 @@ function skillDescriptionSummary(skillMdPath) {
 // detects deletion by the absent SKILL.md), or null when the tier/name is
 // unroutable. Mirrors the seed-time team-first-then-global resolution — the tier
 // the copy recorded at seed/copy time is authoritative here.
+// A resolved source dir counts as "present" only when it actually carries a
+// SKILL.md — the same signal skill-drift.js uses to tell a real source from a
+// deleted one (an empty dir would otherwise hash as in-sync).
+function hasSkillFile(dir) {
+  if (!dir) return false;
+  try { return fs.existsSync(path.join(dir, 'SKILL.md')); } catch { return false; }
+}
+
 function resolveSkillSourceDir(name, tier, teamId) {
   if (!SKILL_NAME_RE.test(String(name || ''))) return null;
   if (tier === 'team') return safeTeamSkillDir(teamId, name);

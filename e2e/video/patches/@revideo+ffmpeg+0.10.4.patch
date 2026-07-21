@@ -1,0 +1,16 @@
+diff --git a/node_modules/@revideo/ffmpeg/dist/utils.js b/node_modules/@revideo/ffmpeg/dist/utils.js
+index 579f75a..224005b 100644
+--- a/node_modules/@revideo/ffmpeg/dist/utils.js
++++ b/node_modules/@revideo/ffmpeg/dist/utils.js
+@@ -26,7 +26,10 @@ function resolvePath(output, assetPath) {
+         resolvedPath = assetPath;
+     }
+     else {
+-        resolvedPath = path.join(output, '../public', assetPath);
++        // patch-package (#742): allow a configurable public dir (REVIDEO_PUBLIC_DIR)
++        // so audio/image assets resolve even when outDir is not a sibling of ./public.
++        const publicDir = process.env.REVIDEO_PUBLIC_DIR || path.join(output, '../public');
++        resolvedPath = path.join(publicDir, assetPath);
+     }
+     return resolvedPath;
+ }

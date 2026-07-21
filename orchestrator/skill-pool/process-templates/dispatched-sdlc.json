@@ -76,14 +76,6 @@
           "prompt": "A pull request was closed. FIRST confirm it was actually MERGED (the event payload's `pull_request.merged` must be true); if it was closed without merging, reply [PASS].\nOn a merge:\n1. Identify which issue the merged PR closed (`gh pr view <n> --json closingIssuesReferences`, or infer from branch/title) and mark that worker (Developer or Developer 2) free in memory/context.md.\n2. From your queue, pick the next eligible ticket whose dependencies are all merged.\n3. IDEMPOTENCY: verify it is still OPEN, does NOT already carry `ready`/`ready-2`, and has no existing branch/PR. If already handled, [PASS].\n4. Release it to the now-free worker: `gh issue edit <successor> --add-label ready` (or `ready-2`), then post a short comment noting it was unblocked by the merge of #<predecessor> (write body to file, `gh-as-agent stamp`, `gh issue comment --body-file`).\n5. Update memory/context.md with the new queue and worker state.\nReply [PASS] if there is nothing to dispatch."
         },
         {
-          "id": "t709-burnin",
-          "type": "cron",
-          "cron": "42 6 * * *",
-          "enabled": true,
-          "description": "Transient: daily burn-in watch for issue #709 (self-removes on 2026-07-26).",
-          "prompt": "Daily burn-in check for issue #709 (Journey J4 before/after screenshots). Burn-in window: 2026-07-18 -> 2026-07-26; goal is one week of nightly e2e.yml runs with NO false-positive screenshot diffs before the sticky PR comment stays permanently enabled. Steps: (1) Find the most recent nightly (event=schedule) e2e.yml run: gh run list --repo {{repoFullName}} --workflow e2e.yml --event schedule --limit 3. (2) If it produced a false-positive screenshot diff (a diff on a capture with no intended UI change — inspect run logs/artifacts if a diff was reported), post a comment on #709 flagging it and note the burn-in window resets. (3) If clean, no need to comment every day — stay quiet unless something noteworthy. (4) If today's date is >= 2026-07-26 AND the whole window was clean, post a summary comment on #709 confirming the burn-in passed, recommend the PR comment stays enabled, CLOSE #709, and REMOVE this trigger (t709-burnin) from triggers.json. Reply [PASS] if there is nothing to report."
-        },
-        {
           "id": "self-curation",
           "type": "cron",
           "cron": "20 3 * * *",

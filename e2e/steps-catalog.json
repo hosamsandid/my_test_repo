@@ -8,7 +8,9 @@
     "gh",
     "chat",
     "templates",
-    "shell"
+    "shell",
+    "triggers",
+    "flows"
   ],
   "steps": [
     {
@@ -259,6 +261,237 @@
       ]
     },
     {
+      "name": "flows.addAgentFromScratch",
+      "module": "flows",
+      "description": "Add an agent from scratch in one call: open the panel, optionally generate the prompt, and confirm. Composes openAddAgent + generateAgentPrompt + confirmAddAgent for steps that don't need to capture the intermediate panel states.",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Agent display name (its node id is the slug)."
+        },
+        {
+          "name": "notes",
+          "required": false,
+          "type": "string",
+          "description": "One-line intent used to generate the prompt."
+        },
+        {
+          "name": "generate",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "description": "Press \"Generate agent prompt\" first."
+        }
+      ],
+      "example": "- action:\n    do: flows.addAgentFromScratch\n    name: Developer\n    notes: Take an issue and implement it. Create a PR at the end.\n    generate: true"
+    },
+    {
+      "name": "flows.addStage",
+      "module": "flows",
+      "description": "Add an ordered stage to the draft (Stages dialog → \"Add\" → PUT). Stages are an organising layer; nodes are assigned to them in the node inspector.",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Stage name to add."
+        }
+      ],
+      "example": "- action:\n    do: flows.addStage\n    name: Requirements"
+    },
+    {
+      "name": "flows.assignStage",
+      "module": "flows",
+      "description": "Assign an agent node to a stage via its inspector (Details → \"Stage (layout column)\" → Save). Opens the node, sets the stage, persists (PUT).",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Agent display name whose node to assign."
+        },
+        {
+          "name": "stage",
+          "required": true,
+          "type": "string",
+          "description": "Stage name to assign it to."
+        }
+      ],
+      "example": "- action:\n    do: flows.assignStage\n    name: Business Analyst\n    stage: Requirements"
+    },
+    {
+      "name": "flows.closeStages",
+      "module": "flows",
+      "description": "Close the Stages dialog (its overlay would otherwise cover the canvas for a screenshot).",
+      "params": [],
+      "example": "- action:\n    do: flows.closeStages"
+    },
+    {
+      "name": "flows.confirmAddAgent",
+      "module": "flows",
+      "description": "Confirm the open Add-agent panel (→ PUT /api/process/drafts/:id) and wait for the new node to appear on the canvas.",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Agent display name being added (its node slug)."
+        }
+      ],
+      "example": "- action:\n    do: flows.confirmAddAgent\n    name: Business Analyst"
+    },
+    {
+      "name": "flows.expectAgentCount",
+      "module": "flows",
+      "description": "Assert exactly `count` agent nodes are on the canvas (actor source nodes are a different class and are excluded).",
+      "params": [
+        {
+          "name": "count",
+          "required": true,
+          "type": "number",
+          "description": "Expected number of agent nodes."
+        }
+      ],
+      "example": "- assert:\n    do: flows.expectAgentCount\n    count: 2"
+    },
+    {
+      "name": "flows.expectAgentNode",
+      "module": "flows",
+      "description": "Assert an agent node is on the canvas by display name.",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Agent display name whose node must be present."
+        }
+      ],
+      "example": "- assert:\n    do: flows.expectAgentNode\n    name: Developer"
+    },
+    {
+      "name": "flows.expectEmptyDraft",
+      "module": "flows",
+      "description": "Assert the empty draft is on screen (capture point for the empty-draft screenshot): the from-scratch design hint + a zero-node canvas.",
+      "params": [],
+      "example": "- assert:\n    do: flows.expectEmptyDraft"
+    },
+    {
+      "name": "flows.expectIssueChannel",
+      "module": "flows",
+      "description": "Assert the persisted draft carries the issue channel (consumer role has a `channels[]` entry from the producer with the routing label + human gate). API-level so it does not depend on canvas edge rendering.",
+      "params": [
+        {
+          "name": "from",
+          "required": true,
+          "type": "string",
+          "description": "Producer agent display name."
+        },
+        {
+          "name": "to",
+          "required": true,
+          "type": "string",
+          "description": "Consumer agent display name."
+        },
+        {
+          "name": "label",
+          "required": true,
+          "type": "string",
+          "description": "Routing label the channel carries."
+        }
+      ],
+      "example": "- assert:\n    do: flows.expectIssueChannel\n    from: Business Analyst\n    to: Developer\n    label: ready"
+    },
+    {
+      "name": "flows.expectMaterializeAvailable",
+      "module": "flows",
+      "description": "Assert the Materialize action is available on the draft (capture point for the finished-draft screenshot). The journey deliberately does not click it — a pure draft has no team side effects.",
+      "params": [],
+      "example": "- assert:\n    do: flows.expectMaterializeAvailable"
+    },
+    {
+      "name": "flows.generateAgentPrompt",
+      "module": "flows",
+      "description": "Press \"Generate agent prompt\" (→ POST /api/agent-prompt/generate; the mock LLM in the E2E stack answers) and wait for the generated prose to land in the editable Agent-prompt textarea (capture point for the generated-prompt panel). Requires the Add-agent panel open with a name filled.",
+      "params": [],
+      "example": "- action:\n    do: flows.generateAgentPrompt"
+    },
+    {
+      "name": "flows.newDraft",
+      "module": "flows",
+      "description": "Open the Flows editor and create a fresh draft (\"New flow\" → POST /api/process/drafts). Waits until the empty draft is on the canvas (its inline-editable title + the Add-agent toolbar action).",
+      "params": [],
+      "example": "- action:\n    do: flows.newDraft"
+    },
+    {
+      "name": "flows.openAddAgent",
+      "module": "flows",
+      "description": "Open the Add-agent panel on the \"From scratch\" tab and fill the name + a one-line note (does NOT generate or confirm — capture point for the from-scratch panel). Forces the scratch tab in case templates default the dialog to \"From a template\".",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Agent display name (its node id is the slug)."
+        },
+        {
+          "name": "notes",
+          "required": false,
+          "type": "string",
+          "description": "One-line intent used to generate the prompt."
+        }
+      ],
+      "example": "- action:\n    do: flows.openAddAgent\n    name: Business Analyst\n    notes: Take requirements and create a GitHub issue."
+    },
+    {
+      "name": "flows.renameDraft",
+      "module": "flows",
+      "description": "Rename the open draft (inline title editor → PUT /api/process/drafts/:id). The fixed name is what the fixture pre-/post-cleans on, keeping the journey re-runnable.",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "New draft name."
+        }
+      ],
+      "example": "- action:\n    do: flows.renameDraft\n    name: Simple SDLC"
+    },
+    {
+      "name": "flows.wireIssueChannel",
+      "module": "flows",
+      "description": "Wire an Issue channel from one agent to another with a human-approval gate: drag the producer's port onto the consumer, choose \"Issue channel\", enter the routing label, tick the human-approval gate, and create it (→ PUT /api/process/drafts/:id). The gate requires a routing label (product rule).",
+      "params": [
+        {
+          "name": "from",
+          "required": true,
+          "type": "string",
+          "description": "Producer agent display name (opens the issue)."
+        },
+        {
+          "name": "to",
+          "required": true,
+          "type": "string",
+          "description": "Consumer agent display name (woken by the issue)."
+        },
+        {
+          "name": "label",
+          "required": true,
+          "type": "string",
+          "description": "Routing label the consumer waits on (e.g. \"ready\")."
+        },
+        {
+          "name": "humanGate",
+          "required": false,
+          "type": "boolean",
+          "default": "true",
+          "description": "Require a human to apply the label."
+        }
+      ],
+      "example": "- action:\n    do: flows.wireIssueChannel\n    from: Business Analyst\n    to: Developer\n    label: ready\n    humanGate: true"
+    },
+    {
       "name": "gh.applyLabel",
       "module": "gh",
       "description": "",
@@ -460,6 +693,223 @@
       "example": "- action:\n    do: templates.openTemplatesPage"
     },
     {
+      "name": "triggers.cancelForm",
+      "module": "triggers",
+      "description": "Cancel the open Add-trigger form without saving (used for the github-event / data-flow form tour, which can't persist without a parseable repo in the E2E stack).",
+      "params": [],
+      "example": "- action:\n    do: triggers.cancelForm"
+    },
+    {
+      "name": "triggers.configureCron",
+      "module": "triggers",
+      "description": "Configure a Cron (recurring) trigger: Daily at the given time + prompt. Opens a fresh Add form; does NOT submit (see module header). The plain-language summary and the underlying cron expression render in the form.",
+      "params": [
+        {
+          "name": "time",
+          "required": false,
+          "type": "string",
+          "default": "07:00",
+          "description": "24h HH:MM the daily schedule fires at."
+        },
+        {
+          "name": "prompt",
+          "required": true,
+          "type": "string",
+          "description": "The instruction the agent receives when it fires."
+        }
+      ],
+      "example": "- action:\n    do: triggers.configureCron\n    time: \"07:00\"\n    prompt: Generate a summary of the pull requests completed yesterday."
+    },
+    {
+      "name": "triggers.configureDataFlow",
+      "module": "triggers",
+      "description": "Configure a Data flow — agent dependency trigger: the \"wake on any push\" hand-off + prompt. Opens a fresh Add form; does NOT submit. `repo` is optional for the same reason as configureGithubEvent (the in-stack repo isn't a parseable github.com URL), so the journey tours the dependency note without a repo.",
+      "params": [
+        {
+          "name": "repo",
+          "required": false,
+          "type": "string",
+          "description": "\"owner/name\" repo the dependency is on (omit if none parseable)."
+        },
+        {
+          "name": "prompt",
+          "required": true,
+          "type": "string",
+          "description": "The instruction delivered when an upstream push lands."
+        }
+      ],
+      "example": "- action:\n    do: triggers.configureDataFlow\n    prompt: An upstream teammate pushed work — pull, check relevance, continue or reply [PASS]."
+    },
+    {
+      "name": "triggers.configureGithubEvent",
+      "module": "triggers",
+      "description": "Configure a GitHub event trigger: optionally pick the repo, then the event, an optional label filter, and the prompt. Opens a fresh Add form; does NOT submit. Selecting the type loads the repo list from the agent's working environment — in the E2E stack the repo is served over the in-stack git remote (not a github.com URL), so the panel's github.com-only parser lists no repo; the journey therefore tours this form (event catalog + label filter) without a repo and does not save it. (github-event firing end-to-end is covered by iban-story.)",
+      "params": [
+        {
+          "name": "repo",
+          "required": false,
+          "type": "string",
+          "description": "\"owner/name\" repo to watch (omit if the env has none parseable)."
+        },
+        {
+          "name": "event",
+          "required": true,
+          "type": "string",
+          "description": "Event key, e.g. \"issues.labeled\"."
+        },
+        {
+          "name": "labelFilter",
+          "required": false,
+          "type": "string",
+          "description": "Exact label to fire on (labelable events only)."
+        },
+        {
+          "name": "prompt",
+          "required": true,
+          "type": "string",
+          "description": "The instruction delivered when the event fires."
+        }
+      ],
+      "example": "- action:\n    do: triggers.configureGithubEvent\n    event: issues.labeled\n    labelFilter: ready\n    prompt: A ready issue was labelled — pick it up and begin implementation."
+    },
+    {
+      "name": "triggers.configureHttp",
+      "module": "triggers",
+      "description": "Configure an HTTP webhook trigger + prompt. Opens a fresh Add form; a shared secret is auto-generated when the type is selected. Does NOT submit.",
+      "params": [
+        {
+          "name": "prompt",
+          "required": true,
+          "type": "string",
+          "description": "The instruction delivered when the hook is called."
+        }
+      ],
+      "example": "- action:\n    do: triggers.configureHttp\n    prompt: The CI/CD pipeline has just deployed a new version to production."
+    },
+    {
+      "name": "triggers.configureOnce",
+      "module": "triggers",
+      "description": "Configure a Once (one-shot) trigger at a fixed future Date & Time + prompt. Opens a fresh Add form; does NOT submit. Use a fixed future timestamp for screenshot determinism (§7) — a one-shot in the future never fires mid-run.",
+      "params": [
+        {
+          "name": "at",
+          "required": true,
+          "type": "string",
+          "description": "datetime-local value, \"YYYY-MM-DDTHH:MM\"."
+        },
+        {
+          "name": "prompt",
+          "required": true,
+          "type": "string",
+          "description": "The instruction delivered when it fires."
+        }
+      ],
+      "example": "- action:\n    do: triggers.configureOnce\n    at: \"2027-07-20T08:00\"\n    prompt: Remind me once that I am responsible for the time reporting this week."
+    },
+    {
+      "name": "triggers.expectCronForm",
+      "module": "triggers",
+      "description": "Assert the Cron form shows its plain-language summary and cron expression (capture point). e.g. summary \"Every day at 07:00\", expression \"0 7 * * *\".",
+      "params": [
+        {
+          "name": "summary",
+          "required": true,
+          "type": "string",
+          "description": "Plain-language schedule text to expect."
+        },
+        {
+          "name": "cron",
+          "required": true,
+          "type": "string",
+          "description": "The 5-field cron expression to expect."
+        }
+      ],
+      "example": "- assert:\n    do: triggers.expectCronForm\n    summary: Every day at 07:00\n    cron: \"0 7 * * *\""
+    },
+    {
+      "name": "triggers.expectDataFlowForm",
+      "module": "triggers",
+      "description": "Assert the Data-flow form shows its \"woken on any push\" dependency note (capture point).",
+      "params": [],
+      "example": "- assert:\n    do: triggers.expectDataFlowForm"
+    },
+    {
+      "name": "triggers.expectGithubEventForm",
+      "module": "triggers",
+      "description": "Assert the GitHub-event form shows the full event catalog and the one-event -per-trigger hint (capture point for the event-catalog screenshot).",
+      "params": [],
+      "example": "- assert:\n    do: triggers.expectGithubEventForm"
+    },
+    {
+      "name": "triggers.expectHttpForm",
+      "module": "triggers",
+      "description": "Assert the HTTP form shows the generated endpoint (POST /hooks/<agentId>/…) and the required X-Hook-Secret section (capture point).",
+      "params": [
+        {
+          "name": "agentId",
+          "required": true,
+          "type": "string",
+          "description": "Agent id the endpoint path must contain."
+        }
+      ],
+      "example": "- assert:\n    do: triggers.expectHttpForm\n    agentId: triggers-demo-business-analyst"
+    },
+    {
+      "name": "triggers.expectOnceForm",
+      "module": "triggers",
+      "description": "Assert the Once form's Date & Time control carries a value (capture point).",
+      "params": [],
+      "example": "- assert:\n    do: triggers.expectOnceForm"
+    },
+    {
+      "name": "triggers.expectPanel",
+      "module": "triggers",
+      "description": "Assert the Triggers panel is showing for an agent (capture point for the empty-panel chapter screenshot).",
+      "params": [],
+      "example": "- assert:\n    do: triggers.expectPanel"
+    },
+    {
+      "name": "triggers.expectTriggerCount",
+      "module": "triggers",
+      "description": "Assert the panel now lists at least `count` triggers for the agent (API-level persistence proof, number-agnostic against the panel's own polling).",
+      "params": [
+        {
+          "name": "agentId",
+          "required": true,
+          "type": "string",
+          "description": "Agent whose triggers are counted."
+        },
+        {
+          "name": "count",
+          "required": true,
+          "type": "number",
+          "description": "Minimum number of triggers expected."
+        }
+      ],
+      "example": "- assert:\n    do: triggers.expectTriggerCount\n    agentId: triggers-demo-business-analyst\n    count: 5"
+    },
+    {
+      "name": "triggers.openPanel",
+      "module": "triggers",
+      "description": "Open an agent's Triggers panel: navigate to its chat, reveal the right rail if a prior localStorage state closed it, and select the Triggers tab. The panel's Add button becoming enabled confirms it rendered for this agent.",
+      "params": [
+        {
+          "name": "agentId",
+          "required": true,
+          "type": "string",
+          "description": "Id of the agent whose trigger panel to open."
+        }
+      ],
+      "example": "- action:\n    do: triggers.openPanel\n    agentId: triggers-demo-business-analyst"
+    },
+    {
+      "name": "triggers.submit",
+      "module": "triggers",
+      "description": "Submit the open Add-trigger form and wait for the create round-trip (POST /api/agents/:id/triggers) so the trigger is persisted before the journey moves on. The dialog closes on success.",
+      "params": [],
+      "example": "- action:\n    do: triggers.submit"
+    },
+    {
       "name": "wizard.createTeamAndExpectProgress",
       "module": "wizard",
       "description": "Journey-friendly wrapper: submit the wizard and assert the per-step NDJSON progress (plan lists team+members+dms, every step reaches `done`, complete carries the teamId + all members). Encapsulates the F1 inline assertions so a journey can express \"create and verify\" as a single step-library call. Accepts { teamId, memberIds } or { teamId, roleIds }.",
@@ -632,6 +1082,20 @@
   ],
   "fixtures": [
     {
+      "name": "flowsDraft",
+      "description": "flowsDraft: the `flows-draft` journey's precondition (#733). The journey authors a draft named `draftName` and never materialises it, so there is no team/env/Matrix state — only the draft document. This fixture just pre-/post- cleans any draft with that name so a re-run (or a crashed prior run) starts and ends clean.",
+      "params": [
+        {
+          "name": "draftName",
+          "required": false,
+          "type": "string",
+          "default": "Simple SDLC",
+          "description": "Draft name the journey renames to."
+        }
+      ],
+      "example": "fixtures:\n  - fixture: flowsDraft\n    params:\n      draftName: Simple SDLC"
+    },
+    {
       "name": "ibanStoryTeam",
       "description": "ibanStoryTeam: the IBAN-story journey's precondition (#711). Stands up the WHOLE label-chain stack in one atomic precondition so the journey body only drives the hops: it (1) resets fake-github so the run starts from clean GitHub state, (2) creates a fake GitHub token so the poller actually polls the fixture repo (a token-less env is ignored by the poller), (3) creates a credential-carrying Working Environment pointing at the in-stack git remote, and (4) materialises a full Core SDLC team FROM THE PROCESS-TEMPLATE BUNDLE — so `POST /api/teams` runs `expandGithubChannels` and the Developer/Code-Reviewer get the derived github-event channel triggers (issues.labeled=`ready`, pull_request.labeled= `ready-for-review`) that carry the label chain. Bare `roles` would materialise the same agents WITHOUT those channels. FIXED ids keep the journey re-runnable on the same stack: setup pre-cleans any leftover team+env+token from a crashed prior run, and teardown removes the team, env and token this journey created — one deterministic, idempotent surface.",
       "params": [
@@ -725,6 +1189,37 @@
         }
       ],
       "example": "fixtures:\n  - fixture: teamEnv\n    params:\n      teamId: agentic-demos\n      envId: agentic-demos-env\n      envName: Agentic Demos\n      repoUrl: \"http://git-remote/e2e/fixture.git\""
+    },
+    {
+      "name": "triggerAgent",
+      "description": "triggerAgent: the `triggers` journey's precondition (#733). Stands up ONE Business-Analyst agent to hang triggers on, as cheaply as possible: a credential-less Working Environment plus a single-member team. The env's repository URL is deliberately a github.com URL so the trigger panel's repo picker (parseRepoFullName, github.com-only) offers it for the github-event / data-flow trigger types — while the token-less HTTPS clone is refused fast by the orchestrator (no PAT ⇒ no username-prompt hang) and tolerated as a seed warning, so the member still materialises. No token ⇒ the poller ignores the repo, so nothing the journey configures ever fires: the config tour stays deterministic (github-event firing end-to-end is already covered by the iban-story journey). FIXED ids keep it re-runnable: setup pre-cleans a leftover team+env, teardown removes the team (cascades to the member) + env.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team slug id (its BA member is `<teamId>-business-analyst`)."
+        },
+        {
+          "name": "envId",
+          "required": true,
+          "type": "string",
+          "description": "Fixture environment id to create."
+        },
+        {
+          "name": "envName",
+          "required": true,
+          "type": "string",
+          "description": "Fixture environment display name."
+        },
+        {
+          "name": "repoUrl",
+          "required": true,
+          "type": "string",
+          "description": "github.com repo URL (parseable by the trigger repo picker)."
+        }
+      ],
+      "example": "fixtures:\n  - fixture: triggerAgent\n    params:\n      teamId: triggers-demo\n      envId: triggers-demo-env\n      envName: Triggers Demo\n      repoUrl: \"https://github.com/aee-e2e/triggers-demo.git\""
     }
   ]
 }

@@ -906,7 +906,10 @@ function llmEndpointInUse(endpointId) {
 function maskLlmEndpoint(ep) {
   if (!ep) return ep;
   const token = readLlmEndpointToken(ep.authTokenId);
-  const { authTokenId, ...rest } = ep;
+  // Normalize the team-scope shape (#800) so every masked record carries an
+  // explicit scope / teamId / assignedTeamIds — pre-#800 entries only stamp a
+  // `teamId` and are treated as team-scoped owned by that team.
+  const { authTokenId, ...rest } = normalizeCredential(ep);
   return {
     ...rest,
     authType: ep.authType === 'oauth-token' ? 'oauth-token' : 'api-key',
@@ -7025,7 +7028,13 @@ function pickEndpointDefaultModel(ep) {
 }
 
 app.get('/api/llm-endpoints', (req, res) => {
-  res.json(listLlmEndpoints().map(maskLlmEndpoint));
+  // Team-scoped (#800), mirroring GET /api/ssh-keys: a non-System-Admin sees
+  // only system-scoped providers assigned to a team they administer plus
+  // team-scoped providers owned by such a team. System Admins / env admin see
+  // all. This also scopes the agent/env provider picker (AC10), which fetches
+  // this same endpoint.
+  const scope = getScope(req);
+  res.json(listLlmEndpoints().filter(ep => visibleCredential(scope, ep)).map(maskLlmEndpoint));
 });
 
 // Read-only view of the ANTHROPIC_* variables from `.env`, surfaced as a
@@ -7036,13 +7045,16 @@ app.get('/api/llm-env-fallback', (req, res) => {
 });
 
 app.get('/api/llm-endpoints/:id', (req, res) => {
+  const scope = getScope(req);
   const ep = listLlmEndpoints().find(e => e.id === req.params.id);
-  if (!ep) return res.status(404).json({ error: 'LLM endpoint not found' });
+  // Fail closed: a provider the caller may not see is reported as absent (#800),
+  // so a Team Admin cannot probe another team's provider ids by-id.
+  if (!ep || !visibleCredential(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
   res.json(maskLlmEndpoint(ep));
 });
 
 app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
-  const { name, baseUrl, authToken, models, defaultModelId, id: rawId, teamId,
+  const { name, baseUrl, authToken, models, defaultModelId, id: rawId,
           authType: rawAuthType, complianceAck, oauthFlowId } = req.body || {};
   const authType = normalizeAuthType(rawAuthType);
   const isOauth = authType === 'oauth-token';
@@ -7051,9 +7063,17 @@ app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
   if (isOauth && complianceAck !== true) {
     return res.status(400).json({ error: 'Subscription auth requires the explicit single-user compliance confirmation (complianceAck).' });
   }
-  let ownerTeamId;
-  try { ownerTeamId = resolveOwnerTeamId(teamId); }
+  // Resolve requested ownership (#800): a `system` provider carries an
+  // assignedTeamIds set (System-Admin only); otherwise a team-scoped provider
+  // owned by one team. Enforce the create gate — a Team Admin may self-serve
+  // only team-scoped providers for a team they administer.
+  const scope = getScope(req);
+  let ownership;
+  try { ownership = resolveCredentialOwnership(req.body); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+  if (!canCreateCredential(scope, ownership)) {
+    return res.status(403).json({ error: 'forbidden: you may not create this provider', code: 'forbidden' });
+  }
   if (!isOauth) {
     try { new URL(baseUrl); } catch { return res.status(400).json({ error: 'baseUrl must be a valid URL' }); }
   }
@@ -7102,7 +7122,9 @@ app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
   const entry = {
     id,
     name,
-    teamId: ownerTeamId,
+    scope: ownership.scope,
+    teamId: ownership.teamId,
+    assignedTeamIds: ownership.assignedTeamIds,
     baseUrl: isOauth ? '' : baseUrl,
     authType,
     ...(isOauth ? { complianceAck: buildComplianceAck(req) } : {}),
@@ -7122,6 +7144,44 @@ app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
   const current = list[idx];
   const { name, baseUrl, authToken, models, defaultModelId,
           authType: rawAuthType, complianceAck, oauthFlowId } = req.body || {};
+
+  // Team-scope enforcement (#800): the caller must be able to manage this
+  // provider at all (System Admin, or the Team Admin of a team-scoped
+  // provider's owning team — never a system-scoped provider for a Team Admin).
+  const scope = getScope(req);
+  if (!canManageCredential(scope, current)) {
+    return res.status(403).json({ error: 'forbidden: you may not manage this provider', code: 'forbidden' });
+  }
+  // Optional scope / team-assignment change. Only a System Admin may reassign
+  // (AC8), and a move must not orphan an environment that still references the
+  // provider (AC edge case). The resolved ownership is stamped onto `next` below.
+  const cur = normalizeCredential(current);
+  const b = req.body || {};
+  const reassigning = ('scope' in b) || ('teamId' in b) || ('assignedTeamIds' in b);
+  let ownership = { scope: cur.scope, teamId: cur.teamId, assignedTeamIds: cur.assignedTeamIds };
+  if (reassigning) {
+    if (!canReassignCredential(scope)) {
+      return res.status(403).json({ error: 'forbidden: only a System Admin may reassign a provider', code: 'forbidden' });
+    }
+    try {
+      ownership = resolveCredentialOwnership({
+        scope: 'scope' in b ? b.scope : cur.scope,
+        teamId: b.teamId,
+        assignedTeamIds: b.assignedTeamIds,
+      });
+    } catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+    const inUse = llmEndpointInUse(current.id);
+    if (inUse) {
+      const env = loadEnvironment(inUse);
+      const envTeam = (env && env.teamId) || 'default';
+      const candidate = { ...current, scope: ownership.scope, teamId: ownership.teamId, assignedTeamIds: ownership.assignedTeamIds };
+      if (!credentialVisibleToTeam(candidate, envTeam)) {
+        return res.status(409).json({
+          error: `Provider is used by environment '${inUse}' (team '${envTeam}'); reassignment would orphan it. Detach it first.`,
+        });
+      }
+    }
+  }
 
   // The effective auth type after this update. Switching to subscription auth
   // demands a fresh explicit single-user confirmation.
@@ -7146,6 +7206,10 @@ app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
   }
 
   const next = { ...current };
+  // Persist the (possibly unchanged) canonical ownership shape (#800).
+  next.scope = ownership.scope;
+  next.teamId = ownership.teamId;
+  next.assignedTeamIds = ownership.assignedTeamIds;
   next.authType = nextAuthType;
   if (isOauth) {
     if (normalizeAuthType(current.authType) !== 'oauth-token' || complianceAck === true) {
@@ -7219,6 +7283,12 @@ app.put('/api/llm-endpoints/:id/models', apiLimiter, (req, res) => {
   const list = listLlmEndpoints();
   const idx = list.findIndex(e => e.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'LLM endpoint not found' });
+  // Same manage gate as the full PUT (#800): editing the model list / default
+  // model is a mutation, rejected for a provider the caller may not manage.
+  const scope = getScope(req);
+  if (!canManageCredential(scope, list[idx])) {
+    return res.status(403).json({ error: 'forbidden: you may not manage this provider', code: 'forbidden' });
+  }
   const models = req.body && Array.isArray(req.body.models) ? req.body.models : req.body;
   const modelErr = validateModels(models);
   if (modelErr) return res.status(400).json({ error: modelErr });
@@ -7246,6 +7316,12 @@ app.delete('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
   const list = listLlmEndpoints();
   const ep = list.find(e => e.id === req.params.id);
   if (!ep) return res.status(404).json({ error: 'LLM endpoint not found' });
+  // Manage gate (#800): a Team Admin may delete only team-scoped providers of a
+  // team they administer, never a system-scoped one.
+  const scope = getScope(req);
+  if (!canManageCredential(scope, ep)) {
+    return res.status(403).json({ error: 'forbidden: you may not manage this provider', code: 'forbidden' });
+  }
   const usedBy = llmEndpointInUse(ep.id);
   if (usedBy) {
     return res.status(409).json({ error: `LLM endpoint is used by environment '${usedBy}'. Detach it first.` });
@@ -7333,15 +7409,20 @@ function validateProbeBody(body) {
 }
 
 app.post('/api/llm-endpoints/:id/test', heavyLimiter, async (req, res) => {
+  const scope = getScope(req);
   const ep = listLlmEndpoints().find(e => e.id === req.params.id);
-  if (!ep) return res.status(404).json({ error: 'LLM endpoint not found' });
+  // A stored-token probe is a "use" of the provider — allowed for any caller
+  // who can see it (incl. a Team Admin's assigned system provider), absent
+  // otherwise (#800). The raw token is never returned, only a pass/fail probe.
+  if (!ep || !visibleCredential(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
   const token = readLlmEndpointToken(ep.authTokenId);
   res.json(await probeLlmEndpointTest(ep.baseUrl, token, ep.authType));
 });
 
 app.post('/api/llm-endpoints/:id/discover-models', heavyLimiter, async (req, res) => {
+  const scope = getScope(req);
   const ep = listLlmEndpoints().find(e => e.id === req.params.id);
-  if (!ep) return res.status(404).json({ error: 'LLM endpoint not found' });
+  if (!ep || !visibleCredential(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
   const token = readLlmEndpointToken(ep.authTokenId);
   const result = await probeLlmEndpointDiscover(ep.baseUrl, token, ep.authType);
   if (result.error) return res.status(502).json(result);

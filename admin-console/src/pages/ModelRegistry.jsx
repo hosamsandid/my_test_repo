@@ -9,6 +9,13 @@ import IdField from '../components/IdField';
 import IconButton from '../components/IconButton';
 import OAuthLoginWizard from '../components/OAuthLoginWizard';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
+import CredentialOwnership from '../components/CredentialOwnership';
+import { useAuth } from '../auth/AuthContext';
+import {
+  teamsById, credentialScopeLabel, defaultOwnership, ownershipPayload,
+  canManageCredentialClient, canReassignCredentialClient, adminTeamIdsOf,
+  normalizeCredential,
+} from './credential-scope-view';
 
 /* ───────────────────────── shared styles ───────────────────────── */
 
@@ -206,11 +213,28 @@ function ModelEditor({ models, defaultModelId, onChange, onDefaultChange }) {
 
 /* ─────────────────── Sub: endpoint form (create + edit) ─────────────────── */
 
-function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
+function EndpointForm({ endpoint, onSave, onCancel, saving, error,
+                        teams = [], isSysAdmin = false, adminTeamIds = [] }) {
   const isEdit = Boolean(endpoint?.id);
   const [name, setName] = useState(endpoint?.name ?? '');
   const [id, setId] = useState(endpoint?.id ?? '');
   const [baseUrl, setBaseUrl] = useState(endpoint?.baseUrl ?? '');
+
+  // Team-scope ownership (#800), mirroring the SSH Keys / GitHub Tokens forms.
+  // A System Admin picks system-scoped (assign to teams) vs team-scoped; a Team
+  // Admin only ever creates team-scoped providers for a team they administer.
+  // On edit only a System Admin may reassign — for everyone else the selector is
+  // shown read-only and the ownership fields are omitted from the payload.
+  const canReassign = canReassignCredentialClient({ isSysAdmin });
+  const [ownership, setOwnership] = useState(() => {
+    if (isEdit) {
+      const n = normalizeCredential(endpoint);
+      return { scope: n.scope, teamId: n.teamId || '', assignedTeamIds: n.assignedTeamIds || [] };
+    }
+    return defaultOwnership({ isSysAdmin, adminTeamIds });
+  });
+  const sendOwnership = !isEdit || canReassign;
+  const ownershipReady = !sendOwnership || ownership.scope === 'system' || !!ownership.teamId;
   const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
     setName,
     setId,
@@ -254,7 +278,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
   const oauthTokenReady = (isEdit && wasOauth && endpoint.hasToken && !clearToken)
     || !!oauthFlowId
     || !!authToken.trim();
-  const canSubmit = name.trim() && (isOauth
+  const canSubmit = name.trim() && ownershipReady && (isOauth
     ? ((!requireCompliance || complianceOk) && oauthTokenReady)
     : !!baseUrl.trim());
   // Probing an oauth provider needs a token the server can reach: the stored
@@ -361,6 +385,10 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
         : '',
     };
     if (!isEdit && id.trim()) payload.id = id.trim();
+    // Ownership: sent on create, and on edit only when the caller may reassign
+    // (System Admin). Omitting it on a Team Admin edit leaves the scope/team
+    // untouched (and the server would 403 a reassignment anyway).
+    if (sendOwnership) Object.assign(payload, ownershipPayload(ownership));
     if (isOauth && complianceOk) payload.complianceAck = true;
     // Token sources, in precedence order: manual paste > completed login flow
     // (claimed server-side) > keep/clear existing.
@@ -400,6 +428,21 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
           ? <>Cannot be changed after creation.</>
           : <>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only. <strong>Cannot be changed after creation.</strong></>}
       />
+
+      {/* Ownership / team scope (#800) */}
+      {isEdit && !canReassign ? (
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+          Only a System Admin can change which team owns a provider or reassign a system-scoped one.
+        </div>
+      ) : (
+        <CredentialOwnership
+          value={ownership}
+          onChange={setOwnership}
+          teams={teams}
+          isSysAdmin={isSysAdmin}
+          adminTeamIds={adminTeamIds}
+        />
+      )}
 
       {/* Auth type — classic API key / proxy vs Claude subscription OAuth */}
       <div>
@@ -853,6 +896,13 @@ function EnvProviderPanel({ provider, onClose }) {
 export default function ModelRegistry() {
   const { data: endpoints, loading, error, refetch } = useApi('/api/llm-endpoints');
   const { data: envFallback } = useApi('/api/llm-env-fallback');
+  const { data: teamsData } = useApi('/api/admin/teams');
+  const { user } = useAuth();
+  const teams = Array.isArray(teamsData) ? teamsData : [];
+  const names = teamsById(teams);
+  const isSysAdmin = !!user?.admin;
+  const adminTeamIds = adminTeamIdsOf(user);
+  const caller = { isSysAdmin, adminTeamIds };
   const [creating, setCreating] = useState(false);
   const [editing, setEditing]   = useState(null);    // endpoint object
   const [deleteTarget, setDeleteTarget] = useState(null);
@@ -895,6 +945,23 @@ export default function ModelRegistry() {
             }}>read-only</span>
           </span>
         : v,
+    },
+    {
+      key: '_scope', label: 'Scope / Teams', sortable: false,
+      render: (_, row) => {
+        if (row.readOnly) return <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
+        const s = credentialScopeLabel(row, names);
+        return (
+          <span style={{ fontSize: 'var(--eb-text-xs)' }}>
+            <span style={{
+              display: 'inline-block', padding: '1px 6px', borderRadius: 'var(--eb-radius-sm)',
+              background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
+              fontWeight: 'var(--eb-font-medium)', marginRight: 'var(--eb-space-2)',
+            }}>{s.label}</span>
+            <span style={{ color: 'var(--eb-text-muted)' }}>{s.detail}</span>
+          </span>
+        );
+      },
     },
     {
       key: 'baseUrl',
@@ -944,16 +1011,26 @@ export default function ModelRegistry() {
       key: '_actions',
       label: '',
       sortable: false,
-      render: (_, row) => row.readOnly ? (
-        <div style={{ display: 'flex', justifyContent: 'flex-end', color: 'var(--eb-text-muted)' }} title="Edit .env and restart to change">
-          <Lock size={13} />
-        </div>
-      ) : (
-        <div className="eb-wrap-md" style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
-          <IconButton icon={Pencil} label="Edit" onClick={() => { setEditing(row); setFormError(null); }} />
-          <IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteTarget(row)} />
-        </div>
-      ),
+      render: (_, row) => {
+        if (row.readOnly) return (
+          <div style={{ display: 'flex', justifyContent: 'flex-end', color: 'var(--eb-text-muted)' }} title="Edit .env and restart to change">
+            <Lock size={13} />
+          </div>
+        );
+        // A Team Admin may see a system provider assigned to their team but not
+        // manage it (#800) — show a lock, no edit/delete, matching the API gate.
+        if (!canManageCredentialClient(row, caller)) return (
+          <div style={{ display: 'flex', justifyContent: 'flex-end', color: 'var(--eb-text-muted)' }} title="System-scoped provider — only a System Admin can manage it. You may use it.">
+            <Lock size={13} />
+          </div>
+        );
+        return (
+          <div className="eb-wrap-md" style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
+            <IconButton icon={Pencil} label="Edit" onClick={() => { setEditing(row); setFormError(null); }} />
+            <IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteTarget(row)} />
+          </div>
+        );
+      },
     },
   ];
 
@@ -1044,7 +1121,13 @@ export default function ModelRegistry() {
         columns={COLUMNS}
         data={envFallback ? [envFallback, ...(endpoints ?? [])] : (endpoints ?? [])}
         emptyText="No model providers registered yet."
-        onRowClick={row => { setEditing(row); setFormError(null); }}
+        onRowClick={row => {
+          // The .env row opens its read-only panel; a manageable provider opens
+          // the editor. A visible-but-unmanageable system provider (Team Admin)
+          // is not clickable — its lock already explains why (#800).
+          if (!row.readOnly && !canManageCredentialClient(row, caller)) return;
+          setEditing(row); setFormError(null);
+        }}
       />
 
       <SidePanel
@@ -1060,6 +1143,9 @@ export default function ModelRegistry() {
             onCancel={() => setCreating(false)}
             saving={saving}
             error={formError}
+            teams={teams}
+            isSysAdmin={isSysAdmin}
+            adminTeamIds={adminTeamIds}
           />
         )}
       </SidePanel>
@@ -1080,6 +1166,9 @@ export default function ModelRegistry() {
             onCancel={() => setEditing(null)}
             saving={saving}
             error={formError}
+            teams={teams}
+            isSysAdmin={isSysAdmin}
+            adminTeamIds={adminTeamIds}
           />
         )}
       </SidePanel>

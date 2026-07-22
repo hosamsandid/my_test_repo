@@ -16,14 +16,15 @@ function downloadExport(url) {
   a.remove();
 }
 
-// CSV / JSON export buttons for a view (#656 phase 3).
-function ExportButtons({ kind, since }) {
+// CSV / JSON export buttons for a view (#656 phase 3). `team` narrows the
+// export to the page's selected team (#801) — undefined/'' means all teams.
+function ExportButtons({ kind, since, team }) {
   return (
     <span style={{ display: 'inline-flex', gap: 'var(--eb-space-1)' }}>
       {['csv', 'json'].map((format) => (
         <button
           key={format}
-          onClick={() => downloadExport(buildExportUrl(kind, { since, format }))}
+          onClick={() => downloadExport(buildExportUrl(kind, { since, format, team }))}
           title={`Download ${format.toUpperCase()} (tokens only — apply prices downstream)`}
           style={{ ...CONTROL_STYLE, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}
         >
@@ -182,6 +183,29 @@ const CONTROL_STYLE = {
   fontFamily: 'inherit',
 };
 
+// Page-level team filter (#801). System-Admin-only page, so the operator sees
+// every team; the default "All teams" restores the full, unfiltered picture.
+// The chosen team id drives the `?team=` parameter on every usage request.
+function TeamFilter({ teams, value, onChange }) {
+  return (
+    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+      Team
+      <select value={value} onChange={(e) => onChange(e.target.value)} style={CONTROL_STYLE}>
+        <option value="">All teams</option>
+        {teams.map((t) => (
+          <option key={t.id} value={t.id}>{t.name || t.id}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+// A `team=<id>&` query fragment for concatenating into a usage URL, or '' for
+// "all teams" so the request stays unfiltered.
+function teamQuery(team) {
+  return team ? `team=${encodeURIComponent(team)}&` : '';
+}
+
 // Derive the ISO `since` (and its `until`) query params for a range preset.
 function useRangeWindow(rangeKey) {
   return useMemo(() => {
@@ -192,14 +216,15 @@ function useRangeWindow(rangeKey) {
 }
 
 /* ── Statistics tab (view 1, #654) ─────────────────────────────────── */
-function StatisticsTab() {
+function StatisticsTab({ team }) {
   const [rangeKey, setRangeKey] = useState('7d');
   const [groupBy, setGroupBy] = useState('agent');
   const { since } = useRangeWindow(rangeKey);
 
   const sinceQ = since ? `since=${encodeURIComponent(since)}&` : '';
-  const summaryUrl = `/api/usage/summary?${sinceQ}groupBy=${encodeURIComponent(groupBy)}`;
-  const dayUrl = `/api/usage/summary?${sinceQ}groupBy=day`;
+  const teamQ = teamQuery(team);
+  const summaryUrl = `/api/usage/summary?${sinceQ}${teamQ}groupBy=${encodeURIComponent(groupBy)}`;
+  const dayUrl = `/api/usage/summary?${sinceQ}${teamQ}groupBy=day`;
 
   const { data: summary, loading, error, refetch } = useApi(summaryUrl);
   const { data: daySummary, refetch: refetchDays } = useApi(dayUrl);
@@ -239,7 +264,7 @@ function StatisticsTab() {
         <button onClick={refresh} style={{ ...CONTROL_STYLE, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
           <RefreshCw size={14} /> Refresh
         </button>
-        <ExportButtons kind="summary" since={since} />
+        <ExportButtons kind="summary" since={since} team={team} />
         {error && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load: {error}</span>}
       </div>
 
@@ -303,12 +328,13 @@ function tierSummary(tiers = {}) {
     .join(' ') || '—';
 }
 
-function WorkItemDetail({ item, since, navigate }) {
+function WorkItemDetail({ item, since, team, navigate }) {
   const [owner, repoName] = (item.repo || '/').split('/');
   const addr = item.prs[0] != null ? item.prs[0] : item.issues[0];
   const sinceQ = since ? `since=${encodeURIComponent(since)}&` : '';
+  const teamQ = teamQuery(team);
   const url = owner && repoName && addr != null
-    ? `/api/usage/work-items/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/${addr}?${sinceQ}`
+    ? `/api/usage/work-items/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/${addr}?${sinceQ}${teamQ}`
     : null;
   const { data, loading } = useApi(url);
 
@@ -368,14 +394,15 @@ function WorkItemDetail({ item, since, navigate }) {
   );
 }
 
-function WorkItemsTab() {
+function WorkItemsTab({ team }) {
   const navigate = useNavigate();
   const [rangeKey, setRangeKey] = useState('7d');
   const [selected, setSelected] = useState(null);
   const { since } = useRangeWindow(rangeKey);
 
   const sinceQ = since ? `since=${encodeURIComponent(since)}&` : '';
-  const { data, loading, error, refetch } = useApi(`/api/usage/work-items?${sinceQ}`);
+  const teamQ = teamQuery(team);
+  const { data, loading, error, refetch } = useApi(`/api/usage/work-items?${sinceQ}${teamQ}`);
 
   const cov = data?.coverage || { runs: { attributed: 0, unattributed: 0, total: 0 }, tokens: { attributed: 0, unattributed: 0, total: 0 }, attributedPct: 0 };
   const unatt = data?.unattributed || { total: 0, runs: 0 };
@@ -425,7 +452,7 @@ function WorkItemsTab() {
         <button onClick={refetch} style={{ ...CONTROL_STYLE, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
           <RefreshCw size={14} /> Refresh
         </button>
-        <ExportButtons kind="work-items" since={since} />
+        <ExportButtons kind="work-items" since={since} team={team} />
         {error && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load: {error}</span>}
       </div>
 
@@ -455,7 +482,7 @@ function WorkItemsTab() {
       )}
 
       {selected && rows.find((r) => r.id === selected) && (
-        <WorkItemDetail item={rows.find((r) => r.id === selected)._raw} since={since} navigate={navigate} />
+        <WorkItemDetail item={rows.find((r) => r.id === selected)._raw} since={since} team={team} navigate={navigate} />
       )}
     </>
   );
@@ -469,12 +496,20 @@ const TABS = [
 
 export default function TokenUsage() {
   const [tab, setTab] = useState('statistics');
+  // Page-level team filter (#801): shared across both tabs so switching tabs
+  // keeps the selected team. '' = all teams (the default, unfiltered view).
+  const [team, setTeam] = useState('');
+  const { data: teamsData } = useApi('/api/admin/teams');
+  const teams = Array.isArray(teamsData) ? teamsData : [];
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
-        Token Usage
-      </h1>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
+        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
+          Token Usage
+        </h1>
+        <TeamFilter teams={teams} value={team} onChange={setTeam} />
+      </div>
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', borderBottom: '1px solid var(--eb-border-default)' }}>
         {TABS.map((t) => (
@@ -495,7 +530,7 @@ export default function TokenUsage() {
         ))}
       </div>
 
-      {tab === 'statistics' ? <StatisticsTab /> : <WorkItemsTab />}
+      {tab === 'statistics' ? <StatisticsTab team={team} /> : <WorkItemsTab team={team} />}
     </div>
   );
 }

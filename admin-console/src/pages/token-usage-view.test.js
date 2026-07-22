@@ -118,6 +118,19 @@ test('buildExportUrl builds a scoped, windowed download URL per view and format'
   assert.equal(buildExportUrl('summary', {}), '/api/usage/summary/export?format=csv');
   assert.equal(buildExportUrl('summary', { format: 'xml' }), '/api/usage/summary/export?format=csv');
 });
+test('buildExportUrl carries the team filter and omits it for "all teams" (#801)', () => {
+  assert.equal(
+    buildExportUrl('summary', { since: '2026-07-16T00:00:00Z', format: 'json', team: 'payments' }),
+    '/api/usage/summary/export?since=2026-07-16T00%3A00%3A00Z&team=payments&format=json',
+  );
+  assert.equal(
+    buildExportUrl('work-items', { team: 'risk' }),
+    '/api/usage/work-items/export?team=risk&format=csv',
+  );
+  // Blank / absent team → omitted (all teams, unfiltered).
+  assert.equal(buildExportUrl('summary', { team: '' }), '/api/usage/summary/export?format=csv');
+  assert.equal(buildExportUrl('summary', {}), '/api/usage/summary/export?format=csv');
+});
 
 test('workItemAverages returns rounded total/input/output means over the attributed work-item count', () => {
   const data = {

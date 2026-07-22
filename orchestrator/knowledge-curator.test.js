@@ -23,7 +23,12 @@ const {
   markUnsynthesised,
   synthesisFallback,
   UNSYNTHESISED_MARKER,
+  ensureSkillFrontmatter,
+  renderSkillFrontmatter,
+  deriveSkillDescription,
+  MAX_DESCRIPTION_LEN,
 } = require('./knowledge-curator');
+const { parseSkillDescription } = require('./skill-source');
 const { resolvePromotionGates, knowledgeCurationConfig } = require('./knowledge-store');
 const { buildCanonicalProjection, groupRelatedClusters, themeToCandidate } = require('./knowledge-convergence');
 
@@ -613,4 +618,125 @@ test('synthesisFallback: LLM text used when usable, else marked heuristic + re-q
 
   // too-short / non-markdown LLM output is treated as a failed call
   assert.equal(synthesisFallback({ heuristic, llmText: 'ok' }).synthesised, false);
+});
+
+// ─── SKILL.md frontmatter (#805) ────────────────────────────────────────────────
+
+test('ensureSkillFrontmatter: prepends a valid block when none exists (AC1)', () => {
+  const out = ensureSkillFrontmatter('# Title\n\n## What\n- a lesson', { name: 'my-skill', description: 'Reach for this when X' });
+  assert.ok(out.startsWith('---\n'));
+  assert.equal(parseSkillDescription(out), 'Reach for this when X');
+  assert.ok(/^name[ \t]*:[ \t]*my-skill$/m.test(out));
+  assert.ok(out.includes('# Title')); // body preserved
+});
+
+test('ensureSkillFrontmatter: preserves an existing non-empty description (E5)', () => {
+  const md = '---\nname: kept\ndescription: authored value\n---\n\n# Kept';
+  const out = ensureSkillFrontmatter(md, { name: 'other', description: 'weaker auto value' });
+  assert.equal(out, md); // untouched — complete already
+  assert.equal(parseSkillDescription(out), 'authored value');
+});
+
+test('ensureSkillFrontmatter: injects only the missing key into an existing block', () => {
+  const md = '---\nname: only-name\n---\n\n# Body';
+  const out = ensureSkillFrontmatter(md, { name: 'ignored', description: 'filled in' });
+  assert.equal((out.match(/^---$/gm) || []).length, 2); // still exactly one block
+  assert.equal(parseSkillDescription(out), 'filled in');
+  assert.ok(/^name[ \t]*:[ \t]*only-name$/m.test(out)); // existing name kept
+});
+
+test('ensureSkillFrontmatter: never double-wraps an already-frontmattered body (E1)', () => {
+  const md = '---\nname: a\ndescription: b\n---\n\n# Body';
+  const out = ensureSkillFrontmatter(md, { name: 'x', description: 'y' });
+  assert.equal((out.match(/^---$/gm) || []).length, 2);
+  assert.equal(parseSkillDescription(out), 'b');
+});
+
+test('ensureSkillFrontmatter: tolerates a stray leading blank before the block', () => {
+  const out = ensureSkillFrontmatter('\n\n---\nname: a\ndescription: b\n---\n\n# Body', {});
+  assert.ok(out.startsWith('---\n'));
+  assert.equal(parseSkillDescription(out), 'b');
+});
+
+test('curatorSkillDraft: emits parseable frontmatter with name + description (AC1/AC4)', () => {
+  const [cluster] = convergedClusters('branch from origin main always');
+  const d = curatorSkillDraft(cluster);
+  assert.ok(d.skillMd.startsWith('---\n'));
+  const desc = parseSkillDescription(d.skillMd);
+  assert.ok(desc && desc.length > 0);
+  assert.equal(desc, d.description);
+  assert.ok(!/\n/.test(desc)); // single line (AC8)
+});
+
+test('curatorThemeSkillDraft: emits parseable frontmatter (AC1)', () => {
+  const clusters = convergedClusters('rebase feature branches before pushing');
+  const cand = themeToCandidate ? null : null; // guard: use candidate shape directly
+  const candidate = { text: 'Dev workflow theme', kind: 'convention', members: [{ text: 'lesson one', originAgent: 'dev-1', id: 'aaaaaaaaaaaa' }], convergence: ['dev-1'], lessonCount: 1 };
+  const d = curatorThemeSkillDraft(candidate, { domain: { id: 'dev-workflow', name: 'Dev workflow', roles: ['developer'] } });
+  assert.ok(d.skillMd.startsWith('---\n'));
+  assert.equal(parseSkillDescription(d.skillMd), d.description);
+  assert.equal(d.name, 'dev-workflow');
+  void clusters;
+});
+
+test('curatorSkillExtension: keeps frontmatter valid; adds it to a legacy doc (AC3)', () => {
+  const cluster = extendCluster('rebase feature branches onto origin main before pushing');
+  const cand = planAutoPromotions([cluster], [], resolvePromotionGates(null), { threshold: 2, teamId: 'acme', now: NOW }).promote[0].candidate;
+  // legacy doc without frontmatter → gains one
+  const ext = curatorSkillExtension('# Dev workflow\n\n## The flow\n- open a PR\n', cand, { name: 'dev-workflow' });
+  assert.ok(ext.added >= 1);
+  assert.ok(ext.skillMd.startsWith('---\n'));
+  assert.ok(parseSkillDescription(ext.skillMd));
+  assert.ok(ext.skillMd.includes('## Added knowledge'));
+  // extending a doc that already carries a description preserves it (E5)
+  const ext2 = curatorSkillExtension('---\nname: dev\ndescription: authored one\n---\n\n# Dev\n- old', cand, { name: 'dev' });
+  assert.equal(parseSkillDescription(ext2.skillMd), 'authored one');
+});
+
+test('synthesisFallback: guarantees frontmatter on LLM output, keeps its own (AC2/E1)', () => {
+  const heuristic = { name: 'dev-workflow', skillMd: '---\nname: dev-workflow\ndescription: det fallback\n---\n\n# Dev\n\n## What\n- a lesson' };
+  const fm = { name: 'dev-workflow', description: 'det fallback' };
+  // LLM omits frontmatter → deterministic fallback injected
+  const noFm = synthesisFallback({ heuristic, llmText: '# Dev\n\n## The flow\nlong abstracted playbook content here', frontmatter: fm });
+  assert.equal(noFm.synthesised, true);
+  assert.equal(parseSkillDescription(noFm.skillMd), 'det fallback');
+  // LLM includes its own frontmatter → preserved, not double-wrapped
+  const own = synthesisFallback({ heuristic, llmText: '---\nname: dev\ndescription: llm line\n---\n\n# Dev\n\n## The flow\nlong abstracted playbook content here', frontmatter: fm });
+  assert.equal(parseSkillDescription(own.skillMd), 'llm line');
+  assert.equal((own.skillMd.match(/^---$/gm) || []).length, 2);
+  // fallback (bad LLM) branch still guarantees frontmatter
+  const bad = synthesisFallback({ heuristic, llmText: null, frontmatter: fm });
+  assert.ok(parseSkillDescription(bad.skillMd));
+  assert.ok(bad.skillMd.includes('Un-synthesised draft'));
+});
+
+test('synthesisFallback: without a frontmatter fallback, output is untouched (legacy)', () => {
+  const heuristic = { name: 'x', skillMd: '# X\n\n## What\n- a' };
+  const out = synthesisFallback({ heuristic, llmText: '# X\n\n## The flow\nlong enough abstracted content goes here' });
+  assert.ok(!out.skillMd.startsWith('---')); // no frontmatter forced when none supplied
+});
+
+test('frontmatter scalars survive special characters (E4) and long descriptions (E3)', () => {
+  const md = ensureSkillFrontmatter('# T', { name: 'weird-name', description: 'Handle "quoted": colons, and # hashes' });
+  assert.equal(parseSkillDescription(md), "Handle 'quoted': colons, and # hashes");
+  const long = ensureSkillFrontmatter('# T', { name: 'n', description: 'word '.repeat(120) });
+  const d = parseSkillDescription(long);
+  assert.ok(d.length <= MAX_DESCRIPTION_LEN);
+  assert.ok(d.endsWith('…'));
+  assert.ok(!/\n/.test(d));
+});
+
+test('deriveSkillDescription: deterministic, single-line, domain-aware', () => {
+  const a = deriveSkillDescription({ text: 'always rebase' });
+  assert.equal(a, deriveSkillDescription({ text: 'always rebase' })); // deterministic
+  assert.ok(!/\n/.test(a));
+  const withDomain = deriveSkillDescription({ text: 'x' }, { domain: { name: 'Dev workflow', roles: ['developer'] } });
+  assert.ok(withDomain.includes('Dev workflow'));
+  assert.ok(withDomain.includes('developer'));
+});
+
+test('renderSkillFrontmatter: always yields a non-empty name + description block', () => {
+  const block = renderSkillFrontmatter({});
+  assert.ok(block.startsWith('---\n') && block.endsWith('\n---'));
+  assert.equal(parseSkillDescription(`${block}\n\n# body`), 'Team-curated knowledge skill.');
 });

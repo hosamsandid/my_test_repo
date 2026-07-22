@@ -30,7 +30,11 @@
 
 - **Credential rename and reassignment** — System Admins can rename any credential and move it between teams or change its scope (team → system or vice versa) via a new **Edit** action on the credential table. Reassigning a credential that is referenced by an existing Working Environment is blocked with a clear error (409) if the move would leave the environment without access. (#803)
 
-- **Team-scoped Model Providers** — the Model Providers page now follows the same scope model as SSH keys and GitHub tokens. Team Admins can self-serve model providers for their team; System Admins can register system-scoped providers and assign them to specific teams. Each team sees only the providers it has been given access to. Existing providers (previously ungrouped) are normalized to team-scoped on read — no data migration required. The Model Providers nav item is now accessible to Team Admins; System Admins continue to have full visibility. (#806)
+- **Team-scoped Model Providers** — the Model Providers page now follows the same scope model as SSH keys and GitHub tokens. Team Admins can self-serve model providers for their team; System Admins can register system-scoped providers and assign them to specific teams. Each team sees only the providers it has been given access to. Existing providers are normalized to team-scoped on read — no data migration required. The Model Providers nav entry is now accessible to Team Admins; System Admins continue to have full visibility. (#806)
+
+### Bug Fixes
+
+- **Auto-curated skills now show descriptions in the agent Skills section** — skills created by the knowledge curator were written without YAML frontmatter, causing agents to see only the skill name with no indication of what the skill covers. The curator now writes a `name` + `description` frontmatter block into every generated SKILL.md. Existing skills are backfilled automatically the next time they are amended. (#807)
 
 ### Changes
 
@@ -40,6 +44,6 @@
 
 ### Breaking Changes
 
-- **Credential and Model Provider visibility now requires Team Admin role** — plain Team Members no longer see SSH keys, GitHub tokens, or Model Providers in the Working Environment editor's credential pickers, or on the respective admin pages. Only Team Admins (and System Admins) can view and manage these resources. (#803, #806)
+- **Credential and Model Provider visibility now requires Team Admin role** — SSH keys, GitHub tokens, and Model Providers are no longer visible to plain Team Members in the Working Environment editor's credential pickers, or on the respective admin pages. Only Team Admins (and System Admins) can view and manage these resources. (#803, #806)
 
 - **Removed trigger-level emits API endpoints** — `GET /api/agents/:id/triggers/:triggerId/emit-suggestions` and `PUT /api/agents/:id/triggers/:triggerId/emits` have been removed. Use the agent-level `emits` field (via `PUT /api/agents/:id`) instead. Any `emits` field supplied to `PUT /api/agents/:id/triggers/:triggerId` is silently stripped. (#788)

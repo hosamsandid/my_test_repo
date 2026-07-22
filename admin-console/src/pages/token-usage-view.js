@@ -128,9 +128,12 @@ export function workItemAverages(data) {
 // 'summary' | 'work-items', `format` is 'csv' | 'json'. Carries the current
 // time window (`since`) so the export matches what's on screen; the server
 // applies the same team scope as the view endpoints.
-export function buildExportUrl(kind, { since, format } = {}) {
+export function buildExportUrl(kind, { since, format, team } = {}) {
   const params = new URLSearchParams();
   if (since) params.set('since', since);
+  // `team` narrows the export to a single team (#801); a blank/absent value
+  // means "all teams" and is simply omitted so the export stays unfiltered.
+  if (team) params.set('team', team);
   params.set('format', format === 'json' ? 'json' : 'csv');
   return `/api/usage/${kind}/export?${params.toString()}`;
 }

@@ -1,0 +1,28 @@
+flowchart LR
+    subgraph browser["Web browser"]
+        UI["Agent Studio<br/>Chat with an agent"]
+    end
+
+    subgraph matrix["Messaging hub"]
+        R1["Private 1:1 chat<br/>with Agent A"]
+        R2["Private 1:1 chat<br/>with Agent B"]
+    end
+
+    MGR["Manager<br/>Creates & runs<br/>one agent per assistant"]
+
+    subgraph aA["Agent A (own sandbox)"]
+        EA["AI assistant<br/>Reads the message,<br/>does the work, replies<br/>Remembers the conversation"]
+    end
+
+    subgraph aB["Agent B (own sandbox)"]
+        EB["AI assistant<br/>Reads the message,<br/>does the work, replies<br/>Remembers the conversation"]
+    end
+
+    UI <-->|"chat"| R1
+    UI -->|"manage agents"| MGR
+
+    R1 <-->|"messages"| EA
+    R2 <-->|"messages"| EB
+
+    MGR -->|"starts / stops"| aA
+    MGR -->|"starts / stops"| aB

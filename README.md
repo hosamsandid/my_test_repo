@@ -6,6 +6,14 @@ For a guided, visual tour of every concept below, open **[`docs/platform-story.h
 
 ---
 
+## At a glance
+
+![How the components interact](docs/images/architecture-overview.png)
+
+A person chats with an agent in the **Agent Studio** browser UI. Each conversation runs in a **private 1:1 chat** carried by a self-hosted messaging hub. A **manager** creates and runs one **agent** per assistant — each in its own sandbox, where it reads the message, does the work, replies, and remembers the conversation.
+
+---
+
 ## Why it exists
 
 Most enterprise AI assistants share the same three limits: they forget everything between sessions, they only act when a human prompts them, and they live on someone else's servers.

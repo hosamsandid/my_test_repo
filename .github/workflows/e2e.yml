@@ -192,3 +192,63 @@ jobs:
   # NOTE: the walkthrough-video render was extracted into its own MANUAL workflow
   # (.github/workflows/walkthrough-video.yml, #749) so it can be started on its own
   # from the Actions UI. It is no longer coupled to this nightly E2E run.
+
+  # ── Makefile smoke test ───────────────────────────────────────────────────
+  # Exercises the operator-facing Makefile targets (help, build, agent-image,
+  # up, ps, logs, down) to catch drift like container-name mismatches.
+  # Runs in parallel with the e2e suite — both gate on podman-preflight.
+  # See PR #772 for design rationale.
+  makefile-smoke:
+    needs: podman-preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Start rootless podman API socket
+        run: |
+          set -euo pipefail
+          systemctl --user enable --now podman.socket \
+            || podman system service --time=0 "unix://${XDG_RUNTIME_DIR}/podman/podman.sock" &
+          SOCK="${XDG_RUNTIME_DIR}/podman/podman.sock"
+          for i in $(seq 1 20); do
+            [ -S "$SOCK" ] && break
+            sleep 0.5
+          done
+          echo "PODMAN_HOST_SOCKET=${SOCK}" >> "$GITHUB_ENV"
+
+      - name: make help
+        run: make help
+
+      - name: make up
+        # `up` depends on `agent-image` and runs `--build`, so it
+        # transitively exercises make build + make agent-image.
+        run: make up
+
+      - name: make ps (verify containers)
+        run: |
+          make ps
+          make ps | grep -q orchestrator
+          make ps | grep -q admin-console
+          make ps | grep -q conduwuit
+
+      - name: make logs (verify streaming)
+        run: |
+          timeout 10 make logs > /tmp/logs-out 2>&1 || true
+          if grep -q 'no container with name or ID' /tmp/logs-out; then
+            echo "FAIL: make logs could not find containers"
+            cat /tmp/logs-out
+            exit 1
+          fi
+          test -s /tmp/logs-out
+
+      - name: make down
+        run: make down
+
+      - name: Teardown (safety net)
+        if: always()
+        run: podman compose -f docker-compose.yml down || true

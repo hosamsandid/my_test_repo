@@ -1,0 +1,44 @@
+diff --git a/node_modules/@revideo/renderer/lib/server/render-video.js b/node_modules/@revideo/renderer/lib/server/render-video.js
+index 40cc5c1..462922e 100644
+--- a/node_modules/@revideo/renderer/lib/server/render-video.js
++++ b/node_modules/@revideo/renderer/lib/server/render-video.js
+@@ -62,9 +62,9 @@ function buildUrl(port, fileName, workerId, totalNumOfWorkers, hiddenFolderId) {
+  */
+ async function initBrowserAndServer(fixedPort, projectFile, outputFolderName, settings, variables) {
+     const args = settings.puppeteer?.args ?? [];
+-    if (!args.includes('--single-process')) {
+-        args.push('--single-process');
+-    }
++    // patch-package (#742): do NOT force '--single-process' — it crashes headless
++    // Chrome on some Linux/CI hosts. Callers opt in via settings.puppeteer.args.
++
+     const resolvedProjectPath = path.join(process.cwd(), projectFile);
+     const [browser, server] = await Promise.all([
+         puppeteer_1.default.launch({ headless: true, ...settings.puppeteer, args }),
+diff --git a/node_modules/@revideo/renderer/lib/server/validate-settings.js b/node_modules/@revideo/renderer/lib/server/validate-settings.js
+index fe4d7d3..320ae0c 100644
+--- a/node_modules/@revideo/renderer/lib/server/validate-settings.js
++++ b/node_modules/@revideo/renderer/lib/server/validate-settings.js
+@@ -2,6 +2,7 @@
+ Object.defineProperty(exports, "__esModule", { value: true });
+ exports.getParamDefaultsAndCheckValidity = getParamDefaultsAndCheckValidity;
+ const uuid_1 = require("uuid");
++const path = require("path");
+ function getParamDefaultsAndCheckValidity(settings) {
+     const defaultReturn = {
+         outputFileName: 'video',
+@@ -14,10 +15,11 @@ function getParamDefaultsAndCheckValidity(settings) {
+         throw Error('You cannot use the image sequence exporter with renderVideo or renderPartialVideo. Please use the editor to export images');
+     }
+     const extension = settings.outFile?.split('.').pop();
++    // patch-package (#742): use only the basename so an absolute or slashed outFile
++    // cannot corrupt the temp-folder name (revideo-<outputFileName>-<uuid>).
+     const outFileWithoutExtension = settings.outFile
+-        ?.split('.')
+-        .slice(0, -1)
+-        .join('.');
++        ? path.basename(settings.outFile).split('.').slice(0, -1).join('.')
++        : undefined;
+     // If the output file name is not provided, we don't need to validate further
+     if (!outFileWithoutExtension) {
+         return {

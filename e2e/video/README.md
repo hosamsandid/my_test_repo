@@ -119,7 +119,7 @@ map each beat's screenshot + audio id and replace the hardcoded example beat lis
 | `fixtures/sample-journey.mp4` | a short real UI clip (H.264) for the optional-motion reference | fixture |
 | `data/audio-manifest.json` | durations the scene reads (seeded `{}`; `prep:audio` regenerates it at render time) | generated |
 | `vite.config.ts` | the `@revideo/vite-plugin` config the renderer bundles with | vendored |
-| `patches/` | the three Revideo 0.10.4 fixes (see `patches/README.md`) | T2 finalises after first install |
+| `patches/` | the three Revideo fixes (see `patches/README.md`), applied by `patch-package` on `npm ci` postinstall | committed (T2/#742) — verified to apply on a fresh `npm ci` |
 
 ## Local render (workstation with Chromium + ffmpeg)
 

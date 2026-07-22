@@ -81,9 +81,9 @@ ps:
 		$(foreach svc,$(SERVICES),--filter name=$(svc))
 
 logs:
-	podman logs -f --tail=100 orchestrator &
-	podman logs -f --tail=100 admin-console &
-	podman logs -f --tail=100 conduwuit &
+	$(COMPOSE) -f $(COMPOSE_FILE) logs -f --tail=100 orchestrator &
+	$(COMPOSE) -f $(COMPOSE_FILE) logs -f --tail=100 admin-console &
+	$(COMPOSE) -f $(COMPOSE_FILE) logs -f --tail=100 conduwuit &
 	wait
 
 seed-pool: seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers

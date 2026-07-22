@@ -36,6 +36,8 @@ const knowledgeConvergence = require("./knowledge-convergence");
 const knowledgeCurator = require("./knowledge-curator");
 const knowledgeDomains = require("./knowledge-domains");
 const knowledgeRouting = require("./knowledge-routing");
+const knowledgeDistillation = require("./knowledge-distillation");
+const knowledgeConsolidation = require("./knowledge-consolidation");
 const knowledgeCleanup = require("./knowledge-cleanup");
 const knowledgeHygiene = require("./knowledge-hygiene");
 const skillReconcile = require("./skill-reconcile");
@@ -2557,6 +2559,34 @@ function writeTeamDomainsDoc(teamId, doc) {
   return normalized;
 }
 
+// #781 consolidation-migration progress doc (§4). Per-team, resumable — an
+// interrupted migration re-enters at the first still-pending domain. Sibling of the
+// domains doc; traversal-guarded the same way.
+function _consolidationPath(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  return path.join(WORKSPACE, "teams", seg, "consolidation-migration.json");
+}
+
+function readConsolidationState(teamId) {
+  const p = _consolidationPath(teamId);
+  if (!p || !fs.existsSync(p)) return null;
+  try {
+    return knowledgeConsolidation.normalizeMigrationState(JSON.parse(fs.readFileSync(p, "utf8")), {});
+  } catch {
+    return null;
+  }
+}
+
+function writeConsolidationState(teamId, state) {
+  const p = _consolidationPath(teamId);
+  if (!p) throw new Error(`consolidation: refusing unsafe team id '${teamId}'`);
+  const normalized = knowledgeConsolidation.normalizeMigrationState(state, {});
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(normalized, null, 2));
+  return normalized;
+}
+
 // Role tokens for a team's squad, used to seed the default domain list. Derives a
 // role from each member config's `role`/`roleId`/id-suffix — best-effort, tolerant.
 function teamSquadRoleTokens(teamId) {
@@ -3453,6 +3483,13 @@ function runConvergenceCollector(teamId, envArg, opts = {}) {
     } catch (err) {
       console.warn(`[Orchestrator] related-theme suggestions for '${teamId}' failed: ${err.message}`);
     }
+    // #781: distil any grown skill that is due (auto path only — review-mode skills
+    // wait for an operator Distill action). Runs LAST so it sees this pass's extends.
+    try {
+      autoDistillStep(teamId, env, { now });
+    } catch (err) {
+      console.warn(`[Orchestrator] auto-distill for '${teamId}' failed: ${err.message}`);
+    }
   } else if (level >= 2) {
     try {
       // Themes first: a lesson bundled into a raised theme card must not also
@@ -4224,6 +4261,93 @@ function _finalizeExtendedSkills(teamId, env, extendedSkills, now) {
       }
     })();
   }
+}
+
+// #781 distillation pass (§3.4): re-synthesise a whole team skill from its current
+// SKILL.md + provenance. NO heuristic fallback — on LLM failure the skill is left
+// BYTE-IDENTICAL (AC2). On a usable synthesis the SKILL.md is rewritten, the
+// provenance entryIds are PRESERVED VERBATIM (AC1), the manifest version bumps
+// (content changed), the amendment counter resets, and a `distillation` feed event is
+// appended. `apply:false` (preview) NEVER writes — it returns the proposed new doc so
+// the caller can render an old-vs-new diff.
+//
+// Returns { changed, reason, skill, old, new, entryCount, mode }.
+function _distillTeamSkill(teamId, envArg, name, { apply = true, now, auto = false } = {}) {
+  const env = teamKnowledgeEnv(teamId, envArg);
+  const doc = _readTeamSkillDoc(teamId, name);
+  if (!doc) return { changed: false, reason: "not-found", skill: name };
+  const ts = now || new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  // Resolve the skill's domain for the prompt title/audience (best-effort).
+  let domain = null;
+  try {
+    domain = readTeamDomainsDoc(teamId).domains.find((d) => knowledgeDomains.domainSkillName(d) === name) || null;
+  } catch { domain = null; }
+  const request = knowledgeDistillation.buildDistillationRequest(doc.skillMd, doc.provenance, { domain });
+  const llmText = _synthesizeSkillMd(env, request);
+  const result = knowledgeDistillation.applyDistillation({
+    skillMd: doc.skillMd, provenance: doc.provenance, llmText, by: auto ? "curator" : "operator", now: ts,
+  });
+  const entryCount = Array.isArray(doc.provenance.entryIds) ? doc.provenance.entryIds.length : 0;
+  const base = {
+    changed: result.changed, reason: result.reason, skill: name,
+    old: doc.skillMd, new: result.skillMd, entryCount, mode: apply ? "applied" : "review",
+  };
+  if (!apply) return base;
+  if (result.reason === "identical") {
+    // The LLM returned the same doc: reset the counter so a manual distill doesn't
+    // immediately re-fire, but don't rewrite/bump/emit.
+    try { fs.writeFileSync(path.join(doc.dir, "provenance.json"), JSON.stringify(result.provenance, null, 2)); }
+    catch (err) { console.warn(`[Orchestrator] distill counter-reset for '${name}' failed: ${err.message}`); }
+    return base;
+  }
+  if (!result.changed) return base; // llm-failed → byte-identical, nothing written (AC2)
+  try {
+    const md = result.skillMd.endsWith("\n") ? result.skillMd : result.skillMd + "\n";
+    fs.writeFileSync(path.join(doc.dir, "SKILL.md"), md);
+    fs.writeFileSync(path.join(doc.dir, "provenance.json"), JSON.stringify(result.provenance, null, 2));
+  } catch (err) {
+    console.warn(`[Orchestrator] distill write for '${name}' (team ${teamId}) failed: ${err.message}`);
+    return { ...base, changed: false, reason: "write-failed" };
+  }
+  try {
+    skillManifest.stampSkillDir(doc.dir, {
+      name, by: auto ? "curator" : "operator", action: "resynced", now: ts,
+      note: `distilled ${entryCount} ${entryCount === 1 ? "lesson" : "lessons"}`,
+    });
+  } catch (err) { console.warn(`[Orchestrator] distill stamp for '${name}' failed: ${err.message}`); }
+  appendKnowledgeEvents([knowledgeDistillation.buildDistillationEvent({
+    teamId, skill: { name, tier: "team" }, mode: "applied", auto, entryCount, reason: "distilled", ts,
+  })]);
+  if (orchestratorSingleton) {
+    orchestratorSingleton.resyncTeamSkill(teamId, name).catch((err) =>
+      console.warn(`[Orchestrator] distill resync '${name}' for team ${teamId} failed: ${err.message}`));
+  }
+  return base;
+}
+
+// #781: after the auto-extend/promote steps, distil any team skill that accrued
+// enough amendments AND whose gate/autonomy allow a direct apply (§3.4). A skill whose
+// mode is 'review' waits for an operator Distill action (no auto-apply). Best-effort;
+// returns the count distilled.
+function autoDistillStep(teamId, envArg, { now } = {}) {
+  const env = teamKnowledgeEnv(teamId, envArg);
+  const gates = resolvePromotionGates(env);
+  const level = knowledgeAutonomyLevel(env);
+  if (knowledgeDistillation.distillationMode(gates, { autonomyLevel: level }) !== "auto") return 0;
+  const { distillAfterAmendments } = knowledgeCurationConfig(env);
+  let distilled = 0;
+  for (const s of readTeamSkillsForMatch(teamId)) {
+    try {
+      const doc = _readTeamSkillDoc(teamId, s.name);
+      if (!doc) continue;
+      if (!knowledgeDistillation.shouldDistill(doc.provenance, { threshold: distillAfterAmendments })) continue;
+      const r = _distillTeamSkill(teamId, env, s.name, { apply: true, now, auto: true });
+      if (r && r.changed) distilled += 1;
+    } catch (err) {
+      console.warn(`[Orchestrator] auto-distill '${s.name}' for team ${teamId} failed: ${err.message}`);
+    }
+  }
+  return distilled;
 }
 
 // Record an agent nomination (the `knowledge promote <id>` CLI verb). Builds a
@@ -9414,6 +9538,121 @@ async function main() {
           writeTeamDomainsDoc(teamId, r.doc);
           if (r.event) appendKnowledgeEvents([r.event]);
           return respond(r.doc);
+        } catch (err) {
+          res.writeHead(err && err.status === 400 ? 400 : 500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+        }
+      });
+      return;
+    }
+
+    // ── Distil a whole team skill (#781 §3.4) ───────────────────────────────────
+    // The admin-console POST /api/knowledge/distill proxies here. `apply:false` is a
+    // preview that returns old/new for a diff; `apply:true` writes (version bump +
+    // feed event) only when the LLM produced a usable re-synthesis — LLM failure
+    // leaves the skill byte-identical (AC2).
+    if (req.method === 'POST' && req.url === '/internal/knowledge/distill') {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const p = JSON.parse(body || '{}');
+          const teamId = String(p.teamId || '');
+          const skill = String(p.skill || '');
+          const apply = p.apply !== false;
+          if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
+          if (!knowledgeCurator.SKILL_NAME_RE.test(skill)) throw new Error('invalid skill name');
+          const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+          const result = _distillTeamSkill(teamId, null, skill, { apply, now, auto: false });
+          const status = result.reason === 'not-found' ? 404 : 200;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: result.reason !== 'not-found', ...result }));
+        } catch (err) {
+          res.writeHead(err && err.status === 400 ? 400 : 500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+        }
+      });
+      return;
+    }
+
+    // ── Consolidation migration (#781 §4) ───────────────────────────────────────
+    // Operator-driven, one-time-per-team, resumable. Ops: read | plan | start |
+    // advance | route-remaining. The actual per-domain synthesis + archive + atomic
+    // grant swap is performed by the existing POST /api/skills/merge (fed the
+    // buildConsolidationMerge input); this endpoint owns the resumable progress doc
+    // and the corpus plan. The admin-console POST /api/knowledge/consolidation proxies here.
+    if (req.method === 'POST' && req.url === '/internal/knowledge/consolidation') {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const p = JSON.parse(body || '{}');
+          const teamId = String(p.teamId || '');
+          const op = String(p.op || 'read');
+          if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
+          const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+          const ok = (extra = {}) => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, ...extra }));
+          };
+          // Build the per-domain member/candidate assignment plan from the confirmed
+          // domains + the current corpus (existing team skills + open candidates).
+          const buildPlan = () => {
+            const domains = readTeamDomainsDoc(teamId).domains;
+            const skills = readTeamSkillsForMatch(teamId);
+            const openCands = (readKnowledgeCandidates(teamId) || []).filter((c) => c && c.status === 'open');
+            const skillEntryIdsByDomain = {};
+            for (const d of domains) {
+              const sk = skills.find((s) => s.name === knowledgeDomains.domainSkillName(d));
+              if (sk) skillEntryIdsByDomain[d.id] = sk.entryIds;
+            }
+            return knowledgeConsolidation.planConsolidation(domains, skills, openCands, { skillEntryIdsByDomain });
+          };
+          if (op === 'read') return ok({ state: readConsolidationState(teamId) });
+          if (op === 'plan') {
+            const plan = buildPlan();
+            // The merge input each ≥2-member domain will feed to POST /api/skills/merge.
+            const merges = plan.domains
+              .map((d) => ({ domainId: d.domainId, skill: d.skill, merge: knowledgeConsolidation.buildConsolidationMerge(d, { teamId }) }))
+              .filter((m) => m.merge);
+            return ok({ plan, merges });
+          }
+          if (op === 'start') {
+            const plan = buildPlan();
+            const state = writeConsolidationState(teamId, knowledgeConsolidation.makeMigrationState(plan, { teamId, now }));
+            appendKnowledgeEvents([knowledgeConsolidation.consolidationEvent('started', {
+              teamId, count: state.domains.length, summary: knowledgeConsolidation.migrationSummary(state), now,
+            })]);
+            return ok({ state });
+          }
+          if (op === 'advance') {
+            const prev = readConsolidationState(teamId);
+            if (!prev) { const e = new Error('no migration in progress'); e.status = 400; throw e; }
+            const domainId = String(p.domainId || '');
+            const stepStatus = p.status === 'skipped' ? 'skipped' : 'accepted';
+            const next = knowledgeConsolidation.advanceMigration(prev, { domainId, status: stepStatus, now });
+            const state = writeConsolidationState(teamId, next);
+            const dom = state.domains.find((d) => d.domainId === domainId) || null;
+            appendKnowledgeEvents([knowledgeConsolidation.consolidationEvent(stepStatus, {
+              teamId, domain: dom ? { id: dom.domainId, name: dom.name } : null, skill: dom ? dom.skill : null, now,
+            })]);
+            return ok({ state });
+          }
+          if (op === 'route-remaining') {
+            const prev = readConsolidationState(teamId);
+            if (!prev) { const e = new Error('no migration in progress'); e.status = 400; throw e; }
+            // Actually route the leftover candidates by re-running the collector pass
+            // (best-effort — it re-projects + routes per §3.2). Then mark the step done.
+            try { runConvergenceCollector(teamId, null, { force: true }); }
+            catch (err) { console.warn(`[Orchestrator] consolidation route-remaining collector for '${teamId}' failed: ${err.message}`); }
+            const state = writeConsolidationState(teamId, knowledgeConsolidation.markRoutedRemaining(prev, { now }));
+            appendKnowledgeEvents([knowledgeConsolidation.consolidationEvent(
+              state.status === 'complete' ? 'completed' : 'routed',
+              { teamId, summary: knowledgeConsolidation.migrationSummary(state), now },
+            )]);
+            return ok({ state });
+          }
+          const e = new Error(`unknown op '${op}'`); e.status = 400; throw e;
         } catch (err) {
           res.writeHead(err && err.status === 400 ? 400 : 500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));

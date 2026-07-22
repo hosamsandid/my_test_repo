@@ -3216,6 +3216,7 @@ app.get('/api/knowledge/graph', async (req, res) => {
   augmentPendingPromotions(graph, teamIds);
   augmentSkillActivation(graph, parsed);
   await augmentDigestInclusion(graph, teamIds);
+  await augmentSkillRoles(graph, teamIds);
   augmentDisplaySummary(graph, entries);
   res.json(graph);
 });
@@ -3262,6 +3263,35 @@ async function augmentDigestInclusion(graph, teamIds) {
   if (included.size === 0) return;
   for (const node of graph.nodes) {
     if (node.kind === 'item' && included.has(String(node.id).slice(5))) node.inDigest = true;
+  }
+}
+
+// Overlay the audience ROLES on every skill node (#781 §3.5 role surfacing): a skill
+// mapped to a domain shows "for: developer, reworker". Read-time only — sourced from
+// the team's domains doc via the orchestrator (a domain's skill name is `skill||id`,
+// both already clean slugs). Best-effort, mutates `graph` in place; a skill with no
+// mapped domain simply carries no `roles` (the UI renders nothing).
+async function augmentSkillRoles(graph, teamIds) {
+  if (!graph || !Array.isArray(graph.nodes)) return;
+  const rolesBySkill = new Map();
+  await Promise.all((teamIds || []).map(async (teamId) => {
+    try {
+      const resp = await fetch(`${ORCH_URL()}/internal/knowledge/domains`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ teamId, op: 'read' }),
+      });
+      if (!resp.ok) return;
+      const data = await resp.json().catch(() => ({}));
+      const domains = data && data.doc && Array.isArray(data.doc.domains) ? data.doc.domains : [];
+      for (const d of domains) {
+        const name = typeof d.skill === 'string' && d.skill ? d.skill : d.id;
+        if (name && Array.isArray(d.roles) && d.roles.length) rolesBySkill.set(name, d.roles.slice());
+      }
+    } catch { /* best effort */ }
+  }));
+  if (rolesBySkill.size === 0) return;
+  for (const node of graph.nodes) {
+    if (node.kind === 'skill' && rolesBySkill.has(node.label)) node.roles = rolesBySkill.get(node.label);
   }
 }
 
@@ -4446,6 +4476,58 @@ app.post('/api/knowledge/domains', apiLimiter, async (req, res) => {
     const out = await r.json().catch(() => ({}));
     if (!r.ok || !out.ok) return res.status(400).json({ error: (out && out.error) || 'domain op failed' });
     res.json({ ok: true, doc: out.doc, budget: out.budget, proposed: out.proposed });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// ── Distillation pass (#781 §3.4) ──────────────────────────────────────────────
+// Re-synthesise a whole team skill. `apply:false` (default) previews old/new for a
+// diff; `apply:true` writes only on a usable re-synthesis (LLM failure leaves the
+// skill byte-identical). Proxies to the orchestrator (owns the skill files + LLM seam).
+app.post('/api/knowledge/distill', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
+  const skill = typeof req.body?.skill === 'string' ? req.body.skill : '';
+  const apply = req.body?.apply === true;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  if (!skill) return res.status(400).json({ error: 'skill is required' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/distill`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, skill, apply }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (r.status === 404) return res.status(404).json({ error: (out && out.error) || 'skill not found' });
+    if (!r.ok || !out.ok) return res.status(502).json({ error: (out && out.error) || 'distill failed' });
+    res.json({ ok: true, changed: out.changed, reason: out.reason, skill: out.skill, old: out.old, new: out.new, entryCount: out.entryCount, mode: out.mode });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// ── Consolidation migration (#781 §4) ──────────────────────────────────────────
+// Operator-driven, one-time-per-team, resumable. Ops: read | plan | start | advance
+// | route-remaining. The actual per-domain synthesis + archive + atomic grant swap
+// runs through POST /api/skills/merge (fed the `merge` inputs the `plan`/`start` ops
+// return). Proxies to the orchestrator (owns the progress doc + corpus).
+const CONSOLIDATION_OPS = new Set(['read', 'plan', 'start', 'advance', 'route-remaining']);
+app.post('/api/knowledge/consolidation', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
+  const op = typeof req.body?.op === 'string' ? req.body.op : 'read';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  if (!CONSOLIDATION_OPS.has(op)) return res.status(400).json({ error: 'invalid op' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/consolidation`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...req.body, teamId, op }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) return res.status(out.error && r.status === 400 ? 400 : 502).json({ error: (out && out.error) || 'consolidation op failed' });
+    res.json({ ok: true, state: out.state, plan: out.plan, merges: out.merges });
   } catch (err) {
     res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
   }

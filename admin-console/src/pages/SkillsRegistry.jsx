@@ -507,6 +507,9 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
   const [installMsg, setInstallMsg] = useState(null);
   const [confirmInstallOverwrite, setConfirmInstallOverwrite] = useState(false);
   const [adoptTeamId, setAdoptTeamId] = useState('');
+  // #781 distillation (team skills only — the pass is team-scoped).
+  const [distill, setDistill] = useState(null); // null | {loading} | {old,new,changed,reason} | {error}
+  const [distillBusy, setDistillBusy] = useState(false);
 
   // Detail tabs (#632): Content (files, default) + Versions / Lineage / Usage,
   // the latter three fed by one lineage fetch. The fetch is lazy — it only fires
@@ -621,6 +624,45 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
       setPromoteError(e.message);
     } finally {
       setPromoting(false);
+    }
+  }
+
+  // #781 §3.4: distil this team skill — preview old-vs-new, then apply. LLM failure
+  // leaves the skill byte-identical (backend-enforced).
+  async function distillPreview() {
+    setDistillBusy(true);
+    setDistill({ loading: true });
+    try {
+      const res = await fetch('/api/knowledge/distill', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ teamId: skill.teamId, skill: skill.name, apply: false }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || !d.ok) throw new Error(d.error || `HTTP ${res.status}`);
+      setDistill({ old: d.old || '', new: d.new || '', changed: !!d.changed, reason: d.reason });
+    } catch (e) {
+      setDistill({ error: e.message });
+    } finally {
+      setDistillBusy(false);
+    }
+  }
+  async function distillApply() {
+    setDistillBusy(true);
+    try {
+      const res = await fetch('/api/knowledge/distill', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ teamId: skill.teamId, skill: skill.name, apply: true }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || !d.ok) throw new Error(d.error || `HTTP ${res.status}`);
+      if (d.changed && selectedFile === 'SKILL.md' && typeof d.new === 'string') {
+        setFileData(fd => ({ ...(fd || {}), content: d.new }));
+      }
+      setDistill(null);
+    } catch (e) {
+      setDistill({ error: e.message });
+    } finally {
+      setDistillBusy(false);
     }
   }
 
@@ -776,6 +818,16 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
                 title="Move this team skill into the global pool (retires the team-tier copy, keeps a recoverable snapshot)"
               >
                 {promoting ? 'Moving…' : 'Move to global'}
+              </button>
+            )}
+            {isTeam && (
+              <button
+                onClick={distillPreview}
+                disabled={distillBusy}
+                style={secondaryBtnStyle}
+                title="Re-synthesise the whole skill from its accumulated content — dedupe, restructure, re-abstract. Shows a diff before applying (#781)."
+              >
+                {distillBusy && distill && distill.loading ? 'Distilling…' : 'Distill…'}
               </button>
             )}
             <button onClick={() => { setDeleteError(null); setConfirmDelete(true); }} style={dangerBtnStyle}>
@@ -1041,6 +1093,52 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
         onConfirm={() => install(true)}
         onCancel={() => setConfirmInstallOverwrite(false)}
       />
+
+      {/* #781 distillation diff (team skills) */}
+      {distill && (
+        <div
+          onClick={() => !distillBusy && setDistill(null)}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 70, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', boxShadow: 'var(--eb-shadow-lg)', maxWidth: 900, width: '100%', maxHeight: '85vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--eb-border-default)' }}>
+              <strong style={{ fontSize: 'var(--eb-text-sm)' }}>Distill “{skill.name}”</strong>
+            </div>
+            <div style={{ padding: 16, overflow: 'auto', flex: 1 }}>
+              {distill.loading && <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Re-synthesising the skill…</div>}
+              {distill.error && <div style={{ color: 'var(--eb-status-error, #d33)', fontSize: 'var(--eb-text-sm)' }}>Distillation failed: {distill.error}</div>}
+              {!distill.loading && !distill.error && !distill.changed && (
+                <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
+                  {distill.reason === 'llm-failed'
+                    ? 'The re-synthesis did not produce a usable result — the skill is left unchanged.'
+                    : 'The distillation produced no change — the skill is already well-structured.'}
+                </div>
+              )}
+              {!distill.loading && !distill.error && distill.changed && (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                  <div>
+                    <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginBottom: 4 }}>Current</div>
+                    <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 'var(--eb-text-xs)', background: 'var(--eb-bg-elevated)', padding: 8, borderRadius: 6, margin: 0, maxHeight: '55vh', overflow: 'auto' }}>{distill.old}</pre>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginBottom: 4 }}>Distilled</div>
+                    <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 'var(--eb-text-xs)', background: 'var(--eb-bg-elevated)', padding: 8, borderRadius: 6, margin: 0, maxHeight: '55vh', overflow: 'auto' }}>{distill.new}</pre>
+                  </div>
+                </div>
+              )}
+            </div>
+            <div style={{ padding: '12px 16px', borderTop: '1px solid var(--eb-border-default)', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button onClick={() => setDistill(null)} disabled={distillBusy} style={secondaryBtnStyle}>Close</button>
+              {!distill.loading && !distill.error && distill.changed && (
+                <button onClick={distillApply} disabled={distillBusy} style={primaryBtnStyle(distillBusy)}>
+                  {distillBusy ? 'Applying…' : 'Apply distillation'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       </>)}
     </div>
   );

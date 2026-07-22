@@ -99,6 +99,12 @@ const DEFAULT_EXTEND_CONFIDENCE_FLOOR = 100;
 // above which a new-domain proposal is pushed into the merge/override flow (§3.5).
 const DEFAULT_SKILL_BUDGET = 12;
 
+// #781 skill-aggregation Phase 3. `distillAfterAmendments` is X: how many amendments
+// a skill may accrue before the curator proposes (or, at autonomy 3 + auto gate,
+// applies) a distillation pass that re-synthesises the whole document (§3.4). Clamped
+// to an integer >= 1.
+const DEFAULT_DISTILL_AFTER_AMENDMENTS = 5;
+
 // ---------------------------------------------------------------------------
 // Ids / clock (injectable so tests are deterministic)
 // ---------------------------------------------------------------------------
@@ -547,6 +553,11 @@ function knowledgeCurationConfig(env) {
   const ss = raw.synthesizeSkills;
   const synthesizeSkills = ss === true || ss === 'on'
     || (ss && typeof ss === 'object' && ss.enabled === true) || false;
+  // #781 distillation cadence (X amendments before a distillation is due).
+  let distillAfterAmendments = Number(raw.distillAfterAmendments);
+  if (!Number.isInteger(distillAfterAmendments) || distillAfterAmendments < 1) {
+    distillAfterAmendments = DEFAULT_DISTILL_AFTER_AMENDMENTS;
+  }
   return {
     maxAutoPromotionsPerPass: cap,
     autoThemeMinLessons,
@@ -557,6 +568,7 @@ function knowledgeCurationConfig(env) {
     domainRouting,
     skillBudget,
     synthesizeSkills,
+    distillAfterAmendments,
   };
 }
 
@@ -650,6 +662,7 @@ module.exports = {
   DEFAULT_DIGEST_GRADUATE_AGENTS,
   DEFAULT_EXTEND_CONFIDENCE_FLOOR,
   DEFAULT_SKILL_BUDGET,
+  DEFAULT_DISTILL_AFTER_AMENDMENTS,
   PROMOTION_TRANSITIONS,
   GATE_MODES,
   DEFAULT_PROMOTION_GATES,

@@ -333,6 +333,44 @@ test('planGrantMigration: constructs granting no source produce no step', () => 
   assert.deepStrictEqual(plan, { teams: [], agents: [] });
 });
 
+test('AC3 (#781 consolidation): grant swap is ATOMIC — target added before members removed', () => {
+  // The consolidation migration accepts a domain playbook by merging N micro-skills
+  // into a domain-named target with retireSources. The grant swap is achieved by
+  // add-before-remove ordering: planGrantMigration carries BOTH addTarget:true and the
+  // removed member names for the team that granted them, and migrateGrantsForMerge (in
+  // api.js) activates the target FIRST, then deactivates each source — so no member
+  // ever loses skill access in the gap.
+  const teamCfg = {
+    id: 'agent-studio', role: 'team',
+    skills: ['dev-workflow-branching', 'commit-conventions-dev', 'unrelated'],
+  };
+  const merge = {
+    sources: [
+      { tier: 'team', teamId: 'agent-studio', name: 'dev-workflow-branching' },
+      { tier: 'team', teamId: 'agent-studio', name: 'commit-conventions-dev' },
+    ],
+    target: { tier: 'team', teamId: 'agent-studio', name: 'dev-workflow' },
+    retireSources: true,
+  };
+  const plan = planGrantMigration([teamCfg], merge);
+  assert.equal(plan.teams.length, 1);
+  const step = plan.teams[0];
+  assert.equal(step.id, 'agent-studio');
+  assert.equal(step.addTarget, true, 'target grant added');
+  assert.deepStrictEqual(step.removes.sort(), ['commit-conventions-dev', 'dev-workflow-branching'], 'only member grants removed');
+  // Coverage invariant across the whole swap. Apply add-before-remove and check the
+  // intermediate set (after add, before any remove) plus the final set both cover the
+  // domain skill; the unrelated grant is preserved throughout.
+  let grants = new Set(teamCfg.skills);
+  if (step.addTarget) grants.add(merge.target.name);
+  assert.ok(grants.has('dev-workflow'), 'target present immediately after add');
+  for (const name of step.removes) {
+    grants.delete(name);
+    assert.ok(grants.has('dev-workflow'), `domain skill still granted while removing ${name}`);
+  }
+  assert.deepStrictEqual([...grants].sort(), ['dev-workflow', 'unrelated']);
+});
+
 // ---------------------------------------------------------------------------
 // isCarriedFile
 // ---------------------------------------------------------------------------

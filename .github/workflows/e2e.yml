@@ -197,7 +197,7 @@ jobs:
   # Exercises the operator-facing Makefile targets (help, build, agent-image,
   # up, ps, logs, down) to catch drift like container-name mismatches.
   # Runs in parallel with the e2e suite — both gate on podman-preflight.
-  # Spec: docs/superpowers/specs/2026-07-22-makefile-smoke-test-design.md
+  # See PR #772 for design rationale.
   makefile-smoke:
     needs: podman-preflight
     runs-on: ubuntu-24.04

@@ -9,6 +9,7 @@ const {
   canManageTeam, visibleUser, describeAuthz,
   normalizeCredential, visibleCredential, canManageCredential,
   canCreateCredential, canReassignCredential, credentialVisibleToTeam,
+  canViewUsageStatistics,
 } = require('./scope');
 
 const users = [
@@ -282,4 +283,28 @@ test('provider gating: team-admin sees/manages own team provider, only uses assi
   assert.equal(canManageCredential(alice, sysProvider), false);
   // AC7: reassigning is System-Admin-only.
   assert.equal(canReassignCredential(alice), false);
+});
+
+// ── Token-usage statistics visibility (#801) ────────────────────────────────
+
+test('canViewUsageStatistics: env admin & System-Admin user may view (AC3/AC6)', () => {
+  const envAdmin = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
+  const sysAdmin = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canViewUsageStatistics(envAdmin), true);
+  assert.equal(canViewUsageStatistics(sysAdmin), true);
+});
+
+test('canViewUsageStatistics: Team Admin & Team Member are denied (AC1/AC2)', () => {
+  // alice is team-admin of payments; bob is a plain team-member of risk.
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const bob   = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canViewUsageStatistics(alice), false);
+  assert.equal(canViewUsageStatistics(bob), false);
+});
+
+test('canViewUsageStatistics: unknown subject / missing scope fail closed', () => {
+  const unknown = computeScope({ username: 'ghost@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canViewUsageStatistics(unknown), false);
+  assert.equal(canViewUsageStatistics(null), false);
+  assert.equal(canViewUsageStatistics(undefined), false);
 });

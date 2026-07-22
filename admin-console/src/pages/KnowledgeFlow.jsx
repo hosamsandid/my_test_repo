@@ -177,8 +177,10 @@ export default function KnowledgeFlow() {
       fetch(`/api/knowledge/gates?team=${enc}`).then(r => (r.ok ? r.json() : null)),
       fetch(`/api/knowledge/promotion-suggestions?team=${enc}`).then(r => (r.ok ? r.json() : null)),
       fetch(`/api/knowledge/review-queue?team=${enc}`).then(r => (r.ok ? r.json() : null)),
+      // #780: the team's skill domains + soft skill-budget state.
+      fetch(`/api/knowledge/domains?team=${enc}`).then(r => (r.ok ? r.json() : null)).catch(() => null),
     ];
-    return Promise.all(gets).then(async ([graph, gates, sugg, review]) => {
+    return Promise.all(gets).then(async ([graph, gates, sugg, review, domains]) => {
       let privateSkills = [];
       if (withPrivate && Array.isArray(members)) {
         const lists = await Promise.all(members.map(m =>
@@ -194,6 +196,8 @@ export default function KnowledgeFlow() {
           gates,
           suggestions: Array.isArray(sugg?.suggestions) ? sugg.suggestions.filter(s => s.status === 'open' || !s.status) : [],
           reviewQueue: Array.isArray(review?.items) ? review.items : [],
+          domains: domains && domains.doc ? domains.doc.domains : [],
+          skillBudget: domains ? domains.budget : null,
           privateSkills: withPrivate ? privateSkills : (prev[teamId]?.privateSkills || []),
         },
       }));
@@ -775,6 +779,8 @@ const TeamSection = React.forwardRef(function TeamSection({
   const suggestions = data?.suggestions || [];
   const reviewQueue = data?.reviewQueue || [];
   const privateSkills = data?.privateSkills || [];
+  const domains = data?.domains || [];
+  const skillBudget = data?.skillBudget || null;
   const warnings = graph?.warnings || [];
 
   return (
@@ -923,6 +929,8 @@ const TeamSection = React.forwardRef(function TeamSection({
             suggestions={suggestions}
             pending={pending}
             autonomy={autonomy}
+            domains={domains}
+            skillBudget={skillBudget}
             onReviewSuggestion={onReviewSuggestion}
             onShareSkill={onShareSkill}
             onControlsChanged={onControlsChanged}
@@ -945,7 +953,96 @@ const SKILL_TABS = [
   ['suggested', 'Suggested', 'Knowledge the collector thinks is worth turning into a skill.'],
 ];
 
-function SkillsColumn({ team, skills, suggestions, pending, autonomy, onReviewSuggestion, onShareSkill, onControlsChanged }) {
+/* ── Skill domains + budget (#780, skill-aggregation Phase 2) ────────────────── */
+
+// A compact panel over the team's persistent skill domains — the routing targets
+// converged clusters are classified against — plus the soft skill-budget bar
+// (§3.5, AC5). Operator CRUD (add / rename) posts to /api/knowledge/domains; domain
+// changes are always a human decision. Collapsible; hidden when a team carries no
+// domains yet and the operator hasn't expanded it.
+function DomainsPanel({ teamId, domains, budget, onChanged }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [adding, setAdding] = useState('');
+  const [renaming, setRenaming] = useState(null); // { id, name }
+  const list = Array.isArray(domains) ? domains : [];
+
+  const post = useCallback((body) => {
+    setBusy(true);
+    return fetch('/api/knowledge/domains', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, ...body }),
+    }).then(r => r.json().catch(() => ({}))).then((out) => {
+      if (!out || out.ok !== true) throw new Error((out && out.error) || 'failed');
+      onChanged && onChanged();
+    }).finally(() => setBusy(false));
+  }, [teamId, onChanged]);
+
+  const over = budget && budget.over;
+  const pct = budget && budget.cap ? Math.min(100, Math.round((budget.used / budget.cap) * 100)) : 0;
+
+  return (
+    <div style={{ marginBottom: 'var(--eb-space-3)', border: '1px solid var(--eb-border)', borderRadius: 8, padding: 'var(--eb-space-2)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }} onClick={() => setOpen(o => !o)}>
+        <strong style={{ fontSize: 13 }}>Domains</strong>
+        <span style={{ fontSize: 12, opacity: 0.7 }}>{list.length}</span>
+        {budget && (
+          <span title={`${budget.used} of ${budget.cap} skills used${over ? ' — at budget; new domains need a merge or override' : ''}`}
+            style={{ marginLeft: 'auto', fontSize: 11, color: over ? 'var(--eb-danger, #b91c1c)' : 'var(--eb-muted, #6b7280)' }}>
+            budget {budget.used}/{budget.cap}
+          </span>
+        )}
+        <span aria-hidden style={{ fontSize: 11, opacity: 0.6 }}>{open ? '▾' : '▸'}</span>
+      </div>
+      {budget && (
+        <div style={{ height: 4, borderRadius: 2, background: 'var(--eb-border)', marginTop: 6, overflow: 'hidden' }}>
+          <div style={{ width: `${pct}%`, height: '100%', background: over ? 'var(--eb-danger, #b91c1c)' : 'var(--eb-accent, #2563eb)' }} />
+        </div>
+      )}
+      {open && (
+        <div style={{ marginTop: 'var(--eb-space-2)' }}>
+          {list.length === 0 && (
+            <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 6 }}>
+              No domains yet. Seed the defaults from the team’s roles, then edit them.
+              <button disabled={busy} onClick={() => post({ op: 'seed' })} style={{ marginLeft: 6 }}>Seed defaults</button>
+            </div>
+          )}
+          {list.map(d => (
+            <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0', fontSize: 12 }}>
+              {renaming && renaming.id === d.id ? (
+                <>
+                  <input value={renaming.name} autoFocus
+                    onChange={e => setRenaming({ id: d.id, name: e.target.value })}
+                    style={{ flex: 1, fontSize: 12 }} />
+                  <button disabled={busy || !renaming.name.trim()}
+                    onClick={() => post({ op: 'rename', id: d.id, name: renaming.name.trim() }).then(() => setRenaming(null))}>Save</button>
+                  <button disabled={busy} onClick={() => setRenaming(null)}>Cancel</button>
+                </>
+              ) : (
+                <>
+                  <span style={{ flex: 1, overflowWrap: 'anywhere' }}>{d.name}</span>
+                  {d.scope && d.scope !== 'team' && <span style={{ fontSize: 10, opacity: 0.6 }}>{d.scope}</span>}
+                  <button disabled={busy} title="Rename" onClick={() => setRenaming({ id: d.id, name: d.name })}>✎</button>
+                  <button disabled={busy} title="Remove" onClick={() => post({ op: 'remove', id: d.id })}>✕</button>
+                </>
+              )}
+            </div>
+          ))}
+          <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+            <input value={adding} placeholder="New domain name…"
+              onChange={e => setAdding(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && adding.trim()) post({ op: 'add', domain: { name: adding.trim() } }).then(() => setAdding('')); }}
+              style={{ flex: 1, fontSize: 12 }} />
+            <button disabled={busy || !adding.trim()}
+              onClick={() => post({ op: 'add', domain: { name: adding.trim() } }).then(() => setAdding(''))}>Add</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SkillsColumn({ team, skills, suggestions, pending, autonomy, domains, skillBudget, onReviewSuggestion, onShareSkill, onControlsChanged }) {
   const teamId = team.id;
   const tabKey = `kf.skillTab.${teamId}`;
   const seenKey = `kf.suggestSeen.${teamId}`;
@@ -1038,6 +1135,8 @@ function SkillsColumn({ team, skills, suggestions, pending, autonomy, onReviewSu
 
   return (
     <div>
+      {/* #780: the team's skill domains + soft skill-budget state */}
+      <DomainsPanel teamId={teamId} domains={domains} budget={skillBudget} onChanged={reload} />
       {/* Lifecycle tabs */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
         {SKILL_TABS.map(([key, label, tip]) => {

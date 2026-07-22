@@ -4419,6 +4419,52 @@ app.put('/api/knowledge/gates', apiLimiter, async (req, res) => {
   }
 });
 
+// ── Skill domains (#780, skill-aggregation Phase 2) ─────────────────────────────
+// The persistent domain taxonomy a team routes converged clusters against + the
+// soft skill-budget state (both surfaced in the Knowledge UI). All logic + storage
+// live in the orchestrator (knowledge-domains.js); these proxy to it.
+const DOMAIN_OPS = new Set(['add', 'rename', 'merge', 'split', 'remove', 'confirm', 'seed', 'bootstrap']);
+
+app.get('/api/knowledge/domains', async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.query.team === 'string' ? req.query.team : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/domains`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, op: 'read' }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) return res.status(502).json({ error: (out && out.error) || 'domains read failed' });
+    res.json({ team: teamId, doc: out.doc, budget: out.budget });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// Operator CRUD (rename/merge/split/add/remove) + seed/bootstrap/confirm. Domain
+// changes are always a human decision, so this is a plain authenticated mutation.
+app.post('/api/knowledge/domains', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
+  const op = typeof req.body?.op === 'string' ? req.body.op : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  if (!DOMAIN_OPS.has(op)) return res.status(400).json({ error: 'invalid op' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/domains`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...req.body, teamId, op }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) return res.status(400).json({ error: (out && out.error) || 'domain op failed' });
+    res.json({ ok: true, doc: out.doc, budget: out.budget, proposed: out.proposed });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
 // ── Autonomy dial (0..3) — the master human-in-control switch ──────────────────
 // The Knowledge Flow page drives this: it turns the whole learning system Off /
 // Share / Suggest / Auto-curate. Proxies to the orchestrator, the env-config

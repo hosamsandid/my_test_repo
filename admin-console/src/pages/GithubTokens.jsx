@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Trash2, Plus, ChevronDown, ChevronRight } from 'lucide-react';
+import { Trash2, Pencil, Plus, ChevronDown, ChevronRight } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
@@ -8,6 +8,13 @@ import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
+import CredentialOwnership from '../components/CredentialOwnership';
+import ReassignPanel from '../components/CredentialReassignPanel';
+import { useAuth } from '../auth/AuthContext';
+import {
+  teamsById, credentialScopeLabel, defaultOwnership, ownershipPayload,
+  canManageCredentialClient, canReassignCredentialClient, adminTeamIdsOf,
+} from './credential-scope-view';
 
 const inputStyle = {
   width: '100%',
@@ -90,17 +97,19 @@ function PermissionRow({ scope, access, note }) {
   );
 }
 
-function CreateForm({ onSave, onCancel, saving, error }) {
+function CreateForm({ onSave, onCancel, saving, error, teams, isSysAdmin, adminTeamIds }) {
   const [name, setName] = useState('');
   const [id, setId] = useState('');
   const [token, setToken] = useState('');
+  const [ownership, setOwnership] = useState(() => defaultOwnership({ isSysAdmin, adminTeamIds }));
   const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
     setName,
     setId,
     getName: () => name,
   });
 
-  const canSubmit = name.trim() && token.trim();
+  const ownershipReady = ownership.scope === 'system' || !!ownership.teamId;
+  const canSubmit = name.trim() && token.trim() && ownershipReady;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -201,6 +210,14 @@ function CreateForm({ onSave, onCancel, saving, error }) {
         helpText={<>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only. Used as the filename of the stored token.</>}
       />
 
+      <CredentialOwnership
+        value={ownership}
+        onChange={setOwnership}
+        teams={teams}
+        isSysAdmin={isSysAdmin}
+        adminTeamIds={adminTeamIds}
+      />
+
       <div>
         <div style={{
           fontSize: 'var(--eb-text-sm)',
@@ -231,7 +248,7 @@ function CreateForm({ onSave, onCancel, saving, error }) {
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         <button
-          onClick={() => onSave({ name: name.trim(), id: id.trim() || undefined, token: token.trim() })}
+          onClick={() => onSave({ name: name.trim(), id: id.trim() || undefined, token: token.trim(), ...ownershipPayload(ownership) })}
           disabled={saving || !canSubmit}
           style={{
             padding: 'var(--eb-space-2) var(--eb-space-4)',
@@ -262,15 +279,40 @@ function CreateForm({ onSave, onCancel, saving, error }) {
 
 export default function GithubTokens() {
   const { data: tokens, loading, error, refetch } = useApi('/api/github-tokens');
+  const { data: teamsData } = useApi('/api/admin/teams');
+  const { user } = useAuth();
   const [creating, setCreating] = useState(false);
+  const [editTarget, setEditTarget] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [actionError, setActionError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState(null);
 
+  const teams = Array.isArray(teamsData) ? teamsData : [];
+  const names = teamsById(teams);
+  const isSysAdmin = !!user?.admin;
+  const adminTeamIds = adminTeamIdsOf(user);
+  const caller = { isSysAdmin, adminTeamIds };
+
   const COLUMNS = [
     { key: 'id', label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
     { key: 'name', label: 'Name' },
+    {
+      key: '_scope', label: 'Scope / Teams', sortable: false,
+      render: (_, row) => {
+        const s = credentialScopeLabel(row, names);
+        return (
+          <span style={{ fontSize: 'var(--eb-text-xs)' }}>
+            <span style={{
+              display: 'inline-block', padding: '1px 6px', borderRadius: 'var(--eb-radius-sm)',
+              background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
+              fontWeight: 'var(--eb-font-medium)', marginRight: 'var(--eb-space-2)',
+            }}>{s.label}</span>
+            <span style={{ color: 'var(--eb-text-muted)' }}>{s.detail}</span>
+          </span>
+        );
+      },
+    },
     { key: 'preview', label: 'Token', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{v}</span> },
     { key: 'fingerprint', label: 'Fingerprint', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{v}</span> },
     { key: 'createdAt', label: 'Added', render: v => v ? new Date(v).toLocaleString() : '—' },
@@ -278,19 +320,36 @@ export default function GithubTokens() {
       key: '_actions',
       label: '',
       sortable: false,
-      render: (_, row) => (
-        <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
-          <IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteTarget(row)} />
-        </div>
-      ),
+      render: (_, row) => {
+        const manageable = canManageCredentialClient(row, caller);
+        return (
+          <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
+            {manageable && <IconButton icon={Pencil} label="Edit" onClick={() => { setEditTarget(row); setFormError(null); }} />}
+            {manageable && <IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteTarget(row)} />}
+          </div>
+        );
+      },
     },
   ];
 
-  async function handleSave({ name, id, token }) {
+  async function handleSave({ name, id, token, scope, teamId, assignedTeamIds }) {
     setSaving(true); setFormError(null);
     try {
-      await apiCall('POST', '/api/github-tokens', { name, id, token });
+      await apiCall('POST', '/api/github-tokens', { name, id, token, scope, teamId, assignedTeamIds });
       setCreating(false);
+      refetch();
+    } catch (e) {
+      setFormError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleEditSave(body) {
+    setSaving(true); setFormError(null);
+    try {
+      await apiCall('PATCH', `/api/github-tokens/${editTarget.id}`, body);
+      setEditTarget(null);
       refetch();
     } catch (e) {
       setFormError(e.message);
@@ -375,6 +434,30 @@ export default function GithubTokens() {
           <CreateForm
             onSave={handleSave}
             onCancel={() => setCreating(false)}
+            saving={saving}
+            error={formError}
+            teams={teams}
+            isSysAdmin={isSysAdmin}
+            adminTeamIds={adminTeamIds}
+          />
+        )}
+      </SidePanel>
+
+      <SidePanel
+        open={!!editTarget}
+        onClose={() => { setEditTarget(null); setFormError(null); }}
+        title="Edit GitHub token"
+        width="560px"
+      >
+        {editTarget && (
+          <ReassignPanel
+            cred={editTarget}
+            teams={teams}
+            isSysAdmin={isSysAdmin}
+            adminTeamIds={adminTeamIds}
+            canReassign={canReassignCredentialClient(caller)}
+            onSave={handleEditSave}
+            onCancel={() => { setEditTarget(null); setFormError(null); }}
             saving={saving}
             error={formError}
           />

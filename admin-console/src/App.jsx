@@ -4,6 +4,7 @@ import Shell from './components/Shell';
 import SetupWizard from './pages/SetupWizard';
 import Login from './pages/Login';
 import { useAuth } from './auth/AuthContext';
+import { canAccessCredentialPages } from './pages/credential-scope-view';
 
 // The Process Canvas now lives inside Flows; preserve old deep links.
 function ProcessTeamRedirect() {
@@ -32,6 +33,17 @@ function TeamSetupRoute() {
 function AdminRoute({ children }) {
   const { user } = useAuth();
   if (!user?.admin) return <Navigate to="/chats" replace />;
+  return children;
+}
+
+// Route guard for the credential pages (SSH Keys, GitHub Tokens, #798). Unlike
+// AdminRoute these are open to any Team Admin (of ≥1 team) as well as System
+// Admins, so a team can self-serve its own credentials. A plain Team Member (or
+// a user in no team) is bounced to /chats. The API is independently scoped, so
+// this is UX, not the security boundary.
+function CredentialRoute({ children }) {
+  const { user } = useAuth();
+  if (!canAccessCredentialPages(user)) return <Navigate to="/chats" replace />;
   return children;
 }
 
@@ -119,8 +131,8 @@ export default function App() {
           <Route path="/team-setup"   element={<TeamSetupRoute />} />
           <Route path="/wizard/team"  element={<TeamSetupRoute />} />
           <Route path="/environments" element={<WorkingEnvironments />} />
-          <Route path="/ssh-keys"     element={<AdminRoute><SshKeys /></AdminRoute>} />
-          <Route path="/github-tokens" element={<AdminRoute><GithubTokens /></AdminRoute>} />
+          <Route path="/ssh-keys"     element={<CredentialRoute><SshKeys /></CredentialRoute>} />
+          <Route path="/github-tokens" element={<CredentialRoute><GithubTokens /></CredentialRoute>} />
           <Route path="/skills"       element={<SkillsRegistry />} />
           <Route path="/role-templates" element={<AdminRoute><RoleTemplates /></AdminRoute>} />
           <Route path="/jobs"         element={<ScheduledJobs />} />

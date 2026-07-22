@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
+import { canAccessCredentialPages } from '../pages/credential-scope-view';
 import AccentureLogo from './AccentureLogo';
 import { formatVersionLabel } from './version-info';
 
@@ -56,8 +57,8 @@ const NAV = [
     // { path: '/orchestrator-wizard', label: 'Orchestrator Wizard', Icon: Wand2 },
   ]},
   { section: 'WORKSPACES', items: [
-    { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key,    adminOnly: true },
-    { path: '/github-tokens', label: 'GitHub Tokens',        Icon: Github, adminOnly: true },
+    { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key,    credAdmin: true },
+    { path: '/github-tokens', label: 'GitHub Tokens',        Icon: Github, credAdmin: true },
     { path: '/environments',  label: 'Working Environments', Icon: Boxes },
   ]},
   { section: 'CONFIGURATION', items: [
@@ -143,14 +144,21 @@ export default function Shell({ children }) {
 
   const sidebarWidth = collapsed ? 'var(--eb-sidebar-collapsed)' : 'var(--eb-sidebar-width)';
 
-  // Hide admin-only nav entries (SSH Keys, GitHub Tokens, Skills, Models, MCP,
-  // Maintenance Mode) from non-System-Admins (#584 AC8). Backend route guards
-  // (App.jsx) and the scoped API back this up — this is defence-in-depth, not
-  // the only enforcement. Drop sections that end up empty.
+  // Hide admin-only nav entries (Skills, Models, MCP, Maintenance Mode, …) from
+  // non-System-Admins (#584 AC8). The credential pages (SSH Keys, GitHub Tokens)
+  // use a looser `credAdmin` gate (#798): visible to System Admins AND any Team
+  // Admin, so a team can self-serve its credentials. Backend route guards
+  // (App.jsx) and the scoped API back this up — defence-in-depth, not the only
+  // enforcement. Drop sections that end up empty.
+  const canSeeCreds = canAccessCredentialPages(user);
   const nav = NAV
     .map(section => ({
       ...section,
-      items: section.items.filter(item => user?.admin || !item.adminOnly),
+      items: section.items.filter(item => {
+        if (item.adminOnly) return !!user?.admin;
+        if (item.credAdmin) return canSeeCreds;
+        return true;
+      }),
     }))
     .filter(section => section.items.length > 0);
 

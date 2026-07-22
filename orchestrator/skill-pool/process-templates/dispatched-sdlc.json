@@ -53,10 +53,6 @@
           "labelFilter": "human:dispatch",
           "from": "humans",
           "enabled": true,
-          "emits": [
-            "ready",
-            "ready-2"
-          ],
           "description": "A human queued an issue by adding the dispatch label.",
           "prompt": "A human added the `human:dispatch` label to an issue to queue it for delivery. Steps:\n1. Add the issue to your delivery queue and remove the `human:dispatch` label so it is not re-queued.\n2. Determine its dependencies against the other open/queued tickets; do not release a ticket whose predecessors are unmerged.\n3. If a developer is free (not currently holding an un-merged ticket) and this ticket is next-eligible, release it: pick a free worker and `gh issue edit <n> --add-label ready` (Developer) or `--add-label ready-2` (Developer 2), then post a short comment noting it was dispatched.\n4. If both workers are busy or a predecessor is still open, leave it queued and record the queue state in memory/context.md.\nReply [PASS] if there is nothing to dispatch right now."
         },
@@ -68,10 +64,6 @@
           ],
           "from": "any-except-self",
           "enabled": true,
-          "emits": [
-            "ready",
-            "ready-2"
-          ],
           "description": "A PR was closed; if it was merged, a worker is now free.",
           "prompt": "A pull request was closed. FIRST confirm it was actually MERGED (the event payload's `pull_request.merged` must be true); if it was closed without merging, reply [PASS].\nOn a merge:\n1. Identify which issue the merged PR closed (`gh pr view <n> --json closingIssuesReferences`, or infer from branch/title) and mark that worker (Developer or Developer 2) free in memory/context.md.\n2. From your queue, pick the next eligible ticket whose dependencies are all merged.\n3. IDEMPOTENCY: verify it is still OPEN, does NOT already carry `ready`/`ready-2`, and has no existing branch/PR. If already handled, [PASS].\n4. Release it to the now-free worker: `gh issue edit <successor> --add-label ready` (or `ready-2`), then post a short comment noting it was unblocked by the merge of #<predecessor> (write body to file, `gh-as-agent stamp`, `gh issue comment --body-file`).\n5. Update memory/context.md with the new queue and worker state.\nReply [PASS] if there is nothing to dispatch."
         },
@@ -195,9 +187,6 @@
           "labelFilter": "revisions-required",
           "from": "team",
           "enabled": true,
-          "emits": [
-            "ready-for-review"
-          ],
           "description": "Woken when the Code Reviewer requests revisions.",
           "prompt": "A pull request was labelled `revisions-required` by the Code Reviewer. Address the feedback per your standing instructions: remove the label, resolve every review comment completely on the PR branch, get the suite green, push, and re-add `ready-for-review` to hand it back. If a comment is contradictory or needs a product decision, escalate to a human instead of guessing. Reply [PASS] if this PR is not for you."
         },

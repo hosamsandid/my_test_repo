@@ -102,9 +102,8 @@ export default function ConnectionsSection({ node, siblings = [], inheritedStage
         </Field>
       )}
 
-      {/* Agent-level emitted labels (#414) — the ONE write target for emits.
-          Legacy per-trigger emits stay readable in the trigger list but no UI
-          adds to them any more. */}
+      {/* Agent-level emitted labels (#414) — the ONE and only source of emits.
+          Trigger-level emits were removed entirely (#783). */}
       {ops.setRoleEmits && (
         <EmitsEditor node={node} ops={ops} onChanged={onChanged} />
       )}

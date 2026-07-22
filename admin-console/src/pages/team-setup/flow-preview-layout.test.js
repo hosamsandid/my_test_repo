@@ -33,7 +33,9 @@ test('ellipsize truncates with … and keeps short strings intact', () => {
 test('bundleEdges: channels + label hand-offs, deduped, no self-edges', () => {
   const bundle = {
     roles: [
-      role('author', 'Build', { emits: ['done'], triggers: [{ emits: ['done'] }] }),
+      // Label hand-offs derive from role-level `emits` only (#783); a trigger
+      // no longer contributes emits.
+      role('author', 'Build', { emits: ['done'] }),
       role('reviewer', 'Build', {
         channels: [{ artifact: 'pr', from: 'author' }],
         triggers: [{ labelFilter: 'done' }],

@@ -18,8 +18,8 @@ const lintCodes = (g) => g.lints.map(l => l.code);
 
 test('label edge: emitter → listener via emits ↔ labelFilter', () => {
   const g = buildUnifiedGraph([
-    { id: 'dev', triggers: [{ id: 't1', type: 'github-event', events: ['issues.labeled'], from: 'any-except-self', emits: ['ready-for-review'] }] },
-    { id: 'rev', triggers: [{ id: 't2', type: 'github-event', labelFilter: 'ready-for-review', from: 'any-except-self', emits: [] }] },
+    { id: 'dev', emits: ['ready-for-review'], triggers: [{ id: 't1', type: 'github-event', events: ['issues.labeled'], from: 'any-except-self' }] },
+    { id: 'rev', triggers: [{ id: 't2', type: 'github-event', labelFilter: 'ready-for-review', from: 'any-except-self' }] },
   ]);
   const e = findEdge(g, x => x.on === 'label' && x.from === 'dev' && x.to === 'rev');
   assert.ok(e, 'expected a label hand-off dev → rev');
@@ -274,7 +274,7 @@ test('dependency-cycle lint fires on a cyclic depends_on', () => {
 
 test('process lints carried through (gate-violation when an agent emits a gate)', () => {
   const g = buildUnifiedGraph([
-    { id: 'rogue', triggers: [{ id: 't', type: 'github-event', events: ['x'], from: 'any-except-self', emits: ['human:approved'] }] },
+    { id: 'rogue', emits: ['human:approved'], triggers: [{ id: 't', type: 'github-event', events: ['x'], from: 'any-except-self' }] },
   ]);
   assert.ok(lintCodes(g).includes('gate-violation'));
 });
@@ -287,8 +287,8 @@ test('processTemplateToUnified maps roles → nodes and preserves wiring', () =>
     name: 'demo',
     level: 'template',
     roles: [
-      { id: 'dev', displayName: 'Developer', role: 'team-member', sessionPolicy: 'per-invocation', systemPrompt: 'build', triggers: [{ id: 't1', type: 'github-event', labelFilter: 'assigned:dev', emits: ['pr-open'] }] },
-      { id: 'rev', displayName: 'Reviewer', role: 'team-member', systemPrompt: 'review', triggers: [{ id: 't2', type: 'github-event', labelFilter: 'pr-open', emits: [] }] },
+      { id: 'dev', displayName: 'Developer', role: 'team-member', sessionPolicy: 'per-invocation', systemPrompt: 'build', emits: ['pr-open'], triggers: [{ id: 't1', type: 'github-event', labelFilter: 'assigned:dev' }] },
+      { id: 'rev', displayName: 'Reviewer', role: 'team-member', systemPrompt: 'review', triggers: [{ id: 't2', type: 'github-event', labelFilter: 'pr-open' }] },
     ],
     gates: [], labels: [],
   };
@@ -319,7 +319,7 @@ test('round-trip: process bundle → unified → process bundle preserves roles/
     name: 'rt',
     level: 'template',
     roles: [
-      { id: 'dev', displayName: 'Developer', role: 'team-member', sessionPolicy: 'per-invocation', systemPrompt: 'p', triggers: [{ id: 't1', type: 'github-event', labelFilter: 'go', emits: ['done'] }] },
+      { id: 'dev', displayName: 'Developer', role: 'team-member', sessionPolicy: 'per-invocation', systemPrompt: 'p', emits: ['done'], triggers: [{ id: 't1', type: 'github-event', labelFilter: 'go' }] },
     ],
     gates: [], labels: [{ name: 'go', humanGate: false, brake: false }],
   };
@@ -328,7 +328,9 @@ test('round-trip: process bundle → unified → process bundle preserves roles/
   assert.equal(back.roles.length, 1);
   assert.equal(back.roles[0].id, 'dev');
   assert.equal(back.roles[0].sessionPolicy, 'per-invocation');
-  assert.deepEqual(back.roles[0].triggers[0].emits, ['done']);
+  // Label hand-off round-trips at the role level (#783).
+  assert.deepEqual(back.roles[0].emits, ['done']);
+  assert.ok(!('emits' in back.roles[0].triggers[0]));
 });
 
 test('processTemplateToUnified reads inputs/outputs/dependsOn from roles (#367)', () => {

@@ -56,7 +56,8 @@ export function bundleEdges(bundle) {
       edges.push({ from: ch.from, to: r.id, label: ch.label || (ch.artifact === 'issue' ? 'issue' : 'PR'), gate: ch.gate === 'human' });
     }
   }
-  // Label hand-offs: emitter (role-level or trigger-level emits) → listener.
+  // Label hand-offs: emitter → listener. Emitters are the role-level `emits`
+  // only (#414/#783) — trigger-level emits were removed as a redundant surface.
   const emitters = new Map(); // label -> Set(roleId)
   const addEmit = (label, id) => {
     if (!emitters.has(label)) emitters.set(label, new Set());
@@ -64,7 +65,6 @@ export function bundleEdges(bundle) {
   };
   for (const r of roles) {
     for (const e of (r.emits || [])) addEmit(e, r.id);
-    for (const t of (r.triggers || [])) for (const e of (t.emits || [])) addEmit(e, r.id);
   }
   for (const r of roles) {
     for (const t of (r.triggers || [])) {

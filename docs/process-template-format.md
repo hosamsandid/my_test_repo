@@ -7,8 +7,10 @@ are wired*, deliberately **not** secrets, repos, or Matrix identities (those are
 supplied when the bundle is materialised into a real team).
 
 It is the machine-readable sibling of the `agent-studio/` reference concept: one
-manifest holding every role's persona prompt, its triggers (with the declarative
-`emits` that draw the hand-off edges), the human gates, and the label registry.
+manifest holding every role's persona prompt, its role-level declarative `emits`
+(the labels it sets — these draw the hand-off edges), its triggers, the human
+gates, and the label registry. (`emits` is authored at the **role/agent** level;
+the earlier per-trigger `emits` variant was removed in #783.)
 
 ## Producing / consuming
 
@@ -37,6 +39,7 @@ role's `{{vars}}` and the target repo are applied per member.
       "role": "team-member",
       "sessionPolicy": "persistent" | "per-invocation",
       "systemPrompt": "You implement issues…",
+      "emits": ["ready-for-review"],         // labels this role sets → outbound edges (#414)
       "github": { "producesPr": true, "producesIssue": false },  // GitHub outputs (#380)
       "channels": [                          // PR/issue channels this role consumes (#380)
         { "artifact": "pr", "from": "developer", "label": "approved", "gate": "human" }
@@ -50,7 +53,6 @@ role's `{{vars}}` and the target repo are applied per member.
           "labelFilter": "assigned:{{agentId}}",
           "cron": "5 3 * * 1",            // cron
           "at": "2026-01-01T00:00:00Z",   // once
-          "emits": ["started:{{agentId}}"],  // labels this run sets → outbound edges
           "description": "…",
           "prompt": "…"                   // the trigger prompt (rendered per member)
         }
@@ -98,10 +100,11 @@ way two agents are wired in the Flow editor. These are optional arrays on a role
 
 ### Notes & invariants
 
-- **Wiring is `emits` ↔ `labelFilter`.** An edge *A → label L → B* exists when a
-  trigger of role `A` lists `L` in `emits` and a trigger of role `B` filters on
-  `L` (`labelFilter`). Raw events (no `labelFilter`) are external triggers, not
-  hand-offs.
+- **Wiring is `emits` ↔ `labelFilter`.** An edge *A → label L → B* exists when
+  role `A` lists `L` in its **role-level** `emits` (#414/#783) and a trigger of
+  role `B` filters on `L` (`labelFilter`). Raw events (no `labelFilter`) are
+  external triggers, not hand-offs. (A legacy bundle carrying a per-trigger
+  `emits` still works — the label is lifted to the role level on import.)
 - **GitHub channels (#380) are declarative ports.** `github.{producesPr,producesIssue}`
   marks what a role opens (drives the node badge/ports and appends the producer
   instruction block to its prompt at materialise). A consumer's `channels` entry

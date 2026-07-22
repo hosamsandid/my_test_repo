@@ -679,19 +679,12 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
         await ops.deleteTrigger(to, triggerId);
       }
       if (delEmit && !humanSource) {
-        // Strip the label from the source's agent-level emits (the new default
-        // wiring) …
+        // Strip the label from the source's agent-level emits — the sole emit
+        // surface now that trigger-level emits are removed (#783).
         if (ops.getRoleEmits && ops.setRoleEmits) {
           const cur = await ops.getRoleEmits(from);
           if (Array.isArray(cur) && cur.includes(label)) {
             await ops.setRoleEmits(from, cur.filter(l => l !== label));
-          }
-        }
-        // … and from any legacy per-trigger emits that still declare it.
-        const ft = await ops.listTriggers(from);
-        for (const t of (Array.isArray(ft) ? ft : [])) {
-          if (Array.isArray(t.emits) && t.emits.includes(label)) {
-            await ops.setEmits(from, t.id, t.emits.filter(l => l !== label));
           }
         }
       }

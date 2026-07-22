@@ -91,7 +91,8 @@ export const liveOps = {
   },
   updateTrigger: (roleId, tid, body) => apiCall('PUT', `/api/agents/${roleId}/triggers/${tid}`, body),
   deleteTrigger: (roleId, tid) => apiCall('DELETE', `/api/agents/${roleId}/triggers/${tid}`),
-  setEmits: (roleId, tid, emits) => apiCall('PUT', `/api/agents/${roleId}/triggers/${tid}/emits`, { emits }),
+  // Trigger-level `emits` was removed (#783) — label hand-offs live on the agent
+  // level (setRoleEmits below), so there is no per-trigger setEmits any more.
   // Display name (#692) — safe on a live agent: it is display-only and does not
   // change the agent id (that is immutable once materialized). Shape-compatible
   // with makeDraftOps.renameRole so the shared inspector never branches on mode.
@@ -377,12 +378,8 @@ export function makeDraftOps(getBundle, persist) {
       if (r) r.triggers = (r.triggers || []).filter(x => x.id !== tid);
       await persist(b);
     },
-    setEmits: async (roleId, tid, emits) => {
-      const b = clone(getBundle());
-      const t = (role(b, roleId)?.triggers || []).find(x => x.id === tid);
-      if (t) t.emits = emits;
-      await persist(b);
-    },
+    // Trigger-level `emits` was removed (#783) — label hand-offs live on the
+    // role level (setRoleEmits below), so there is no per-trigger setEmits.
     // Agent-level emitted labels (label hand-offs) — on the role, no trigger.
     getRoleEmits: async (roleId) => {
       const r = role(getBundle(), roleId);

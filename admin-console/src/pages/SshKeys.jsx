@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Trash2, Plus, ChevronDown, ChevronRight, Terminal, KeyRound, ClipboardPaste, Copy, Check, ExternalLink } from 'lucide-react';
+import { Trash2, Pencil, Plus, ChevronDown, ChevronRight, Terminal, KeyRound, ClipboardPaste, Copy, Check, ExternalLink } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
@@ -8,6 +8,13 @@ import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
+import CredentialOwnership from '../components/CredentialOwnership';
+import ReassignPanel from '../components/CredentialReassignPanel';
+import { useAuth } from '../auth/AuthContext';
+import {
+  teamsById, credentialScopeLabel, defaultOwnership, ownershipPayload,
+  canManageCredentialClient, canReassignCredentialClient, adminTeamIdsOf,
+} from './credential-scope-view';
 
 const inputStyle = {
   width: '100%',
@@ -186,11 +193,13 @@ function PublicKeyReveal({ publicKey, onDone }) {
   );
 }
 
-function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, generated, onDoneGenerated }) {
+function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, generated, onDoneGenerated,
+                      teams, isSysAdmin, adminTeamIds }) {
   const [mode, setMode] = useState('generate');
   const [name, setName] = useState('');
   const [id, setId] = useState('');
   const [privateKey, setPrivateKey] = useState('');
+  const [ownership, setOwnership] = useState(() => defaultOwnership({ isSysAdmin, adminTeamIds }));
   const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
     setName,
     setId,
@@ -203,8 +212,20 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
     return <PublicKeyReveal publicKey={generated} onDone={onDoneGenerated} />;
   }
 
-  const canPaste    = name.trim() && privateKey.trim();
-  const canGenerate = name.trim();
+  // A team-scoped credential needs an owning team selected before it can be saved.
+  const ownershipReady = ownership.scope === 'system' || !!ownership.teamId;
+  const canPaste    = name.trim() && privateKey.trim() && ownershipReady;
+  const canGenerate = name.trim() && ownershipReady;
+
+  const ownershipFields = (
+    <CredentialOwnership
+      value={ownership}
+      onChange={setOwnership}
+      teams={teams}
+      isSysAdmin={isSysAdmin}
+      adminTeamIds={adminTeamIds}
+    />
+  );
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -256,9 +277,11 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
             helpText={idHelp}
           />
 
+          {ownershipFields}
+
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
             <button
-              onClick={() => onSaveGenerate({ name: name.trim(), id: id.trim() || undefined })}
+              onClick={() => onSaveGenerate({ name: name.trim(), id: id.trim() || undefined, ...ownershipPayload(ownership) })}
               disabled={saving || !canGenerate}
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
@@ -329,6 +352,8 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
             helpText={idHelp}
           />
 
+          {ownershipFields}
+
           <div>
             <div style={{
               fontSize: 'var(--eb-text-sm)',
@@ -358,7 +383,7 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
 
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
             <button
-              onClick={() => onSavePaste({ name: name.trim(), id: id.trim() || undefined, privateKey: privateKey.trim() })}
+              onClick={() => onSavePaste({ name: name.trim(), id: id.trim() || undefined, privateKey: privateKey.trim(), ...ownershipPayload(ownership) })}
               disabled={saving || !canPaste}
               style={{
                 padding: 'var(--eb-space-2) var(--eb-space-4)',
@@ -391,34 +416,63 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
 
 export default function SshKeys() {
   const { data: keys, loading, error, refetch } = useApi('/api/ssh-keys');
+  const { data: teamsData } = useApi('/api/admin/teams');
+  const { user } = useAuth();
   const [creating, setCreating] = useState(false);
+  const [editTarget, setEditTarget] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [actionError, setActionError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState(null);
   const [generatedPublicKey, setGeneratedPublicKey] = useState(null);
 
+  const teams = Array.isArray(teamsData) ? teamsData : [];
+  const names = teamsById(teams);
+  const isSysAdmin = !!user?.admin;
+  const adminTeamIds = adminTeamIdsOf(user);
+  const caller = { isSysAdmin, adminTeamIds };
+
   const COLUMNS = [
     { key: 'id', label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
     { key: 'name', label: 'Name' },
+    {
+      key: '_scope', label: 'Scope / Teams', sortable: false,
+      render: (_, row) => {
+        const s = credentialScopeLabel(row, names);
+        return (
+          <span style={{ fontSize: 'var(--eb-text-xs)' }}>
+            <span style={{
+              display: 'inline-block', padding: '1px 6px', borderRadius: 'var(--eb-radius-sm)',
+              background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
+              fontWeight: 'var(--eb-font-medium)', marginRight: 'var(--eb-space-2)',
+            }}>{s.label}</span>
+            <span style={{ color: 'var(--eb-text-muted)' }}>{s.detail}</span>
+          </span>
+        );
+      },
+    },
     { key: 'fingerprint', label: 'Fingerprint', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{v}</span> },
     { key: 'createdAt', label: 'Added', render: v => v ? new Date(v).toLocaleString() : '—' },
     {
       key: '_actions',
       label: '',
       sortable: false,
-      render: (_, row) => (
-        <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
-          <IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteTarget(row)} />
-        </div>
-      ),
+      render: (_, row) => {
+        const manageable = canManageCredentialClient(row, caller);
+        return (
+          <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
+            {manageable && <IconButton icon={Pencil} label="Edit" onClick={() => { setEditTarget(row); setFormError(null); }} />}
+            {manageable && <IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteTarget(row)} />}
+          </div>
+        );
+      },
     },
   ];
 
-  async function handleSavePaste({ name, id, privateKey }) {
+  async function handleSavePaste({ name, id, privateKey, scope, teamId, assignedTeamIds }) {
     setSaving(true); setFormError(null);
     try {
-      await apiCall('POST', '/api/ssh-keys', { name, id, privateKey });
+      await apiCall('POST', '/api/ssh-keys', { name, id, privateKey, scope, teamId, assignedTeamIds });
       setCreating(false);
       refetch();
     } catch (e) {
@@ -428,11 +482,24 @@ export default function SshKeys() {
     }
   }
 
-  async function handleSaveGenerate({ name, id }) {
+  async function handleSaveGenerate({ name, id, scope, teamId, assignedTeamIds }) {
     setSaving(true); setFormError(null);
     try {
-      const r = await apiCall('POST', '/api/ssh-keys/generate', { name, id });
+      const r = await apiCall('POST', '/api/ssh-keys/generate', { name, id, scope, teamId, assignedTeamIds });
       setGeneratedPublicKey(r.publicKey);
+      refetch();
+    } catch (e) {
+      setFormError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleEditSave(body) {
+    setSaving(true); setFormError(null);
+    try {
+      await apiCall('PATCH', `/api/ssh-keys/${editTarget.id}`, body);
+      setEditTarget(null);
       refetch();
     } catch (e) {
       setFormError(e.message);
@@ -529,6 +596,30 @@ export default function SshKeys() {
             error={formError}
             generated={generatedPublicKey}
             onDoneGenerated={closeCreatePanel}
+            teams={teams}
+            isSysAdmin={isSysAdmin}
+            adminTeamIds={adminTeamIds}
+          />
+        )}
+      </SidePanel>
+
+      <SidePanel
+        open={!!editTarget}
+        onClose={() => { setEditTarget(null); setFormError(null); }}
+        title="Edit SSH key"
+        width="560px"
+      >
+        {editTarget && (
+          <ReassignPanel
+            cred={editTarget}
+            teams={teams}
+            isSysAdmin={isSysAdmin}
+            adminTeamIds={adminTeamIds}
+            canReassign={canReassignCredentialClient(caller)}
+            onSave={handleEditSave}
+            onCancel={() => { setEditTarget(null); setFormError(null); }}
+            saving={saving}
+            error={formError}
           />
         )}
       </SidePanel>

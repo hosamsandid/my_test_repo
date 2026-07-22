@@ -7,6 +7,8 @@ const assert = require('node:assert/strict');
 const {
   computeScope, visibleTeam, visibleAgent,
   canManageTeam, visibleUser, describeAuthz,
+  normalizeCredential, visibleCredential, canManageCredential,
+  canCreateCredential, canReassignCredential, credentialVisibleToTeam,
 } = require('./scope');
 
 const users = [
@@ -166,4 +168,77 @@ test('describeAuthz: unknown subject fails closed', () => {
   assert.equal(a.admin, false);
   assert.equal(a.systemAdmin, false);
   assert.deepEqual(a.teams, []);
+});
+
+// ── Credentials scope & management gate (#798) ─────────────────────────────
+// alice = team-admin of 'payments', team-member of 'default'.
+// bob   = team-member of 'risk'. sys = System Admin. admin = env admin.
+
+test('normalizeCredential: legacy entry (no scope) is team-scoped by teamId', () => {
+  assert.deepEqual(normalizeCredential({ id: 'k', teamId: 'payments' }),
+    { id: 'k', scope: 'team', teamId: 'payments', assignedTeamIds: [] });
+  assert.equal(normalizeCredential({ id: 'k' }).teamId, 'default'); // missing → default
+});
+
+test('normalizeCredential: system entry keeps assignedTeamIds, drops teamId', () => {
+  const n = normalizeCredential({ id: 'k', scope: 'system', assignedTeamIds: ['payments', 'payments', 'risk'] });
+  assert.equal(n.scope, 'system');
+  assert.equal(n.teamId, null);
+  assert.deepEqual(n.assignedTeamIds, ['payments', 'risk']);
+});
+
+test('visibleCredential: team-admin sees own team-scoped + system assigned to their team', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(visibleCredential(alice, { scope: 'team', teamId: 'payments' }), true);   // owns
+  assert.equal(visibleCredential(alice, { scope: 'team', teamId: 'risk' }), false);       // other team
+  assert.equal(visibleCredential(alice, { teamId: 'default' }), false);                   // only a member of default, not admin
+  assert.equal(visibleCredential(alice, { scope: 'system', assignedTeamIds: ['payments'] }), true);  // assigned to her team
+  assert.equal(visibleCredential(alice, { scope: 'system', assignedTeamIds: ['risk'] }), false);     // not assigned
+  assert.equal(visibleCredential(alice, { scope: 'system', assignedTeamIds: [] }), false);           // unassigned → sysadmin-only
+});
+
+test('visibleCredential: system admin & env admin see everything', () => {
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  const env = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
+  assert.equal(visibleCredential(sys, { scope: 'system', assignedTeamIds: [] }), true);
+  assert.equal(visibleCredential(env, { scope: 'team', teamId: 'risk' }), true);
+});
+
+test('visibleCredential: plain team-member sees no credentials (access deferred)', () => {
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(visibleCredential(bob, { scope: 'team', teamId: 'risk' }), false);
+  assert.equal(visibleCredential(bob, { scope: 'system', assignedTeamIds: ['risk'] }), false);
+});
+
+test('canManageCredential: team-admin manages own team creds, never system creds', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canManageCredential(alice, { scope: 'team', teamId: 'payments' }), true);
+  assert.equal(canManageCredential(alice, { scope: 'team', teamId: 'risk' }), false);
+  assert.equal(canManageCredential(alice, { scope: 'system', assignedTeamIds: ['payments'] }), false); // AC5
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canManageCredential(sys, { scope: 'system', assignedTeamIds: [] }), true);
+});
+
+test('canCreateCredential: team-admin only team-scoped for own team; system is sysadmin-only', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canCreateCredential(alice, { scope: 'team', teamId: 'payments' }), true);
+  assert.equal(canCreateCredential(alice, { scope: 'team', teamId: 'risk' }), false);
+  assert.equal(canCreateCredential(alice, { scope: 'system', assignedTeamIds: ['payments'] }), false); // AC6
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canCreateCredential(sys, { scope: 'system', assignedTeamIds: ['payments'] }), true);
+});
+
+test('canReassignCredential: System Admins only (AC7)', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canReassignCredential(alice), false);
+  assert.equal(canReassignCredential(sys), true);
+});
+
+test('credentialVisibleToTeam: used for the reassignment-orphan guard', () => {
+  assert.equal(credentialVisibleToTeam({ scope: 'team', teamId: 'payments' }, 'payments'), true);
+  assert.equal(credentialVisibleToTeam({ scope: 'team', teamId: 'payments' }, 'risk'), false);
+  assert.equal(credentialVisibleToTeam({ scope: 'system', assignedTeamIds: ['payments', 'risk'] }, 'risk'), true);
+  assert.equal(credentialVisibleToTeam({ scope: 'system', assignedTeamIds: ['payments'] }, 'risk'), false);
+  assert.equal(credentialVisibleToTeam({ teamId: 'default' }, undefined), true); // legacy default
 });

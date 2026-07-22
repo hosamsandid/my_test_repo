@@ -98,6 +98,32 @@ export function buildDaySeries(summary) {
   return { points, maxTotal };
 }
 
+// Average tokens per attributed work item (#795), broken out as total / input
+// / output. The denominator is the attributed work-item count (`workItems`
+// length — every entry is one issue↔PR chain with runs > 0), deliberately NOT
+// total runs or the unattributed remainder: unattributed tokens have no work
+// item to divide by, so mixing them in would distort the per-work-item figure.
+// Each average is a rounded integer. With zero work items the averages are
+// `null` (caller renders a placeholder) so there is never a NaN / Infinity /
+// divide-by-zero artifact. Pure derivation of the already-fetched
+// /api/usage/work-items response — recomputed by the caller on range change /
+// refresh, no backend involvement.
+export function workItemAverages(data) {
+  const items = data && Array.isArray(data.workItems) ? data.workItems : [];
+  const count = items.length;
+  if (count === 0) return { count: 0, total: null, input: null, output: null };
+  const sum = (key) => items.reduce((acc, w) => {
+    const v = w && w.tokens && Number.isFinite(w.tokens[key]) ? w.tokens[key] : 0;
+    return acc + v;
+  }, 0);
+  return {
+    count,
+    total: Math.round(sum('total') / count),
+    input: Math.round(sum('input') / count),
+    output: Math.round(sum('output') / count),
+  };
+}
+
 // Build the flat-export download URL (#656) for a view. `kind` is
 // 'summary' | 'work-items', `format` is 'csv' | 'json'. Carries the current
 // time window (`since`) so the export matches what's on screen; the server

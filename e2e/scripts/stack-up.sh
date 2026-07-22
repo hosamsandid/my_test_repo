@@ -123,6 +123,17 @@ else
   echo " WARNING: mock LLM provider registration returned HTTP ${llm_code} (flows-draft prompt gen may fail)" >&2
 fi
 
+# The orchestrator migrates the ANTHROPIC_* env into a `default` LLM endpoint at
+# startup (baseUrl = the deliberately-dead http://127.0.0.1:1). It sorts BEFORE
+# `e2e-mock`, so `resolveGenerationTarget` (which picks endpoints[0]) would hit
+# the dead URL and POST /api/agent-prompt/generate would 502 — breaking the
+# flows-draft "Generate agent prompt" step (#733). Remove it so `e2e-mock` is the
+# effective target. Best-effort: 204 (deleted) / 404 (already gone) are fine.
+echo -n "Removing dead env-migrated 'default' LLM endpoint "
+del_code=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" \
+  -X DELETE "${ADMIN_BASE}/api/llm-endpoints/default" || true)
+echo " (HTTP ${del_code})"
+
 echo
 echo "=========================================="
 echo "  aee-e2e stack ready"

@@ -117,7 +117,94 @@ const ibanStoryTeam = {
   },
 };
 
-const FIXTURES = { teamEnv, ibanStoryTeam };
+/**
+ * triggerAgent: the `triggers` journey's precondition (#733). Stands up ONE
+ * Business-Analyst agent to hang triggers on, as cheaply as possible: a
+ * credential-less Working Environment plus a single-member team. The env's
+ * repository URL is deliberately a github.com URL so the trigger panel's repo
+ * picker (parseRepoFullName, github.com-only) offers it for the github-event /
+ * data-flow trigger types — while the token-less HTTPS clone is refused fast by
+ * the orchestrator (no PAT ⇒ no username-prompt hang) and tolerated as a seed
+ * warning, so the member still materialises. No token ⇒ the poller ignores the
+ * repo, so nothing the journey configures ever fires: the config tour stays
+ * deterministic (github-event firing end-to-end is already covered by the
+ * iban-story journey). FIXED ids keep it re-runnable: setup pre-cleans a leftover
+ * team+env, teardown removes the team (cascades to the member) + env.
+ *
+ * @param {string} params.teamId - Team slug id (its BA member is `<teamId>-business-analyst`).
+ * @param {string} params.envId - Fixture environment id to create.
+ * @param {string} params.envName - Fixture environment display name.
+ * @param {string} params.repoUrl - github.com repo URL (parseable by the trigger repo picker).
+ * @example
+ * fixtures:
+ *   - fixture: triggerAgent
+ *     params:
+ *       teamId: triggers-demo
+ *       envId: triggers-demo-env
+ *       envName: Triggers Demo
+ *       repoUrl: "https://github.com/aee-e2e/triggers-demo.git"
+ */
+const triggerAgent = {
+  async setup(ctx, params = {}) {
+    const { teamId, envId, envName, repoUrl, branch = 'main' } = params;
+    if (!teamId || !envId || !envName || !repoUrl) {
+      throw new Error('triggerAgent fixture requires { teamId, envId, envName, repoUrl }');
+    }
+    await teardown.teardownTeam(ctx, { teamId, envId });
+    await env.createFixtureEnv(ctx, { id: envId, name: envName, repoUrl, branch });
+    await team.materializeTeam(ctx, {
+      teamId, teamName: envName, envId, roles: ['business-analyst'],
+    });
+    return { teamId, envId };
+  },
+  async teardown(ctx, params = {}) {
+    const { teamId, envId } = params;
+    if (teamId && envId) await teardown.teardownTeam(ctx, { teamId, envId });
+  },
+};
+
+// Delete every process draft carrying a given name (idempotent). Drafts get
+// server-generated ids, so the journey renames its draft to a fixed name and the
+// fixture cleans by that name — one deterministic, re-runnable surface.
+async function deleteDraftsNamed(ctx, name) {
+  const res = await ctx.request.get('/api/process/drafts');
+  if (!res.ok()) return;
+  const body = await res.json();
+  const drafts = Array.isArray(body) ? body : (body.drafts || []);
+  for (const d of drafts) {
+    if (d && d.name === name && d.id) {
+      await ctx.request.delete(`/api/process/drafts/${encodeURIComponent(d.id)}`);
+    }
+  }
+}
+
+/**
+ * flowsDraft: the `flows-draft` journey's precondition (#733). The journey
+ * authors a draft named `draftName` and never materialises it, so there is no
+ * team/env/Matrix state — only the draft document. This fixture just pre-/post-
+ * cleans any draft with that name so a re-run (or a crashed prior run) starts and
+ * ends clean.
+ *
+ * @param {string} [params.draftName=Simple SDLC] - Draft name the journey renames to.
+ * @example
+ * fixtures:
+ *   - fixture: flowsDraft
+ *     params:
+ *       draftName: Simple SDLC
+ */
+const flowsDraft = {
+  async setup(ctx, params = {}) {
+    const { draftName = 'Simple SDLC' } = params;
+    await deleteDraftsNamed(ctx, draftName);
+    return { draftName };
+  },
+  async teardown(ctx, params = {}) {
+    const { draftName = 'Simple SDLC' } = params;
+    await deleteDraftsNamed(ctx, draftName);
+  },
+};
+
+const FIXTURES = { teamEnv, ibanStoryTeam, triggerAgent, flowsDraft };
 
 function resolveFixture(name) {
   const fx = FIXTURES[name];

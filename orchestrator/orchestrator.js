@@ -35,6 +35,8 @@ const memoryMigration = require("./memory-migration");
 const knowledgeConvergence = require("./knowledge-convergence");
 const knowledgeCurator = require("./knowledge-curator");
 const knowledgeCleanup = require("./knowledge-cleanup");
+const knowledgeHygiene = require("./knowledge-hygiene");
+const skillReconcile = require("./skill-reconcile");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const gitPanelOps = require("./git-panel-ops");
@@ -1068,6 +1070,31 @@ function writeSeededSkills(id, manifest) {
   const p = path.join(agentDir(id), SEEDED_SKILLS_REL);
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, JSON.stringify(manifest, null, 2));
+}
+
+// Per-member skill reconcile state (#776 §3): tracks bounded retry attempts plus
+// the last error + timestamp for a pending skill the auto-reconcile loop is
+// trying to heal. Keyed by skill name. Read by the admin-console graph overlay so
+// a stuck member surfaces a Retry + the reason instead of a silent "pending".
+const SKILL_RECONCILE_REL = path.join(".aee", "skill-reconcile.json");
+
+function readSkillReconcileState(id) {
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(agentDir(id), SKILL_RECONCILE_REL), "utf8"));
+    return m && typeof m === "object" ? m : {};
+  } catch { return {}; }
+}
+
+function writeSkillReconcileState(id, map) {
+  const p = path.join(agentDir(id), SKILL_RECONCILE_REL);
+  try {
+    const clean = map && typeof map === "object" ? map : {};
+    // An empty map means every skill reconciled — drop the file so it leaves no
+    // trace (and the overlay never reads a stale error).
+    if (Object.keys(clean).length === 0) { try { fs.rmSync(p, { force: true }); } catch { /* noop */ } return; }
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(clean, null, 2));
+  } catch { /* best effort */ }
 }
 
 // Tier of a resolved skill source dir (skill-source.js resolution order).
@@ -3319,6 +3346,32 @@ function runConvergenceCollector(teamId, envArg, opts = {}) {
       console.warn(`[Orchestrator] convergence suggestions for '${teamId}' failed: ${err.message}`);
     }
   }
+
+  // Suggestion auto-hygiene (#776 §4): move open cards that have gathered no new
+  // evidence for N weeks (default 4, configurable) into a `stale` state so they
+  // drop out of the default inbox, and revive a stale card whose underlying
+  // cluster reappeared this run. Feed-logged for transparency. Idempotent — a run
+  // with nothing to move rewrites nothing. Runs at every autonomy level so an
+  // existing backlog keeps healing even after the dial is lowered.
+  try {
+    const staleWeeks = Math.max(1, Number(process.env.KNOWLEDGE_SUGGESTION_STALE_WEEKS) || 4);
+    const observedIds = new Set(
+      (Array.isArray(proj.clusters) ? proj.clusters : []).map((c) => knowledgeConvergence.stableSuggestionId(c)),
+    );
+    const plan = knowledgeHygiene.planStaleTransitions(readKnowledgeCandidates(teamId), {
+      now, maxWeeks: staleWeeks, observedIds,
+    });
+    if (plan.changed) {
+      writeKnowledgeCandidates(teamId, plan.next);
+      const evts = [
+        ...plan.stale.map((c) => knowledgeFeed.buildStaleEvent({ teamId, suggestionId: c.id, text: c.text, revived: false })),
+        ...plan.revive.map((c) => knowledgeFeed.buildStaleEvent({ teamId, suggestionId: c.id, text: c.text, revived: true })),
+      ];
+      if (evts.length) appendKnowledgeEvents(evts);
+    }
+  } catch (err) {
+    console.warn(`[Orchestrator] suggestion hygiene for '${teamId}' failed: ${err.message}`);
+  }
 }
 
 // Raise related-theme (thematic aggregation) suggestion cards for a team and
@@ -5519,6 +5572,59 @@ class Orchestrator {
     }
     console.log(`[Orchestrator] Team ${teamId}: skill '${name}' content re-synced to ${results.length} member(s)`);
     return { teamId, skillName: name, resynced: true, members: results };
+  }
+
+  // Auto-reconcile pending skill members (#776 §3). Periodic + best-effort: for
+  // every team with active skills, sync any member that is GRANTED a skill but
+  // missing it from its seed manifest (the `pending` state) — the distribution
+  // that used to wait for a human "Sync now". Bounded by skill-reconcile's
+  // attempt cap + exponential backoff, so a persistent failure (e.g. a deleted
+  // source file) records its error and stops rather than looping hot. Idempotent:
+  // a fully-synced team does zero work and writes nothing. The per-target outcome
+  // is folded into each member's `.aee/skill-reconcile.json` so the Rollout tab
+  // can turn a stuck member's action into a Retry with the last error + time.
+  async reconcilePendingSkills({ now = new Date().toISOString() } = {}) {
+    const teamIds = listAgentIds()
+      .map((id) => loadAgentConfig(id))
+      .filter((c) => c && c.role === "team" && Array.isArray(c.skills) && c.skills.length)
+      .map((c) => c.id);
+    const summary = { synced: [], failed: [], exhausted: [] };
+    for (const teamId of teamIds) {
+      const teamCfg = loadAgentConfig(teamId);
+      const activeSkills = Array.isArray(teamCfg.skills) ? teamCfg.skills : [];
+      const members = listAgentIds()
+        .map((id) => loadAgentConfig(id))
+        .filter((c) => c && c.role === "team-member" && c.parentTeamId === teamId);
+      const plan = skillReconcile.planTeamReconcile(
+        { members, activeSkills, seededOf: readSeededSkills, stateOf: readSkillReconcileState },
+        { now },
+      );
+      summary.exhausted.push(...plan.exhausted);
+      for (const target of plan.due) {
+        const cfg = members.find((m) => m.id === target.agentId);
+        if (!cfg) continue;
+        let ok = false; let error = null;
+        try {
+          // Reuse the idempotent activation sync scoped to this one member — it
+          // never re-emits an activation feed event (scope set) and the team list
+          // insert is a no-op (the skill is already active).
+          const res = await this.setTeamSkillActive(teamId, target.skillName, { active: true, onlyMembers: [target.agentId] });
+          const mine = (res.members || []).find((r) => r.agentId === target.agentId);
+          ok = !!mine && mine.status === "seeded";
+          if (!ok) error = (mine && (mine.error || mine.status)) || "not synced";
+        } catch (err) { error = err.message; }
+        const state = readSkillReconcileState(target.agentId);
+        const nextEntry = skillReconcile.recordAttempt(state[target.skillName], { ok, error, now });
+        if (nextEntry === null) delete state[target.skillName]; else state[target.skillName] = nextEntry;
+        writeSkillReconcileState(target.agentId, state);
+        (ok ? summary.synced : summary.failed).push(target);
+      }
+    }
+    const touched = summary.synced.length + summary.failed.length;
+    if (touched) {
+      console.log(`[Orchestrator] skill reconcile: ${summary.synced.length} synced, ${summary.failed.length} failed, ${summary.exhausted.length} exhausted`);
+    }
+    return summary;
   }
 
   // Drift state of ONE seeded copy against the source it descends from (#629,
@@ -8847,13 +8953,24 @@ async function main() {
           // feed event (below) so the live feed records the decision.
           const dismissReason = dismiss ? knowledgeFeed.normalizeDismissReason(p.reason) : null;
           let touched = null; // the candidate we flipped, for the feed event text
-          if (p.suggestionId) {
+          // #776 §2: a merge-basket promotion flips SEVERAL candidates to
+          // `promoted` in one call (`suggestionIds`), so all merged cards leave
+          // the inbox. dismiss/undismiss stay single-card (`suggestionId`).
+          const idList = (!dismiss && !undismiss && Array.isArray(p.suggestionIds) && p.suggestionIds.length)
+            ? [...new Set([...p.suggestionIds, ...(p.suggestionId ? [p.suggestionId] : [])]
+                .filter((x) => typeof x === 'string' && x))]
+            : (typeof p.suggestionId === 'string' && p.suggestionId ? [p.suggestionId] : []);
+          if (idList.length) {
             const list = readKnowledgeCandidates(teamId);
-            const i = list.findIndex((c) => c && c.id === p.suggestionId);
-            if (i >= 0) {
+            let wrote = false;
+            for (const sid of idList) {
+              const i = list.findIndex((c) => c && c.id === sid);
+              if (i < 0) continue;
               if (undismiss) {
-                const { dismissReason: _dr, dismissedAt: _da, resolvedAt: _ra, ...rest } = list[i];
-                list[i] = { ...rest, status: 'open' };
+                // Restore a dismissed OR a stale (#776 §4) candidate to the open
+                // inbox — strip every resolved-state marker so it reads as fresh.
+                const { dismissReason: _dr, dismissedAt: _da, resolvedAt: _ra, staleAt: _sa, ...rest } = list[i];
+                list[i] = { ...rest, status: 'open', lastEvidenceAt: new Date().toISOString() };
               } else {
                 list[i] = {
                   ...list[i],
@@ -8863,8 +8980,9 @@ async function main() {
                 };
               }
               touched = list[i];
-              writeKnowledgeCandidates(teamId, list);
+              wrote = true;
             }
+            if (wrote) writeKnowledgeCandidates(teamId, list);
           } else if (!dismiss && !undismiss && entryIds.length > 0) {
             // Promotion without a stored suggestion (manual combine, agent→team
             // lift): record a synthetic promoted row so the collector's promoted
@@ -9825,6 +9943,28 @@ async function main() {
   };
   const curatorTimer = setInterval(runCuratorBackstop, CURATOR_INTERVAL_MS);
   if (typeof curatorTimer.unref === "function") curatorTimer.unref();
+
+  // ============================================================
+  // Skill auto-reconcile loop (skill-UX Phase 3, #776 §3).
+  // Heals `pending` skill members — a member granted a skill but missing it from
+  // its seed manifest gets the idempotent workspace sync re-run for it, so
+  // distribution is system work, not a human "Sync now". Bounded retry/backoff
+  // lives in the pure planner; this timer just drives it with an overlap guard.
+  // ============================================================
+  const RECONCILE_INTERVAL_MS = Math.max(
+    30_000,
+    Number(process.env.SKILL_RECONCILE_INTERVAL_MS) || 5 * 60 * 1000,
+  );
+  let reconcileBusy = false;
+  const runSkillReconcile = async () => {
+    if (reconcileBusy) return; // overlap guard — a slow pass must not stack
+    reconcileBusy = true;
+    try { await orchestrator.reconcilePendingSkills(); }
+    catch (err) { console.warn(`[Orchestrator] skill reconcile pass failed: ${err.message}`); }
+    finally { reconcileBusy = false; }
+  };
+  const reconcileTimer = setInterval(runSkillReconcile, RECONCILE_INTERVAL_MS);
+  if (typeof reconcileTimer.unref === "function") reconcileTimer.unref();
 }
 
 main().catch((err) => { console.error("Fatal:", err); process.exit(1); });

@@ -123,6 +123,20 @@ function buildDismissalEvent({ teamId, suggestionId, reason, text, undo, ts } = 
   };
 }
 
+// One `stale` / `revive` feed event (#776 §4): the auto-hygiene pass moved a
+// suggestion out of the inbox because it collected no new evidence for N weeks,
+// or brought a stale one back after fresh evidence arrived. Transparency only —
+// the underlying lessons are untouched.
+function buildStaleEvent({ teamId, suggestionId, text, revived, ts } = {}) {
+  return {
+    type: revived ? 'revive' : 'stale',
+    ts: typeof ts === 'string' && ts.trim() ? ts.trim() : new Date().toISOString(),
+    teamId: typeof teamId === 'string' ? teamId : null,
+    suggestionId: typeof suggestionId === 'string' ? suggestionId : null,
+    text: typeof text === 'string' ? text : null,
+  };
+}
+
 function serializeEvent(event) {
   return JSON.stringify(event);
 }
@@ -134,6 +148,7 @@ module.exports = {
   buildHarvestEvent,
   buildPromotionCleanupEvent,
   buildDismissalEvent,
+  buildStaleEvent,
   DISMISS_REASONS,
   normalizeDismissReason,
   leanEntry,

@@ -3330,6 +3330,12 @@ function augmentSkillActivation(graph, parsed) {
     m.id,
     readJsonFile(path.join(AGENTS_DIR, m.id, '.aee', 'seeded-skills.json'), {}) || {},
   ]));
+  // #776 §3: per-member auto-reconcile state so a stuck `pending` member surfaces
+  // a Retry + the last error/time instead of a silent "Sync now".
+  const reconciles = new Map(members.map(m => [
+    m.id,
+    readJsonFile(path.join(AGENTS_DIR, m.id, '.aee', 'skill-reconcile.json'), {}) || {},
+  ]));
 
   // Ghost nodes for active-list skills the lane filter didn't render
   // (adopted global skills with a foreign/no origin team).
@@ -3373,6 +3379,21 @@ function augmentSkillActivation(graph, parsed) {
           : granted ? 'pending'
           : 'inactive';
         const out = { agentId: m.id, displayName: m.displayName || m.id, state };
+        // #776 §3: when a member is `pending`, expose the auto-reconcile progress
+        // so the UI reads "syncing…" by default and only offers Retry (with the
+        // reason + timestamp) once the reconcile loop has actually reported an
+        // error for this skill — a bounded-retry, self-healing rollout.
+        if (state === 'pending') {
+          const rc = (reconciles.get(m.id) || {})[name];
+          if (rc && (rc.lastError || rc.attempts)) {
+            out.reconcile = {
+              attempts: rc.attempts || 0,
+              lastError: rc.lastError || null,
+              lastAttemptAt: rc.lastAttemptAt || null,
+              exhausted: (rc.attempts || 0) >= 5,
+            };
+          }
+        }
         // Drift (#629 AC2) is meaningful only for a copy that was actually
         // seeded into this member's workspace — the seeded entry is the anchor.
         if (seeded) {
@@ -3671,8 +3692,9 @@ app.get('/api/knowledge/promotion-suggestions', (req, res) => {
   if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
   // #775: the Suggested-tab inbox reads `open`; the triage view's "Dismissed"
   // filter reads `?status=dismissed` so a turned-down suggestion stays queryable
-  // for un-dismiss. Any other status value falls back to `open`.
-  const wanted = req.query.status === 'dismissed' ? 'dismissed' : 'open';
+  // for un-dismiss. #776: the "Stale" filter reads `?status=stale` (auto-hygiene
+  // aged them out of the default inbox). Any other value falls back to `open`.
+  const wanted = ['dismissed', 'stale'].includes(req.query.status) ? req.query.status : 'open';
   const rows = readCandidateStore(teamId).filter(c => c && c.status === wanted);
   // Auto-match (#553, AC4): pre-compute whether each converged cluster fits an
   // existing team-tier skill (the default promotion home), so the dialog can
@@ -3683,6 +3705,7 @@ app.get('/api/knowledge/promotion-suggestions', (req, res) => {
     view.matchedSkill = knowledgeSuggestions.matchExistingSkill(c, eligible);
     if (c.dismissReason) view.dismissReason = c.dismissReason;
     if (c.dismissedAt) view.dismissedAt = c.dismissedAt;
+    if (c.staleAt) view.staleAt = c.staleAt;
     return view;
   });
   res.json({ team: teamId, status: wanted, suggestions });
@@ -3996,6 +4019,7 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           teamId, suggestionId: req.body.suggestionId || null,
+          ...(Array.isArray(req.body.suggestionIds) && req.body.suggestionIds.length ? { suggestionIds: req.body.suggestionIds } : {}),
           skill: { name: v.targetName, tier: v.to }, entryIds: v.entryIds, extend: true,
         }),
       });
@@ -4101,6 +4125,7 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         teamId, suggestionId: req.body.suggestionId || null,
+        ...(Array.isArray(req.body.suggestionIds) && req.body.suggestionIds.length ? { suggestionIds: req.body.suggestionIds } : {}),
         skill: { name: v.name, tier: v.to }, entryIds: v.entryIds,
       }),
     });

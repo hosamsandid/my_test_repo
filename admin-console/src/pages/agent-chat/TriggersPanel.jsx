@@ -6,6 +6,11 @@ import ScriptViewerPanel from '../../components/ScriptViewerPanel';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import FormInput from '../../components/FormInput';
 import { liveOps } from '../process/edit-adapters';
+import {
+  GITHUB_EVENT_OPTIONS,
+  LABEL_FILTERABLE_EVENTS,
+  summarizeGithubEventTrigger,
+} from './trigger-summary.js';
 
 // preCheckScript paths reference an installed binary inside the orchestrator
 // container (e.g. `/usr/local/bin/multi-agent-bid`). The allowlisted name is
@@ -28,39 +33,9 @@ function isDataFlowTrigger(t) {
   return !!t && t.dataFlow === true;
 }
 
-// Subset of GitHub Events API event types most useful for agent workflows.
-// (The Events API does not emit every webhook action — e.g. pull_request
-// has opened/closed/reopened but not synchronize. It also splits closed
-// PRs: `closed` for non-merged closes, `merged` for merged ones — so a
-// "react to merge" trigger MUST subscribe to `pull_request.merged` even
-// though webhooks call it `closed` with `merged: true`.)
-const GITHUB_EVENT_OPTIONS = [
-  { value: 'push',                                  label: 'Push' },
-  { value: 'pull_request.opened',                   label: 'PR opened' },
-  { value: 'pull_request.closed',                   label: 'PR closed (without merge)' },
-  { value: 'pull_request.merged',                   label: 'PR merged' },
-  { value: 'pull_request.reopened',                 label: 'PR reopened' },
-  { value: 'pull_request.labeled',                  label: 'PR labeled' },
-  { value: 'pull_request.unlabeled',                label: 'PR unlabeled' },
-  { value: 'pull_request_review.submitted',         label: 'PR review submitted' },
-  { value: 'pull_request_review_comment.created',   label: 'PR review comment' },
-  { value: 'issue_comment.created',                 label: 'Issue / PR comment' },
-  { value: 'issues.opened',                         label: 'Issue opened' },
-  { value: 'issues.closed',                         label: 'Issue closed' },
-  { value: 'issues.labeled',                        label: 'Issue labeled' },
-  { value: 'issues.unlabeled',                      label: 'Issue unlabeled' },
-  { value: 'release.published',                     label: 'Release published' },
-];
-
-// Events that carry a `payload.label.name` GitHub sends — the only ones
-// where a label-name filter makes sense. Used by the form to decide
-// whether to show the label-name input.
-const LABEL_FILTERABLE_EVENTS = new Set([
-  'issues.labeled',
-  'issues.unlabeled',
-  'pull_request.labeled',
-  'pull_request.unlabeled',
-]);
+// `GITHUB_EVENT_OPTIONS` / `LABEL_FILTERABLE_EVENTS` (the friendly event
+// wording + which events carry a label) now live in ./trigger-summary.js so
+// the card summary and the Flow canvas readout share one source of truth (#778).
 
 // Mirrors orchestrator/github-poller.js — extracts owner/repo from the
 // repository URL stored in the working environment.
@@ -550,17 +525,23 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
     ? Object.entries(trigger.preCheckEnv)
     : [];
   const isDataFlow = isDataFlowTrigger(trigger);
+  // A plain (non-data-flow) github-event trigger gets a dedicated, wrapping
+  // event/label summary below the header (AC1–AC5); the header `<code>` then
+  // only carries the repo, which may ellipsize without hiding the summary (AC6).
+  const ghSummary = (trigger.type === 'github-event' && !isDataFlow)
+    ? summarizeGithubEventTrigger(trigger)
+    : null;
   let schedule;
   if (isDataFlow) {
     schedule = `wakes on push${trigger.repo ? ` to ${trigger.repo}` : ' to the team repo'}`;
   } else if (trigger.type === 'http') {
     schedule = `/hooks/${agentId}/${trigger.id}`;
-  } else if (trigger.type === 'github-event') {
-    const evs = Array.isArray(trigger.events) ? trigger.events : [];
-    const labelTag = trigger.labelFilter ? ` · label="${trigger.labelFilter}"` : '';
-    schedule = `${trigger.repo || '?'} · ${evs.join(', ') || 'no event'}${labelTag}`;
+  } else if (ghSummary) {
+    schedule = trigger.repo || 'any repo';
+  } else if (trigger.cron) {
+    schedule = describeCron(parseCronState(trigger.cron)) || trigger.cron;
   } else {
-    schedule = trigger.cron || trigger.at || '—';
+    schedule = trigger.at || '—';
   }
 
   async function handleToggle(val) {
@@ -610,6 +591,28 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
           <Trash2 size={11} />
         </button>
       </div>
+
+      {ghSummary && (
+        <div style={{
+          display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
+          fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.4,
+        }}>
+          <Github size={13} style={{ color: 'var(--eb-text-muted)', flexShrink: 0, marginTop: 2 }} />
+          <span style={{ overflowWrap: 'anywhere' }}>
+            <strong style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-medium)' }}>
+              {ghSummary.events.length ? ghSummary.events.join(', ') : 'No event'}
+            </strong>
+            {ghSummary.label && (
+              <>
+                {' · label '}
+                <strong style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-medium)' }}>
+                  “{ghSummary.label}”
+                </strong>
+              </>
+            )}
+          </span>
+        </div>
+      )}
 
       {trigger.id && (
         <div style={{ fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)' }}>

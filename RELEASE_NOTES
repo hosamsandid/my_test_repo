@@ -1,0 +1,13 @@
+# Release Notes
+
+## Unreleased
+
+### New Features
+
+- **Knowledge page: Review mode** — a guided, one-at-a-time triage flow over suggested knowledge candidates. Navigate with keyboard shortcuts (`P` promote · `M` add to merge · `D` dismiss · `→`/`Enter` skip · `Esc` close) and track progress via an "n of m" indicator. Accessible via **Start review** on the Suggested tab. (#787)
+
+- **Multi-candidate knowledge merge** — an **Add to merge** basket lets you queue multiple suggestion cards (from the list or inside review mode), then promote them all into a single skill in one step. The resulting skill's Origin tab records every contributing lesson. (#787)
+
+- **Skill rollout auto-reconcile** — the orchestrator now continuously detects team members who have been granted a skill but haven't received it yet (e.g. due to a prior sync failure) and re-syncs them automatically with exponential backoff and an attempt cap. The Rollout tab reflects live sync state, showing "syncing…" while in progress and surfacing the last error with a Retry button only after the loop reports a failure. (#787)
+
+- **Stale candidate hygiene** — knowledge suggestions with no new supporting evidence for 4 weeks (configurable via `KNOWLEDGE_SUGGESTION_STALE_WEEKS`) are automatically moved to a `stale` state. Stale candidates are hidden from the default inbox view but accessible via a new **Stale** filter, can be manually restored, and are automatically revived if fresh evidence re-surfaces them. (#787)

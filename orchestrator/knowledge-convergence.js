@@ -383,6 +383,133 @@ function planNewSuggestions(clusters, existing, { threshold = 2, teamId, now } =
 }
 
 // ---------------------------------------------------------------------------
+// Digest-only routing (#779, skill-aggregation Phase 1)
+// ---------------------------------------------------------------------------
+//
+// A single converged convention/fact is already GUARANTEED in every agent's
+// context via the knowledge digest (buildKnowledgeDigest injects exactly this
+// class of content), so wrapping it in its own micro-skill adds no delivery
+// value — only governance noise. This planner sits in FRONT of the single-cluster
+// candidate/auto-promotion path: it classifies each converged cluster and pulls
+// the digest-delivered ones out so they raise no candidate and no card. It is
+// thresholded, not absolute: a cluster that keeps recurring (>= graduateAtAgents
+// distinct agents) GRADUATES to a real candidate. Themes (multi-lesson synthesis)
+// and non-collector paths (agent `knowledge promote`, manual combine) are never
+// routed here — they are the preserved escape hatches.
+
+// Kinds the digest reliably delivers as small, self-contained bullets. `entity`
+// is intentionally excluded: an entity is a structural reference, not a one-line
+// lesson, so it never routes digest-only. Frozen so a caller can't mutate it.
+const DIGEST_DELIVERED_KINDS = Object.freeze(['convention', 'fact']);
+
+/**
+ * Classify one converged cluster for skill-candidate routing (#779).
+ * @param {object} cluster  a cluster from clusterEntries/buildCanonicalProjection
+ * @param {{ threshold?: number, graduateAtAgents?: number, digestKinds?: string[] }} opts
+ * @returns {'not-converged'|'digest-only'|'candidate'}
+ *   - 'not-converged': below the convergence threshold (raises nothing anyway).
+ *   - 'digest-only':   a digest-delivered kind, converged but not yet graduated —
+ *                      the digest already delivers it, so no candidate/card.
+ *   - 'candidate':     eligible for a promotion candidate (a non-digest kind, or a
+ *                      graduated cluster whose recurrence >= graduateAtAgents).
+ */
+function classifyClusterRouting(cluster, { threshold = 2, graduateAtAgents = 4, digestKinds = DIGEST_DELIVERED_KINDS } = {}) {
+  if (!crossesConvergence(cluster, threshold)) return 'not-converged';
+  const kinds = Array.isArray(digestKinds) ? digestKinds : DIGEST_DELIVERED_KINDS;
+  const kind = (cluster && typeof cluster.kind === 'string') ? cluster.kind : 'fact';
+  if (!kinds.includes(kind)) return 'candidate';
+  const grad = Number.isInteger(graduateAtAgents) && graduateAtAgents > threshold
+    ? graduateAtAgents
+    : Math.max(threshold + 1, 4);
+  const count = Number(cluster && cluster.convergenceCount);
+  if (Number.isFinite(count) && count >= grad) return 'candidate';
+  return 'digest-only';
+}
+
+// A lean, auditable record of a digest-only routing decision — stored on the
+// candidate store (status:"digest-only", never rendered as an open card) and
+// summarised in the feed event. Keyed by the SAME stable id a candidate would
+// carry, so when the cluster grows (a new member ⇒ a new member-id set ⇒ a new
+// stable id) it is naturally NOT the same row and re-classifies from scratch.
+function toDigestOnlyRow(cluster, { teamId, now } = {}) {
+  const ts = typeof now === 'string' && now.trim() ? now.trim() : new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  return {
+    id: stableSuggestionId(cluster),
+    teamId: typeof teamId === 'string' ? teamId : (cluster.teamId || 'default'),
+    kind: cluster.kind,
+    canonicalId: cluster.canonicalId,
+    entryIds: (Array.isArray(cluster.memberIds) ? cluster.memberIds : []).slice(),
+    convergence: (Array.isArray(cluster.convergence) ? cluster.convergence : []).slice(),
+    convergenceCount: cluster.convergenceCount,
+    text: cluster.text,
+    source: 'convergence',
+    status: 'digest-only',
+    routedAt: ts,
+  };
+}
+
+/**
+ * Route the converged clusters for the single-cluster candidate path (#779).
+ * Splits the input into the clusters still eligible to become a candidate and the
+ * ones the digest already delivers, and produces the new digest-only store rows
+ * (idempotent against the candidate store by stable id) plus ONE batched feed
+ * event summarising newly-routed decisions.
+ *
+ * @param {object[]} clusters  converged clusters (from buildCanonicalProjection)
+ * @param {object[]} existing  the team's current candidate store rows
+ * @param {{ threshold?: number, graduateAtAgents?: number, digestKinds?: string[],
+ *           teamId?: string, now?: string }} opts
+ * @returns {{ candidateClusters, digestOnlyClusters, digestOnlyCanonicalIds:Set,
+ *             rows: object[], batch: object|null }}
+ *   candidateClusters:      pass these to planNewSuggestions / planAutoPromotions.
+ *   digestOnlyClusters:     the routed-out clusters (kept in the THEME path).
+ *   digestOnlyCanonicalIds: Set of their canonicalIds (for filtering elsewhere).
+ *   rows:                   NEW digest-only rows to persist (not already known).
+ *   batch:                  the `digest-routing` feed event (null when nothing new).
+ */
+function planDigestRouting(clusters, existing, { threshold = 2, graduateAtAgents = 4, digestKinds = DIGEST_DELIVERED_KINDS, teamId, now } = {}) {
+  const list = Array.isArray(clusters) ? clusters : [];
+  // Any row with this stable id already recorded (open/promoted/dismissed candidate
+  // OR a prior digest-only decision) ⇒ don't re-emit the feed event for it.
+  const known = new Set(
+    (Array.isArray(existing) ? existing : [])
+      .filter((c) => c && ['open', 'promoted', 'dismissed', 'digest-only'].includes(c.status))
+      .map((c) => c.id),
+  );
+  const candidateClusters = [];
+  const digestOnlyClusters = [];
+  const digestOnlyCanonicalIds = new Set();
+  const rows = [];
+  for (const cluster of list) {
+    const routing = classifyClusterRouting(cluster, { threshold, graduateAtAgents, digestKinds });
+    if (routing === 'digest-only') {
+      digestOnlyClusters.push(cluster);
+      if (cluster && cluster.canonicalId) digestOnlyCanonicalIds.add(cluster.canonicalId);
+      const row = toDigestOnlyRow(cluster, { teamId, now });
+      if (!known.has(row.id)) rows.push(row);
+    } else {
+      // 'candidate' and 'not-converged' both stay in the candidate path — the
+      // downstream planners already skip non-converged clusters.
+      candidateClusters.push(cluster);
+    }
+  }
+  let batch = null;
+  if (rows.length > 0) {
+    const ts = typeof now === 'string' && now.trim() ? now.trim() : new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+    batch = {
+      type: 'digest-routing',
+      ts,
+      teamId: typeof teamId === 'string' ? teamId : null,
+      count: rows.length,
+      samples: rows.slice(0, 5).map((r) => ({
+        id: r.id, canonicalId: r.canonicalId, kind: r.kind, text: r.text, convergenceCount: r.convergenceCount,
+      })),
+    };
+  }
+  return { candidateClusters, digestOnlyClusters, digestOnlyCanonicalIds, rows, batch };
+}
+
+// ---------------------------------------------------------------------------
 // Related-theme aggregation
 // ---------------------------------------------------------------------------
 //
@@ -623,6 +750,10 @@ module.exports = {
   stableSuggestionId,
   toCandidate,
   planNewSuggestions,
+  DIGEST_DELIVERED_KINDS,
+  classifyClusterRouting,
+  toDigestOnlyRow,
+  planDigestRouting,
   topicTokens,
   relatedness,
   groupRelatedClusters,

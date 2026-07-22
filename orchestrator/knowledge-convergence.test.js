@@ -15,6 +15,9 @@ const {
   crossesConvergence,
   stableSuggestionId,
   planNewSuggestions,
+  classifyClusterRouting,
+  planDigestRouting,
+  toDigestOnlyRow,
 } = require('./knowledge-convergence');
 const { parseEntry, validateKnowledgeEntry } = require('./knowledge-store');
 
@@ -484,4 +487,108 @@ test('clustersCoveredByThemes: a promoted MANUAL combine covers its lessons too'
   assert.ok(covered.has('a1a1a1a1a1a1'));
   assert.ok(covered.has('b2b2b2b2b2b2'));
   assert.ok(!covered.has('c3c3c3c3c3c3'));
+});
+
+// ─── digest-only routing (#779, skill-aggregation Phase 1) ──────────────────────
+
+// A converged cluster of `kind` recorded independently by `agentCount` distinct
+// agents (convergenceCount == agentCount), used to exercise the graduation edge.
+function convergedOfKind(kind, text, agentCount) {
+  const entries = [];
+  for (let i = 0; i < agentCount; i += 1) {
+    entries.push(entry({
+      id: String.fromCharCode(97 + i).repeat(12),
+      kind,
+      originAgent: `acme-dev-${i + 1}`,
+      text,
+      createdAt: `2026-07-08T0${i}:00:00Z`,
+      correlationId: `$e${i}`,
+    }));
+  }
+  return buildCanonicalProjection(entries, { simThreshold: 0.6, now: NOW }).clusters[0];
+}
+
+test('classifyClusterRouting: single converged convention/fact → digest-only', () => {
+  assert.equal(classifyClusterRouting(convergedOfKind('convention', 'always squash-merge feature prs', 2), {}), 'digest-only');
+  assert.equal(classifyClusterRouting(convergedOfKind('fact', 'ci runs node --test on every pr', 2), {}), 'digest-only');
+});
+
+test('classifyClusterRouting: below convergence threshold → not-converged', () => {
+  assert.equal(classifyClusterRouting(convergedOfKind('convention', 'only one agent knows this', 1), {}), 'not-converged');
+});
+
+test('classifyClusterRouting: entity kind is never digest-only (always a candidate)', () => {
+  assert.equal(classifyClusterRouting(convergedOfKind('entity', 'the orchestrator service owns credentials', 2), {}), 'candidate');
+});
+
+test('classifyClusterRouting: graduates to candidate at >= graduateAtAgents', () => {
+  const c3 = convergedOfKind('convention', 'reused label convention across the team', 3);
+  const c4 = convergedOfKind('convention', 'reused label convention across the team', 4);
+  assert.equal(classifyClusterRouting(c3, { graduateAtAgents: 4 }), 'digest-only');
+  assert.equal(classifyClusterRouting(c4, { graduateAtAgents: 4 }), 'candidate');
+});
+
+test('planDigestRouting: routes digest-only out of the candidate path, keeps others', () => {
+  const conv = convergedOfKind('convention', 'small convention the digest delivers', 2);
+  const ent = convergedOfKind('entity', 'named domain entity worth a skill', 2);
+  const routed = planDigestRouting([conv, ent], [], { threshold: 2, graduateAtAgents: 4, teamId: 'acme', now: NOW });
+  // convention → digest-only; entity → still a candidate
+  assert.deepEqual(routed.candidateClusters.map((c) => c.kind), ['entity']);
+  assert.equal(routed.digestOnlyClusters.length, 1);
+  assert.ok(routed.digestOnlyCanonicalIds.has(conv.canonicalId));
+  assert.equal(routed.rows.length, 1);
+  assert.equal(routed.rows[0].status, 'digest-only');
+  assert.equal(routed.rows[0].kind, 'convention');
+  assert.ok(routed.batch && routed.batch.type === 'digest-routing');
+  assert.equal(routed.batch.count, 1);
+});
+
+test('planDigestRouting: idempotent — a recorded digest-only decision does not re-emit', () => {
+  const conv = convergedOfKind('convention', 'small convention the digest delivers', 2);
+  const first = planDigestRouting([conv], [], { threshold: 2, graduateAtAgents: 4, teamId: 'acme', now: NOW });
+  assert.equal(first.rows.length, 1);
+  // Feed the persisted digest-only row back in as existing store state.
+  const second = planDigestRouting([conv], first.rows, { threshold: 2, graduateAtAgents: 4, teamId: 'acme', now: NOW });
+  assert.equal(second.rows.length, 0, 'no new row for an already-recorded decision');
+  assert.equal(second.batch, null);
+  // Still routed OUT of the candidate path (the exclusion is not idempotency-gated).
+  assert.equal(second.candidateClusters.length, 0);
+  assert.ok(second.digestOnlyCanonicalIds.has(conv.canonicalId));
+});
+
+test('planDigestRouting: an already-open candidate id is treated as known (no digest row)', () => {
+  const conv = convergedOfKind('convention', 'small convention the digest delivers', 2);
+  const openRow = { id: stableSuggestionId(conv), status: 'open' };
+  const routed = planDigestRouting([conv], [openRow], { threshold: 2, graduateAtAgents: 4, teamId: 'acme', now: NOW });
+  assert.equal(routed.rows.length, 0);
+  assert.equal(routed.batch, null);
+});
+
+test('planDigestRouting: a grown (graduated) cluster becomes a candidate on a later pass (AC2)', () => {
+  // Pass 1: two agents → digest-only.
+  const c2 = convergedOfKind('convention', 'a recurring team convention', 2);
+  const p1 = planDigestRouting([c2], [], { threshold: 2, graduateAtAgents: 4, teamId: 'acme', now: NOW });
+  assert.equal(p1.candidateClusters.length, 0);
+  const store = [...p1.rows];
+  // Pass 2: four agents (grown) — different member-id set ⇒ different stable id ⇒
+  // classifies as a candidate and is NOT filtered out of the candidate path.
+  const c4 = convergedOfKind('convention', 'a recurring team convention', 4);
+  const p2 = planDigestRouting([c4], store, { threshold: 2, graduateAtAgents: 4, teamId: 'acme', now: NOW });
+  assert.equal(p2.candidateClusters.length, 1);
+  assert.equal(p2.digestOnlyClusters.length, 0);
+  // planNewSuggestions now raises it (its grown stable id is unknown to the store).
+  const { raise } = planNewSuggestions(p2.candidateClusters, store, { threshold: 2, teamId: 'acme', now: NOW });
+  assert.equal(raise.length, 1);
+  assert.equal(raise[0].convergenceCount, 4);
+});
+
+test('toDigestOnlyRow: lean, keyed by the same stable id a candidate would carry', () => {
+  const conv = convergedOfKind('fact', 'ci runs the tests on every pr', 2);
+  const row = toDigestOnlyRow(conv, { teamId: 'acme', now: NOW });
+  assert.equal(row.id, stableSuggestionId(conv));
+  assert.equal(row.status, 'digest-only');
+  assert.equal(row.source, 'convergence');
+  assert.equal(row.canonicalId, conv.canonicalId);
+  assert.equal(row.routedAt, NOW);
+  assert.ok(!/correlationId|sessionId|token/i.test(JSON.stringify(row)));
 });

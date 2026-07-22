@@ -3213,18 +3213,76 @@ function runConvergenceCollector(teamId, envArg, opts = {}) {
     ? proj.clusters
     : proj.clusters.filter((c) => c && !heldCanonicalIds.has(c.canonicalId));
   const level = knowledgeAutonomyLevel(env);
+
+  // #779 digest-only routing: at the candidate-raising levels (>= 2), a single
+  // converged convention/fact the knowledge digest already delivers raises NO skill
+  // candidate/card until it graduates (>= graduateAtAgents distinct agents). The
+  // decision is persisted (status:"digest-only" — never an open card) and surfaced
+  // as a low-key `digest-routing` feed event, so it is auditable rather than silent.
+  // Digest-only clusters are pulled ONLY from the single-cluster candidate/auto-
+  // promotion path (candidateClusters); they stay in the THEME path (eligibleClusters)
+  // so a growing set can still surface as a theme. The escape hatches (agent
+  // `knowledge promote`, manual combine) run on other code paths, never here.
+  let candidateClusters = eligibleClusters;
+  let curCandidates = candidates;
+  if (level >= 2) {
+    const { digestRouting, graduateAtAgents } = knowledgeCurationConfig(env);
+    if (digestRouting) {
+      try {
+        const routed = knowledgeConvergence.planDigestRouting(eligibleClusters, curCandidates, {
+          threshold: convergenceThreshold, graduateAtAgents, teamId, now,
+        });
+        candidateClusters = routed.candidateClusters;
+        if (routed.rows.length > 0) {
+          writeKnowledgeCandidates(teamId, [...curCandidates, ...routed.rows]);
+          curCandidates = readKnowledgeCandidates(teamId);
+          if (routed.batch) appendKnowledgeEvents([routed.batch]);
+        }
+      } catch (err) {
+        console.warn(`[Orchestrator] digest routing for '${teamId}' failed: ${err.message}`);
+        candidateClusters = eligibleClusters;
+      }
+    }
+  }
+
   if (level >= 3) {
+    // #779: the per-pass cap is shared across auto-extend + convergence promotions +
+    // theme promotions. Auto-extend runs FIRST and claims its matched clusters so
+    // they don't also spawn a brand-new skill; then create-new promotion on the
+    // remaining clusters; then themes. The remaining budget shrinks at each step.
+    const { maxAutoPromotionsPerPass, autoExtend } = knowledgeCurationConfig(env);
+    let capUsed = 0;
+    let consumed = new Set();
+    // Auto-extend follows the autonomy dial (level >= 3, so on here) unless the team
+    // explicitly toggled it off (autoExtend === false).
+    if (autoExtend !== false) {
+      try {
+        const existingSkills = readTeamSkillsForMatch(teamId);
+        const ext = autoExtendStep(teamId, env, candidateClusters, curCandidates, existingSkills, {
+          convergenceThreshold, now, capRemaining: maxAutoPromotionsPerPass - capUsed,
+        });
+        capUsed += ext.extendedCount;
+        consumed = ext.consumedCanonicalIds;
+        curCandidates = readKnowledgeCandidates(teamId);
+      } catch (err) {
+        console.warn(`[Orchestrator] auto-extend for '${teamId}' failed: ${err.message}`);
+      }
+    }
     try {
-      autoPromoteStep(teamId, env, eligibleClusters, candidates, { convergenceThreshold, now });
+      const n = autoPromoteStep(teamId, env, candidateClusters, curCandidates, {
+        convergenceThreshold, now, capRemaining: maxAutoPromotionsPerPass - capUsed, excludeCanonicalIds: consumed,
+      });
+      capUsed += (n || 0);
     } catch (err) {
       console.warn(`[Orchestrator] auto-promotion for '${teamId}' failed: ${err.message}`);
     }
     // #604: strong single-role accumulation themes are also auto-promoted (and
-    // auto-activated) at level 3 — one reusable team skill per theme whose
-    // lessonCount >= autoThemeMinLessons. Re-read the store: autoPromoteStep just
-    // rewrote it.
+    // auto-activated) at level 3. Re-read the store: the steps above just rewrote it.
     try {
-      autoPromoteThemesStep(teamId, env, eligibleClusters, readKnowledgeCandidates(teamId), { relatedThreshold, now });
+      const n = autoPromoteThemesStep(teamId, env, eligibleClusters, readKnowledgeCandidates(teamId), {
+        relatedThreshold, now, capRemaining: maxAutoPromotionsPerPass - capUsed,
+      });
+      capUsed += (n || 0);
     } catch (err) {
       console.warn(`[Orchestrator] theme auto-promotion for '${teamId}' failed: ${err.message}`);
     }
@@ -3241,11 +3299,13 @@ function runConvergenceCollector(teamId, envArg, opts = {}) {
     try {
       // Themes first: a lesson bundled into a raised theme card must not also
       // raise its own single-lesson convergence card (one decision, not two).
-      const afterThemes = raiseRelatedSuggestions(teamId, eligibleClusters, candidates, { relatedThreshold, now });
+      const afterThemes = raiseRelatedSuggestions(teamId, eligibleClusters, curCandidates, { relatedThreshold, now });
       const covered = knowledgeConvergence.clustersCoveredByThemes(eligibleClusters, afterThemes);
+      // #779: single-cluster candidates are raised only for digest-routed
+      // candidateClusters (digest-only clusters excluded), minus theme-covered ones.
       const singles = covered.size === 0
-        ? eligibleClusters
-        : eligibleClusters.filter((c) => c && !covered.has(c.canonicalId));
+        ? candidateClusters
+        : candidateClusters.filter((c) => c && !covered.has(c.canonicalId));
       const { raise, batch } = knowledgeConvergence.planNewSuggestions(singles, afterThemes, {
         threshold: convergenceThreshold,
         teamId,
@@ -3472,17 +3532,27 @@ function _teamSkillDir(teamId, name) {
 // Set in main(); lets free functions (this one) reach instance methods.
 let orchestratorSingleton = null;
 
-function autoPromoteStep(teamId, env, clusters, candidates, { convergenceThreshold, now }) {
+function autoPromoteStep(teamId, env, clusters, candidates, { convergenceThreshold, now, capRemaining, excludeCanonicalIds } = {}) {
   env = teamKnowledgeEnv(teamId, env); // #570: per-team knowledge config
   const gates = resolvePromotionGates(env);
   const { maxAutoPromotionsPerPass } = knowledgeCurationConfig(env);
-  const plan = knowledgeCurator.planAutoPromotions(clusters, candidates, gates, {
+  // #779: the per-pass cap is shared across auto-extend + convergence promotions +
+  // theme promotions. When the caller has already spent part of it, it passes the
+  // remaining budget; absent ⇒ the whole cap (legacy behaviour).
+  const cap = Number.isInteger(capRemaining) ? Math.max(0, capRemaining) : maxAutoPromotionsPerPass;
+  // #779: clusters already claimed by the auto-extend path must not also spawn a
+  // brand-new skill here.
+  const exclude = excludeCanonicalIds instanceof Set ? excludeCanonicalIds : null;
+  const inClusters = exclude && exclude.size > 0
+    ? (Array.isArray(clusters) ? clusters : []).filter((c) => c && !exclude.has(c.canonicalId))
+    : clusters;
+  const plan = knowledgeCurator.planAutoPromotions(inClusters, candidates, gates, {
     threshold: convergenceThreshold,
-    cap: maxAutoPromotionsPerPass,
+    cap,
     teamId,
     now,
   });
-  if (plan.promote.length === 0 && plan.defer.length === 0) return;
+  if (plan.promote.length === 0 && plan.defer.length === 0) return 0;
 
   const byId = new Map((candidates || []).filter((c) => c && c.id).map((c) => [c.id, c]));
   const promotedSkills = [];
@@ -3539,6 +3609,7 @@ function autoPromoteStep(teamId, env, clusters, candidates, { convergenceThresho
       })),
     }]);
   }
+  return promotedSkills.length;
 }
 
 // Shared finalize for a batch of curator auto-promotions (convergence clusters or
@@ -3594,18 +3665,20 @@ function _finalizePromotedSkills(teamId, env, promotedSkills, now) {
 // event + source archival + auto-activation). Weaker/gated/over-cap themes are NOT
 // raised here — the caller's raiseRelatedSuggestions raises the remainder as cards
 // (planRelatedSuggestions naturally excludes the clusters this step just promoted).
-function autoPromoteThemesStep(teamId, env, clusters, candidates, { relatedThreshold, now }) {
+function autoPromoteThemesStep(teamId, env, clusters, candidates, { relatedThreshold, now, capRemaining } = {}) {
   env = teamKnowledgeEnv(teamId, env); // #570: per-team knowledge config
   const gates = resolvePromotionGates(env);
   const { maxAutoPromotionsPerPass, autoThemeMinLessons } = knowledgeCurationConfig(env);
+  // #779: share the per-pass cap with auto-extend + convergence promotions.
+  const cap = Number.isInteger(capRemaining) ? Math.max(0, capRemaining) : maxAutoPromotionsPerPass;
   const plan = knowledgeCurator.planAutoPromoteThemes(clusters, candidates, gates, {
     autoThemeMinLessons,
-    cap: maxAutoPromotionsPerPass,
+    cap,
     relatedThreshold,
     teamId,
     now,
   });
-  if (plan.promote.length === 0) return;
+  if (plan.promote.length === 0) return 0;
 
   const byId = new Map((candidates || []).filter((c) => c && c.id).map((c) => [c.id, c]));
   const promotedSkills = [];
@@ -3642,6 +3715,177 @@ function autoPromoteThemesStep(teamId, env, clusters, candidates, { relatedThres
 
   writeKnowledgeCandidates(teamId, [...byId.values()]);
   _finalizePromotedSkills(teamId, env, promotedSkills, now);
+  return promotedSkills.length;
+}
+
+// ── Curator auto-extend (#779, skill-aggregation Phase 1) ───────────────────────
+// Read the team's existing team-tier skills as match targets for the auto-extend
+// planner: [{ name, tier:"team", entryIds }] where entryIds come from each skill's
+// provenance.json (the same lineage signal admin-console eligibleExtendSkills uses).
+// Best-effort + tolerant: an unreadable dir/provenance yields an empty entryIds set,
+// never throws. Returns [] when the team has no skill pool yet.
+function readTeamSkillsForMatch(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return [];
+  const base = path.resolve(WORKSPACE, "teams", seg, "skills");
+  let names;
+  try { names = fs.readdirSync(base, { withFileTypes: true }); } catch { return []; }
+  const out = [];
+  for (const d of names) {
+    if (!d.isDirectory()) continue;
+    const name = d.name;
+    if (!knowledgeCurator.SKILL_NAME_RE.test(name)) continue;
+    const dir = path.join(base, name);
+    if (!fs.existsSync(path.join(dir, "SKILL.md"))) continue;
+    let entryIds = [];
+    try {
+      const prov = JSON.parse(fs.readFileSync(path.join(dir, "provenance.json"), "utf8"));
+      if (prov && Array.isArray(prov.entryIds)) {
+        entryIds = prov.entryIds.filter((x) => typeof x === "string" && /^[0-9a-f]{12}$/.test(x));
+      }
+    } catch { /* no/garbled provenance ⇒ name-only match still possible */ }
+    out.push({ name, tier: "team", entryIds });
+  }
+  return out;
+}
+
+// Read one existing team skill's SKILL.md + provenance.json for an in-place
+// extension. Returns { dir, skillMd, provenance } or null when the skill/dir is
+// missing or unsafe.
+function _readTeamSkillDoc(teamId, name) {
+  const dir = _teamSkillDir(teamId, name);
+  if (!dir) return null;
+  let skillMd;
+  try { skillMd = fs.readFileSync(path.join(dir, "SKILL.md"), "utf8"); } catch { return null; }
+  let provenance = {};
+  try { provenance = JSON.parse(fs.readFileSync(path.join(dir, "provenance.json"), "utf8")) || {}; }
+  catch { provenance = {}; }
+  return { dir, skillMd, provenance };
+}
+
+// Level-3 curator auto-extend. Plans with the pure curator core
+// (planAutoExtensions), folds each auto-extendable cluster into its matched team
+// skill in place (re-synthesised SKILL.md via the heuristic extension draft +
+// unioned provenance + a version-bumping "extended" stamp), flips the candidate to
+// promoted, and raises review cards (extend mode preselected) for below-confidence /
+// gated / over-cap matches. Shares the per-pass cap via `capRemaining`. Best-effort:
+// a per-skill failure logs and continues. Returns
+// { extendedCount, consumedCanonicalIds } so the caller excludes claimed clusters
+// from the create-new auto-promotion path and debits the shared cap.
+function autoExtendStep(teamId, env, clusters, candidates, existingSkills, { convergenceThreshold, now, capRemaining } = {}) {
+  env = teamKnowledgeEnv(teamId, env); // #570: per-team knowledge config
+  const gates = resolvePromotionGates(env);
+  const { maxAutoPromotionsPerPass, extendConfidenceFloor } = knowledgeCurationConfig(env);
+  const cap = Number.isInteger(capRemaining) ? Math.max(0, capRemaining) : maxAutoPromotionsPerPass;
+  const plan = knowledgeCurator.planAutoExtensions(clusters, candidates, existingSkills, gates, {
+    threshold: convergenceThreshold,
+    cap,
+    confidenceFloor: extendConfidenceFloor,
+    teamId,
+    now,
+  });
+  if (plan.extend.length === 0 && plan.reviewExtend.length === 0) {
+    return { extendedCount: 0, consumedCanonicalIds: new Set() };
+  }
+
+  const byId = new Map((candidates || []).filter((c) => c && c.id).map((c) => [c.id, c]));
+  const extendedSkills = [];
+  for (const item of plan.extend) {
+    const doc = _readTeamSkillDoc(teamId, item.target.name);
+    if (!doc) {
+      // The match target vanished between the read and now — leave the cluster for
+      // the create-new path on the next pass (don't claim it as extended).
+      item.cluster && item.cluster.canonicalId && plan.consumedCanonicalIds.delete(item.cluster.canonicalId);
+      console.warn(`[Orchestrator] auto-extend: target skill '${item.target.name}' not readable for team ${teamId}`);
+      continue;
+    }
+    const ext = knowledgeCurator.curatorSkillExtension(doc.skillMd, item.candidate);
+    if (!ext.added) {
+      // No genuinely new content (all lessons already present) — settle the
+      // candidate as promoted so it isn't retried, but write nothing.
+      byId.set(item.candidate.id, { ...item.candidate, status: "promoted", resolvedAt: now, promotedBy: "curator", extendedInto: item.target.name });
+      continue;
+    }
+    const prov = knowledgeCurator.curatorExtendProvenance({
+      existingProv: doc.provenance, from: "team", to: "team", teamId,
+      entryIds: item.candidate.entryIds, candidate: item.candidate, now,
+    });
+    try {
+      const md = ext.skillMd.endsWith("\n") ? ext.skillMd : ext.skillMd + "\n";
+      fs.writeFileSync(path.join(doc.dir, "SKILL.md"), md);
+      fs.writeFileSync(path.join(doc.dir, "provenance.json"), JSON.stringify(prov, null, 2));
+    } catch (err) {
+      console.warn(`[Orchestrator] auto-extend: writing skill '${item.target.name}' failed: ${err.message}`);
+      continue;
+    }
+    // Version bump + history (#779 AC3): the content changed, so stampSkillDir
+    // increments the version and records an "extended" entry. Un-synthesised: the
+    // heuristic append is the failure fallback for the LLM extension draft.
+    try {
+      skillManifest.stampSkillDir(doc.dir, {
+        name: item.target.name, by: "curator", action: "extended", now,
+        note: `folded ${item.candidate.entryIds.length} converged ${item.candidate.entryIds.length === 1 ? "lesson" : "lessons"} (heuristic, un-synthesised)`,
+      });
+    } catch (err) { console.warn(`[Orchestrator] auto-extend: stamp '${item.target.name}' failed: ${err.message}`); }
+    byId.set(item.candidate.id, { ...item.candidate, status: "promoted", resolvedAt: now, promotedBy: "curator", extendedInto: item.target.name });
+    extendedSkills.push({ name: item.target.name, entryIds: item.candidate.entryIds });
+  }
+
+  // Below-confidence / gated / over-cap matches become review cards that
+  // pre-select extend mode with the matched target (the dialog's mode:'extend').
+  const raisedCards = [];
+  for (const item of plan.reviewExtend) {
+    if (byId.has(item.candidate.id)) continue; // already tracked
+    const card = {
+      ...item.candidate,
+      autoDrafted: true,
+      extendMode: true,
+      matchedSkill: { name: item.target.name, tier: item.target.tier || "team", score: item.target.score },
+      gateReason: item.reason,
+    };
+    byId.set(card.id, card);
+    raisedCards.push(card);
+  }
+
+  writeKnowledgeCandidates(teamId, [...byId.values()]);
+  _finalizeExtendedSkills(teamId, env, extendedSkills, now);
+  if (raisedCards.length > 0) {
+    appendKnowledgeEvents([{
+      type: "suggestion", ts: now, teamId, count: raisedCards.length,
+      samples: raisedCards.slice(0, 5).map((c) => ({
+        id: c.id, canonicalId: c.canonicalId, text: c.text, convergenceCount: c.convergenceCount,
+        extendMode: true, matchedSkill: c.matchedSkill ? c.matchedSkill.name : null,
+      })),
+    }]);
+  }
+  return { extendedCount: extendedSkills.length, consumedCanonicalIds: plan.consumedCanonicalIds };
+}
+
+// Shared finalize for a batch of curator auto-EXTENSIONS: emit the distinguishable
+// `extension` feed event (auto:true), archive the source KB entries folded in, and
+// re-sync the refreshed skill content to every member that already has it active
+// (the skill already exists, so — unlike a fresh promotion — this re-syncs rather
+// than activates). Each side is best-effort and never rolls the write back.
+function _finalizeExtendedSkills(teamId, env, extendedSkills, now) {
+  if (!extendedSkills || extendedSkills.length === 0) return;
+  appendKnowledgeEvents(extendedSkills.map((s) => ({
+    type: "extension", ts: now, teamId, skill: { name: s.name, tier: "team" }, entryIds: s.entryIds, auto: true,
+  })));
+  for (const s of extendedSkills) {
+    try {
+      removePromotedSourceEntries(teamId, s.entryIds, { skill: { name: s.name, tier: "team" }, auto: true, env });
+    } catch (err) {
+      console.warn(`[Orchestrator] auto extend-cleanup for '${s.name}' (team ${teamId}) failed: ${err.message}`);
+    }
+  }
+  if (orchestratorSingleton) {
+    (async () => {
+      for (const s of extendedSkills) {
+        try { await orchestratorSingleton.resyncTeamSkill(teamId, s.name); }
+        catch (err) { console.warn(`[Orchestrator] auto-extend resync '${s.name}' for team ${teamId} failed: ${err.message}`); }
+      }
+    })();
+  }
 }
 
 // Record an agent nomination (the `knowledge promote <id>` CLI verb). Builds a

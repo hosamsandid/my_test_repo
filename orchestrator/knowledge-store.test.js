@@ -365,7 +365,12 @@ test('resolvePromotionGates: defaults + team>global forced review + fail-safe cl
 });
 
 test('knowledgeCurationConfig: clamp + legacy default', () => {
-  assert.deepEqual(knowledgeCurationConfig(null), { maxAutoPromotionsPerPass: 3, autoThemeMinLessons: 4 });
+  // #779 added digest-routing + auto-extend knobs to the config shape (defaults:
+  // routing on, graduate at 4 agents, auto-extend follows autonomy (null), floor 100).
+  assert.deepEqual(knowledgeCurationConfig(null), {
+    maxAutoPromotionsPerPass: 3, autoThemeMinLessons: 4,
+    digestRouting: true, graduateAtAgents: 4, autoExtend: null, extendConfidenceFloor: 100,
+  });
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { maxAutoPromotionsPerPass: 10 } }).maxAutoPromotionsPerPass, 10);
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { maxAutoPromotionsPerPass: -2 } }).maxAutoPromotionsPerPass, 3);
   // #604: autoThemeMinLessons default 4, clamps to int >= 1.

@@ -242,3 +242,44 @@ test('credentialVisibleToTeam: used for the reassignment-orphan guard', () => {
   assert.equal(credentialVisibleToTeam({ scope: 'system', assignedTeamIds: ['payments'] }, 'risk'), false);
   assert.equal(credentialVisibleToTeam({ teamId: 'default' }, undefined), true); // legacy default
 });
+
+// ── Model Providers / LLM endpoints reuse the same primitives (#800) ───────
+// Model Providers are stored as LLM endpoints and carry the identical
+// scope/teamId/assignedTeamIds ownership shape, so the credential scope
+// predicates gate them unchanged. These assertions pin that reuse on a
+// provider-shaped entry (extra fields: baseUrl, models, authTokenId).
+
+test('normalizeCredential: preserves provider-shaped fields (baseUrl/models)', () => {
+  const legacy = { id: 'litellm', name: 'LiteLLM', teamId: 'payments',
+    baseUrl: 'https://p/v1', authTokenId: 'litellm-x', models: [{ id: 'm', displayName: 'M' }] };
+  const n = normalizeCredential(legacy);
+  assert.equal(n.scope, 'team');
+  assert.equal(n.teamId, 'payments');
+  assert.deepEqual(n.assignedTeamIds, []);
+  // The mask path reads these off the normalized copy — they must survive.
+  assert.equal(n.baseUrl, 'https://p/v1');
+  assert.equal(n.authTokenId, 'litellm-x');
+  assert.deepEqual(n.models, [{ id: 'm', displayName: 'M' }]);
+
+  const sys = normalizeCredential({ id: 'shared', scope: 'system', assignedTeamIds: ['payments'],
+    baseUrl: 'https://s/v1', models: [] });
+  assert.equal(sys.scope, 'system');
+  assert.equal(sys.teamId, null);
+  assert.equal(sys.baseUrl, 'https://s/v1');
+});
+
+test('provider gating: team-admin sees/manages own team provider, only uses assigned system one', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const teamProvider = { id: 'p1', scope: 'team', teamId: 'payments', baseUrl: 'https://p/v1' };
+  const sysProvider  = { id: 'p2', scope: 'system', assignedTeamIds: ['payments'], baseUrl: 'https://s/v1' };
+  const otherTeam    = { id: 'p3', scope: 'team', teamId: 'risk', baseUrl: 'https://r/v1' };
+  // AC1/AC2: visible = own team-scoped + system assigned to her team; another team's is absent.
+  assert.equal(visibleCredential(alice, teamProvider), true);
+  assert.equal(visibleCredential(alice, sysProvider), true);
+  assert.equal(visibleCredential(alice, otherTeam), false);
+  // AC5/AC6: manage own team-scoped; never a system-scoped provider.
+  assert.equal(canManageCredential(alice, teamProvider), true);
+  assert.equal(canManageCredential(alice, sysProvider), false);
+  // AC7: reassigning is System-Admin-only.
+  assert.equal(canReassignCredential(alice), false);
+});

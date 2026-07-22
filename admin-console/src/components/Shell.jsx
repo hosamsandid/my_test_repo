@@ -68,7 +68,7 @@ const NAV = [
     { path: '/jobs',         label: 'Triggers',            Icon: Clock },
     { path: '/github-events', label: 'GitHub Event Log',   Icon: History },
     { path: '/token-usage',  label: 'Token Usage',         Icon: BarChart3 },
-    { path: '/models',       label: 'Model Providers',     Icon: Sparkles, adminOnly: true },
+    { path: '/models',       label: 'Model Providers',     Icon: Sparkles, credAdmin: true },
     { path: '/mcp',          label: 'MCP Servers',         Icon: Server,  adminOnly: true },
     { path: '/patterns',     label: 'Patterns Catalog',    Icon: BookOpen },
     { path: '/maintenance-mode', label: 'Maintenance Mode', Icon: Wrench, adminOnly: true },
@@ -144,10 +144,11 @@ export default function Shell({ children }) {
 
   const sidebarWidth = collapsed ? 'var(--eb-sidebar-collapsed)' : 'var(--eb-sidebar-width)';
 
-  // Hide admin-only nav entries (Skills, Models, MCP, Maintenance Mode, …) from
-  // non-System-Admins (#584 AC8). The credential pages (SSH Keys, GitHub Tokens)
-  // use a looser `credAdmin` gate (#798): visible to System Admins AND any Team
-  // Admin, so a team can self-serve its credentials. Backend route guards
+  // Hide admin-only nav entries (Skills, MCP, Maintenance Mode, …) from
+  // non-System-Admins (#584 AC8). The credential pages (SSH Keys, GitHub Tokens,
+  // #798; Model Providers, #800) use a looser `credAdmin` gate: visible to
+  // System Admins AND any Team Admin, so a team can self-serve its credentials
+  // and model providers. Backend route guards
   // (App.jsx) and the scoped API back this up — defence-in-depth, not the only
   // enforcement. Drop sections that end up empty.
   const canSeeCreds = canAccessCredentialPages(user);

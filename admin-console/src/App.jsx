@@ -25,22 +25,23 @@ function TeamSetupRoute() {
   return <TeamSetup />;
 }
 
-// Route guard for System-Admin-only pages (#584 AC8): SSH Keys, GitHub Tokens,
-// Skills, Models, MCP, Maintenance Mode. A non-admin who navigates directly to
-// one of these URLs is bounced to /chats — the nav entries are already hidden
-// (Shell.jsx), so this only catches hand-typed / bookmarked links. The API is
-// independently scoped, so this is UX, not the security boundary.
+// Route guard for System-Admin-only pages (#584 AC8): Skills, MCP, Maintenance
+// Mode, Agent Templates. A non-admin who navigates directly to one of these
+// URLs is bounced to /chats — the nav entries are already hidden (Shell.jsx),
+// so this only catches hand-typed / bookmarked links. The API is independently
+// scoped, so this is UX, not the security boundary.
 function AdminRoute({ children }) {
   const { user } = useAuth();
   if (!user?.admin) return <Navigate to="/chats" replace />;
   return children;
 }
 
-// Route guard for the credential pages (SSH Keys, GitHub Tokens, #798). Unlike
-// AdminRoute these are open to any Team Admin (of ≥1 team) as well as System
-// Admins, so a team can self-serve its own credentials. A plain Team Member (or
-// a user in no team) is bounced to /chats. The API is independently scoped, so
-// this is UX, not the security boundary.
+// Route guard for the credential pages (SSH Keys, GitHub Tokens, #798; Model
+// Providers, #800). Unlike AdminRoute these are open to any Team Admin (of ≥1
+// team) as well as System Admins, so a team can self-serve its own credentials
+// / model providers. A plain Team Member (or a user in no team) is bounced to
+// /chats. The API is independently scoped, so this is UX, not the security
+// boundary.
 function CredentialRoute({ children }) {
   const { user } = useAuth();
   if (!canAccessCredentialPages(user)) return <Navigate to="/chats" replace />;
@@ -138,7 +139,7 @@ export default function App() {
           <Route path="/jobs"         element={<ScheduledJobs />} />
           <Route path="/github-events" element={<GithubEventLog />} />
           <Route path="/token-usage"  element={<TokenUsage />} />
-          <Route path="/models"       element={<AdminRoute><ModelRegistry /></AdminRoute>} />
+          <Route path="/models"       element={<CredentialRoute><ModelRegistry /></CredentialRoute>} />
           <Route path="/mcp"          element={<AdminRoute><McpServers /></AdminRoute>} />
           <Route path="/maintenance-mode" element={<AdminRoute><MaintenanceMode /></AdminRoute>} />
           <Route path="/teams"        element={<Teams />} />

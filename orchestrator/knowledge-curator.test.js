@@ -84,6 +84,8 @@ test('knowledgeCurationConfig: default cap + autoThemeMinLessons, clamp, legacy 
     digestRouting: true, graduateAtAgents: 4, autoExtend: null, extendConfidenceFloor: 100,
     // #780: domain routing on by default, soft skill budget 12, synthesis opt-in.
     domainRouting: true, skillBudget: 12, synthesizeSkills: false,
+    // #781: distillation cadence.
+    distillAfterAmendments: 5,
   });
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { maxAutoPromotionsPerPass: 7 } }).maxAutoPromotionsPerPass, 7);
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { maxAutoPromotionsPerPass: 0 } }).maxAutoPromotionsPerPass, 3);
@@ -448,6 +450,10 @@ test('curatorExtendProvenance: unions ids/agents, appends curator extension reco
   assert.equal(prov.lastExtendedBy, 'curator');
   assert.equal(prov.lastExtendedAt, NOW);
   assert.equal(prov.extensions.at(-1).extendedBy, 'curator');
+  // #781: an amendment bumps the distillation counter (legacy record → 0, so first = 1).
+  assert.equal(prov.amendmentsSinceDistillation, 1);
+  const twice = curatorExtendProvenance({ existingProv: prov, teamId: 'acme', entryIds: cand.entryIds, candidate: cand, now: NOW });
+  assert.equal(twice.amendmentsSinceDistillation, 2);
 });
 
 test('planAutoExtensions: id-lineage match + auto gate → extend, cluster claimed', () => {

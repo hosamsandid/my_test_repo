@@ -518,6 +518,13 @@ function curatorExtendProvenance({ existingProv, from = 'team', to = 'team', tea
     extendedAt: ts,
   });
 
+  // #781: every amendment bumps the distillation counter so a grown skill becomes
+  // due for a whole-document re-synthesis after X amendments (knowledge-distillation
+  // reads/resets amendmentsSinceDistillation). A legacy record with no counter reads
+  // as 0, so the first extension after the upgrade correctly counts as 1.
+  const prevAmendments = Number.isInteger(prev.amendmentsSinceDistillation) && prev.amendmentsSinceDistillation >= 0
+    ? prev.amendmentsSinceDistillation : 0;
+
   return {
     ...prev,
     fromTier: prev.fromTier || from,
@@ -533,6 +540,7 @@ function curatorExtendProvenance({ existingProv, from = 'team', to = 'team', tea
     extensions,
     lastExtendedAt: ts,
     lastExtendedBy: 'curator',
+    amendmentsSinceDistillation: prevAmendments + 1,
   };
 }
 

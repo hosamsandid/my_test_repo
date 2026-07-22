@@ -372,7 +372,11 @@ test('knowledgeCurationConfig: clamp + legacy default', () => {
     digestRouting: true, graduateAtAgents: 4, autoExtend: null, extendConfidenceFloor: 100,
     // #780: domain routing on by default, soft skill budget 12, synthesis opt-in.
     domainRouting: true, skillBudget: 12, synthesizeSkills: false,
+    // #781: distillation cadence — X amendments before a distillation is due.
+    distillAfterAmendments: 5,
   });
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { distillAfterAmendments: 8 } }).distillAfterAmendments, 8);
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { distillAfterAmendments: 0 } }).distillAfterAmendments, 5);
   // #780 domain-routing + budget knobs clamp/pass-through.
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { domainRouting: false } }).domainRouting, false);
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { skillBudget: 6 } }).skillBudget, 6);

@@ -2208,6 +2208,11 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
           <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{skill.label}</div>
             <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }} title={tierTip}>{tierMeta}</div>
+            {Array.isArray(skill.roles) && skill.roles.length > 0 && (
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }} title="Domain audience roles (#781)">
+                for: {skill.roles.join(', ')}
+              </div>
+            )}
           </div>
           {act && !act.active && (
             <button
@@ -2303,6 +2308,9 @@ function SkillInspector({ open, onClose, skill, teamId, status, busy, installedC
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDeactivate, setConfirmDeactivate] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // #781 distillation: preview a whole-skill re-synthesis (old vs. new), then apply.
+  const [distill, setDistill] = useState(null); // null | {loading} | {old,new,changed,reason} | {error}
+  const [distillBusy, setDistillBusy] = useState(false);
 
   const qs = (extra = {}) => {
     const q = new URLSearchParams({ source: src, ...extra });
@@ -2350,6 +2358,44 @@ function SkillInspector({ open, onClose, skill, teamId, status, busy, installedC
       .catch(e => { if (!cancelled) setLineageErr(e.message); });
     return () => { cancelled = true; };
   }, [open, tab, skill.label, src, teamId]);
+
+  // #781 §3.4: preview a distillation (re-synthesise the whole skill) — old vs. new.
+  const previewDistill = async () => {
+    setDistillBusy(true);
+    setDistill({ loading: true });
+    try {
+      const r = await fetch('/api/knowledge/distill', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ teamId, skill: skill.label, apply: false }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      setDistill({ old: d.old || '', new: d.new || '', changed: !!d.changed, reason: d.reason });
+    } catch (e) {
+      setDistill({ error: e.message });
+    } finally {
+      setDistillBusy(false);
+    }
+  };
+  // Apply the distillation. LLM failure leaves the skill byte-identical (AC2) — the
+  // backend enforces that; the UI just reports the outcome and refreshes the content.
+  const applyDistill = async () => {
+    setDistillBusy(true);
+    try {
+      const r = await fetch('/api/knowledge/distill', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ teamId, skill: skill.label, apply: true }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      if (d.changed && typeof d.new === 'string') setContent(d.new);
+      setDistill(null);
+    } catch (e) {
+      setDistill({ error: e.message });
+    } finally {
+      setDistillBusy(false);
+    }
+  };
 
   if (!open) return null;
 
@@ -2555,6 +2601,15 @@ function SkillInspector({ open, onClose, skill, teamId, status, busy, installedC
           </button>
         )}
         <button onClick={onShare} style={ghostBtn}><Share2 size={13} />Share…</button>
+        {skill.tier === 'team' && (
+          <button
+            onClick={previewDistill}
+            disabled={distillBusy}
+            title="Re-synthesise the whole skill from its accumulated content — dedupe, restructure, re-abstract. Shows a diff before applying."
+            style={ghostBtn}>
+            <Sparkles size={13} />{distillBusy && distill && distill.loading ? 'Distilling…' : 'Distill…'}
+          </button>
+        )}
         <a href={editorHref} style={ghostBtn} title="Open this skill in the Skills Registry with the tier/team filter applied">
           Open in Skill Editor <ExternalLink size={12} />
         </a>
@@ -2595,6 +2650,51 @@ function SkillInspector({ open, onClose, skill, teamId, status, busy, installedC
         onConfirm={() => { setConfirmDelete(false); onDelete(false); }}
         onCancel={() => setConfirmDelete(false)}
       />
+      {distill && (
+        <div
+          onClick={() => !distillBusy && setDistill(null)}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 70, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', boxShadow: 'var(--eb-shadow-lg)', maxWidth: 900, width: '100%', maxHeight: '85vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <div style={{ padding: 'var(--eb-space-3) var(--eb-space-4)', borderBottom: '1px solid var(--eb-border-default)', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Sparkles size={15} style={{ color: 'var(--eb-status-warning)' }} />
+              <strong style={{ fontSize: 'var(--eb-text-sm)' }}>Distill “{skill.label}”</strong>
+            </div>
+            <div style={{ padding: 'var(--eb-space-4)', overflow: 'auto', flex: 1 }}>
+              {distill.loading && <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Re-synthesising the skill…</div>}
+              {distill.error && <div style={{ color: 'var(--eb-status-error, #d33)', fontSize: 'var(--eb-text-sm)' }}>Distillation failed: {distill.error}</div>}
+              {!distill.loading && !distill.error && !distill.changed && (
+                <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
+                  {distill.reason === 'llm-failed'
+                    ? 'The re-synthesis did not produce a usable result — the skill is left unchanged.'
+                    : 'The distillation produced no change — the skill is already well-structured.'}
+                </div>
+              )}
+              {!distill.loading && !distill.error && distill.changed && (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                  <div>
+                    <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginBottom: 4 }}>Current</div>
+                    <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 'var(--eb-text-xs)', background: 'var(--eb-bg-elevated)', padding: 8, borderRadius: 6, margin: 0, maxHeight: '55vh', overflow: 'auto' }}>{distill.old}</pre>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginBottom: 4 }}>Distilled</div>
+                    <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 'var(--eb-text-xs)', background: 'var(--eb-bg-elevated)', padding: 8, borderRadius: 6, margin: 0, maxHeight: '55vh', overflow: 'auto' }}>{distill.new}</pre>
+                  </div>
+                </div>
+              )}
+            </div>
+            <div style={{ padding: 'var(--eb-space-3) var(--eb-space-4)', borderTop: '1px solid var(--eb-border-default)', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button onClick={() => setDistill(null)} disabled={distillBusy} style={ghostBtn}>Close</button>
+              {!distill.loading && !distill.error && distill.changed && (
+                <button onClick={applyDistill} disabled={distillBusy} style={primaryBtn}>
+                  {distillBusy ? 'Applying…' : 'Apply distillation'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </SidePanel>
   );
 }

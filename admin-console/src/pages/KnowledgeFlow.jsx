@@ -4,6 +4,7 @@ import {
   Brain, RefreshCw, X, ExternalLink, GitBranch, Sparkles, Check, Wand2,
   Archive, Share2, ShieldCheck, Ban, MessageSquare, Search, ArrowRight, Users,
   HelpCircle, BookOpen, Combine, Trash2, MoreHorizontal, FileText,
+  Inbox, Filter, RotateCcw, CheckCircle2, Circle,
 } from 'lucide-react';
 import InfoTip from '../components/InfoTip';
 import SidePanel from '../components/SidePanel';
@@ -16,6 +17,10 @@ import useSSE from '../hooks/useSSE';
 import { parseTeamParam, resolveSelectedTeam, teamTotals, streamScopeUrl } from './knowledge-scope';
 import { summarizeActivation } from './knowledge-activation-view';
 import { rolloutStatus } from './skill-rollout-view';
+import {
+  partitionSkills, tabCounts, buildInbox, skillMatchesQuery, hasNewEvidence,
+  INBOX_CAP, SUGGESTION_SOURCES,
+} from './skill-inbox-view';
 
 /*
  * Knowledge Flow — team-scoped (#560).
@@ -902,7 +907,7 @@ const TeamSection = React.forwardRef(function TeamSection({
 
         <FlowArrow />
 
-        {/* Skills */}
+        {/* Skills — lifecycle tabs + suggestion inbox (#775) */}
         <div>
           <ColHeader
             label="Skills"
@@ -912,13 +917,214 @@ const TeamSection = React.forwardRef(function TeamSection({
               text: 'Knowledge that proved important, packaged as a reusable instruction file agents load automatically when they work. Team skills serve this team; a skill can also be shared with other teams.',
             }}
           />
-          {/* Existing team skills first — they are more important than the suggestions below (#728). */}
-          {skills.map(sk => (
-            <SkillCard key={sk.id} skill={sk} teamId={team.id} onShare={() => onShareSkill(sk)} onReload={onControlsChanged} />
-          ))}
-          {suggestions.map(s => (
-            <SuggestionCard key={s.id} suggestion={s} onReview={() => onReviewSuggestion(s, skills)} />
-          ))}
+          <SkillsColumn
+            team={team}
+            skills={skills}
+            suggestions={suggestions}
+            pending={pending}
+            autonomy={autonomy}
+            onReviewSuggestion={onReviewSuggestion}
+            onShareSkill={onShareSkill}
+            onControlsChanged={onControlsChanged}
+          />
+          {privateSkills.length > 0 && (
+            <PrivateSkillsBlock teamId={team.id} skills={privateSkills} onLifted={onLifted} />
+          )}
+          <GlobalSkillPicker teamId={team.id} activeNames={activeSkillNames} onReload={onControlsChanged} />
+        </div>
+      </div>
+    </section>
+  );
+});
+
+/* ── Skills column: lifecycle tabs + suggestion inbox (#775) ────────────────── */
+
+const SKILL_TABS = [
+  ['inuse', 'In use', 'Skills active on this team — agents load them when they work.'],
+  ['ready', 'Ready', 'Promoted into the team library but not activated yet.'],
+  ['suggested', 'Suggested', 'Knowledge the collector thinks is worth turning into a skill.'],
+];
+
+function SkillsColumn({ team, skills, suggestions, pending, autonomy, onReviewSuggestion, onShareSkill, onControlsChanged }) {
+  const teamId = team.id;
+  const tabKey = `kf.skillTab.${teamId}`;
+  const seenKey = `kf.suggestSeen.${teamId}`;
+
+  const [tab, setTab] = useState(() => {
+    try { const v = localStorage.getItem(tabKey); return SKILL_TABS.some(t => t[0] === v) ? v : 'inuse'; }
+    catch { return 'inuse'; }
+  });
+  const [q, setQ] = useState('');
+  const [sortMode, setSortMode] = useState('evidence');
+  const [selected, setSelected] = useState(() => new Set());
+  const [triageOpen, setTriageOpen] = useState(false);
+  const [dismissing, setDismissing] = useState(null); // a single suggestion pending reason
+  const [flash, setFlash] = useState(null); // { kind, text }
+  const flashTimer = useRef(null);
+  const feedback = useCallback((kind, text) => {
+    setFlash({ kind, text });
+    clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => setFlash(null), kind === 'ok' ? 4000 : 9000);
+  }, []);
+
+  const counts = tabCounts(skills, suggestions);
+  const { inuse, ready } = useMemo(() => partitionSkills(skills), [skills]);
+
+  // "New evidence" dot on Suggested since the operator's last visit to the tab.
+  const [newDot, setNewDot] = useState(false);
+  useEffect(() => {
+    try { setNewDot(hasNewEvidence(suggestions, localStorage.getItem(seenKey))); }
+    catch { setNewDot(hasNewEvidence(suggestions, null)); }
+  }, [suggestions, seenKey]);
+
+  const chooseTab = useCallback((t) => {
+    setTab(t);
+    setSelected(new Set());
+    try { localStorage.setItem(tabKey, t); } catch { /* ignore */ }
+    if (t === 'suggested') {
+      try { localStorage.setItem(seenKey, new Date().toISOString()); } catch { /* ignore */ }
+      setNewDot(false);
+    }
+  }, [tabKey, seenKey]);
+
+  // Selection resets when the team changes underneath us.
+  useEffect(() => { setSelected(new Set()); }, [teamId]);
+
+  const toggleSel = useCallback((id) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const inuseF = useMemo(() => inuse.filter(sk => skillMatchesQuery(sk, q)), [inuse, q]);
+  const readyF = useMemo(() => ready.filter(sk => skillMatchesQuery(sk, q)), [ready, q]);
+  const inbox = useMemo(
+    () => buildInbox(suggestions, { mode: sortMode, now: Date.now(), cap: INBOX_CAP, query: q }),
+    [suggestions, sortMode, q],
+  );
+
+  const reload = useCallback(() => { onControlsChanged && onControlsChanged(); }, [onControlsChanged]);
+
+  // Bulk runner shared by the three tabs. `verb`/`noun` name the action + items
+  // for the per-item tally (#775 AC4 — partial failure lists what failed).
+  const runBulkAction = useCallback((items, fn, verb, noun) => {
+    if (items.length === 0) return;
+    runBulk(items, fn).then(results => {
+      const ok = results.filter(r => r.ok).length;
+      const failed = results.filter(r => !r.ok);
+      if (failed.length === 0) {
+        feedback('ok', `${verb} ${ok} ${noun}${ok === 1 ? '' : 's'}.`);
+      } else {
+        feedback('error', `${verb} ${ok}/${results.length}. Failed: ${failed.map(f => f.label).join(', ')}.`);
+      }
+      setSelected(new Set());
+      reload();
+    });
+  }, [feedback, reload]);
+
+  const doDismiss = useCallback((id, reason) => {
+    dismissSuggestion(teamId, id, reason)
+      .then(() => { feedback('ok', 'Dismissed — it won’t be proposed again.'); reload(); })
+      .catch(e => feedback('error', `Dismiss failed: ${e.message}`));
+  }, [teamId, feedback, reload]);
+
+  // The item set the bulk bar operates on for the current tab + selection.
+  const tabItems = tab === 'inuse' ? inuseF : tab === 'ready' ? readyF : inbox.shown;
+  const selItems = tabItems.filter(it => selected.has(it.id));
+
+  const suggestedEmpty = suggestions.length === 0;
+
+  return (
+    <div>
+      {/* Lifecycle tabs */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+        {SKILL_TABS.map(([key, label, tip]) => {
+          const n = counts[key];
+          const activeTab = tab === key;
+          return (
+            <button
+              key={key}
+              onClick={() => chooseTab(key)}
+              title={tip}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5, padding: '4px 10px',
+                border: `1px solid ${activeTab ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+                borderRadius: 'var(--eb-radius-full)', cursor: 'pointer',
+                background: activeTab ? 'var(--eb-accent-muted)' : 'transparent',
+                color: activeTab ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)',
+                fontSize: 'var(--eb-text-xs)', fontWeight: activeTab ? 'var(--eb-font-semibold)' : 'var(--eb-font-normal)',
+              }}>
+              {label}
+              <span style={{ fontVariantNumeric: 'tabular-nums', opacity: 0.85 }}>{n}</span>
+              {key === 'suggested' && newDot && (
+                <span title="New evidence since your last visit" style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--eb-status-warning)' }} />
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Search across all three tabs */}
+      <div style={{ position: 'relative', marginBottom: 'var(--eb-space-2)' }}>
+        <Search size={12} style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', color: 'var(--eb-text-muted)' }} />
+        <input
+          value={q}
+          onChange={e => setQ(e.target.value)}
+          placeholder="Search skills & suggestions…"
+          style={{
+            width: '100%', boxSizing: 'border-box', padding: '5px 8px 5px 26px',
+            border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+            background: 'var(--eb-bg-app)', color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-xs)',
+          }} />
+      </div>
+
+      {flash && (
+        <div style={{
+          fontSize: 'var(--eb-text-xs)', marginBottom: 'var(--eb-space-2)', padding: '4px 8px',
+          borderRadius: 'var(--eb-radius-md)',
+          color: flash.kind === 'ok' ? 'var(--eb-status-success)' : 'var(--eb-status-error, #d33)',
+          background: 'var(--eb-bg-app)', border: '1px solid var(--eb-border-default)',
+        }}>{flash.text}</div>
+      )}
+
+      {/* Bulk action bar (per tab) */}
+      {selItems.length > 0 && (
+        <BulkActionBar
+          tab={tab}
+          items={selItems}
+          onClear={() => setSelected(new Set())}
+          onActivate={() => runBulkAction(selItems, sk => activateSkill(teamId, sk.label), 'Activated', 'skill')}
+          onDeactivate={() => runBulkAction(selItems, sk => deactivateSkill(teamId, sk.label), 'Deactivated', 'skill')}
+          onDismiss={() => runBulkAction(selItems, s => dismissSuggestion(teamId, s.id), 'Dismissed', 'suggestion')}
+        />
+      )}
+
+      {/* Tab content */}
+      {tab === 'inuse' && (
+        inuseF.length === 0
+          ? <ColEmpty text={q ? 'No active skills match your search.' : 'No skills in use yet.'} />
+          : inuseF.map(sk => (
+            <SelectableRow key={sk.id} selected={selected.has(sk.id)} onToggle={() => toggleSel(sk.id)}>
+              <SkillCard skill={sk} teamId={teamId} onShare={() => onShareSkill(sk)} onReload={reload} />
+            </SelectableRow>
+          ))
+      )}
+
+      {tab === 'ready' && (
+        readyF.length === 0
+          ? <ColEmpty text={q ? 'No ready skills match your search.' : 'Nothing waiting to be activated.'} />
+          : readyF.map(sk => (
+            <SelectableRow key={sk.id} selected={selected.has(sk.id)} onToggle={() => toggleSel(sk.id)}>
+              <SkillCard skill={sk} teamId={teamId} onShare={() => onShareSkill(sk)} onReload={reload} />
+            </SelectableRow>
+          ))
+      )}
+
+      {tab === 'suggested' && (
+        <>
+          {/* Gate-stopped promotions still surface here (not part of the ranked inbox). */}
           {pending.map(p => {
             const s = suggestions.find(x => x.id === p.suggestionId);
             return s ? null : (
@@ -929,22 +1135,219 @@ const TeamSection = React.forwardRef(function TeamSection({
               </div>
             );
           })}
-          {skills.length === 0 && suggestions.length === 0 && pending.length === 0 && (
-            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', padding: 'var(--eb-space-2) 0' }}>
-              No skills yet. {autonomy >= 2
-                ? 'When several agents learn the same thing, a suggestion appears here to turn it into a reusable skill.'
-                : 'Set Autonomy to “2 Suggest” and you’ll get a suggestion here whenever several agents learn the same thing.'}
-            </div>
+
+          {suggestedEmpty ? (
+            <ColEmpty text={autonomy >= 2
+              ? 'When several agents learn the same thing, a suggestion appears here to turn it into a reusable skill.'
+              : 'Set Autonomy to “2 Suggest” and you’ll get a suggestion here whenever several agents learn the same thing.'} />
+          ) : inbox.total === 0 ? (
+            <ColEmpty text="No suggestions match your search." />
+          ) : (
+            <>
+              {/* Sort control */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 'var(--eb-space-2)' }}>
+                <span style={{ fontSize: 10, color: 'var(--eb-text-muted)' }}>Sort</span>
+                <select
+                  value={sortMode}
+                  onChange={e => setSortMode(e.target.value)}
+                  style={{ fontSize: 'var(--eb-text-xs)', padding: '2px 6px', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-app)', color: 'var(--eb-text-primary)' }}>
+                  <option value="evidence">by evidence</option>
+                  <option value="newest">newest</option>
+                  <option value="oldest">oldest</option>
+                </select>
+              </div>
+
+              {inbox.themed.length > 0 && (
+                <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.4, color: 'var(--eb-text-muted)', margin: '2px 0 4px' }}>Theme groups</div>
+              )}
+              {inbox.themed.map(s => (
+                <SuggestionCard
+                  key={s.id} suggestion={s}
+                  selectable selected={selected.has(s.id)} onToggleSelect={() => toggleSel(s.id)}
+                  onReview={() => onReviewSuggestion(s, skills)}
+                  onDismiss={() => setDismissing(s)} />
+              ))}
+
+              {inbox.singles.length > 0 && inbox.themed.length > 0 && (
+                <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.4, color: 'var(--eb-text-muted)', margin: '6px 0 4px' }}>Single suggestions</div>
+              )}
+              {inbox.singles.map(s => (
+                <SuggestionCard
+                  key={s.id} suggestion={s}
+                  selectable selected={selected.has(s.id)} onToggleSelect={() => toggleSel(s.id)}
+                  onReview={() => onReviewSuggestion(s, skills)}
+                  onDismiss={() => setDismissing(s)} />
+              ))}
+
+              {inbox.hiddenCount > 0 && (
+                <button
+                  onClick={() => setTriageOpen(true)}
+                  style={{ ...miniBtn, display: 'flex', alignItems: 'center', gap: 4, marginTop: 4 }}
+                  title="Open the full triage view">
+                  <Inbox size={12} /> View all {inbox.total} <ArrowRight size={11} />
+                </button>
+              )}
+            </>
           )}
-          {privateSkills.length > 0 && (
-            <PrivateSkillsBlock teamId={team.id} skills={privateSkills} onLifted={onLifted} />
+        </>
+      )}
+
+      {dismissing && (
+        <DismissDialog
+          suggestion={dismissing}
+          onCancel={() => setDismissing(null)}
+          onConfirm={(reason) => { doDismiss(dismissing.id, reason); setDismissing(null); }} />
+      )}
+
+      {triageOpen && (
+        <TriageModal
+          teamId={teamId}
+          openSuggestions={suggestions}
+          skills={skills}
+          onReview={onReviewSuggestion}
+          onDismiss={(id, reason) => doDismiss(id, reason)}
+          onUndismiss={(id) => undismissSuggestion(teamId, id).then(() => { feedback('ok', 'Restored to the inbox.'); reload(); }).catch(e => feedback('error', `Un-dismiss failed: ${e.message}`))}
+          onClose={() => setTriageOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+function ColEmpty({ text }) {
+  return (
+    <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', padding: 'var(--eb-space-2) 0' }}>{text}</div>
+  );
+}
+
+// A skill card with a leading select toggle for the bulk action bar.
+function SelectableRow({ selected, onToggle, children }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginBottom: 'var(--eb-space-2)' }}>
+      <button
+        onClick={onToggle}
+        title={selected ? 'Deselect' : 'Select for a bulk action'}
+        style={{ background: 'none', border: 'none', padding: '2px 0 0', cursor: 'pointer', flexShrink: 0 }}>
+        {selected
+          ? <CheckCircle2 size={15} style={{ color: 'var(--eb-accent-primary)' }} />
+          : <Circle size={15} style={{ color: 'var(--eb-text-muted)' }} />}
+      </button>
+      <div style={{ flex: 1, minWidth: 0 }}>{children}</div>
+    </div>
+  );
+}
+
+function BulkActionBar({ tab, items, onClear, onActivate, onDeactivate, onDismiss }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8, marginBottom: 'var(--eb-space-2)',
+      border: '1px solid var(--eb-accent-primary)', borderRadius: 'var(--eb-radius-md)',
+      background: 'var(--eb-accent-muted)', padding: 'var(--eb-space-2) var(--eb-space-3)',
+    }}>
+      <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)' }}>
+        {items.length} selected
+      </span>
+      <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+        {tab === 'ready' && (
+          <button onClick={onActivate} style={{ ...primaryBtn, padding: '2px 10px' }}>Activate</button>
+        )}
+        {tab === 'inuse' && (
+          <button onClick={onDeactivate} style={{ ...miniBtn }}>Deactivate</button>
+        )}
+        {tab === 'suggested' && (
+          <button onClick={onDismiss} style={{ ...miniBtn, display: 'flex', alignItems: 'center', gap: 4 }}><Ban size={11} /> Dismiss</button>
+        )}
+        <button onClick={onClear} style={miniBtn}>Clear</button>
+      </div>
+    </div>
+  );
+}
+
+// Full-height triage view over ALL suggestions (open + optionally dismissed),
+// with search and a source filter (#775 §3). Dismissed candidates are fetched
+// lazily via ?status=dismissed and can be un-dismissed.
+function TriageModal({ teamId, openSuggestions, skills, onReview, onDismiss, onUndismiss, onClose }) {
+  const [q, setQ] = useState('');
+  const [source, setSource] = useState(null); // null = all
+  const [showDismissed, setShowDismissed] = useState(false);
+  const [dismissedRows, setDismissedRows] = useState(null); // null = not loaded
+  const [dismissing, setDismissing] = useState(null);
+
+  useEffect(() => {
+    if (!showDismissed || dismissedRows !== null) return;
+    let cancelled = false;
+    fetch(`/api/knowledge/promotion-suggestions?team=${encodeURIComponent(teamId)}&status=dismissed`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (!cancelled) setDismissedRows(Array.isArray(d?.suggestions) ? d.suggestions : []); })
+      .catch(() => { if (!cancelled) setDismissedRows([]); });
+    return () => { cancelled = true; };
+  }, [showDismissed, dismissedRows, teamId]);
+
+  const base = showDismissed ? (dismissedRows || []) : openSuggestions;
+  const view = useMemo(
+    () => buildInbox(base, { mode: 'evidence', now: Date.now(), cap: null, query: q, sourceFilter: source }),
+    [base, q, source],
+  );
+
+  return (
+    <div
+      onClick={onClose}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000, display: 'flex', justifyContent: 'center', alignItems: 'stretch', padding: 'var(--eb-space-4)' }}>
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{ background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-lg)', width: 'min(720px, 96vw)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: 'var(--eb-space-3) var(--eb-space-4)', borderBottom: '1px solid var(--eb-border-default)' }}>
+          <Inbox size={15} style={{ color: 'var(--eb-accent-primary)' }} />
+          <span style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
+            Suggestion triage — {teamId}
+          </span>
+          <button onClick={onClose} style={{ ...miniBtn, marginLeft: 'auto', display: 'flex', alignItems: 'center' }}><X size={13} /></button>
+        </div>
+
+        {/* Filters */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', padding: 'var(--eb-space-3) var(--eb-space-4)', borderBottom: '1px solid var(--eb-border-default)' }}>
+          <div style={{ position: 'relative', flex: '1 1 200px' }}>
+            <Search size={12} style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', color: 'var(--eb-text-muted)' }} />
+            <input
+              value={q} onChange={e => setQ(e.target.value)} placeholder="Search…"
+              style={{ width: '100%', boxSizing: 'border-box', padding: '5px 8px 5px 26px', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-app)', color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-xs)' }} />
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <Filter size={12} style={{ color: 'var(--eb-text-muted)' }} />
+            <Chip active={source === null} onClick={() => setSource(null)}>all</Chip>
+            {SUGGESTION_SOURCES.map(s => (
+              <Chip key={s} active={source === s} onClick={() => setSource(source === s ? null : s)}>{s}</Chip>
+            ))}
+          </div>
+          <Chip active={showDismissed} onClick={() => setShowDismissed(v => !v)} title="Show suggestions you dismissed earlier">dismissed</Chip>
+        </div>
+
+        {/* List */}
+        <div style={{ overflowY: 'auto', padding: 'var(--eb-space-3) var(--eb-space-4)', maxHeight: '70vh' }}>
+          {showDismissed && dismissedRows === null ? (
+            <ColEmpty text="Loading dismissed suggestions…" />
+          ) : view.total === 0 ? (
+            <ColEmpty text={showDismissed ? 'No dismissed suggestions.' : 'Nothing matches these filters.'} />
+          ) : (
+            view.shown.map(s => (
+              <SuggestionCard
+                key={s.id} suggestion={s}
+                onReview={() => { onReview(s, skills); onClose(); }}
+                onDismiss={() => setDismissing(s)}
+                onUndismiss={() => { onUndismiss(s.id); setDismissedRows(rows => (rows || []).filter(r => r.id !== s.id)); }} />
+            ))
           )}
-          <GlobalSkillPicker teamId={team.id} activeNames={activeSkillNames} onReload={onControlsChanged} />
         </div>
       </div>
-    </section>
+
+      {dismissing && (
+        <DismissDialog
+          suggestion={dismissing}
+          onCancel={() => setDismissing(null)}
+          onConfirm={(reason) => { onDismiss(dismissing.id, reason); setDismissing(null); }} />
+      )}
+    </div>
   );
-});
+}
 
 /* ── Overview table — human-readable, one row per learned fact (#635) ───────── */
 
@@ -1944,11 +2347,26 @@ const amberCard = {
   marginBottom: 'var(--eb-space-2)',
 };
 
-function SuggestionCard({ suggestion, onReview }) {
+function SuggestionCard({ suggestion, onReview, onDismiss, onUndismiss, selectable, selected, onToggleSelect }) {
   const related = suggestion.source === 'related';
+  const dismissed = suggestion.status === 'dismissed';
   return (
-    <div style={{ ...amberCard, flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
+    <div style={{
+      ...amberCard, flexDirection: 'column', alignItems: 'stretch', gap: 6,
+      ...(selected ? { borderStyle: 'solid', borderColor: 'var(--eb-accent-primary)', background: 'var(--eb-accent-muted)' } : {}),
+      ...(dismissed ? { opacity: 0.7, borderStyle: 'solid', borderColor: 'var(--eb-border-default)' } : {}),
+    }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        {selectable && (
+          <button
+            onClick={onToggleSelect}
+            title={selected ? 'Deselect' : 'Select for a bulk action'}
+            style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex', flexShrink: 0 }}>
+            {selected
+              ? <CheckCircle2 size={14} style={{ color: 'var(--eb-accent-primary)' }} />
+              : <Circle size={14} style={{ color: 'var(--eb-text-muted)' }} />}
+          </button>
+        )}
         {related
           ? <Combine size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
           : <Sparkles size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />}
@@ -1977,7 +2395,70 @@ function SuggestionCard({ suggestion, onReview }) {
           <span style={{ color: 'var(--eb-text-muted)' }}> + {suggestion.lessonCount - 1} related lesson{suggestion.lessonCount === 2 ? '' : 's'}</span>
         )}
       </div>
-      <button onClick={onReview} title="Open the review dialog — nothing is promoted until you confirm" style={{ ...primaryBtn, alignSelf: 'flex-end' }}>Review & promote</button>
+      {dismissed && suggestion.dismissReason && (
+        <div style={{ fontSize: 10, color: 'var(--eb-text-muted)' }}>
+          dismissed · {DISMISS_REASON_LABELS[suggestion.dismissReason] || suggestion.dismissReason}
+        </div>
+      )}
+      <div style={{ display: 'flex', gap: 6, alignSelf: 'flex-end', alignItems: 'center' }}>
+        {dismissed ? (
+          onUndismiss && (
+            <button onClick={onUndismiss} title="Put this suggestion back in the inbox" style={{ ...miniBtn, display: 'flex', alignItems: 'center', gap: 4 }}>
+              <RotateCcw size={11} /> Un-dismiss
+            </button>
+          )
+        ) : (
+          <>
+            {onDismiss && (
+              <button onClick={onDismiss} title="Turn this suggestion down — it won’t be re-proposed. The underlying lessons stay in team knowledge." style={{ ...miniBtn, display: 'flex', alignItems: 'center', gap: 4 }}>
+                <Ban size={11} /> Dismiss
+              </button>
+            )}
+            <button onClick={onReview} title="Open the review dialog — nothing is promoted until you confirm" style={primaryBtn}>Review &amp; promote</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Structured dismiss reasons — the closed set the orchestrator validates (#775).
+const DISMISS_REASON_LABELS = {
+  'not-relevant': 'not relevant',
+  'already-covered': 'already covered',
+  'too-specific': 'too specific',
+};
+
+// Small modal to pick an optional reason when dismissing one suggestion.
+function DismissDialog({ suggestion, onCancel, onConfirm }) {
+  const [reason, setReason] = useState(null);
+  return (
+    <div
+      onClick={onCancel}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{ background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-lg)', padding: 'var(--eb-space-4)', width: 'min(440px, 92vw)' }}>
+        <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)', marginBottom: 6 }}>
+          Dismiss this suggestion?
+        </div>
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginBottom: 'var(--eb-space-3)' }}>
+          It won’t be proposed again. The underlying lessons stay in team knowledge, and you can un-dismiss it later from “View all”.
+        </div>
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)', marginBottom: 4 }}>Reason (optional)</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 'var(--eb-space-3)' }}>
+          {Object.entries(DISMISS_REASON_LABELS).map(([k, label]) => (
+            <label key={k} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)', cursor: 'pointer' }}>
+              <input type="radio" name="dismiss-reason" checked={reason === k} onChange={() => setReason(reason === k ? null : k)} onClick={() => reason === k && setReason(null)} />
+              {label}
+            </label>
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button onClick={onCancel} style={miniBtn}>Cancel</button>
+          <button onClick={() => onConfirm(reason)} style={primaryBtn}>Dismiss</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2493,6 +2974,47 @@ function activateSkill(teamId, skillName) {
     if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
     return d;
   });
+}
+
+function deactivateSkill(teamId, skillName) {
+  return fetch('/api/knowledge/deactivate', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ teamId, skillName }),
+  }).then(async r => {
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    return d;
+  });
+}
+
+function dismissSuggestion(teamId, id, reason) {
+  return fetch(`/api/knowledge/promotion-suggestions/${encodeURIComponent(id)}/dismiss`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ team: teamId, ...(reason ? { reason } : {}) }),
+  }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return true; });
+}
+
+function undismissSuggestion(teamId, id) {
+  return fetch(`/api/knowledge/promotion-suggestions/${encodeURIComponent(id)}/undismiss`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ team: teamId }),
+  }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return true; });
+}
+
+// Run an async action over each selected item sequentially, collecting a
+// per-item {label, ok, error} so a partial failure names exactly what failed
+// (#775 AC4). Never rejects — the bulk bar always reports a full tally.
+// `labelOf` turns an item into a human-readable name (skills have `.label`,
+// suggestions fall back to their draft name / text / id).
+async function runBulk(items, fn, labelOf) {
+  const name = labelOf || (it => it.label || (it.draft && it.draft.name)
+    || (it.text ? `${it.text.slice(0, 40)}…` : it.id));
+  const results = [];
+  for (const it of items) {
+    try { await fn(it); results.push({ label: name(it), ok: true }); }
+    catch (e) { results.push({ label: name(it), ok: false, error: e.message }); }
+  }
+  return results;
 }
 
 // "active for k/n members" (k = seeded), or plain "activated" for standalone.

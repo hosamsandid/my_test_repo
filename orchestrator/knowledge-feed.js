@@ -100,6 +100,29 @@ function buildPromotionCleanupEvent({ teamId, skill, entryIds, auto, ts } = {}) 
   };
 }
 
+// Optional structured reason an operator gives when dismissing a suggestion
+// (#775 §4). Free text is rejected — only this closed set is stored/echoed.
+const DISMISS_REASONS = ['not-relevant', 'already-covered', 'too-specific'];
+
+function normalizeDismissReason(reason) {
+  return DISMISS_REASONS.includes(reason) ? reason : null;
+}
+
+// One `dismissal` / `undismiss` feed event (#775 §4, transparency principle):
+// the operator turned a promotion suggestion down (with an optional reason) or
+// restored a previously-dismissed one. The underlying lessons are untouched;
+// this only records the decision so the live feed shows it happened.
+function buildDismissalEvent({ teamId, suggestionId, reason, text, undo, ts } = {}) {
+  return {
+    type: undo ? 'undismiss' : 'dismissal',
+    ts: typeof ts === 'string' && ts.trim() ? ts.trim() : new Date().toISOString(),
+    teamId: typeof teamId === 'string' ? teamId : null,
+    suggestionId: typeof suggestionId === 'string' ? suggestionId : null,
+    reason: undo ? null : normalizeDismissReason(reason),
+    text: typeof text === 'string' ? text : null,
+  };
+}
+
 function serializeEvent(event) {
   return JSON.stringify(event);
 }
@@ -110,6 +133,9 @@ module.exports = {
   shouldRefresh,
   buildHarvestEvent,
   buildPromotionCleanupEvent,
+  buildDismissalEvent,
+  DISMISS_REASONS,
+  normalizeDismissReason,
   leanEntry,
   parsePushEntries,
   serializeEvent,

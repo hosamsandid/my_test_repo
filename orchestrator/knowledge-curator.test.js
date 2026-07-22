@@ -323,6 +323,25 @@ test('planAutoPromoteThemes: empty inputs → empty plan', () => {
   assert.deepEqual(planAutoPromoteThemes(null, null, null, {}), { promote: [], defer: [] });
 });
 
+test('planAutoPromoteThemes: resolveDomain → domain-based naming, absent → lesson-slug (AC4)', () => {
+  const clusters = themeClusters(accumulationEntries());
+  const gates = resolvePromotionGates(null);
+  // No resolver → legacy lesson-slug name (backward-compatible).
+  const slug = planAutoPromoteThemes(clusters, [], gates, { autoThemeMinLessons: 4, cap: 3, teamId: 'acme', now: NOW });
+  assert.equal(slug.promote.length, 1);
+  const slugName = slug.promote[0].name;
+  // A resolver that places the theme in a domain → the skill is named after it.
+  const resolveDomain = () => ({ id: 'review-practice', name: 'Review practice' });
+  const domained = planAutoPromoteThemes(clusters, [], gates, { autoThemeMinLessons: 4, cap: 3, teamId: 'acme', now: NOW, resolveDomain });
+  assert.equal(domained.promote.length, 1);
+  assert.equal(domained.promote[0].name, 'review-practice');
+  assert.equal(domained.promote[0].draft.name, 'review-practice');
+  assert.notEqual(domained.promote[0].name, slugName);
+  // A resolver that finds no domain → falls back to the lesson-slug name.
+  const unresolved = planAutoPromoteThemes(clusters, [], gates, { autoThemeMinLessons: 4, cap: 3, teamId: 'acme', now: NOW, resolveDomain: () => null });
+  assert.equal(unresolved.promote[0].name, slugName);
+});
+
 test('curatorThemeSkillDraft: accumulation framing, member texts, no secret fields', () => {
   const groups = groupRelatedClusters(themeClusters(accumulationEntries()), { relatedThreshold: 0.3 });
   const cand = themeToCandidate(groups[0], { teamId: 'acme', now: NOW });

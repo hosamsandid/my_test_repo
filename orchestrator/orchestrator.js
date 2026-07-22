@@ -3383,9 +3383,35 @@ function runConvergenceCollector(teamId, envArg, opts = {}) {
     }
     // #604: strong single-role accumulation themes are also auto-promoted (and
     // auto-activated) at level 3. Re-read the store: the steps above just rewrote it.
+    // #780 AC4: resolve each theme's best-matching domain so it is named after the
+    // domain (not a lesson-slug). Read-only — never seeds domains here; when the
+    // team has no taxonomy the resolver is null and naming stays lesson-slug (the
+    // backward-compatible no-op). Reuses the same heuristic classifier as _routeDomains.
+    let resolveThemeDomain = null;
+    try {
+      const themeDomains = readTeamDomainsDoc(teamId).domains;
+      if (themeDomains.length > 0) {
+        const existingSkills = readTeamSkillsForMatch(teamId);
+        const skillEntryIdsByDomain = {};
+        for (const d of themeDomains) {
+          const sk = existingSkills.find((s) => s.name === knowledgeDomains.domainSkillName(d));
+          if (sk) skillEntryIdsByDomain[d.id] = sk.entryIds;
+        }
+        const tagsByEntryId = {};
+        for (const e of shardEntries) {
+          if (e && e.id && Array.isArray(e.tags) && e.tags.length) tagsByEntryId[e.id] = e.tags;
+        }
+        resolveThemeDomain = (cand) => {
+          const m = knowledgeRouting.classifyCandidateToDomain(cand, themeDomains, { skillEntryIdsByDomain, tagsByEntryId });
+          return m ? (themeDomains.find((d) => d.id === m.domainId) || null) : null;
+        };
+      }
+    } catch (err) {
+      console.warn(`[Orchestrator] theme domain resolver for '${teamId}' failed: ${err.message}`);
+    }
     try {
       const n = autoPromoteThemesStep(teamId, env, eligibleClusters, readKnowledgeCandidates(teamId), {
-        relatedThreshold, now, capRemaining: maxAutoPromotionsPerPass - capUsed,
+        relatedThreshold, now, capRemaining: maxAutoPromotionsPerPass - capUsed, resolveDomain: resolveThemeDomain,
       });
       capUsed += (n || 0);
     } catch (err) {
@@ -3777,7 +3803,7 @@ function _finalizePromotedSkills(teamId, env, promotedSkills, now) {
 // event + source archival + auto-activation). Weaker/gated/over-cap themes are NOT
 // raised here — the caller's raiseRelatedSuggestions raises the remainder as cards
 // (planRelatedSuggestions naturally excludes the clusters this step just promoted).
-function autoPromoteThemesStep(teamId, env, clusters, candidates, { relatedThreshold, now, capRemaining } = {}) {
+function autoPromoteThemesStep(teamId, env, clusters, candidates, { relatedThreshold, now, capRemaining, resolveDomain } = {}) {
   env = teamKnowledgeEnv(teamId, env); // #570: per-team knowledge config
   const gates = resolvePromotionGates(env);
   const { maxAutoPromotionsPerPass, autoThemeMinLessons } = knowledgeCurationConfig(env);
@@ -3789,6 +3815,7 @@ function autoPromoteThemesStep(teamId, env, clusters, candidates, { relatedThres
     relatedThreshold,
     teamId,
     now,
+    resolveDomain, // #780 AC4: domain-based naming for auto-promoted themes
   });
   if (plan.promote.length === 0) return 0;
 
@@ -9270,7 +9297,7 @@ async function main() {
           if (r.event) appendKnowledgeEvents([r.event]);
           return respond(r.doc);
         } catch (err) {
-          res.writeHead(err && err.status === 400 ? 400 : 400, { 'Content-Type': 'application/json' });
+          res.writeHead(err && err.status === 400 ? 400 : 500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
         }
       });

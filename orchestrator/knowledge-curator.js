@@ -329,7 +329,7 @@ function planAutoPromotions(clusters, candidates, gates, { threshold = 2, cap = 
  */
 function planAutoPromoteThemes(clusters, candidates, gates, {
   autoThemeMinLessons = 4, cap = 3, relatedThreshold = 0.3,
-  minLessons = 2, minAgents = 2, strongLessons = 3, teamId, now,
+  minLessons = 2, minAgents = 2, strongLessons = 3, teamId, now, resolveDomain,
 } = {}) {
   const rows = Array.isArray(candidates) ? candidates : [];
   const byId = new Map(
@@ -380,7 +380,11 @@ function planAutoPromoteThemes(clusters, candidates, gates, {
       defer.push({ candidate, transition, reason: 'over-cap' });
       continue;
     }
-    const draft = curatorThemeSkillDraft(candidate);
+    // #780 AC4: name an auto-promoted theme after its best-matching domain (the
+    // caller supplies the resolver — this module stays fs-/routing-free); the
+    // lesson-slug name in curatorThemeSkillDraft is a last-resort fallback only.
+    const domain = typeof resolveDomain === 'function' ? resolveDomain(candidate) : null;
+    const draft = curatorThemeSkillDraft(candidate, { domain });
     promote.push({ candidate, transition, name: draft.name, draft });
   }
   return { promote, defer };

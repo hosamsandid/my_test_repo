@@ -4,7 +4,7 @@ import {
   Brain, RefreshCw, X, ExternalLink, GitBranch, Sparkles, Check, Wand2,
   Archive, Share2, ShieldCheck, Ban, MessageSquare, Search, ArrowRight, Users,
   HelpCircle, BookOpen, Combine, Trash2, MoreHorizontal, FileText,
-  Inbox, Filter, RotateCcw, CheckCircle2, Circle,
+  Inbox, Filter, RotateCcw, CheckCircle2, Circle, Play, SkipForward, Layers,
 } from 'lucide-react';
 import InfoTip from '../components/InfoTip';
 import SidePanel from '../components/SidePanel';
@@ -79,6 +79,39 @@ function manualSuggestionFrom(items) {
     convergence: agents,
     convergenceCount: agents.length,
     lessonCount: list.length,
+  };
+}
+
+// Combine several promotion SUGGESTIONS into one ad-hoc candidate for the merge
+// basket (#776 §2). Like manualSuggestionFrom but the inputs are candidates, not
+// raw KB items: union their entryIds / members / convergence so the promotion
+// dialog seeds from every lesson, and carry `suggestionIds` so the promote path
+// marks ALL merged cards promoted server-side (they all leave the inbox).
+function mergeSuggestionsInto(list) {
+  const arr = Array.isArray(list) ? list.filter(Boolean) : [];
+  if (arr.length === 0) return null;
+  const entryIds = [...new Set(arr.flatMap(s => Array.isArray(s.entryIds) ? s.entryIds : []))];
+  const members = [];
+  const seen = new Set();
+  for (const s of arr) {
+    for (const m of (Array.isArray(s.members) ? s.members : [])) {
+      const key = m && m.id ? m.id : JSON.stringify(m);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      members.push(m);
+    }
+  }
+  const convergence = [...new Set(arr.flatMap(s => Array.isArray(s.convergence) ? s.convergence : []))].sort();
+  return {
+    id: null, // ad-hoc: server rebuilds provenance from the union of entry ids
+    source: 'related',
+    text: arr.map(s => s.text).filter(Boolean).join(' • '),
+    entryIds,
+    members,
+    convergence,
+    convergenceCount: convergence.length,
+    lessonCount: members.length || entryIds.length,
+    suggestionIds: arr.map(s => s.id).filter(Boolean),
   };
 }
 
@@ -959,6 +992,10 @@ function SkillsColumn({ team, skills, suggestions, pending, autonomy, onReviewSu
   const [selected, setSelected] = useState(() => new Set());
   const [triageOpen, setTriageOpen] = useState(false);
   const [dismissing, setDismissing] = useState(null); // a single suggestion pending reason
+  // #776 §2: the merge basket collects candidates to promote into ONE skill.
+  const [basket, setBasket] = useState(() => new Map()); // id -> suggestion
+  // #776 §1: guided one-at-a-time review flow over the ranked suggestion list.
+  const [reviewOpen, setReviewOpen] = useState(false);
   const [flash, setFlash] = useState(null); // { kind, text }
   const flashTimer = useRef(null);
   const feedback = useCallback((kind, text) => {
@@ -1004,6 +1041,11 @@ function SkillsColumn({ team, skills, suggestions, pending, autonomy, onReviewSu
     () => buildInbox(suggestions, { mode: sortMode, now: Date.now(), cap: INBOX_CAP, query: q }),
     [suggestions, sortMode, q],
   );
+  // #776 §1: review mode walks the FULL ranked/filtered list (not the top-10 cap).
+  const reviewList = useMemo(
+    () => buildInbox(suggestions, { mode: sortMode, now: Date.now(), cap: null, query: q }).shown,
+    [suggestions, sortMode, q],
+  );
 
   const reload = useCallback(() => { onControlsChanged && onControlsChanged(); }, [onControlsChanged]);
 
@@ -1029,6 +1071,45 @@ function SkillsColumn({ team, skills, suggestions, pending, autonomy, onReviewSu
       .then(() => { feedback('ok', 'Dismissed — it won’t be proposed again.'); reload(); })
       .catch(e => feedback('error', `Dismiss failed: ${e.message}`));
   }, [teamId, feedback, reload]);
+
+  // Basket resets when the team changes underneath us.
+  useEffect(() => { setBasket(new Map()); setReviewOpen(false); }, [teamId]);
+
+  // Keep the basket consistent with the live open suggestions: once a candidate
+  // is promoted (merge succeeded) or dismissed it leaves `suggestions`, so drop
+  // it from the basket too — no stale phantom entries after a reload.
+  useEffect(() => {
+    setBasket(prev => {
+      if (prev.size === 0) return prev;
+      const ids = new Set(suggestions.map(s => s.id));
+      let changed = false;
+      const next = new Map();
+      for (const [id, s] of prev) { if (ids.has(id)) next.set(id, s); else changed = true; }
+      return changed ? next : prev;
+    });
+  }, [suggestions]);
+
+  const addToMerge = useCallback((s) => {
+    if (!s || !s.id) return;
+    setBasket(prev => {
+      const next = new Map(prev);
+      next.set(s.id, s);
+      return next;
+    });
+    feedback('ok', 'Added to the merge basket.');
+  }, [feedback]);
+
+  const removeFromMerge = useCallback((id) => {
+    setBasket(prev => { const next = new Map(prev); next.delete(id); return next; });
+  }, []);
+
+  // Promote the whole basket (or an ad-hoc selection) as ONE skill: open the
+  // PromotionDialog seeded with the union of every candidate's lessons.
+  const promoteMerge = useCallback((suggestions) => {
+    const combined = mergeSuggestionsInto(suggestions);
+    if (!combined) return;
+    onReviewSuggestion(combined, skills);
+  }, [onReviewSuggestion, skills]);
 
   // The item set the bulk bar operates on for the current tab + selection.
   const tabItems = tab === 'inuse' ? inuseF : tab === 'ready' ? readyF : inbox.shown;
@@ -1098,6 +1179,7 @@ function SkillsColumn({ team, skills, suggestions, pending, autonomy, onReviewSu
           onActivate={() => runBulkAction(selItems, sk => activateSkill(teamId, sk.label), 'Activated', 'skill')}
           onDeactivate={() => runBulkAction(selItems, sk => deactivateSkill(teamId, sk.label), 'Deactivated', 'skill')}
           onDismiss={() => runBulkAction(selItems, s => dismissSuggestion(teamId, s.id), 'Dismissed', 'suggestion')}
+          onMerge={() => { promoteMerge(selItems); setSelected(new Set()); }}
         />
       )}
 
@@ -1144,7 +1226,7 @@ function SkillsColumn({ team, skills, suggestions, pending, autonomy, onReviewSu
             <ColEmpty text="No suggestions match your search." />
           ) : (
             <>
-              {/* Sort control */}
+              {/* Sort control + guided review entry (#776 §1) */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 'var(--eb-space-2)' }}>
                 <span style={{ fontSize: 10, color: 'var(--eb-text-muted)' }}>Sort</span>
                 <select
@@ -1155,7 +1237,24 @@ function SkillsColumn({ team, skills, suggestions, pending, autonomy, onReviewSu
                   <option value="newest">newest</option>
                   <option value="oldest">oldest</option>
                 </select>
+                {reviewList.length > 0 && (
+                  <button
+                    onClick={() => setReviewOpen(true)}
+                    title="Work through these suggestions one at a time with keyboard shortcuts"
+                    style={{ ...miniBtn, marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <Play size={11} /> Start review
+                  </button>
+                )}
               </div>
+
+              {/* Merge basket (#776 §2) */}
+              {basket.size > 0 && (
+                <MergeBasketBar
+                  items={[...basket.values()]}
+                  onRemove={removeFromMerge}
+                  onClear={() => setBasket(new Map())}
+                  onPromote={() => promoteMerge([...basket.values()])} />
+              )}
 
               {inbox.themed.length > 0 && (
                 <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.4, color: 'var(--eb-text-muted)', margin: '2px 0 4px' }}>Theme groups</div>
@@ -1165,6 +1264,7 @@ function SkillsColumn({ team, skills, suggestions, pending, autonomy, onReviewSu
                   key={s.id} suggestion={s}
                   selectable selected={selected.has(s.id)} onToggleSelect={() => toggleSel(s.id)}
                   onReview={() => onReviewSuggestion(s, skills)}
+                  onAddMerge={() => addToMerge(s)} inBasket={basket.has(s.id)}
                   onDismiss={() => setDismissing(s)} />
               ))}
 
@@ -1176,6 +1276,7 @@ function SkillsColumn({ team, skills, suggestions, pending, autonomy, onReviewSu
                   key={s.id} suggestion={s}
                   selectable selected={selected.has(s.id)} onToggleSelect={() => toggleSel(s.id)}
                   onReview={() => onReviewSuggestion(s, skills)}
+                  onAddMerge={() => addToMerge(s)} inBasket={basket.has(s.id)}
                   onDismiss={() => setDismissing(s)} />
               ))}
 
@@ -1209,6 +1310,137 @@ function SkillsColumn({ team, skills, suggestions, pending, autonomy, onReviewSu
           onUndismiss={(id) => undismissSuggestion(teamId, id).then(() => { feedback('ok', 'Restored to the inbox.'); reload(); }).catch(e => feedback('error', `Un-dismiss failed: ${e.message}`))}
           onClose={() => setTriageOpen(false)} />
       )}
+
+      {reviewOpen && (
+        <ReviewMode
+          items={reviewList}
+          basket={basket}
+          onPromote={(s) => { setReviewOpen(false); onReviewSuggestion(s, skills); }}
+          onAddMerge={addToMerge}
+          onDismiss={(id, reason) => doDismiss(id, reason)}
+          onClose={() => setReviewOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+// Guided one-at-a-time triage over the ranked suggestion list (#776 §1). Keyboard:
+// P promote · M add-to-merge · D dismiss · → / Enter skip. Every decision reuses
+// the same handlers as the list actions, so they emit the same feed events.
+function ReviewMode({ items, basket, onPromote, onAddMerge, onDismiss, onClose }) {
+  const [i, setI] = useState(0);
+  const [dismissing, setDismissing] = useState(null);
+  const list = Array.isArray(items) ? items : [];
+  const current = list[i] || null;
+  const done = i >= list.length;
+
+  const next = useCallback(() => setI(n => n + 1), []);
+  const inBasket = current && basket instanceof Map && basket.has(current.id);
+
+  const act = useCallback((kind) => {
+    if (!current) return;
+    if (kind === 'promote') { onPromote(current); return; }
+    if (kind === 'merge') { if (!inBasket) onAddMerge(current); next(); return; }
+    if (kind === 'dismiss') { setDismissing(current); return; }
+    if (kind === 'skip') { next(); return; }
+  }, [current, inBasket, onPromote, onAddMerge, next]);
+
+  useEffect(() => {
+    if (done || dismissing) return undefined;
+    const onKey = (e) => {
+      if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+      const k = e.key.toLowerCase();
+      if (k === 'p') { e.preventDefault(); act('promote'); }
+      else if (k === 'm') { e.preventDefault(); act('merge'); }
+      else if (k === 'd') { e.preventDefault(); act('dismiss'); }
+      else if (e.key === 'ArrowRight' || e.key === 'Enter') { e.preventDefault(); act('skip'); }
+      else if (e.key === 'Escape') { e.preventDefault(); onClose(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [act, done, dismissing, onClose]);
+
+  const memberTexts = (current?.members || []).map(m => m && m.text).filter(Boolean);
+
+  return (
+    <div onClick={onClose} style={overlay}>
+      <div onClick={e => e.stopPropagation()} style={{ ...dialog, width: 620, display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+          <Inbox size={16} style={{ color: 'var(--eb-accent-primary)' }} />
+          <h2 style={{ margin: 0, fontSize: 'var(--eb-text-md)', color: 'var(--eb-text-primary)' }}>Review suggestions</h2>
+          <span style={{ marginLeft: 'auto', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontVariantNumeric: 'tabular-nums' }}>
+            {done ? `${list.length} of ${list.length}` : `${i + 1} of ${list.length}`}
+          </span>
+          <button onClick={onClose} style={{ ...btn }}><X size={14} /></button>
+        </div>
+
+        {done ? (
+          <div style={{ padding: 'var(--eb-space-4) 0', textAlign: 'center', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
+            <Check size={20} style={{ color: 'var(--eb-status-success)' }} /><br />
+            You’ve worked through every suggestion.{basket && basket.size > 0 ? ` ${basket.size} in the merge basket.` : ''}
+            <div style={{ marginTop: 'var(--eb-space-3)' }}><button onClick={onClose} style={primaryBtn}>Close</button></div>
+          </div>
+        ) : (
+          <>
+            <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+              {current.source === 'related' || current.source === 'manual'
+                ? <>Combining {current.lessonCount || memberTexts.length} lessons · from {(current.convergence || []).join(', ') || 'unknown'}</>
+                : <>Learned {current.convergenceCount}× independently · by {(current.convergence || []).join(', ') || 'unknown'}</>}
+            </div>
+            <div style={{
+              fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', background: 'var(--eb-bg-app)',
+              border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)',
+              maxHeight: 220, overflowY: 'auto',
+            }}>
+              {memberTexts.length > 1 ? (
+                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {memberTexts.map((t, k) => <li key={k} style={{ wordBreak: 'break-word' }}>{t}</li>)}
+                </ul>
+              ) : (current.text || memberTexts[0] || '')}
+            </div>
+
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-2)' }}>
+              <button onClick={() => act('promote')} style={{ ...primaryBtn, display: 'flex', alignItems: 'center', gap: 5 }}><Sparkles size={13} /> Promote… <kbd style={kbdStyle}>P</kbd></button>
+              <button onClick={() => act('merge')} disabled={inBasket} style={{ ...miniBtn, display: 'flex', alignItems: 'center', gap: 5 }}><Combine size={12} /> {inBasket ? 'In basket' : 'Add to merge'} <kbd style={kbdStyle}>M</kbd></button>
+              <button onClick={() => act('dismiss')} style={{ ...miniBtn, display: 'flex', alignItems: 'center', gap: 5 }}><Ban size={12} /> Dismiss <kbd style={kbdStyle}>D</kbd></button>
+              <button onClick={() => act('skip')} style={{ ...miniBtn, marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 5 }}>Skip <SkipForward size={12} /> <kbd style={kbdStyle}>→</kbd></button>
+            </div>
+          </>
+        )}
+      </div>
+
+      {dismissing && (
+        <DismissDialog
+          suggestion={dismissing}
+          onCancel={() => setDismissing(null)}
+          onConfirm={(reason) => { onDismiss(dismissing.id, reason); setDismissing(null); next(); }} />
+      )}
+    </div>
+  );
+}
+
+// The merge-basket bar shown above the inbox once ≥1 candidate is collected.
+function MergeBasketBar({ items, onRemove, onClear, onPromote }) {
+  return (
+    <div style={{
+      display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 'var(--eb-space-2)',
+      border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)',
+      background: 'var(--eb-bg-app)', padding: 'var(--eb-space-2) var(--eb-space-3)',
+    }}>
+      <Layers size={13} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
+      <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)' }}>{items.length} in merge basket</span>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, flex: '1 1 100%' }}>
+        {items.map(s => (
+          <span key={s.id} title={s.text} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 'var(--eb-radius-full)', border: '1px solid var(--eb-border-default)', color: 'var(--eb-text-secondary)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+            {(s.text || s.id).slice(0, 28)}
+            <button onClick={() => onRemove(s.id)} title="Remove from basket" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: 'var(--eb-text-muted)', display: 'inline-flex' }}><X size={10} /></button>
+          </span>
+        ))}
+      </div>
+      <div style={{ display: 'flex', gap: 6, marginLeft: 'auto' }}>
+        <button onClick={onPromote} disabled={items.length < 1} style={{ ...primaryBtn, padding: '2px 10px', display: 'flex', alignItems: 'center', gap: 4 }}><Combine size={11} /> Merge into one skill</button>
+        <button onClick={onClear} style={miniBtn}>Clear</button>
+      </div>
     </div>
   );
 }
@@ -1236,7 +1468,7 @@ function SelectableRow({ selected, onToggle, children }) {
   );
 }
 
-function BulkActionBar({ tab, items, onClear, onActivate, onDeactivate, onDismiss }) {
+function BulkActionBar({ tab, items, onClear, onActivate, onDeactivate, onDismiss, onMerge }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 8, marginBottom: 'var(--eb-space-2)',
@@ -1253,6 +1485,9 @@ function BulkActionBar({ tab, items, onClear, onActivate, onDeactivate, onDismis
         {tab === 'inuse' && (
           <button onClick={onDeactivate} style={{ ...miniBtn }}>Deactivate</button>
         )}
+        {tab === 'suggested' && items.length >= 2 && onMerge && (
+          <button onClick={onMerge} title="Combine the selected suggestions into one skill" style={{ ...primaryBtn, padding: '2px 10px', display: 'flex', alignItems: 'center', gap: 4 }}><Combine size={11} /> Merge into one skill</button>
+        )}
         {tab === 'suggested' && (
           <button onClick={onDismiss} style={{ ...miniBtn, display: 'flex', alignItems: 'center', gap: 4 }}><Ban size={11} /> Dismiss</button>
         )}
@@ -1268,25 +1503,28 @@ function BulkActionBar({ tab, items, onClear, onActivate, onDeactivate, onDismis
 function TriageModal({ teamId, openSuggestions, skills, onReview, onDismiss, onUndismiss, onClose }) {
   const [q, setQ] = useState('');
   const [source, setSource] = useState(null); // null = all
-  const [showDismissed, setShowDismissed] = useState(false);
-  const [dismissedRows, setDismissedRows] = useState(null); // null = not loaded
+  // Lifecycle view: 'open' (default) · 'dismissed' · 'stale' (#776 §4). The
+  // non-open views are lazily fetched by status and cached.
+  const [lifecycle, setLifecycle] = useState('open');
+  const [rows, setRows] = useState({ dismissed: null, stale: null }); // null = not loaded
   const [dismissing, setDismissing] = useState(null);
 
   useEffect(() => {
-    if (!showDismissed || dismissedRows !== null) return;
+    if (lifecycle === 'open' || rows[lifecycle] !== null) return undefined;
     let cancelled = false;
-    fetch(`/api/knowledge/promotion-suggestions?team=${encodeURIComponent(teamId)}&status=dismissed`)
+    fetch(`/api/knowledge/promotion-suggestions?team=${encodeURIComponent(teamId)}&status=${lifecycle}`)
       .then(r => (r.ok ? r.json() : null))
-      .then(d => { if (!cancelled) setDismissedRows(Array.isArray(d?.suggestions) ? d.suggestions : []); })
-      .catch(() => { if (!cancelled) setDismissedRows([]); });
+      .then(d => { if (!cancelled) setRows(prev => ({ ...prev, [lifecycle]: Array.isArray(d?.suggestions) ? d.suggestions : [] })); })
+      .catch(() => { if (!cancelled) setRows(prev => ({ ...prev, [lifecycle]: [] })); });
     return () => { cancelled = true; };
-  }, [showDismissed, dismissedRows, teamId]);
+  }, [lifecycle, rows, teamId]);
 
-  const base = showDismissed ? (dismissedRows || []) : openSuggestions;
+  const base = lifecycle === 'open' ? openSuggestions : (rows[lifecycle] || []);
   const view = useMemo(
     () => buildInbox(base, { mode: 'evidence', now: Date.now(), cap: null, query: q, sourceFilter: source }),
     [base, q, source],
   );
+  const dropFromView = (id) => setRows(prev => ({ ...prev, [lifecycle]: (prev[lifecycle] || []).filter(r => r.id !== id) }));
 
   return (
     <div
@@ -1318,22 +1556,23 @@ function TriageModal({ teamId, openSuggestions, skills, onReview, onDismiss, onU
               <Chip key={s} active={source === s} onClick={() => setSource(source === s ? null : s)}>{s}</Chip>
             ))}
           </div>
-          <Chip active={showDismissed} onClick={() => setShowDismissed(v => !v)} title="Show suggestions you dismissed earlier">dismissed</Chip>
+          <Chip active={lifecycle === 'dismissed'} onClick={() => setLifecycle(v => (v === 'dismissed' ? 'open' : 'dismissed'))} title="Show suggestions you dismissed earlier">dismissed</Chip>
+          <Chip active={lifecycle === 'stale'} onClick={() => setLifecycle(v => (v === 'stale' ? 'open' : 'stale'))} title="Show suggestions auto-archived after weeks with no new evidence">stale</Chip>
         </div>
 
         {/* List */}
         <div style={{ overflowY: 'auto', padding: 'var(--eb-space-3) var(--eb-space-4)', maxHeight: '70vh' }}>
-          {showDismissed && dismissedRows === null ? (
-            <ColEmpty text="Loading dismissed suggestions…" />
+          {lifecycle !== 'open' && rows[lifecycle] === null ? (
+            <ColEmpty text={`Loading ${lifecycle} suggestions…`} />
           ) : view.total === 0 ? (
-            <ColEmpty text={showDismissed ? 'No dismissed suggestions.' : 'Nothing matches these filters.'} />
+            <ColEmpty text={lifecycle === 'dismissed' ? 'No dismissed suggestions.' : lifecycle === 'stale' ? 'No stale suggestions.' : 'Nothing matches these filters.'} />
           ) : (
             view.shown.map(s => (
               <SuggestionCard
                 key={s.id} suggestion={s}
                 onReview={() => { onReview(s, skills); onClose(); }}
-                onDismiss={() => setDismissing(s)}
-                onUndismiss={() => { onUndismiss(s.id); setDismissedRows(rows => (rows || []).filter(r => r.id !== s.id)); }} />
+                onDismiss={lifecycle === 'open' ? () => setDismissing(s) : undefined}
+                onUndismiss={lifecycle !== 'open' ? () => { onUndismiss(s.id); dropFromView(s.id); } : undefined} />
             ))
           )}
         </div>
@@ -1693,7 +1932,7 @@ function ItemCard({ item, pulsing, selected, picked, anyPicked, onPick, onClick,
 // Plain-language chip per member state — what the badge expands into.
 const MEMBER_STATE_CHIPS = {
   active: { label: '✓ active', color: 'var(--eb-status-success)', tip: 'This member has the skill in its workspace and loads it when it works.' },
-  pending: { label: 'pending', color: 'var(--eb-status-warning)', tip: 'The skill is in the team’s active set but hasn’t reached this member’s workspace yet.' },
+  pending: { label: 'syncing…', color: 'var(--eb-status-warning)', tip: 'The skill is in the team’s active set and the orchestrator is copying it into this member’s workspace — this heals itself, no action needed.' },
   'excluded-override': { label: 'excluded — own skill list', color: 'var(--eb-text-muted)', tip: 'This member manages its own skill list, so team activations don’t apply automatically.' },
   stub: { label: 'not materialized', color: 'var(--eb-text-muted)', tip: 'This member has no workspace yet — it gets the skill when it’s materialized.' },
   inactive: { label: 'inactive', color: 'var(--eb-text-muted)', tip: 'This member doesn’t have the skill in its workspace.' },
@@ -2169,9 +2408,25 @@ function SkillInspector({ open, onClose, skill, teamId, status, busy, installedC
                   </button>
                 )}
                 {m.state === 'pending' && !sourceMissing && (
-                  <button disabled={!!busy} onClick={() => onActivate(m.agentId, { onlyMembers: [m.agentId], scoped: true })} title="Re-run the workspace sync so this member gets the skill now" style={linkBtn}>
-                    {busy === m.agentId ? 'Syncing…' : 'Sync now'}
-                  </button>
+                  // #776 §3: distribution is system work — the reconcile loop syncs
+                  // pending members itself. A manual action only appears once that
+                  // loop has reported an error for this member (then it's a Retry,
+                  // with the last error + timestamp); otherwise it just reads
+                  // "syncing…" and heals on its own.
+                  m.reconcile && m.reconcile.lastError ? (
+                    <>
+                      <span
+                        title={`Last sync error${m.reconcile.lastAttemptAt ? ` at ${fmtWhen(m.reconcile.lastAttemptAt)}` : ''}: ${m.reconcile.lastError}${m.reconcile.exhausted ? ' — giving up after repeated failures' : ''}`}
+                        style={{ flexShrink: 0, fontSize: 10, fontWeight: 600, color: 'var(--eb-status-error, #d33)', whiteSpace: 'nowrap', cursor: 'help' }}>
+                        {m.reconcile.exhausted ? 'sync failed' : 'retrying…'}
+                      </span>
+                      <button disabled={!!busy} onClick={() => onActivate(m.agentId, { onlyMembers: [m.agentId], scoped: true })} title={`Re-run the workspace sync now. Last error: ${m.reconcile.lastError}`} style={linkBtn}>
+                        {busy === m.agentId ? 'Syncing…' : 'Retry'}
+                      </button>
+                    </>
+                  ) : (
+                    <span title="The orchestrator is syncing this member — no action needed." style={{ flexShrink: 0, fontSize: 10, color: 'var(--eb-text-muted)', whiteSpace: 'nowrap' }}>syncing…</span>
+                  )
                 )}
                 {m.state === 'pending' && sourceMissing && (
                   <span title="This skill’s files are no longer available, so it can’t be installed for this agent." style={{ flexShrink: 0, fontSize: 10, fontWeight: 600, color: 'var(--eb-status-error, #d33)', whiteSpace: 'nowrap' }}>can’t install</span>
@@ -2347,14 +2602,16 @@ const amberCard = {
   marginBottom: 'var(--eb-space-2)',
 };
 
-function SuggestionCard({ suggestion, onReview, onDismiss, onUndismiss, selectable, selected, onToggleSelect }) {
+function SuggestionCard({ suggestion, onReview, onDismiss, onUndismiss, onAddMerge, inBasket, selectable, selected, onToggleSelect }) {
   const related = suggestion.source === 'related';
   const dismissed = suggestion.status === 'dismissed';
+  const stale = suggestion.status === 'stale';
+  const resolved = dismissed || stale; // dimmed + restore-only
   return (
     <div style={{
       ...amberCard, flexDirection: 'column', alignItems: 'stretch', gap: 6,
       ...(selected ? { borderStyle: 'solid', borderColor: 'var(--eb-accent-primary)', background: 'var(--eb-accent-muted)' } : {}),
-      ...(dismissed ? { opacity: 0.7, borderStyle: 'solid', borderColor: 'var(--eb-border-default)' } : {}),
+      ...(resolved ? { opacity: 0.7, borderStyle: 'solid', borderColor: 'var(--eb-border-default)' } : {}),
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         {selectable && (
@@ -2400,11 +2657,16 @@ function SuggestionCard({ suggestion, onReview, onDismiss, onUndismiss, selectab
           dismissed · {DISMISS_REASON_LABELS[suggestion.dismissReason] || suggestion.dismissReason}
         </div>
       )}
+      {stale && (
+        <div style={{ fontSize: 10, color: 'var(--eb-text-muted)' }}>
+          stale · no new evidence{suggestion.staleAt ? ` since ${fmtWhen(suggestion.staleAt)}` : ''}
+        </div>
+      )}
       <div style={{ display: 'flex', gap: 6, alignSelf: 'flex-end', alignItems: 'center' }}>
-        {dismissed ? (
+        {resolved ? (
           onUndismiss && (
-            <button onClick={onUndismiss} title="Put this suggestion back in the inbox" style={{ ...miniBtn, display: 'flex', alignItems: 'center', gap: 4 }}>
-              <RotateCcw size={11} /> Un-dismiss
+            <button onClick={onUndismiss} title={stale ? 'Bring this suggestion back into the inbox' : 'Put this suggestion back in the inbox'} style={{ ...miniBtn, display: 'flex', alignItems: 'center', gap: 4 }}>
+              <RotateCcw size={11} /> {stale ? 'Restore' : 'Un-dismiss'}
             </button>
           )
         ) : (
@@ -2412,6 +2674,11 @@ function SuggestionCard({ suggestion, onReview, onDismiss, onUndismiss, selectab
             {onDismiss && (
               <button onClick={onDismiss} title="Turn this suggestion down — it won’t be re-proposed. The underlying lessons stay in team knowledge." style={{ ...miniBtn, display: 'flex', alignItems: 'center', gap: 4 }}>
                 <Ban size={11} /> Dismiss
+              </button>
+            )}
+            {onAddMerge && (
+              <button onClick={onAddMerge} disabled={inBasket} title="Collect this suggestion in the merge basket to combine several into one skill" style={{ ...miniBtn, display: 'flex', alignItems: 'center', gap: 4 }}>
+                <Combine size={11} /> {inBasket ? 'In basket' : 'Add to merge'}
               </button>
             )}
             <button onClick={onReview} title="Open the review dialog — nothing is promoted until you confirm" style={primaryBtn}>Review &amp; promote</button>
@@ -3249,6 +3516,7 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
           mode: 'extend', from: 'team', to: effectiveTo, teamId, targetName, skillMd,
           entryIds: suggestion.entryIds, removeSourceKnowledge: removeSource,
           ...(suggestion.id ? { suggestionId: suggestion.id } : {}),
+          ...(Array.isArray(suggestion.suggestionIds) && suggestion.suggestionIds.length ? { suggestionIds: suggestion.suggestionIds } : {}),
         }),
       })
         .then(async r => { if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`); return r.json(); })
@@ -3272,6 +3540,7 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
         from: 'team', to: tier, teamId, name, skillMd,
         entryIds: suggestion.entryIds, removeSourceKnowledge: removeSource,
         ...(suggestion.id ? { suggestionId: suggestion.id } : {}),
+        ...(Array.isArray(suggestion.suggestionIds) && suggestion.suggestionIds.length ? { suggestionIds: suggestion.suggestionIds } : {}),
       }),
     })
       .then(async r => { if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`); return r.json(); })
@@ -3592,6 +3861,12 @@ const primaryBtn = {
   padding: '4px var(--eb-space-3)', borderRadius: 'var(--eb-radius-md)',
   border: '1px solid var(--eb-accent-primary)', background: 'var(--eb-accent-primary)',
   color: 'var(--eb-text-on-accent, #fff)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer',
+};
+
+// Inline keyboard-hint pill shown on review-mode action buttons (#776 §1).
+const kbdStyle = {
+  fontSize: 9, fontFamily: 'var(--eb-font-mono, monospace)', padding: '0 4px', borderRadius: 3,
+  border: '1px solid currentColor', opacity: 0.7, lineHeight: '14px',
 };
 
 const lbl = { fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' };

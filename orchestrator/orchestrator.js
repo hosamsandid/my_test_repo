@@ -3799,6 +3799,7 @@ function autoPromoteStep(teamId, env, clusters, candidates, { convergenceThresho
       heuristicMd: item.draft.skillMd,
       request: knowledgeCurator.buildSkillSynthesisRequest(item.candidate),
       synthesize: synthesizeSkills,
+      frontmatter: { name: item.draft.name, description: item.draft.description },
     });
     try {
       fs.mkdirSync(dir, { recursive: true });
@@ -4073,11 +4074,15 @@ function _synthesizeSkillMd(env, request) {
 // synthesis (§3.3) when the team opted in. OFF (default) ⇒ the Phase-1 heuristic
 // draft verbatim (backward-compatible). ON ⇒ attempt LLM synthesis, else the
 // marked-un-synthesised fallback. Returns { skillMd, synthesised, note }.
-function _resolveSkillMd(env, { heuristicMd, request, synthesize }) {
+function _resolveSkillMd(env, { heuristicMd, request, synthesize, frontmatter }) {
+  // #805: the heuristic draft already carries frontmatter, so OFF is safe verbatim.
+  // ON: hand the deterministic { name, description } to synthesisFallback so the LLM
+  // output is guaranteed a valid frontmatter block (its own if present, else this).
   if (!synthesize) return { skillMd: heuristicMd, synthesised: null, note: null };
   const out = knowledgeCurator.synthesisFallback({
     heuristic: { name: null, skillMd: heuristicMd },
     llmText: _synthesizeSkillMd(env, request),
+    frontmatter,
   });
   return {
     skillMd: out.skillMd,
@@ -4161,7 +4166,9 @@ function autoExtendStep(teamId, env, clusters, candidates, existingSkills, { con
       console.warn(`[Orchestrator] auto-extend: target skill '${item.target.name}' not readable for team ${teamId}`);
       continue;
     }
-    const ext = knowledgeCurator.curatorSkillExtension(doc.skillMd, item.candidate);
+    // #805: pass the target skill name so a legacy (pre-#805) skill gains valid
+    // frontmatter on extension; an existing description is preserved (E5).
+    const ext = knowledgeCurator.curatorSkillExtension(doc.skillMd, item.candidate, { name: item.target.name });
     if (!ext.added) {
       // No genuinely new content (all lessons already present) — settle the
       // candidate as promoted so it isn't retried, but write nothing.
@@ -4181,6 +4188,7 @@ function autoExtendStep(teamId, env, clusters, candidates, existingSkills, { con
         heuristicMd: ext.skillMd,
         request: knowledgeCurator.buildSkillExtensionSynthesisRequest(doc.skillMd, item.candidate),
         synthesize: true,
+        frontmatter: { name: item.target.name, description: ext.description },
       })
       : { skillMd: ext.skillMd, synthesised: false, note: null };
     const synthesised = synth.synthesised === true;

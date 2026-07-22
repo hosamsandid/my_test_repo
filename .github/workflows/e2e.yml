@@ -224,13 +224,9 @@ jobs:
       - name: make help
         run: make help
 
-      - name: make build
-        run: make build
-
-      - name: make agent-image
-        run: make agent-image
-
       - name: make up
+        # `up` depends on `agent-image` and runs `--build`, so it
+        # transitively exercises make build + make agent-image.
         run: make up
 
       - name: make ps (verify containers)

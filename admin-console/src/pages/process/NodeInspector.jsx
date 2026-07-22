@@ -6,6 +6,7 @@ import TriggersPanel from '../agent-chat/TriggersPanel';
 import ConnectionsSection from './ConnectionsSection';
 import { resolveInheritedStage } from './hierarchy-utils';
 import { applyDetailsSave } from './node-inspector-save';
+import { summarizeGithubEventTrigger } from '../agent-chat/trigger-summary.js';
 
 // Shared node inspector for the Flow Editor (#692). ONE component drives both
 // modes so the first-page layout, tab set, and Connections/Triggers wiring live
@@ -319,15 +320,22 @@ function TemplateReadonly({ node }) {
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginBottom: 4 }}>Triggers</div>
         {(node.triggers || []).length === 0
           ? <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>None.</span>
-          : (node.triggers || []).map(t => (
-            <div key={t.id} style={{ fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-secondary)', padding: '3px 0', borderTop: '1px solid var(--eb-border-default)' }}>
-              <span>{t.type}</span>
-              {t.labelFilter ? ` · 🏷 ${t.labelFilter}` : (t.events?.length ? ` · ${t.events.join(', ')}` : '')}
-              {Array.isArray(t.emits) && t.emits.length > 0 && (
-                <span style={{ color: 'var(--eb-status-info)' }}> → {t.emits.join(', ')}{t.emitsDerived ? ' ≈' : ''}</span>
-              )}
-            </div>
-          ))}
+          : (node.triggers || []).map(t => {
+            // Friendly event + required label, sharing TriggersPanel's source of
+            // truth so raw dotted keys no longer appear here either (#778 AC10).
+            const s = summarizeGithubEventTrigger(t);
+            const evText = s.events.join(', ');
+            return (
+              <div key={t.id} style={{ fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-secondary)', padding: '3px 0', borderTop: '1px solid var(--eb-border-default)' }}>
+                <span>{t.type}</span>
+                {evText ? ` · ${evText}` : ''}
+                {s.label ? ` · 🏷 ${s.label}` : ''}
+                {Array.isArray(t.emits) && t.emits.length > 0 && (
+                  <span style={{ color: 'var(--eb-status-info)' }}> → {t.emits.join(', ')}{t.emitsDerived ? ' ≈' : ''}</span>
+                )}
+              </div>
+            );
+          })}
       </div>
     </div>
   );

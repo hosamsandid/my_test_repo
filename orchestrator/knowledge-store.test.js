@@ -370,7 +370,13 @@ test('knowledgeCurationConfig: clamp + legacy default', () => {
   assert.deepEqual(knowledgeCurationConfig(null), {
     maxAutoPromotionsPerPass: 3, autoThemeMinLessons: 4,
     digestRouting: true, graduateAtAgents: 4, autoExtend: null, extendConfidenceFloor: 100,
+    // #780: domain routing on by default, soft skill budget 12, synthesis opt-in.
+    domainRouting: true, skillBudget: 12, synthesizeSkills: false,
   });
+  // #780 domain-routing + budget knobs clamp/pass-through.
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { domainRouting: false } }).domainRouting, false);
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { skillBudget: 6 } }).skillBudget, 6);
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { skillBudget: 0 } }).skillBudget, 12);
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { maxAutoPromotionsPerPass: 10 } }).maxAutoPromotionsPerPass, 10);
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { maxAutoPromotionsPerPass: -2 } }).maxAutoPromotionsPerPass, 3);
   // #604: autoThemeMinLessons default 4, clamps to int >= 1.

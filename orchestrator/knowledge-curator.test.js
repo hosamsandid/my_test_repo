@@ -18,6 +18,11 @@ const {
   curatorSkillExtension,
   curatorExtendProvenance,
   planAutoExtensions,
+  buildSkillSynthesisRequest,
+  buildSkillExtensionSynthesisRequest,
+  markUnsynthesised,
+  synthesisFallback,
+  UNSYNTHESISED_MARKER,
 } = require('./knowledge-curator');
 const { resolvePromotionGates, knowledgeCurationConfig } = require('./knowledge-store');
 const { buildCanonicalProjection, groupRelatedClusters, themeToCandidate } = require('./knowledge-convergence');
@@ -77,6 +82,8 @@ test('knowledgeCurationConfig: default cap + autoThemeMinLessons, clamp, legacy 
   assert.deepEqual(knowledgeCurationConfig(null), {
     maxAutoPromotionsPerPass: 3, autoThemeMinLessons: 4,
     digestRouting: true, graduateAtAgents: 4, autoExtend: null, extendConfidenceFloor: 100,
+    // #780: domain routing on by default, soft skill budget 12, synthesis opt-in.
+    domainRouting: true, skillBudget: 12, synthesizeSkills: false,
   });
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { maxAutoPromotionsPerPass: 7 } }).maxAutoPromotionsPerPass, 7);
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { maxAutoPromotionsPerPass: 0 } }).maxAutoPromotionsPerPass, 3);
@@ -316,6 +323,25 @@ test('planAutoPromoteThemes: empty inputs → empty plan', () => {
   assert.deepEqual(planAutoPromoteThemes(null, null, null, {}), { promote: [], defer: [] });
 });
 
+test('planAutoPromoteThemes: resolveDomain → domain-based naming, absent → lesson-slug (AC4)', () => {
+  const clusters = themeClusters(accumulationEntries());
+  const gates = resolvePromotionGates(null);
+  // No resolver → legacy lesson-slug name (backward-compatible).
+  const slug = planAutoPromoteThemes(clusters, [], gates, { autoThemeMinLessons: 4, cap: 3, teamId: 'acme', now: NOW });
+  assert.equal(slug.promote.length, 1);
+  const slugName = slug.promote[0].name;
+  // A resolver that places the theme in a domain → the skill is named after it.
+  const resolveDomain = () => ({ id: 'review-practice', name: 'Review practice' });
+  const domained = planAutoPromoteThemes(clusters, [], gates, { autoThemeMinLessons: 4, cap: 3, teamId: 'acme', now: NOW, resolveDomain });
+  assert.equal(domained.promote.length, 1);
+  assert.equal(domained.promote[0].name, 'review-practice');
+  assert.equal(domained.promote[0].draft.name, 'review-practice');
+  assert.notEqual(domained.promote[0].name, slugName);
+  // A resolver that finds no domain → falls back to the lesson-slug name.
+  const unresolved = planAutoPromoteThemes(clusters, [], gates, { autoThemeMinLessons: 4, cap: 3, teamId: 'acme', now: NOW, resolveDomain: () => null });
+  assert.equal(unresolved.promote[0].name, slugName);
+});
+
 test('curatorThemeSkillDraft: accumulation framing, member texts, no secret fields', () => {
   const groups = groupRelatedClusters(themeClusters(accumulationEntries()), { relatedThreshold: 0.3 });
   const cand = themeToCandidate(groups[0], { teamId: 'acme', now: NOW });
@@ -512,4 +538,73 @@ test('planAutoExtensions: empty skills / empty clusters → empty plan', () => {
   assert.equal(p1.reviewExtend.length, 0);
   const p2 = planAutoExtensions([], [], [{ name: 'x', tier: 'team', entryIds: [] }], resolvePromotionGates(null), {});
   assert.equal(p2.extend.length, 0);
+});
+
+// ─── Phase 2 (#780): domain-based naming + default synthesis ────────────────────
+
+test('curatorSkillDraft: domain-based naming when a domain is supplied (AC4)', () => {
+  const cluster = { text: 'always run git pull first on every triggered run', kind: 'convention',
+    members: [{ id: 'e1', text: 'always run git pull first', originAgent: 'dev' }], convergence: ['dev', 'rew'] };
+  const withDomain = curatorSkillDraft(cluster, { domain: { id: 'dev-workflow', name: 'Dev workflow' } });
+  assert.equal(withDomain.name, 'dev-workflow');
+  // legacy fallback: no domain → lesson-slug (unchanged behaviour)
+  const legacy = curatorSkillDraft(cluster);
+  assert.notEqual(legacy.name, 'dev-workflow');
+  assert.ok(legacy.name.length > 0);
+});
+
+test('curatorThemeSkillDraft: domain-based naming', () => {
+  const candidate = { text: 'review practice', kind: 'convention', lessonCount: 3,
+    members: [{ id: 'e1', text: 'reviewers apply one label', originAgent: 'rev' }], convergence: ['rev'] };
+  assert.equal(curatorThemeSkillDraft(candidate, { domain: { id: 'review-practice', name: 'Review practice' } }).name, 'review-practice');
+});
+
+test('buildSkillSynthesisRequest: sectioned playbook contract with all five sections', () => {
+  const candidate = { text: 'x', members: [{ text: 'lesson one' }, { text: 'lesson two' }] };
+  const req = buildSkillSynthesisRequest(candidate, { domain: { name: 'Dev workflow', roles: ['developer'] } });
+  assert.ok(req.max_tokens >= 1024);
+  const c = req.messages[0].content;
+  for (const s of ['When to use', 'The flow', 'Rules & conventions', 'Gotchas & edge cases', 'Examples & snippets']) {
+    assert.ok(c.includes(`## ${s}`), `missing section ${s}`);
+  }
+  assert.ok(c.includes('# Dev workflow'));
+  assert.ok(c.includes('for: developer'));
+  assert.ok(c.includes('lesson one'));
+});
+
+test('buildSkillExtensionSynthesisRequest: carries the existing doc + new lessons', () => {
+  const req = buildSkillExtensionSynthesisRequest('# Dev workflow\n\nold body', { members: [{ text: 'new lesson' }] }, { domain: { name: 'Dev workflow' } });
+  const c = req.messages[0].content;
+  assert.ok(c.includes('old body'));
+  assert.ok(c.includes('new lesson'));
+});
+
+test('markUnsynthesised: injects a visible marker after H1, idempotent (AC3)', () => {
+  const marked = markUnsynthesised('# Title\n\nbody here');
+  assert.ok(marked.includes('Un-synthesised draft'));
+  const lines = marked.split('\n');
+  assert.equal(lines[0], '# Title'); // H1 stays first
+  // idempotent: re-marking does not double-insert
+  assert.equal(markUnsynthesised(marked), marked);
+  // no H1 → marker at the very top
+  assert.ok(markUnsynthesised('just text').startsWith(UNSYNTHESISED_MARKER));
+});
+
+test('synthesisFallback: LLM text used when usable, else marked heuristic + re-queued (AC3)', () => {
+  const heuristic = { name: 'dev-workflow', skillMd: '# Dev workflow\n\n## What\n- a lesson' };
+  const good = synthesisFallback({ heuristic, llmText: '# Dev workflow\n\n## The flow\nabstracted process text that is long enough' });
+  assert.equal(good.synthesised, true);
+  assert.equal(good.needsResynthesis, false);
+  assert.equal(good.llmDrafted, true);
+  assert.ok(!good.skillMd.includes('Un-synthesised'));
+
+  const bad = synthesisFallback({ heuristic, llmText: null });
+  assert.equal(bad.synthesised, false);
+  assert.equal(bad.needsResynthesis, true);
+  assert.equal(bad.llmDrafted, false);
+  assert.ok(bad.skillMd.includes('Un-synthesised draft'));
+  assert.equal(bad.name, 'dev-workflow');
+
+  // too-short / non-markdown LLM output is treated as a failed call
+  assert.equal(synthesisFallback({ heuristic, llmText: 'ok' }).synthesised, false);
 });

@@ -29,6 +29,7 @@ const {
   themeQualifies,
   themeToCandidate,
 } = require('./knowledge-convergence');
+const { domainSkillName } = require('./knowledge-domains');
 
 // Mirror the admin-console SKILL_NAME_RE so a generated name is always writable.
 const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
@@ -52,9 +53,12 @@ function slugifySkillName(text, kind = 'fact') {
 // A templated SKILL.md built from the cluster alone — cheap, dependency-free, no
 // secrets. The curator uses this deterministic draft (no LLM on the hot path);
 // operator-initiated "Draft with AI" polish stays a level-2 concern.
-function curatorSkillDraft(cluster) {
+function curatorSkillDraft(cluster, { domain } = {}) {
   const c = cluster && typeof cluster === 'object' ? cluster : {};
-  const name = slugifySkillName(c.text, c.kind);
+  // Domain-based naming (#780 AC4): when the cluster routes to a domain, the skill
+  // is named after the domain, not the first six words of a lesson. Falls back to
+  // the legacy lesson-slug only when no domain is supplied (last-resort).
+  const name = domain ? domainSkillName(domain) : slugifySkillName(c.text, c.kind);
   const title = (c.text || 'Team knowledge').trim();
   const members = Array.isArray(c.members) ? c.members : [];
   const convergence = Array.isArray(c.convergence) ? c.convergence : [];
@@ -164,9 +168,9 @@ function curatorSkillProvenance({ teamId, cluster, entryIds, now } = {}) {
 // "Why" framing differs from the convergence draft: a theme is accumulation, not
 // necessarily N independent recordings, so it never claims cross-agent
 // convergence it doesn't have.
-function curatorThemeSkillDraft(candidate) {
+function curatorThemeSkillDraft(candidate, { domain } = {}) {
   const c = candidate && typeof candidate === 'object' ? candidate : {};
-  const name = slugifySkillName(c.text, c.kind);
+  const name = domain ? domainSkillName(domain) : slugifySkillName(c.text, c.kind);
   const title = (c.text || 'Team knowledge').trim();
   const members = Array.isArray(c.members) ? c.members : [];
   const agents = [...new Set(
@@ -325,7 +329,7 @@ function planAutoPromotions(clusters, candidates, gates, { threshold = 2, cap = 
  */
 function planAutoPromoteThemes(clusters, candidates, gates, {
   autoThemeMinLessons = 4, cap = 3, relatedThreshold = 0.3,
-  minLessons = 2, minAgents = 2, strongLessons = 3, teamId, now,
+  minLessons = 2, minAgents = 2, strongLessons = 3, teamId, now, resolveDomain,
 } = {}) {
   const rows = Array.isArray(candidates) ? candidates : [];
   const byId = new Map(
@@ -376,7 +380,11 @@ function planAutoPromoteThemes(clusters, candidates, gates, {
       defer.push({ candidate, transition, reason: 'over-cap' });
       continue;
     }
-    const draft = curatorThemeSkillDraft(candidate);
+    // #780 AC4: name an auto-promoted theme after its best-matching domain (the
+    // caller supplies the resolver — this module stays fs-/routing-free); the
+    // lesson-slug name in curatorThemeSkillDraft is a last-resort fallback only.
+    const domain = typeof resolveDomain === 'function' ? resolveDomain(candidate) : null;
+    const draft = curatorThemeSkillDraft(candidate, { domain });
     promote.push({ candidate, transition, name: draft.name, draft });
   }
   return { promote, defer };
@@ -601,8 +609,150 @@ function planAutoExtensions(clusters, candidates, existingSkills, gates, {
   return { extend, reviewExtend, consumedCanonicalIds };
 }
 
+// ---------------------------------------------------------------------------
+// Default LLM synthesis (#780, skill-aggregation Phase 2, §3.3)
+// ---------------------------------------------------------------------------
+//
+// Every path that writes a SKILL.md should run the LLM draft with a sharpened
+// contract — abstract the practice into a sectioned PLAYBOOK, not a verbatim lesson
+// dump. These builders MIRROR the admin-console buildSkillDraftRequest transport
+// shape ({ max_tokens, messages }); the orchestrator supplies the model + transport
+// (a guarded, best-effort call — see orchestrator.js). On LLM failure the heuristic
+// draft (curatorSkillDraft / curatorSkillExtension) is kept but VISIBLY MARKED
+// un-synthesised and queued for re-synthesis (synthesisFallback below).
+
+// The target playbook shape (§2 of docs/skill-aggregation-concept.md).
+const PLAYBOOK_SECTIONS = Object.freeze([
+  'When to use', 'The flow', 'Rules & conventions', 'Gotchas & edge cases', 'Examples & snippets',
+]);
+
+function _statementLines(members, fallbackText) {
+  const out = [];
+  const seen = new Set();
+  for (const m of Array.isArray(members) ? members : []) {
+    const t = (m && typeof m.text === 'string' ? m.text.trim() : '');
+    if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); out.push(`- ${t}`); }
+  }
+  if (out.length === 0 && fallbackText) out.push(`- ${String(fallbackText).trim()}`);
+  return out.join('\n');
+}
+
+// Meta-prompt turning a converged cluster (or a theme candidate) into a sectioned
+// domain playbook. `domain` (optional) supplies the human title + audience roles.
+function buildSkillSynthesisRequest(candidate, { domain } = {}) {
+  const c = candidate && typeof candidate === 'object' ? candidate : {};
+  const title = domain && domain.name ? domain.name : (c.text || 'Team knowledge');
+  const roles = domain && Array.isArray(domain.roles) && domain.roles.length
+    ? domain.roles.join(', ') : '';
+  const facts = _statementLines(c.members, c.text);
+  const instruction = [
+    'You curate reusable skills for a team of AI software-delivery agents.',
+    'Turn the recorded lessons below into ONE coherent SKILL.md that reads as a',
+    'DOMAIN PLAYBOOK — the abstracted practice, its flow, rules, gotchas and examples —',
+    'NOT a flat verbatim bullet dump of the individual statements.',
+    '',
+    `Domain: ${title}${roles ? ` (for: ${roles})` : ''}`,
+    'The recorded lessons:',
+    facts,
+    '',
+    'Structure the document as:',
+    `# ${title}`,
+    ...PLAYBOOK_SECTIONS.map((s) => `## ${s}`),
+    '',
+    'How to synthesise:',
+    '- Generalise beyond the incident: express the PROCESS, not the occurrence.',
+    '- File each lesson into the right section (a hard rule vs. a gotcha vs. an example).',
+    '- Keep concrete snippets, but mark them clearly as examples of the abstract rule.',
+    '- Never drop evidence: every distinct lesson must remain represented somewhere.',
+    '- Omit a section that has no material rather than padding it.',
+    '- Do NOT invent tool names, repo names, file paths or credentials that were not stated.',
+    '- Output ONLY the Markdown of the SKILL.md — no preamble, no surrounding code fences.',
+  ].join('\n');
+  return { max_tokens: 2048, messages: [{ role: 'user', content: instruction }] };
+}
+
+// Meta-prompt re-synthesising an EXISTING playbook with new lessons folded in — the
+// synthesis-default sibling of curatorSkillExtension's heuristic append.
+function buildSkillExtensionSynthesisRequest(existingSkillMd, candidate, { domain } = {}) {
+  const c = candidate && typeof candidate === 'object' ? candidate : {};
+  const prior = typeof existingSkillMd === 'string' ? existingSkillMd : '';
+  const title = domain && domain.name ? domain.name : (c.text || 'Team knowledge');
+  const facts = _statementLines(c.members, c.text);
+  const instruction = [
+    'You maintain a reusable domain playbook (SKILL.md) for a team of AI agents.',
+    `Domain: ${title}`,
+    'The existing playbook:',
+    '---',
+    prior,
+    '---',
+    'Fold these NEW lessons into it, re-synthesising rather than appending a raw list:',
+    facts,
+    '',
+    'Requirements:',
+    '- Preserve everything already in the playbook; integrate the new lessons into the',
+    `  right sections (${PLAYBOOK_SECTIONS.join(' / ')}).`,
+    '- Generalise + deduplicate; do not restate a lesson already covered.',
+    '- Keep the sectioned playbook shape; do not invent unstated specifics.',
+    '- Output ONLY the Markdown of the full updated SKILL.md — no preamble, no code fences.',
+  ].join('\n');
+  return { max_tokens: 3072, messages: [{ role: 'user', content: instruction }] };
+}
+
+// Inject a visible "un-synthesised" marker into a heuristic draft: a blockquote
+// right after the first H1 (or at the top when there is none). Idempotent — a
+// re-mark of an already-marked doc is a no-op.
+const UNSYNTHESISED_MARKER =
+  '> ⚠️ **Un-synthesised draft** — raw lessons pending AI synthesis into the ' +
+  'domain-playbook shape (When to use / The flow / Rules / Gotchas / Examples). ' +
+  'Queued for re-synthesis.';
+
+function markUnsynthesised(skillMd) {
+  const md = typeof skillMd === 'string' ? skillMd : '';
+  if (md.includes('Un-synthesised draft')) return md; // already marked (idempotent)
+  const lines = md.split('\n');
+  const h1 = lines.findIndex((l) => /^#\s/.test(l));
+  if (h1 >= 0) {
+    lines.splice(h1 + 1, 0, '', UNSYNTHESISED_MARKER);
+    return lines.join('\n');
+  }
+  return `${UNSYNTHESISED_MARKER}\n\n${md}`;
+}
+
+/**
+ * Resolve a SKILL.md write to either the LLM-synthesised playbook or the marked
+ * heuristic fallback (§3.3, AC3). Pure — the caller runs the LLM (or not) and hands
+ * the result in via `llmText`.
+ *
+ * @param {{ heuristic: {name, skillMd}, llmText?: string|null }} args
+ * @returns {{ name, skillMd, synthesised:boolean, needsResynthesis:boolean, llmDrafted:boolean }}
+ *   synthesised:true when the LLM produced usable Markdown; otherwise the heuristic
+ *   draft is returned with a visible marker and needsResynthesis:true (re-queued).
+ */
+function synthesisFallback({ heuristic, llmText } = {}) {
+  const h = heuristic && typeof heuristic === 'object' ? heuristic : { name: null, skillMd: '' };
+  const text = typeof llmText === 'string' ? llmText.trim() : '';
+  // A usable synthesis is non-trivial Markdown with at least a heading — anything
+  // shorter is treated as a failed call and falls back.
+  if (text && text.length >= 40 && /(^|\n)#\s/.test(`\n${text}`)) {
+    return { name: h.name, skillMd: text, synthesised: true, needsResynthesis: false, llmDrafted: true };
+  }
+  return {
+    name: h.name,
+    skillMd: markUnsynthesised(h.skillMd),
+    synthesised: false,
+    needsResynthesis: true,
+    llmDrafted: false,
+  };
+}
+
 module.exports = {
   SKILL_NAME_RE,
+  PLAYBOOK_SECTIONS,
+  UNSYNTHESISED_MARKER,
+  buildSkillSynthesisRequest,
+  buildSkillExtensionSynthesisRequest,
+  markUnsynthesised,
+  synthesisFallback,
   slugifySkillName,
   curatorSkillDraft,
   curatorSkillProvenance,

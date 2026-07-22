@@ -92,6 +92,13 @@ const DEFAULT_DIGEST_GRADUATE_AGENTS = 4;
 // similarity (< 100) falls back to review. Blast-radius-conservative by design.
 const DEFAULT_EXTEND_CONFIDENCE_FLOOR = 100;
 
+// #780 skill-aggregation Phase 2. `domainRouting` (default ON) turns on the
+// route-against-domains step (knowledge-routing.js) in the collector — a no-op for
+// a team with no confirmed domains, so existing teams are unaffected until they
+// seed/bootstrap a domain list. `skillBudget` is the soft per-team cap (~5–15)
+// above which a new-domain proposal is pushed into the merge/override flow (§3.5).
+const DEFAULT_SKILL_BUDGET = 12;
+
 // ---------------------------------------------------------------------------
 // Ids / clock (injectable so tests are deterministic)
 // ---------------------------------------------------------------------------
@@ -525,6 +532,21 @@ function knowledgeCurationConfig(env) {
   if (!Number.isFinite(extendConfidenceFloor) || extendConfidenceFloor < 1) {
     extendConfidenceFloor = DEFAULT_EXTEND_CONFIDENCE_FLOOR;
   }
+  // #780 domain routing (default ON — set knowledgeCuration.domainRouting to false
+  // to opt out) + the soft per-team skill budget (clamped to an integer >= 1).
+  const drt = raw.domainRouting;
+  const domainRouting = drt === false || drt === 'off' ? false
+    : (drt && typeof drt === 'object' && drt.enabled === false ? false : true);
+  let skillBudget = Number(raw.skillBudget);
+  if (!Number.isInteger(skillBudget) || skillBudget < 1) skillBudget = DEFAULT_SKILL_BUDGET;
+  // #780 default synthesis on SKILL.md writes (§3.3). Opt-in per team for now
+  // (default OFF) because the collector's LLM transport is best-effort and unproven
+  // in every deployment: OFF = the Phase-1 heuristic draft is written verbatim
+  // (backward-compatible); ON = the write runs the LLM synthesis contract and, on
+  // failure, falls back to the heuristic VISIBLY MARKED un-synthesised + re-queued.
+  const ss = raw.synthesizeSkills;
+  const synthesizeSkills = ss === true || ss === 'on'
+    || (ss && typeof ss === 'object' && ss.enabled === true) || false;
   return {
     maxAutoPromotionsPerPass: cap,
     autoThemeMinLessons,
@@ -532,6 +554,9 @@ function knowledgeCurationConfig(env) {
     graduateAtAgents,
     autoExtend,
     extendConfidenceFloor,
+    domainRouting,
+    skillBudget,
+    synthesizeSkills,
   };
 }
 
@@ -624,6 +649,7 @@ module.exports = {
   DEFAULT_AUTO_THEME_MIN_LESSONS,
   DEFAULT_DIGEST_GRADUATE_AGENTS,
   DEFAULT_EXTEND_CONFIDENCE_FLOOR,
+  DEFAULT_SKILL_BUDGET,
   PROMOTION_TRANSITIONS,
   GATE_MODES,
   DEFAULT_PROMOTION_GATES,

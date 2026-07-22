@@ -95,6 +95,86 @@ function visibleUser(scope, userId, memberships = []) {
   return memberships.some(m => m.userId === userId && scope.teamIds.has(m.teamId));
 }
 
+// ── Credentials (SSH keys + GitHub tokens) scope & management gate (#798) ────
+//
+// Credentials extend the #302/#584 model with a two-value scope, so a Team
+// Admin can self-serve their team's credentials and a System Admin can provision
+// shared, system-wide credentials assigned to specific teams:
+//
+//   • team   — owned by exactly one team (`teamId`). Visible to that team's
+//              Team Admins and to System Admins.
+//   • system — created by a System Admin, assigned to 0..n teams
+//              (`assignedTeamIds`). Visible to System Admins always and to the
+//              Team Admins of every assigned team. Assigned to zero teams → only
+//              System Admins see it (never orphaned or globally visible).
+//
+// Visibility and management are gated on the *team-admin* role (canManageTeam),
+// NOT mere membership: Team Member credential access is deferred. All admins
+// keep `all: true` (no regression to the single-operator setup).
+
+// Backward-compatible view of a stored credential entry. Pre-#798 entries have
+// no `scope` field and carry only `teamId` (all currently 'default'); treat each
+// as team-scoped owned by its team so existing credentials keep working. Returns
+// a normalized copy with an explicit `scope`, `teamId` and `assignedTeamIds`.
+function normalizeCredential(entry) {
+  if (!entry || typeof entry !== 'object') return entry;
+  const scope = entry.scope === 'system' ? 'system' : 'team';
+  if (scope === 'system') {
+    const assignedTeamIds = Array.isArray(entry.assignedTeamIds)
+      ? [...new Set(entry.assignedTeamIds.map(String))]
+      : [];
+    return { ...entry, scope, teamId: null, assignedTeamIds };
+  }
+  return { ...entry, scope: 'team', teamId: entry.teamId || 'default', assignedTeamIds: [] };
+}
+
+// Is this credential visible to the caller? (list-endpoint filter — AC1/AC2/AC3)
+function visibleCredential(scope, cred) {
+  if (!scope) return false;
+  if (scope.all) return true;
+  const c = normalizeCredential(cred);
+  if (c.scope === 'system') return c.assignedTeamIds.some(t => canManageTeam(scope, t));
+  return canManageTeam(scope, c.teamId);
+}
+
+// May the caller edit/delete THIS existing credential? A Team Admin may manage
+// team-scoped credentials of a team they administer, never system-scoped ones
+// (AC5); System Admins may manage all.
+function canManageCredential(scope, cred) {
+  if (!scope) return false;
+  if (scope.all) return true;
+  const c = normalizeCredential(cred);
+  if (c.scope === 'system') return false;
+  return canManageTeam(scope, c.teamId);
+}
+
+// May the caller create a credential with the requested ownership? System-scoped
+// creation is System-Admin-only; a Team Admin may create team-scoped credentials
+// only for a team they administer (AC3/AC4/AC6).
+function canCreateCredential(scope, desired) {
+  if (!scope) return false;
+  if (scope.all) return true;
+  const reqScope = desired && desired.scope === 'system' ? 'system' : 'team';
+  if (reqScope === 'system') return false;
+  return canManageTeam(scope, (desired && desired.teamId) || 'default');
+}
+
+// Only a System Admin may change a credential's scope or team assignment,
+// including a cross-team move of a team-scoped credential (AC6/AC7).
+function canReassignCredential(scope) {
+  return !!(scope && scope.all);
+}
+
+// Would `teamId` still see this credential under the given (normalized) state?
+// Used to reject a reassignment that would orphan an environment still
+// referencing the credential (edge case: no silent break).
+function credentialVisibleToTeam(cred, teamId) {
+  const c = normalizeCredential(cred);
+  const t = teamId || 'default';
+  if (c.scope === 'system') return c.assignedTeamIds.includes(t);
+  return c.teamId === t;
+}
+
 // A serializable authorization descriptor for the session (AC6/AC7). Carries an
 // admin/System-Admin indicator and the caller's per-team memberships+roles, so
 // the frontend can make rendering decisions without re-deriving them. The env
@@ -119,4 +199,10 @@ module.exports = {
   canManageTeam,
   visibleUser,
   describeAuthz,
+  normalizeCredential,
+  visibleCredential,
+  canManageCredential,
+  canCreateCredential,
+  canReassignCredential,
+  credentialVisibleToTeam,
 };

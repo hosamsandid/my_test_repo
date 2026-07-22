@@ -21,7 +21,9 @@ const usageExport = require('./usage-export');
 const maintenanceMode = require('./maintenance-mode');
 const { detectRasterImageType, imageContentType } = require('./image-type');
 const { githubApiBase } = require('./github-api-base');
-const { computeScope, visibleTeam, visibleAgent, canManageTeam, visibleUser, describeAuthz } = require('./scope');
+const { computeScope, visibleTeam, visibleAgent, canManageTeam, visibleUser, describeAuthz,
+        normalizeCredential, visibleCredential, canManageCredential, canCreateCredential,
+        canReassignCredential, credentialVisibleToTeam } = require('./scope');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { buildProcessGraph } = require('./process-graph');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses } = require('./knowledge-graph');
@@ -474,6 +476,82 @@ function resolveOwnerTeamId(teamId) {
     throw err;
   }
   return teamId;
+}
+
+// Resolve the requested ownership of a credential from a create/reassign body
+// (#798). A `system` scope carries an `assignedTeamIds` set (0..n existing
+// teams); any other value is a `team` scope owned by exactly one team. Throws a
+// 400-tagged error for an unknown team. Returns the canonical persisted shape.
+function resolveCredentialOwnership(body) {
+  const b = body || {};
+  const reqScope = b.scope === 'system' ? 'system' : 'team';
+  if (reqScope === 'system') {
+    const raw = Array.isArray(b.assignedTeamIds) ? b.assignedTeamIds : [];
+    const ids = [...new Set(raw.map(String))];
+    if (ids.length) {
+      const teams = readJsonFile(TEAMS_INDEX, []);
+      for (const id of ids) {
+        if (!Array.isArray(teams) || !teams.some(t => t.id === id)) {
+          const err = new Error(`Assigned team '${id}' not found`);
+          err.status = 400;
+          throw err;
+        }
+      }
+    }
+    return { scope: 'system', teamId: null, assignedTeamIds: ids };
+  }
+  const teamId = resolveOwnerTeamId(b.teamId);
+  return { scope: 'team', teamId, assignedTeamIds: [] };
+}
+
+// Apply a rename/reassign patch to a credential entry (#798), enforcing the
+// role model. The caller has already been checked with `canManageCredential`.
+// Returns the updated entry, or null after sending the appropriate error
+// response (403 for a reassignment by a non-System-Admin, 400 for an unknown
+// team, 409 when the move would orphan a referencing environment).
+function applyCredentialPatch({ res, cred, scope, body, inUse, label }) {
+  const b = body || {};
+  const cur = normalizeCredential(cred);
+  const reassigning = ('scope' in b) || ('teamId' in b) || ('assignedTeamIds' in b);
+
+  let next = { scope: cur.scope, teamId: cur.teamId, assignedTeamIds: cur.assignedTeamIds };
+  if (reassigning) {
+    if (!canReassignCredential(scope)) {
+      res.status(403).json({ error: `forbidden: only a System Admin may reassign a ${label}`, code: 'forbidden' });
+      return null;
+    }
+    try {
+      next = resolveCredentialOwnership({
+        scope: 'scope' in b ? b.scope : cur.scope,
+        teamId: b.teamId,
+        assignedTeamIds: b.assignedTeamIds,
+      });
+    } catch (err) {
+      res.status(err.status || 400).json({ error: err.message });
+      return null;
+    }
+    // Do not silently orphan an environment that still references this credential.
+    if (inUse) {
+      const env = loadEnvironment(inUse);
+      const envTeam = (env && env.teamId) || 'default';
+      const candidate = { ...cred, scope: next.scope, teamId: next.teamId, assignedTeamIds: next.assignedTeamIds };
+      if (!credentialVisibleToTeam(candidate, envTeam)) {
+        res.status(409).json({
+          error: `${label} is used by environment '${inUse}' (team '${envTeam}'); reassignment would orphan it. Detach it first.`,
+        });
+        return null;
+      }
+    }
+  }
+
+  const name = (typeof b.name === 'string' && b.name.trim()) ? b.name.trim() : cred.name;
+  return {
+    ...cred,
+    name,
+    scope: next.scope,
+    teamId: next.teamId,
+    assignedTeamIds: next.assignedTeamIds,
+  };
 }
 
 // Resolve what the logged-in caller may see (#302). Reads the users/memberships
@@ -9810,20 +9888,26 @@ app.put('/api/blueprints/:id/memory/:file', apiLimiter, express.text({ type: '*/
 /* ─── SSH Keys ──────────────────────────────────────────────────────── */
 
 app.get('/api/ssh-keys', (req, res) => {
-  // Return only metadata — never the private key
+  // Return only metadata — never the private key. Scoped to the caller (#798):
+  // Team Admins see system credentials assigned to a team they administer plus
+  // team credentials they own; System Admins see all.
   const scope = getScope(req);
-  res.json(listSshKeys().filter(k => visibleTeam(scope, k.teamId))); // (#302)
+  res.json(listSshKeys().map(normalizeCredential).filter(k => visibleCredential(scope, k)));
 });
 
 app.post('/api/ssh-keys', apiLimiter, (req, res) => {
-  const { name, privateKey, id: rawId, teamId } = req.body || {};
+  const { name, privateKey, id: rawId } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (!privateKey || typeof privateKey !== 'string') {
     return res.status(400).json({ error: 'privateKey (string) is required' });
   }
-  let ownerTeamId;
-  try { ownerTeamId = resolveOwnerTeamId(teamId); }
+  const scope = getScope(req);
+  let ownership;
+  try { ownership = resolveCredentialOwnership(req.body); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+  if (!canCreateCredential(scope, ownership)) {
+    return res.status(403).json({ error: 'forbidden: you may not create this credential', code: 'forbidden' });
+  }
   const trimmed = privateKey.trim();
   if (!/-----BEGIN [A-Z ]+PRIVATE KEY-----/.test(trimmed)) {
     return res.status(400).json({ error: 'privateKey does not look like an SSH private key' });
@@ -9855,24 +9939,30 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
   const entry = {
     id,
     name,
-    teamId: ownerTeamId,
+    scope: ownership.scope,
+    teamId: ownership.teamId,
+    assignedTeamIds: ownership.assignedTeamIds,
     fingerprint: sshKeyFingerprint(trimmed),
     createdAt: new Date().toISOString(),
   };
   saveSshKeysIndex([...existing, entry]);
-  res.status(201).json(entry);
+  res.status(201).json(normalizeCredential(entry));
 });
 
 // Server-side keypair generation. Returns the public key once so the user
 // can paste it into GitHub; the private key never leaves the workspace.
 app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
-  const { name, comment, id: rawId, teamId } = req.body || {};
+  const { name, comment, id: rawId } = req.body || {};
   if (!name || typeof name !== 'string') {
     return res.status(400).json({ error: 'name is required' });
   }
-  let ownerTeamId;
-  try { ownerTeamId = resolveOwnerTeamId(teamId); }
+  const scope = getScope(req);
+  let ownership;
+  try { ownership = resolveCredentialOwnership(req.body); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+  if (!canCreateCredential(scope, ownership)) {
+    return res.status(403).json({ error: 'forbidden: you may not create this credential', code: 'forbidden' });
+  }
   const existing = listSshKeys();
   let id;
   if (rawId !== undefined && rawId !== null && String(rawId).trim() !== '') {
@@ -9900,19 +9990,46 @@ app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
   const entry = {
     id,
     name,
-    teamId: ownerTeamId,
+    scope: ownership.scope,
+    teamId: ownership.teamId,
+    assignedTeamIds: ownership.assignedTeamIds,
     fingerprint: sshFingerprintFromPubBlob(pubBlob),
     createdAt: new Date().toISOString(),
   };
   saveSshKeysIndex([...existing, entry]);
-  res.status(201).json({ ...entry, publicKey: pubText });
+  res.status(201).json({ ...normalizeCredential(entry), publicKey: pubText });
+});
+
+// Reassign / rename an SSH key (#798). Renaming a team-scoped key is available
+// to that team's Team Admins; changing scope or team assignment (incl. a
+// cross-team move) is System-Admin only. A move that would leave a referencing
+// environment unable to see the key is refused (409) rather than orphaning it.
+app.patch('/api/ssh-keys/:id', apiLimiter, (req, res) => {
+  const { id } = req.params;
+  if (!SSH_KEY_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid ssh key id' });
+  const scope = getScope(req);
+  const keys = listSshKeys();
+  const cred = keys.find(k => k.id === id);
+  if (!cred) return res.status(404).json({ error: 'SSH key not found' });
+  if (!canManageCredential(scope, cred)) {
+    return res.status(403).json({ error: 'forbidden: you may not manage this credential', code: 'forbidden' });
+  }
+  const updated = applyCredentialPatch({ res, cred, scope, body: req.body, inUse: sshKeyInUse(id), label: 'SSH key' });
+  if (!updated) return; // applyCredentialPatch already sent the error
+  saveSshKeysIndex(keys.map(k => (k.id === id ? updated : k)));
+  res.json(normalizeCredential(updated));
 });
 
 app.delete('/api/ssh-keys/:id', apiLimiter, (req, res) => {
   const { id } = req.params;
   if (!SSH_KEY_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid ssh key id' });
+  const scope = getScope(req);
   const keys = listSshKeys();
-  if (!keys.some(k => k.id === id)) return res.status(404).json({ error: 'SSH key not found' });
+  const cred = keys.find(k => k.id === id);
+  if (!cred) return res.status(404).json({ error: 'SSH key not found' });
+  if (!canManageCredential(scope, cred)) {
+    return res.status(403).json({ error: 'forbidden: you may not manage this credential', code: 'forbidden' });
+  }
   const usedBy = sshKeyInUse(id);
   if (usedBy) {
     return res.status(409).json({ error: `SSH key is used by environment '${usedBy}'. Detach it first.` });
@@ -9925,20 +10042,26 @@ app.delete('/api/ssh-keys/:id', apiLimiter, (req, res) => {
 /* ─── GitHub Tokens ─────────────────────────────────────────────────── */
 
 app.get('/api/github-tokens', (req, res) => {
-  // Metadata only — never the raw token
+  // Metadata only — never the raw token. Caller-scoped (#798), same model as
+  // SSH keys: Team Admins see system tokens assigned to a team they administer
+  // plus team tokens they own; System Admins see all.
   const scope = getScope(req);
-  res.json(listGithubTokens().filter(t => visibleTeam(scope, t.teamId))); // (#302)
+  res.json(listGithubTokens().map(normalizeCredential).filter(t => visibleCredential(scope, t)));
 });
 
 app.post('/api/github-tokens', apiLimiter, (req, res) => {
-  const { name, token, id: rawId, teamId } = req.body || {};
+  const { name, token, id: rawId } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (!token || typeof token !== 'string') {
     return res.status(400).json({ error: 'token (string) is required' });
   }
-  let ownerTeamId;
-  try { ownerTeamId = resolveOwnerTeamId(teamId); }
+  const scope = getScope(req);
+  let ownership;
+  try { ownership = resolveCredentialOwnership(req.body); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+  if (!canCreateCredential(scope, ownership)) {
+    return res.status(403).json({ error: 'forbidden: you may not create this credential', code: 'forbidden' });
+  }
   const trimmed = token.trim();
   if (!/^(github_pat_|ghp_|gho_|ghs_|ghu_|ghr_)[A-Za-z0-9_]{20,}$/.test(trimmed)) {
     return res.status(400).json({
@@ -9968,20 +10091,44 @@ app.post('/api/github-tokens', apiLimiter, (req, res) => {
   const entry = {
     id,
     name,
-    teamId: ownerTeamId,
+    scope: ownership.scope,
+    teamId: ownership.teamId,
+    assignedTeamIds: ownership.assignedTeamIds,
     preview: githubTokenPreview(trimmed),
     fingerprint: githubTokenFingerprint(trimmed),
     createdAt: new Date().toISOString(),
   };
   saveGithubTokensIndex([...existing, entry]);
-  res.status(201).json(entry);
+  res.status(201).json(normalizeCredential(entry));
+});
+
+// Reassign / rename a GitHub token (#798) — same role model as SSH keys above.
+app.patch('/api/github-tokens/:id', apiLimiter, (req, res) => {
+  const { id } = req.params;
+  if (!GH_TOKEN_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid token id' });
+  const scope = getScope(req);
+  const tokens = listGithubTokens();
+  const cred = tokens.find(t => t.id === id);
+  if (!cred) return res.status(404).json({ error: 'GitHub token not found' });
+  if (!canManageCredential(scope, cred)) {
+    return res.status(403).json({ error: 'forbidden: you may not manage this credential', code: 'forbidden' });
+  }
+  const updated = applyCredentialPatch({ res, cred, scope, body: req.body, inUse: githubTokenInUse(id), label: 'GitHub token' });
+  if (!updated) return;
+  saveGithubTokensIndex(tokens.map(t => (t.id === id ? updated : t)));
+  res.json(normalizeCredential(updated));
 });
 
 app.delete('/api/github-tokens/:id', apiLimiter, (req, res) => {
   const { id } = req.params;
   if (!GH_TOKEN_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid token id' });
+  const scope = getScope(req);
   const tokens = listGithubTokens();
-  if (!tokens.some(t => t.id === id)) return res.status(404).json({ error: 'GitHub token not found' });
+  const cred = tokens.find(t => t.id === id);
+  if (!cred) return res.status(404).json({ error: 'GitHub token not found' });
+  if (!canManageCredential(scope, cred)) {
+    return res.status(403).json({ error: 'forbidden: you may not manage this credential', code: 'forbidden' });
+  }
   const usedBy = githubTokenInUse(id);
   if (usedBy) {
     return res.status(409).json({ error: `GitHub token is used by environment '${usedBy}'. Detach it first.` });

@@ -10,6 +10,7 @@ import {
   buildDaySeries,
   stackSegments,
   buildExportUrl,
+  workItemAverages,
 } from './token-usage-view.js';
 
 test('TOKEN_CLASSES matches the four-class API contract, in display order', () => {
@@ -116,4 +117,67 @@ test('buildExportUrl builds a scoped, windowed download URL per view and format'
   // Unknown/absent format defaults to csv; absent since is simply omitted.
   assert.equal(buildExportUrl('summary', {}), '/api/usage/summary/export?format=csv');
   assert.equal(buildExportUrl('summary', { format: 'xml' }), '/api/usage/summary/export?format=csv');
+});
+
+test('workItemAverages returns rounded total/input/output means over the attributed work-item count', () => {
+  const data = {
+    workItems: [
+      { tokens: { total: 100, input: 60, output: 40 } },
+      { tokens: { total: 300, input: 180, output: 120 } },
+      { tokens: { total: 200, input: 90, output: 110 } },
+    ],
+  };
+  const avg = workItemAverages(data);
+  assert.equal(avg.count, 3);
+  assert.equal(avg.total, 200);  // (100+300+200)/3
+  assert.equal(avg.input, 110);  // (60+180+90)/3
+  assert.equal(avg.output, 90);  // (40+120+110)/3
+});
+
+test('workItemAverages rounds to the nearest integer (never a fraction)', () => {
+  const avg = workItemAverages({
+    workItems: [
+      { tokens: { total: 10, input: 10, output: 0 } },
+      { tokens: { total: 11, input: 0, output: 11 } },
+    ],
+  });
+  // 21/2 = 10.5 → 11 (round half up), 10/2 = 5, 11/2 = 5.5 → 6
+  assert.equal(avg.total, 11);
+  assert.equal(avg.input, 5);
+  assert.equal(avg.output, 6);
+});
+
+test('workItemAverages Ø-total shares the numerator with coverage.tokens.attributed (AC3)', () => {
+  const data = {
+    coverage: { tokens: { attributed: 450 } },
+    workItems: [
+      { tokens: { total: 150, input: 100, output: 50 } },
+      { tokens: { total: 300, input: 200, output: 100 } },
+    ],
+  };
+  const avg = workItemAverages(data);
+  assert.equal(avg.total, Math.round(data.coverage.tokens.attributed / avg.count));
+});
+
+test('workItemAverages yields null averages (no NaN/Infinity) for zero work items', () => {
+  for (const data of [undefined, {}, { workItems: [] }, { workItems: null }]) {
+    const avg = workItemAverages(data);
+    assert.equal(avg.count, 0);
+    assert.equal(avg.total, null);
+    assert.equal(avg.input, null);
+    assert.equal(avg.output, null);
+  }
+});
+
+test('workItemAverages tolerates missing/partial token fields', () => {
+  const avg = workItemAverages({
+    workItems: [
+      { tokens: { total: 100, input: 100 } },  // no output
+      {},                                        // no tokens at all
+    ],
+  });
+  assert.equal(avg.count, 2);
+  assert.equal(avg.total, 50);
+  assert.equal(avg.input, 50);
+  assert.equal(avg.output, 0);
 });

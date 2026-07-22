@@ -3,7 +3,7 @@ import { RefreshCw, Download } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useApi } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
-import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, niceScale, buildDaySeries, stackSegments, buildExportUrl } from './token-usage-view.js';
+import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages } from './token-usage-view.js';
 
 // Trigger a browser download of an export URL. The endpoints are behind the
 // auth-cookie gate, so a same-origin anchor navigation carries the session.
@@ -380,6 +380,12 @@ function WorkItemsTab() {
   const cov = data?.coverage || { runs: { attributed: 0, unattributed: 0, total: 0 }, tokens: { attributed: 0, unattributed: 0, total: 0 }, attributedPct: 0 };
   const unatt = data?.unattributed || { total: 0, runs: 0 };
 
+  // Mean cost of one attributed work item (#795) — pure derivation of `data`,
+  // so it re-computes on every range change / Refresh with the cards below.
+  // `null` averages (zero work items) render as a placeholder, never NaN.
+  const avg = useMemo(() => workItemAverages(data), [data]);
+  const fmtAvg = (v) => (v === null ? '—' : formatInt(v));
+
   const rows = useMemo(() => (data?.workItems || []).map((w) => ({
     id: w.id,
     chain: [
@@ -430,6 +436,9 @@ function WorkItemsTab() {
         <StatCard label="Unattributed tokens" value={formatInt(unatt.total)} accent="var(--eb-status-warning)" />
         <StatCard label="Unattributed runs" value={formatInt(unatt.runs)} />
         <StatCard label="Total runs" value={formatInt(cov.runs.total)} />
+        <StatCard label="Ø total / work item" value={fmtAvg(avg.total)} />
+        <StatCard label="Ø input / work item" value={fmtAvg(avg.input)} />
+        <StatCard label="Ø output / work item" value={fmtAvg(avg.output)} />
       </div>
 
       {loading ? (

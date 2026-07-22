@@ -30,9 +30,108 @@ const {
   themeToCandidate,
 } = require('./knowledge-convergence');
 const { domainSkillName } = require('./knowledge-domains');
+// Reuse the #617 consumer parser (pure sibling, no orchestrator boot) so the
+// frontmatter the curator writes is guaranteed to read back through the exact same
+// code path that composes it into an agent's CLAUDE.md (#805 AC4/AC8).
+const { parseSkillDescription } = require('./skill-source');
 
 // Mirror the admin-console SKILL_NAME_RE so a generated name is always writable.
 const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
+
+// ---------------------------------------------------------------------------
+// SKILL.md frontmatter (#805) — every curator-generated SKILL.md must carry a
+// valid YAML frontmatter block with a non-empty `name` + one-line `description`,
+// so the #617 consumer advertises it in CLAUDE.md instead of listing it name-only.
+// ---------------------------------------------------------------------------
+
+const MAX_DESCRIPTION_LEN = 200; // keep the CLAUDE.md Skills list readable (E3)
+
+// Collapse any whitespace run (incl. newlines) to a single space and trim (AC8/E3).
+function collapseLine(value) {
+  return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+}
+
+// Truncate an already-collapsed line to one readable sentence-length line, cutting
+// on a word boundary and appending an ellipsis (E3).
+function truncateLine(line, max = MAX_DESCRIPTION_LEN) {
+  const s = String(line == null ? '' : line);
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max - 1);
+  const sp = cut.lastIndexOf(' ');
+  const head = sp > max * 0.6 ? cut.slice(0, sp) : cut;
+  return `${head.replace(/[\s.,;:!?/–—-]+$/, '')}…`;
+}
+
+// Render one YAML scalar the fail-soft parseSkillDescription reader accepts (E4).
+// Backslashes are dropped and inner double-quotes folded to single-quotes so a
+// double-quoted scalar never needs escaping (the reader strips outer quotes but
+// does not un-escape). A value with no YAML-significant punctuation stays plain.
+function fmScalar(value) {
+  const s = collapseLine(value).replace(/\\/g, '').replace(/"/g, "'");
+  if (!s) return '""';
+  const plainSafe = /^[A-Za-z0-9][A-Za-z0-9 _.()/-]*$/.test(s);
+  return plainSafe ? s : `"${s}"`;
+}
+
+// Build a fresh frontmatter block: `---` / name / description / `---`.
+function renderSkillFrontmatter({ name, description } = {}) {
+  const n = collapseLine(name) || 'team-skill';
+  const d = truncateLine(collapseLine(description)) || 'Team-curated knowledge skill.';
+  return ['---', `name: ${fmScalar(n)}`, `description: ${fmScalar(d)}`, '---'].join('\n');
+}
+
+const FRONTMATTER_RE = /^﻿?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/;
+
+/**
+ * Guarantee `skillMd` begins with exactly one valid YAML frontmatter block that
+ * carries a non-empty `name` and `description` (#805 AC1-AC4).
+ *
+ * - No block yet → prepend one built from the supplied fallback name/description.
+ * - A block already present → inject only the MISSING key(s); a present, non-empty
+ *   `name`/`description` is preserved verbatim (E5 — never overwrite a stronger
+ *   authored value, and E1 — never double-wrap an already-frontmattered LLM body).
+ * Pure (string in, string out).
+ */
+function ensureSkillFrontmatter(skillMd, { name, description } = {}) {
+  let md = String(skillMd == null ? '' : skillMd).replace(/^﻿/, '');
+  md = md.replace(/^\s+(?=---[ \t]*\r?\n)/, ''); // tolerate a stray blank before a block
+  const fName = collapseLine(name);
+  const fDesc = truncateLine(collapseLine(description));
+  const m = FRONTMATTER_RE.exec(md);
+  if (m) {
+    const body = m[1];
+    const rest = md.slice(m[0].length);
+    const hasName = /^name[ \t]*:[ \t]*\S/m.test(body);
+    const hasDesc = !!parseSkillDescription(md);
+    const inject = [];
+    if (!hasName) inject.push(`name: ${fmScalar(fName || 'team-skill')}`);
+    if (!hasDesc) inject.push(`description: ${fmScalar(fDesc || 'Team-curated knowledge skill.')}`);
+    if (inject.length === 0) return md; // already complete
+    const newBody = inject.concat(body ? [body] : []).join('\n');
+    return `---\n${newBody}\n---\n${rest}`;
+  }
+  return `${renderSkillFrontmatter({ name: fName, description: fDesc })}\n\n${md.replace(/^\n+/, '')}`;
+}
+
+// Derive a deterministic one-line "when to reach for this" description from a
+// cluster/theme candidate (+ optional routed domain). No LLM on the hot path, no
+// secrets/URLs (only the domain/lesson title + role audience) — mirrors the
+// no-secrets constraint the drafts already honour (#805 AC6, open-question 1).
+function deriveSkillDescription(source, { domain } = {}) {
+  const s = source && typeof source === 'object' ? source : {};
+  if (domain && domain.name) {
+    const roles = Array.isArray(domain.roles) && domain.roles.length ? domain.roles.join(', ') : '';
+    return truncateLine(collapseLine(
+      `${domain.name} — team-curated playbook${roles ? ` for ${roles}` : ''}. ` +
+      'Reach for this when a task falls in this domain.',
+    ));
+  }
+  const title = collapseLine(s.text) || 'team knowledge';
+  const topic = title.replace(/[.:;!?]+$/, '');
+  return truncateLine(collapseLine(
+    `Team-curated guidance: ${title}. Reach for this when a task involves ${topic.toLowerCase()}.`,
+  ));
+}
 
 // ---------------------------------------------------------------------------
 // Skill name + heuristic draft (kept shape-compatible with knowledge-suggestions)
@@ -98,7 +197,11 @@ function curatorSkillDraft(cluster, { domain } = {}) {
   }
   lines.push('');
 
-  return { name, skillMd: lines.join('\n'), llmDrafted: false };
+  // #805: prepend YAML frontmatter (name + one-line description) so the #617
+  // consumer advertises this skill in CLAUDE.md instead of listing it name-only.
+  const description = deriveSkillDescription(c, { domain });
+  const skillMd = ensureSkillFrontmatter(lines.join('\n'), { name, description });
+  return { name, description, skillMd, llmDrafted: false };
 }
 
 // Shared provenance builder for a curator auto-promotion. Both the single-cluster
@@ -220,7 +323,10 @@ function curatorThemeSkillDraft(candidate, { domain } = {}) {
   }
   lines.push('');
 
-  return { name, skillMd: lines.join('\n'), llmDrafted: false };
+  // #805: prepend YAML frontmatter (name + one-line description).
+  const description = deriveSkillDescription(c, { domain });
+  const skillMd = ensureSkillFrontmatter(lines.join('\n'), { name, description });
+  return { name, description, skillMd, llmDrafted: false };
 }
 
 // Provenance for a theme auto-promotion — sourced from the theme candidate, whose
@@ -452,7 +558,7 @@ function matchExistingSkill(candidate, existingSkills) {
 // marked `llmDrafted:false` / `synthesised:false` — the caller records that the
 // added content is un-synthesised. `added` is the count of genuinely new lines so
 // the caller can reject an empty (no-op) extension.
-function curatorSkillExtension(existingSkillMd, candidate) {
+function curatorSkillExtension(existingSkillMd, candidate, { name, domain } = {}) {
   const c = candidate && typeof candidate === 'object' ? candidate : {};
   const prior = (typeof existingSkillMd === 'string' ? existingSkillMd : '').replace(/\s+$/, '');
   const priorLc = prior.toLowerCase();
@@ -468,13 +574,20 @@ function curatorSkillExtension(existingSkillMd, candidate) {
     if (priorLc.includes(lc)) continue; // already covered by the existing doc
     statements.push(t);
   }
+  // #805: the update must never drop or blank the frontmatter (AC3). ensureSkillFrontmatter
+  // preserves an existing name/description (E5) and only fills a missing one — so a legacy
+  // skill written before #805 gains a valid block on its first extension, while a skill that
+  // already had a description keeps it.
+  const skillName = collapseLine(name) || (domain ? domainSkillName(domain) : slugifySkillName(c.text, c.kind));
+  const description = deriveSkillDescription(c, { domain });
+  const fm = (md) => ensureSkillFrontmatter(md, { name: skillName, description });
   if (statements.length === 0) {
-    return { skillMd: prior, llmDrafted: false, synthesised: false, added: 0 };
+    return { skillMd: fm(prior), description, llmDrafted: false, synthesised: false, added: 0 };
   }
   const lines = [prior, '', '## Added knowledge', ''];
   for (const s of statements) lines.push(`- ${s}`);
   lines.push('');
-  return { skillMd: lines.join('\n'), llmDrafted: false, synthesised: false, added: statements.length };
+  return { skillMd: fm(lines.join('\n')), description, llmDrafted: false, synthesised: false, added: statements.length };
 }
 
 // Union the new provenance onto an existing skill's record (mirrors admin-console
@@ -664,10 +777,16 @@ function buildSkillSynthesisRequest(candidate, { domain } = {}) {
     facts,
     '',
     'Structure the document as:',
+    '---',
+    `name: ${domain && domain.id ? domain.id : slugifySkillName(title)}`,
+    'description: <one line: when to reach for this skill>',
+    '---',
     `# ${title}`,
     ...PLAYBOOK_SECTIONS.map((s) => `## ${s}`),
     '',
     'How to synthesise:',
+    '- Begin with the YAML frontmatter block above: a non-empty `name` and a single-line',
+    '  `description` (a concise "when to reach for this" summary, no colons-in-value issues).',
     '- Generalise beyond the incident: express the PROCESS, not the occurrence.',
     '- File each lesson into the right section (a hard rule vs. a gotcha vs. an example).',
     '- Keep concrete snippets, but mark them clearly as examples of the abstract rule.',
@@ -697,6 +816,8 @@ function buildSkillExtensionSynthesisRequest(existingSkillMd, candidate, { domai
     facts,
     '',
     'Requirements:',
+    '- Keep (or add, if missing) the leading YAML frontmatter block with a non-empty',
+    '  `name` and single-line `description`; never blank or drop it.',
     '- Preserve everything already in the playbook; integrate the new lessons into the',
     `  right sections (${PLAYBOOK_SECTIONS.join(' / ')}).`,
     '- Generalise + deduplicate; do not restate a lesson already covered.',
@@ -736,17 +857,22 @@ function markUnsynthesised(skillMd) {
  *   synthesised:true when the LLM produced usable Markdown; otherwise the heuristic
  *   draft is returned with a visible marker and needsResynthesis:true (re-queued).
  */
-function synthesisFallback({ heuristic, llmText } = {}) {
+function synthesisFallback({ heuristic, llmText, frontmatter } = {}) {
   const h = heuristic && typeof heuristic === 'object' ? heuristic : { name: null, skillMd: '' };
   const text = typeof llmText === 'string' ? llmText.trim() : '';
+  // #805 AC2/E1/E2: when a deterministic frontmatter fallback is supplied, guarantee
+  // the written doc begins with a valid frontmatter block — keeping any frontmatter
+  // the LLM produced itself (E1), else injecting the deterministic one. When no
+  // fallback is given (legacy callers) the text is returned untouched.
+  const guarantee = (md) => (frontmatter ? ensureSkillFrontmatter(md, frontmatter) : md);
   // A usable synthesis is non-trivial Markdown with at least a heading — anything
   // shorter is treated as a failed call and falls back.
   if (text && text.length >= 40 && /(^|\n)#\s/.test(`\n${text}`)) {
-    return { name: h.name, skillMd: text, synthesised: true, needsResynthesis: false, llmDrafted: true };
+    return { name: h.name, skillMd: guarantee(text), synthesised: true, needsResynthesis: false, llmDrafted: true };
   }
   return {
     name: h.name,
-    skillMd: markUnsynthesised(h.skillMd),
+    skillMd: guarantee(markUnsynthesised(h.skillMd)),
     synthesised: false,
     needsResynthesis: true,
     llmDrafted: false,
@@ -757,6 +883,10 @@ module.exports = {
   SKILL_NAME_RE,
   PLAYBOOK_SECTIONS,
   UNSYNTHESISED_MARKER,
+  MAX_DESCRIPTION_LEN,
+  ensureSkillFrontmatter,
+  renderSkillFrontmatter,
+  deriveSkillDescription,
   buildSkillSynthesisRequest,
   buildSkillExtensionSynthesisRequest,
   markUnsynthesised,

@@ -3669,17 +3669,23 @@ app.get('/api/knowledge/promotion-suggestions', (req, res) => {
   const teamId = typeof req.query.team === 'string' ? req.query.team : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
   if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
-  const open = readCandidateStore(teamId).filter(c => c && c.status === 'open');
+  // #775: the Suggested-tab inbox reads `open`; the triage view's "Dismissed"
+  // filter reads `?status=dismissed` so a turned-down suggestion stays queryable
+  // for un-dismiss. Any other status value falls back to `open`.
+  const wanted = req.query.status === 'dismissed' ? 'dismissed' : 'open';
+  const rows = readCandidateStore(teamId).filter(c => c && c.status === wanted);
   // Auto-match (#553, AC4): pre-compute whether each converged cluster fits an
   // existing team-tier skill (the default promotion home), so the dialog can
   // pre-select "extend" with that target. Default stays "create new" (null).
   const eligible = eligibleExtendSkills(scope, teamId, 'team');
-  const suggestions = open.map(c => {
+  const suggestions = rows.map(c => {
     const view = knowledgeSuggestions.promotionSuggestionView(c, c.draft);
     view.matchedSkill = knowledgeSuggestions.matchExistingSkill(c, eligible);
+    if (c.dismissReason) view.dismissReason = c.dismissReason;
+    if (c.dismissedAt) view.dismissedAt = c.dismissedAt;
     return view;
   });
-  res.json({ team: teamId, suggestions });
+  res.json({ team: teamId, status: wanted, suggestions });
 });
 
 // Optional LLM polish of a candidate's SKILL.md — operator-initiated (Draft with
@@ -3878,8 +3884,28 @@ app.post('/api/knowledge/promotion-suggestions/:id/dismiss', apiLimiter, async (
   const teamId = typeof req.body?.team === 'string' ? req.body.team : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
   if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  // #775: an optional structured reason travels with the dismissal. The
+  // orchestrator validates it against its closed set (free text is dropped).
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason : null;
   try {
     await fetch(`${ORCH_URL()}/internal/knowledge/dismiss`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, suggestionId: req.params.id, reason }),
+    });
+  } catch { /* best-effort — lifecycle is a convenience, not a gate */ }
+  res.json({ ok: true });
+});
+
+// #775: restore a previously-dismissed suggestion to the open inbox (the triage
+// view's Un-dismiss action). Mirrors dismiss — the underlying lessons are never
+// touched, only the candidate's lifecycle status.
+app.post('/api/knowledge/promotion-suggestions/:id/undismiss', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.body?.team === 'string' ? req.body.team : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  try {
+    await fetch(`${ORCH_URL()}/internal/knowledge/undismiss`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ teamId, suggestionId: req.params.id }),
     });

@@ -9,6 +9,9 @@ const {
   shouldRefresh,
   buildHarvestEvent,
   buildPromotionCleanupEvent,
+  buildDismissalEvent,
+  DISMISS_REASONS,
+  normalizeDismissReason,
   leanEntry,
   parsePushEntries,
 } = require('./knowledge-feed');
@@ -104,6 +107,33 @@ test('buildPromotionCleanupEvent marks the autonomy-3 auto path + tolerates gaps
   assert.deepEqual(empty.entryIds, []);
   assert.equal(empty.count, 0);
   assert.equal(buildPromotionCleanupEvent({}).count, 0);
+});
+
+// ── buildDismissalEvent (#775) ────────────────────────────────────────────────
+
+test('normalizeDismissReason keeps the closed set, drops free text', () => {
+  for (const r of DISMISS_REASONS) assert.equal(normalizeDismissReason(r), r);
+  assert.equal(normalizeDismissReason('whatever'), null);
+  assert.equal(normalizeDismissReason(undefined), null);
+});
+
+test('buildDismissalEvent emits a dismissal with a validated reason', () => {
+  const ev = buildDismissalEvent({
+    teamId: 'acme', suggestionId: 'abc', reason: 'too-specific', text: 'a lesson', ts: '2026-07-22T00:00:00Z',
+  });
+  assert.equal(ev.type, 'dismissal');
+  assert.equal(ev.teamId, 'acme');
+  assert.equal(ev.suggestionId, 'abc');
+  assert.equal(ev.reason, 'too-specific');
+  assert.equal(ev.text, 'a lesson');
+  // free-text reason is not persisted
+  assert.equal(buildDismissalEvent({ teamId: 'acme', reason: 'nonsense' }).reason, null);
+});
+
+test('buildDismissalEvent with undo emits an undismiss and drops the reason', () => {
+  const ev = buildDismissalEvent({ teamId: 'acme', suggestionId: 'abc', reason: 'too-specific', undo: true });
+  assert.equal(ev.type, 'undismiss');
+  assert.equal(ev.reason, null);
 });
 
 // ── parsePushEntries ──────────────────────────────────────────────────────────

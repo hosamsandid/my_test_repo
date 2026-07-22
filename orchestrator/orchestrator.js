@@ -8585,26 +8585,43 @@ async function main() {
     // Called by the admin-console after it writes a promoted skill: flip the
     // candidate lifecycle to `promoted` and echo a `promotion` event into the
     // live feed so the Knowledge Flow view draws the T1→T2 edge.
-    if (req.method === 'POST' && (req.url === '/internal/knowledge/promoted' || req.url === '/internal/knowledge/dismiss')) {
+    if (req.method === 'POST' && (req.url === '/internal/knowledge/promoted' || req.url === '/internal/knowledge/dismiss' || req.url === '/internal/knowledge/undismiss')) {
       const dismiss = req.url.endsWith('/dismiss');
+      const undismiss = req.url.endsWith('/undismiss');
       let body = '';
       req.on('data', (d) => { body += d; });
       req.on('end', async () => {
         try {
           const p = JSON.parse(body || '{}');
           const teamId = String(p.teamId || DEFAULT_TEAM_ID);
-          const isExtend = !dismiss && !!p.extend;
+          const isExtend = !dismiss && !undismiss && !!p.extend;
           const entryIds = Array.isArray(p.entryIds)
             ? p.entryIds.filter((x) => typeof x === 'string' && /^[0-9a-f]{12}$/.test(x))
             : [];
+          // #775: dismiss carries an optional structured reason; un-dismiss
+          // restores a previously-dismissed suggestion to `open`. Both emit a
+          // feed event (below) so the live feed records the decision.
+          const dismissReason = dismiss ? knowledgeFeed.normalizeDismissReason(p.reason) : null;
+          let touched = null; // the candidate we flipped, for the feed event text
           if (p.suggestionId) {
             const list = readKnowledgeCandidates(teamId);
             const i = list.findIndex((c) => c && c.id === p.suggestionId);
             if (i >= 0) {
-              list[i] = { ...list[i], status: dismiss ? 'dismissed' : 'promoted', resolvedAt: new Date().toISOString() };
+              if (undismiss) {
+                const { dismissReason: _dr, dismissedAt: _da, resolvedAt: _ra, ...rest } = list[i];
+                list[i] = { ...rest, status: 'open' };
+              } else {
+                list[i] = {
+                  ...list[i],
+                  status: dismiss ? 'dismissed' : 'promoted',
+                  resolvedAt: new Date().toISOString(),
+                  ...(dismiss ? { dismissedAt: new Date().toISOString(), dismissReason } : {}),
+                };
+              }
+              touched = list[i];
               writeKnowledgeCandidates(teamId, list);
             }
-          } else if (!dismiss && entryIds.length > 0) {
+          } else if (!dismiss && !undismiss && entryIds.length > 0) {
             // Promotion without a stored suggestion (manual combine, agent→team
             // lift): record a synthetic promoted row so the collector's promoted
             // overlay, the archive guard, and the planners' promoted-entry
@@ -8626,7 +8643,17 @@ async function main() {
               writeKnowledgeCandidates(teamId, list);
             }
           }
-          if (!dismiss) {
+          if (dismiss || undismiss) {
+            // #775 §4: record the dismiss / un-dismiss decision in the live feed
+            // so it is transparent that a suggestion was turned down or restored.
+            appendKnowledgeEvents([knowledgeFeed.buildDismissalEvent({
+              teamId,
+              suggestionId: typeof p.suggestionId === 'string' ? p.suggestionId : null,
+              reason: dismissReason,
+              text: touched && typeof touched.text === 'string' ? touched.text : null,
+              undo: undismiss,
+            })]);
+          } else {
             const skill = p.skill && typeof p.skill === 'object'
               ? { name: p.skill.name, tier: p.skill.tier } : null;
             // Distinguishable feed event (#553, AC9): "extension" (skill X gained

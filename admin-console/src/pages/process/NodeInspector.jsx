@@ -330,9 +330,8 @@ function TemplateReadonly({ node }) {
                 <span>{t.type}</span>
                 {evText ? ` · ${evText}` : ''}
                 {s.label ? ` · 🏷 ${s.label}` : ''}
-                {Array.isArray(t.emits) && t.emits.length > 0 && (
-                  <span style={{ color: 'var(--eb-status-info)' }}> → {t.emits.join(', ')}{t.emitsDerived ? ' ≈' : ''}</span>
-                )}
+                {/* Trigger-level emits were removed (#783) — label hand-offs are
+                    shown at the node/role level, not per trigger. */}
               </div>
             );
           })}

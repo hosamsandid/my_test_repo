@@ -23,12 +23,11 @@ const { detectRasterImageType, imageContentType } = require('./image-type');
 const { githubApiBase } = require('./github-api-base');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, visibleUser, describeAuthz } = require('./scope');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
-const { deriveEmitsForTrigger } = require('./emits-derivation');
 const { buildProcessGraph } = require('./process-graph');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
@@ -2749,6 +2748,11 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   if (idx === -1) return res.status(404).json({ error: 'Trigger not found' });
   const prev = triggers[idx];
   const merged = { ...prev, ...req.body, id: triggerId };
+  // Trigger-level `emits` was removed (#783): the agent/role level is canonical.
+  // Ignore any supplied `emits` and drop a legacy field so an edit never
+  // re-persists it (a persisted-but-ignored value can't create a phantom edge).
+  delete merged.emits;
+  delete merged.emitsDerived;
   if (merged.type === 'github-event') {
     const now = new Date().toISOString();
     // Refresh the activation horizon on a disable→enable flip so a
@@ -2785,14 +2789,6 @@ app.delete('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) =
   res.status(204).end();
 });
 
-/* ─── Trigger emits (Process Canvas #328) ───────────────────────────────
- * A trigger's `emits` array declares the labels its run is expected to set —
- * the outbound edges of the orchestration graph. We never author it silently:
- * the suggestions endpoint heuristically *derives* a draft from the prompt
- * prose (the trigger's own prompt folded with the agent's system prompt), the
- * operator confirms/corrects it, and the emits endpoint persists the confirmed
- * set through the same single-writer trigger path. */
-
 function readAgentSystemPrompt(id) {
   try {
     const agentsRoot = path.resolve(AGENTS_DIR);
@@ -2802,73 +2798,42 @@ function readAgentSystemPrompt(id) {
   } catch { return ''; }
 }
 
-// Heuristic draft only — advisory, never persisted by this call.
-app.get('/api/agents/:id/triggers/:triggerId/emit-suggestions', (req, res) => {
-  const { id, triggerId } = req.params;
-  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const agentsRoot = path.resolve(AGENTS_DIR) + path.sep;
-  const agentDir = path.resolve(AGENTS_DIR, id);
-  if (!(agentDir + path.sep).startsWith(agentsRoot)) return res.status(400).json({ error: 'Invalid agent id' });
-  if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
-  const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
-  const trigger = (Array.isArray(triggers) ? triggers : []).find(t => t.id === triggerId);
-  if (!trigger) return res.status(404).json({ error: 'Trigger not found' });
-  const suggestions = deriveEmitsForTrigger(trigger, readAgentSystemPrompt(id));
-  res.json({ current: Array.isArray(trigger.emits) ? trigger.emits : [], suggestions });
-});
-
-// Persist the operator-confirmed emits set onto the trigger.
-app.put('/api/agents/:id/triggers/:triggerId/emits', apiLimiter, async (req, res) => {
-  const { id, triggerId } = req.params;
-  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  if (!fs.existsSync(path.join(AGENTS_DIR, id))) return res.status(404).json({ error: 'Agent not found' });
-  const { emits } = req.body || {};
-  if (!Array.isArray(emits) || emits.some(e => typeof e !== 'string' || !e.trim())) {
-    return res.status(400).json({ error: 'emits must be an array of non-empty strings' });
+// Live migration (#783, AC8): trigger-level `emits` was removed. An already-
+// materialised agent may still carry `emits` on a trigger in its triggers.json.
+// Tolerate-and-lift at graph-build time so no label hand-off edge is lost: merge
+// any trigger-level emit into the agent-level set the graph builders read. Pure;
+// deduped, agent-level labels first. (No write-back — the read is tolerant.)
+function liftAgentEmits(cfgEmits, triggers) {
+  const base = Array.isArray(cfgEmits) ? cfgEmits.filter(e => typeof e === 'string' && e) : [];
+  const lifted = [];
+  for (const t of (Array.isArray(triggers) ? triggers : [])) {
+    if (t && Array.isArray(t.emits)) {
+      for (const e of t.emits) if (typeof e === 'string' && e) lifted.push(e);
+    }
   }
-  // Normalise: trim, drop blanks, de-duplicate while preserving order.
-  const clean = [...new Set(emits.map(e => e.trim()))];
-  const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
-  const list = Array.isArray(cur) ? cur : [];
-  const idx = list.findIndex(t => t.id === triggerId);
-  if (idx === -1) return res.status(404).json({ error: 'Trigger not found' });
-  list[idx] = { ...list[idx], emits: clean };
-  try {
-    await putTriggers(id, list);
-  } catch (err) {
-    return res.status(502).json({ error: `Could not save triggers: ${err.message}` });
-  }
-  res.json(list[idx]);
-});
+  return lifted.length ? [...new Set([...base, ...lifted])] : base;
+}
 
 /* ─── Process graph (Process Canvas #329) ───────────────────────────────
  * Aggregates agents (or role templates) + their triggers into the
- * orchestration graph the canvas renders, in one call. Edge wiring is
- * deterministic from each trigger's effective `emits` set:
- *   - live level (default, or ?team=<id> to scope to one team): uses the
- *     persisted `emits` only — labels are already concrete in triggers.json.
- *   - template level (?templates=1 or ?templates=a,b): reads the role-template
- *     catalog, leaves `{{var}}` tokens raw, and (unless ?derive=0) falls back to
- *     the #328 heuristic so the blueprint shows wiring before emits are set. */
-
-function effectiveTriggers(triggers, { derive, systemPrompt }) {
-  return (Array.isArray(triggers) ? triggers : []).map(t => {
-    if (Array.isArray(t.emits)) return t; // operator-confirmed — authoritative
-    if (!derive) return { ...t, emits: [] };
-    const sug = deriveEmitsForTrigger(t, systemPrompt);
-    return { ...t, emits: sug.map(s => s.label), emitsDerived: sug.length > 0 };
-  });
-}
+ * orchestration graph the canvas renders, in one call. Label hand-off edges
+ * are derived exclusively from the agent/role level `emits` (#414/#783);
+ * trigger-level emits were removed. A trigger only contributes its listen
+ * side (labelFilter / events); it emits nothing.
+ *   - live level (default, or ?team=<id> to scope to one team): agent-level
+ *     `emits` from each agent's config.json.
+ *   - template level (?templates=1 or ?templates=a,b): the role-template
+ *     catalog's own `emits`, `{{var}}` tokens left raw. */
 
 function truthyParam(v) { return v === '1' || v === 'true' || v === ''; }
 
 app.get('/api/process/graph', (req, res) => {
   const templatesParam = req.query.templates;
 
-  // Template-level blueprint graph.
+  // Template-level blueprint graph. Label hand-off edges come from each
+  // template's role-level `emits` (#414/#783); triggers contribute only their
+  // listen side.
   if (templatesParam !== undefined) {
-    const derive = req.query.derive !== undefined
-      ? truthyParam(String(req.query.derive)) : true;
     const ids = truthyParam(String(templatesParam))
       ? listAgentTemplateIds()
       : String(templatesParam).split(',').map(s => s.trim()).filter(Boolean);
@@ -2876,29 +2841,25 @@ app.get('/api/process/graph', (req, res) => {
     for (const id of ids) {
       const t = loadAgentTemplate(id);
       if (!t) continue;
-      const triggers = effectiveTriggers(
-        (t.triggers || []).map(tr => ({
-          id: tr.id, type: tr.type, events: tr.events, labelFilter: tr.labelFilter,
-          cron: tr.cron, at: tr.at, enabled: tr.enabled,
-          emits: tr.emits, prompt: tr.promptTemplate,
-        })),
-        { derive, systemPrompt: t.promptTemplate || '' },
-      );
+      const triggers = (t.triggers || []).map(tr => ({
+        id: tr.id, type: tr.type, events: tr.events, labelFilter: tr.labelFilter,
+        cron: tr.cron, at: tr.at, enabled: tr.enabled, channel: tr.channel,
+      }));
       agents.push({
         id: t.id, role: 'template', displayName: t.displayName || t.id,
         sessionPolicy: t.sessionPolicy || 'persistent', environmentId: null, triggers,
+        emits: Array.isArray(t.emits) ? t.emits : [],
         github: t.github || null, channels: Array.isArray(t.channels) ? t.channels : [],
       });
     }
     return res.json({ level: 'template', team: null, ...buildProcessGraph(agents) });
   }
 
-  // Live graph — persisted emits only (the hybrid default: deterministic, no
-  // silent derivation). Optionally scoped to one team.
+  // Live graph — agent-level `emits` from each agent's config.json (#414/#783).
+  // Optionally scoped to one team.
   const team = typeof req.query.team === 'string' && req.query.team.trim()
     ? req.query.team.trim() : null;
   if (team && !AGENT_ID_RE.test(team)) return res.status(400).json({ error: 'Invalid team id' });
-  const derive = req.query.derive !== undefined && truthyParam(String(req.query.derive));
 
   const agents = [];
   for (const id of listAgentDirs()) {
@@ -2906,14 +2867,14 @@ app.get('/api/process/graph', (req, res) => {
     const role = cfg.role || 'agent';
     if (role === 'team') continue; // template holder — no triggers of its own
     if (team && cfg.parentTeamId !== team) continue;
-    const raw = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
-    const triggers = effectiveTriggers(raw, {
-      derive, systemPrompt: derive ? readAgentSystemPrompt(id) : '',
-    });
+    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
     agents.push({
       id, role, displayName: cfg.displayName || id,
       sessionPolicy: cfg.sessionPolicy || 'persistent',
-      environmentId: cfg.environmentId || null, triggers,
+      environmentId: cfg.environmentId || null,
+      triggers: Array.isArray(triggers) ? triggers : [],
+      // Agent-level label hand-offs, lifting any legacy trigger-level emit (AC8).
+      emits: liftAgentEmits(cfg.emits, triggers),
       github: cfg.github || null, channels: Array.isArray(cfg.channels) ? cfg.channels : [],
     });
   }
@@ -2928,7 +2889,7 @@ app.post('/api/process/graph', (req, res) => {
   const v = validateProcessTemplate(raw, { allowEmptyRoles: true });
   if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
   // Map legacy pr-review roles (#347) onto the #380 channel ports so old drafts render.
-  const bundle = normalizeLegacyReview(raw);
+  const bundle = liftTriggerEmits(normalizeLegacyReview(raw));
   const agents = bundle.roles.map(r => ({
     id: r.id, role: 'template', displayName: r.displayName || r.id,
     sessionPolicy: r.sessionPolicy || 'persistent',
@@ -4665,7 +4626,6 @@ app.get('/api/flows/graph', async (req, res) => {
   const team = typeof req.query.team === 'string' && req.query.team.trim()
     ? req.query.team.trim() : null;
   if (team && !AGENT_ID_RE.test(team)) return res.status(400).json({ error: 'Invalid team id' });
-  const derive = req.query.derive !== undefined && truthyParam(String(req.query.derive));
 
   const nodes = [];
   for (const id of listAgentDirs()) {
@@ -4674,9 +4634,7 @@ app.get('/api/flows/graph', async (req, res) => {
     if (role === 'team') continue; // template holder — no triggers of its own
     if (team && cfg.parentTeamId !== team) continue;
     const raw = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
-    const triggers = effectiveTriggers(raw, {
-      derive, systemPrompt: derive ? readAgentSystemPrompt(id) : '',
-    });
+    const triggers = Array.isArray(raw) ? raw : [];
     // Data-flow ports persisted at materialise time (#379) so the live graph
     // of an imported team still renders its dependency/artifact edges.
     const df = cfg.dataFlow && typeof cfg.dataFlow === 'object' ? cfg.dataFlow : {};
@@ -4684,7 +4642,8 @@ app.get('/api/flows/graph', async (req, res) => {
       id, role, displayName: cfg.displayName || id,
       sessionPolicy: cfg.sessionPolicy || 'persistent',
       environmentId: cfg.environmentId || null, triggers,
-      emits: Array.isArray(cfg.emits) ? cfg.emits : [], // agent-level label hand-offs
+      // Agent-level label hand-offs, lifting any legacy trigger-level emit (AC8).
+      emits: liftAgentEmits(cfg.emits, triggers),
       inputs: Array.isArray(df.inputs) ? df.inputs : [],
       outputs: Array.isArray(df.outputs) ? df.outputs : [],
       dependsOn: Array.isArray(df.dependsOn) ? df.dependsOn : [],
@@ -4715,7 +4674,7 @@ app.post('/api/flows/graph', (req, res) => {
   const v = validateProcessTemplate(raw, { allowEmptyRoles: true });
   if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
   // Map legacy pr-review roles (#347) onto the #380 channel ports so old drafts render.
-  const bundle = normalizeLegacyReview(raw);
+  const bundle = liftTriggerEmits(normalizeLegacyReview(raw));
   const flow = processTemplateToUnified(bundle);
   res.json({
     unifiedFlowVersion: flow.unifiedFlowVersion, source: 'draft', imported: true, name: bundle.name,
@@ -4752,13 +4711,16 @@ app.get('/api/process/template', (req, res) => {
     // Effective prompt the agent actually runs (rendered AGENT-PROMPT.md),
     // falling back to the config override.
     const systemPrompt = readAgentSystemPrompt(id) || cfg.systemPrompt || '';
+    // Lift any legacy trigger-level emit to the agent level (#783) so the export
+    // carries label hand-offs canonically and loses no edge.
+    const emits = liftAgentEmits(cfg.emits, tlist);
     roleEntries.push({
       id, displayName: cfg.displayName || id, role,
       sessionPolicy: cfg.sessionPolicy || 'persistent', systemPrompt, triggers: tlist,
-      ...(Array.isArray(cfg.emits) && cfg.emits.length ? { emits: cfg.emits } : {}),
+      ...(emits.length ? { emits } : {}),
       ...(typeof cfg.stage === 'string' && cfg.stage ? { stage: cfg.stage } : {}),
     });
-    graphAgents.push({ id, role, triggers: tlist, emits: cfg.emits });
+    graphAgents.push({ id, role, triggers: tlist, emits });
   }
   const g = buildProcessGraph(graphAgents);
   res.json(buildProcessTemplate({
@@ -8743,7 +8705,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     // normalizeLegacyReview maps any legacy pr-review roles (#347) onto channels.
     customRolesRaw = templateToCustomRoles(
       expandDataFlowSteps(
-        expandGithubChannels(normalizeLegacyReview(body.processTemplate), { teamId }),
+        expandGithubChannels(liftTriggerEmits(normalizeLegacyReview(body.processTemplate)), { teamId }),
         { teamId },
       )
     );
@@ -9220,7 +9182,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
     if (!v.ok) return fail(400, `Invalid processTemplate: ${v.error}`);
     customRolesRaw = templateToCustomRoles(
       expandDataFlowSteps(
-        expandGithubChannels(normalizeLegacyReview(body.processTemplate), { teamId }),
+        expandGithubChannels(liftTriggerEmits(normalizeLegacyReview(body.processTemplate)), { teamId }),
         { teamId },
       )
     );

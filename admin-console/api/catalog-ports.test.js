@@ -101,8 +101,10 @@ test('dispatcher wiring on developer is NOT intrinsic; curation and triage essen
   const triage = readTpl('issue-triage');
   const ids = intrinsicTriggers(triage).map(t => t.id);
   assert.ok(ids.includes('triage-issue-opened'));
+  // Label hand-offs live at the role level now (#783), not on the trigger.
+  assert.deepEqual(triage.emits, ['req:refine']);
   const opened = triage.triggers.find(t => t.id === 'triage-issue-opened');
-  assert.deepEqual(opened.emits, ['req:refine']);
+  assert.ok(!('emits' in opened), 'trigger-level emits removed (#783)');
   const ba = readTpl('business-analyst');
   const refine = ba.triggers.find(t => t.id === 'ba-on-refine');
   assert.equal(refine.labelFilter, 'req:refine');

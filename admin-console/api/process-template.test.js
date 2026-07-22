@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId } = require('./process-template');
 
 // A tiny stand-in for the on-disk draft store: an id is "taken" iff present.
 const existsIn = (set) => (id) => set.has(id);
@@ -56,14 +56,43 @@ const sampleRoles = [
   {
     id: 'acme-developer', displayName: 'Developer', role: 'team-member', sessionPolicy: 'per-invocation',
     systemPrompt: 'You implement issues.',
+    // Label hand-offs live at the role level (#414/#783), not on triggers.
+    emits: ['started:dev'],
     triggers: [
       { id: 'dev-assigned', type: 'github-event', enabled: true, events: ['issues.labeled'],
-        from: 'any-except-self', labelFilter: 'assigned:dev', emits: ['started:dev'], repo: 'acme/app',
+        from: 'any-except-self', labelFilter: 'assigned:dev', repo: 'acme/app',
         prompt: 'Implement it.', description: 'assigned' },
       { id: 'curate', type: 'cron', enabled: true, cron: '5 3 * * 1', prompt: 'Tidy memory.' },
     ],
   },
 ];
+
+test('liftTriggerEmits: legacy trigger-level emits are lifted to role level (#783 AC7)', () => {
+  const legacy = {
+    processTemplateVersion: 1, name: 'legacy', level: 'template',
+    roles: [
+      { id: 'triage', systemPrompt: 'p', triggers: [
+        { id: 't', type: 'github-event', events: ['issues.opened'], emits: ['req:refine'], emitsDerived: true },
+      ] },
+      { id: 'dev', systemPrompt: 'p', emits: ['ready'], triggers: [
+        { id: 't2', type: 'github-event', events: ['x'], emits: ['ready', 'started:dev'] },
+      ] },
+      { id: 'plain', systemPrompt: 'p', triggers: [{ id: 't3', type: 'cron', cron: '0 9 * * 1' }] },
+    ],
+  };
+  const lifted = liftTriggerEmits(legacy);
+  // triage: role gains the trigger's label; trigger loses emits/emitsDerived.
+  assert.deepEqual(lifted.roles[0].emits, ['req:refine']);
+  assert.ok(!('emits' in lifted.roles[0].triggers[0]));
+  assert.ok(!('emitsDerived' in lifted.roles[0].triggers[0]));
+  // dev: role emit + trigger emits merge, deduped, role-first order.
+  assert.deepEqual(lifted.roles[1].emits, ['ready', 'started:dev']);
+  assert.ok(!('emits' in lifted.roles[1].triggers[0]));
+  // plain: untouched, no emits introduced.
+  assert.ok(!('emits' in lifted.roles[2]));
+  // Idempotent: a second pass changes nothing.
+  assert.deepEqual(liftTriggerEmits(lifted), lifted);
+});
 
 test('roleKeyOf strips the team prefix', () => {
   assert.equal(roleKeyOf('acme-developer', 'acme'), 'developer');
@@ -83,9 +112,11 @@ test('buildProcessTemplate shapes a versioned bundle and drops team-specifics', 
   assert.equal(r.id, 'developer');         // team prefix stripped
   assert.equal(r.sessionPolicy, 'per-invocation');
   assert.equal(r.systemPrompt, 'You implement issues.');
+  // Label hand-offs are carried at the role level (#783), not on triggers.
+  assert.deepEqual(r.emits, ['started:dev']);
   const t = r.triggers[0];
   assert.equal(t.labelFilter, 'assigned:dev');
-  assert.deepEqual(t.emits, ['started:dev']);
+  assert.ok(!('emits' in t), 'trigger-level emits removed (#783)');
   assert.equal(t.prompt, 'Implement it.');
   assert.ok(!('repo' in t), 'repo is team-specific and must not be in the bundle');
   assert.ok(!('from' in t), 'origin filter removed — triggers fire on any matching event');
@@ -113,7 +144,9 @@ test('templateToCustomRoles maps to the /api/teams pseudo-template shape', () =>
   const t = role.triggers.find(x => x.id === 'dev-assigned');
   assert.equal(t.promptTemplate, 'Implement it.');
   assert.equal(t.labelFilter, 'assigned:dev');
-  assert.deepEqual(t.emits, ['started:dev']);
+  assert.ok(!('emits' in t), 'trigger-level emits removed (#783)');
+  // Label hand-offs are carried at the role level.
+  assert.deepEqual(role.emits, ['started:dev']);
 });
 
 test('stage: per-role stage + ordered stages survive build → customRoles (#stage-order)', () => {
@@ -141,7 +174,9 @@ test('round-trip: build → validate → customRoles preserves wiring', () => {
   assert.equal(validateProcessTemplate(b).ok, true);
   const cr = templateToCustomRoles(b);
   assert.deepEqual(cr.map(r => r.id), ['developer']);
-  assert.deepEqual(cr[0].triggers.find(t => t.id === 'dev-assigned').emits, ['started:dev']);
+  // Label hand-off preserved at the role level through the round-trip (#783).
+  assert.deepEqual(cr[0].emits, ['started:dev']);
+  assert.ok(!('emits' in cr[0].triggers.find(t => t.id === 'dev-assigned')));
 });
 
 test('emptyDraftBundle is a valid draft (empty roles) but not a materialisable template', () => {
@@ -521,7 +556,7 @@ const devTemplate = {
   triggers: [
     { id: 'dev-assigned', type: 'github-event', enabled: true,
       events: ['issues.labeled'], labelFilter: 'assigned:{{agentId}}',
-      emits: ['started:{{agentId}}'], dataFlow: false,
+      dataFlow: false,
       promptTemplate: 'Implement the issue for {{repoFullName}}.',
       preCheckEnv: { REPO: '{{repoFullName}}' } },
     { id: 'dev-curate', type: 'cron', enabled: true, cron: '5 3 * * 1',
@@ -531,18 +566,19 @@ const devTemplate = {
 
 const devVars = { repoFullName: 'acme/app', agentId: 'acme-developer', readyLabel: 'ready' };
 
-test('buildMemberFromTemplate: substitutes {{vars}} in prompt, labelFilter, emits, preCheckEnv', () => {
+test('buildMemberFromTemplate: substitutes {{vars}} in prompt, labelFilter, preCheckEnv', () => {
   const m = buildMemberFromTemplate(devTemplate, {
     teamId: 'acme', memberId: 'acme-developer', memberDisplayName: 'Developer', vars: devVars,
   });
   assert.equal(m.systemPromptOverride, 'You build for acme/app as acme-developer.');
   const gh = m.triggers.find(t => t.id === 'dev-assigned');
   assert.equal(gh.labelFilter, 'assigned:acme-developer');
-  assert.deepEqual(gh.emits, ['started:acme-developer']);
+  assert.ok(!('emits' in gh), 'trigger-level emits removed (#783)');
   assert.equal(gh.prompt, 'Implement the issue for acme/app.');
   assert.deepEqual(gh.preCheckEnv, { REPO: 'acme/app' });
-  // agent-level emits substituted too
-  assert.deepEqual(m.emits, ['started:{{agentId}}']); // raw template value passthrough
+  // Agent-level emits are carried through (raw template value — resolved by the
+  // orchestrator's own substitution when the member config is written).
+  assert.deepEqual(m.emits, ['started:{{agentId}}']);
 });
 
 test('buildMemberFromTemplate: github-event trigger gets repo + fresh activation stamps', () => {

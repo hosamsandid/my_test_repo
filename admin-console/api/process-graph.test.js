@@ -9,21 +9,20 @@ const path = require('path');
 const { buildProcessGraph, computeLints, listenKeys, classifyKind } = require('./process-graph');
 
 function lintCodes(g) { return g.lints.map(l => l.code); }
-const { deriveEmitsForTrigger } = require('./emits-derivation');
 
 const TEMPLATES_DIR = path.join(
   __dirname, '..', '..', 'orchestrator', 'skill-pool', 'agent-templates',
 );
 
-// Mirror of api.js#effectiveTriggers for the template level (derive on).
+// Mirror of api.js's template-level graph gathering (#783): a template's label
+// hand-offs come from its role-level `emits`; triggers contribute listen side
+// only.
 function templateNode(tpl) {
-  const triggers = (tpl.triggers || []).map(tr => {
-    const t = { ...tr, prompt: tr.promptTemplate };
-    if (Array.isArray(tr.emits)) return t;
-    const sug = deriveEmitsForTrigger(t, tpl.promptTemplate || '');
-    return { ...t, emits: sug.map(s => s.label), emitsDerived: sug.length > 0 };
-  });
-  return { id: tpl.id, role: 'template', displayName: tpl.displayName, triggers };
+  const triggers = (tpl.triggers || []).map(tr => ({ ...tr, prompt: tr.promptTemplate }));
+  return {
+    id: tpl.id, role: 'template', displayName: tpl.displayName,
+    emits: Array.isArray(tpl.emits) ? tpl.emits : [], triggers,
+  };
 }
 function loadTpl(id) {
   return JSON.parse(fs.readFileSync(path.join(TEMPLATES_DIR, `${id}.json`), 'utf8'));
@@ -55,7 +54,7 @@ test('classifyKind', () => {
 
 test('emitter→listener edge forms on a matching label', () => {
   const g = buildProcessGraph([
-    { id: 'a', triggers: [{ id: 't1', type: 'github-event', events: ['issues.opened'], emits: ['dispatch'] }] },
+    { id: 'a', emits: ['dispatch'], triggers: [{ id: 't1', type: 'github-event', events: ['issues.opened'] }] },
     { id: 'b', triggers: [{ id: 't2', type: 'github-event', events: ['issues.labeled'], labelFilter: 'dispatch' }] },
   ]);
   const e = edgesBetween(g, 'a', 'b');
@@ -105,7 +104,7 @@ test('http trigger (#410): becomes a webhook edge from outside', () => {
 
 test('dead-end emitter: nothing listens on the emitted label', () => {
   const g = buildProcessGraph([
-    { id: 'a', triggers: [{ id: 't', type: 'github-event', events: ['x'], emits: ['stage:done'] }] },
+    { id: 'a', emits: ['stage:done'], triggers: [{ id: 't', type: 'github-event', events: ['x'] }] },
   ]);
   const e = g.edges.find(x => x.from === 'a' && x.deadEnd);
   assert.ok(e);
@@ -149,7 +148,7 @@ test('DM-only agent (no triggers) is an entry point', () => {
 
 test('one emitter feeding two listeners yields two edges', () => {
   const g = buildProcessGraph([
-    { id: 'src', triggers: [{ id: 't', type: 'github-event', events: ['x'], emits: ['go'] }] },
+    { id: 'src', emits: ['go'], triggers: [{ id: 't', type: 'github-event', events: ['x'] }] },
     { id: 'l1', triggers: [{ id: 't', type: 'github-event', labelFilter: 'go' }] },
     { id: 'l2', triggers: [{ id: 't', type: 'github-event', labelFilter: 'go' }] },
   ]);
@@ -159,8 +158,8 @@ test('one emitter feeding two listeners yields two edges', () => {
 
 test('label registry tags gates and brakes', () => {
   const g = buildProcessGraph([
-    { id: 'a', triggers: [
-      { id: 't', type: 'github-event', labelFilter: 'human:td-approved', emits: ['stage:build'] },
+    { id: 'a', emits: ['stage:build'], triggers: [
+      { id: 't', type: 'github-event', labelFilter: 'human:td-approved' },
       { id: 'h', type: 'github-event', labelFilter: 'hold' },
     ] },
   ]);
@@ -170,12 +169,11 @@ test('label registry tags gates and brakes', () => {
   assert.equal(byName['stage:build'].humanGate, false);
 });
 
-test('template level: shipped dispatcher derives emits onto its node', () => {
+test('template level: shipped dispatcher carries its role-level emits onto its node', () => {
   const g = buildProcessGraph([templateNode(loadTpl('dispatcher'))]);
   const dispatcher = g.nodes.find(n => n.id === 'dispatcher');
-  const dispatcherEmits = dispatcher.triggers.flatMap(t => t.emits);
-  assert.ok(dispatcherEmits.includes('dispatch'),
-    'dispatcher should carry `dispatch` as an emitted label');
+  assert.ok(dispatcher.emits.includes('dispatch'),
+    'dispatcher should carry `dispatch` as a role-level emitted label');
 });
 
 test('template level: a synthetic listener wires to a shipped emitter', () => {
@@ -196,8 +194,8 @@ test('template level: {{var}} label tokens still wire emitter to listener', () =
   // materialisation. The shipped catalog no longer uses them, but imported /
   // hand-authored templates may.
   const emitter = {
-    id: 'producer', role: 'template',
-    triggers: [{ id: 'e', type: 'github-event', events: ['issues.opened'], emits: ['{{dispatchLabel}}'] }],
+    id: 'producer', role: 'template', emits: ['{{dispatchLabel}}'],
+    triggers: [{ id: 'e', type: 'github-event', events: ['issues.opened'] }],
   };
   const listener = {
     id: 'consumer', role: 'template',
@@ -228,7 +226,7 @@ test('lint: orphan listener fires and is keyed to the target node', () => {
 
 test('lint: dead-end emitter fires', () => {
   const g = buildProcessGraph([
-    { id: 'a', triggers: [{ id: 't', type: 'github-event', from: 'any-except-self', events: ['x'], emits: ['stage:done'] }] },
+    { id: 'a', emits: ['stage:done'], triggers: [{ id: 't', type: 'github-event', from: 'any-except-self', events: ['x'] }] },
   ]);
   assert.ok(g.lints.some(l => l.code === 'dead-end-emitter' && l.nodeId === 'a'));
 });
@@ -245,14 +243,14 @@ test('lint: no unguarded-self-trigger lint (origin filters removed)', () => {
 
 test('lint: competing stage labels', () => {
   const g = buildProcessGraph([
-    { id: 'a', triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['x'], emits: ['stage:td', 'stage:build'] }] },
+    { id: 'a', emits: ['stage:td', 'stage:build'], triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['x'] }] },
   ]);
   assert.ok(g.lints.some(l => l.code === 'competing-stage' && l.nodeId === 'a'));
 });
 
 test('lint: gate-violation when an agent emits a human:* label (error severity)', () => {
   const g = buildProcessGraph([
-    { id: 'a', triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['x'], emits: ['human:fdd-approved'] }] },
+    { id: 'a', emits: ['human:fdd-approved'], triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['x'] }] },
   ]);
   const v = g.lints.find(l => l.code === 'gate-violation');
   assert.ok(v);
@@ -262,7 +260,7 @@ test('lint: gate-violation when an agent emits a human:* label (error severity)'
 
 test('lint: a clean wired pair produces no lints', () => {
   const g = buildProcessGraph([
-    { id: 'a', triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['x'], emits: ['dispatch'] }] },
+    { id: 'a', emits: ['dispatch'], triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['x'] }] },
     { id: 'b', triggers: [{ id: 't', type: 'github-event', from: 'any-except-self', labelFilter: 'dispatch' }] },
   ]);
   assert.deepEqual(g.lints, []);
@@ -387,21 +385,37 @@ test('a human-approval gate (downstream waits on human:*) renders as a gate and 
 test('node view exposes the expected fields', () => {
   const g = buildProcessGraph([{
     id: 'dev', role: 'team-member', displayName: 'Developer', sessionPolicy: 'per-invocation',
-    environmentId: 'team-x',
+    environmentId: 'team-x', emits: ['started:dev'],
     triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'],
-      labelFilter: 'assigned:dev', emits: ['started:dev'], emitsDerived: true }],
+      labelFilter: 'assigned:dev' }],
   }]);
   const n = g.nodes[0];
   assert.equal(n.role, 'team-member');
   assert.equal(n.displayName, 'Developer');
   assert.equal(n.sessionPolicy, 'per-invocation');
   assert.equal(n.environmentId, 'team-x');
+  // Agent-level emits carry the label hand-offs (#414/#783).
+  assert.deepEqual(n.emits, ['started:dev']);
   const t = n.triggers[0];
   assert.deepEqual(t.events, ['issues.labeled']);
   assert.ok(!('from' in t), 'origin filter removed from the trigger view');
   assert.equal(t.labelFilter, 'assigned:dev');
-  assert.deepEqual(t.emits, ['started:dev']);
-  assert.equal(t.emitsDerived, true);
+  // Trigger view no longer carries emits (#783).
+  assert.ok(!('emits' in t));
+});
+
+test('trigger-level emits are ignored — only agent-level emits wire edges (#783)', () => {
+  // A legacy trigger still carrying `emits` must NOT produce a hand-off edge; the
+  // agent-level emit is the sole source. Proves AC4 (t.emits is no longer read).
+  const g = buildProcessGraph([
+    { id: 'a', triggers: [{ id: 't', type: 'github-event', events: ['x'], emits: ['legacy'] }] },
+    { id: 'b', triggers: [{ id: 't2', type: 'github-event', labelFilter: 'legacy' }] },
+  ]);
+  assert.equal(edgesBetween(g, 'a', 'b').length, 0, 'no edge from a trigger-level emit');
+  // The listener is a plain orphan (nobody emits the label at the agent level).
+  assert.ok(g.lints.some(l => l.code === 'orphan-listener' && l.nodeId === 'b'));
+  // …and there is no dead-end-emitter lint for the ignored trigger emit.
+  assert.ok(!g.lints.some(l => l.code === 'dead-end-emitter'));
 });
 
 test('agent-level emits wire a label hand-off without a pre-existing trigger', () => {

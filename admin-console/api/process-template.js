@@ -52,7 +52,9 @@ function bundleTrigger(t) {
   } else if (t.type === 'once') {
     out.at = t.at || null;
   }
-  if (Array.isArray(t.emits) && t.emits.length) out.emits = t.emits.slice();
+  // Trigger-level `emits` was removed (#783) — the portable bundle carries
+  // label hand-offs only at the role level. A legacy trigger `emits` is dropped
+  // here; callers lift it to the role level (liftTriggerEmits) before export.
   if (t.dataFlow) out.dataFlow = true; // data-flow (agent dependency) marker (#379)
   if (t.description) out.description = t.description;
   if (t.prompt) out.prompt = t.prompt;
@@ -218,7 +220,7 @@ function templateToCustomRoles(bundle) {
       labelFilter: t.labelFilter,
       cron: t.cron,
       at: t.at,
-      emits: t.emits,
+      // Trigger-level emits removed (#783) — label hand-offs ride on role `emits`.
       dataFlow: t.dataFlow,
       channel: t.channel,
       description: t.description,
@@ -436,6 +438,45 @@ function normalizeLegacyReview(bundle) {
   return changed ? { ...bundle, roles } : bundle;
 }
 
+/**
+ * Backward-compat lift (#783). Trigger-level `emits` was removed — the agent/
+ * role level is the canonical, sole source of label hand-off edges. An old
+ * bundle, draft, exported team, or live `triggers.json` may still carry `emits`
+ * on a role's triggers. Merge every such label into the role-level `emits`
+ * (deduped, order-preserving: role labels first, then lifted trigger labels) and
+ * strip `emits`/`emitsDerived` from the triggers, so no drawn edge is lost on
+ * import/materialisation. Returns a NEW bundle; roles carrying no trigger emits
+ * pass through untouched. Idempotent.
+ */
+function liftTriggerEmits(bundle) {
+  if (!bundle || !Array.isArray(bundle.roles)) return bundle;
+  let changed = false;
+  const roles = bundle.roles.map((r) => {
+    const triggers = Array.isArray(r.triggers) ? r.triggers : [];
+    const hasTriggerEmits = triggers.some(
+      (t) => t && typeof t === 'object' && ('emits' in t || 'emitsDerived' in t));
+    if (!hasTriggerEmits) return r;
+    changed = true;
+    const lifted = [];
+    for (const t of triggers) {
+      if (t && Array.isArray(t.emits)) {
+        for (const e of t.emits) if (typeof e === 'string' && e) lifted.push(e);
+      }
+    }
+    const roleEmits = Array.isArray(r.emits) ? r.emits.filter((e) => typeof e === 'string' && e) : [];
+    const merged = [...new Set([...roleEmits, ...lifted])];
+    const strippedTriggers = triggers.map((t) => {
+      if (t && typeof t === 'object' && ('emits' in t || 'emitsDerived' in t)) {
+        const { emits, emitsDerived, ...rest } = t; // eslint-disable-line no-unused-vars
+        return rest;
+      }
+      return t;
+    });
+    return { ...r, ...(merged.length ? { emits: merged } : {}), triggers: strippedTriggers };
+  });
+  return changed ? { ...bundle, roles } : bundle;
+}
+
 // ─── Data-flow steps (#379) ───────────────────────────────────────────────
 // Core principle: agents hand files off via `git commit` + `git push`, so a
 // push by an upstream agent IS the signal that downstream data is ready. This
@@ -635,9 +676,8 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
       out.preCheckEnv = Object.fromEntries(
         Object.entries(tr.preCheckEnv).map(([k, v]) => [k, subst(v)]));
     }
-    // Optional declarative `emits` (#328) — labels this trigger's run sets;
-    // template tokens (e.g. `started:{{agentId}}`) resolved per-member.
-    if (Array.isArray(tr.emits)) out.emits = tr.emits.map((e) => subst(String(e)));
+    // Trigger-level `emits` (#328) was removed (#783). Label hand-offs are the
+    // template's role-level `emits`, applied to the member config below.
     return out;
   });
 
@@ -677,7 +717,7 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
 
 module.exports = {
   buildProcessTemplate, validateProcessTemplate, templateToCustomRoles,
-  buildMemberFromTemplate,
+  buildMemberFromTemplate, liftTriggerEmits,
   expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview,
   channelTriggerId, isChannelTrigger, stampDerivedActivation,
   emptyDraftBundle, roleKeyOf, VERSION,

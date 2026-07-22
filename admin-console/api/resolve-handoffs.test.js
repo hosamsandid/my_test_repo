@@ -10,8 +10,8 @@ const { buildUnifiedGraph } = require('./unified-graph');
 // and 'd' depends on 'a'. (dependency edge is from:a → to:d.)
 function mixedGraph() {
   return buildUnifiedGraph([
-    { id: 'a', triggers: [{ id: 't', type: 'github-event', events: ['x'], from: 'any-except-self', emits: ['go'] }], outputs: [{ path: 'spec.md' }] },
-    { id: 'b', triggers: [{ id: 't2', type: 'github-event', labelFilter: 'go', from: 'any-except-self', emits: [] }] },
+    { id: 'a', emits: ['go'], triggers: [{ id: 't', type: 'github-event', events: ['x'], from: 'any-except-self' }], outputs: [{ path: 'spec.md' }] },
+    { id: 'b', triggers: [{ id: 't2', type: 'github-event', labelFilter: 'go', from: 'any-except-self' }] },
     { id: 'c', triggers: [], inputs: [{ path: 'spec.md' }] },
     { id: 'd', triggers: [], dependsOn: ['a'] },
   ]);
@@ -38,9 +38,9 @@ test('artifact production and label emission fan out through the same resolver (
 
 test('label filter narrows to the emitted labels', () => {
   const g = buildUnifiedGraph([
-    { id: 'a', triggers: [{ id: 't', type: 'github-event', events: ['x'], from: 'any-except-self', emits: ['go', 'stop'] }] },
-    { id: 'b', triggers: [{ id: 't2', type: 'github-event', labelFilter: 'go', emits: [] }] },
-    { id: 'c', triggers: [{ id: 't3', type: 'github-event', labelFilter: 'stop', emits: [] }] },
+    { id: 'a', emits: ['go', 'stop'], triggers: [{ id: 't', type: 'github-event', events: ['x'], from: 'any-except-self' }] },
+    { id: 'b', triggers: [{ id: 't2', type: 'github-event', labelFilter: 'go' }] },
+    { id: 'c', triggers: [{ id: 't3', type: 'github-event', labelFilter: 'stop' }] },
   ]);
   const { targets } = resolveHandoffs(g, { node: 'a', labels: ['go'] });
   assert.deepEqual(targets.filter(t => t.on === 'label').map(t => t.to), ['b']);

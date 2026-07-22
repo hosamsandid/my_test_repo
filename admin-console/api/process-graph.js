@@ -78,8 +78,9 @@ function triggerView(t) {
     // secret is intentionally not carried into the graph view.
     if (t.description) v.description = t.description;
   }
-  v.emits = Array.isArray(t.emits) ? t.emits.slice() : [];
-  if (t.emitsDerived) v.emitsDerived = true; // heuristic, not operator-confirmed
+  // Trigger-level `emits` was removed (#783): the agent/role level (`n.emits`,
+  // #414) is the canonical, sole source of label hand-off edges. A trigger no
+  // longer carries or contributes emits — a supplied `t.emits` is ignored.
   if (t.channel) v.channel = true; // derived GitHub-channel trigger (#380)
   if (t.dataFlow) v.dataFlow = true; // derived data-flow push trigger (#379)
   return v;
@@ -143,14 +144,14 @@ function buildProcessGraph(agents) {
     noteLabel(label);
   };
   for (const n of nodes) {
-    // Agent-level emits (operator-declared on the agent, no trigger needed).
+    // Agent-level emits (operator-declared on the agent) are the ONLY emit
+    // source (#414/#783) — trigger-level emits were removed.
     for (const e of n.emits) addEmit(e, n.id);
     for (const t of n.triggers) {
       // Derived GitHub-channel triggers (#380) are represented by the on:'github'
       // edges built from the channel ports (unified-graph) — never as label/event
       // edges here, so their labelFilter must not register as a listen key.
       if (t.channel) continue;
-      for (const e of t.emits) addEmit(e, n.id);
       const lk = labelListenKey(t);
       if (lk) { allListenKeys.add(lk); noteLabel(lk); }
     }
@@ -327,15 +328,15 @@ function computeLints(nodes, edges) {
           message: `\`${n.id}\` consumes a ${artifact === 'pr' ? 'PR' : 'issue'} from \`${ch.from}\`, which isn't marked as opening ${artifact === 'pr' ? 'PRs' : 'issues'}.` });
       }
     }
+    // Emit-shape lints read the agent-level `emits` (#414/#783) — the only emit
+    // source now that trigger-level emits are gone.
     const stageEmits = new Set();
-    for (const t of n.triggers || []) {
-      for (const lbl of t.emits || []) {
-        if (isHumanGate(lbl)) {
-          lints.push({ code: 'gate-violation', severity: 'error', nodeId: n.id, label: lbl, triggerId: t.id,
-            message: `\`${n.id}\` declares emit of gate label \`${lbl}\` — only humans may set it.` });
-        }
-        if (lbl.startsWith('stage:')) stageEmits.add(lbl);
+    for (const lbl of n.emits || []) {
+      if (isHumanGate(lbl)) {
+        lints.push({ code: 'gate-violation', severity: 'error', nodeId: n.id, label: lbl,
+          message: `\`${n.id}\` declares emit of gate label \`${lbl}\` — only humans may set it.` });
       }
+      if (lbl.startsWith('stage:')) stageEmits.add(lbl);
     }
     if (stageEmits.size > 1) {
       lints.push({ code: 'competing-stage', severity: 'warning', nodeId: n.id,

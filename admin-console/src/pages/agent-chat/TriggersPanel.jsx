@@ -421,12 +421,6 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
         </div>
       )}
 
-      {trigger.id && (
-        <div style={{ fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)' }}>
-          {trigger.id}
-        </div>
-      )}
-
       {trigger.description && (
         <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.4 }}>
           {trigger.description}

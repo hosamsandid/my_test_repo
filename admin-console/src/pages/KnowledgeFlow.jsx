@@ -3,16 +3,19 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   Brain, RefreshCw, X, ExternalLink, GitBranch, Sparkles, Check, Wand2,
   Archive, Share2, ShieldCheck, Ban, MessageSquare, Search, ArrowRight, Users,
-  HelpCircle, BookOpen, Combine, Trash2,
+  HelpCircle, BookOpen, Combine, Trash2, MoreHorizontal, FileText,
 } from 'lucide-react';
 import InfoTip from '../components/InfoTip';
 import SidePanel from '../components/SidePanel';
+import ConfirmDialog from '../components/ConfirmDialog';
+import SkillMarkdown from '../components/SkillMarkdown';
 import KnowledgeLearningSections, {
   AUTONOMY_LEVELS, GATE_ORDER, GATE_LABELS, GATE_TIPS, PanelSection,
 } from '../components/KnowledgeLearningConfig';
 import useSSE from '../hooks/useSSE';
 import { parseTeamParam, resolveSelectedTeam, teamTotals, streamScopeUrl } from './knowledge-scope';
 import { summarizeActivation } from './knowledge-activation-view';
+import { rolloutStatus } from './skill-rollout-view';
 
 /*
  * Knowledge Flow — team-scoped (#560).
@@ -1305,10 +1308,19 @@ const DRIFT_CHIPS = {
   unknown: { label: 'no origin', color: 'var(--eb-text-muted)', tip: 'This copy predates skill manifests, so its origin is unknown — it is surfaced but never auto-synced. Re-import to establish an anchor.' },
 };
 
+// Health tone → colour token, shared by the status pill and the health sentence
+// (#774). Mirrors the `tone` values skill-rollout-view.js returns.
+const TONE_COLOR = {
+  success: 'var(--eb-status-success)',
+  warning: 'var(--eb-status-warning)',
+  error: 'var(--eb-status-error, #d33)',
+  muted: 'var(--eb-text-muted)',
+};
+
 function SkillCard({ skill, teamId, onShare, onReload }) {
   const auto = skill.promotedBy === 'curator';
   const act = skill.activation || null;
-  const [expanded, setExpanded] = useState(false);
+  const [open, setOpen] = useState(false); // skill inspector drawer (#774)
   const [busy, setBusy] = useState(null); // 'activate' | 'deactivate' | <agentId>
   const [flash, setFlash] = useState(null); // { kind: 'ok' | 'error', text }
   const flashTimer = useRef(null);
@@ -1347,10 +1359,13 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
       .finally(() => setBusy(null));
   };
 
+  // Unified deactivate (#774 AC3): the single labeled action behind the
+  // inspector's "Deactivate…" confirm sheet. Reversible — the skill file stays
+  // in the team library and Activate undoes it — so the confirm sheet only
+  // explains the consequence; it does not warn like a destructive action. The
+  // same action also resolves the sourceMissing recovery case (an undeliverable
+  // skill: removing it from the active set clears the stuck state).
   const deactivate = () => {
-    // Symmetric with Activate (#630): neither light action prompts. Deactivation
-    // is reversible — the skill file stays in the pool and Activate undoes it —
-    // so no confirm; only destructive actions (delete) still confirm.
     setBusy('deactivate');
     fetch('/api/knowledge/deactivate', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1359,31 +1374,10 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
       .then(async r => {
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        feedback('ok', 'Deactivated — the skill stays in the team library and can be activated again.');
         onReload && onReload();
       })
       .catch(e => feedback('error', `Action failed: ${e.message}`))
-      .finally(() => setBusy(null));
-  };
-
-  // #750 AC5/AC6: the one action that actually RESOLVES a genuinely-undeliverable
-  // skill from the operator's seat. The skill's files aren't available, so no
-  // agent can ever receive it and no retry helps; removing it from the team's
-  // active set cleanly clears the stuck `0/N` state with an explicit "couldn't be
-  // installed — removed" outcome (Deactivate under the hood — reversible, and it
-  // leaves any archived snapshot untouched for a later restore).
-  const removeUndeliverable = () => {
-    setBusy('deactivate');
-    fetch('/api/knowledge/deactivate', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ teamId, skillName: skill.label }),
-    })
-      .then(async r => {
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-        feedback('ok', 'This skill couldn’t be installed, so it was removed from the team.');
-        onReload && onReload();
-      })
-      .catch(e => feedback('error', `Couldn’t remove it: ${e.message}`))
       .finally(() => setBusy(null));
   };
 
@@ -1442,238 +1436,409 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
       .catch(e => { feedback('error', `Delete failed: ${e.message}`); setBusy(null); });
   };
 
-  const deleteSkill = () => {
-    if (!window.confirm(`Delete team skill "${skill.label}"? A restorable snapshot is archived, then the skill is removed from the team pool.`)) return;
-    runDelete(false);
-  };
-
-  const members = act ? (act.members || []) : [];
-  const activeCount = members.filter(m => m.state === 'active').length;
-  // Pool file gone (#739 AC4): the overlay flags it node-level; we only alarm when
-  // it actually strands a member (the reported `active · 0/N` all-pending case).
-  const anyPending = members.some(m => m.state === 'pending');
-  const sourceMissing = !!(act && act.active && act.sourceMissing);
+  const status = rolloutStatus(act);
+  const installedCount = status ? status.counts.installed : 0;
   // Node-level drift rollup (#629 AC2): { worst, outdated, resyncable, total, counts }.
   const drift = skill.drift || null;
   const driftWorst = drift && drift.worst && drift.worst !== 'in-sync' ? drift.worst : null;
-  const badge = !act ? null : !act.active
-    ? { text: 'promoted · not activated', color: 'var(--eb-text-muted)', border: 'var(--eb-border-default)',
-        tip: 'This skill is promoted and lives in the team’s pool, but it is not in the team’s active set — no member loads it yet. Click Activate to sync it into members.' }
-    : { text: `active · ${activeCount}/${members.length}`,
-        color: activeCount === members.length ? 'var(--eb-status-success)' : 'var(--eb-status-warning)',
-        border: activeCount === members.length ? 'var(--eb-status-success)' : 'var(--eb-status-warning)',
-        tip: 'This skill is in the team’s active set. The count shows how many members actually have it in their workspace.' };
+  const tierMeta = `${skill.tier} skill${skill.alsoGlobal ? ' · also global' : ''}${auto ? ' · auto-promoted' : ''}${skill.adopted ? ' · adopted' : ''}`;
+  const tierTip = `${skill.tier === 'global' ? 'Global skill — agents in every team load it' : 'Team skill — only this team’s agents load it'}${skill.alsoGlobal ? '. Also promoted to the global pool — the team keeps its own copy.' : ''}${auto ? '. Promoted automatically by the team’s curator (autonomy 3).' : ''}${skill.adopted ? '. Adopted from the global pool into this team’s active set.' : ''}`;
 
   return (
-    <div style={{
-      border: '1px solid var(--eb-border-default)',
-      borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-elevated)',
-      padding: 'var(--eb-space-2) var(--eb-space-3)', marginBottom: 'var(--eb-space-2)',
-    }}>
-      {/* Header redesign (#727): the skill name gets its own wrapping line (no
-          more single-line ellipsis truncation), the action icons sit top-right on
-          the same row without squeezing it, and the status badge drops to its own
-          line below — so name, actions and badge no longer compete in one row. */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+    <>
+      {/* Compact clickable row (#774): the whole card opens the read-only skill
+          inspector. The only inline action is the Ready → Activate one-click;
+          deactivate, rollout, delete, share, open-in-editor and resync all move
+          into the inspector, so no icon strip competes on the row. */}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setOpen(true)}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(true); } }}
+        title="Open the skill inspector"
+        style={{
+          border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-elevated)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)', marginBottom: 'var(--eb-space-2)',
+          cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 6,
+        }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
           <GitBranch size={13} style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2 }} />
           <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{skill.label}</div>
-            <div
-              style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', cursor: 'help' }}
-              title={`${skill.tier === 'global' ? 'Global skill — agents in every team load it' : 'Team skill — only this team’s agents load it'}${skill.alsoGlobal ? '. Also promoted to the global pool — the team keeps its own copy.' : ''}${auto ? '. Promoted automatically by the team’s curator (autonomy 3).' : ''}${skill.adopted ? '. Adopted from the global pool into this team’s active set.' : ''}`}>
-              {skill.tier} skill{skill.alsoGlobal ? ' · also global' : ''}{auto ? ' · auto-promoted' : ''}{skill.adopted ? ' · adopted' : ''}
-            </div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }} title={tierTip}>{tierMeta}</div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-            {act && act.active && (
-              <span
-                title="Deactivate — remove this skill from the team's active set (the file stays in the pool)"
-                onClick={deactivate}
-                style={{ display: 'inline-flex', cursor: 'pointer', color: 'var(--eb-text-muted)' }}>
-                <X size={13} />
-              </span>
-            )}
-            <span
-              title="Share this skill into another team"
-              onClick={onShare}
-              style={{ display: 'inline-flex', cursor: 'pointer', color: 'var(--eb-text-muted)' }}>
-              <Share2 size={13} />
-            </span>
-            <a
-              href={`/skills?team=${encodeURIComponent(teamId)}`}
-              title="Manage this skill in the Skills surface — files, version history, lineage & usage"
-              style={{ display: 'inline-flex', color: 'var(--eb-text-muted)' }}>
-              <ExternalLink size={13} />
-            </a>
-            {skill.tier === 'team' && (
-              <span
-                title="Delete this team skill — archives a restorable snapshot, then removes it from the team pool (Team Admin)"
-                onClick={() => { if (!busy) deleteSkill(); }}
-                style={{ display: 'inline-flex', cursor: busy ? 'default' : 'pointer', color: 'var(--eb-status-error, #d33)', opacity: busy ? 0.5 : 1 }}>
-                <Trash2 size={13} />
-              </span>
-            )}
-          </div>
+          {act && !act.active && (
+            <button
+              disabled={busy === 'activate'}
+              onClick={(e) => { e.stopPropagation(); activate('activate'); }}
+              title="Add this skill to the team's active set and sync it into every member's workspace"
+              style={{ ...primaryBtn, padding: '2px 10px', fontSize: 'var(--eb-text-xs)', flexShrink: 0 }}>
+              {busy === 'activate' ? 'Activating…' : 'Activate'}
+            </button>
+          )}
         </div>
-        {badge && (
-          <div>
-            <span
-              onClick={() => members.length > 0 && setExpanded(x => !x)}
-              title={badge.tip}
-              style={{
-                display: 'inline-block', fontSize: 10, fontWeight: 600, padding: '1px 7px',
-                borderRadius: 'var(--eb-radius-full)', border: `1px solid ${badge.border}`,
-                color: badge.color, cursor: members.length > 0 ? 'pointer' : 'help', whiteSpace: 'nowrap',
-              }}>
-              {badge.text}
+
+        {status && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{
+              display: 'inline-block', fontSize: 10, fontWeight: 600, padding: '1px 8px',
+              borderRadius: 'var(--eb-radius-full)', border: `1px solid ${TONE_COLOR[status.tone]}`,
+              color: TONE_COLOR[status.tone], whiteSpace: 'nowrap',
+            }}>
+              {status.pill}
             </span>
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: TONE_COLOR[status.tone] }}>{status.sentence}</span>
+          </div>
+        )}
+
+        {driftWorst && (
+          <span
+            title={(DRIFT_CHIPS[driftWorst] || {}).tip || 'Some copies of this skill have drifted from the source.'}
+            style={{
+              alignSelf: 'flex-start', fontSize: 10, fontWeight: 600, padding: '1px 7px', borderRadius: 'var(--eb-radius-full)',
+              border: `1px solid ${(DRIFT_CHIPS[driftWorst] || {}).color || 'var(--eb-status-warning)'}`,
+              color: (DRIFT_CHIPS[driftWorst] || {}).color || 'var(--eb-status-warning)', whiteSpace: 'nowrap',
+            }}>
+            {drift.outdated > 0 ? `${drift.outdated} outdated` : (DRIFT_CHIPS[driftWorst] || {}).label || driftWorst}
+          </span>
+        )}
+
+        {flash && (
+          <div style={{
+            fontSize: 'var(--eb-text-xs)', fontWeight: 600,
+            color: flash.kind === 'ok' ? 'var(--eb-status-success)'
+              : flash.kind === 'warn' ? 'var(--eb-status-warning)'
+              : 'var(--eb-status-error, #d33)',
+          }}>
+            {flash.kind === 'ok' ? '✓ ' : '⚠ '}{flash.text}
           </div>
         )}
       </div>
 
-      {act && !act.active && (
-        <div style={{ marginTop: 6 }}>
-          <button
-            disabled={busy === 'activate'}
-            onClick={() => activate('activate')}
-            title="Add this skill to the team's active set and sync it into every member's workspace"
-            style={{ ...primaryBtn, padding: '2px 10px', fontSize: 'var(--eb-text-xs)' }}>
-            {busy === 'activate' ? 'Activating…' : 'Activate'}
-          </button>
+      <SkillInspector
+        open={open}
+        onClose={() => setOpen(false)}
+        skill={skill}
+        teamId={teamId}
+        status={status}
+        busy={busy}
+        installedCount={installedCount}
+        onShare={onShare}
+        onActivate={activate}
+        onDeactivate={deactivate}
+        onResync={resync}
+        onDelete={runDelete}
+      />
+    </>
+  );
+}
+
+/* ── Skill inspector drawer (#774) ────────────────────────────────────────────
+ *
+ * One read-only slide-over for every skill-shaped item on the Knowledge page.
+ * Content / Origin / Rollout tabs use the existing skill endpoints (no new
+ * backend); the action footer carries the one named Deactivate… (with a
+ * consequence confirm sheet), Share…, a working "Open in Skill Editor" deep
+ * link, and an overflow ⋯ menu with the destructive Delete… (team tier only).
+ * The mutating handlers live on the parent SkillCard and are passed in, so the
+ * drawer stays a view over the same busy/flash state. */
+function SkillInspector({ open, onClose, skill, teamId, status, busy, installedCount, onShare, onActivate, onDeactivate, onResync, onDelete }) {
+  const act = skill.activation || null;
+  const src = skill.tier === 'team' ? 'team' : 'pool';
+  const members = act ? (act.members || []) : [];
+  const drift = skill.drift || null;
+  const sourceMissing = !!(act && act.active && act.sourceMissing);
+
+  const [tab, setTab] = useState('content');
+  const [content, setContent] = useState(null);
+  const [contentErr, setContentErr] = useState(null);
+  const [files, setFiles] = useState(null);
+  const [selectedFile, setSelectedFile] = useState('SKILL.md');
+  const [fileData, setFileData] = useState(null);
+  const [fileErr, setFileErr] = useState(null);
+  const [lineage, setLineage] = useState(null);
+  const [lineageErr, setLineageErr] = useState(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [confirmDeactivate, setConfirmDeactivate] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const qs = (extra = {}) => {
+    const q = new URLSearchParams({ source: src, ...extra });
+    if (src === 'team') q.set('teamId', teamId);
+    return q.toString();
+  };
+  const encName = encodeURIComponent(skill.label);
+
+  // Content (rendered SKILL.md) + file list, loaded when the drawer opens.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setContent(null); setContentErr(null); setSelectedFile('SKILL.md'); setFileData(null);
+    fetch(`/api/skills/${encName}/content?${qs()}`)
+      .then(async r => { const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`); return d; })
+      .then(d => { if (!cancelled) setContent(d.content || ''); })
+      .catch(e => { if (!cancelled) setContentErr(e.message); });
+    setFiles(null);
+    fetch(`/api/skills/${encName}/files?${qs()}`)
+      .then(async r => { const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`); return d; })
+      .then(d => { if (!cancelled) setFiles(Array.isArray(d.files) ? d.files : []); })
+      .catch(() => { if (!cancelled) setFiles([]); });
+    return () => { cancelled = true; };
+  }, [open, skill.label, src, teamId]);
+
+  // Selected non-SKILL.md file content (SKILL.md is rendered from `content`).
+  useEffect(() => {
+    if (!open || selectedFile === 'SKILL.md' || !selectedFile) { setFileData(null); setFileErr(null); return; }
+    let cancelled = false;
+    setFileData(null); setFileErr(null);
+    fetch(`/api/skills/${encName}/file?${qs({ file: selectedFile })}`)
+      .then(async r => { const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`); return d; })
+      .then(d => { if (!cancelled) setFileData(d); })
+      .catch(e => { if (!cancelled) setFileErr(e.message); });
+    return () => { cancelled = true; };
+  }, [open, selectedFile, skill.label, src, teamId]);
+
+  // Origin/lineage, loaded lazily the first time the Origin tab is shown.
+  useEffect(() => {
+    if (!open || tab !== 'origin' || lineage || lineageErr) return;
+    let cancelled = false;
+    fetch(`/api/skills/${encName}/lineage?${qs()}`)
+      .then(async r => { const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`); return d; })
+      .then(d => { if (!cancelled) setLineage(d); })
+      .catch(e => { if (!cancelled) setLineageErr(e.message); });
+    return () => { cancelled = true; };
+  }, [open, tab, skill.label, src, teamId]);
+
+  if (!open) return null;
+
+  const editorHref = `/skills?skill=${encName}&tier=${src}${src === 'team' ? `&team=${encodeURIComponent(teamId)}` : ''}`;
+  const resyncable = drift && drift.resyncable ? drift.resyncable : 0;
+
+  const tabBtn = (id, label) => (
+    <button
+      onClick={() => setTab(id)}
+      style={{
+        background: 'none', border: 'none', borderBottom: `2px solid ${tab === id ? 'var(--eb-accent-primary)' : 'transparent'}`,
+        color: tab === id ? 'var(--eb-text-primary)' : 'var(--eb-text-muted)',
+        fontSize: 'var(--eb-text-sm)', fontWeight: tab === id ? 600 : 500,
+        padding: '6px 10px', cursor: 'pointer',
+      }}>
+      {label}
+    </button>
+  );
+
+  const footerBtn = { ...primaryBtn, padding: '4px 12px', fontSize: 'var(--eb-text-sm)' };
+  const ghostBtn = {
+    display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 12px',
+    borderRadius: 'var(--eb-radius-md)', border: '1px solid var(--eb-border-default)',
+    background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-primary)',
+    fontSize: 'var(--eb-text-sm)', cursor: 'pointer', textDecoration: 'none',
+  };
+
+  return (
+    <SidePanel open={open} onClose={onClose} title={skill.label} width="560px">
+      {/* Header: status pill + health sentence + provenance metatext */}
+      {status && (
+        <div style={{ marginBottom: 'var(--eb-space-3)' }}>
+          <span style={{
+            display: 'inline-block', fontSize: 11, fontWeight: 600, padding: '2px 10px',
+            borderRadius: 'var(--eb-radius-full)', border: `1px solid ${TONE_COLOR[status.tone]}`,
+            color: TONE_COLOR[status.tone],
+          }}>
+            {status.pill}
+          </span>
+          <div style={{ marginTop: 4, fontSize: 'var(--eb-text-sm)', color: TONE_COLOR[status.tone] }}>{status.sentence}</div>
+          <div style={{ marginTop: 2, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            {skill.tier} skill{skill.alsoGlobal ? ' · also global' : ''}{skill.promotedBy === 'curator' ? ' · auto-promoted' : ''}{skill.adopted ? ' · adopted' : ''}
+          </div>
         </div>
       )}
 
-      {driftWorst && (
-        <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <span
-            title={(DRIFT_CHIPS[driftWorst] || {}).tip || 'Some copies of this skill have drifted from the source.'}
-            style={{
-              fontSize: 10, fontWeight: 600, padding: '1px 7px', borderRadius: 'var(--eb-radius-full)',
-              border: `1px solid ${(DRIFT_CHIPS[driftWorst] || {}).color || 'var(--eb-status-warning)'}`,
-              color: (DRIFT_CHIPS[driftWorst] || {}).color || 'var(--eb-status-warning)', cursor: 'help', whiteSpace: 'nowrap',
-            }}>
-            {drift.outdated > 0 ? `${drift.outdated} outdated` : (DRIFT_CHIPS[driftWorst] || {}).label || driftWorst}
-          </span>
-          {drift.resyncable > 0 && (
-            <button
-              disabled={!!busy}
-              onClick={() => resync({ teamId }, 'resync')}
-              title="Sync all outdated copies of this skill to the current source content (edited/conflicted copies are left untouched)"
-              style={{ ...primaryBtn, padding: '2px 10px', fontSize: 'var(--eb-text-xs)' }}>
-              {busy === 'resync' ? 'Syncing…' : `Sync all outdated (${drift.resyncable})`}
-            </button>
+      {/* Tabs */}
+      <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid var(--eb-border-default)', marginBottom: 'var(--eb-space-3)' }}>
+        {tabBtn('content', 'Content')}
+        {tabBtn('origin', 'Origin')}
+        {tabBtn('rollout', `Rollout${members.length ? ` (${members.length})` : ''}`)}
+      </div>
+
+      {/* ── Content tab ── */}
+      {tab === 'content' && (
+        <div>
+          {files && files.length > 1 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 'var(--eb-space-3)' }}>
+              {files.map(f => (
+                <button
+                  key={f.path}
+                  onClick={() => setSelectedFile(f.path)}
+                  title={f.path}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px',
+                    borderRadius: 'var(--eb-radius-full)', fontSize: 'var(--eb-text-xs)', cursor: 'pointer',
+                    border: `1px solid ${selectedFile === f.path ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+                    background: selectedFile === f.path ? 'var(--eb-accent-primary)' : 'var(--eb-bg-elevated)',
+                    color: selectedFile === f.path ? 'var(--eb-text-on-accent, #fff)' : 'var(--eb-text-secondary)',
+                  }}>
+                  <FileText size={11} />{f.path}
+                </button>
+              ))}
+            </div>
+          )}
+          {contentErr && <div style={{ color: 'var(--eb-status-error, #d33)', fontSize: 'var(--eb-text-sm)' }}>Couldn’t load content: {contentErr}</div>}
+          {selectedFile === 'SKILL.md'
+            ? (content == null && !contentErr
+                ? <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading…</div>
+                : content != null && <SkillMarkdown content={content} />)
+            : (fileErr
+                ? <div style={{ color: 'var(--eb-status-error, #d33)', fontSize: 'var(--eb-text-sm)' }}>Couldn’t load file: {fileErr}</div>
+                : fileData == null
+                  ? <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading…</div>
+                  : fileData.binary
+                    ? <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Binary file ({fileData.size} bytes) — not previewable.</div>
+                    : <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-3)', margin: 0 }}>{fileData.content}{fileData.truncated ? '\n… (truncated)' : ''}</pre>)}
+        </div>
+      )}
+
+      {/* ── Origin tab ── */}
+      {tab === 'origin' && (
+        <div style={{ fontSize: 'var(--eb-text-sm)' }}>
+          {lineageErr && <div style={{ color: 'var(--eb-status-error, #d33)' }}>Couldn’t load lineage: {lineageErr}</div>}
+          {!lineage && !lineageErr && <div style={{ color: 'var(--eb-text-muted)' }}>Loading…</div>}
+          {lineage && (
+            <>
+              <div style={{ marginBottom: 'var(--eb-space-3)' }}>
+                <div style={{ ...lbl, marginBottom: 2 }}>Version</div>
+                {lineage.versions && lineage.versions.current && lineage.versions.current.version != null
+                  ? <div>v{lineage.versions.current.version}{lineage.versions.current.contentHash ? ` · ${String(lineage.versions.current.contentHash).slice(0, 7)}` : ''}{lineage.versions.current.updatedAt ? ` · updated ${lineage.versions.current.updatedAt}` : ''}</div>
+                  : <div style={{ color: 'var(--eb-text-muted)' }}>No version manifest (predates skill manifests).</div>}
+              </div>
+              <div>
+                <div style={{ ...lbl, marginBottom: 2 }}>All known copies ({(lineage.copies || []).length})</div>
+                {(lineage.copies || []).length === 0 && <div style={{ color: 'var(--eb-text-muted)' }}>Only this copy is known.</div>}
+                {(lineage.copies || []).map((c, i) => (
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0' }}>
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      {c.tier}{c.teamId ? ` · ${c.teamId}` : ''}{c.agentId ? ` · ${c.agentId}` : ''}{c.viewed ? ' (this copy)' : ''}
+                    </span>
+                    {c.drift && c.drift !== 'in-sync' && DRIFT_CHIPS[c.drift] && (
+                      <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 600, color: DRIFT_CHIPS[c.drift].color }}>{DRIFT_CHIPS[c.drift].label}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </>
           )}
         </div>
       )}
 
-      {sourceMissing && anyPending && (
-        // #750 AC4/AC5/AC6: plain-language explanation (no "pool"/"pending"
-        // jargon) plus the one action that actually resolves the state. The old
-        // "Restore or manage →" link pointed at a Skills surface with no restore
-        // UI (dead end); we offer "Remove this skill" instead, which cleanly
-        // clears the stuck state and reports an explicit outcome.
-        <div style={{
-          marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
-          fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error, #d33)',
-        }}>
-          <span title="This skill was added to the team automatically, but its files are no longer available — so no agent can receive it, and trying again won’t help. You can remove it from the team.">
-            ⚠ This skill couldn’t be installed — its files are no longer available, so no agent could receive it.
-          </span>
-          <button
-            disabled={!!busy}
-            onClick={removeUndeliverable}
-            title="Remove this undeliverable skill from the team’s active set — this clears the stuck state"
-            style={{ ...primaryBtn, padding: '2px 10px', fontSize: 'var(--eb-text-xs)' }}>
-            {busy === 'deactivate' ? 'Removing…' : 'Remove this skill'}
-          </button>
-        </div>
-      )}
-
-      {expanded && members.length > 0 && (
-        <div style={{ marginTop: 6, borderTop: '1px dashed var(--eb-border-default)', paddingTop: 6 }}>
+      {/* ── Rollout tab ── */}
+      {tab === 'rollout' && (
+        <div style={{ fontSize: 'var(--eb-text-sm)' }}>
+          {sourceMissing && (
+            <div style={{ marginBottom: 'var(--eb-space-3)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error, #d33)' }}>
+              ⚠ This skill’s files are no longer available, so no agent can receive it. Use “Deactivate…” below to clear the stuck state — the skill leaves the active set but any archived snapshot is kept.
+            </div>
+          )}
+          {members.length === 0 && <div style={{ color: 'var(--eb-text-muted)' }}>No members to roll out to yet.</div>}
           {members.map(m => {
             const chip = MEMBER_STATE_CHIPS[m.state] || { label: m.state, color: 'var(--eb-text-muted)', tip: '' };
             return (
-              <div key={m.agentId} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0' }}>
+              <div key={m.agentId} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0', borderBottom: '1px solid var(--eb-border-subtle, var(--eb-border-default))' }}>
                 <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)', flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   {m.displayName || m.agentId}
                 </span>
-                <span
-                  title={chip.tip}
-                  style={{
-                    flexShrink: 0, fontSize: 10, fontWeight: 600, padding: '0 6px',
-                    borderRadius: 'var(--eb-radius-full)', border: `1px solid ${chip.color}`,
-                    color: chip.color, cursor: 'help', whiteSpace: 'nowrap',
-                  }}>
+                <span title={chip.tip} style={{ flexShrink: 0, fontSize: 10, fontWeight: 600, padding: '0 6px', borderRadius: 'var(--eb-radius-full)', border: `1px solid ${chip.color}`, color: chip.color, cursor: 'help', whiteSpace: 'nowrap' }}>
                   {chip.label}
                 </span>
                 {m.drift && m.drift !== 'in-sync' && DRIFT_CHIPS[m.drift] && (
-                  <span
-                    title={DRIFT_CHIPS[m.drift].tip}
-                    style={{
-                      flexShrink: 0, fontSize: 10, fontWeight: 600, padding: '0 6px',
-                      borderRadius: 'var(--eb-radius-full)', border: `1px solid ${DRIFT_CHIPS[m.drift].color}`,
-                      color: DRIFT_CHIPS[m.drift].color, cursor: 'help', whiteSpace: 'nowrap',
-                    }}>
+                  <span title={DRIFT_CHIPS[m.drift].tip} style={{ flexShrink: 0, fontSize: 10, fontWeight: 600, padding: '0 6px', borderRadius: 'var(--eb-radius-full)', border: `1px solid ${DRIFT_CHIPS[m.drift].color}`, color: DRIFT_CHIPS[m.drift].color, cursor: 'help', whiteSpace: 'nowrap' }}>
                     {DRIFT_CHIPS[m.drift].label}
                   </span>
                 )}
                 {m.drift === 'outdated' && (
-                  <button
-                    disabled={!!busy}
-                    onClick={() => resync({ agentId: m.agentId }, m.agentId)}
-                    title="Resync this copy to the current source content"
-                    style={linkBtn}>
+                  <button disabled={!!busy} onClick={() => onResync({ agentId: m.agentId }, m.agentId)} title="Resync this copy to the current source content" style={linkBtn}>
                     {busy === m.agentId ? 'Updating…' : 'Update'}
                   </button>
                 )}
                 {m.state === 'excluded-override' && (
-                  <button
-                    disabled={!!busy}
-                    onClick={() => activate(m.agentId, { includeMembers: [m.agentId], onlyMembers: [m.agentId], scoped: true })}
-                    title="This member manages its own skill list — opt it into this skill anyway"
-                    style={linkBtn}>
-                    {busy === m.agentId ? 'Adding…' : 'Add for this member'}
+                  <button disabled={!!busy} onClick={() => onActivate(m.agentId, { includeMembers: [m.agentId], onlyMembers: [m.agentId], scoped: true })} title="This member manages its own skill list — opt it into this skill anyway" style={linkBtn}>
+                    {busy === m.agentId ? 'Adding…' : 'Include'}
                   </button>
                 )}
-                {m.state === 'pending' && (
-                  sourceMissing ? (
-                    // The skill's files are gone — a retry can never move this member
-                    // off `pending` (#750 AC4/AC6). Plain language, no dead-end link;
-                    // the team-level "Remove this skill" banner above is the resolving
-                    // action.
-                    <span title="This skill’s files are no longer available, so it can’t be installed for this agent. Use “Remove this skill” above to clear it."
-                      style={{ flexShrink: 0, fontSize: 10, fontWeight: 600, color: 'var(--eb-status-error, #d33)', cursor: 'help', whiteSpace: 'nowrap' }}>
-                      can’t install
-                    </span>
-                  ) : (
-                    <button
-                      disabled={!!busy}
-                      onClick={() => activate(m.agentId, { onlyMembers: [m.agentId], scoped: true })}
-                      title="Re-run the workspace sync so this member gets the skill now"
-                      style={linkBtn}>
-                      {busy === m.agentId ? 'Syncing…' : 'Sync now'}
-                    </button>
-                  )
+                {m.state === 'pending' && !sourceMissing && (
+                  <button disabled={!!busy} onClick={() => onActivate(m.agentId, { onlyMembers: [m.agentId], scoped: true })} title="Re-run the workspace sync so this member gets the skill now" style={linkBtn}>
+                    {busy === m.agentId ? 'Syncing…' : 'Sync now'}
+                  </button>
+                )}
+                {m.state === 'pending' && sourceMissing && (
+                  <span title="This skill’s files are no longer available, so it can’t be installed for this agent." style={{ flexShrink: 0, fontSize: 10, fontWeight: 600, color: 'var(--eb-status-error, #d33)', whiteSpace: 'nowrap' }}>can’t install</span>
                 )}
               </div>
             );
           })}
+          {resyncable > 0 && (
+            <div style={{ marginTop: 'var(--eb-space-3)' }}>
+              <button disabled={!!busy} onClick={() => onResync({ teamId }, 'resync')} title="Sync all outdated copies of this skill to the current source content (edited/conflicted copies are left untouched)" style={{ ...footerBtn }}>
+                {busy === 'resync' ? 'Syncing…' : `Sync all outdated (${resyncable})`}
+              </button>
+            </div>
+          )}
         </div>
       )}
 
-      {flash && (
-        <div style={{
-          marginTop: 4, fontSize: 'var(--eb-text-xs)', fontWeight: 600,
-          color: flash.kind === 'ok' ? 'var(--eb-status-success)'
-            : flash.kind === 'warn' ? 'var(--eb-status-warning)'
-            : 'var(--eb-status-error, #d33)',
-        }}>
-          {flash.kind === 'ok' ? '✓ ' : '⚠ '}{flash.text}
-        </div>
-      )}
-    </div>
+      {/* ── Action footer ── */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 'var(--eb-space-4)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+        {act && act.active ? (
+          <button disabled={busy === 'deactivate'} onClick={() => setConfirmDeactivate(true)} style={footerBtn}>
+            {busy === 'deactivate' ? 'Deactivating…' : 'Deactivate…'}
+          </button>
+        ) : (
+          <button disabled={busy === 'activate'} onClick={() => onActivate('activate')} style={footerBtn}>
+            {busy === 'activate' ? 'Activating…' : 'Activate'}
+          </button>
+        )}
+        <button onClick={onShare} style={ghostBtn}><Share2 size={13} />Share…</button>
+        <a href={editorHref} style={ghostBtn} title="Open this skill in the Skills Registry with the tier/team filter applied">
+          Open in Skill Editor <ExternalLink size={12} />
+        </a>
+        {skill.tier === 'team' && (
+          <div style={{ position: 'relative', marginLeft: 'auto' }}>
+            <button onClick={() => setMenuOpen(o => !o)} title="More actions" style={{ ...ghostBtn, padding: '4px 8px' }}>
+              <MoreHorizontal size={16} />
+            </button>
+            {menuOpen && (
+              <div style={{ position: 'absolute', right: 0, bottom: '110%', background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', boxShadow: 'var(--eb-shadow-lg)', minWidth: 140, zIndex: 62 }}>
+                <button
+                  disabled={!!busy}
+                  onClick={() => { setMenuOpen(false); setConfirmDelete(true); }}
+                  style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%', textAlign: 'left', background: 'none', border: 'none', padding: '8px 12px', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error, #d33)', cursor: 'pointer' }}>
+                  <Trash2 size={13} />Delete…
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <ConfirmDialog
+        open={confirmDeactivate}
+        title="Deactivate skill"
+        variant="info"
+        confirmLabel="Deactivate"
+        message={`The skill stays in the team library. It will be removed from ${installedCount === 1 ? '1 agent workspace' : `all ${installedCount} agent workspaces`} on the next sync. You can activate it again at any time.`}
+        onConfirm={() => { setConfirmDeactivate(false); onDeactivate(); }}
+        onCancel={() => setConfirmDeactivate(false)}
+      />
+      <ConfirmDialog
+        open={confirmDelete}
+        title="Delete team skill"
+        variant="danger"
+        confirmLabel="Delete"
+        message={`Delete team skill "${skill.label}"? A restorable snapshot is archived, then the skill is removed from the team pool. This can’t be undone from here.`}
+        onConfirm={() => { setConfirmDelete(false); onDelete(false); }}
+        onCancel={() => setConfirmDelete(false)}
+      />
+    </SidePanel>
   );
 }
 

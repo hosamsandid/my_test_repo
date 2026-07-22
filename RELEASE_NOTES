@@ -26,6 +26,10 @@
 
 - **Token usage: average cost per work item** — the Token Usage page's Work items tab now shows three summary cards — **Ø total / work item**, **Ø input / work item**, and **Ø output / work item** — so stakeholders can see the mean token cost of one work item at a glance without exporting data. Cards update automatically when the date range changes or the page is refreshed. Zero work items shows `—` rather than an error. (#797)
 
+- **Team-scoped SSH keys and GitHub tokens** — credentials can now be owned by a specific team (`team` scope) or shared across teams by a System Admin (`system` scope). Team Admins gain a self-service credential management page where they can create and delete SSH keys and GitHub tokens for their own team without involving a System Admin. System Admins can additionally assign a system-scoped credential to any set of teams. The SSH Keys and GitHub Tokens pages are now accessible to Team Admins, and the Working Environment credential pickers show exactly the credentials a Team Admin is permitted to see. (#803)
+
+- **Credential rename and reassignment** — System Admins can rename any credential and move it between teams or change its scope (team → system or vice versa) via a new **Edit** action on the credential table. Reassigning a credential that is referenced by an existing Working Environment is blocked with a clear error (409) if the move would leave the environment without access. (#803)
+
 ### Changes
 
 - **Process Canvas emits now authored at the role/agent level only** — the per-trigger emits editor has been removed from the Triggers panel. Label hand-off edges are now defined exclusively on the role or agent, which was already the canonical location. Existing process graphs are unaffected: any legacy trigger-level emits are automatically lifted to the role level on import or materialisation. (#788)
@@ -33,5 +37,7 @@
 - **Trigger cards no longer show the raw internal ID** — the grey monospace trigger ID line has been removed from each trigger card in the chat right-rail Triggers panel, reducing visual noise for non-technical readers. The ID is still visible in the trigger edit form, and HTTP-webhook cards continue to show their full webhook path. (#792)
 
 ### Breaking Changes
+
+- **Credential visibility now requires Team Admin role** — SSH keys and GitHub tokens are no longer visible to plain Team Members in the Working Environment editor's credential pickers. Only Team Admins (and System Admins) can see and select credentials. Plain Team Members who previously could see credentials in the picker will no longer be able to do so after upgrading. (#803)
 
 - **Removed trigger-level emits API endpoints** — `GET /api/agents/:id/triggers/:triggerId/emit-suggestions` and `PUT /api/agents/:id/triggers/:triggerId/emits` have been removed. Use the agent-level `emits` field (via `PUT /api/agents/:id`) instead. Any `emits` field supplied to `PUT /api/agents/:id/triggers/:triggerId` is silently stripped. (#788)

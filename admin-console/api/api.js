@@ -23,7 +23,7 @@ const { detectRasterImageType, imageContentType } = require('./image-type');
 const { githubApiBase } = require('./github-api-base');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, visibleUser, describeAuthz,
         normalizeCredential, visibleCredential, canManageCredential, canCreateCredential,
-        canReassignCredential, credentialVisibleToTeam } = require('./scope');
+        canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics } = require('./scope');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { buildProcessGraph } = require('./process-graph');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses } = require('./knowledge-graph');
@@ -312,17 +312,52 @@ app.delete('/api/agents/:id/pending/:entryId', async (req, res) => {
 // Token-usage statistics (#654, §5 view 1 of docs/cost-per-pr-concept.md).
 // Reads the day-bucketed usage records the orchestrator ingested and runs the
 // pure aggregator. Tokens only — dollar figures are never surfaced (AC4).
-// Team-scoped (#302): callers without full visibility only see records whose
-// teamId is one of their memberships, applied BEFORE aggregation so totals and
-// groups both reflect the caller's scope. Protected by the auth gate above.
+//
+// System-Admin-only for now (#801): every usage endpoint rejects a non-System-
+// Admin caller with 403 via requireUsageAdmin — this is the real security
+// boundary; the SPA route/nav gate is UX only. The System Admin narrows to a
+// single team with `?team=<id>`. Protected by the auth gate above.
+
+// The optional `?team=<id>` narrowing (#801 AC4). A blank/absent param means
+// "all teams" (the full, unfiltered picture).
+function usageTeamParam(req) {
+  return typeof req.query.team === 'string' && req.query.team ? req.query.team : null;
+}
+
+// Narrow usage records by the caller's scope (defensive — a System Admin is
+// `scope.all`, so this is a no-op for them) and the optional team filter (#801).
+// Under "all teams" (no `team`) a System Admin sees every record, including
+// legacy records with no `teamId`; under a specific team filter a record only
+// matches when its `teamId` equals that team, so team-less legacy records are
+// (correctly) excluded from a single-team view — they belong to no team.
+function narrowUsageRecords(records, scope, team) {
+  if (scope.all && !team) return records;
+  return records.filter((r) => {
+    const t = r && r.teamId;
+    if (!scope.all && !visibleTeam(scope, t)) return false;
+    if (team && t !== team) return false;
+    return true;
+  });
+}
+
+// Gate: usage statistics are System-Admin-only (#801). Returns the caller's
+// scope when allowed, else sends 403 and returns null (caller must bail out).
+function requireUsageAdmin(req, res) {
+  const scope = getScope(req);
+  if (!canViewUsageStatistics(scope)) {
+    res.status(403).json({ error: 'System-Admin access required', code: 'forbidden' });
+    return null;
+  }
+  return scope;
+}
+
 app.get('/api/usage/summary', (req, res) => {
+  const scope = requireUsageAdmin(req, res);
+  if (!scope) return;
   const { since, until } = req.query;
   const groupBy = req.query.groupBy;
-  const scope = getScope(req);
   let records = usageLog.readRecords({ since });
-  if (!scope.all) {
-    records = records.filter((r) => visibleTeam(scope, r && r.teamId));
-  }
+  records = narrowUsageRecords(records, scope, usageTeamParam(req));
   res.json(summarize(records, { since, until, groupBy }));
 });
 
@@ -341,9 +376,10 @@ function sendExport(req, res, kind, records, prEvents) {
 }
 
 app.get('/api/usage/summary/export', (req, res) => {
-  const scope = getScope(req);
+  const scope = requireUsageAdmin(req, res);
+  if (!scope) return;
   let records = usageLog.readRecords({ since: req.query.since });
-  if (!scope.all) records = records.filter((r) => visibleTeam(scope, r && r.teamId));
+  records = narrowUsageRecords(records, scope, usageTeamParam(req));
   sendExport(req, res, 'summary', records, null);
 });
 
@@ -355,25 +391,17 @@ app.get('/api/usage/summary/export', (req, res) => {
 // dropped BEFORE attribution, so a work item with no in-scope runs never surfaces.
 // pr-link records are read unfiltered — they only supply the graph edges; output
 // is gated on in-scope runs > 0, so no cross-team artifact leaks.
-function scopedUsageRecords(req) {
+function scopedUsageRecords(req, scope) {
   const { since } = req.query;
-  const scope = getScope(req);
-  const team = typeof req.query.team === 'string' && req.query.team ? req.query.team : null;
-  let records = usageLog.readRecords({ since });
-  if (!scope.all || team) {
-    records = records.filter((r) => {
-      const t = r && r.teamId;
-      if (!scope.all && !visibleTeam(scope, t)) return false;
-      if (team && t !== team) return false;
-      return true;
-    });
-  }
-  return records;
+  const records = usageLog.readRecords({ since });
+  return narrowUsageRecords(records, scope, usageTeamParam(req));
 }
 
 app.get('/api/usage/work-items', (req, res) => {
+  const scope = requireUsageAdmin(req, res);
+  if (!scope) return;
   const { since, until } = req.query;
-  const records = scopedUsageRecords(req);
+  const records = scopedUsageRecords(req, scope);
   const prEvents = prEventsLog.readRecords();
   res.json(buildWorkItems(records, prEvents, { since, until }));
 });
@@ -383,7 +411,9 @@ app.get('/api/usage/work-items', (req, res) => {
 // the attribution-tier context so downstream numbers stay honest. Team-scoped
 // exactly like the list route. `format` = csv (default) | json.
 app.get('/api/usage/work-items/export', (req, res) => {
-  const records = scopedUsageRecords(req);
+  const scope = requireUsageAdmin(req, res);
+  if (!scope) return;
+  const records = scopedUsageRecords(req, scope);
   const prEvents = prEventsLog.readRecords();
   sendExport(req, res, 'work-items', records, prEvents);
 });
@@ -391,13 +421,15 @@ app.get('/api/usage/work-items/export', (req, res) => {
 // Drill-down addressed by ANY artifact in the chain. `repo` is owner/name, so it
 // arrives as two path segments reassembled here.
 app.get('/api/usage/work-items/:owner/:repo/:number', (req, res) => {
+  const scope = requireUsageAdmin(req, res);
+  if (!scope) return;
   const { since, until } = req.query;
   const repo = `${req.params.owner}/${req.params.repo}`;
   const number = Number(req.params.number);
   if (!Number.isInteger(number) || number <= 0) {
     return res.status(400).json({ error: 'invalid artifact number' });
   }
-  const records = scopedUsageRecords(req);
+  const records = scopedUsageRecords(req, scope);
   const prEvents = prEventsLog.readRecords();
   const detail = workItemDetail(records, prEvents, repo, number, { since, until });
   if (!detail) return res.status(404).json({ error: 'work item not found' });

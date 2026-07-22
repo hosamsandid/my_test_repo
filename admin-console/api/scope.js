@@ -175,6 +175,20 @@ function credentialVisibleToTeam(cred, teamId) {
   return c.teamId === t;
 }
 
+// ── Token-usage statistics visibility (#801) ────────────────────────────────
+//
+// The Token Usage statistics view (token/cost figures) is, for now, a
+// System-Admin-only surface: the operator keeps consumption numbers until it is
+// decided how much of them teams should see. The boundary is simply full
+// visibility (`scope.all` — the env admin or a System-Admin user); a Team Admin
+// or Team Member gets none. This is the real security boundary enforced on every
+// usage endpoint; the SPA route/nav gate is UX only. The System Admin narrows to
+// a single team via the `?team=` query parameter (see the usage routes), which is
+// orthogonal to this gate.
+function canViewUsageStatistics(scope) {
+  return !!(scope && scope.all);
+}
+
 // A serializable authorization descriptor for the session (AC6/AC7). Carries an
 // admin/System-Admin indicator and the caller's per-team memberships+roles, so
 // the frontend can make rendering decisions without re-deriving them. The env
@@ -205,4 +219,5 @@ module.exports = {
   canCreateCredential,
   canReassignCredential,
   credentialVisibleToTeam,
+  canViewUsageStatistics,
 };

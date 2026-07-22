@@ -138,7 +138,7 @@ export default function App() {
           <Route path="/role-templates" element={<AdminRoute><RoleTemplates /></AdminRoute>} />
           <Route path="/jobs"         element={<ScheduledJobs />} />
           <Route path="/github-events" element={<GithubEventLog />} />
-          <Route path="/token-usage"  element={<TokenUsage />} />
+          <Route path="/token-usage"  element={<AdminRoute><TokenUsage /></AdminRoute>} />
           <Route path="/models"       element={<CredentialRoute><ModelRegistry /></CredentialRoute>} />
           <Route path="/mcp"          element={<AdminRoute><McpServers /></AdminRoute>} />
           <Route path="/maintenance-mode" element={<AdminRoute><MaintenanceMode /></AdminRoute>} />

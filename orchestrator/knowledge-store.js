@@ -74,6 +74,23 @@ const DEFAULT_MAX_AUTO_PROMOTIONS = 3;
 // the theme card floor (strongLessons=3) so a weaker theme still gets human
 // review rather than an automatic skill.
 const DEFAULT_AUTO_THEME_MIN_LESSONS = 4;
+// #779 skill-aggregation Phase 1. Digest-only routing: a single converged
+// convention/fact cluster is delivered by the knowledge digest already, so it
+// raises NO skill candidate until it "graduates" — i.e. until at least this many
+// DISTINCT agents have independently recorded it (convergenceCount). Deliberately
+// above DEFAULT_CONVERGENCE_THRESHOLD (2), so ordinary two-agent convergence stays
+// digest-only and only a lesson that keeps recurring across the team becomes a
+// real candidate. The "more lessons" graduation dimension is served by the theme
+// aggregation path (planRelatedSuggestions / theme auto-promotion).
+const DEFAULT_DIGEST_GRADUATE_AGENTS = 4;
+// #779 curator auto-extend: the minimum matchExistingSkill score for the level-3
+// curator to auto-fold a converged cluster into an existing team skill (rather
+// than raising a review card that pre-selects extend mode). matchExistingSkill
+// weights an entry-id lineage overlap at 100/id and a name-token overlap at 1/token
+// (admin-console knowledge-suggestions.matchExistingSkill), so a floor of 100
+// means "auto-extend only on a direct provenance-lineage hit"; a mere name
+// similarity (< 100) falls back to review. Blast-radius-conservative by design.
+const DEFAULT_EXTEND_CONFIDENCE_FLOOR = 100;
 
 // ---------------------------------------------------------------------------
 // Ids / clock (injectable so tests are deterministic)
@@ -486,7 +503,36 @@ function knowledgeCurationConfig(env) {
   if (!Number.isInteger(autoThemeMinLessons) || autoThemeMinLessons < 1) {
     autoThemeMinLessons = DEFAULT_AUTO_THEME_MIN_LESSONS;
   }
-  return { maxAutoPromotionsPerPass: cap, autoThemeMinLessons };
+  // #779 digest-only routing (default ON — set knowledgeCuration.digestRouting to
+  // false to opt out) + its per-team graduation threshold (clamped to an integer
+  // strictly above the convergence threshold so a graduation is always possible).
+  const dr = raw.digestRouting;
+  const digestRouting = dr === false || dr === 'off' ? false
+    : (dr && typeof dr === 'object' && dr.enabled === false ? false : true);
+  let graduateAtAgents = Number(dr && typeof dr === 'object' ? dr.graduateAtAgents : raw.digestGraduateAtAgents);
+  if (!Number.isInteger(graduateAtAgents) || graduateAtAgents <= DEFAULT_CONVERGENCE_THRESHOLD) {
+    graduateAtAgents = DEFAULT_DIGEST_GRADUATE_AGENTS;
+  }
+  // #779 curator auto-extend. `autoExtend` defaults to null ("follow the autonomy
+  // dial" — the collector enables it at level >= 3); an explicit boolean overrides.
+  // The confidence floor clamps to a finite number >= 1 (see DEFAULT_EXTEND_CONFIDENCE_FLOOR).
+  const ae = raw.autoExtend;
+  let autoExtend = null;
+  if (ae === false || ae === 'off') autoExtend = false;
+  else if (ae === true || ae === 'on') autoExtend = true;
+  else if (ae && typeof ae === 'object' && typeof ae.enabled === 'boolean') autoExtend = ae.enabled;
+  let extendConfidenceFloor = Number(ae && typeof ae === 'object' ? ae.confidenceFloor : raw.extendConfidenceFloor);
+  if (!Number.isFinite(extendConfidenceFloor) || extendConfidenceFloor < 1) {
+    extendConfidenceFloor = DEFAULT_EXTEND_CONFIDENCE_FLOOR;
+  }
+  return {
+    maxAutoPromotionsPerPass: cap,
+    autoThemeMinLessons,
+    digestRouting,
+    graduateAtAgents,
+    autoExtend,
+    extendConfidenceFloor,
+  };
 }
 
 // The per-session harvest instruction woven into the agent's memory hint
@@ -575,6 +621,9 @@ module.exports = {
   DEFAULT_SIM_THRESHOLD,
   DEFAULT_CONVERGENCE_THRESHOLD,
   DEFAULT_MAX_AUTO_PROMOTIONS,
+  DEFAULT_AUTO_THEME_MIN_LESSONS,
+  DEFAULT_DIGEST_GRADUATE_AGENTS,
+  DEFAULT_EXTEND_CONFIDENCE_FLOOR,
   PROMOTION_TRANSITIONS,
   GATE_MODES,
   DEFAULT_PROMOTION_GATES,

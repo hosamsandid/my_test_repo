@@ -382,6 +382,225 @@ function planAutoPromoteThemes(clusters, candidates, gates, {
   return { promote, defer };
 }
 
+// ---------------------------------------------------------------------------
+// Curator auto-extend (#779, skill-aggregation Phase 1)
+// ---------------------------------------------------------------------------
+//
+// Today the curator can only ever CREATE a new sibling skill; related knowledge
+// accretes as micro-skills instead of maturing one document. This adds the
+// level-3 curator's auto-extend path: when a converged cluster clearly matches an
+// existing team skill, fold it in via the existing extend machinery rather than
+// spawning a new skill. As with the draft/provenance builders above, these MIRROR
+// the admin-console originals (matchExistingSkill / buildHeuristicSkillExtension /
+// extendSkillProvenance in admin-console/api/knowledge-suggestions.js) instead of
+// importing them — the two services never require each other's code. Keep in sync.
+
+/**
+ * Auto-match a converged candidate to an existing skill (mirrors admin-console
+ * knowledge-suggestions.matchExistingSkill). Given the candidate and a list of
+ * eligible skills ({ name, tier, entryIds? }), return the best match or null.
+ * Signals, strongest first: (1) any overlap between the candidate's KB entry ids
+ * and a skill's provenance entryIds (a direct lineage hit, weighted 100/id); (2)
+ * token overlap between the candidate text and the skill name (1/token). A skill
+ * is only proposed when a signal fires — the default stays "create new".
+ */
+function matchExistingSkill(candidate, existingSkills) {
+  const c = candidate && typeof candidate === 'object' ? candidate : {};
+  const skills = Array.isArray(existingSkills) ? existingSkills : [];
+  if (skills.length === 0) return null;
+  const entryIds = new Set(Array.isArray(c.entryIds) ? c.entryIds : []);
+  const textTokens = new Set(
+    String(c.text || '')
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((t) => t.length >= 4),
+  );
+
+  let best = null;
+  let bestScore = 0;
+  for (const s of skills) {
+    if (!s || typeof s.name !== 'string' || !s.name) continue;
+    let idOverlap = 0;
+    for (const id of Array.isArray(s.entryIds) ? s.entryIds : []) {
+      if (entryIds.has(id)) idOverlap += 1;
+    }
+    const nameTokens = s.name.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    let nameOverlap = 0;
+    for (const t of nameTokens) if (textTokens.has(t)) nameOverlap += 1;
+    const score = idOverlap * 100 + nameOverlap;
+    if (score > bestScore) {
+      bestScore = score;
+      best = { name: s.name, tier: s.tier || null, score, idOverlap, nameOverlap };
+    }
+  }
+  return bestScore > 0 ? best : null;
+}
+
+// Heuristic re-synthesis fallback for an auto-extension (mirrors admin-console
+// buildHeuristicSkillExtension): keep the existing SKILL.md verbatim and append the
+// new, not-yet-present lessons under an "## Added knowledge" section, deduplicated
+// (case-insensitive substring) against the existing text so a re-run is close to a
+// no-op. The heuristic is the FAILURE fallback for the LLM extension draft, so it is
+// marked `llmDrafted:false` / `synthesised:false` — the caller records that the
+// added content is un-synthesised. `added` is the count of genuinely new lines so
+// the caller can reject an empty (no-op) extension.
+function curatorSkillExtension(existingSkillMd, candidate) {
+  const c = candidate && typeof candidate === 'object' ? candidate : {};
+  const prior = (typeof existingSkillMd === 'string' ? existingSkillMd : '').replace(/\s+$/, '');
+  const priorLc = prior.toLowerCase();
+  const members = Array.isArray(c.members) ? c.members : [];
+  const statements = [];
+  const seen = new Set();
+  for (const m of members) {
+    const t = (m && typeof m.text === 'string' ? m.text.trim() : '');
+    if (!t) continue;
+    const lc = t.toLowerCase();
+    if (seen.has(lc)) continue;
+    seen.add(lc);
+    if (priorLc.includes(lc)) continue; // already covered by the existing doc
+    statements.push(t);
+  }
+  if (statements.length === 0) {
+    return { skillMd: prior, llmDrafted: false, synthesised: false, added: 0 };
+  }
+  const lines = [prior, '', '## Added knowledge', ''];
+  for (const s of statements) lines.push(`- ${s}`);
+  lines.push('');
+  return { skillMd: lines.join('\n'), llmDrafted: false, synthesised: false, added: statements.length };
+}
+
+// Union the new provenance onto an existing skill's record (mirrors admin-console
+// extendSkillProvenance) with `extendedBy` fixed to "curator". Existing entryIds,
+// originAgents, convergence and the original promotion metadata are preserved; the
+// new ids/agents are merged in and a dated extension entry appended to extensions[].
+function curatorExtendProvenance({ existingProv, from = 'team', to = 'team', teamId, entryIds, candidate, now } = {}) {
+  const ts = typeof now === 'string' && now.trim() ? now.trim() : new Date().toISOString();
+  const prev = existingProv && typeof existingProv === 'object' ? existingProv : {};
+  const c = candidate && typeof candidate === 'object' ? candidate : {};
+  const members = Array.isArray(c.members) ? c.members : [];
+
+  const prevIds = Array.isArray(prev.entryIds) ? prev.entryIds : [];
+  const addedIds = (Array.isArray(entryIds) ? entryIds : []).filter((id) => !prevIds.includes(id));
+  const mergedIds = [...prevIds, ...addedIds];
+
+  const newAgents = [...new Set(
+    members.map((m) => m && m.originAgent).filter((x) => typeof x === 'string' && x.trim()),
+  )];
+  const prevAgents = Array.isArray(prev.originAgents) ? prev.originAgents : [];
+  const mergedAgents = [...new Set([...prevAgents, ...newAgents])];
+
+  const prevConvergence = Array.isArray(prev.convergence) ? prev.convergence : [];
+  const newConvergence = Array.isArray(c.convergence) ? c.convergence : newAgents;
+  const mergedConvergence = [...new Set([...prevConvergence, ...newConvergence])];
+
+  const sourceRefs = Array.isArray(prev.sourceRefs) ? prev.sourceRefs.slice() : [];
+  const sessions = Array.isArray(prev.sessions) ? prev.sessions.slice() : [];
+  for (const m of members) {
+    if (m && m.correlationId) sessions.push({ agentId: m.originAgent || null, correlationId: m.correlationId });
+    if (m && Array.isArray(m.sourceRefs)) {
+      for (const r of m.sourceRefs) if (r && r.kind && r.ref) sourceRefs.push({ kind: r.kind, ref: r.ref });
+    }
+  }
+
+  const extensions = Array.isArray(prev.extensions) ? prev.extensions.slice() : [];
+  extensions.push({
+    entryIds: addedIds.slice(),
+    addedAgents: newAgents,
+    extendedBy: 'curator',
+    extendedAt: ts,
+  });
+
+  return {
+    ...prev,
+    fromTier: prev.fromTier || from,
+    toTier: to || prev.toTier,
+    teamId: teamId || prev.teamId || c.teamId || 'default',
+    entryIds: mergedIds,
+    canonicalId: prev.canonicalId || mergedIds[0] || null,
+    originAgents: mergedAgents,
+    convergence: mergedConvergence,
+    sourceRefs,
+    sessions,
+    originTeamId: prev.originTeamId || teamId || c.teamId || 'default',
+    extensions,
+    lastExtendedAt: ts,
+    lastExtendedBy: 'curator',
+  };
+}
+
+/**
+ * Decide which converged clusters the level-3 curator may AUTO-EXTEND into an
+ * existing team skill versus defer to a review card that pre-selects extend mode
+ * (#779). Pure: no IO. Runs BEFORE planAutoPromotions — a cluster matched here is
+ * claimed (returned in `consumedCanonicalIds`) so it does not also spawn a new
+ * skill. Shares the per-pass promotion cap with the caller via `cap` (an already-
+ * reduced remaining budget).
+ *
+ * @param {object[]} clusters       from buildCanonicalProjection (deterministic order)
+ * @param {object[]} candidates     the team's current candidate store rows
+ * @param {object[]} existingSkills  [{ name, tier:'team', entryIds? }] — TEAM-tier only
+ * @param {object} gates            resolvePromotionGates(env) output
+ * @param {{ threshold?: number, cap?: number, confidenceFloor?: number,
+ *           teamId?: string, now?: string }} opts
+ * @returns {{ extend: object[], reviewExtend: object[], consumedCanonicalIds: Set }}
+ *   extend:       [{ cluster, candidate, transition, target, matchScore }] — gate=auto,
+ *                 score >= confidenceFloor, within cap; the curator writes these.
+ *   reviewExtend: [{ cluster, candidate, target, reason }] — a review card in extend
+ *                 mode (reason: gated | below-confidence | over-cap).
+ *   consumedCanonicalIds: every cluster this planner claimed (extend + reviewExtend),
+ *                 so the caller excludes them from the create-new auto-promotion path.
+ */
+function planAutoExtensions(clusters, candidates, existingSkills, gates, {
+  threshold = 2, cap = 3, confidenceFloor = 100, teamId, now,
+} = {}) {
+  const byId = new Map(
+    (Array.isArray(candidates) ? candidates : [])
+      .filter((c) => c && typeof c.id === 'string')
+      .map((c) => [c.id, c]),
+  );
+  const skills = Array.isArray(existingSkills) ? existingSkills : [];
+  const capN = Number.isInteger(cap) && cap >= 0 ? cap : 3;
+  const floor = Number.isFinite(confidenceFloor) && confidenceFloor >= 1 ? confidenceFloor : 100;
+  const g = gates && typeof gates === 'object' ? gates : {};
+  const extend = [];
+  const reviewExtend = [];
+  const consumedCanonicalIds = new Set();
+  if (skills.length === 0) return { extend, reviewExtend, consumedCanonicalIds };
+
+  for (const cluster of Array.isArray(clusters) ? clusters : []) {
+    if (!crossesConvergence(cluster, threshold)) continue;
+    const candidate = toCandidate(cluster, { teamId, source: 'convergence', now });
+    const existing = byId.get(candidate.id);
+    // Respect the operator + idempotency: a dismissed/already-promoted cluster is
+    // never auto-extended.
+    if (existing && (existing.status === 'promoted' || existing.status === 'dismissed')) continue;
+    const match = matchExistingSkill(candidate, skills);
+    if (!match) continue; // no signal ⇒ leave for the create-new auto-promotion path
+    const transition = targetTransitionFor(cluster); // 'team>team'
+    const claim = () => consumedCanonicalIds.add(cluster.canonicalId);
+    // team>global / agent>team are never auto-extended: only a team>team auto gate
+    // opens the auto-extend path; anything else becomes a review card.
+    if (g[transition] !== 'auto') {
+      reviewExtend.push({ cluster, candidate, target: match, reason: 'gated' });
+      claim();
+      continue;
+    }
+    if (match.score < floor) {
+      reviewExtend.push({ cluster, candidate, target: match, reason: 'below-confidence' });
+      claim();
+      continue;
+    }
+    if (extend.length >= capN) {
+      reviewExtend.push({ cluster, candidate, target: match, reason: 'over-cap' });
+      claim();
+      continue;
+    }
+    extend.push({ cluster, candidate, transition, target: match, matchScore: match.score });
+    claim();
+  }
+  return { extend, reviewExtend, consumedCanonicalIds };
+}
+
 module.exports = {
   SKILL_NAME_RE,
   slugifySkillName,
@@ -392,4 +611,8 @@ module.exports = {
   targetTransitionFor,
   planAutoPromotions,
   planAutoPromoteThemes,
+  matchExistingSkill,
+  curatorSkillExtension,
+  curatorExtendProvenance,
+  planAutoExtensions,
 };

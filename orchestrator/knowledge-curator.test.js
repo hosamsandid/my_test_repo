@@ -14,6 +14,10 @@ const {
   targetTransitionFor,
   planAutoPromotions,
   planAutoPromoteThemes,
+  matchExistingSkill,
+  curatorSkillExtension,
+  curatorExtendProvenance,
+  planAutoExtensions,
 } = require('./knowledge-curator');
 const { resolvePromotionGates, knowledgeCurationConfig } = require('./knowledge-store');
 const { buildCanonicalProjection, groupRelatedClusters, themeToCandidate } = require('./knowledge-convergence');
@@ -68,7 +72,12 @@ test('resolvePromotionGates: absent transition uses its default, present valid v
 });
 
 test('knowledgeCurationConfig: default cap + autoThemeMinLessons, clamp, legacy env', () => {
-  assert.deepEqual(knowledgeCurationConfig(null), { maxAutoPromotionsPerPass: 3, autoThemeMinLessons: 4 });
+  // #779: the config now also carries digest-routing + auto-extend knobs (defaults:
+  // routing on, graduate at 4 agents, auto-extend follows autonomy (null), floor 100).
+  assert.deepEqual(knowledgeCurationConfig(null), {
+    maxAutoPromotionsPerPass: 3, autoThemeMinLessons: 4,
+    digestRouting: true, graduateAtAgents: 4, autoExtend: null, extendConfidenceFloor: 100,
+  });
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { maxAutoPromotionsPerPass: 7 } }).maxAutoPromotionsPerPass, 7);
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { maxAutoPromotionsPerPass: 0 } }).maxAutoPromotionsPerPass, 3);
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { maxAutoPromotionsPerPass: 'x' } }).maxAutoPromotionsPerPass, 3);
@@ -337,4 +346,170 @@ test('curatorThemeSkillProvenance: falls back to candidate entryIds when omitted
   const cand = themeToCandidate(groups[0], { teamId: 'acme', now: NOW });
   const prov = curatorThemeSkillProvenance({ teamId: 'acme', candidate: cand, now: NOW });
   assert.deepEqual(prov.entryIds.slice().sort(), cand.entryIds.slice().sort());
+});
+
+// ─── curator auto-extend (#779, skill-aggregation Phase 1) ──────────────────────
+
+// A converged cluster (two agents) whose canonical member id is `canonId` — used
+// to seed an existing skill's provenance entryIds for an id-lineage match.
+function extendCluster(text = 'always rebase feature branches onto origin main') {
+  return convergedClusters(text)[0];
+}
+
+test('knowledgeCurationConfig: #779 digest-routing knobs (default on, graduate 4, clamp)', () => {
+  assert.equal(knowledgeCurationConfig(null).digestRouting, true);
+  assert.equal(knowledgeCurationConfig(null).graduateAtAgents, 4);
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { digestRouting: false } }).digestRouting, false);
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { digestRouting: { enabled: false } } }).digestRouting, false);
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { digestRouting: { graduateAtAgents: 6 } } }).graduateAtAgents, 6);
+  // Must be strictly above the convergence threshold (2); a bogus/too-low value clamps to 4.
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { digestRouting: { graduateAtAgents: 2 } } }).graduateAtAgents, 4);
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { digestRouting: { graduateAtAgents: 'x' } } }).graduateAtAgents, 4);
+});
+
+test('knowledgeCurationConfig: #779 auto-extend knobs (default follow-autonomy null, floor 100, overrides)', () => {
+  assert.equal(knowledgeCurationConfig(null).autoExtend, null); // follow the autonomy dial
+  assert.equal(knowledgeCurationConfig(null).extendConfidenceFloor, 100);
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { autoExtend: false } }).autoExtend, false);
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { autoExtend: true } }).autoExtend, true);
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { autoExtend: { enabled: false } } }).autoExtend, false);
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { autoExtend: { confidenceFloor: 50 } } }).extendConfidenceFloor, 50);
+  assert.equal(knowledgeCurationConfig({ knowledgeCuration: { autoExtend: { confidenceFloor: 0 } } }).extendConfidenceFloor, 100);
+});
+
+test('matchExistingSkill: id-lineage overlap outranks name; null when no signal', () => {
+  const cluster = extendCluster();
+  const cand = planAutoPromotions([cluster], [], resolvePromotionGates(null), { threshold: 2, teamId: 'acme', now: NOW }).promote[0].candidate;
+  const shared = cand.entryIds[0];
+  // id-lineage hit wins big
+  const m = matchExistingSkill(cand, [
+    { name: 'unrelated-skill', tier: 'team', entryIds: [] },
+    { name: 'dev-workflow', tier: 'team', entryIds: [shared] },
+  ]);
+  assert.equal(m.name, 'dev-workflow');
+  assert.ok(m.score >= 100);
+  assert.equal(m.idOverlap, 1);
+  // no signal → null
+  assert.equal(matchExistingSkill(cand, [{ name: 'zzz-none', tier: 'team', entryIds: [] }]), null);
+  assert.equal(matchExistingSkill(cand, []), null);
+});
+
+test('curatorSkillExtension: appends un-synthesised block; no-op when all present', () => {
+  const cluster = extendCluster('rebase feature branches onto origin main before pushing');
+  const cand = planAutoPromotions([cluster], [], resolvePromotionGates(null), { threshold: 2, teamId: 'acme', now: NOW }).promote[0].candidate;
+  const prior = '# Dev workflow\n\n## The flow\n\n- open a PR\n';
+  const ext = curatorSkillExtension(prior, cand);
+  assert.ok(ext.added >= 1);
+  assert.equal(ext.synthesised, false);
+  assert.equal(ext.llmDrafted, false);
+  assert.ok(ext.skillMd.includes('## Added knowledge'));
+  assert.ok(ext.skillMd.includes('rebase feature branches onto origin main before pushing'));
+  // Re-running against a doc that already contains the lesson adds nothing (idempotent-ish).
+  const noop = curatorSkillExtension(ext.skillMd, cand);
+  assert.equal(noop.added, 0);
+  assert.equal(noop.skillMd.replace(/\s+$/, ''), ext.skillMd.replace(/\s+$/, ''));
+});
+
+test('curatorExtendProvenance: unions ids/agents, appends curator extension record', () => {
+  const cluster = extendCluster();
+  const cand = planAutoPromotions([cluster], [], resolvePromotionGates(null), { threshold: 2, teamId: 'acme', now: NOW }).promote[0].candidate;
+  const existingProv = { fromTier: 'team', toTier: 'team', teamId: 'acme', entryIds: ['ffffffffffff'], originAgents: ['old-agent'], convergence: ['old-agent'] };
+  const prov = curatorExtendProvenance({ existingProv, teamId: 'acme', entryIds: cand.entryIds, candidate: cand, now: NOW });
+  assert.ok(prov.entryIds.includes('ffffffffffff')); // preserved
+  for (const id of cand.entryIds) assert.ok(prov.entryIds.includes(id)); // merged
+  assert.ok(prov.originAgents.includes('old-agent'));
+  assert.ok(prov.originAgents.includes('acme-dev-1'));
+  assert.equal(prov.lastExtendedBy, 'curator');
+  assert.equal(prov.lastExtendedAt, NOW);
+  assert.equal(prov.extensions.at(-1).extendedBy, 'curator');
+});
+
+test('planAutoExtensions: id-lineage match + auto gate → extend, cluster claimed', () => {
+  const cluster = extendCluster();
+  const cand = planAutoPromotions([cluster], [], resolvePromotionGates(null), { threshold: 2, teamId: 'acme', now: NOW }).promote[0].candidate;
+  const skills = [{ name: 'dev-workflow', tier: 'team', entryIds: [cand.entryIds[0]] }];
+  const gates = resolvePromotionGates(null); // team>team auto
+  const plan = planAutoExtensions([cluster], [], skills, gates, { threshold: 2, cap: 3, confidenceFloor: 100, teamId: 'acme', now: NOW });
+  assert.equal(plan.extend.length, 1);
+  assert.equal(plan.extend[0].target.name, 'dev-workflow');
+  assert.equal(plan.extend[0].transition, 'team>team');
+  assert.equal(plan.reviewExtend.length, 0);
+  assert.ok(plan.consumedCanonicalIds.has(cluster.canonicalId));
+});
+
+test('planAutoExtensions: below-confidence match → review card in extend mode', () => {
+  // Name-only overlap ('branch') scores 1 (< floor 100) → review, not auto.
+  const cluster = extendCluster('branch protection should require a green build');
+  const cand = planAutoPromotions([cluster], [], resolvePromotionGates(null), { threshold: 2, teamId: 'acme', now: NOW }).promote[0].candidate;
+  const skills = [{ name: 'branch-hygiene', tier: 'team', entryIds: [] }];
+  const gates = resolvePromotionGates(null);
+  const plan = planAutoExtensions([cluster], [], skills, gates, { threshold: 2, cap: 3, confidenceFloor: 100, teamId: 'acme', now: NOW });
+  assert.equal(plan.extend.length, 0);
+  assert.equal(plan.reviewExtend.length, 1);
+  assert.equal(plan.reviewExtend[0].reason, 'below-confidence');
+  assert.equal(plan.reviewExtend[0].target.name, 'branch-hygiene');
+  assert.ok(plan.consumedCanonicalIds.has(cluster.canonicalId)); // still claimed → no create-new
+});
+
+test('planAutoExtensions: gate not auto → review (never auto-extend team>global / gated)', () => {
+  const cluster = extendCluster();
+  const cand = planAutoPromotions([cluster], [], resolvePromotionGates(null), { threshold: 2, teamId: 'acme', now: NOW }).promote[0].candidate;
+  const skills = [{ name: 'dev-workflow', tier: 'team', entryIds: [cand.entryIds[0]] }];
+  const gates = resolvePromotionGates({ knowledgePromotionGates: { 'team>team': 'review' } });
+  const plan = planAutoExtensions([cluster], [], skills, gates, { threshold: 2, cap: 3, confidenceFloor: 100, teamId: 'acme', now: NOW });
+  assert.equal(plan.extend.length, 0);
+  assert.equal(plan.reviewExtend.length, 1);
+  assert.equal(plan.reviewExtend[0].reason, 'gated');
+});
+
+test('planAutoExtensions: cap respected — overflow deferred as over-cap review', () => {
+  const mk = (kind, id1, id2, txt) => [
+    entry({ id: id1, kind, originAgent: 'd1', text: txt, createdAt: '2026-07-08T08:00:00Z', correlationId: '$a' }),
+    entry({ id: id2, kind, originAgent: 'd2', text: txt, createdAt: '2026-07-08T09:00:00Z', correlationId: '$b' }),
+  ];
+  const entries = [
+    ...mk('fact', '111111111111', '222222222222', 'alpha lesson unique one'),
+    ...mk('convention', '555555555555', '666666666666', 'gamma convention unique three'),
+  ];
+  const clusters = buildCanonicalProjection(entries, { simThreshold: 0.6, now: NOW }).clusters;
+  // Each cluster id-matches its own skill (entryIds seeded from each cluster's members).
+  const skills = clusters.map((c, i) => ({ name: `skill-${i}`, tier: 'team', entryIds: [c.memberIds[0]] }));
+  const gates = resolvePromotionGates(null);
+  const plan = planAutoExtensions(clusters, [], skills, gates, { threshold: 2, cap: 1, confidenceFloor: 100, teamId: 'acme', now: NOW });
+  assert.equal(plan.extend.length, 1);
+  assert.equal(plan.reviewExtend.length, 1);
+  assert.equal(plan.reviewExtend[0].reason, 'over-cap');
+  // Every crossing cluster is claimed (extend + review), never left to create-new.
+  assert.equal(plan.consumedCanonicalIds.size, clusters.length);
+});
+
+test('planAutoExtensions: no matching skill → nothing claimed (left for create-new)', () => {
+  const cluster = extendCluster();
+  const skills = [{ name: 'totally-unrelated-xyz', tier: 'team', entryIds: ['aaaaaaaaaaab'] }];
+  const gates = resolvePromotionGates(null);
+  const plan = planAutoExtensions([cluster], [], skills, gates, { threshold: 2, cap: 3, confidenceFloor: 100, teamId: 'acme', now: NOW });
+  assert.equal(plan.extend.length, 0);
+  assert.equal(plan.reviewExtend.length, 0);
+  assert.equal(plan.consumedCanonicalIds.size, 0);
+});
+
+test('planAutoExtensions: promoted/dismissed candidate is never auto-extended', () => {
+  const cluster = extendCluster();
+  const cand = planAutoPromotions([cluster], [], resolvePromotionGates(null), { threshold: 2, teamId: 'acme', now: NOW }).promote[0].candidate;
+  const skills = [{ name: 'dev-workflow', tier: 'team', entryIds: [cand.entryIds[0]] }];
+  const gates = resolvePromotionGates(null);
+  for (const status of ['promoted', 'dismissed']) {
+    const plan = planAutoExtensions([cluster], [{ ...cand, status }], skills, gates, { threshold: 2, cap: 3, confidenceFloor: 100, teamId: 'acme', now: NOW });
+    assert.equal(plan.extend.length, 0, status);
+    assert.equal(plan.reviewExtend.length, 0, status);
+  }
+});
+
+test('planAutoExtensions: empty skills / empty clusters → empty plan', () => {
+  const cluster = extendCluster();
+  const p1 = planAutoExtensions([cluster], [], [], resolvePromotionGates(null), { threshold: 2, now: NOW });
+  assert.equal(p1.extend.length, 0);
+  assert.equal(p1.reviewExtend.length, 0);
+  const p2 = planAutoExtensions([], [], [{ name: 'x', tier: 'team', entryIds: [] }], resolvePromotionGates(null), {});
+  assert.equal(p2.extend.length, 0);
 });

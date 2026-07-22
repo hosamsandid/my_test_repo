@@ -160,9 +160,41 @@ co-located with `knowledgeConvergenceConfig`):
 
 ```jsonc
 "knowledgeCuration": {
-  "maxAutoPromotionsPerPass": 3        // clamp >=1, default 3 (#449 burst-cap parity)
+  "maxAutoPromotionsPerPass": 3,       // clamp >=1, default 3 (#449 burst-cap parity)
+  "autoThemeMinLessons": 4,            // #604 theme auto-promotion floor, clamp >=1
+
+  // #779 skill-aggregation Phase 1 — both per-team, both optional:
+  "digestRouting": true,               // default ON; `false` (or {enabled:false}) opts out.
+                                        // {graduateAtAgents:N} raises the graduation bar
+                                        // (default 4, must be > convergenceThreshold).
+  "autoExtend": null,                  // null = follow the autonomy dial (on at level >=3);
+                                        // `false`/`true` (or {enabled:bool}) overrides.
+                                        // {confidenceFloor:N} sets the matchExistingSkill
+                                        // score floor for an AUTO extension (default 100 =
+                                        // "a direct entry-id lineage hit"; below → review card).
 }
 ```
+
+**Digest-only routing (#779).** A single converged `convention`/`fact` cluster is
+already delivered to every agent by the knowledge digest, so it raises **no** skill
+candidate/card — the decision is recorded on the candidate store (`status:"digest-only"`,
+never an open card) and surfaced as a low-key `digest-routing` feed event. It is
+thresholded, not absolute: once a cluster recurs across `>= graduateAtAgents` distinct
+agents it **graduates** to a real candidate on a later collector pass. `entity` clusters
+are never routed digest-only, and the escape hatches (agent `knowledge promote`, manual
+combine) bypass routing entirely. Digest-only clusters stay in the **theme** aggregation
+path, so a growing set can still surface as a theme card.
+
+**Curator auto-extend (#779).** At autonomy level 3, when a converged cluster clearly
+matches an existing team skill (`matchExistingSkill` score `>= confidenceFloor`, a direct
+entry-id lineage hit by default) the curator **extends** that skill in place — re-synthesised
+SKILL.md (the heuristic `## Added knowledge` append is the un-synthesised failure fallback
+for the LLM extension draft), unioned provenance, a version-bumping `extended` manifest
+stamp, and an `extension` feed event — instead of spawning a new sibling skill. A
+below-confidence / gated / over-cap match falls back to a review card that pre-selects
+extend mode with the matched target. Gates apply exactly as for auto-promotion
+(`team>team` only — `team>global` / `agent>team` are never auto-extended) and the extension
+counts against the **same** `maxAutoPromotionsPerPass` cap as the create-new promotions.
 
 `convergenceThreshold` is reused from `knowledgeConvergence` (the same maturity
 bar that raises a card is the bar that auto-promotes) — no second threshold to

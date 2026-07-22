@@ -81,9 +81,7 @@ ps:
 		$(foreach svc,$(SERVICES),--filter name=$(svc))
 
 logs:
-	$(COMPOSE) -f $(COMPOSE_FILE) logs -f --tail=100 orchestrator &
-	$(COMPOSE) -f $(COMPOSE_FILE) logs -f --tail=100 admin-console &
-	$(COMPOSE) -f $(COMPOSE_FILE) logs -f --tail=100 conduwuit &
+	$(foreach svc,$(SERVICES),$(COMPOSE) -f $(COMPOSE_FILE) logs -f --tail=100 $(svc) &)
 	wait
 
 seed-pool: seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers

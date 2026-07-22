@@ -14,6 +14,8 @@
 // Kept as a side-effect-free module so it can be unit-tested with node:test,
 // mirroring the pending-queue-view.js pattern.
 
+import { tallyRollout, classifyMemberStatus, ROLLOUT_CLASS } from './skill-rollout-view.js';
+
 // Per-member statuses the orchestrator emits (see _syncSkillIntoWorkspace /
 // setTeamSkillActive): a real file sync succeeded, was neutral (nothing to do),
 // or failed.
@@ -61,21 +63,22 @@ export function summarizeActivation(members, { scoped = false } = {}) {
     return { kind: 'ok', text: 'activated', synced: 0, failed: 0, syncable: 0, reasons: [] };
   }
 
-  const synced = ms.filter(m => SUCCESS_RE.test(statusOf(m))).length;
-  const neutral = ms.filter(m => NEUTRAL_RE.test(statusOf(m))).length;
-  const failedMs = ms.filter(m => !SUCCESS_RE.test(statusOf(m)) && !NEUTRAL_RE.test(statusOf(m)));
-  const failed = failedMs.length;
-  const syncable = ms.length - neutral; // members a sync was actually attempted on
+  // Counting delegated to the ONE shared basis (#774): `synced` = installed,
+  // `syncable` = target (materialized, non-override). This is the same basis the
+  // status pill uses, so the flash and the badge can never disagree again.
+  const counts = tallyRollout(ms.map(classifyMemberStatus));
+  const synced = counts.installed;
+  const failed = counts.failed;
+  const syncable = counts.target; // members a sync was actually attempted on
+  const failedMs = ms.filter(m => classifyMemberStatus(m) === ROLLOUT_CLASS.FAILED);
   const reasons = [...new Set(failedMs.map(syncFailureReason))].filter(Boolean);
 
   if (scoped) {
     const m = ms[0];
-    const st = statusOf(m);
-    if (SUCCESS_RE.test(st)) return { kind: 'ok', text: 'synced', synced: 1, failed: 0, syncable: 1, reasons: [] };
-    if (NEUTRAL_RE.test(st)) {
-      const text = /stub/i.test(st) ? 'not materialized yet' : 'member manages its own skill list';
-      return { kind: 'ok', text, synced: 0, failed: 0, syncable: 0, reasons: [] };
-    }
+    const cls = classifyMemberStatus(m);
+    if (cls === ROLLOUT_CLASS.INSTALLED) return { kind: 'ok', text: 'synced', synced: 1, failed: 0, syncable: 1, reasons: [] };
+    if (cls === ROLLOUT_CLASS.STUB) return { kind: 'ok', text: 'not materialized yet', synced: 0, failed: 0, syncable: 0, reasons: [] };
+    if (cls === ROLLOUT_CLASS.OVERRIDE) return { kind: 'ok', text: 'member manages its own skill list', synced: 0, failed: 0, syncable: 0, reasons: [] };
     return { kind: 'error', text: `still failing — ${syncFailureReason(m)}`, synced: 0, failed: 1, syncable: 1, reasons };
   }
 

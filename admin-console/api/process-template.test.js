@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId, outcomesBlock, stripOutcomesBlock, applyDerivedPromptBlocks } = require('./process-template');
 
 // A tiny stand-in for the on-disk draft store: an id is "taken" iff present.
 const existsIn = (set) => (id) => set.has(id);
@@ -713,4 +713,176 @@ test('buildMemberFromTemplate: unknown {{vars}} stay literal; materialize passes
     { teamId: 'acme', memberId: 'acme-x', memberDisplayName: 'X', vars: {}, materialize: true });
   assert.equal(m.systemPromptOverride, 'Hi {{missing}}.'); // no silent "undefined"
   assert.equal(m.materialize, true);
+});
+
+// ─── Outcomes prompt block (#829, concept §6) ────────────────────────────────
+
+const EXACTLY_ONE = {
+  mode: 'exactlyOne',
+  options: [
+    { id: 'dev', title: 'Route to Developer', when: 'frontend/UI task', actions: [{ type: 'setLabel', label: 'ready' }] },
+    { id: 'dev2', title: 'Route to Developer 2', when: 'backend/DB task', actions: [{ type: 'setLabel', label: 'ready-2' }] },
+    { id: 'hold', title: 'Hold for clarification', when: 'ambiguous', notify: 'dm', actions: [{ type: 'none' }] },
+  ],
+};
+
+test('outcomesBlock: exactlyOne — lead, per-option label/when, and the single-label footer', () => {
+  const block = outcomesBlock(EXACTLY_ONE);
+  assert.match(block, /<!-- outcomes:start -->/);
+  assert.match(block, /<!-- outcomes:end -->/);
+  assert.match(block, /## Outcomes/);
+  assert.match(block, /choose \*\*exactly one\*\* of the following outcomes:/);
+  assert.match(block, /1\. \*\*Route to Developer\*\* — when: frontend\/UI task\. Then: apply label `ready`\./);
+  assert.match(block, /2\. \*\*Route to Developer 2\*\* — when: backend\/DB task\. Then: apply label `ready-2`\./);
+  // `none` action → "set no label"; notify:"dm" → DM reporting instruction.
+  assert.match(block, /3\. \*\*Hold for clarification\*\* — when: ambiguous\. Then: set no label; report to the user in the DM\./);
+  assert.match(block, /Never apply more than one of these labels in a single run\./);
+});
+
+test('outcomesBlock: anyOf — "all that apply, zero allowed" lead and NO single-label footer', () => {
+  const block = outcomesBlock({
+    mode: 'anyOf',
+    options: [
+      { id: 'sec', title: 'Security concern', actions: [{ type: 'setLabel', label: 'security' }] },
+      { id: 'perf', actions: [{ type: 'setLabel', label: 'perf' }] }, // no title → falls back to id
+    ],
+  });
+  assert.match(block, /choose \*\*all outcomes that apply\*\* — zero is allowed:/);
+  assert.doesNotMatch(block, /Never apply more than one/);
+  assert.match(block, /1\. \*\*Security concern\*\* — Then: apply label `security`\./); // no `when:` when absent
+  assert.match(block, /2\. \*\*perf\*\* — Then: apply label `perf`\./); // id fallback for missing title
+});
+
+test('outcomesBlock: openPr/openIssue reuse the produce wording (once)', () => {
+  const block = outcomesBlock({
+    mode: 'anyOf',
+    options: [
+      { id: 'ship', title: 'Ship it', actions: [{ type: 'openPr' }] },
+      { id: 'file', title: 'File follow-up', actions: [{ type: 'openIssue' }] },
+    ],
+  });
+  assert.match(block, /Then: open a pull request\./);
+  assert.match(block, /Then: open a GitHub issue\./);
+  // The full how-to (reused producePrText/produceIssueText) appears once each.
+  assert.equal((block.match(/gh pr create/g) || []).length, 1);
+  assert.equal((block.match(/gh issue create/g) || []).length, 1);
+});
+
+test('outcomesBlock: a non-authored port projects nothing (legacy no-block, AC4)', () => {
+  assert.equal(outcomesBlock(null), '');
+  assert.equal(outcomesBlock(undefined), '');
+  assert.equal(outcomesBlock({ mode: 'anyOf', options: [] }), ''); // empty options is not authored
+  assert.equal(outcomesBlock({ options: [{ id: 'x', actions: [] }] }), ''); // no mode is not authored
+});
+
+test('stripOutcomesBlock + applyDerivedPromptBlocks are byte-idempotent (AC1)', () => {
+  const base = 'You are the dispatcher.';
+  const once = applyDerivedPromptBlocks(base, { outcomes: EXACTLY_ONE });
+  assert.match(once, /You are the dispatcher\./);
+  assert.match(once, /outcomes:start/);
+  // Re-applying over the already-blocked prompt yields byte-identical output.
+  const twice = applyDerivedPromptBlocks(once, { outcomes: EXACTLY_ONE });
+  assert.equal(twice, once);
+  assert.equal((twice.match(/outcomes:start/g) || []).length, 1);
+  // Stripping restores the base exactly.
+  assert.equal(stripOutcomesBlock(once), base);
+});
+
+test('applyDerivedPromptBlocks: legacy emits-only agent gets a byte-identical prompt (AC4)', () => {
+  const base = 'Plain agent prompt.';
+  // No github, no authored outcomes → nothing appended.
+  assert.equal(applyDerivedPromptBlocks(base, {}), base);
+  assert.equal(applyDerivedPromptBlocks(base, { outcomes: null }), base);
+  // A github-only agent keeps its produce block unchanged (no outcomes block).
+  const gh = applyDerivedPromptBlocks(base, { github: { producesPr: true } });
+  assert.match(gh, /github-io:start/);
+  assert.doesNotMatch(gh, /outcomes:start/);
+});
+
+test('applyDerivedPromptBlocks: github-io + outcomes coexist without a doubled open-PR instruction (AC3)', () => {
+  const outcomes = {
+    mode: 'exactlyOne',
+    options: [
+      { id: 'ship', title: 'Ship', actions: [{ type: 'openPr' }] },
+      { id: 'hold', title: 'Hold', actions: [{ type: 'none' }] },
+    ],
+  };
+  // The agent ALSO carries a github.producesPr flag — the produce how-to must
+  // still appear exactly once (absorbed into the outcomes block; the github-io
+  // block drops the covered flag).
+  const out = applyDerivedPromptBlocks('Reviewer.', { github: { producesPr: true }, outcomes });
+  assert.match(out, /outcomes:start/);
+  assert.equal((out.match(/gh pr create/g) || []).length, 1);
+  // producesPr is fully covered by the outcome → no empty github-io block.
+  assert.doesNotMatch(out, /github-io:start/);
+
+  // A producesIssue NOT covered by any outcome still yields its github-io block.
+  const out2 = applyDerivedPromptBlocks('Reviewer.', { github: { producesPr: true, producesIssue: true }, outcomes });
+  assert.match(out2, /github-io:start/);
+  assert.equal((out2.match(/gh pr create/g) || []).length, 1); // still once (from the outcome)
+  assert.equal((out2.match(/gh issue create/g) || []).length, 1); // from the github-io block
+});
+
+test('expandGithubChannels: materialises the outcomes block; export round-trip does not duplicate it (AC2)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'x', level: 'template',
+    roles: [{
+      id: 'dispatch', displayName: 'Dispatcher', systemPrompt: 'Route issues.',
+      outcomes: EXACTLY_ONE, triggers: [],
+    }],
+  };
+  const once = expandGithubChannels(bundle);
+  const p1 = once.roles[0].systemPrompt;
+  assert.match(p1, /Route issues\./);
+  assert.match(p1, /outcomes:start/);
+  assert.match(p1, /apply label `ready`/);
+  // Re-expanding does not duplicate the block.
+  const twice = expandGithubChannels(once);
+  assert.equal((twice.roles[0].systemPrompt.match(/outcomes:start/g) || []).length, 1);
+  // Export strips the block back out so the portable bundle stays clean, and the
+  // structured `outcomes` port survives — a re-import regenerates it (no dup).
+  const b = buildProcessTemplate({ name: 'x', level: 'live', roles: twice.roles });
+  assert.equal(b.roles[0].systemPrompt, 'Route issues.');
+  assert.ok(!b.roles[0].systemPrompt.includes('outcomes:start'));
+  assert.equal(b.roles[0].outcomes.mode, 'exactlyOne');
+  const reimport = expandGithubChannels({ ...b });
+  assert.equal((reimport.roles[0].systemPrompt.match(/outcomes:start/g) || []).length, 1);
+});
+
+test('materialise: the outcomes block reaches the member override with {{vars}} substituted', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'x', level: 'template',
+    roles: [{
+      id: 'dispatch', displayName: 'Dispatcher', systemPrompt: 'Route.',
+      outcomes: { mode: 'exactlyOne', options: [{ id: 'go', title: 'Go', actions: [{ type: 'setLabel', label: '{{dispatchLabel}}' }] }] },
+      triggers: [],
+    }],
+  };
+  const expanded = expandGithubChannels(bundle);
+  const custom = templateToCustomRoles(expanded, 'acme');
+  const m = buildMemberFromTemplate(custom[0], {
+    teamId: 'acme', memberId: 'acme-dispatch', memberDisplayName: 'Dispatcher',
+    vars: { dispatchLabel: 'dispatch' }, materialize: true,
+  });
+  assert.match(m.systemPromptOverride, /outcomes:start/);
+  assert.match(m.systemPromptOverride, /apply label `dispatch`/); // {{dispatchLabel}} substituted
+  // The member also carries the structured outcomes port, itself substituted.
+  assert.equal(m.outcomes.options[0].actions[0].label, 'dispatch');
+});
+
+test('reconcile fan-out (per-member transform): only authored-outcomes members get a block, idempotently', () => {
+  // Model the reconciler's core: for each member config, re-render from its base
+  // prompt + ports. Authored-outcomes members gain the block; legacy (emits-only)
+  // and plain members are unchanged; a second pass is a no-op (byte-idempotent).
+  const members = [
+    { id: 'a', systemPrompt: 'A.', outcomes: EXACTLY_ONE },
+    { id: 'b', systemPrompt: 'B.', emits: ['ready'] }, // legacy flat emits → no block
+    { id: 'c', systemPrompt: 'C.' },                    // plain → no block
+  ];
+  const pass1 = members.map(m => applyDerivedPromptBlocks(m.systemPrompt, { github: m.github, outcomes: m.outcomes }));
+  assert.match(pass1[0], /outcomes:start/);
+  assert.equal(pass1[1], 'B.');
+  assert.equal(pass1[2], 'C.');
+  const pass2 = pass1.map((p, i) => applyDerivedPromptBlocks(p, { github: members[i].github, outcomes: members[i].outcomes }));
+  assert.deepEqual(pass2, pass1); // idempotent fan-out
 });

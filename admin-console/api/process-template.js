@@ -21,6 +21,7 @@
 
 const {
   validateOutcomes, normalizeOutcomes, isAuthoredOutcomes, substituteOutcomes,
+  outcomesToGithub,
 } = require('./outcomes');
 
 const VERSION = 1;
@@ -92,9 +93,10 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
       displayName: r.displayName || r.id,
       role: r.role || 'team-member',
       sessionPolicy: r.sessionPolicy || 'persistent',
-      // Drop the derived producer block (#380) so the portable bundle stays clean;
-      // it is regenerated from the `github` flag by expandGithubChannels.
-      systemPrompt: stripProduceBlock(r.systemPrompt),
+      // Drop the derived prompt blocks (github-io #380 + outcomes #829) so the
+      // portable bundle stays clean; they are regenerated from the `github` flag
+      // and the `outcomes` port by expandGithubChannels on import/materialise.
+      systemPrompt: stripDerivedPromptBlocks(r.systemPrompt),
       // Agent-level OUTCOMES port (#827) — the structured successor to `emits`.
       // When present it supersedes `emits` (writing outcomes clears emits,
       // mirroring PUT /api/agents/:id), so the two never both ride the bundle.
@@ -303,6 +305,121 @@ function produceBlock(github) {
   return `${PRODUCE_MARK_START}\n\n## GitHub outputs\n\n${parts.join('\n\n')}\n\n${PRODUCE_MARK_END}`;
 }
 
+// ─── Outcomes prompt block (#829, agent-outcomes concept §6) ─────────────────
+//
+// The structured `outcomes` declaration (#827) is the source of truth; this is
+// its generated *prompt projection* — the same marker-delimited, strip-then-
+// reappend idempotency as the github-io produce block above, so a re-import /
+// re-reconcile never duplicates it. Only an **authored** outcomes port projects
+// a block: an agent carrying just flat `emits` (the degenerate read-path lift)
+// gets nothing, so a migration alone changes no behaviour (concept §7, AC4).
+//
+// It closes the gap the produce block leaves open — today's producePrText /
+// produceIssueText never mention the routing *label* the consumer filters on, so
+// agent-driven labelling only worked if the author remembered to put it in
+// prose. With outcomes the projection is guaranteed consistent with the switch.
+const OUTCOMES_MARK_START = '<!-- outcomes:start -->';
+const OUTCOMES_MARK_END = '<!-- outcomes:end -->';
+
+function stripOutcomesBlock(text) {
+  if (typeof text !== 'string' || !text.includes(OUTCOMES_MARK_START)) {
+    return typeof text === 'string' ? text : '';
+  }
+  return text.replace(
+    new RegExp(`\\n*${OUTCOMES_MARK_START}[\\s\\S]*?${OUTCOMES_MARK_END}\\n*`, 'g'), '',
+  ).trimEnd();
+}
+
+// The "Then: …" action clause for one option — a human-readable summary of its
+// actions joined with " and ". `setLabel` names the label; `openPr`/`openIssue`
+// use the produce verbs (the full how-to is appended once below, reusing
+// producePrText/produceIssueText); a `none`-only / empty action set is
+// "set no label". A `notify: "dm"` option appends the DM-reporting instruction.
+// Returns the clause plus whether this option opens a PR/issue.
+function outcomeActionClause(option) {
+  const parts = [];
+  let opensPr = false;
+  let opensIssue = false;
+  for (const a of (option && Array.isArray(option.actions) ? option.actions : [])) {
+    if (!a || typeof a !== 'object') continue;
+    if (a.type === 'setLabel' && typeof a.label === 'string' && a.label.trim()) {
+      parts.push(`apply label \`${a.label.trim()}\``);
+    } else if (a.type === 'openPr') {
+      parts.push('open a pull request'); opensPr = true;
+    } else if (a.type === 'openIssue') {
+      parts.push('open a GitHub issue'); opensIssue = true;
+    }
+  }
+  if (!parts.length) parts.push('set no label');
+  let clause = parts.join(' and ');
+  if (option && option.notify === 'dm') clause += '; report to the user in the DM';
+  return { clause, opensPr, opensIssue };
+}
+
+// Generate the marker-delimited `## Outcomes` block for an authored outcomes
+// port (concept §6). Empty string for a non-authored port (nothing to project).
+// Pure; the caller (expandGithubChannels / reconcileTeamOutcomes) does the
+// strip-then-reappend into the systemPrompt.
+function outcomesBlock(outcomes) {
+  if (!isAuthoredOutcomes(outcomes)) return '';
+  const exactlyOne = outcomes.mode === 'exactlyOne';
+  const lead = exactlyOne
+    ? 'At the end of every run you choose **exactly one** of the following outcomes:'
+    : 'At the end of every run you choose **all outcomes that apply** — zero is allowed:';
+  const items = [];
+  let anyPr = false;
+  let anyIssue = false;
+  outcomes.options.forEach((o, i) => {
+    const title = (typeof o.title === 'string' && o.title.trim()) ? o.title.trim() : o.id;
+    const { clause, opensPr, opensIssue } = outcomeActionClause(o);
+    anyPr = anyPr || opensPr;
+    anyIssue = anyIssue || opensIssue;
+    const when = (typeof o.when === 'string' && o.when.trim()) ? ` when: ${o.when.trim()}.` : '';
+    items.push(`${i + 1}. **${title}** —${when} Then: ${clause}.`);
+  });
+  const body = [lead, '', ...items];
+  if (exactlyOne) {
+    body.push('', 'Never apply more than one of these labels in a single run.');
+  }
+  // Absorb the produce how-to once for any option that opens a PR/issue —
+  // reusing the exact producePrText/produceIssueText wording. The github-io
+  // produce block omits the flags an outcome already covers (see
+  // expandGithubChannels), so the "open a PR/issue" instruction never doubles.
+  const tail = [];
+  if (anyPr) tail.push(producePrText());
+  if (anyIssue) tail.push(produceIssueText());
+  const full = tail.length ? `${body.join('\n')}\n\n${tail.join('\n\n')}` : body.join('\n');
+  return `${OUTCOMES_MARK_START}\n\n## Outcomes\n\n${full}\n\n${OUTCOMES_MARK_END}`;
+}
+
+// Strip both derived prompt blocks (github-io #380 + outcomes #829) from a
+// systemPrompt — the portable/base form. Used on export and by the reconciler
+// before re-appending freshly-generated blocks.
+function stripDerivedPromptBlocks(text) {
+  return stripOutcomesBlock(stripProduceBlock(text));
+}
+
+// Re-render a role/agent's systemPrompt with both derived prompt blocks from its
+// declarative ports (`github` + `outcomes`) — strip-then-reappend, idempotent.
+// Coexistence (AC3): an outcome that opens a PR/issue already carries the produce
+// how-to inside the outcomes block, so the produce flags it covers are dropped
+// from the github-io block — the instruction never appears twice. Order is
+// produce-then-outcomes so a github-only agent's prompt stays byte-identical to
+// before #829 (the outcomes block is empty and appends nothing). Pure.
+function applyDerivedPromptBlocks(systemPrompt, { github, outcomes } = {}) {
+  const base = stripDerivedPromptBlocks(systemPrompt || '');
+  const covered = isAuthoredOutcomes(outcomes) ? outcomesToGithub(outcomes) : {};
+  const effGithub = github && typeof github === 'object'
+    ? {
+      producesPr: !!(github.producesPr && !covered.producesPr),
+      producesIssue: !!(github.producesIssue && !covered.producesIssue),
+    }
+    : github;
+  const appended = [produceBlock(effGithub), outcomesBlock(outcomes)]
+    .filter(Boolean).join('\n\n');
+  return appended ? `${base ? `${base}\n\n` : ''}${appended}` : base;
+}
+
 const CHANNEL_EVENTS = {
   pr: { open: ['pull_request.opened', 'pull_request.reopened'], labeled: ['pull_request.labeled'] },
   issue: { open: ['issues.opened'], labeled: ['issues.labeled'] },
@@ -485,10 +602,10 @@ function expandGithubChannels(bundle, _opts = {}) {
           : consumeIssuePrompt(producerLabel, { label: g.label, human: g.human }),
       });
     }
-    // Producer instruction block — idempotent (strip any prior block, re-append).
-    const stripped = stripProduceBlock(b.systemPrompt || '');
-    const block = produceBlock(b.github);
-    b.systemPrompt = block ? `${stripped ? stripped + '\n\n' : ''}${block}` : stripped;
+    // Derived prompt blocks — idempotent (strip any prior blocks, re-append):
+    // the github-io producer instruction (#380) and the outcomes projection
+    // (#829). Coexistence is handled inside applyDerivedPromptBlocks.
+    b.systemPrompt = applyDerivedPromptBlocks(b.systemPrompt, { github: b.github, outcomes: b.outcomes });
   }
   return { ...bundle, roles };
 }
@@ -811,6 +928,7 @@ module.exports = {
   buildMemberFromTemplate, liftTriggerEmits,
   expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview,
   channelTriggerId, isChannelTrigger, stampDerivedActivation,
+  outcomesBlock, stripOutcomesBlock, stripDerivedPromptBlocks, applyDerivedPromptBlocks,
   emptyDraftBundle, roleKeyOf, VERSION,
   artifactKey, artifactHint, artifactIsNamed,
   slugifyDraft, deriveUniqueDraftId,

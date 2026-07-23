@@ -29,7 +29,7 @@ const { buildProcessGraph } = require('./process-graph');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
@@ -1418,6 +1418,66 @@ async function reconcileTeamGithubChannels(teamId) {
   }
 }
 
+// Re-render the derived OUTCOMES prompt block (#829) for a whole team from its
+// members' declarative `outcomes` ports, mirroring what `expandGithubChannels`
+// (via applyDerivedPromptBlocks) does at materialise time. This is the prompt-side
+// analogue of reconcileTeamGithubChannels: where that reconciler re-derives the
+// runtime triggers, this one re-derives the marker-delimited `## Outcomes` block
+// in each member's effective prompt so a live outcomes edit takes effect without
+// a re-materialise. Same discipline: best-effort, idempotent, skip no-op writes.
+//
+// The block belongs in the prompt STRING (AGENT-PROMPT.md, which CLAUDE.md
+// `@`-imports per #510 — CLAUDE.md itself is static and never rebuilt for a
+// prompt-content change), so we resolve each member's effective base prompt
+// (own systemPrompt override, else the parent team's template), re-apply BOTH
+// derived blocks (github-io + outcomes — coexistence is handled inside
+// applyDerivedPromptBlocks so "open a PR" never doubles), write AGENT-PROMPT.md,
+// keep an override member's stored config.systemPrompt in sync (so export /
+// prompt-toggle paths see the current block), and mirror the file into the
+// agent's isolated volume via notifyAgentReseed. Iterating the whole team (a
+// fan-out) matches reconcileTeamGithubChannels; since outcomes are per-agent only
+// the edited member's block actually changes — the rest re-render identically and
+// are skipped.
+async function reconcileTeamOutcomes(teamId) {
+  if (!teamId) return;
+  const teamCfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null);
+  const teamTemplate = teamCfg && typeof teamCfg.systemPromptTemplate === 'string'
+    ? teamCfg.systemPromptTemplate : '';
+  for (const id of listAgentDirs()) {
+    const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
+    const cfg = readJsonFile(cfgPath, null);
+    if (!cfg || cfg.parentTeamId !== teamId) continue;
+
+    const hasOwnPrompt = typeof cfg.systemPrompt === 'string';
+    const base = hasOwnPrompt ? cfg.systemPrompt : teamTemplate;
+    const nextPrompt = applyDerivedPromptBlocks(base, { github: cfg.github, outcomes: cfg.outcomes });
+
+    // Persist the re-rendered block onto an override member's stored prompt so
+    // export (buildProcessTemplate strips it back out) and a later prompt-toggle
+    // stay consistent with what the agent reads. Inheriting members carry no
+    // override — only their AGENT-PROMPT.md is refreshed.
+    if (hasOwnPrompt && cfg.systemPrompt !== nextPrompt) {
+      cfg.systemPrompt = nextPrompt;
+      try { writeJsonAtomic(cfgPath, cfg); } catch { /* best-effort */ }
+    }
+
+    const promptPath = path.join(AGENTS_DIR, id, 'AGENT-PROMPT.md');
+    let current = null;
+    try { current = fs.readFileSync(promptPath, 'utf8'); } catch { current = null; }
+    if (current === nextPrompt) continue; // idempotent — no churn
+
+    try {
+      const tmp = promptPath + '.tmp';
+      fs.writeFileSync(tmp, nextPrompt, 'utf8');
+      fs.renameSync(tmp, promptPath);
+      notifyAgentReseed(id, ['AGENT-PROMPT.md']);
+      notifyAgentReload(id);
+    } catch (err) {
+      console.error(`[API] Failed to write AGENT-PROMPT.md for ${id} (outcomes reconcile): ${err.message}`);
+    }
+  }
+}
+
 // Guard against a parent-child cycle among a team's members (#377). Walks the
 // existing parentMemberId chain: setting `child`'s parent to `parent` is a cycle
 // if `child` is already an ancestor of `parent` (or they're equal).
@@ -1582,6 +1642,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // CLEARS `emits` (the two never coexist on a config). An empty/null/malformed
   // value clears `outcomes` and leaves any `emits` set above untouched. Both
   // fields are accepted during coexistence — outcomes wins when present.
+  let outcomesChanged = false;
   if (outcomes !== undefined) {
     if (isAuthoredOutcomes(outcomes)) {
       fresh.outcomes = normalizeOutcomes(outcomes);
@@ -1589,6 +1650,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
     } else {
       delete fresh.outcomes;
     }
+    outcomesChanged = true;
   }
 
   // ── Unified orchestration edges (Process Canvas) ──────────────────────────
@@ -1802,6 +1864,16 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // graph badge + lints immediately.
   if (channelsChanged && fresh.parentTeamId) {
     await reconcileTeamGithubChannels(fresh.parentTeamId);
+  }
+  // An outcomes-port change re-renders the team's generated `## Outcomes` prompt
+  // block (#829) into each affected member's AGENT-PROMPT.md and mirrors it into
+  // the isolated volume, so a live edit takes effect without a re-materialise —
+  // the prompt-side analogue of the channel/data-flow reconcilers above. The
+  // reconciler re-applies BOTH derived blocks (github-io + outcomes) from the
+  // stored ports, so openPr/openIssue coexistence stays correct here too; a
+  // github-flag-only change keeps the produce block's established lazy refresh.
+  if (outcomesChanged && fresh.parentTeamId) {
+    await reconcileTeamOutcomes(fresh.parentTeamId);
   }
   // Wake a running agent so it re-pulls config promptly under volume isolation
   // (#185 Phase 2). On the shared volume the agent re-reads config.json on its

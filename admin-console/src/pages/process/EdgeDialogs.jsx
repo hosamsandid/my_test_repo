@@ -315,6 +315,136 @@ export function CreateEdgeDialog({
   );
 }
 
+/* ── Add input chooser (Routing → Inputs, #866) ─────────────────────────────
+ * The inspector-side sibling of the canvas CreateEdgeDialog: one [+ Add input]
+ * entry point onto the SAME plain-language vocabulary and the SAME ops the
+ * canvas drags use, so an input can be authored from the inspector without
+ * dragging on the canvas (closes the create-on-canvas / remove-only-in-inspector
+ * asymmetry of §3). `node` is the consumer being woken; connection tiles
+ * (channel / artifact) first pick the upstream producer, then reuse the exact
+ * canvas form. Trigger tiles create a manual trigger directly on this node. */
+export function AddInputDialog({ node, peers = [], labels = [], ops = liveOps, onClose, onDone }) {
+  const [step, setStep] = useState(null);       // null = tile chooser
+  const [fromPeer, setFromPeer] = useState(null);
+  const toName = node.displayName || node.id;
+  const sources = peers.filter(p => p && p.id !== node.id);
+  const toTiles = () => { setFromPeer(null); setStep(null); };
+  const common = { to: node.id, toName, ops, onClose, onDone };
+
+  if (step === 'event') return <GithubTriggerForm {...common} labels={labels} onBack={toTiles} />;
+  if (step === 'label') return <GithubTriggerForm {...common} labels={labels} initialEvent="issues.labeled" onBack={toTiles} />;
+  if (step === 'webhook') return <WebhookForm {...common} onBack={toTiles} />;
+  if (step === 'schedule') return <ScheduleInputForm {...common} onBack={toTiles} />;
+
+  if (step === 'channel:pick' || step === 'artifact:pick') {
+    const artifactStep = step === 'artifact:pick';
+    return (
+      <PeerPicker
+        title={artifactStep ? 'Artifact from another agent' : 'PR / issue from another agent'}
+        prompt={artifactStep
+          ? `Which agent's artifact wakes ${toName}?`
+          : `Which agent's pull request / issue wakes ${toName}?`}
+        peers={sources}
+        onPick={(p) => { setFromPeer(p); setStep(artifactStep ? 'artifact' : 'channel'); }}
+        onBack={toTiles}
+        onClose={onClose}
+      />
+    );
+  }
+  if (step === 'channel' && fromPeer) {
+    return <CreateChannelDialog {...common} from={fromPeer.id} fromName={fromPeer.displayName || fromPeer.id}
+      onBack={() => setStep('channel:pick')} />;
+  }
+  if (step === 'artifact' && fromPeer) {
+    return <ArtifactEdgeForm {...common} from={fromPeer.id} fromName={fromPeer.displayName || fromPeer.id}
+      onBack={() => setStep('artifact:pick')} />;
+  }
+
+  const choices = [
+    { id: 'event', title: 'GitHub event', desc: `${toName} wakes on a repo event (issue/PR opened, push, …).` },
+    { id: 'label', title: 'Label applied', desc: `${toName} wakes when a specific label is set — by an agent or a human.` },
+    { id: 'channel:pick', title: 'PR / issue from another agent', desc: `${toName} reacts to a pull request or issue another agent opens.` },
+    { id: 'schedule', title: 'Schedule', desc: `${toName} wakes on a recurring cron or a one-shot time.` },
+    { id: 'webhook', title: 'Webhook', desc: `An external system (CI, tooling) wakes ${toName} via an HTTP call.` },
+    { id: 'artifact:pick', title: 'Artifact from another agent', desc: `${toName} consumes an artifact another agent produces.` },
+  ];
+
+  return (
+    <SidePanel open onClose={onClose} title="Add input" width="520px">
+      <p style={hint}>What should wake <strong>{toName}</strong>?</p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+        {choices.map(c => (
+          <button key={c.id} onClick={() => setStep(c.id)} style={{
+            textAlign: 'left', background: 'var(--eb-bg-app)', cursor: 'pointer',
+            border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+            padding: 'var(--eb-space-3)', fontFamily: 'inherit',
+          }}>
+            <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>{c.title}</div>
+            <div style={{ ...small, marginTop: 2 }}>{c.desc}</div>
+          </button>
+        ))}
+      </div>
+    </SidePanel>
+  );
+}
+
+// Pick the upstream agent for a channel / artifact input authored from the
+// inspector (the canvas supplies this by which node you drag from).
+function PeerPicker({ title, prompt, peers, onPick, onBack, onClose }) {
+  return (
+    <SidePanel open onClose={onClose} title={title} width="520px">
+      <p style={hint}>{prompt}</p>
+      {peers.length === 0 ? (
+        <p style={small}>No other agents to connect from yet — add one to the flow first.</p>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+          {peers.map(p => (
+            <button key={p.id} onClick={() => onPick(p)} style={{
+              textAlign: 'left', background: 'var(--eb-bg-app)', cursor: 'pointer',
+              border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+              padding: 'var(--eb-space-3)', fontFamily: 'inherit',
+              fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)',
+            }}>{p.displayName || p.id}</button>
+          ))}
+        </div>
+      )}
+      <div style={{ ...actions, marginTop: 'var(--eb-space-4)' }}>
+        <button onClick={onBack} style={{ ...ghost, marginRight: 'auto' }}>Back</button>
+        <button onClick={onClose} style={ghost}>Cancel</button>
+      </div>
+    </SidePanel>
+  );
+}
+
+// Schedule input — wraps the reused TriggersPanel form (cron / once, with its
+// cron builder) in a SidePanel and persists via ops.createTrigger. The form's
+// own type selector still lets the user flip to another trigger kind, so nothing
+// the Triggers tab offered is lost (concept §6 capability parity).
+function ScheduleInputForm({ to, toName, ops = liveOps, onBack, onClose, onDone }) {
+  const [saving, setSaving] = useState(false);
+  async function save(body) {
+    setSaving(true);
+    try { await ops.createTrigger(to, body); onDone?.(); }
+    finally { setSaving(false); }
+  }
+  return (
+    <SidePanel open onClose={onClose} title="Add a schedule" width="520px">
+      <p style={hint}>
+        <strong>{toName}</strong> wakes on a recurring schedule or at a one-shot time.
+      </p>
+      {/* No initialValues → create mode: the Type selector stays open (cron is
+          the default; the user can flip to Once), the ID auto-generates. */}
+      <TriggerForm
+        agentId={to}
+        ops={ops}
+        saving={saving}
+        onSave={save}
+        onCancel={onBack || onClose}
+      />
+    </SidePanel>
+  );
+}
+
 /* ── Create a GitHub channel: A opens a PR/Issue that wakes B (#380) ─────────
  * Stored as a declarative `channels` port on the *consumer* (B); the backend
  * derives the github-event trigger. An optional label + human-approval gate model
@@ -1128,8 +1258,8 @@ function ReadonlyEdgeDialog({ edge, fromName, toName, onClose }) {
 // regardless of who caused it. No repo input either: the repo is resolved from
 // the agent's working environment (live) or at materialise time (draft), since
 // it is unknown while modelling the flow.
-export function GithubTriggerForm({ to, toName, labels, ops = liveOps, onBack, onClose, onDone }) {
-  const [event, setEvent] = useState('');
+export function GithubTriggerForm({ to, toName, labels, ops = liveOps, onBack, onClose, onDone, initialEvent = '' }) {
+  const [event, setEvent] = useState(initialEvent);
   const [label, setLabel] = useState('');
   const [prompt, setPrompt] = useState('');
   const [saving, setSaving] = useState(false);

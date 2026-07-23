@@ -2,21 +2,23 @@ import React, { useEffect, useState } from 'react';
 import { Save, Trash2, Loader2 } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
 import { apiCall } from '../../hooks/useApi';
-import TriggersPanel from '../agent-chat/TriggersPanel';
 import RoutingSection from './RoutingSection';
 import { resolveInheritedStage } from './hierarchy-utils';
 import { applyDetailsSave } from './node-inspector-save';
 import { summarizeGithubEventTrigger } from '../agent-chat/trigger-summary.js';
 
 // Shared node inspector for the Flow Editor (#692). ONE component drives both
-// modes so the first-page layout, tab set, and Connections/Triggers wiring live
-// in a single place:
+// modes so the first-page layout, tab set, and routing wiring live in a single
+// place:
 //   - DRAFT (mode='draft'): edits a process-template bundle role via draftOps.
 //   - LIVE  (mode='live') : edits a materialized agent via liveOps (HTTP).
-// Tabs are Details · Routing · Triggers — the old Connections tab was retired
-// (#865): its static placement controls (Parent, Stage) moved into the Details
-// "Structure" section, and its flow controls (channels, data flow, emits, GitHub
-// outputs) moved into Routing.
+// Tabs are Details · Routing — two tabs, one flow surface (concept §2). The
+// Connections tab was retired in #865 (its Parent/Stage moved to Details →
+// Structure, its flow controls to Routing); the Triggers tab was retired in
+// #866 once Routing → Inputs reached full CRUD parity (manual triggers are now
+// authored/edited there via the reused TriggersPanel form, and a channel/
+// data-flow trigger is never editable raw). A read-only raw-triggers.json
+// disclosure inside Inputs preserves workspace transparency.
 // Behavioural differences are mode-aware props, never duplicated components:
 //   - Details tab, page 1: Display name, Agent ID, Agent prompt, then a
 //     Structure section (Stage + Parent — both static placement, not flow).
@@ -34,6 +36,7 @@ export default function NodeInspector({
   nodes = [],       // live peer list
   stages = [],
   lints = [],       // graph lints (Routing tab surfaces duplicate-listener for this node)
+  labels = [],      // known label registry (label-name suggestions in the Add-input chooser)
   ops,
   teamId,           // live: binds a brand-new stage to the team's ordered list
   level,            // live: 'template' renders read-only
@@ -64,6 +67,9 @@ export default function NodeInspector({
 
   if (!node) return null;
   const isTemplate = level === 'template' || node.role === 'template';
+  // Warning dot on the Routing tab when any lint it surfaces fires for this node
+  // (today: duplicate-listener), so problems are findable without opening it (§3).
+  const routingHasLint = (lints || []).some(l => l.code === 'duplicate-listener' && l.nodeId === node.id);
 
   const peers = isLive ? nodes : roles;
   const siblings = peers.filter(n => n.id !== node.id).map(n => ({ id: n.id, displayName: n.displayName || n.id }));
@@ -130,8 +136,7 @@ export default function NodeInspector({
         <>
           <div style={{ display: 'flex', borderBottom: '1px solid var(--eb-border-default)', marginBottom: 'var(--eb-space-4)' }}>
             <TabButton active={tab === 'details'} onClick={() => setTab('details')}>Details</TabButton>
-            <TabButton active={tab === 'routing'} onClick={() => setTab('routing')}>Routing</TabButton>
-            <TabButton active={tab === 'triggers'} onClick={() => setTab('triggers')}>Triggers</TabButton>
+            <TabButton active={tab === 'routing'} onClick={() => setTab('routing')} dot={routingHasLint}>Routing</TabButton>
           </div>
 
           {tab === 'details' && (
@@ -229,18 +234,13 @@ export default function NodeInspector({
               node={node}
               peers={peers}
               lints={lints}
+              labels={labels}
               ops={ops}
               mode={mode}
               focusOutcome={focus?.tab === 'routing' ? focus?.outcome : null}
               focusSection={focus?.tab === 'routing' ? focus?.section : null}
               onChanged={onChanged}
             />
-          )}
-
-          {tab === 'triggers' && (
-            <div style={{ height: 'min(60vh, 540px)', display: 'flex', flexDirection: 'column', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', overflow: 'hidden' }}>
-              <TriggersPanel agentId={node.id} active ops={ops} onChanged={onChanged} />
-            </div>
           )}
         </>
       )}
@@ -388,14 +388,20 @@ function TemplateReadonly({ node }) {
   );
 }
 
-function TabButton({ active, onClick, children }) {
+function TabButton({ active, onClick, dot, children }) {
   return (
     <button onClick={onClick} style={{
+      display: 'inline-flex', alignItems: 'center', gap: 5,
       background: 'none', border: 'none', borderBottom: active ? '2px solid var(--eb-accent-primary)' : '2px solid transparent',
       color: active ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
       padding: 'var(--eb-space-2) var(--eb-space-3)', cursor: 'pointer',
       fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: active ? 'var(--eb-font-medium)' : 'normal',
-    }}>{children}</button>
+    }}>
+      {children}
+      {dot && <span title="This tab has a warning" style={{
+        width: 6, height: 6, borderRadius: '50%', background: 'var(--eb-status-warning, #d97706)', flexShrink: 0,
+      }} />}
+    </button>
   );
 }
 

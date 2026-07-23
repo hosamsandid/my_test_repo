@@ -457,6 +457,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           roles={draftBundle?.roles || []}
           stages={draftBundle?.stages || []}
           lints={displayGraph?.lints || []}
+          labels={displayGraph?.labels || []}
           focus={routingFocus}
           ops={draftOps}
           onClose={() => { setSelectedId(null); setRoutingFocus(null); graphRef.current?.setSelected(null); }}
@@ -473,6 +474,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           nodes={displayGraph?.nodes || []}
           stages={displayGraph?.stages || []}
           lints={displayGraph?.lints || []}
+          labels={displayGraph?.labels || []}
           focus={routingFocus}
           ops={liveOps}
           teamId={isTeamScope && !imported ? scope : undefined}

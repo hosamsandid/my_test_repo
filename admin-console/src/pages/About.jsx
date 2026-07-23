@@ -20,7 +20,7 @@ export default function About() {
     }}>
       {/* Accenture copyright */}
       <div style={{ textAlign: 'center' }}>
-        <AccentureLogo size={40} style={{ color: 'var(--eb-text-primary)', marginBottom: 'var(--eb-space-3)' }} />
+        <AccentureLogo size={40} style={{ color: 'var(--eb-accent-primary)', marginBottom: 'var(--eb-space-3)' }} />
         <div style={{
           fontSize: 'var(--eb-text-md)',
           color: 'var(--eb-text-primary)',

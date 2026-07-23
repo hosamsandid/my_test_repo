@@ -157,15 +157,15 @@ services:
       ADMIN_PASSWORD: "${ADMIN_PASSWORD:-admin}"
       AUTH_SESSION_SECRET: "${AUTH_SESSION_SECRET:-}"
       AUTH_COOKIE_SECURE: "${AUTH_COOKIE_SECURE:-}"
-      WHISPER_URL: "${WHISPER_URL:-http://whisper-asr:9000}"
+      STT_URL: "${STT_URL:-http://stt:9000}"
     depends_on:
       conduwuit:
         condition: service_started
 
-  whisper-asr:
+  stt:
     build:
-      context: ./whisper-asr
-    container_name: ${COMPOSE_PROJECT_NAME}-whisper-asr
+      context: ./stt
+    container_name: ${COMPOSE_PROJECT_NAME}-stt
     restart: unless-stopped
     expose:
       - "9000"

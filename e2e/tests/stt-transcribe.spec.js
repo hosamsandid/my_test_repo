@@ -6,7 +6,7 @@
 // is not reachable, so this file is safe to run in any environment.
 //
 // Audio fixture: e2e/fixtures/audio/stt-test.wav — JFK inaugural address clip
-// (public domain, from whisper.cpp samples/jfk.wav).
+// (public domain, sourced from whisper.cpp samples/jfk.wav).
 //
 // The UI test mocks getUserMedia to play the fixture WAV through AudioContext
 // (headless Chromium on macOS does not support --use-fake-device-for-media-stream)

@@ -1,7 +1,7 @@
 'use strict';
 
-function createTranscribeRoute({ fetchFn = globalThis.fetch, whisperUrl } = {}) {
-  const url = whisperUrl || process.env.WHISPER_URL || 'http://whisper-asr:9000';
+function createTranscribeRoute({ fetchFn = globalThis.fetch, sttUrl } = {}) {
+  const url = sttUrl || process.env.STT_URL || 'http://stt:9000';
 
   return async function handleTranscribe(req, res) {
     if (!req.file) {

@@ -14,7 +14,7 @@
 
 COMPOSE     ?= podman compose
 COMPOSE_FILE = docker-compose.yml
-SERVICES     = conduwuit orchestrator admin-console whisper-asr
+SERVICES     = conduwuit orchestrator admin-console stt
 
 # Skill pool seed sources — copied into the skill-pool volume by `make seed-pool`.
 # Two inputs combine into the pool: the ACE engineering skill (host-side, from
@@ -63,7 +63,7 @@ down:
 restart: down up
 
 build:
-	$(COMPOSE) -f $(COMPOSE_FILE) build orchestrator admin-console whisper-asr
+	$(COMPOSE) -f $(COMPOSE_FILE) build orchestrator admin-console stt
 
 agent-image:
 	podman build -t as-agent:latest -f agent-image/Dockerfile agent-image/

@@ -10,7 +10,7 @@ describe('POST /api/transcribe', () => {
     mock.restoreAll();
   });
 
-  it('forwards audio to Whisper and returns transcribed text', async () => {
+  it('forwards audio to STT service and returns transcribed text', async () => {
     const mockFetch = mock.fn(() =>
       Promise.resolve({
         ok: true,
@@ -19,7 +19,7 @@ describe('POST /api/transcribe', () => {
     );
 
     const { createTranscribeRoute } = require('./transcribe.js');
-    const handler = createTranscribeRoute({ fetchFn: mockFetch, whisperUrl: 'http://whisper:9000' });
+    const handler = createTranscribeRoute({ fetchFn: mockFetch, sttUrl: 'http://stt:9000' });
 
     const req = {
       file: {
@@ -42,17 +42,17 @@ describe('POST /api/transcribe', () => {
 
     assert.equal(mockFetch.mock.calls.length, 1);
     const [url, opts] = mockFetch.mock.calls[0].arguments;
-    assert.equal(url, 'http://whisper:9000/asr?output=json&vad_filter=true');
+    assert.equal(url, 'http://stt:9000/asr?output=json&vad_filter=true');
     assert.equal(opts.method, 'POST');
   });
 
-  it('returns 500 when Whisper responds with an error', async () => {
+  it('returns 500 when STT service responds with an error', async () => {
     const mockFetch = mock.fn(() =>
       Promise.resolve({ ok: false, status: 503, text: () => Promise.resolve('Service Unavailable') })
     );
 
     const { createTranscribeRoute } = require('./transcribe.js');
-    const handler = createTranscribeRoute({ fetchFn: mockFetch, whisperUrl: 'http://whisper:9000' });
+    const handler = createTranscribeRoute({ fetchFn: mockFetch, sttUrl: 'http://stt:9000' });
 
     const req = {
       file: {
@@ -74,11 +74,11 @@ describe('POST /api/transcribe', () => {
     assert.deepEqual(res._body, { error: 'Transcription failed' });
   });
 
-  it('returns 500 when fetch throws (Whisper unreachable)', async () => {
+  it('returns 500 when fetch throws (STT service unreachable)', async () => {
     const mockFetch = mock.fn(() => Promise.reject(new Error('ECONNREFUSED')));
 
     const { createTranscribeRoute } = require('./transcribe.js');
-    const handler = createTranscribeRoute({ fetchFn: mockFetch, whisperUrl: 'http://whisper:9000' });
+    const handler = createTranscribeRoute({ fetchFn: mockFetch, sttUrl: 'http://stt:9000' });
 
     const req = {
       file: {
@@ -104,7 +104,7 @@ describe('POST /api/transcribe', () => {
     const mockFetch = mock.fn();
 
     const { createTranscribeRoute } = require('./transcribe.js');
-    const handler = createTranscribeRoute({ fetchFn: mockFetch, whisperUrl: 'http://whisper:9000' });
+    const handler = createTranscribeRoute({ fetchFn: mockFetch, sttUrl: 'http://stt:9000' });
 
     const req = { file: undefined };
     const res = {

@@ -351,7 +351,7 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
       )}
 
       {editInput && (
-        <EditArtifactInputDialog input={editInput} nodeId={node.id} ops={ops}
+        <EditArtifactInputDialog artifact={editInput} nodeId={node.id} ops={ops}
           onClose={closeEdits} onDone={afterEdit} />
       )}
     </div>
@@ -427,23 +427,23 @@ function RawTriggersDisclosure({ triggers }) {
 // is fixed — only the informative hint/description are editable, so the
 // producer↔consumer name match never desyncs. Persisted as remove-then-add on
 // the same key (no dedicated update op on the shared adapter).
-function EditArtifactInputDialog({ input, nodeId, ops, onClose, onDone }) {
-  const [hint, setHint] = useState(input.hint || '');
-  const [description, setDescription] = useState(input.description || '');
+function EditArtifactInputDialog({ artifact, nodeId, ops, onClose, onDone }) {
+  const [hint, setHint] = useState(artifact.hint || '');
+  const [description, setDescription] = useState(artifact.description || '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   async function save() {
     setSaving(true); setError(null);
     try {
-      await ops.removeArtifact(nodeId, { direction: 'input', name: input.name });
-      await ops.addArtifact(nodeId, { direction: 'input', name: input.name, hint: hint.trim(), description: description.trim() || undefined });
+      await ops.removeArtifact(nodeId, { direction: 'input', name: artifact.name });
+      await ops.addArtifact(nodeId, { direction: 'input', name: artifact.name, hint: hint.trim(), description: description.trim() || undefined });
       onDone?.();
     } catch (e) { setError(e?.message || String(e)); setSaving(false); }
   }
   return (
     <SidePanel open onClose={onClose} title="Edit artifact input" width="520px">
       <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 0 }}>
-        Consumes artifact <code style={codeChip}>{input.name}</code>. The name is the match key with the
+        Consumes artifact <code style={codeChip}>{artifact.name}</code>. The name is the match key with the
         producer — edit the informative path / description only.
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>

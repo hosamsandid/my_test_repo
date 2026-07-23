@@ -63,7 +63,7 @@ down:
 restart: down up
 
 build:
-	$(COMPOSE) -f $(COMPOSE_FILE) build orchestrator admin-console
+	$(COMPOSE) -f $(COMPOSE_FILE) build orchestrator admin-console whisper-asr
 
 agent-image:
 	podman build -t as-agent:latest -f agent-image/Dockerfile agent-image/

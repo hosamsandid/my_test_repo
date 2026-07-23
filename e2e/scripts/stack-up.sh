@@ -106,6 +106,20 @@ if [ "$agents_code" != "200" ]; then
   echo "ERROR: GET /api/agents returned ${agents_code} (orchestrator proxy not ready)" >&2; exit 1
 fi
 
+# Whisper ASR — model is pre-baked but the HTTP server takes a few seconds.
+# POST a tiny payload through the admin-console proxy (whisper has no host port).
+echo -n "Waiting for whisper-asr "
+for i in $(seq 1 60); do
+  wh_code=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" \
+    -X POST "${ADMIN_BASE}/api/transcribe" \
+    -F "audio_file=@${SCRIPT_DIR}/../fixtures/audio/stt-test.wav;type=audio/wav" || true)
+  if [ "$wh_code" = "200" ]; then echo " ok"; break; fi
+  echo -n "."; sleep 2
+done
+if [ "$wh_code" != "200" ]; then
+  echo; echo "WARNING: whisper-asr not ready (last HTTP ${wh_code}) — STT tests will skip" >&2
+fi
+
 # --- 7. Register the mock LLM Model Provider (#710, journey-spec §6.3) ---
 # `resolveGenerationTarget` picks the first registered (non-oauth) endpoint, so
 # POST /api/agent-prompt/generate reaches fake-github's canned /v1/messages

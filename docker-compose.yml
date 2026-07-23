@@ -163,17 +163,12 @@ services:
         condition: service_started
 
   whisper-asr:
-    image: onerahmet/openai-whisper-asr-webservice:latest
+    build:
+      context: ./whisper-asr
     container_name: ${COMPOSE_PROJECT_NAME}-whisper-asr
     restart: unless-stopped
     expose:
       - "9000"
-    environment:
-      ASR_MODEL: small
-      ASR_ENGINE: faster_whisper
-      ASR_COMPUTE_TYPE: int8
-    volumes:
-      - whisper-cache:/root/.cache/whisper
 
 volumes:
   conduwuit-db:
@@ -193,5 +188,3 @@ volumes:
   # admin-console only — the read-side that survives per-agent volume isolation.
   agent-control-plane:
     name: ${COMPOSE_PROJECT_NAME}_agent-control-plane
-  whisper-cache:
-    name: ${COMPOSE_PROJECT_NAME}_whisper-cache

@@ -3,22 +3,11 @@ import subprocess
 import tempfile
 
 import numpy as np
-import sherpa_onnx
+import onnx_asr
 import soundfile as sf
 from fastapi import FastAPI, File, UploadFile
 
-MODEL_DIR = "/app/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
-
-recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
-    encoder=f"{MODEL_DIR}/encoder.int8.onnx",
-    decoder=f"{MODEL_DIR}/decoder.int8.onnx",
-    joiner=f"{MODEL_DIR}/joiner.int8.onnx",
-    tokens=f"{MODEL_DIR}/tokens.txt",
-    num_threads=4,
-    sample_rate=16000,
-    feature_dim=80,
-    decoding_method="greedy_search",
-)
+model = onnx_asr.load_model("nemo-parakeet-tdt-0.6b-v3")
 
 app = FastAPI()
 
@@ -72,8 +61,5 @@ async def transcribe(audio_file: UploadFile = File(...)):
 
     audio = _resample(audio, sr, 16000)
 
-    stream = recognizer.create_stream()
-    stream.accept_waveform(16000, audio)
-    recognizer.decode_stream(stream)
-
-    return {"text": stream.result.text.strip()}
+    result = model.recognize(audio, sr=16000)
+    return {"text": result.strip()}

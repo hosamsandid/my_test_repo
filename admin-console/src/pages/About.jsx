@@ -43,17 +43,39 @@ export default function About() {
             style={{ color: 'var(--eb-accent-primary)' }}>
             nvidia/parakeet-tdt-0.6b-v3
           </a>
+          {' · '}License:{' '}
+          <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer"
+            style={{ color: 'var(--eb-accent-primary)' }}>
+            CC-BY-4.0
+          </a>
+          {' · '}Copyright NVIDIA Corporation.
         </div>
-        <div>
-          License:{' '}
+        <div style={{ marginTop: 'var(--eb-space-2)' }}>
+          ONNX conversion:{' '}
+          <a href="https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx" target="_blank" rel="noopener noreferrer"
+            style={{ color: 'var(--eb-accent-primary)' }}>
+            istupakov/parakeet-tdt-0.6b-v3-onnx
+          </a>
+          {' · '}License:{' '}
           <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer"
             style={{ color: 'var(--eb-accent-primary)' }}>
             CC-BY-4.0
           </a>
         </div>
-        <div>Copyright NVIDIA Corporation.</div>
+        <div style={{ marginTop: 'var(--eb-space-2)' }}>
+          Inference:{' '}
+          <a href="https://github.com/istupakov/onnx-asr" target="_blank" rel="noopener noreferrer"
+            style={{ color: 'var(--eb-accent-primary)' }}>
+            onnx-asr
+          </a>
+          {' · '}License:{' '}
+          <a href="https://opensource.org/licenses/MIT" target="_blank" rel="noopener noreferrer"
+            style={{ color: 'var(--eb-accent-primary)' }}>
+            MIT
+          </a>
+        </div>
         <div style={{ marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-          Model converted to ONNX (int8) format for CPU inference via sherpa-onnx; no retraining or fine-tuning performed.
+          No retraining or fine-tuning performed.
         </div>
       </div>
 

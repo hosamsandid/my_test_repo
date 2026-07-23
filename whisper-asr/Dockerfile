@@ -3,16 +3,13 @@ FROM python:3.11-slim
 WORKDIR /app
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg wget bzip2 && \
+    apt-get install -y --no-install-recommends ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir sherpa-onnx fastapi uvicorn soundfile numpy
+RUN pip install --no-cache-dir "onnx-asr[cpu,hub]" fastapi uvicorn soundfile numpy python-multipart
 
-RUN mkdir -p /app/models && \
-    wget -q -O /tmp/model.tar.bz2 \
-      https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2 && \
-    tar xf /tmp/model.tar.bz2 -C /app/models && \
-    rm /tmp/model.tar.bz2
+# Pre-download the model at build time so startup is instant.
+RUN python3 -c "import onnx_asr; onnx_asr.load_model('nemo-parakeet-tdt-0.6b-v3')"
 
 COPY server.py .
 

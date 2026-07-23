@@ -210,27 +210,47 @@ export const liveOps = {
     await apiCall('PUT', `/api/agents/${roleId}`, { channels });
   },
   updateChannel: async (roleId, spec) => liveOps.addChannel(roleId, spec),
-  removeChannel: async (roleId, { artifact, from }) => {
+  removeChannel: async (roleId, { artifact, from, label }) => {
     const a = await apiCall('GET', `/api/agents/${roleId}`);
-    const art = artifact === 'issue' ? 'issue' : 'pr';
-    const channels = (Array.isArray(a?.channels) ? a.channels : []).filter(c => !(c.artifact === art && c.from === from));
+    const channels = removeChannelFrom(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label });
     await apiCall('PUT', `/api/agents/${roleId}`, { channels });
   },
 };
 
-// Upsert a channel into a list, keyed on (artifact, from). Pure helper shared by
-// the live + draft adapters so a re-drawn edge edits in place rather than dupes.
+// Upsert a channel into a list, keyed on (artifact, from, label) — the #828
+// relaxation of the original (artifact, from) key. A single producer can now
+// feed one consumer through DIFFERENTLY-labelled channels (switch fan-in: e.g.
+// a reviewer's PR routed to the merger on `ready-to-merge` and to the reworker
+// on `revisions-required`). Re-drawing the same (artifact, from, label) edits
+// in place (updates the gate); a new label adds a sibling channel. Pure helper
+// shared by the live + draft adapters.
+function chLabelKey(label) {
+  return typeof label === 'string' && label.trim() ? label.trim() : '';
+}
 function upsertChannel(list, { artifact, from, label, gate }) {
   const art = artifact === 'issue' ? 'issue' : 'pr';
+  const lbl = chLabelKey(label);
   const next = {
     artifact: art, from,
-    ...(typeof label === 'string' && label.trim() ? { label: label.trim() } : {}),
+    ...(lbl ? { label: lbl } : {}),
     ...(gate === 'human' ? { gate: 'human' } : {}),
   };
   const out = (Array.isArray(list) ? list : []).slice();
-  const i = out.findIndex(c => c.artifact === art && c.from === from);
+  const i = out.findIndex(c => c.artifact === art && c.from === from && chLabelKey(c.label) === lbl);
   if (i >= 0) out[i] = next; else out.push(next);
   return out;
+}
+
+// Remove a channel from a list. When a `label` is supplied (present in the spec,
+// including the empty string), the match is the full (artifact, from, label)
+// key so switch fan-in siblings are removed individually; a legacy caller that
+// omits `label` entirely drops every channel with that (artifact, from).
+function removeChannelFrom(list, { artifact, from, label }) {
+  const art = artifact === 'issue' ? 'issue' : 'pr';
+  const hasLabel = label !== undefined;
+  const lbl = chLabelKey(label);
+  return (Array.isArray(list) ? list : []).filter(c =>
+    !(c.artifact === art && c.from === from && (!hasLabel || chLabelKey(c.label) === lbl)));
 }
 
 const clone = (x) => JSON.parse(JSON.stringify(x));
@@ -641,14 +661,14 @@ export function makeDraftOps(getBundle, persist) {
       r.channels = upsertChannel(r.channels, spec);
       await persist(b);
     },
-    // Upsert keyed on (artifact, from), so editing a channel's label/gate reuses it.
+    // Upsert keyed on (artifact, from, label) (#828), so editing a channel's
+    // gate reuses it while a new label adds a switch fan-in sibling.
     updateChannel: async (roleId, spec) => makeDraftOps(getBundle, persist).addChannel(roleId, spec),
-    removeChannel: async (roleId, { artifact, from }) => {
+    removeChannel: async (roleId, { artifact, from, label }) => {
       const b = clone(getBundle());
       const r = role(b, roleId);
       if (r) {
-        const art = artifact === 'issue' ? 'issue' : 'pr';
-        r.channels = (r.channels || []).filter(c => !(c.artifact === art && c.from === from));
+        r.channels = removeChannelFrom(r.channels, { artifact, from, label });
         if (!r.channels.length) delete r.channels;
       }
       await persist(b);

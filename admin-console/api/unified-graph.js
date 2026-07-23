@@ -135,6 +135,10 @@ function processEdgeToUnified(e) {
   // label events (issue/PR × added/removed) ride along for display.
   const u = { from: e.from, to: e.to, on: 'label', label: e.label, triggerId: e.triggerId };
   if (Array.isArray(e.events) && e.events.length) u.events = e.events;
+  // Outcome-keyed edge (#827/#828): the emitter set this label as part of a
+  // structured outcome; carry the outcome option id so the canvas can title the
+  // edge with it and clicking focuses the Routing tab on that outcome.
+  if (e.outcome) u.outcome = e.outcome;
   if (e.kind === 'gate' || e.kind === 'brake' || isHumanGate(e.label) || isBrake(e.label)) {
     u.gate = 'human';
   }

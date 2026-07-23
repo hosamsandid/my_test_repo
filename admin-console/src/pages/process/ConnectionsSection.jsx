@@ -127,8 +127,8 @@ export default function ConnectionsSection({ node, siblings = [], inheritedStage
       {channels.length > 0 && (
         <ChipRow label="reacts to" color="#8b5cf6"
           items={channels.map(c => ({
-            key: `${c.artifact}:${c.from}`, text: chLabel(c),
-            onRemove: () => run(() => ops.removeChannel(node.id, { artifact: c.artifact, from: c.from })),
+            key: `${c.artifact}:${c.from}:${c.label || ''}`, text: chLabel(c),
+            onRemove: () => run(() => ops.removeChannel(node.id, { artifact: c.artifact, from: c.from, label: c.label || '' })),
           }))} />
       )}
 

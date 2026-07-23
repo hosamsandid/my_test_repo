@@ -32,6 +32,8 @@
 
 - **Team-scoped Model Providers** — the Model Providers page now follows the same scope model as SSH keys and GitHub tokens. Team Admins can self-serve model providers for their team; System Admins can register system-scoped providers and assign them to specific teams. Each team sees only the providers it has been given access to. Existing providers are normalized to team-scoped on read — no data migration required. The Model Providers nav entry is now accessible to Team Admins; System Admins continue to have full visibility. (#806)
 
+- **Token Usage: per-team filter** — System Admins can now filter the Token Usage page (Summary and Work Items tabs, including CSV exports) by team. Selecting a specific team shows only that team's records; "All teams" remains the default and includes legacy entries with no team assigned. (#810)
+
 ### Bug Fixes
 
 - **Auto-curated skills now show descriptions in the agent Skills section** — skills created by the knowledge curator were written without YAML frontmatter, causing agents to see only the skill name with no indication of what the skill covers. The curator now writes a `name` + `description` frontmatter block into every generated SKILL.md. Existing skills are backfilled automatically the next time they are amended. (#807)
@@ -42,7 +44,11 @@
 
 - **Trigger cards no longer show the raw internal ID** — the grey monospace trigger ID line has been removed from each trigger card in the chat right-rail Triggers panel, reducing visual noise for non-technical readers. The ID is still visible in the trigger edit form, and HTTP-webhook cards continue to show their full webhook path. (#792)
 
+- **Session Log: system event content now visible** — `system_event` rows in the Session Log panel (e.g. `thinking_tokens`) previously rendered as a bare label. They now show an inline summary of their payload (e.g. `thinking_tokens: 1234`) and are click-to-expand to display the full raw JSON — mirroring how other detailed log entries are rendered. No log data format changed; existing persisted logs show content on reload. (#821)
+
 ### Breaking Changes
+
+- **Token Usage page now restricted to System Admins** — the `/token-usage` route and all five usage API endpoints (`/api/usage/summary`, `/summary/export`, `/work-items`, `/work-items/export`, `/work-items/:owner/:repo/:number`) now return 403 for any caller who is not a System Admin or environment admin. The nav entry is hidden for Team Members and Team Admins. (#810)
 
 - **Credential and Model Provider visibility now requires Team Admin role** — SSH keys, GitHub tokens, and Model Providers are no longer visible to plain Team Members in the Working Environment editor's credential pickers, or on the respective admin pages. Only Team Admins (and System Admins) can view and manage these resources. (#803, #806)
 

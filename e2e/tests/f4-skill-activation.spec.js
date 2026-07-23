@@ -65,7 +65,7 @@ test.describe('F4: team skill activation', () => {
     });
 
     await test.step('UI shows every member active (member-level, not just the toggle)', async () => {
-      await knowledge.expectAllMembersActive(ctx, { memberCount: memberIds.length });
+      await knowledge.expectAllMembersActive(ctx, { memberCount: memberIds.length, skillName });
     });
 
     await test.step('API graph overlay confirms per-member active state', async () => {

@@ -30,13 +30,15 @@ def _decode_audio(raw: bytes) -> tuple[np.ndarray, int]:
         tmp.flush()
         result = subprocess.run(
             [
-                "ffmpeg", "-i", tmp.name,
+                "ffmpeg", "-nostdin", "-loglevel", "error",
+                "-i", tmp.name,
                 "-ar", "16000", "-ac", "1", "-f", "wav", "-",
             ],
             capture_output=True,
+            timeout=30,
         )
         if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg failed: {result.stderr.decode()}")
+            raise RuntimeError(f"ffmpeg failed: {result.stderr.decode(errors='replace')}")
         audio, sr = sf.read(io.BytesIO(result.stdout), dtype="float32")
         return audio, sr
 

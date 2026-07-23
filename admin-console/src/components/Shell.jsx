@@ -332,9 +332,14 @@ export default function Shell({ children }) {
 
         {/* Copyright footer — links to /about */}
         {!collapsed && (
-          <div
+          <button
+            type="button"
             onClick={() => navigate('/about')}
             style={{
+              all: 'unset',
+              display: 'block',
+              boxSizing: 'border-box',
+              width: '100%',
               flexShrink: 0,
               padding: 'var(--eb-space-3) var(--eb-space-4)',
               paddingTop: 'var(--eb-space-4)',
@@ -345,14 +350,17 @@ export default function Shell({ children }) {
               cursor: 'pointer',
               borderRadius: 'var(--eb-radius-sm)',
               transition: 'background var(--eb-transition-fast)',
+              textAlign: 'left',
             }}
             onMouseEnter={e => e.currentTarget.style.background = 'var(--eb-bg-hover)'}
             onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+            onFocus={e => e.currentTarget.style.background = 'var(--eb-bg-hover)'}
+            onBlur={e => e.currentTarget.style.background = 'transparent'}
           >
             <div style={{ fontWeight: 'bold' }}>About</div>
             <div>© 2026 Accenture. All rights reserved.</div>
             <div data-testid="app-version" style={{ color: 'var(--eb-text-muted)' }}>v{VERSION_LABEL}</div>
-          </div>
+          </button>
         )}
       </aside>
 

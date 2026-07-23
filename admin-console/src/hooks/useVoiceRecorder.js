@@ -61,7 +61,15 @@ export default function useVoiceRecorder({ onTranscription }) {
     }
 
     streamRef.current = stream;
-    const recorder = new MediaRecorder(stream);
+    let recorder;
+    try {
+      recorder = new MediaRecorder(stream);
+    } catch {
+      stream.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
+      setError('Voice recording is not supported in this browser.');
+      return;
+    }
     recorderRef.current = recorder;
 
     recorder.ondataavailable = async (e) => {

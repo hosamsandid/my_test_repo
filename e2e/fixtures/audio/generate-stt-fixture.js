@@ -2,14 +2,13 @@
 // Generates a minimal valid WAV file (440 Hz sine wave, 2 seconds, 16 kHz, mono, 16-bit PCM)
 // for use as the STT e2e test fixture.
 //
-// NOTE: This is a synthetic tone, not a real spoken-word recording. The Whisper model may
+// NOTE: This is a synthetic tone, not a real spoken-word recording. The ASR model may
 // transcribe it as empty, silence, or gibberish. The API-level test assertions that check for
-// specific expected words ('hello', 'test', 'recording') will only pass against a real Whisper
-// instance that receives a proper speech recording. For meaningful transcription testing,
-// REPLACE this fixture with an actual spoken-word WAV of the phrase "Hello, this is a test
-// recording" recorded at 16 kHz mono 16-bit PCM.
+// specific expected words will only pass against a real ASR instance that receives a proper
+// speech recording. For meaningful transcription testing, REPLACE this fixture with an actual
+// spoken-word WAV recorded at 16 kHz mono 16-bit PCM.
 //
-// The test suite's beforeAll health-check will skip the entire suite if the Whisper container
+// The test suite's beforeAll health-check will skip the entire suite if the STT container
 // is not reachable, so the synthetic tone is safe as a structural placeholder.
 
 const fs = require('fs');

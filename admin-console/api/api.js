@@ -227,7 +227,7 @@ auth.registerAuthRoutes(app, {
 });
 app.use('/api', auth.gate);
 
-// Speech-to-text transcription: proxies audio to Whisper ASR and returns { text }.
+// Speech-to-text transcription: proxies audio to the STT service and returns { text }.
 const _transcribeUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 app.post('/api/transcribe', _transcribeUpload.single('audio_file'), createTranscribeRoute());
 

@@ -8,9 +8,9 @@
 // Audio fixture: e2e/fixtures/audio/stt-test.wav — JFK inaugural address clip
 // (public domain, from whisper.cpp samples/jfk.wav).
 //
-// Chromium is launched with --use-fake-device-for-media-stream and
-// --use-file-for-fake-audio-capture pointing at the fixture (playwright.config.js)
-// so the UI test exercises the MediaRecorder path without a real microphone.
+// The UI test mocks getUserMedia to play the fixture WAV through AudioContext
+// (headless Chromium on macOS does not support --use-fake-device-for-media-stream)
+// so MediaRecorder captures real speech audio without a physical microphone.
 
 const { test, expect } = require('@playwright/test');
 const path = require('path');
@@ -77,6 +77,73 @@ test.describe('Speech-to-Text', () => {
     for (const word of EXPECTED_WORDS) {
       expect(normalized).toContain(word);
     }
+  });
+
+  test('UI: records via fake mic and populates textarea', async ({ page, context }) => {
+    test.setTimeout(45_000);
+
+    const errors = [];
+    page.on('pageerror', (err) => errors.push(err.message));
+
+    await context.grantPermissions(['microphone']);
+
+    await page.goto('/chats');
+
+    const agentOption = page.locator('[role="option"]').first();
+    await agentOption.click({ timeout: 10_000 });
+
+    const textarea = page.locator('textarea');
+    await textarea.waitFor({ state: 'visible', timeout: 10_000 });
+
+    const micButton = page.locator('button[aria-label="Record voice message"]');
+    await micButton.waitFor({ state: 'visible', timeout: 5_000 });
+
+    // Headless Chromium on macOS does not support getUserMedia even with
+    // --use-fake-device-for-media-stream. Mock it to play the JFK WAV fixture
+    // through AudioContext so MediaRecorder captures real speech audio.
+    const wavBase64 = fs.readFileSync(FIXTURE_PATH).toString('base64');
+    await page.evaluate(async (b64) => {
+      const binary = atob(b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const wavBuffer = bytes.buffer;
+
+      const origGUM = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+      navigator.mediaDevices.getUserMedia = async (constraints) => {
+        if (constraints?.audio) {
+          const ctx = new AudioContext();
+          const audioBuffer = await ctx.decodeAudioData(wavBuffer.slice(0));
+          const source = ctx.createBufferSource();
+          source.buffer = audioBuffer;
+          source.loop = true;
+          const dest = ctx.createMediaStreamDestination();
+          source.connect(dest);
+          source.start();
+          return dest.stream;
+        }
+        return origGUM(constraints);
+      };
+    }, wavBase64);
+
+    await micButton.click();
+
+    const stopButton = page.locator('button[aria-label="Stop recording"]');
+    await stopButton.waitFor({ state: 'visible', timeout: 10_000 });
+
+    // Record long enough to capture "ask not what your country can do for you".
+    await page.waitForTimeout(8000);
+
+    await stopButton.click();
+
+    await micButton.waitFor({ state: 'visible', timeout: 20_000 });
+
+    const value = await textarea.inputValue();
+    const normalized = normalize(value);
+    for (const word of EXPECTED_WORDS) {
+      expect(normalized).toContain(word);
+    }
+
+    expect(errors).toHaveLength(0);
   });
 
 });

@@ -148,6 +148,35 @@ del_code=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" \
   -X DELETE "${ADMIN_BASE}/api/llm-endpoints/default" || true)
 echo " (HTTP ${del_code})"
 
+# --- 8. Preconfigure a standalone agent for UI-level e2e tests ---
+# Create a minimal Working Environment + agent so chat-based tests (STT, etc.)
+# have something to open. Idempotent: 409 = already exists.
+echo -n "Creating e2e Working Environment "
+env_code=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" \
+  -X POST "${ADMIN_BASE}/api/environments" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"e2e-env","name":"E2E Environment"}' || true)
+echo " (HTTP ${env_code})"
+
+echo -n "Creating e2e agent "
+agent_code=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" \
+  -X POST "${ADMIN_BASE}/api/agents" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"e2e-agent","displayName":"E2E Agent","role":"agent","environmentId":"e2e-env","systemPrompt":"You are a helpful test agent."}' || true)
+echo " (HTTP ${agent_code})"
+
+echo -n "Enabling e2e agent "
+enable_code=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" \
+  -X PUT "${ADMIN_BASE}/api/agents/e2e-agent" \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":true}' || true)
+echo " (HTTP ${enable_code})"
+
+echo -n "Creating DM room for e2e agent "
+dm_code=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" \
+  -X POST "${ADMIN_BASE}/api/matrix/agents/e2e-agent/dm" || true)
+echo " (HTTP ${dm_code})"
+
 echo
 echo "=========================================="
 echo "  aee-e2e stack ready"

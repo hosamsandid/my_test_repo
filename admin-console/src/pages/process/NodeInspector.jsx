@@ -4,6 +4,7 @@ import SidePanel from '../../components/SidePanel';
 import { apiCall } from '../../hooks/useApi';
 import TriggersPanel from '../agent-chat/TriggersPanel';
 import ConnectionsSection from './ConnectionsSection';
+import RoutingSection from './RoutingSection';
 import { resolveInheritedStage } from './hierarchy-utils';
 import { applyDetailsSave } from './node-inspector-save';
 import { summarizeGithubEventTrigger } from '../agent-chat/trigger-summary.js';
@@ -28,16 +29,18 @@ export default function NodeInspector({
   roles = [],       // draft peer list
   nodes = [],       // live peer list
   stages = [],
+  lints = [],       // graph lints (Routing tab surfaces duplicate-listener for this node)
   ops,
   teamId,           // live: binds a brand-new stage to the team's ordered list
   level,            // live: 'template' renders read-only
+  focus,            // { tab, outcome? } — open a specific tab (canvas outcome-edge click → Routing)
   onClose,
   onChanged,
   onDeleted,        // draft
   onRenamedId,      // draft
 }) {
   const isLive = mode === 'live';
-  const [tab, setTab] = useState('details');
+  const [tab, setTab] = useState(focus?.tab || 'details');
   const [name, setName] = useState(node.displayName || node.id);
   const [id, setId] = useState(node.id);
   const [prompt, setPrompt] = useState(node.systemPrompt || '');  // draft only
@@ -105,6 +108,7 @@ export default function NodeInspector({
         <>
           <div style={{ display: 'flex', borderBottom: '1px solid var(--eb-border-default)', marginBottom: 'var(--eb-space-4)' }}>
             <TabButton active={tab === 'details'} onClick={() => setTab('details')}>Details</TabButton>
+            <TabButton active={tab === 'routing'} onClick={() => setTab('routing')}>Routing</TabButton>
             <TabButton active={tab === 'triggers'} onClick={() => setTab('triggers')}>Triggers</TabButton>
             <TabButton active={tab === 'connections'} onClick={() => setTab('connections')}>Connections</TabButton>
           </div>
@@ -174,6 +178,18 @@ export default function NodeInspector({
                 </div>
               )}
             </div>
+          )}
+
+          {tab === 'routing' && (
+            <RoutingSection
+              node={node}
+              peers={peers}
+              lints={lints}
+              ops={ops}
+              mode={mode}
+              focusOutcome={focus?.tab === 'routing' ? focus?.outcome : null}
+              onChanged={onChanged}
+            />
           )}
 
           {tab === 'triggers' && (

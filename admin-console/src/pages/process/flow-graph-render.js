@@ -14,7 +14,7 @@
 import { computeFlowLayout, assignCrossCoords } from './flow-layout';
 import { routeOrthogonalEdges, roundedPathD, laneLoadByChannel } from './edge-router';
 
-export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge, actorSources, expandChildrenByDefault } = {}) {
+export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutcome, onSelectEdge, actorSources, expandChildrenByDefault } = {}) {
 
   // ─── Constants ──────────────────────────────────────────────────────
   const NODE_W      = 320;
@@ -120,6 +120,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
       .bp-badge-revision       { background:rgba(99,102,241,0.15);  color:#818cf8; border:1px solid rgba(99,102,241,0.4); }
       .bp-badge-gh-pr          { background:rgba(139,92,246,0.15);  color:#a78bfa; border:1px solid rgba(139,92,246,0.4); }
       .bp-badge-gh-issue       { background:rgba(20,184,166,0.15);  color:#2dd4bf; border:1px solid rgba(20,184,166,0.4); }
+      .bp-badge-outcome        { background:rgba(234,179,8,0.15);   color:#eab308; border:1px solid rgba(234,179,8,0.45); }
 
       /* ── Status backgrounds (dark, default) ─────────────────────────── */
       .bp-node-status-draft      { background: #1e1318; }
@@ -148,6 +149,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
       :root[data-theme="admin-light"] .bp-badge-rigor-high     { color:#c2410c; border-color:rgba(194,65,12,0.4); }
       :root[data-theme="admin-light"] .bp-badge-rigor-standard { color:#4b5563; border-color:rgba(75,85,99,0.4); }
       :root[data-theme="admin-light"] .bp-badge-revision       { color:#4338ca; border-color:rgba(67,56,202,0.4); }
+      :root[data-theme="admin-light"] .bp-badge-outcome        { color:#a16207; border-color:rgba(161,98,7,0.45); }
     `;
     document.head.appendChild(style);
   }
@@ -392,6 +394,9 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
       // GitHub artifact ports (#380): produce flags → badge + output ports.
       github: (n.github && (n.github.producesPr || n.github.producesIssue)) ? n.github : null,
       channels: Array.isArray(n.channels) ? n.channels : [],
+      // Structured outcomes port (#828): drives the ◇ switch badge + per-outcome
+      // output ports. Only authored ports reach the graph (see process-graph.js).
+      outcomes: (n.outcomes && Array.isArray(n.outcomes.options) && n.outcomes.options.length) ? n.outcomes : null,
       _role: n.role,
       _isParent: n.isParent === true,
     }));
@@ -1115,6 +1120,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
         badgeParts.push(`<span class="bp-badge bp-badge-gh-pr" title="Opens pull requests">⇅ PR</span>`);
       if (bp.github && bp.github.producesIssue)
         badgeParts.push(`<span class="bp-badge bp-badge-gh-issue" title="Opens issues">◉ Issue</span>`);
+      // Switch badge (#828): an exactlyOne outcomes port picks exactly one branch
+      // per run — render the ◇ glyph so the node reads as a switch.
+      if (bp.outcomes && bp.outcomes.mode === 'exactlyOne')
+        badgeParts.push(`<span class="bp-badge bp-badge-outcome" title="Switch — exactly one outcome per run">◇ switch</span>`);
       if (badgeParts.length > 0) {
         const badges = document.createElement('div');
         badges.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px;';
@@ -1221,6 +1230,36 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
           startConnect(n.id);
         });
         node.appendChild(port);
+      }
+
+      // Outcome output ports (#828): one small square port per outcome option on
+      // an authored outcomes port. Dragging one onto another node opens the label
+      // hand-off dialog pre-filled with that outcome's label (onConnectOutcome).
+      // Stacked as a labelled column on the node's right edge, below the ● port.
+      if (state.editable && onConnectOutcome && bp.outcomes && Array.isArray(bp.outcomes.options) && bp.outcomes.options.length) {
+        const col = document.createElement('div');
+        col.style.cssText = 'position:absolute;right:-9px;top:calc(50% + 14px);display:flex;flex-direction:column;gap:5px;z-index:3;align-items:flex-end;';
+        bp.outcomes.options.forEach((o) => {
+          const title = o.title || o.id;
+          const setLabelAction = (o.actions || []).find(a => a.type === 'setLabel' && a.label);
+          const row = document.createElement('div');
+          row.style.cssText = 'display:flex;align-items:center;gap:4px;';
+          const tag = document.createElement('span');
+          tag.textContent = title;
+          tag.style.cssText = 'font-size:9px;color:#a16207;background:rgba(234,179,8,0.12);border:1px solid rgba(234,179,8,0.4);border-radius:3px;padding:0 4px;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+          const dot = document.createElement('div');
+          dot.title = `Outcome “${title}” — drag to the agent it routes to`;
+          dot.style.cssText = 'width:12px;height:12px;border-radius:2px;background:#eab308;border:2px solid var(--eb-bg-surface);cursor:crosshair;flex-shrink:0;';
+          dot.addEventListener('mousedown', (ev) => {
+            ev.stopPropagation();
+            ev.preventDefault();
+            startConnect(n.id, { id: o.id, title, label: setLabelAction ? setLabelAction.label : '' });
+          });
+          row.appendChild(tag);
+          row.appendChild(dot);
+          col.appendChild(row);
+        });
+        node.appendChild(col);
       }
 
       // NOTE (#411): the separate PR/Issue drag pills are gone — the header
@@ -1630,6 +1669,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     // lanes, side gutters for long/backward edges, labels on the edge.
     const EXTRA_COLOR = { label: EDGE_STYLES.label.color, review: EDGE_STYLES.review.color, manual: EDGE_STYLES.label.color };
     const GH_COLOR = { pr: EDGE_STYLES.pr.color, issue: EDGE_STYLES.issue.color };
+    const OUTCOME_EDGE_COLOR = '#eab308';  // amber — matches the ◇ switch badge (#828)
 
     function drawRoutedProcessEdges() {
       const nodes = [];
@@ -1680,18 +1720,23 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
         if (!visibleIds.has(e.from) || !visibleIds.has(e.to)) return;
         const isGithub = e.on === 'github';
         const artifact = e.artifact === 'issue' ? 'issue' : 'pr';
+        // Outcome-keyed label edge (#828): the emitter set this label as part of a
+        // structured outcome. Title the edge with the outcome, colour it like the
+        // switch badge, and tag the hit payload so a click focuses the Routing tab.
+        const isOutcome = e.on === 'label' && !!e.outcome;
         list.push({
           from: e.from, to: e.to,
-          color: isGithub ? GH_COLOR[artifact] : (EXTRA_COLOR[e.on] || EDGE_STYLES.label.color),
+          color: isGithub ? GH_COLOR[artifact] : (isOutcome ? OUTCOME_EDGE_COLOR : (EXTRA_COLOR[e.on] || EDGE_STYLES.label.color)),
           width: isGithub ? 2 : 1.5,
           dash: '',
           opacity: 1,
           labelText: isGithub ? channelChipText(e)
-            : (e.on === 'label' ? labelChipText(e) : (e.label || '')),
+            : (isOutcome ? outcomeEdgeText(e) : (e.on === 'label' ? labelChipText(e) : (e.label || ''))),
           chip: isGithub,
           gate: e.gate === 'human',
           hit: { from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on,
-            artifact: isGithub ? artifact : undefined, gate: e.gate, triggerId: e.triggerId },
+            artifact: isGithub ? artifact : undefined, gate: e.gate, triggerId: e.triggerId,
+            ...(e.outcome ? { outcome: e.outcome } : {}) },
         });
       });
       visible.forEach(n => {
@@ -1896,6 +1941,16 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
   function labelChipText(e) {
     const tag = labelEventTag(e.events);
     return tag ? `${e.label || ''} · ${tag}` : (e.label || '');
+  }
+  // The producer's title for an outcome-keyed edge (#828): resolve the outcome
+  // option's title from the source node so the edge reads `◇ Accepted` rather
+  // than the raw label. Falls back to the option id, then the label.
+  function outcomeEdgeText(e) {
+    const src = state.byId[e.from];
+    const opt = src && src.outcomes && Array.isArray(src.outcomes.options)
+      ? src.outcomes.options.find(o => o.id === e.outcome) : null;
+    const title = (opt && (opt.title || opt.id)) || e.outcome || e.label || '';
+    return `◇ ${title}`;
   }
 
   // The chip text for a GitHub-channel edge (#380): artifact + optional human-gate
@@ -2252,8 +2307,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
       y: (clientY - r.top - state.pan.y) / state.zoom,
     };
   }
-  function startConnect(fromId) {
-    state.connecting = { fromId };
+  function startConnect(fromId, outcome) {
+    state.connecting = { fromId, outcome: outcome || null };
     viewport.style.cursor = 'crosshair';
     tempEdge = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     tempEdge.setAttribute('stroke', 'var(--eb-accent-primary)');
@@ -2285,6 +2340,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
   }
   function finishConnect(e) {
     const fromId = state.connecting.fromId;
+    const outcome = state.connecting.outcome;
     state.connecting = null;
     viewport.style.cursor = 'grab';
     if (tempEdge) { tempEdge.remove(); tempEdge = null; }
@@ -2293,7 +2349,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     const nodeEl = el && el.closest ? el.closest('.bp-node') : null;
     const toId = nodeEl && nodeEl.dataset ? nodeEl.dataset.id : null;
     if (!toId || toId === fromId) return;
-    if (onConnect) onConnect(fromId, toId);
+    // A drag from an outcome port pre-fills the outcome's label hand-off (#828);
+    // the plain ● port creates any edge type via onConnect.
+    if (outcome && onConnectOutcome) onConnectOutcome(fromId, toId, outcome);
+    else if (onConnect) onConnect(fromId, toId);
   }
 
   function onWheel(e) {

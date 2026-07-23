@@ -97,6 +97,11 @@ test.describe('Speech-to-Text', () => {
     // Try data-testid first; fall back to href pattern.
     const agentItem = page.locator('[data-testid="agent-list-item"]').first();
     const agentLink = page.locator('a[href*="/chats/"]').first();
+    const hasAgent = (await agentItem.count()) > 0 || (await agentLink.count()) > 0;
+    if (!hasAgent) {
+      test.skip(true, 'No agents available in the e2e stack — skipping UI test');
+      return;
+    }
     const target = (await agentItem.count()) > 0 ? agentItem : agentLink;
     await target.click({ timeout: 10_000 });
 

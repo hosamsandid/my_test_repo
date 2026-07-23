@@ -183,6 +183,15 @@ Start with the visual walkthrough, then dive into the reference docs as needed.
 | Teams & multi-user model | [docs/teams-data-model.md](./docs/teams-data-model.md) · [docs/multi-user-concept.md](./docs/multi-user-concept.md) |
 | Key files & project layout | [docs/key-files.md](./docs/key-files.md) |
 
+## Third-party Models
+
+Speech-to-text powered by [NVIDIA Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3).
+
+- **Model license:** [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/) — Copyright NVIDIA Corporation
+- **ONNX conversion:** [istupakov/parakeet-tdt-0.6b-v3-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx) — [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/)
+- **Inference library:** [onnx-asr](https://github.com/istupakov/onnx-asr) — [MIT](https://opensource.org/licenses/MIT)
+- No retraining or fine-tuning performed.
+
 ## Contributing
 
 Bug reports and pull requests are welcome. Please open an issue first to discuss significant changes before submitting a PR.

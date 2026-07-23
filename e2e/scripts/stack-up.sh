@@ -106,6 +106,20 @@ if [ "$agents_code" != "200" ]; then
   echo "ERROR: GET /api/agents returned ${agents_code} (orchestrator proxy not ready)" >&2; exit 1
 fi
 
+# STT — model is pre-baked but the HTTP server takes a few seconds.
+# POST a tiny payload through the admin-console proxy (stt has no host port).
+echo -n "Waiting for stt "
+for i in $(seq 1 60); do
+  wh_code=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" \
+    -X POST "${ADMIN_BASE}/api/transcribe" \
+    -F "audio_file=@${SCRIPT_DIR}/../fixtures/audio/stt-test.wav;type=audio/wav" || true)
+  if [ "$wh_code" = "200" ]; then echo " ok"; break; fi
+  echo -n "."; sleep 2
+done
+if [ "$wh_code" != "200" ]; then
+  echo; echo "WARNING: stt not ready (last HTTP ${wh_code}) — STT tests will skip" >&2
+fi
+
 # --- 7. Register the mock LLM Model Provider (#710, journey-spec §6.3) ---
 # `resolveGenerationTarget` picks the first registered (non-oauth) endpoint, so
 # POST /api/agent-prompt/generate reaches fake-github's canned /v1/messages
@@ -133,6 +147,35 @@ echo -n "Removing dead env-migrated 'default' LLM endpoint "
 del_code=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" \
   -X DELETE "${ADMIN_BASE}/api/llm-endpoints/default" || true)
 echo " (HTTP ${del_code})"
+
+# --- 8. Preconfigure a standalone agent for UI-level e2e tests ---
+# Create a minimal Working Environment + agent so chat-based tests (STT, etc.)
+# have something to open. Idempotent: 409 = already exists.
+echo -n "Creating e2e Working Environment "
+env_code=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" \
+  -X POST "${ADMIN_BASE}/api/environments" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"e2e-env","name":"E2E Environment"}' || true)
+echo " (HTTP ${env_code})"
+
+echo -n "Creating e2e agent "
+agent_code=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" \
+  -X POST "${ADMIN_BASE}/api/agents" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"e2e-agent","displayName":"E2E Agent","role":"agent","environmentId":"e2e-env","systemPrompt":"You are a helpful test agent."}' || true)
+echo " (HTTP ${agent_code})"
+
+echo -n "Enabling e2e agent "
+enable_code=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" \
+  -X PUT "${ADMIN_BASE}/api/agents/e2e-agent" \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":true}' || true)
+echo " (HTTP ${enable_code})"
+
+echo -n "Creating DM room for e2e agent "
+dm_code=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" \
+  -X POST "${ADMIN_BASE}/api/matrix/agents/e2e-agent/dm" || true)
+echo " (HTTP ${dm_code})"
 
 echo
 echo "=========================================="

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Send, Paperclip, Loader2 } from 'lucide-react';
+import { Send, Paperclip, Loader2, Mic, Square } from 'lucide-react';
+import useVoiceRecorder from '../../hooks/useVoiceRecorder.js';
 
 /**
  * Auto-resizing textarea with a send button and inline file attachments.
@@ -37,6 +38,24 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
   // (or any IME) candidate is active must NOT submit the message — that
   // Enter is consumed by the IME to commit the candidate.
   const composingRef = useRef(false);
+
+  const handleTranscription = React.useCallback((text) => {
+    setValue(prev => {
+      if (!prev.trim()) return text;
+      return prev + ' ' + text;
+    });
+  }, []);
+
+  const { state: voiceState, elapsedSeconds, error: voiceError, toggleRecording, clearError } = useVoiceRecorder({
+    onTranscription: handleTranscription,
+  });
+
+  // Auto-clear voice error after 3 seconds.
+  React.useEffect(() => {
+    if (!voiceError) return;
+    const t = setTimeout(clearError, 3000);
+    return () => clearTimeout(t);
+  }, [voiceError, clearError]);
 
   useEffect(() => { autoResize(taRef.current); }, [value]);
 
@@ -143,6 +162,9 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
       background: 'var(--eb-bg-surface)',
       flexShrink: 0,
     }}>
+      {voiceState === 'recording' && (
+        <style>{'@keyframes stt-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }'}</style>
+      )}
       <div
         onDragEnter={handleDragEnter}
         onDragOver={handleDragOver}
@@ -239,6 +261,45 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
             padding: '4px 6px',
           }}
         />
+        <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0, gap: 4 }}>
+          {voiceState === 'recording' && (
+            <span style={{
+              fontSize: 'var(--eb-text-xs)',
+              color: 'var(--eb-status-error-text, #dc2626)',
+              whiteSpace: 'nowrap',
+              fontVariantNumeric: 'tabular-nums',
+            }}>
+              {Math.floor(elapsedSeconds / 60)}:{String(elapsedSeconds % 60).padStart(2, '0')}
+            </span>
+          )}
+          <button
+            onClick={toggleRecording}
+            disabled={disabled || voiceState === 'transcribing'}
+            aria-label={voiceState === 'recording' ? 'Stop recording' : voiceState === 'transcribing' ? 'Transcribing…' : 'Record voice message'}
+            title={voiceState === 'recording' ? 'Stop recording' : voiceState === 'transcribing' ? 'Transcribing…' : 'Voice input'}
+            style={{
+              width: 32, height: 32,
+              background: voiceState === 'recording' ? 'var(--eb-status-error-bg, #fef2f2)' : 'transparent',
+              color: voiceState === 'recording'
+                ? 'var(--eb-status-error-text, #dc2626)'
+                : voiceState === 'transcribing'
+                  ? 'var(--eb-text-muted)'
+                  : 'var(--eb-text-secondary)',
+              border: 'none',
+              borderRadius: 'var(--eb-radius-md)',
+              cursor: (disabled || voiceState === 'transcribing') ? 'not-allowed' : 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexShrink: 0,
+              animation: voiceState === 'recording' ? 'stt-pulse 1.5s ease-in-out infinite' : 'none',
+            }}
+          >
+            {voiceState === 'recording'
+              ? <Square size={14} />
+              : voiceState === 'transcribing'
+                ? <Loader2 size={14} style={{ animation: 'spin 0.8s linear infinite' }} />
+                : <Mic size={14} />}
+          </button>
+        </div>
         <button
           onClick={submit}
           disabled={disabled || !value.trim()}
@@ -262,15 +323,20 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
 
       <div style={{
         fontSize: 'var(--eb-text-xs)',
-        color: 'var(--eb-text-muted)',
+        color: voiceError ? 'var(--eb-status-error-text, #dc2626)' : 'var(--eb-text-muted)',
         marginTop: 'var(--eb-space-1)',
         paddingLeft: 'var(--eb-space-1)',
+        transition: 'color var(--eb-transition-fast)',
       }}>
-        {uploading
-          ? 'Uploading attachment…'
-          : onUpload
-            ? <>Markdown supported · attach with <Paperclip size={11} style={{ verticalAlign: '-1px' }} />, drag &amp; drop, or paste (<kbd style={kbdStyle}>⌘</kbd>/<kbd style={kbdStyle}>Ctrl</kbd>+<kbd style={kbdStyle}>V</kbd>) · <kbd style={kbdStyle}>⌘</kbd>+<kbd style={kbdStyle}>↩</kbd> to send</>
-            : <>Markdown supported · <kbd style={kbdStyle}>⌘</kbd>+<kbd style={kbdStyle}>↩</kbd> to send · <kbd style={kbdStyle}>↩</kbd> for newline</>}
+        {voiceError
+          ? voiceError
+          : voiceState === 'transcribing'
+            ? 'Transcribing…'
+            : uploading
+              ? 'Uploading attachment…'
+              : onUpload
+                ? <>Markdown supported · attach with <Paperclip size={11} style={{ verticalAlign: '-1px' }} />, drag &amp; drop, or paste (<kbd style={kbdStyle}>⌘</kbd>/<kbd style={kbdStyle}>Ctrl</kbd>+<kbd style={kbdStyle}>V</kbd>) · <kbd style={kbdStyle}>⌘</kbd>+<kbd style={kbdStyle}>↩</kbd> to send</>
+                : <>Markdown supported · <kbd style={kbdStyle}>⌘</kbd>+<kbd style={kbdStyle}>↩</kbd> to send · <kbd style={kbdStyle}>↩</kbd> for newline</>}
       </div>
     </div>
   );

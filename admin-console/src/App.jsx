@@ -70,6 +70,7 @@ const OrchestratorWizard  = lazy(() => import('./pages/OrchestratorWizard'));
 const PatternsCatalog     = lazy(() => import('./pages/PatternsCatalog'));
 const SdlcCatalogPage     = lazy(() => import('./pages/SdlcCatalogPage'));
 const MainframeCatalogPage = lazy(() => import('./pages/MainframeCatalogPage'));
+const About = lazy(() => import('./pages/About'));
 
 export default function App() {
   const { loading: authLoading, authenticated } = useAuth();
@@ -152,6 +153,7 @@ export default function App() {
           <Route path="/patterns"           element={<PatternsCatalog />} />
           <Route path="/patterns/sdlc"      element={<SdlcCatalogPage />} />
           <Route path="/patterns/mainframe" element={<MainframeCatalogPage />} />
+          <Route path="/about" element={<About />} />
         </Routes>
       </Suspense>
     </Shell>

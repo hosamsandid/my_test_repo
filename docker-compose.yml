@@ -157,9 +157,18 @@ services:
       ADMIN_PASSWORD: "${ADMIN_PASSWORD:-admin}"
       AUTH_SESSION_SECRET: "${AUTH_SESSION_SECRET:-}"
       AUTH_COOKIE_SECURE: "${AUTH_COOKIE_SECURE:-}"
+      STT_URL: "${STT_URL:-http://stt:9000}"
     depends_on:
       conduwuit:
         condition: service_started
+
+  stt:
+    build:
+      context: ./stt
+    container_name: ${COMPOSE_PROJECT_NAME}-stt
+    restart: unless-stopped
+    expose:
+      - "9000"
 
 volumes:
   conduwuit-db:

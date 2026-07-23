@@ -38,6 +38,8 @@
 
 - **Auto-curated skills now show descriptions in the agent Skills section** — skills created by the knowledge curator were written without YAML frontmatter, causing agents to see only the skill name with no indication of what the skill covers. The curator now writes a `name` + `description` frontmatter block into every generated SKILL.md. Existing skills are backfilled automatically the next time they are amended. (#807)
 
+- **Process Canvas: "Add agent" button now shows a busy state during provisioning** — clicking "Add agent" on a live team previously gave no visual feedback while the backend provisioned the Matrix user and seeded the workspace (which can take several seconds), making the UI appear frozen. The button now shows a spinner and "Adding…" label, dims, and disables double-submit for the full request duration. (#833)
+
 ### Changes
 
 - **Process Canvas emits now authored at the role/agent level only** — the per-trigger emits editor has been removed from the Triggers panel. Label hand-off edges are now defined exclusively on the role or agent, which was already the canonical location. Existing process graphs are unaffected: any legacy trigger-level emits are automatically lifted to the role level on import or materialisation. (#788)

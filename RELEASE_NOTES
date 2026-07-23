@@ -78,6 +78,8 @@
 
 - **Session Log: thinking-token entries now collapse into a single self-updating row** — extended thinking runs previously produced one `system_event (thinking_tokens)` row per streamed chunk, filling the Session Log with dozens of near-identical entries during a single response. These are now consolidated in real time: the first chunk opens one collapsible row, subsequent chunks update its counter in place, and the full token total appears once the response completes. Existing historical log entries are unaffected. (#870)
 
+- **Flow Editor: Agent Prompt disclosure removed from node cards** — the expandable agent prompt text block that previously appeared on node inspector cards in the Flow Editor canvas has been removed, reducing card clutter. The agent's full system prompt remains accessible via the **Prompt** tab in the agent chat's right rail. (#873)
+
 ### Breaking Changes
 
 - **Token Usage page now restricted to System Admins** — the `/token-usage` route and all five usage API endpoints (`/api/usage/summary`, `/summary/export`, `/work-items`, `/work-items/export`, `/work-items/:owner/:repo/:number`) now return 403 for any caller who is not a System Admin or environment admin. The nav entry is hidden for Team Members and Team Admins. (#810)

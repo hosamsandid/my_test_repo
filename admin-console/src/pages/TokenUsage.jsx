@@ -3,7 +3,8 @@ import { RefreshCw, Download } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useApi } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
-import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages } from './token-usage-view.js';
+import InfoTip from '../components/InfoTip';
+import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP } from './token-usage-view.js';
 
 // Trigger a browser download of an export URL. The endpoints are behind the
 // auth-cookie gate, so a same-origin anchor navigation carries the session.
@@ -53,7 +54,11 @@ const CLASS_COLOR = {
 };
 
 /* ── Summary card ──────────────────────────────────────────────────── */
-function StatCard({ label, value, accent }) {
+// `help`, when set, adds an InfoTip "?" affordance next to the label (#832):
+// a visible indicator that reveals a plain-language explanation on hover,
+// keyboard focus and tap. Purely additive — cards without `help` render
+// exactly as before (value, order and layout unchanged).
+function StatCard({ label, value, accent, help }) {
   return (
     <div style={{
       flex: '1 1 120px',
@@ -64,7 +69,10 @@ function StatCard({ label, value, accent }) {
       borderRadius: 'var(--eb-radius-lg)',
       borderTop: accent ? `3px solid ${accent}` : undefined,
     }}>
-      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginBottom: 4 }}>{label}</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginBottom: 4 }}>
+        <span>{label}</span>
+        {help ? <InfoTip title={label} text={help} size={12} /> : null}
+      </div>
       <div style={{ fontSize: 'var(--eb-text-lg)', fontWeight: 'var(--eb-font-semibold)', fontFamily: 'var(--eb-font-mono)' }}>
         {value}
       </div>
@@ -458,14 +466,14 @@ function WorkItemsTab({ team }) {
 
       {/* Coverage — attribution is never total, so the remainder is always shown. */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-3)' }}>
-        <StatCard label="Attributed" value={formatPct(cov.attributedPct)} accent="var(--eb-status-success)" />
-        <StatCard label="Attributed tokens" value={formatInt(cov.tokens.attributed)} />
-        <StatCard label="Unattributed tokens" value={formatInt(unatt.total)} accent="var(--eb-status-warning)" />
-        <StatCard label="Unattributed runs" value={formatInt(unatt.runs)} />
-        <StatCard label="Total runs" value={formatInt(cov.runs.total)} />
-        <StatCard label="Ø total / work item" value={fmtAvg(avg.total)} />
-        <StatCard label="Ø input / work item" value={fmtAvg(avg.input)} />
-        <StatCard label="Ø output / work item" value={fmtAvg(avg.output)} />
+        <StatCard label="Attributed" value={formatPct(cov.attributedPct)} accent="var(--eb-status-success)" help={WORK_ITEM_TILE_HELP.attributed} />
+        <StatCard label="Attributed tokens" value={formatInt(cov.tokens.attributed)} help={WORK_ITEM_TILE_HELP.attributedTokens} />
+        <StatCard label="Unattributed tokens" value={formatInt(unatt.total)} accent="var(--eb-status-warning)" help={WORK_ITEM_TILE_HELP.unattributedTokens} />
+        <StatCard label="Unattributed runs" value={formatInt(unatt.runs)} help={WORK_ITEM_TILE_HELP.unattributedRuns} />
+        <StatCard label="Total runs" value={formatInt(cov.runs.total)} help={WORK_ITEM_TILE_HELP.totalRuns} />
+        <StatCard label="Ø total / work item" value={fmtAvg(avg.total)} help={WORK_ITEM_TILE_HELP.avgTotal} />
+        <StatCard label="Ø input / work item" value={fmtAvg(avg.input)} help={WORK_ITEM_TILE_HELP.avgInput} />
+        <StatCard label="Ø output / work item" value={fmtAvg(avg.output)} help={WORK_ITEM_TILE_HELP.avgOutput} />
       </div>
 
       {loading ? (

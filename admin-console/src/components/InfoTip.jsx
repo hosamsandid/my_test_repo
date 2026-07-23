@@ -11,6 +11,10 @@ import { HelpCircle } from 'lucide-react';
  * Rendered into document.body via a portal with position: fixed (coordinates
  * from the trigger's bounding rect, clamped to the viewport) so it is never
  * clipped by an ancestor's overflow.
+ *
+ * Not hover-only: hover (mouse), focus (keyboard) and tap (touch) all reveal
+ * it. On touch there is no hover, so `onClick` reveals the popover directly
+ * and tapping elsewhere (blur) dismisses it.
  */
 export default function InfoTip({ title, text, size = 13 }) {
   const ref = useRef(null);
@@ -36,6 +40,7 @@ export default function InfoTip({ title, text, size = 13 }) {
       onMouseLeave={hide}
       onFocus={show}
       onBlur={hide}
+      onClick={show}
       style={{
         display: 'inline-flex', alignItems: 'center', flexShrink: 0,
         color: 'var(--eb-text-muted)', cursor: 'help', outline: 'none',

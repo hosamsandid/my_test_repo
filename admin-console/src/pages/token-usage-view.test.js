@@ -11,6 +11,7 @@ import {
   stackSegments,
   buildExportUrl,
   workItemAverages,
+  WORK_ITEM_TILE_HELP,
 } from './token-usage-view.js';
 
 test('TOKEN_CLASSES matches the four-class API contract, in display order', () => {
@@ -193,4 +194,40 @@ test('workItemAverages tolerates missing/partial token fields', () => {
   assert.equal(avg.total, 50);
   assert.equal(avg.input, 50);
   assert.equal(avg.output, 0);
+});
+
+/* ── Work-items tile help copy (#832) ──────────────────────────────── */
+// The eight ids the Work-items summary row wires into StatCard.help, in the
+// on-screen order. Keeping this list in the test guards against a tile losing
+// its help affordance (AC1/AC2) when the row is edited.
+const WORK_ITEM_TILE_IDS = [
+  'attributed', 'attributedTokens', 'unattributedTokens', 'unattributedRuns',
+  'totalRuns', 'avgTotal', 'avgInput', 'avgOutput',
+];
+
+test('WORK_ITEM_TILE_HELP carries help for all eight Work-items tiles (AC1/AC2)', () => {
+  assert.deepEqual(Object.keys(WORK_ITEM_TILE_HELP).sort(), [...WORK_ITEM_TILE_IDS].sort());
+  for (const id of WORK_ITEM_TILE_IDS) {
+    const text = WORK_ITEM_TILE_HELP[id];
+    assert.equal(typeof text, 'string', `${id} help must be a string`);
+    assert.ok(text.trim().length > 0, `${id} help must not be empty`);
+  }
+});
+
+test('attributed/unattributed help defines a work item as an issue↔PR chain (AC4)', () => {
+  // A work item = a GitHub issue and the PR(s) resolving it. The attributed
+  // tiles must say so in plain language.
+  assert.match(WORK_ITEM_TILE_HELP.attributed, /issue/i);
+  assert.match(WORK_ITEM_TILE_HELP.attributed, /pull request|PR/i);
+  assert.match(WORK_ITEM_TILE_HELP.attributedTokens, /issue ↔ PR|issue.*PR/i);
+  // Unattributed = could NOT be tied to a single work item; names real causes.
+  assert.match(WORK_ITEM_TILE_HELP.unattributedTokens, /could not be tied|not linked/i);
+  assert.match(WORK_ITEM_TILE_HELP.unattributedRuns, /could not be attributed/i);
+});
+
+test('Ø …/work item help states per attributed work item, excluding unattributed (AC5)', () => {
+  for (const id of ['avgTotal', 'avgInput', 'avgOutput']) {
+    assert.match(WORK_ITEM_TILE_HELP[id], /attributed work item/i, `${id} must say "attributed work item"`);
+    assert.match(WORK_ITEM_TILE_HELP[id], /excluded/i, `${id} must state unattributed tokens are excluded`);
+  }
 });

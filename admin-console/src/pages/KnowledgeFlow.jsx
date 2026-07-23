@@ -26,6 +26,7 @@ import {
 import {
   PHASE_LABELS, nextPendingDomain, migrationProgress,
   isResumable, mergeForDomain, planDomainRows, planFoldTotals,
+  consolidationStartGate,
 } from './consolidation-view';
 
 /*
@@ -1382,7 +1383,9 @@ function ConsolidationPanel({ teamId, domains, onChanged, signal }) {
   const allDecided = running && progress.pending === 0;
   const fold = planData ? planFoldTotals(planData.plan) : null;
   const planRows = planData ? planDomainRows(planData.plan, planData.merges) : [];
-  const foldableCount = planRows.filter(r => r.mergeable).length;
+  // Startable whenever any skill or candidate maps to a confirmed domain — a
+  // ≥2-skill domain is not required (#871). `busy` still disables (in-flight).
+  const startGate = consolidationStartGate(fold, { busy });
 
   // Run a consolidation op then refresh; `reload` also refetches team data so the
   // collapse (archived skills / cleared suggestions, AC3) shows immediately.
@@ -1518,15 +1521,20 @@ function ConsolidationPanel({ teamId, domains, onChanged, signal }) {
                 </div>
               )}
               <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
-                <button disabled={busy || foldableCount === 0} onClick={start}
-                  title={foldableCount === 0 ? 'No domain has two or more skills to merge' : 'Begin the migration — you review each playbook before it is applied'}
-                  style={{ ...primaryBtn, opacity: (busy || foldableCount === 0) ? 0.5 : 1 }}>
+                <button disabled={!startGate.enabled} onClick={start}
+                  title={startGate.enabled ? 'Begin the migration — you review each playbook before it is applied' : startGate.reason}
+                  style={{ ...primaryBtn, opacity: startGate.enabled ? 1 : 0.5 }}>
                   <Play size={13} /> Start migration
                 </button>
                 <button disabled={busy} onClick={refresh} style={{ ...miniBtn, display: 'inline-flex', alignItems: 'center', gap: 4, opacity: busy ? 0.5 : 1 }}>
                   <RotateCcw size={12} /> Refresh plan
                 </button>
               </div>
+              {!startGate.enabled && startGate.reason && (
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+                  {startGate.reason}
+                </div>
+              )}
             </div>
           ) : (
             /* ── In-progress: step through domains, then route remainder ── */

@@ -109,6 +109,32 @@ export function planDomainRows(plan, merges) {
   });
 }
 
+// Whether the "Start migration" button may begin the migration, and — when it may
+// not — a plain-language reason to show inline (#871, AC1/AC2/AC4/AC7/AC8).
+//
+// The gate is deliberately consistent with the panel's own summary line: there is
+// something to consolidate whenever any skill OR candidate is assigned to a
+// confirmed domain (`fold.skills + fold.candidates > 0`). A ≥2-skill domain is NOT
+// required — 0/1-skill domains are handled downstream as record-only decisions and
+// the leftover candidates are routed in the final step. Unassigned-only content
+// (nothing mapped to a confirmed domain) is NOT startable (AC8): routing loose
+// candidates on its own is not a valid reason to start.
+//
+// `busy` (a consolidation request in flight) always disables the button (AC7); the
+// structural "nothing to consolidate" reason takes precedence in the message since
+// it is the persistent cause, whereas busy is transient.
+export function consolidationStartGate(fold, { busy = false } = {}) {
+  const assigned = fold ? (fold.skills || 0) + (fold.candidates || 0) : 0;
+  const hasWork = assigned > 0;
+  let reason = '';
+  if (!hasWork) {
+    reason = 'Nothing to consolidate yet — no existing skills or candidates map to the confirmed domains.';
+  } else if (busy) {
+    reason = 'A consolidation request is in flight — please wait.';
+  }
+  return { enabled: hasWork && !busy, hasWork, reason };
+}
+
 // Total number of source micro-skills the plan would fold across all domains —
 // the headline "collapse" number shown in the preview.
 export function planFoldTotals(plan) {

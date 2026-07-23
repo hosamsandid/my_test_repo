@@ -1,8 +1,8 @@
 // @ts-check
-// STT e2e tests — API-level and UI-level smoke for the speech-to-text pipeline
-// (whisper-asr container + POST /api/transcribe + mic button in MessageInput).
+// STT e2e tests — API-level smoke for the speech-to-text pipeline
+// (parakeet-asr container + POST /api/transcribe + mic button in MessageInput).
 //
-// The beforeAll health-check skips the entire suite when the Whisper container
+// The beforeAll health-check skips the entire suite when the ASR container
 // is not reachable, so this file is safe to run in any environment.
 //
 // Audio fixture: e2e/fixtures/audio/stt-test.wav — JFK inaugural address clip
@@ -29,9 +29,9 @@ function normalize(text) {
 
 test.describe('Speech-to-Text', () => {
   test.beforeAll(async ({ request }) => {
-    // Skip suite if Whisper is unreachable or unhealthy.
-    // Send the real fixture so a working Whisper returns 200; a network error
-    // or a proxy 500 (Whisper down) both skip.
+    // Skip suite if ASR is unreachable or unhealthy.
+    // Send the real fixture so a working ASR returns 200; a network error
+    // or a proxy 500 (ASR down) both skip.
     try {
       const audioBuffer = fs.readFileSync(FIXTURE_PATH);
       const res = await request.post('/api/transcribe', {
@@ -45,10 +45,10 @@ test.describe('Speech-to-Text', () => {
         timeout: 15000,
       });
       if (!res.ok()) {
-        test.skip(true, `Whisper returned ${res.status()} — skipping STT tests`);
+        test.skip(true, `ASR returned ${res.status()} — skipping STT tests`);
       }
     } catch {
-      test.skip(true, 'Whisper ASR container is not reachable — skipping STT tests');
+      test.skip(true, 'ASR container is not reachable — skipping STT tests');
     }
   });
 
@@ -69,7 +69,7 @@ test.describe('Speech-to-Text', () => {
 
     expect(response.ok()).toBeTruthy();
     const body = await response.json();
-    // Whisper must return a text field (may be empty string for a tone fixture).
+    // ASR must return a text field (may be empty string for a tone fixture).
     expect(body).toHaveProperty('text');
     expect(typeof body.text).toBe('string');
 

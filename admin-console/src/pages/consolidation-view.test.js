@@ -11,6 +11,7 @@ import {
   mergeForDomain,
   planDomainRows,
   planFoldTotals,
+  consolidationStartGate,
 } from './consolidation-view.js';
 
 const PLAN = {
@@ -112,4 +113,47 @@ test('planFoldTotals sums the collapse headline', () => {
     unassignedCandidates: 2,
   });
   assert.deepEqual(planFoldTotals(null), { domains: 0, skills: 0, candidates: 0, unassignedSkills: 0, unassignedCandidates: 0 });
+});
+
+test('consolidationStartGate: enabled when a skill OR candidate maps to a confirmed domain (#871 AC1)', () => {
+  // The reported case: 3 skills + 216 candidates, none in a ≥2-skill domain.
+  const gate = consolidationStartGate({ domains: 5, skills: 3, candidates: 216, unassignedSkills: 0, unassignedCandidates: 0 });
+  assert.equal(gate.enabled, true);
+  assert.equal(gate.hasWork, true);
+  assert.equal(gate.reason, '');
+});
+
+test('consolidationStartGate: one skill alone is enough (no ≥2-skill domain required, AC1)', () => {
+  assert.equal(consolidationStartGate({ skills: 1, candidates: 0 }).enabled, true);
+  assert.equal(consolidationStartGate({ skills: 0, candidates: 1 }).enabled, true);
+});
+
+test('consolidationStartGate: unassigned-only content is NOT startable (#871 AC8)', () => {
+  const gate = consolidationStartGate({ domains: 2, skills: 0, candidates: 0, unassignedSkills: 1, unassignedCandidates: 216 });
+  assert.equal(gate.enabled, false);
+  assert.equal(gate.hasWork, false);
+  assert.match(gate.reason, /Nothing to consolidate yet/);
+});
+
+test('consolidationStartGate: nothing to consolidate at all → disabled with the clear reason (AC2/AC4)', () => {
+  const gate = consolidationStartGate({ skills: 0, candidates: 0 });
+  assert.equal(gate.enabled, false);
+  assert.match(gate.reason, /no existing skills or candidates map to the confirmed domains/);
+  // null-safe (plan not loaded yet).
+  const g2 = consolidationStartGate(null);
+  assert.equal(g2.enabled, false);
+  assert.equal(g2.hasWork, false);
+});
+
+test('consolidationStartGate: busy disables even with work, with an in-flight reason (#871 AC7)', () => {
+  const gate = consolidationStartGate({ skills: 4, candidates: 3 }, { busy: true });
+  assert.equal(gate.enabled, false);
+  assert.equal(gate.hasWork, true);
+  assert.match(gate.reason, /in flight/);
+});
+
+test('consolidationStartGate: structural "nothing" reason wins over busy when there is no work', () => {
+  const gate = consolidationStartGate({ skills: 0, candidates: 0 }, { busy: true });
+  assert.equal(gate.enabled, false);
+  assert.match(gate.reason, /Nothing to consolidate yet/);
 });

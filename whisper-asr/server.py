@@ -73,7 +73,7 @@ async def transcribe(audio_file: UploadFile = File(...)):
     audio = _resample(audio, sr, 16000)
 
     stream = recognizer.create_stream()
-    stream.accept_waveform(16000, audio.tolist())
+    stream.accept_waveform(16000, audio)
     recognizer.decode_stream(stream)
 
     return {"text": stream.result.text.strip()}

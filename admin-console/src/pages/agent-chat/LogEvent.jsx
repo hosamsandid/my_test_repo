@@ -4,6 +4,7 @@ import {
   Send, ArrowDown, Cpu, Clock, Settings2, ChevronRight,
 } from 'lucide-react';
 import ToolBlock from './ToolBlock';
+import { systemEventSummary, systemEventHasDetail } from './system-event.js';
 
 /**
  * One row in the SessionLogPanel.
@@ -174,6 +175,9 @@ function hasExpansion(ev) {
     case 'unknown':
     case 'parse_error':
       return true;
+    case 'system_event':
+      // Expandable only when `raw` carries content beyond the subtype label.
+      return systemEventHasDetail(ev);
     default:
       return false;
   }
@@ -346,12 +350,25 @@ function Body({ event, expanded }) {
           Parse error: {truncate(event.raw || '', 200)}
         </div>
       );
-    case 'system_event':
+    case 'system_event': {
+      // Surface the informative content the CLI reported (captured in `raw`,
+      // e.g. a thinking-token count) inline, and offer the full raw JSON on
+      // expand — mirroring the default/unknown case below. Degrades to the
+      // bare `system / <subtype>` label when `raw` carries nothing extra.
+      const summary = systemEventSummary(event.raw);
+      const detail = expanded ? JSON.stringify(event.raw, null, 2) : null;
       return (
         <div style={{ ...baseStyle, color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
           system / <span style={{ color: 'var(--eb-text-secondary)' }}>{event.subtype || 'unknown'}</span>
+          {summary && <span style={{ color: 'var(--eb-text-secondary)' }}> — {summary}</span>}
+          {detail && (
+            <pre style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', fontSize: 'inherit', color: 'var(--eb-text-muted)' }}>
+              {detail}
+            </pre>
+          )}
         </div>
       );
+    }
     default: {
       const rawObj = event.raw ?? event;
       const summary = [rawObj?.type, rawObj?.subtype].filter(Boolean).join(' / ') || event.type || 'unknown';

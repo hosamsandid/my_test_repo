@@ -14,7 +14,7 @@
 
 COMPOSE     ?= podman compose
 COMPOSE_FILE = docker-compose.yml
-SERVICES     = conduwuit orchestrator admin-console
+SERVICES     = conduwuit orchestrator admin-console whisper-asr
 
 # Skill pool seed sources — copied into the skill-pool volume by `make seed-pool`.
 # Two inputs combine into the pool: the ACE engineering skill (host-side, from

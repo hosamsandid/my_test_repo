@@ -258,17 +258,12 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
             padding: '4px 6px',
           }}
         />
-        <div style={{ position: 'relative', flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0, gap: 4 }}>
           {voiceState === 'recording' && (
             <span style={{
-              position: 'absolute',
-              bottom: '100%',
-              left: '50%',
-              transform: 'translateX(-50%)',
               fontSize: 'var(--eb-text-xs)',
               color: 'var(--eb-status-error-text, #dc2626)',
               whiteSpace: 'nowrap',
-              marginBottom: 2,
               fontVariantNumeric: 'tabular-nums',
             }}>
               {Math.floor(elapsedSeconds / 60)}:{String(elapsedSeconds % 60).padStart(2, '0')}

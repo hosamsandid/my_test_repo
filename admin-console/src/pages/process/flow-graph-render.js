@@ -302,7 +302,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     briefings:          [],
     byId:               {},
     roots:              [],
-    contentVisible:     new Set(),
     childrenVisible:    new Set(),
     userCollapsed:      new Set(), // parents the user explicitly collapsed (with expandChildrenByDefault)
     outputsVisible:     new Set(),
@@ -611,9 +610,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   function getNodeHeight(id) {
     const el = canvas.querySelector(`.bp-node[data-id="${id}"]`);
     if (el) return el.offsetHeight;
-    let h = 90;
-    if (state.contentVisible.has(id)) h += 300;
-    return h;
+    return 90;
   }
 
   function getArtifactNodeHeight(path) {
@@ -1208,16 +1205,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       }
 
       // Only append the actions row when it carries something (children /
-      // artifact toggles). The Agent Prompt is a separate disclosure below.
+      // artifact toggles).
       if (actions.childElementCount > 0) node.appendChild(actions);
-
-      // Agent Prompt — a collapsible disclosure (not a named button). Expanding
-      // reveals the read-only prompt/content; editing happens in the inspector.
-      if (bp.body) {
-        const promptToggle = makeDisclosure('Agent Prompt', state.contentVisible.has(n.id));
-        promptToggle.addEventListener('click', () => toggleContent(n.id));
-        node.appendChild(promptToggle);
-      }
 
       // Connect-to-wire port (#362 Phase C2): drag to another node to wire a
       // hand-off / link. Only when editable and a handler is wired.
@@ -1280,16 +1269,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       // badges above keep the "opens PRs/issues" information visible, and the
       // single ● port creates every connection type (the create dialog ranks
       // the PR/Issue channel first for producers).
-
-      // Agent Prompt panel — the node's prompt/content, read-only markdown.
-      // Editing (prompt, stage, links) is in the right-side inspector.
-      if (state.contentVisible.has(n.id) && bp.body) {
-        const body = document.createElement('div');
-        body.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid var(--eb-border-default);font-size:11px;max-height:300px;overflow-y:auto;line-height:1.5;';
-        body.innerHTML = renderMarkdown(bp.body);
-        body.addEventListener('wheel', e => e.stopPropagation());
-        node.appendChild(body);
-      }
 
       canvas.appendChild(node);
     });
@@ -1585,27 +1564,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       color:${active ? '#3b82f6' : 'var(--eb-text-secondary)'};
       cursor:pointer;
     `;
-    return btn;
-  }
-
-  // A collapsible disclosure row (caret + label). Used for the read-only
-  // Agent Prompt panel — reads as a dropdown, not a named action button.
-  function makeDisclosure(label, active) {
-    const btn = document.createElement('button');
-    btn.style.cssText = `
-      display:flex;align-items:center;gap:6px;width:100%;margin-top:6px;
-      padding:2px 0;font-size:11px;font-family:inherit;
-      background:transparent;border:none;
-      color:${active ? '#3b82f6' : 'var(--eb-text-secondary)'};
-      cursor:pointer;text-align:left;
-    `;
-    const caret = document.createElement('span');
-    caret.textContent = active ? '▾' : '▸';
-    caret.style.cssText = 'font-size:9px;line-height:1;';
-    const text = document.createElement('span');
-    text.textContent = label;
-    btn.appendChild(caret);
-    btn.appendChild(text);
     return btn;
   }
 
@@ -2162,12 +2120,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
 
   // ─── Interactions ────────────────────────────────────────────────────
 
-  function toggleContent(id) {
-    if (state.contentVisible.has(id)) state.contentVisible.delete(id);
-    else state.contentVisible.add(id);
-    render();
-  }
-
   function toggleChildren(id) {
     if (state.childrenVisible.has(id)) {
       collapseSubtree(id);
@@ -2214,7 +2166,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     state.briefings.forEach(bp => {
       if (bp.children && bp.children.length > 0) state.userCollapsed.add(bp.id);
     });
-    state.contentVisible.clear();
     state.outputsVisible.clear();
     state.inputsVisible.clear();
     render();
@@ -2393,112 +2344,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   function applyTransform() {
     canvas.style.transform = `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.zoom})`;
     if (document.activeElement !== zoomInput) zoomInput.value = Math.round(state.zoom * 100) + '%';
-  }
-
-  // ─── Markdown Renderer ────────────────────────────────────────────────
-
-  function renderMarkdown(text) {
-    if (!text) return '';
-
-    let html = esc(text);
-
-    const codeBlocks = [];
-    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
-      let rendered = code.replace(/\n$/, '').split('\n').map(line => {
-        if (line.startsWith('+') && !line.startsWith('+++')) return `<span style="color:#34d399">${line}</span>`;
-        if (line.startsWith('-') && !line.startsWith('---')) return `<span style="color:#f87171">${line}</span>`;
-        return line;
-      }).join('\n');
-      const placeholder = `\x00CB${codeBlocks.length}\x00`;
-      codeBlocks.push(`<pre style="background:var(--eb-bg-app);border:1px solid var(--eb-border-default);padding:8px;border-radius:4px;overflow-x:auto;"><code${lang ? ` data-lang="${lang}"` : ''}>${rendered}</code></pre>`);
-      return placeholder;
-    });
-
-    const inlineCodes = [];
-    html = html.replace(/`([^`]+)`/g, (_, code) => {
-      const placeholder = `\x00IC${inlineCodes.length}\x00`;
-      inlineCodes.push(`<code style="background:var(--eb-bg-app);border:1px solid var(--eb-border-default);padding:1px 4px;border-radius:3px;">${code}</code>`);
-      return placeholder;
-    });
-
-    {
-      const lines  = html.split('\n');
-      const result = [];
-      for (let i = 0; i < lines.length; i++) {
-        const prev = result.length > 0 ? result[result.length - 1] : '';
-        if (/^\s+\S/.test(lines[i]) && !/^\s*- /.test(lines[i]) && /^\s*- /.test(prev)) {
-          result[result.length - 1] += ' ' + lines[i].trim();
-        } else {
-          result.push(lines[i]);
-        }
-      }
-      html = result.join('\n');
-    }
-
-    html = html.replace(/^(\|.+\|)\n(\|[-: |]+\|)\n((?:\|.+\|\n?)*)/gm, (match, header, sep, body) => {
-      const stripOuter = parts => { let a = parts; if (!a[0].trim()) a = a.slice(1); if (!a[a.length-1].trim()) a = a.slice(0,-1); return a; };
-      const sepCells = stripOuter(sep.split('|'));
-      const aligns = sepCells.map(c => {
-        const t = c.trim();
-        if (t.startsWith(':') && t.endsWith(':')) return 'center';
-        if (t.endsWith(':')) return 'right';
-        return 'left';
-      });
-      const ths = stripOuter(header.split('|')).map((c, i) =>
-        `<th style="text-align:${aligns[i] || 'left'};padding:4px 8px;border:1px solid var(--eb-border-default);">${c.trim()}</th>`
-      ).join('');
-      const rows = body.trim().split('\n').filter(r => r.trim()).map(row => {
-        const tds = stripOuter(row.split('|')).map((c, i) =>
-          `<td style="text-align:${aligns[i] || 'left'};padding:4px 8px;border:1px solid var(--eb-border-default);">${c.trim()}</td>`
-        ).join('');
-        return `<tr>${tds}</tr>`;
-      }).join('');
-      return `<table style="border-collapse:collapse;width:100%;"><thead><tr>${ths}</tr></thead><tbody>${rows}</tbody></table>`;
-    });
-
-    html = html.replace(/(^&gt; .+(\n&gt; .+)*)/gm, (match) => {
-      const content = match.replace(/^&gt; ?/gm, '');
-      return `<blockquote style="border-left:3px solid var(--eb-border-default);padding-left:8px;color:var(--eb-text-secondary);margin:4px 0;">${content}</blockquote>`;
-    });
-
-    html = html.replace(/^#### (.+)$/gm, '<h4 style="margin:6px 0 2px;">$1</h4>');
-    html = html.replace(/^### (.+)$/gm,  '<h3 style="margin:6px 0 2px;">$1</h3>');
-    html = html.replace(/^## (.+)$/gm,   '<h2 style="margin:6px 0 2px;">$1</h2>');
-    html = html.replace(/^# (.+)$/gm,    '<h1 style="margin:6px 0 2px;">$1</h1>');
-    html = html.replace(/^---$/gm, '<hr style="border:none;border-top:1px solid var(--eb-border-default);">');
-
-    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    html = html.replace(/\*(.+?)\*/g,     '<em>$1</em>');
-
-    html = html.replace(/^- \[ \] (.+)$/gm, '<li style="list-style:none">&#9744; $1</li>');
-    html = html.replace(/^- \[x\] (.+)$/gm, '<li style="list-style:none">&#9745; $1</li>');
-    html = html.replace(/^\s*- (.+)$/gm, '<li>$1</li>');
-    html = html.replace(/^\d+\. (.+)$/gm, '<oli>$1</oli>');
-
-    html = html.replace(/((?:<li[^>]*>.*<\/li>\n?)+)/g, '<ul style="padding-left:16px;margin:4px 0;">$1</ul>');
-    html = html.replace(/((?:<oli>.*<\/oli>\n?)+)/g, (m) => {
-      return '<ol style="padding-left:16px;margin:4px 0;">' + m.replace(/<\/?oli>/g, t => t.replace('oli', 'li')) + '</ol>';
-    });
-
-    html = html.replace(/\n\n+/g, '</p><p>');
-    html = '<p style="margin:0 0 4px;">' + html + '</p>';
-
-    const blocks = ['h[1234]', 'table', 'ul', 'ol', 'pre', 'hr', 'blockquote'];
-    html = html.replace(/<p[^>]*>\s*<\/p>/g, '');
-    blocks.forEach(tag => {
-      html = html.replace(new RegExp(`<p[^>]*>\\s*(<${tag}[> ])`, 'g'), '$1');
-      html = html.replace(new RegExp(`<p[^>]*>\\s*(<${tag}>)`, 'g'), '$1');
-      html = html.replace(new RegExp(`(</${tag}>)\\s*</p>`, 'g'), '$1');
-    });
-
-    codeBlocks.forEach((block, i) => {
-      html = html.replace(`\x00CB${i}\x00`, block);
-    });
-    inlineCodes.forEach((code, i) => {
-      html = html.replace(`\x00IC${i}\x00`, code);
-    });
-
-    return html;
   }
 
   // ─── Utilities ────────────────────────────────────────────────────────

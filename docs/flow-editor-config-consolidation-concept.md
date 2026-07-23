@@ -200,18 +200,19 @@ surface again.
 
 ## 8. Phasing
 
-Deliberately incremental; each phase ships alone and leaves the editor consistent:
+Deliberately incremental; each phase ships alone and leaves the editor consistent. Epic: #864.
 
-1. **Restructure (pure moves, no behaviour change).** Parent → Details/Structure. Artifacts block
-   + channel/data-flow rows appear in Routing (still remove-only, linking derived triggers to
+1. **Restructure (pure moves, no behaviour change)** — #865. Parent → Details/Structure. Artifacts
+   block + channel/data-flow rows appear in Routing (still remove-only, linking derived triggers to
    ports). Connections tab retired. Edge-dialog "Open in Routing" jump for all edge types.
-2. **Inputs CRUD parity.** Reuse the `TriggersPanel` form as the Routing input-row detail editor;
-   `[+ Add input]` chooser incl. channel/data-flow creation from the inspector. Derived triggers
-   disappear as raw rows. Retire the Triggers tab (keep the raw-`triggers.json` disclosure).
-3. **Legacy output removal (#784 phase 6).** Remove `EmitsEditor` + produce checkboxes; migrate
-   templates/drafts still carrying flat `emits` on first save through the Routing tab.
-4. **Optional later:** per-channel wake-prompt override on derived inputs; artifacts as outcome
-   actions; dropping the per-type edge edit dialogs in favour of the Routing jump.
+2. **Inputs CRUD parity** — #866. Reuse the `TriggersPanel` form as the Routing input-row detail
+   editor; `[+ Add input]` chooser incl. channel/data-flow creation from the inspector. Derived
+   triggers disappear as raw rows. Retire the Triggers tab (keep the raw-`triggers.json`
+   disclosure).
+3. **Legacy output removal (#784 phase 6)** — #867. Remove `EmitsEditor` + produce checkboxes;
+   migrate templates/drafts still carrying flat `emits` on first save through the Routing tab.
+4. **Optional later** — #868: per-channel wake-prompt override on derived inputs; artifacts as
+   outcome actions; dropping the per-type edge edit dialogs in favour of the Routing jump.
 
 Open (product) questions, non-blocking, defaults chosen above: (a) whether the Triggers tab
 survives as a read-only "advanced/raw" view instead of a disclosure — default: disclosure only;

@@ -140,6 +140,38 @@ const SANITIZE_SCHEMA = {
   },
 };
 
+/**
+ * Shared markdown presentation CSS for the `.agent-chat-md` wrapper.
+ *
+ * Single source of truth so the trigger-notice card (NoticeMessage) renders
+ * markdown byte-for-byte the same as the regular chat bubble — same compact
+ * paragraph/heading/blockquote spacing so block-level markdown can't blow up
+ * a card. Rendered via a `<style>` tag in both surfaces.
+ */
+const AGENT_CHAT_MD_CSS = `
+  .agent-chat-md { min-width: 0; max-width: 100%; }
+  /* rehype-pretty-code wraps code blocks in a <figure> — kill the UA
+     default margin (1em 40px) and cap it so the pre's own horizontal
+     scrollbar kicks in instead of widening the bubble. */
+  .agent-chat-md figure { margin: 0; max-width: 100%; min-width: 0; }
+  .agent-chat-md pre { max-width: 100%; }
+  .agent-chat-md :not(pre) > code { overflow-wrap: anywhere; }
+  .agent-chat-md p { margin: 0; }
+  .agent-chat-md p + p { margin-top: var(--eb-space-2); }
+  .agent-chat-md ul, .agent-chat-md ol { padding-left: 1.4em; margin: var(--eb-space-1) 0; }
+  .agent-chat-md li { margin: 2px 0; }
+  .agent-chat-md table { border-collapse: collapse; margin: var(--eb-space-2) 0; font-size: var(--eb-text-sm); display: block; max-width: 100%; overflow-x: auto; }
+  .agent-chat-md th, .agent-chat-md td { border: 1px solid var(--eb-border-default); padding: 4px 8px; text-align: left; }
+  .agent-chat-md th { background: var(--eb-bg-elevated); }
+  .agent-chat-md blockquote { margin: var(--eb-space-2) 0; padding-left: var(--eb-space-3); border-left: 3px solid var(--eb-border-default); color: var(--eb-text-secondary); }
+  .agent-chat-md h1, .agent-chat-md h2, .agent-chat-md h3, .agent-chat-md h4 { margin: var(--eb-space-3) 0 var(--eb-space-1); font-weight: var(--eb-font-semibold); }
+  .agent-chat-md h1 { font-size: var(--eb-text-lg); }
+  .agent-chat-md h2 { font-size: var(--eb-text-md); }
+  .agent-chat-md h3 { font-size: var(--eb-text-md); color: var(--eb-text-secondary); }
+  .agent-chat-md hr { border: none; border-top: 1px solid var(--eb-border-default); margin: var(--eb-space-3) 0; }
+  .agent-chat-md a { color: var(--eb-accent-primary); }
+`;
+
 const TIME_FORMAT = new Intl.DateTimeFormat('de-DE', { hour: '2-digit', minute: '2-digit' });
 const DATE_TIME_FORMAT = new Intl.DateTimeFormat('de-DE', {
   day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
@@ -281,12 +313,20 @@ function NoticeMessage({ message }) {
         color: 'var(--eb-text-muted)',
         maxWidth: 'min(720px, 75%)',
       }}>
-        {/* Plain text only — intentionally scoped to AEE trigger notices, not general Matrix m.notice rendering */}
-        <span>{message.body}</span>
+        {/* Render markdown through the same sanitized pipeline as the normal
+            chat bubble (SafeMarkdown = react-markdown + remark-gfm +
+            rehype-pretty-code + rehype-sanitize), scoped to AEE trigger
+            notices. The `.agent-chat-md` wrapper (styled below) keeps the card
+            compact so inline code renders formatted without literal backticks
+            while block-level markdown can't blow up the card. */}
+        <div className="agent-chat-md">
+          <SafeMarkdown body={message.body || ''} />
+        </div>
         <div style={{ fontSize: 'var(--eb-text-xs)', marginTop: 'var(--eb-space-0-5)', opacity: 0.7 }}>
           {message.sender} · {time}
         </div>
       </div>
+      <style>{AGENT_CHAT_MD_CSS}</style>
     </div>
   );
 }
@@ -356,29 +396,7 @@ export default function Message({ message, agentUserId, thinking }) {
         </div>
       </div>
 
-      <style>{`
-        .agent-chat-md { min-width: 0; max-width: 100%; }
-        /* rehype-pretty-code wraps code blocks in a <figure> — kill the UA
-           default margin (1em 40px) and cap it so the pre's own horizontal
-           scrollbar kicks in instead of widening the bubble. */
-        .agent-chat-md figure { margin: 0; max-width: 100%; min-width: 0; }
-        .agent-chat-md pre { max-width: 100%; }
-        .agent-chat-md :not(pre) > code { overflow-wrap: anywhere; }
-        .agent-chat-md p { margin: 0; }
-        .agent-chat-md p + p { margin-top: var(--eb-space-2); }
-        .agent-chat-md ul, .agent-chat-md ol { padding-left: 1.4em; margin: var(--eb-space-1) 0; }
-        .agent-chat-md li { margin: 2px 0; }
-        .agent-chat-md table { border-collapse: collapse; margin: var(--eb-space-2) 0; font-size: var(--eb-text-sm); display: block; max-width: 100%; overflow-x: auto; }
-        .agent-chat-md th, .agent-chat-md td { border: 1px solid var(--eb-border-default); padding: 4px 8px; text-align: left; }
-        .agent-chat-md th { background: var(--eb-bg-elevated); }
-        .agent-chat-md blockquote { margin: var(--eb-space-2) 0; padding-left: var(--eb-space-3); border-left: 3px solid var(--eb-border-default); color: var(--eb-text-secondary); }
-        .agent-chat-md h1, .agent-chat-md h2, .agent-chat-md h3, .agent-chat-md h4 { margin: var(--eb-space-3) 0 var(--eb-space-1); font-weight: var(--eb-font-semibold); }
-        .agent-chat-md h1 { font-size: var(--eb-text-lg); }
-        .agent-chat-md h2 { font-size: var(--eb-text-md); }
-        .agent-chat-md h3 { font-size: var(--eb-text-md); color: var(--eb-text-secondary); }
-        .agent-chat-md hr { border: none; border-top: 1px solid var(--eb-border-default); margin: var(--eb-space-3) 0; }
-        .agent-chat-md a { color: var(--eb-accent-primary); }
-      `}</style>
+      <style>{AGENT_CHAT_MD_CSS}</style>
     </div>
   );
 }

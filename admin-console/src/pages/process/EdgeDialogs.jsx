@@ -3,6 +3,7 @@ import { Loader2 } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
 import { liveOps } from './edit-adapters';
 import { TriggerForm } from '../agent-chat/TriggersPanel';
+import { defaultListenerPrompt, handoffVerb, handoffTargetNoun } from './handoff-prompt';
 
 // Only these GitHub events carry a label name, so a labelFilter is meaningful.
 const LABEL_EVENTS = [
@@ -114,8 +115,8 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
   }, [from, to]);
 
   const event = `${target}.${action}`; // e.g. issues.labeled, pull_request.unlabeled
-  const verb = action === 'labeled' ? 'added to' : 'removed from';
-  const targetNoun = target === 'issues' ? 'an issue' : 'a pull request';
+  const verb = handoffVerb(action);
+  const targetNoun = handoffTargetNoun(target);
 
   // Human gates (human:*) and the universal brakes are set by humans, never by
   // an agent — wire only the listener, never an agent emit (#333).
@@ -124,7 +125,7 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
   const humanLabel = isGate || isBrake;
 
   const effectivePrompt = prompt
-    || `\`${label || '<label>'}\` was ${verb} ${targetNoun} in \`${repo || '<repo>'}\` by ${fromName || from}. The event payload above has the details.\n\n<Describe what ${toName || to} should do.> Reply \`[PASS]\` if there's nothing to do.`;
+    || defaultListenerPrompt({ label, verb, targetNoun, repo, fromLabel: fromName || from, toLabel: toName || to });
 
   async function submit() {
     const trimmed = label.trim();
@@ -618,6 +619,11 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
   const [action, setAction] = useState('labeled');
   const [labelName, setLabelName] = useState(label || '');
   const [initialEvents, setInitialEvents] = useState([]);
+  const [repo, setRepo] = useState('');
+  // The stored listener prompt. `null` = untouched / not yet loaded (AC3: seed
+  // the auto-generated default); any string (incl. '') = an operator-owned value
+  // shown verbatim and saved as-is (AC2 + the empty-prompt / rename edge cases).
+  const [prompt, setPrompt] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [delListener, setDelListener] = useState(true);
   const [delEmit, setDelEmit] = useState(!humanSource);
@@ -638,6 +644,11 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
           if (typeof t.labelFilter === 'string' && t.labelFilter.trim()) {
             setLabelName(t.labelFilter.trim());
           }
+          if (typeof t.repo === 'string') setRepo(t.repo);
+          // Prefill the stored prompt verbatim (AC2). A trigger with no stored
+          // prompt (undefined / non-string — e.g. created before this field
+          // existed) stays `null`, so the default seeds it below (AC3).
+          if (typeof t.prompt === 'string') setPrompt(t.prompt);
         }
       } catch (e) {
         if (alive) setError(e.message);
@@ -649,8 +660,17 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
   }, [to, triggerId]);
 
   const event = `${target}.${action}`;
-  const verb = action === 'labeled' ? 'added to' : 'removed from';
-  const targetNoun = target === 'issues' ? 'an issue' : 'a pull request';
+  const verb = handoffVerb(action);
+  const targetNoun = handoffTargetNoun(target);
+  // While untouched (prompt === null), show the same auto-generated default the
+  // create dialog offers, derived live from the current label/kind (AC3). Once
+  // loaded from storage or edited, show that value verbatim.
+  const effectivePrompt = prompt !== null
+    ? prompt
+    : defaultListenerPrompt({
+        label: labelName, verb, targetNoun, repo,
+        fromLabel: fromName || from, toLabel: toName || to,
+      });
 
   async function saveEdits() {
     const newLabel = labelName.trim();
@@ -659,6 +679,10 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
     try {
       await ops.updateTrigger(to, triggerId, {
         events: [event], labelFilter: newLabel,
+        // Persist the prompt verbatim (AC4) — the seeded default when untouched,
+        // the operator's text otherwise (incl. an intentionally empty value).
+        // Never regenerated on a label rename (saved as-is per the edge cases).
+        prompt: effectivePrompt,
       });
       // Renaming the label keeps the source's emits in sync (agent-sourced
       // hand-offs only — human-set labels have no emitter to rewrite).
@@ -723,6 +747,15 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
               </small>
             )}
           </Field>
+
+          <Field label="Listener prompt">
+            <textarea value={effectivePrompt} onChange={e => setPrompt(e.target.value)}
+              style={{ ...input, minHeight: 120, fontFamily: 'var(--eb-font-mono)', resize: 'vertical' }} />
+          </Field>
+          <small style={small}>
+            The instruction <strong>{toName || to}</strong> is woken with. Leave the
+            default or refine it; clearing it saves an empty prompt.
+          </small>
 
           {error && <span style={errStyle}>{error}</span>}
 

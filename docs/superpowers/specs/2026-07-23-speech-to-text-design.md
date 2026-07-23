@@ -100,18 +100,37 @@ One test for `POST /api/transcribe` — mock the Whisper fetch to verify:
 - `useVoiceRecorder` hook: test state transitions (idle → recording → transcribing → idle), cleanup on unmount.
 - MessageInput component: verify mic button renders, correct icons per state, transcribed text appended to textarea.
 
-### E2E test (Playwright)
+### E2E tests (Playwright)
 
-Real end-to-end test exercising the full transcription pipeline:
+Both tests require the Whisper container running. A `beforeAll` health check skips the suite if unreachable — fast fail, not a 15s timeout.
 
-1. **Fixture:** A short (3-5s), clear audio file committed to `e2e/fixtures/audio/stt-test.wav`. Native English speaker, quiet environment, unambiguous phrase (e.g. "Hello, this is a test recording").
-2. **Test flow:** Playwright's `request.post` sends the fixture to `/api/transcribe` as `multipart/form-data`. No microphone, no UI interaction.
-3. **Assertion:** Normalize response (lowercase, collapse/strip whitespace, strip punctuation). Assert the result contains key words ("hello", "test", "recording") rather than exact match — absorbs minor Whisper variations.
-4. **Guard:** `beforeAll` health check on the Whisper container. Test is skipped if unreachable — fast fail, not a 15s timeout.
+**Fixture:** A short (3-5s), clear audio file committed to `e2e/fixtures/audio/stt-test.wav`. Native English speaker, quiet environment, unambiguous phrase (e.g. "Hello, this is a test recording").
 
-### Manual check
+**Assertion (shared):** Normalize response text (lowercase, collapse/strip whitespace, strip punctuation). Assert the result contains key words ("hello", "test", "recording") rather than exact match — absorbs minor Whisper variations.
 
-Verify the full UI flow once (tap mic, speak, see text in textarea). Cannot automate browser microphone grants reliably.
+#### API-level test (fast check)
+
+Playwright's `request.post` sends the fixture to `/api/transcribe` as `multipart/form-data`. No browser, no UI — validates the backend proxy and Whisper integration in isolation.
+
+#### UI-level test (full flow)
+
+Launches Chromium with fake-audio flags so `getUserMedia` returns the fixture as a mic stream — no real microphone, no permission prompt:
+
+```js
+chromium.launch({
+  args: [
+    '--use-fake-device-for-media-stream',
+    '--use-file-for-fake-audio-capture=/path/to/stt-test.wav',
+  ],
+});
+```
+
+Test flow:
+1. Navigate to an agent chat page.
+2. Click the mic button — starts "recording" from the fixture file.
+3. Wait a few seconds, click mic again — stops recording.
+4. Wait for the transcribing state to resolve.
+5. Assert the textarea contains the expected key words.
 
 ## Files Changed
 

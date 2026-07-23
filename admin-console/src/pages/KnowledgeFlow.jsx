@@ -5,8 +5,10 @@ import {
   Archive, Share2, ShieldCheck, Ban, MessageSquare, Search, ArrowRight, Users,
   HelpCircle, BookOpen, Combine, Trash2, MoreHorizontal, FileText,
   Inbox, Filter, RotateCcw, CheckCircle2, Circle, Play, SkipForward, Layers,
+  Pencil,
 } from 'lucide-react';
 import InfoTip from '../components/InfoTip';
+import IconButton from '../components/IconButton';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import SkillMarkdown from '../components/SkillMarkdown';
@@ -1015,59 +1017,83 @@ function DomainsPanel({ teamId, domains, budget, onChanged }) {
   const pct = budget && budget.cap ? Math.min(100, Math.round((budget.used / budget.cap) * 100)) : 0;
 
   return (
-    <div style={{ marginBottom: 'var(--eb-space-3)', border: '1px solid var(--eb-border)', borderRadius: 8, padding: 'var(--eb-space-2)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }} onClick={() => setOpen(o => !o)}>
-        <strong style={{ fontSize: 13 }}>Domains</strong>
-        <span style={{ fontSize: 12, opacity: 0.7 }}>{list.length}</span>
+    <div style={{
+      marginBottom: 'var(--eb-space-3)', border: '1px solid var(--eb-border-default)',
+      borderRadius: 'var(--eb-radius-lg)', background: 'var(--eb-bg-surface)', padding: 'var(--eb-space-3)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', cursor: 'pointer' }}
+        onClick={() => setOpen(o => !o)}>
+        <strong style={{ fontSize: 'var(--eb-text-base)', color: 'var(--eb-text-primary)' }}>Domains</strong>
+        <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>{list.length}</span>
         {budget && (
           <span title={`${budget.used} of ${budget.cap} skills used${over ? ' — at budget; new domains need a merge or override' : ''}`}
-            style={{ marginLeft: 'auto', fontSize: 11, color: over ? 'var(--eb-danger, #b91c1c)' : 'var(--eb-muted, #6b7280)' }}>
+            style={{
+              marginLeft: 'auto', fontSize: 'var(--eb-text-xs)',
+              color: over ? 'var(--eb-status-error)' : 'var(--eb-text-muted)',
+            }}>
             budget {budget.used}/{budget.cap}
           </span>
         )}
-        <span aria-hidden style={{ fontSize: 11, opacity: 0.6 }}>{open ? '▾' : '▸'}</span>
+        <span aria-hidden style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{open ? '▾' : '▸'}</span>
       </div>
       {budget && (
-        <div style={{ height: 4, borderRadius: 2, background: 'var(--eb-border)', marginTop: 6, overflow: 'hidden' }}>
-          <div style={{ width: `${pct}%`, height: '100%', background: over ? 'var(--eb-danger, #b91c1c)' : 'var(--eb-accent, #2563eb)' }} />
+        <div style={{
+          height: 4, borderRadius: 'var(--eb-radius-full)', background: 'var(--eb-border-default)',
+          marginTop: 'var(--eb-space-1)', overflow: 'hidden',
+        }}>
+          <div style={{ width: `${pct}%`, height: '100%', background: over ? 'var(--eb-status-error)' : 'var(--eb-accent-primary)' }} />
         </div>
       )}
       {open && (
         <div style={{ marginTop: 'var(--eb-space-2)' }}>
           {list.length === 0 && (
-            <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 6 }}>
-              No domains yet. Seed the defaults from the team’s roles, then edit them.
-              <button disabled={busy} onClick={() => post({ op: 'seed' })} style={{ marginLeft: 6 }}>Seed defaults</button>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap',
+              fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', marginBottom: 'var(--eb-space-2)',
+            }}>
+              <span>No domains yet. Seed the defaults from the team’s roles, then edit them.</span>
+              <button disabled={busy} onClick={() => post({ op: 'seed' })}
+                style={{ ...miniBtn, opacity: busy ? 0.5 : 1 }}>Seed defaults</button>
             </div>
           )}
           {list.map(d => (
-            <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0', fontSize: 12 }}>
+            <div key={d.id} style={{
+              display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+              padding: 'var(--eb-space-1) 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)',
+            }}>
               {renaming && renaming.id === d.id ? (
                 <>
                   <input value={renaming.name} autoFocus
                     onChange={e => setRenaming({ id: d.id, name: e.target.value })}
-                    style={{ flex: 1, fontSize: 12 }} />
+                    style={{ ...inp, flex: 1 }} />
                   <button disabled={busy || !renaming.name.trim()}
-                    onClick={() => post({ op: 'rename', id: d.id, name: renaming.name.trim() }).then(() => setRenaming(null))}>Save</button>
-                  <button disabled={busy} onClick={() => setRenaming(null)}>Cancel</button>
+                    onClick={() => post({ op: 'rename', id: d.id, name: renaming.name.trim() }).then(() => setRenaming(null))}
+                    style={{ ...primaryBtn, opacity: (busy || !renaming.name.trim()) ? 0.5 : 1 }}>Save</button>
+                  <button disabled={busy} onClick={() => setRenaming(null)}
+                    style={{ ...miniBtn, opacity: busy ? 0.5 : 1 }}>Cancel</button>
                 </>
               ) : (
                 <>
                   <span style={{ flex: 1, overflowWrap: 'anywhere' }}>{d.name}</span>
-                  {d.scope && d.scope !== 'team' && <span style={{ fontSize: 10, opacity: 0.6 }}>{d.scope}</span>}
-                  <button disabled={busy} title="Rename" onClick={() => setRenaming({ id: d.id, name: d.name })}>✎</button>
-                  <button disabled={busy} title="Remove" onClick={() => post({ op: 'remove', id: d.id })}>✕</button>
+                  {d.scope && d.scope !== 'team' && (
+                    <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{d.scope}</span>
+                  )}
+                  <IconButton icon={Pencil} label="Rename" disabled={busy}
+                    onClick={() => setRenaming({ id: d.id, name: d.name })} />
+                  <IconButton icon={Trash2} label="Remove" danger disabled={busy}
+                    onClick={() => post({ op: 'remove', id: d.id })} />
                 </>
               )}
             </div>
           ))}
-          <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)' }}>
             <input value={adding} placeholder="New domain name…"
               onChange={e => setAdding(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter' && adding.trim()) post({ op: 'add', domain: { name: adding.trim() } }).then(() => setAdding('')); }}
-              style={{ flex: 1, fontSize: 12 }} />
+              style={{ ...inp, flex: 1 }} />
             <button disabled={busy || !adding.trim()}
-              onClick={() => post({ op: 'add', domain: { name: adding.trim() } }).then(() => setAdding(''))}>Add</button>
+              onClick={() => post({ op: 'add', domain: { name: adding.trim() } }).then(() => setAdding(''))}
+              style={{ ...primaryBtn, opacity: (busy || !adding.trim()) ? 0.5 : 1 }}>Add</button>
           </div>
         </div>
       )}

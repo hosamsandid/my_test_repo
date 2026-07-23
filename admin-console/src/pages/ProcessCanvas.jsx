@@ -273,6 +273,18 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
 
   function afterEdit() { if (!isDraft) refetch(); /* draft re-derives via persist */ }
 
+  // "Open in Routing" jump (#865): an edge edit dialog hands control to the
+  // owning node's inspector, focused on the row/section that carries the edge —
+  // the same setRoutingFocus mechanism the canvas uses for outcome-edge clicks.
+  // A 'structure' section targets the Details tab (Parent lives there now).
+  function openRouting(nodeId, section) {
+    if (!nodeId) return;
+    setSelectedEdge(null);
+    setSelectedId(nodeId);
+    graphRef.current?.setSelected(nodeId);
+    setRoutingFocus({ tab: section === 'structure' ? 'details' : 'routing', section });
+  }
+
   // Round-trip (#348): open a live team as an editable draft copy.
   async function editAsDraft() {
     try {
@@ -513,6 +525,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
             ? (displayGraph?.edges || []).filter(e =>
                 e.on === 'github' && e.from === selectedEdge.from && e.artifact === selectedEdge.artifact).length
             : undefined}
+          onOpenRouting={openRouting}
           onClose={() => setSelectedEdge(null)}
           onDone={() => { setSelectedEdge(null); afterEdit(); }}
         />

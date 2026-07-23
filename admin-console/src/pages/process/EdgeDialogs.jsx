@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Loader2 } from 'lucide-react';
+import { Loader2, ArrowUpRight } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
 import { liveOps } from './edit-adapters';
 import { TriggerForm } from '../agent-chat/TriggersPanel';
@@ -538,7 +538,7 @@ export function EditHandoffDialog(props) {
 /* ── Edit / remove a GitHub channel edge (#380) ─────────────────────────────
  * The channel is a port on the consumer; editing changes the routing label +
  * human-gate, removing drops the port (the backend re-derives the trigger). */
-function EditChannelDialog({ edge, fromName, toName, ops = liveOps, producerChannelCount, onClose, onDone }) {
+function EditChannelDialog({ edge, fromName, toName, ops = liveOps, producerChannelCount, onClose, onDone, onOpenRouting }) {
   const { from, to, artifact: art } = edge;
   const artifact = art === 'issue' ? 'issue' : 'pr';
   const [label, setLabel] = useState(edge.label || '');
@@ -582,7 +582,8 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, producerChan
       <p style={hint}>
         <strong>{fromName || from}</strong>'s {noun} → <strong>{toName || to}</strong>
       </p>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={to} section="inputs" />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)', marginTop: 'var(--eb-space-3)' }}>
         <Field label="Routing label (optional)">
           <input value={label} onChange={e => setLabel(e.target.value)}
             placeholder="e.g. approved" style={input} />
@@ -611,7 +612,7 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, producerChan
   );
 }
 
-function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDone }) {
+function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDone, onOpenRouting }) {
   const { from, to, label, triggerId } = edge;
   // Actor-sourced hand-off (#412): the label is set by a human, not an agent —
   // there is no emit to edit or strip, only the listener trigger.
@@ -726,6 +727,7 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
       <p style={hint}>
         <strong>{fromName || from}</strong> → <code>{label}</code> → <strong>{toName || to}</strong>
       </p>
+      <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={to} section="inputs" />
       {loading ? (
         <Center><Loader2 size={14} style={spin} /> Loading…</Center>
       ) : (
@@ -805,7 +807,7 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
 }
 
 /* ── Remove a dependency or parent edge ─────────────────────────────────── */
-function RemoveEdgeDialog({ kind, edge, fromName, toName, ops = liveOps, onClose, onDone }) {
+function RemoveEdgeDialog({ kind, edge, fromName, toName, ops = liveOps, onClose, onDone, onOpenRouting }) {
   const { from, to } = edge;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -829,6 +831,8 @@ function RemoveEdgeDialog({ kind, edge, fromName, toName, ops = liveOps, onClose
           <><strong>{fromName || from}</strong> is the parent of <strong>{toName || to}</strong>.</>
         )}
       </p>
+      <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={to} section={isDep ? 'inputs' : 'structure'} />
+      <div style={{ marginTop: 'var(--eb-space-3)' }} />
       {error && <span style={errStyle}>{error}</span>}
       <div style={actions}>
         <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
@@ -843,7 +847,7 @@ function RemoveEdgeDialog({ kind, edge, fromName, toName, ops = liveOps, onClose
 /* ── Remove one side of a data-flow (artifact) edge ─────────────────────────
  * The graph routes data flow through a shared artifact node, so a click targets
  * exactly one port — a producer's output or a consumer's input of that path. */
-function RemoveArtifactEdgeDialog({ edge, fromName, ops = liveOps, onClose, onDone }) {
+function RemoveArtifactEdgeDialog({ edge, fromName, ops = liveOps, onClose, onDone, onOpenRouting }) {
   const { from, direction, path } = edge;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -860,6 +864,8 @@ function RemoveArtifactEdgeDialog({ edge, fromName, ops = liveOps, onClose, onDo
       <p style={hint}>
         <strong>{fromName || from}</strong> {isOutput ? 'produces' : 'consumes'} <code>{path}</code>.
       </p>
+      <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={from} section={isOutput ? 'artifacts' : 'inputs'} />
+      <div style={{ marginTop: 'var(--eb-space-3)' }} />
       <div style={{ ...small, marginBottom: 'var(--eb-space-3)' }}>
         Removes this {isOutput ? 'output' : 'input'} port only. The other side of the flow (if any) stays —
         remove it from its own node to clear the whole hand-off.
@@ -884,7 +890,7 @@ function RemoveArtifactEdgeDialog({ edge, fromName, ops = liveOps, onClose, onDo
 // lets the user turn the schedule into a different trigger kind (the graph
 // re-derives the edge on refresh); Save patches the trigger through the ops
 // adapter, so unrelated fields (emits, dataFlow, channel markers) stay intact.
-function EditTimerDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
+function EditTimerDialog({ edge, toName, ops = liveOps, onClose, onDone, onOpenRouting }) {
   const { to, triggerId } = edge;
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -919,6 +925,7 @@ function EditTimerDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
   return (
     <SidePanel open onClose={onClose} title="Schedule" width="520px">
       <p style={hint}>⏰ Schedule → <strong>{toName || to}</strong></p>
+      <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={to} section="inputs" />
       {loading ? (
         <Center><Loader2 size={14} style={spin} /> Loading…</Center>
       ) : !initialValues ? (
@@ -946,7 +953,7 @@ function EditTimerDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
 // 🐙 → agent: edit the event, the optional label filter + origin filter,
 // or delete. The same unified GitHub-trigger surface the create dialog offers —
 // one event per trigger; legacy multi-event triggers surface a notice.
-function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
+function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone, onOpenRouting }) {
   const { to, triggerId } = edge;
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -1002,6 +1009,7 @@ function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
   return (
     <SidePanel open onClose={onClose} title="GitHub trigger" width="520px">
       <p style={hint}>🐙 GitHub → <strong>{toName || to}</strong></p>
+      <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={to} section="inputs" />
       {loading ? <Center><Loader2 size={14} style={spin} /> Loading…</Center> : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
           <Field label="Event">
@@ -1033,7 +1041,7 @@ function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
 }
 
 // ⚡ → agent: show the hook URL, rotate the secret (shown once), or delete.
-function EditWebhookDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
+function EditWebhookDialog({ edge, toName, ops = liveOps, onClose, onDone, onOpenRouting }) {
   const { to, triggerId, label } = edge;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -1058,7 +1066,8 @@ function EditWebhookDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
   return (
     <SidePanel open onClose={onClose} title="Webhook" width="520px">
       <p style={hint}>⚡ {label || 'Webhook'} → <strong>{toName || to}</strong></p>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={to} section="inputs" />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)', marginTop: 'var(--eb-space-3)' }}>
         {isDraft ? (
           <div style={small}>The URL exists once the team is materialised.</div>
         ) : (
@@ -1302,6 +1311,26 @@ function Field({ label, children }) {
     </label>
   );
 }
+
+// "Open in Routing" jump link (#865): closes the edge dialog and opens the owning
+// node's inspector focused on the row/section that carries this edge — the same
+// setRoutingFocus pattern the canvas uses for outcome edges. `section` of
+// 'structure' targets the Details tab (Parent lives there now); everything else
+// targets a Routing section (inputs / artifacts / legacy).
+function OpenRoutingLink({ onOpenRouting, nodeId, section }) {
+  if (typeof onOpenRouting !== 'function' || !nodeId) return null;
+  const where = section === 'structure' ? 'Details' : 'Routing';
+  return (
+    <button type="button" onClick={() => onOpenRouting(nodeId, section)} style={jumpLink}>
+      <ArrowUpRight size={12} /> Open in {where}
+    </button>
+  );
+}
+const jumpLink = {
+  display: 'inline-flex', alignItems: 'center', gap: 4, alignSelf: 'flex-start',
+  background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+  color: 'var(--eb-accent-primary)', fontFamily: 'inherit', fontSize: 'var(--eb-text-xs)',
+};
 function Center({ children }) {
   return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: 'var(--eb-space-6)', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>{children}</div>;
 }

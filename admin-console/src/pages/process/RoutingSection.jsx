@@ -1,22 +1,33 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Plus, X, Trash2, Sparkles, Save, Loader2, AlertTriangle,
-  GitPullRequest, CircleDot, Link, RefreshCw, Package, ChevronDown, ChevronRight } from 'lucide-react';
+  GitPullRequest, CircleDot, Link, RefreshCw, Package, ChevronDown, ChevronRight,
+  Clock, CalendarClock, Globe, Github, Pencil } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
+import SidePanel from '../../components/SidePanel';
+import { TriggerForm } from '../agent-chat/TriggersPanel';
+import { AddInputDialog, EditHandoffDialog } from './EdgeDialogs';
 import { summarizeGithubEventTrigger } from '../agent-chat/trigger-summary.js';
+import { partitionTriggers, scheduleText } from './input-rows.js';
 
 // Routing tab (#828, agent-outcomes concept §5.2; absorbs the retired
 // Connections tab in #865) — ONE place for an agent's whole routing decision.
 // Shared by the draft + live inspector through the same `ops` adapter; nothing
 // branches on mode.
 //
-//   INPUTS   — what wakes this agent, in one unified list: the GitHub PR/issue
-//              channels it reacts to (channels[]), its data-flow inputs +
-//              dependencies (dataFlow.inputs / dependsOn), the manual
-//              github-event listeners with their contributing `sources`, and the
-//              derived (channel/dataFlow) triggers shown read-only as
-//              "⟲ derived from connection" rows that point at their owning port.
-//              The `duplicate-listener` lint offers an inline delete. The
-//              port rows (channels/inputs/deps) are remove-only in this phase.
+//   INPUTS   — what wakes this agent, in one unified list with FULL CRUD (#866):
+//              the GitHub PR/issue channels it reacts to (channels[]), its
+//              data-flow inputs + dependencies (dataFlow.inputs / dependsOn), the
+//              manual triggers (cron / once / http / github-event) with their
+//              contributing `sources`, and the derived (channel/dataFlow) triggers
+//              shown read-only as "⟲ derived from connection" rows that point at
+//              their owning port. Manual triggers are created/edited/toggled/
+//              deleted via the reused TriggersPanel form; channels edit via the
+//              inlined channel editor; a `[+ Add input]` chooser authors any kind.
+//              Derived triggers are NEVER edited raw (the §1 footgun is gone —
+//              they're edited via their owning port). The `duplicate-listener`
+//              lint offers an inline delete; a read-only raw-`triggers.json`
+//              disclosure preserves workspace transparency. This retires the
+//              separate Triggers tab (concept §6).
 //   OUTCOMES — the structured `outcomes` port: mode toggle (exactly one / any
 //              of), editable option rows (title / when / actions), the derived
 //              read-only consumers per outcome, and "suggest outcomes…".
@@ -28,7 +39,7 @@ import { summarizeGithubEventTrigger } from '../agent-chat/trigger-summary.js';
 // The Outcomes editor holds a local draft and persists only on Save (or when a
 // suggestion is confirmed) — nothing is written implicitly, so a declined
 // suggestion persists nothing (AC4).
-export default function RoutingSection({ node, peers = [], lints = [], ops, onChanged, focusOutcome = null, focusSection = null, mode }) {
+export default function RoutingSection({ node, peers = [], lints = [], labels = [], ops, onChanged, focusOutcome = null, focusSection = null, mode }) {
   const [outcomes, setOutcomes] = useState(null);   // { mode, options[] } local draft
   const [loaded, setLoaded] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -96,7 +107,7 @@ export default function RoutingSection({ node, peers = [], lints = [], ops, onCh
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <InputsPanel node={node} peers={peers} dupLints={dupLints} ops={ops} onChanged={onChanged} focus={focusSection === 'inputs'} />
+      <InputsPanel node={node} peers={peers} dupLints={dupLints} labels={labels} ops={ops} onChanged={onChanged} focus={focusSection === 'inputs'} />
 
       <div style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -110,9 +121,16 @@ export default function RoutingSection({ node, peers = [], lints = [], ops, onCh
           </div>
         )}
 
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+          {outcomes.mode === 'exactlyOne'
+            ? 'exactly one — the agent picks exactly one outcome per run (a switch).'
+            : 'any of — zero or more outcomes may apply on a run.'}
+        </div>
+
         {outcomes.options.length === 0 && (
           <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-            No outcomes yet — add one, or let the assistant suggest a set from this agent's prompt.
+            How does a run of this agent end? Define outcomes so downstream agents can react —
+            or let the assistant suggest them from the prompt.
           </div>
         )}
 
@@ -159,20 +177,21 @@ export default function RoutingSection({ node, peers = [], lints = [], ops, onCh
 }
 
 // ── Inputs ─────────────────────────────────────────────────────────────────
-// Everything that wakes this agent, in one unified list (#865): the PR/issue
-// channels + data-flow inputs + dependencies it reacts to (remove-only ports),
-// the manual github-event listeners, and the derived triggers shown read-only.
-function InputsPanel({ node, peers, dupLints, ops, onChanged, focus }) {
+// Everything that wakes this agent, in one unified list with full CRUD (#866).
+function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
   const ref = useRef(null);
   useFocusScroll(ref, focus);
-  const listeners = (node.triggers || []).filter(t => t && t.type === 'github-event');
-  const derived = listeners.filter(t => t.channel || t.dataFlow);
-  const manual = listeners.filter(t => !t.channel && !t.dataFlow);
+  const { manual, derived } = partitionTriggers(node.triggers);
   const channels = Array.isArray(node.channels) ? node.channels : [];
   const deps = Array.isArray(node.dependsOn) ? node.dependsOn : [];
   const inputs = Array.isArray(node.inputs) ? node.inputs : [];
   const nameOf = (id) => peers.find(p => p.id === id)?.displayName || id;
   const [busy, setBusy] = useState(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [editTrigger, setEditTrigger] = useState(null);   // manual trigger being edited
+  const [editChannel, setEditChannel] = useState(null);   // channel port being edited
+  const [editInput, setEditInput] = useState(null);       // data-flow input port being edited
+  const [savingEdit, setSavingEdit] = useState(false);
 
   const run = async (key, fn) => {
     setBusy(key);
@@ -181,8 +200,22 @@ function InputsPanel({ node, peers, dupLints, ops, onChanged, focus }) {
     finally { setBusy(null); }
   };
   const removeTrigger = (tid) => { if (ops.deleteTrigger) run(`t:${tid}`, () => ops.deleteTrigger(node.id, tid)); };
+  const toggleTrigger = (t) => { if (ops.updateTrigger) run(`t:${t.id}`, () => ops.updateTrigger(node.id, t.id, { enabled: t.enabled === false })); };
+
+  const closeEdits = () => { setEditTrigger(null); setEditChannel(null); setEditInput(null); };
+  const afterEdit = () => { closeEdits(); onChanged?.(); };
+
+  // channel edit: how many channels consume THIS producer (for the #412 orphan-
+  // produce-flag cleanup offered on remove).
+  const producerChannelCount = (from) => channels.filter(c => c.from === from).length;
 
   const hasAny = channels.length || deps.length || inputs.length || manual.length || derived.length;
+
+  async function saveTriggerEdit(body) {
+    setSavingEdit(true);
+    try { await ops.updateTrigger(node.id, editTrigger.id, body); afterEdit(); }
+    finally { setSavingEdit(false); }
+  }
 
   return (
     <div ref={ref} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)', ...(focus ? focusRing : {}) }}>
@@ -191,17 +224,19 @@ function InputsPanel({ node, peers, dupLints, ops, onChanged, focus }) {
       </div>
       {!hasAny && (
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-          Nothing wakes this agent yet — drag a connection onto it on the canvas.
+          Nothing wakes this agent yet — add an input below, or drag a connection onto it on the canvas.
         </div>
       )}
 
-      {/* GitHub PR/issue channels (#380) — remove-only in this phase. */}
+      {/* GitHub PR/issue channels (#380) — edit label/gate via the channel editor,
+          or remove. Never edit the derived trigger raw (§1 footgun removal). */}
       {channels.map(c => {
         const key = `ch:${c.artifact}:${c.from}:${c.label || ''}`;
         const noun = c.artifact === 'pr' ? 'pull request' : 'issue';
         return (
           <InputRow key={key} busy={busy === key}
             icon={c.artifact === 'pr' ? <GitPullRequest size={14} /> : <CircleDot size={14} />}
+            onEdit={ops.updateChannel || ops.addChannel ? () => setEditChannel(c) : null}
             onRemove={ops.removeChannel ? () => run(key, () => ops.removeChannel(node.id, { artifact: c.artifact, from: c.from, label: c.label || '' })) : null}
             text={<>Reacts to <strong>{nameOf(c.from)}</strong>'s {noun}
               {c.label ? <> when labeled <code style={codeChip}>{c.label}</code></> : null}
@@ -209,7 +244,8 @@ function InputsPanel({ node, peers, dupLints, ops, onChanged, focus }) {
         );
       })}
 
-      {/* Dependencies (node-level) — remove-only. */}
+      {/* Dependencies (node-level) — remove-only (a plain ordering link has no
+          editable field). */}
       {deps.map(d => {
         const key = `dep:${d}`;
         return (
@@ -219,38 +255,31 @@ function InputsPanel({ node, peers, dupLints, ops, onChanged, focus }) {
         );
       })}
 
-      {/* Data-flow inputs (#382) — remove-only. */}
+      {/* Data-flow inputs (#382) — edit the port (hint/description) or remove; the
+          match key (name) is fixed so the producer link never desyncs. */}
       {inputs.map(a => {
         const key = `in:${artifactKey(a)}`;
         const h = a && typeof a === 'object' && a.name && a.hint ? a.hint : '';
         return (
           <InputRow key={key} busy={busy === key} icon={<Package size={14} />}
+            onEdit={ops.addArtifact && ops.removeArtifact && a && typeof a === 'object' && a.name ? () => setEditInput(a) : null}
             onRemove={ops.removeArtifact ? () => run(key, () => ops.removeArtifact(node.id, { direction: 'input', name: a && a.name, path: a && a.path })) : null}
             text={<>Consumes artifact <code style={codeChip}>{artifactKey(a)}</code>{h ? ` · ${h}` : ''}</>} />
         );
       })}
 
-      {/* Manual github-event listeners — the raw triggers not derived from a port. */}
-      {manual.map(t => {
-        const s = summarizeGithubEventTrigger(t);
-        const sources = Array.isArray(t.sources) ? t.sources : [];
-        return (
-          <div key={t.id} style={listenerRow}>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
-              <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>{s.events.join(', ') || t.type}</span>
-              {s.label && <span style={labelChip}>🏷 {s.label}</span>}
-            </div>
-            {sources.length > 0 && (
-              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-                ← {sources.map(nameOf).join('  ← ')}
-              </div>
-            )}
-          </div>
-        );
-      })}
+      {/* Manual triggers (cron / once / http / github-event) — full CRUD via the
+          reused TriggersPanel form (#866). */}
+      {manual.map(t => (
+        <ManualTriggerRow key={t.id} trigger={t} agentId={node.id} busy={busy === `t:${t.id}`}
+          onEdit={ops.updateTrigger ? () => setEditTrigger(t) : null}
+          onToggle={ops.updateTrigger ? () => toggleTrigger(t) : null}
+          onRemove={ops.deleteTrigger ? () => removeTrigger(t.id) : null}
+          nameOf={nameOf} />
+      ))}
 
       {/* Derived triggers (channel/dataFlow) — read-only, they point back at the
-          owning port row above; never edited here (#865). */}
+          owning port row above; never edited here (§1 footgun removal). */}
       {derived.map(t => {
         const s = summarizeGithubEventTrigger(t);
         const origin = t.channel ? 'a PR/issue channel above' : 'a data-flow input above';
@@ -259,7 +288,7 @@ function InputsPanel({ node, peers, dupLints, ops, onChanged, focus }) {
             <RefreshCw size={13} style={{ flexShrink: 0, color: 'var(--eb-text-muted)' }} />
             <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
               <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-                ⟲ derived from {origin}
+                ⟲ derived from {origin} — edit it there
               </span>
               <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
                 {s.events.join(', ') || t.type}{s.label ? ` · 🏷 ${s.label}` : ''}
@@ -289,13 +318,156 @@ function InputsPanel({ node, peers, dupLints, ops, onChanged, focus }) {
           </div>
         );
       })}
+
+      {/* [+ Add input] — the single entry point onto every wake source (#866),
+          sharing the canvas CreateEdgeDialog vocabulary + ops. */}
+      {ops.createTrigger && (
+        <button onClick={() => setAddOpen(true)} style={{ ...ghost, alignSelf: 'flex-start', marginTop: 2 }}>
+          <Plus size={13} /> Add input
+        </button>
+      )}
+
+      <RawTriggersDisclosure triggers={node.triggers} />
+
+      {addOpen && (
+        <AddInputDialog node={node} peers={peers} labels={labels} ops={ops}
+          onClose={() => setAddOpen(false)}
+          onDone={() => { setAddOpen(false); onChanged?.(); }} />
+      )}
+
+      {editTrigger && (
+        <SidePanel open onClose={closeEdits} title="Edit input" width="520px">
+          <TriggerForm agentId={node.id} ops={ops} initialValues={editTrigger} saving={savingEdit}
+            onSave={saveTriggerEdit} onCancel={closeEdits} />
+        </SidePanel>
+      )}
+
+      {editChannel && (
+        <EditHandoffDialog
+          edge={{ on: 'github', from: editChannel.from, to: node.id, artifact: editChannel.artifact, label: editChannel.label || '', gate: editChannel.gate }}
+          fromName={nameOf(editChannel.from)} toName={node.displayName || node.id}
+          ops={ops} producerChannelCount={producerChannelCount(editChannel.from)}
+          onClose={closeEdits} onDone={afterEdit} />
+      )}
+
+      {editInput && (
+        <EditArtifactInputDialog input={editInput} nodeId={node.id} ops={ops}
+          onClose={closeEdits} onDone={afterEdit} />
+      )}
     </div>
   );
 }
 
+// A manual trigger row: type icon + plain-language schedule + enabled switch +
+// edit + remove. The detail editor (edit) is the reused TriggersPanel form.
+const TRIGGER_ICON = { cron: Clock, once: CalendarClock, http: Globe, 'github-event': Github };
+function ManualTriggerRow({ trigger, agentId, busy, onEdit, onToggle, onRemove, nameOf }) {
+  const Icon = TRIGGER_ICON[trigger.type] || Github;
+  const enabled = trigger.enabled !== false;
+  const sources = Array.isArray(trigger.sources) ? trigger.sources : [];
+  return (
+    <div style={unifiedRow}>
+      <span style={{ flexShrink: 0, color: 'var(--eb-text-muted)', display: 'inline-flex', marginTop: 1 }}><Icon size={14} /></span>
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
+        <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', opacity: enabled ? 1 : 0.55 }}>
+          {scheduleText(trigger, agentId)}
+        </span>
+        {trigger.description && (
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{trigger.description}</span>
+        )}
+        {sources.length > 0 && (
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>← {sources.map(nameOf).join('  ← ')}</span>
+        )}
+        {!enabled && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>disabled</span>}
+      </div>
+      {onToggle && (
+        <button onClick={onToggle} disabled={busy} title={enabled ? 'Disable' : 'Enable'} style={switchBtn(enabled)}>
+          <span style={switchKnob(enabled)} />
+        </button>
+      )}
+      {onEdit && (
+        <button onClick={onEdit} title="Edit input" style={iconBtn}><Pencil size={13} /></button>
+      )}
+      {onRemove && (
+        <button onClick={onRemove} disabled={busy} title="Remove" style={iconBtn}>
+          {busy ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <X size={13} />}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// Read-only "view raw triggers.json" disclosure — the workspace-transparency
+// principle: the file stays the browsable truth even though editing now happens
+// through the plain-language rows above (concept §6).
+function RawTriggersDisclosure({ triggers }) {
+  const [open, setOpen] = useState(false);
+  const list = Array.isArray(triggers) ? triggers : [];
+  if (!list.length) return null;
+  return (
+    <div style={{ marginTop: 2 }}>
+      <button onClick={() => setOpen(o => !o)} style={{
+        display: 'flex', alignItems: 'center', gap: 4, background: 'none', border: 'none', cursor: 'pointer',
+        color: 'var(--eb-text-muted)', fontFamily: 'inherit', fontSize: 'var(--eb-text-xs)', padding: 0,
+      }}>
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />} View raw <code style={{ fontFamily: 'var(--eb-font-mono)' }}>triggers.json</code>
+      </button>
+      {open && (
+        <pre style={{
+          margin: '6px 0 0', maxHeight: 200, overflow: 'auto', fontSize: 'var(--eb-text-xs)',
+          fontFamily: 'var(--eb-font-mono)', background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
+          border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)',
+        }}>{JSON.stringify(list, null, 2)}</pre>
+      )}
+    </div>
+  );
+}
+
+// Small port editor for a data-flow INPUT artifact (#866): the match key (name)
+// is fixed — only the informative hint/description are editable, so the
+// producer↔consumer name match never desyncs. Persisted as remove-then-add on
+// the same key (no dedicated update op on the shared adapter).
+function EditArtifactInputDialog({ input, nodeId, ops, onClose, onDone }) {
+  const [hint, setHint] = useState(input.hint || '');
+  const [description, setDescription] = useState(input.description || '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  async function save() {
+    setSaving(true); setError(null);
+    try {
+      await ops.removeArtifact(nodeId, { direction: 'input', name: input.name });
+      await ops.addArtifact(nodeId, { direction: 'input', name: input.name, hint: hint.trim(), description: description.trim() || undefined });
+      onDone?.();
+    } catch (e) { setError(e?.message || String(e)); setSaving(false); }
+  }
+  return (
+    <SidePanel open onClose={onClose} title="Edit artifact input" width="520px">
+      <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 0 }}>
+        Consumes artifact <code style={codeChip}>{input.name}</code>. The name is the match key with the
+        producer — edit the informative path / description only.
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Path hint (optional)</span>
+          <input value={hint} onChange={e => setHint(e.target.value)} placeholder="e.g. reports/analysis.md" style={input} />
+        </label>
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Description (optional)</span>
+          <input value={description} onChange={e => setDescription(e.target.value)} style={input} />
+        </label>
+        {error && <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</span>}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)' }}>
+          <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+          <button onClick={save} disabled={saving} style={primary}>{saving ? 'Saving…' : 'Save'}</button>
+        </div>
+      </div>
+    </SidePanel>
+  );
+}
+
 // A unified input/artifact row: kind icon + plain-language sentence + optional
-// remove button (#865). Remove-only ports use this; read-only rows omit onRemove.
-function InputRow({ icon, text, subtitle, onRemove, busy }) {
+// edit + remove buttons (#865/#866). Read-only rows omit both callbacks.
+function InputRow({ icon, text, subtitle, onEdit, onRemove, busy }) {
   return (
     <div style={unifiedRow}>
       <span style={{ flexShrink: 0, color: 'var(--eb-text-muted)', display: 'inline-flex', marginTop: 1 }}>{icon}</span>
@@ -303,6 +475,9 @@ function InputRow({ icon, text, subtitle, onRemove, busy }) {
         <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>{text}</span>
         {subtitle && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{subtitle}</span>}
       </div>
+      {onEdit && (
+        <button onClick={onEdit} title="Edit" style={iconBtn}><Pencil size={13} /></button>
+      )}
       {onRemove && (
         <button onClick={onRemove} disabled={busy} title="Remove" style={iconBtn}>
           {busy ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <X size={13} />}
@@ -321,12 +496,22 @@ function ArtifactsBlock({ node, peers, ops, onChanged, focus }) {
   useFocusScroll(ref, focus);
   const outputs = Array.isArray(node.outputs) ? node.outputs : [];
   const [busy, setBusy] = useState(null);
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState('');
+  const [hint, setHint] = useState('');
   const run = async (key, fn) => {
     setBusy(key);
     try { await fn(); onChanged?.(); }
     catch (e) { window.alert(e?.message || String(e)); }
     finally { setBusy(null); }
   };
+  const existingKeys = new Set(outputs.map(artifactKey));
+  const nm = name.trim();
+  const canAdd = !!nm && !existingKeys.has(nm);
+  const addArtifact = () => run('add', async () => {
+    await ops.addArtifact(node.id, { direction: 'output', name: nm, hint: hint.trim() });
+    setName(''); setHint(''); setAdding(false);
+  });
   return (
     <div ref={ref} style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)', ...(focus ? focusRing : {}) }}>
       <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 'var(--eb-font-medium)' }}>
@@ -346,6 +531,30 @@ function ArtifactsBlock({ node, peers, ops, onChanged, focus }) {
             subtitle={consumers.length ? `consumers: ${consumers.join(', ')}` : 'no consumer yet'} />
         );
       })}
+
+      {/* Inline "+ Add artifact" form (#866) — writes dataFlow.outputs via the
+          same op the canvas artifact drag uses (matched by logical name). */}
+      {ops.addArtifact && (adding ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)' }}>
+          <input value={name} onChange={e => setName(e.target.value)} placeholder="Artifact name (the match key, e.g. analysis-report)"
+            style={{ ...input, fontFamily: 'var(--eb-font-mono)' }} autoFocus />
+          <input value={hint} onChange={e => setHint(e.target.value)} placeholder="Path hint (optional, e.g. reports/analysis.md)"
+            style={{ ...input, fontSize: 'var(--eb-text-xs)' }} />
+          {nm && existingKeys.has(nm) && (
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning, #d97706)' }}>An artifact named “{nm}” already exists.</span>
+          )}
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+            <button onClick={addArtifact} disabled={!canAdd || busy === 'add'} style={{ ...primary, opacity: canAdd ? 1 : 0.6, cursor: canAdd ? 'pointer' : 'default' }}>
+              {busy === 'add' ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <Plus size={13} />} Add
+            </button>
+            <button onClick={() => { setAdding(false); setName(''); setHint(''); }} style={ghost}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <button onClick={() => setAdding(true)} style={{ ...ghost, alignSelf: 'flex-start' }}>
+          <Plus size={13} /> Add artifact
+        </button>
+      ))}
     </div>
   );
 }
@@ -615,14 +824,22 @@ const primary = {
   borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
 };
 const iconBtn = { background: 'none', border: 'none', color: 'var(--eb-text-muted)', cursor: 'pointer', display: 'inline-flex', padding: 2 };
+// Compact enabled switch for a manual-trigger row (mirrors TriggersPanel's).
+const switchBtn = (on) => ({
+  width: 28, height: 16, borderRadius: 'var(--eb-radius-full)', border: 'none', flexShrink: 0,
+  background: on ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)',
+  position: 'relative', cursor: 'pointer', padding: 0, alignSelf: 'center',
+});
+const switchKnob = (on) => ({
+  position: 'absolute', top: 2, left: on ? 12 : 2, width: 12, height: 12,
+  borderRadius: '50%', background: 'white',
+});
 const rowBox = { display: 'flex', flexDirection: 'column', gap: 6, border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)' };
-const listenerRow = { display: 'flex', flexDirection: 'column', gap: 2, border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)' };
 const unifiedRow = { display: 'flex', alignItems: 'flex-start', gap: 8, border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)' };
 const derivedRow = { display: 'flex', alignItems: 'flex-start', gap: 8, borderLeft: '2px solid var(--eb-border-default)', paddingLeft: 'var(--eb-space-2)', marginLeft: 6 };
 const codeChip = { fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-sm)', padding: '0 4px' };
 const focusRing = { borderRadius: 'var(--eb-radius-md)', boxShadow: '0 0 0 2px var(--eb-accent-primary)', padding: 'var(--eb-space-2)' };
 const check = { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' };
-const labelChip = { fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-secondary)' };
 const radio = { display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer' };
 const banner = {
   display: 'flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)',

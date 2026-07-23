@@ -2277,8 +2277,11 @@ function migrateAgentMemoryToKb(id, cfg, env) {
   if (entries.length > 0) {
     const ts = new Date().toISOString();
     appendKnowledgeEvents(entries.map((entry) => knowledgeFeed.buildHarvestEvent({ teamId, agentId: id, entry, ts })));
-    try { runConvergenceCollector(teamId, env); }
-    catch (err) { console.warn(`[Orchestrator] convergence after migration of ${id}: ${err.message}`); }
+    // #855: runConvergenceCollector is async (its curator LLM synthesis no longer
+    // blocks the event loop) — fire-and-forget with a .catch so the (already
+    // best-effort) pass never surfaces an unhandled rejection.
+    runConvergenceCollector(teamId, env)
+      .catch((err) => console.warn(`[Orchestrator] convergence after migration of ${id}: ${err.message}`));
     try { fanOutKnowledgeDigests(teamId, env); }
     catch (err) { console.warn(`[Orchestrator] digest fan-out after migration of ${id}: ${err.message}`); }
   }
@@ -2944,11 +2947,9 @@ function emitKnowledgeHarvest(id, cfg, env, rawBody) {
   appendKnowledgeEvents(events);
 
   // Phase 3: grow convergence[] across agents + raise promotion suggestions.
-  try {
-    runConvergenceCollector(teamId, env);
-  } catch (err) {
-    console.warn(`[Orchestrator] convergence collector for '${teamId}' failed: ${err.message}`);
-  }
+  // #855: async fire-and-forget — the pass is best-effort and no longer blocks.
+  runConvergenceCollector(teamId, env)
+    .catch((err) => console.warn(`[Orchestrator] convergence collector for '${teamId}' failed: ${err.message}`));
 }
 
 // ── Convergence collector (Shared Agent Learning, Phase 3) ───────────────────
@@ -3148,7 +3149,10 @@ function reviewKnowledgeEntry(teamId, id, decision) {
   writeReviewDecisions(teamId, decisions);
   try {
     refreshKnowledgeClone(teamId, { force: true, env });
-    runConvergenceCollector(teamId, env);
+    // #855: async, non-blocking — the response (below) no longer waits on the
+    // curator LLM synthesis; the re-projection commits in the background.
+    runConvergenceCollector(teamId, env)
+      .catch((err) => console.warn(`[Orchestrator] review re-projection for '${teamId}' failed: ${err.message}`));
   } catch (err) {
     console.warn(`[Orchestrator] review re-projection for '${teamId}' failed: ${err.message}`);
   }
@@ -3179,7 +3183,7 @@ function _pushKnowledgeClone(clonePath, gitEnv, branch = knowledgeSync.KNOWLEDGE
   throw new Error(`knowledge canonical push failed: ${String(lastErr).trim().slice(0, 200)}`);
 }
 
-function runConvergenceCollector(teamId, envArg, opts = {}) {
+async function runConvergenceCollector(teamId, envArg, opts = {}) {
   // #570: overlay the team's per-team knowledge config BEFORE reading repoRef, so
   // the repoRef used to build the push credentials and the branch resolved below
   // both come from the team's store — never a mix of the env's repoRef and the
@@ -3420,7 +3424,7 @@ function runConvergenceCollector(teamId, envArg, opts = {}) {
     if (autoExtend !== false) {
       try {
         const existingSkills = readTeamSkillsForMatch(teamId);
-        const ext = autoExtendStep(teamId, env, candidateClusters, curCandidates, existingSkills, {
+        const ext = await autoExtendStep(teamId, env, candidateClusters, curCandidates, existingSkills, {
           convergenceThreshold, now, capRemaining: maxAutoPromotionsPerPass - capUsed,
         });
         capUsed += ext.extendedCount;
@@ -3431,7 +3435,7 @@ function runConvergenceCollector(teamId, envArg, opts = {}) {
       }
     }
     try {
-      const n = autoPromoteStep(teamId, env, candidateClusters, curCandidates, {
+      const n = await autoPromoteStep(teamId, env, candidateClusters, curCandidates, {
         convergenceThreshold, now, capRemaining: maxAutoPromotionsPerPass - capUsed, excludeCanonicalIds: consumed,
       });
       capUsed += (n || 0);
@@ -3486,7 +3490,7 @@ function runConvergenceCollector(teamId, envArg, opts = {}) {
     // #781: distil any grown skill that is due (auto path only — review-mode skills
     // wait for an operator Distill action). Runs LAST so it sees this pass's extends.
     try {
-      autoDistillStep(teamId, env, { now });
+      await autoDistillStep(teamId, env, { now });
     } catch (err) {
       console.warn(`[Orchestrator] auto-distill for '${teamId}' failed: ${err.message}`);
     }
@@ -3651,7 +3655,8 @@ function persistKnowledgeSummaries(teamId, summaries) {
   for (const [id, text] of clean.entries()) extra[id] = text;
   try {
     refreshKnowledgeClone(teamId, { force: true, env });
-    runConvergenceCollector(teamId, env, { extraSummaries: extra });
+    runConvergenceCollector(teamId, env, { extraSummaries: extra }) // #855: async, non-blocking
+      .catch((err) => console.warn(`[Orchestrator] summary persist re-projection for '${teamId}' failed: ${err.message}`));
   } catch (err) {
     console.warn(`[Orchestrator] summary persist re-projection for '${teamId}' failed: ${err.message}`);
   }
@@ -3683,7 +3688,8 @@ function archiveKnowledgeEntry(teamId, id, archived) {
   // Re-project + commit so the change is reflected + git-audited. Best-effort.
   try {
     refreshKnowledgeClone(teamId, { force: true, env });
-    runConvergenceCollector(teamId, env);
+    runConvergenceCollector(teamId, env) // #855: async, non-blocking
+      .catch((err) => console.warn(`[Orchestrator] archive re-projection for '${teamId}' failed: ${err.message}`));
   } catch (err) {
     console.warn(`[Orchestrator] archive re-projection for '${teamId}' failed: ${err.message}`);
   }
@@ -3719,7 +3725,11 @@ function removePromotedSourceEntries(teamId, entryIds, { skill = null, auto = fa
   // failure never rolls the promotion back (AC7): the ids are already archived.
   try {
     refreshKnowledgeClone(teamId, { force: true, env: resolvedEnv });
-    runConvergenceCollector(teamId, resolvedEnv);
+    // #855: async, non-blocking. This runs from a curator pass (_finalizePromotedSkills)
+    // as well as the operator handler; fire-and-forget keeps the (best-effort,
+    // idempotent, git-audited) re-projection off the caller's critical path.
+    runConvergenceCollector(teamId, resolvedEnv)
+      .catch((err) => console.warn(`[Orchestrator] promote-cleanup re-projection for '${teamId}' failed: ${err.message}`));
   } catch (err) {
     console.warn(`[Orchestrator] promote-cleanup re-projection for '${teamId}' failed: ${err.message}`);
   }
@@ -3753,7 +3763,7 @@ function _teamSkillDir(teamId, name) {
 // Set in main(); lets free functions (this one) reach instance methods.
 let orchestratorSingleton = null;
 
-function autoPromoteStep(teamId, env, clusters, candidates, { convergenceThreshold, now, capRemaining, excludeCanonicalIds } = {}) {
+async function autoPromoteStep(teamId, env, clusters, candidates, { convergenceThreshold, now, capRemaining, excludeCanonicalIds } = {}) {
   env = teamKnowledgeEnv(teamId, env); // #570: per-team knowledge config
   const gates = resolvePromotionGates(env);
   const { maxAutoPromotionsPerPass, synthesizeSkills } = knowledgeCurationConfig(env);
@@ -3795,7 +3805,7 @@ function autoPromoteStep(teamId, env, clusters, candidates, { convergenceThresho
     });
     // #780 §3.3: default LLM synthesis on the create path (opt-in per team) — the
     // heuristic draft is the marked fallback when synthesis is off or the call fails.
-    const synth = _resolveSkillMd(env, {
+    const synth = await _resolveSkillMd(env, {
       heuristicMd: item.draft.skillMd,
       request: knowledgeCurator.buildSkillSynthesisRequest(item.candidate),
       synthesize: synthesizeSkills,
@@ -4042,7 +4052,14 @@ function _routeDomains(teamId, env, domains, candidateClusters, { skillBudget, n
 // caller (synthesisFallback) then keeps the heuristic draft VISIBLY MARKED
 // un-synthesised and re-queued. Deliberately fail-soft: synthesis quality never
 // blocks a promotion, and a slow/absent endpoint just yields the marked fallback.
-function _synthesizeSkillMd(env, request) {
+//
+// #855: this MUST be non-blocking. It was previously a synchronous
+// `execFileSync('curl', …)`, which parks the orchestrator's single-threaded Node
+// event loop for the whole LLM round-trip (up to the 25 s timeout) — freezing every
+// other concurrent request (the 'orchestrator unreachable: fetch failed' bug). It is
+// now an async `fetch` with an `AbortSignal` timeout, so the loop stays free while
+// the LLM is in flight and only THIS logical operation waits. Every caller awaits it.
+async function _synthesizeSkillMd(env, request) {
   const base = process.env.ANTHROPIC_BASE_URL;
   const token = process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
   const model = process.env.ANTHROPIC_SYNTHESIS_MODEL
@@ -4050,17 +4067,23 @@ function _synthesizeSkillMd(env, request) {
     || process.env.ANTHROPIC_MODEL;
   if (!base || !token || !model || !request || !Array.isArray(request.messages)) return null;
   try {
-    const url = new URL(`${String(base).replace(/\/+$/, '')}/v1/messages`);
+    const url = `${String(base).replace(/\/+$/, '')}/v1/messages`;
     const body = JSON.stringify({ model, max_tokens: request.max_tokens || 2048, messages: request.messages });
-    const res = execFileSync('curl', [
-      '-sS', '--max-time', '25', '-X', 'POST', url.toString(),
-      '-H', 'content-type: application/json',
-      '-H', 'anthropic-version: 2023-06-01',
-      '-H', `x-api-key: ${token}`,
-      '-H', `authorization: Bearer ${token}`,
-      '--data-binary', '@-',
-    ], { input: body, timeout: 30_000, stdio: ['pipe', 'pipe', 'pipe'], maxBuffer: 4 * 1024 * 1024 }).toString();
-    const parsed = JSON.parse(res);
+    // Same 25 s budget as the former curl `--max-time`, enforced by an abort signal
+    // rather than a blocking process timeout so the event loop is never parked.
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'anthropic-version': '2023-06-01',
+        'x-api-key': token,
+        authorization: `Bearer ${token}`,
+      },
+      body,
+      signal: AbortSignal.timeout(25_000),
+    });
+    if (!res.ok) return null;
+    const parsed = await res.json();
     const text = Array.isArray(parsed.content)
       ? parsed.content.filter((b) => b && b.type === 'text').map((b) => b.text).join('').trim()
       : '';
@@ -4074,14 +4097,14 @@ function _synthesizeSkillMd(env, request) {
 // synthesis (§3.3) when the team opted in. OFF (default) ⇒ the Phase-1 heuristic
 // draft verbatim (backward-compatible). ON ⇒ attempt LLM synthesis, else the
 // marked-un-synthesised fallback. Returns { skillMd, synthesised, note }.
-function _resolveSkillMd(env, { heuristicMd, request, synthesize, frontmatter }) {
+async function _resolveSkillMd(env, { heuristicMd, request, synthesize, frontmatter }) {
   // #805: the heuristic draft already carries frontmatter, so OFF is safe verbatim.
   // ON: hand the deterministic { name, description } to synthesisFallback so the LLM
   // output is guaranteed a valid frontmatter block (its own if present, else this).
   if (!synthesize) return { skillMd: heuristicMd, synthesised: null, note: null };
   const out = knowledgeCurator.synthesisFallback({
     heuristic: { name: null, skillMd: heuristicMd },
-    llmText: _synthesizeSkillMd(env, request),
+    llmText: await _synthesizeSkillMd(env, request), // #855: async, non-blocking
     frontmatter,
   });
   return {
@@ -4139,7 +4162,7 @@ function _readTeamSkillDoc(teamId, name) {
 // a per-skill failure logs and continues. Returns
 // { extendedCount, consumedCanonicalIds } so the caller excludes claimed clusters
 // from the create-new auto-promotion path and debits the shared cap.
-function autoExtendStep(teamId, env, clusters, candidates, existingSkills, { convergenceThreshold, now, capRemaining } = {}) {
+async function autoExtendStep(teamId, env, clusters, candidates, existingSkills, { convergenceThreshold, now, capRemaining } = {}) {
   env = teamKnowledgeEnv(teamId, env); // #570: per-team knowledge config
   const gates = resolvePromotionGates(env);
   const { maxAutoPromotionsPerPass, extendConfidenceFloor, synthesizeSkills } = knowledgeCurationConfig(env);
@@ -4184,7 +4207,7 @@ function autoExtendStep(teamId, env, clusters, candidates, existingSkills, { con
     // heuristic append VISIBLY MARKED un-synthesised (curatorSkillExtension already
     // returns synthesised:false, so the append is the marked fallback either way).
     const synth = synthesizeSkills
-      ? _resolveSkillMd(env, {
+      ? await _resolveSkillMd(env, {
         heuristicMd: ext.skillMd,
         request: knowledgeCurator.buildSkillExtensionSynthesisRequest(doc.skillMd, item.candidate),
         synthesize: true,
@@ -4280,7 +4303,7 @@ function _finalizeExtendedSkills(teamId, env, extendedSkills, now) {
 // the caller can render an old-vs-new diff.
 //
 // Returns { changed, reason, skill, old, new, entryCount, mode }.
-function _distillTeamSkill(teamId, envArg, name, { apply = true, now, auto = false } = {}) {
+async function _distillTeamSkill(teamId, envArg, name, { apply = true, now, auto = false } = {}) {
   const env = teamKnowledgeEnv(teamId, envArg);
   const doc = _readTeamSkillDoc(teamId, name);
   if (!doc) return { changed: false, reason: "not-found", skill: name };
@@ -4291,7 +4314,7 @@ function _distillTeamSkill(teamId, envArg, name, { apply = true, now, auto = fal
     domain = readTeamDomainsDoc(teamId).domains.find((d) => knowledgeDomains.domainSkillName(d) === name) || null;
   } catch { domain = null; }
   const request = knowledgeDistillation.buildDistillationRequest(doc.skillMd, doc.provenance, { domain });
-  const llmText = _synthesizeSkillMd(env, request);
+  const llmText = await _synthesizeSkillMd(env, request); // #855: async, non-blocking
   const result = knowledgeDistillation.applyDistillation({
     skillMd: doc.skillMd, provenance: doc.provenance, llmText, by: auto ? "curator" : "operator", now: ts,
   });
@@ -4337,7 +4360,7 @@ function _distillTeamSkill(teamId, envArg, name, { apply = true, now, auto = fal
 // enough amendments AND whose gate/autonomy allow a direct apply (§3.4). A skill whose
 // mode is 'review' waits for an operator Distill action (no auto-apply). Best-effort;
 // returns the count distilled.
-function autoDistillStep(teamId, envArg, { now } = {}) {
+async function autoDistillStep(teamId, envArg, { now } = {}) {
   const env = teamKnowledgeEnv(teamId, envArg);
   const gates = resolvePromotionGates(env);
   const level = knowledgeAutonomyLevel(env);
@@ -4349,7 +4372,7 @@ function autoDistillStep(teamId, envArg, { now } = {}) {
       const doc = _readTeamSkillDoc(teamId, s.name);
       if (!doc) continue;
       if (!knowledgeDistillation.shouldDistill(doc.provenance, { threshold: distillAfterAmendments })) continue;
-      const r = _distillTeamSkill(teamId, env, s.name, { apply: true, now, auto: true });
+      const r = await _distillTeamSkill(teamId, env, s.name, { apply: true, now, auto: true });
       if (r && r.changed) distilled += 1;
     } catch (err) {
       console.warn(`[Orchestrator] auto-distill '${s.name}' for team ${teamId} failed: ${err.message}`);
@@ -9504,7 +9527,7 @@ async function main() {
     if (req.method === 'POST' && req.url === '/internal/knowledge/domains') {
       let body = '';
       req.on('data', (d) => { body += d; });
-      req.on('end', () => {
+      req.on('end', async () => { // #855: async so the bootstrap LLM call is awaited non-blockingly
         try {
           const p = JSON.parse(body || '{}');
           const teamId = String(p.teamId || '');
@@ -9535,7 +9558,7 @@ async function main() {
               const req2 = knowledgeDomains.buildBootstrapRequest(
                 Array.isArray(p.lessons) ? p.lessons : [], { roles: teamSquadRoleTokens(teamId) },
               );
-              const text = _synthesizeSkillMd(teamKnowledgeEnv(teamId, null), req2);
+              const text = await _synthesizeSkillMd(teamKnowledgeEnv(teamId, null), req2); // #855: async, non-blocking
               const llmProposed = knowledgeDomains.parseBootstrapResponse(text, { now });
               // `fallback` tells the UI the LLM target was unavailable/unusable and the
               // proposal is the deterministic role-seed instead (AC1 — visible fallback).
@@ -9573,7 +9596,7 @@ async function main() {
     if (req.method === 'POST' && req.url === '/internal/knowledge/distill') {
       let body = '';
       req.on('data', (d) => { body += d; });
-      req.on('end', () => {
+      req.on('end', async () => { // #855: async so the distill LLM synthesis is awaited non-blockingly
         try {
           const p = JSON.parse(body || '{}');
           const teamId = String(p.teamId || '');
@@ -9582,7 +9605,7 @@ async function main() {
           if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
           if (!knowledgeCurator.SKILL_NAME_RE.test(skill)) throw new Error('invalid skill name');
           const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-          const result = _distillTeamSkill(teamId, null, skill, { apply, now, auto: false });
+          const result = await _distillTeamSkill(teamId, null, skill, { apply, now, auto: false }); // #855: async, non-blocking
           const status = result.reason === 'not-found' ? 404 : 200;
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: result.reason !== 'not-found', ...result }));
@@ -9662,8 +9685,8 @@ async function main() {
             if (!prev) { const e = new Error('no migration in progress'); e.status = 400; throw e; }
             // Actually route the leftover candidates by re-running the collector pass
             // (best-effort — it re-projects + routes per §3.2). Then mark the step done.
-            try { runConvergenceCollector(teamId, null, { force: true }); }
-            catch (err) { console.warn(`[Orchestrator] consolidation route-remaining collector for '${teamId}' failed: ${err.message}`); }
+            runConvergenceCollector(teamId, null, { force: true }) // #855: async, non-blocking
+              .catch((err) => console.warn(`[Orchestrator] consolidation route-remaining collector for '${teamId}' failed: ${err.message}`));
             const state = writeConsolidationState(teamId, knowledgeConsolidation.markRoutedRemaining(prev, { now }));
             appendKnowledgeEvents([knowledgeConsolidation.consolidationEvent(
               state.status === 'complete' ? 'completed' : 'routed',
@@ -9771,7 +9794,8 @@ async function main() {
           // daily backstop; turning ON stamps pending on anything not baselined).
           try {
             refreshKnowledgeClone(teamId, { force: true, env });
-            runConvergenceCollector(teamId, env);
+            runConvergenceCollector(teamId, env) // #855: async, non-blocking
+              .catch((err) => console.warn(`[Orchestrator] review-mode re-projection for '${teamId}' failed: ${err.message}`));
           } catch (err) {
             console.warn(`[Orchestrator] review-mode re-projection for '${teamId}' failed: ${err.message}`);
           }
@@ -10543,7 +10567,8 @@ async function main() {
     for (const teamId of teamIds) {
       try {
         refreshKnowledgeClone(teamId, { force: true });
-        runConvergenceCollector(teamId);
+        runConvergenceCollector(teamId) // #855: async, non-blocking
+          .catch((err) => console.warn(`[Orchestrator] curator backstop for '${teamId}' failed: ${err.message}`));
       } catch (err) {
         console.warn(`[Orchestrator] curator backstop for '${teamId}' failed: ${err.message}`);
       }

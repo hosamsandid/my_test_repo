@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
-import { AlertTriangle, Download, Boxes, X, Plus, Layers, Sparkles, Pencil } from 'lucide-react';
+import { AlertTriangle, Download, Boxes, X, Plus, Layers, Sparkles, Pencil, Loader2 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { initFlowGraph } from './process/flow-graph-render';
 import NodeInspector from './process/NodeInspector';
@@ -636,6 +636,10 @@ function AddRoleDialog({ onClose, onCreate }) {
     boxSizing: 'border-box', width: '100%', outline: 'none',
   };
   const hasTemplates = templates.length > 0;
+  // Primary button is disabled both while a request is in flight (busy, prevents
+  // double-submit — AC3) and when there is no agent name yet; both now read as
+  // disabled visually (dim + not-allowed), matching the sibling Generate button.
+  const addDisabled = busy || !displayName.trim();
   return (
     <SidePanel open onClose={onClose} title="Add agent" width="480px">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
@@ -759,17 +763,30 @@ function AddRoleDialog({ onClose, onCreate }) {
         {submitError && (
           <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error, #d33)' }}>{submitError}</div>
         )}
+        {/* #820: agent provisioning on a live team is genuinely slow (create the
+            chat user → seed workspace → git clone), so surface the already-existing
+            `busy` flag on the primary button — spinner + "Adding…" + dim/not-allowed —
+            mirroring the sibling "Generate agent prompt" button and the ConfirmDialog
+            pattern, so the click is visibly registered. Presentation-only; submit()
+            and onCreate are untouched. */}
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)' }}>
           <button onClick={onClose} disabled={busy} style={{
             background: 'none', color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', cursor: 'pointer',
+            borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
+            cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.6 : 1,
           }}>Cancel</button>
-          <button onClick={submit} disabled={busy || !displayName.trim()} style={{
+          <button onClick={submit} disabled={addDisabled} style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6,
             background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
-            borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
-          }}>Add agent</button>
+            borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+            cursor: addDisabled ? 'not-allowed' : 'pointer', opacity: addDisabled ? 0.6 : 1,
+          }}>
+            {busy && <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />}
+            {busy ? 'Adding…' : 'Add agent'}
+          </button>
         </div>
       </div>
+      {busy && <style>{'@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }'}</style>}
     </SidePanel>
   );
 }

@@ -162,6 +162,9 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
       background: 'var(--eb-bg-surface)',
       flexShrink: 0,
     }}>
+      {voiceState === 'recording' && (
+        <style>{'@keyframes stt-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }'}</style>
+      )}
       <div
         onDragEnter={handleDragEnter}
         onDragOver={handleDragOver}
@@ -345,13 +348,6 @@ function autoResize(el) {
   el.style.height = 'auto';
   // Cap at maxHeight (set in style); CSS will clip the visual height.
   el.style.height = `${Math.min(el.scrollHeight, 320)}px`;
-}
-
-if (typeof document !== 'undefined' && !document.getElementById('stt-keyframes')) {
-  const style = document.createElement('style');
-  style.id = 'stt-keyframes';
-  style.textContent = `@keyframes stt-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }`;
-  document.head.appendChild(style);
 }
 
 const kbdStyle = {

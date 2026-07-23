@@ -34,8 +34,11 @@ export default function useVoiceRecorder({ onTranscription }) {
   useEffect(() => {
     return () => {
       clearInterval(timerRef.current);
-      recorderRef.current?.stop();
+      timerRef.current = null;
+      try { if (recorderRef.current?.state !== 'inactive') recorderRef.current?.stop(); } catch {}
+      recorderRef.current = null;
       streamRef.current?.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
     };
   }, []);
 
@@ -44,7 +47,7 @@ export default function useVoiceRecorder({ onTranscription }) {
   const stopRecording = useCallback(() => {
     clearInterval(timerRef.current);
     timerRef.current = null;
-    recorderRef.current?.stop();
+    try { if (recorderRef.current?.state !== 'inactive') recorderRef.current?.stop(); } catch {}
   }, []);
 
   const startRecording = useCallback(async () => {

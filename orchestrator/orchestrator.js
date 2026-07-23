@@ -9530,9 +9530,14 @@ async function main() {
                 Array.isArray(p.lessons) ? p.lessons : [], { roles: teamSquadRoleTokens(teamId) },
               );
               const text = _synthesizeSkillMd(teamKnowledgeEnv(teamId, null), req2);
-              let proposed = knowledgeDomains.parseBootstrapResponse(text, { now });
-              if (proposed.length === 0) proposed = knowledgeDomains.seedDomainsFromRoles(teamSquadRoleTokens(teamId), { now });
-              return respond(doc, { proposed });
+              const llmProposed = knowledgeDomains.parseBootstrapResponse(text, { now });
+              // `fallback` tells the UI the LLM target was unavailable/unusable and the
+              // proposal is the deterministic role-seed instead (AC1 — visible fallback).
+              const fallback = llmProposed.length === 0;
+              const proposed = fallback
+                ? knowledgeDomains.seedDomainsFromRoles(teamSquadRoleTokens(teamId), { now })
+                : llmProposed;
+              return respond(doc, { proposed, fallback });
             }
             case 'add': r = knowledgeDomains.addDomain(doc, p.domain || {}, { teamId, now }); break;
             case 'rename': r = knowledgeDomains.renameDomain(doc, String(p.id || ''), String(p.name || ''), { teamId, now }); break;

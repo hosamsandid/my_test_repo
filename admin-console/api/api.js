@@ -4588,7 +4588,7 @@ app.post('/api/knowledge/domains', apiLimiter, async (req, res) => {
     });
     const out = await r.json().catch(() => ({}));
     if (!r.ok || !out.ok) return res.status(400).json({ error: (out && out.error) || 'domain op failed' });
-    res.json({ ok: true, doc: out.doc, budget: out.budget, proposed: out.proposed });
+    res.json({ ok: true, doc: out.doc, budget: out.budget, proposed: out.proposed, fallback: out.fallback });
   } catch (err) {
     res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
   }

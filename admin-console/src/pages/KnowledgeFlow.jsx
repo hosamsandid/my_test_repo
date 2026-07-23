@@ -1007,6 +1007,22 @@ const parseRolesInput = (s) => Array.from(new Set(
   String(s || '').split(',').map(r => r.trim()).filter(Boolean),
 ));
 
+// Shared layout for a domain row's name cell and its trailing controls (#856).
+// The name truncates with an ellipsis instead of wrapping character-by-character
+// (`minWidth: 0` lets it shrink inside the flex row; `nowrap`+`overflow:hidden`
+// stops the one-letter-per-line stack the old `overflowWrap: 'anywhere'` produced
+// once the column was crushed). The controls group never shrinks and wraps onto a
+// second line when the rail is too narrow, so tags/scope/actions stay reachable
+// without crushing the name. Full name is preserved in the element `title`.
+const domainNameCell = {
+  flex: '1 1 10rem', minWidth: '7rem',
+  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+};
+const domainRowControls = {
+  display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+  flexWrap: 'wrap', flex: '0 0 auto', maxWidth: '100%',
+};
+
 // Render a domain's audience roles as small pills (mirrors the skill cards' "for:"
 // tags — the same roles[] drives both via the server-side augmentSkillRoles overlay).
 function DomainRoleTags({ roles }) {
@@ -1162,10 +1178,12 @@ function DomainsPanel({ teamId, domains, budget, lessons, onChanged }) {
                 </div>
               )}
               {proposal.proposed.map(d => (
-                <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: '2px 0', fontSize: 'var(--eb-text-sm)' }}>
-                  <span style={{ flex: 1, overflowWrap: 'anywhere' }}>{d.name}</span>
-                  <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{d.scope}</span>
-                  <DomainRoleTags roles={d.roles} />
+                <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap', padding: '2px 0', fontSize: 'var(--eb-text-sm)' }}>
+                  <span title={d.name} style={domainNameCell}>{d.name}</span>
+                  <div style={domainRowControls}>
+                    <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{d.scope}</span>
+                    <DomainRoleTags roles={d.roles} />
+                  </div>
                 </div>
               ))}
               <div style={{ display: 'flex', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)' }}>
@@ -1240,20 +1258,22 @@ function DomainsPanel({ teamId, domains, budget, lessons, onChanged }) {
                   </div>
                 </div>
               ) : (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
                   <input type="checkbox" checked={selected.has(d.id)} onChange={() => toggleSelect(d.id)}
-                    title="Select to merge" style={{ cursor: 'pointer' }} />
-                  <span style={{ flex: 1, overflowWrap: 'anywhere' }}>{d.name}</span>
-                  <DomainRoleTags roles={d.roles} />
-                  {d.scope && d.scope !== 'team' && (
-                    <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{d.scope}</span>
-                  )}
-                  <IconButton icon={Pencil} label="Edit scope & roles" disabled={busy}
-                    onClick={() => { setSplitting(null); setEditing({ id: d.id, name: d.name, scope: d.scope || 'team', roles: (d.roles || []).join(', ') }); }} />
-                  <IconButton icon={Layers} label="Split" disabled={busy}
-                    onClick={() => { setEditing(null); setSplitting({ id: d.id, parts: [{ name: '', scope: d.scope || 'team' }, { name: '', scope: d.scope || 'team' }] }); }} />
-                  <IconButton icon={Trash2} label="Remove" danger disabled={busy}
-                    onClick={() => post({ op: 'remove', id: d.id }).catch(() => {})} />
+                    title="Select to merge" style={{ cursor: 'pointer', flex: '0 0 auto' }} />
+                  <span title={d.name} style={domainNameCell}>{d.name}</span>
+                  <div style={domainRowControls}>
+                    <DomainRoleTags roles={d.roles} />
+                    {d.scope && d.scope !== 'team' && (
+                      <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{d.scope}</span>
+                    )}
+                    <IconButton icon={Pencil} label="Edit scope & roles" disabled={busy}
+                      onClick={() => { setSplitting(null); setEditing({ id: d.id, name: d.name, scope: d.scope || 'team', roles: (d.roles || []).join(', ') }); }} />
+                    <IconButton icon={Layers} label="Split" disabled={busy}
+                      onClick={() => { setEditing(null); setSplitting({ id: d.id, parts: [{ name: '', scope: d.scope || 'team' }, { name: '', scope: d.scope || 'team' }] }); }} />
+                    <IconButton icon={Trash2} label="Remove" danger disabled={busy}
+                      onClick={() => post({ op: 'remove', id: d.id }).catch(() => {})} />
+                  </div>
                 </div>
               )}
             </div>

@@ -49,6 +49,7 @@ const skillImport = require('./skill-import');
 const skillGrantValidate = require('./skill-grant-validate');
 const { buildSetupStatus } = require('./setup-status');
 const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archives');
+const { createTranscribeRoute } = require('./transcribe.js');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -225,6 +226,10 @@ auth.registerAuthRoutes(app, {
   }),
 });
 app.use('/api', auth.gate);
+
+// Speech-to-text transcription: proxies audio to Whisper ASR and returns { text }.
+const _transcribeUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+app.post('/api/transcribe', _transcribeUpload.single('audio_file'), createTranscribeRoute());
 
 // Read recent audit entries (newest first). Protected by the gate above.
 app.get('/api/audit', (req, res) => {

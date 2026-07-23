@@ -15,6 +15,17 @@
 // universal brakes (`hold`, `needs:human`) have no agent emitter — their edges
 // originate from `null` and are tagged so the renderer can colour them.
 
+// Structured OUTCOMES port (#827): the successor to flat `emits`. Legacy agents
+// (flat `emits`, no `outcomes`) are untouched below and yield byte-identical
+// edges; an authored `outcomes` port projects its `setLabel` labels into the
+// same emit index (now keyed by outcome) and its `openPr`/`openIssue` actions
+// into the github produce flags. `require`d at top is safe — outcomes.js only
+// requires this module lazily (inside function bodies), so there is no
+// load-time cycle.
+const {
+  isAuthoredOutcomes, normalizeOutcomes, outcomeEmitPairs, outcomeSetLabels, outcomesToGithub,
+} = require('./outcomes');
+
 const BRAKES = new Set(['hold', 'needs:human']);
 
 function isHumanGate(label) {
@@ -104,6 +115,19 @@ function buildProcessGraph(agents) {
   const nodes = list.map(a => {
     const triggers = (a.triggers || []).map(triggerView);
     const hasGithubEvent = triggers.some(t => t.type === 'github-event');
+    // Structured outcomes (#827) supersede flat `emits` when authored: the emit
+    // labels are the `setLabel` action labels, and the github produce flags fold
+    // in the `openPr`/`openIssue` actions. A legacy agent (no authored outcomes)
+    // takes the original code path verbatim, so its node — and every edge below
+    // — is byte-identical to before.
+    const authored = isAuthoredOutcomes(a.outcomes);
+    const emits = authored
+      ? outcomeSetLabels(a.outcomes)
+      : (Array.isArray(a.emits) ? a.emits.filter(e => typeof e === 'string' && e) : []);
+    const baseGh = a.github || {};
+    const ocGh = authored ? outcomesToGithub(a.outcomes) : {};
+    const producesPr = baseGh.producesPr || ocGh.producesPr;
+    const producesIssue = baseGh.producesIssue || ocGh.producesIssue;
     return {
       id: a.id,
       role: a.role || 'agent',
@@ -115,15 +139,18 @@ function buildProcessGraph(agents) {
       // Agent-level emitted labels (operator-declared): the labels this agent
       // sets during its work, independent of which trigger run does it. Lets a
       // label hand-off be wired from the edge alone, without attaching the emit
-      // to a pre-existing trigger.
-      emits: Array.isArray(a.emits) ? a.emits.filter(e => typeof e === 'string' && e) : [],
+      // to a pre-existing trigger. Projected from `outcomes` when authored (#827).
+      emits,
       // GitHub artifact ports (#380): produce flags drive the node badge/ports;
       // the consumed channels drive the on:'github' edges (built in unified-graph
       // from these ports, not from the derived triggers).
-      github: (a.github && (a.github.producesPr || a.github.producesIssue))
-        ? { ...(a.github.producesPr ? { producesPr: true } : {}), ...(a.github.producesIssue ? { producesIssue: true } : {}) }
+      github: (producesPr || producesIssue)
+        ? { ...(producesPr ? { producesPr: true } : {}), ...(producesIssue ? { producesIssue: true } : {}) }
         : null,
       channels: Array.isArray(a.channels) ? a.channels : [],
+      // Structured OUTCOMES port (#827) — surfaced only when authored so a legacy
+      // node stays byte-identical; phase 3 renders the switch/ports from this.
+      ...(authored ? { outcomes: normalizeOutcomes(a.outcomes) } : {}),
       // DM-only front door: nothing wakes it from git, it talks to a human.
       isEntryPoint: !hasGithubEvent,
     };
@@ -167,6 +194,21 @@ function buildProcessGraph(agents) {
     // feedback edges never appear.
     for (const ch of channelLabels(n)) { allListenKeys.add(ch); noteLabel(ch); }
   }
+
+  // Outcome-keyed emit index (#827): label -> Map(agentId -> outcomeId), built
+  // from AUTHORED outcomes only (a legacy agent leaves this empty, so its edges
+  // gain no `outcome` field and stay byte-identical). `ocOf` annotates a label
+  // edge with the id of the outcome whose `setLabel` action produced it.
+  const outcomeByEmit = new Map();
+  for (const a of list) {
+    if (!isAuthoredOutcomes(a.outcomes)) continue;
+    for (const { label, outcome } of outcomeEmitPairs(a.outcomes)) {
+      if (!outcomeByEmit.has(label)) outcomeByEmit.set(label, new Map());
+      const m = outcomeByEmit.get(label);
+      if (!m.has(a.id)) m.set(a.id, outcome); // first outcome setting the label wins
+    }
+  }
+  const ocOf = (label, agentId) => (outcomeByEmit.get(label) || new Map()).get(agentId);
 
   const edges = [];
   const gateSet = new Set();
@@ -213,7 +255,8 @@ function buildProcessGraph(agents) {
             edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, orphan: true, ...evs });
           } else {
             for (const s of emitters) {
-              edges.push({ from: s, to: n.id, label: key, kind, triggerId: t.id, ...evs });
+              const oc = ocOf(key, s);
+              edges.push({ from: s, to: n.id, label: key, kind, triggerId: t.id, ...(oc ? { outcome: oc } : {}), ...evs });
             }
           }
         }
@@ -263,7 +306,8 @@ function buildProcessGraph(agents) {
       if (kind === 'gate' || kind === 'brake') continue; // human-set, edge comes from null
       for (const s of (emitIndex.get(label) || [])) {
         if (s === n.id || s === ch.from) continue; // self / already the github edge
-        edges.push({ from: s, to: n.id, label, kind });
+        const oc = ocOf(label, s);
+        edges.push({ from: s, to: n.id, label, kind, ...(oc ? { outcome: oc } : {}) });
       }
     }
   }
@@ -273,7 +317,8 @@ function buildProcessGraph(agents) {
     if (isHumanGate(label) || isBrake(label)) continue;
     if (!allListenKeys.has(label)) {
       for (const s of emitters) {
-        edges.push({ from: s, to: null, label, kind: classifyKind(label), deadEnd: true });
+        const oc = ocOf(label, s);
+        edges.push({ from: s, to: null, label, kind: classifyKind(label), ...(oc ? { outcome: oc } : {}), deadEnd: true });
       }
     }
   }

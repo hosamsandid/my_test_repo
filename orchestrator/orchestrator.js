@@ -5657,6 +5657,9 @@ class Orchestrator {
         ...(opts.dataFlow && typeof opts.dataFlow === 'object' ? { dataFlow: opts.dataFlow } : {}),
         ...(typeof opts.parentMemberId === 'string' && opts.parentMemberId ? { parentMemberId: opts.parentMemberId } : {}),
         ...(Array.isArray(opts.emits) && opts.emits.length ? { emits: opts.emits } : {}),
+        // Structured OUTCOMES port (#827) — the successor to `emits`, recorded
+        // verbatim for the process graph. Declarative only (no runtime effect).
+        ...(opts.outcomes && typeof opts.outcomes === 'object' ? { outcomes: opts.outcomes } : {}),
         ...(opts.github && typeof opts.github === 'object' ? { github: opts.github } : {}),
         ...(Array.isArray(opts.channels) && opts.channels.length ? { channels: opts.channels } : {}),
         // Process stage band (#362 E) — so the live graph reproduces the draft's
@@ -5730,6 +5733,9 @@ class Orchestrator {
       ...(typeof opts.parentMemberId === 'string' && opts.parentMemberId ? { parentMemberId: opts.parentMemberId } : {}),
       // Agent-level emitted labels (label hand-offs) for the process graph.
       ...(Array.isArray(opts.emits) && opts.emits.length ? { emits: opts.emits } : {}),
+      // Structured OUTCOMES port (#827) — the successor to `emits`, recorded
+      // verbatim for the process graph. Declarative only (no runtime effect).
+      ...(opts.outcomes && typeof opts.outcomes === 'object' ? { outcomes: opts.outcomes } : {}),
       // GitHub artifact ports (#380) — produce flags + consumed channels, recorded
       // for the process graph. Runtime consumer hand-offs are driven by the derived
       // github-event triggers, not this block.

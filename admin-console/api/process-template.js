@@ -19,6 +19,10 @@
 //     labels: [ { name, humanGate, brake } ],
 //   }
 
+const {
+  validateOutcomes, normalizeOutcomes, isAuthoredOutcomes, substituteOutcomes,
+} = require('./outcomes');
+
 const VERSION = 1;
 
 // Strip a leading `<teamId>-` so an exported member id becomes a reusable role
@@ -91,8 +95,14 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
       // Drop the derived producer block (#380) so the portable bundle stays clean;
       // it is regenerated from the `github` flag by expandGithubChannels.
       systemPrompt: stripProduceBlock(r.systemPrompt),
-      // Agent-level emitted labels (label hand-offs) — keep in the portable bundle.
-      ...(Array.isArray(r.emits) && r.emits.length ? { emits: r.emits.slice() } : {}),
+      // Agent-level OUTCOMES port (#827) — the structured successor to `emits`.
+      // When present it supersedes `emits` (writing outcomes clears emits,
+      // mirroring PUT /api/agents/:id), so the two never both ride the bundle.
+      ...(isAuthoredOutcomes(r.outcomes) ? { outcomes: normalizeOutcomes(r.outcomes) } : {}),
+      // Agent-level emitted labels (legacy flat hand-offs) — kept only when no
+      // structured outcomes supersede them.
+      ...(!isAuthoredOutcomes(r.outcomes) && Array.isArray(r.emits) && r.emits.length
+        ? { emits: r.emits.slice() } : {}),
       // Process stage band — portable so an exported team round-trips its stage
       // layout back into a draft (Edit as draft) and re-materialises unchanged.
       ...(typeof r.stage === 'string' && r.stage ? { stage: r.stage } : {}),
@@ -125,6 +135,10 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
   for (const r of b.roles) {
     if (!r || typeof r.id !== 'string' || !r.id) return { ok: false, error: 'each role needs a string id' };
     if (r.triggers && !Array.isArray(r.triggers)) return { ok: false, error: `role ${r.id}: triggers must be an array` };
+    if (r.outcomes !== undefined) {
+      const vo = validateOutcomes(r.outcomes);
+      if (!vo.ok) return { ok: false, error: `role ${r.id}: ${vo.error}` };
+    }
     if (r.channels !== undefined) {
       if (!Array.isArray(r.channels)) return { ok: false, error: `role ${r.id}: channels must be an array` };
       for (const c of r.channels) {
@@ -204,8 +218,13 @@ function templateToCustomRoles(bundle) {
     // live graph reproduces the draft's stage layout instead of collapsing to
     // the auto-layered columns.
     ...(typeof r.stage === 'string' && r.stage ? { stage: r.stage } : {}),
-    // Agent-level emitted labels (label hand-offs) — recorded on member config.
-    ...(Array.isArray(r.emits) && r.emits.length ? { emits: r.emits } : {}),
+    // Agent-level OUTCOMES port (#827) — recorded on member config; supersedes
+    // `emits` when present (the two never coexist on a materialised member).
+    ...(isAuthoredOutcomes(r.outcomes) ? { outcomes: normalizeOutcomes(r.outcomes) } : {}),
+    // Agent-level emitted labels (legacy flat hand-offs) — recorded on member
+    // config only when no structured outcomes supersede them.
+    ...(!isAuthoredOutcomes(r.outcomes) && Array.isArray(r.emits) && r.emits.length
+      ? { emits: r.emits } : {}),
     // GitHub artifact ports (#380) — carried to member config so the live graph
     // renders channel edges + the orchestrator instructs the agent to open
     // PRs/issues. The functional consumer triggers are already expanded by
@@ -773,7 +792,11 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
     // hierarchy (#377), agent-level emits, stage band, GitHub ports (#380).
     ...(dataFlow ? { dataFlow } : {}),
     ...(typeof t.parent === 'string' && t.parent ? { parentMemberId: `${teamId}-${t.parent}` } : {}),
-    ...(Array.isArray(t.emits) && t.emits.length ? { emits: t.emits } : {}),
+    // OUTCOMES port (#827): `{{var}}` substituted inside label/when like trigger
+    // fields; supersedes `emits` when present. Only one of the two is carried.
+    ...(isAuthoredOutcomes(t.outcomes)
+      ? { outcomes: normalizeOutcomes(substituteOutcomes(t.outcomes, subst)) }
+      : (Array.isArray(t.emits) && t.emits.length ? { emits: t.emits } : {})),
     ...(typeof t.stage === 'string' && t.stage ? { stage: t.stage } : {}),
     ...(t.github && (t.github.producesPr || t.github.producesIssue) ? { github: t.github } : {}),
     ...(Array.isArray(t.channels) && t.channels.length

@@ -40,6 +40,15 @@ role's `{{vars}}` and the target repo are applied per member.
       "sessionPolicy": "persistent" | "per-invocation",
       "systemPrompt": "You implement issues…",
       "emits": ["ready-for-review"],         // labels this role sets → outbound edges (#414)
+      "outcomes": {                          // structured successor to `emits` (#827); supersedes it
+        "mode": "exactlyOne",                //   "exactlyOne" (switch) | "anyOf" (zero or more per run)
+        "options": [
+          { "id": "accepted", "title": "Accepted", "when": "Review clean",
+            "actions": [ { "type": "setLabel", "label": "ready-to-merge" } ] },
+          { "id": "revisions", "title": "Revisions required", "when": "Issues found",
+            "actions": [ { "type": "setLabel", "label": "revisions-required" } ] }
+        ]
+      },
       "github": { "producesPr": true, "producesIssue": false },  // GitHub outputs (#380)
       "channels": [                          // PR/issue channels this role consumes (#380)
         { "artifact": "pr", "from": "developer", "label": "approved", "gate": "human" }
@@ -97,6 +106,54 @@ way two agents are wired in the Flow editor. These are optional arrays on a role
 - In the Flow editor the *Dependency* and *Data flow* connect actions are unified
   into one "Data flow / hand-off" dialog: give it an artifact **name** for a data
   hand-off, or leave name+path empty for a plain dependency.
+
+### Outcomes — structured successor to `emits` (#827)
+
+A role may carry a first-class **`outcomes`** port — the structured successor to
+the flat `emits` list (concept `docs/agent-outcomes-concept.md` §3/§5.1/§7). It
+describes *which signals the agent sets and when*: a code reviewer's *accepted*
+vs *revisions required*, a dispatcher's *route to Developer 1 / 2 / hold*.
+
+```jsonc
+{
+  "outcomes": {
+    "mode": "exactlyOne",              // switch — exactly one option per run | "anyOf" — zero or more
+    "options": [
+      {
+        "id": "to-developer",          // stable slug, unique within the role
+        "title": "Route to Developer", // display name (optional)
+        "when": "Frontend task, or Dev 2 at capacity",  // human-readable condition (optional, {{var}}-substituted)
+        "actions": [ { "type": "setLabel", "label": "ready-{{stagePrefix}}" } ],
+        "notify": "dm"                 // optional: post a DM summary when this outcome is chosen
+      },
+      { "id": "hold", "title": "Hold", "when": "Ambiguous", "actions": [ { "type": "none" } ] }
+    ]
+  }
+}
+```
+
+- **Action types.** `setLabel` (apply a GitHub label — `label` required),
+  `openPr`, `openIssue` (absorb `github.producesPr/producesIssue`), `none`
+  (terminal, no outbound signal). An option may carry several actions.
+- **Validation.** `mode` must be `exactlyOne` | `anyOf`; option `id`s are unique;
+  action types must be known; a `setLabel` label may **not** be a `human:*` /
+  brake (`hold`, `needs:human`) label (same gate convention as `gate-violation`).
+  `exactlyOne` with fewer than two options is valid (a phase-5 lint, not an error).
+- **`{{var}}` substitution** applies to `label` and `when` at materialise time,
+  exactly like trigger fields.
+- **Supersedes `emits`.** When a role carries authored `outcomes`, its `emits` is
+  dropped (the two never coexist on a materialised member or an exported role).
+- **Read-path lift (§7).** A role with flat `emits` and no `outcomes` is read
+  everywhere (graph build, export, materialise) as the degenerate set
+  `{ mode: "anyOf", options: emits.map(l => ({ id: slug(l), actions: [{ type: "setLabel", label: l }] })) }`
+  — so a legacy role projects back to exactly its label set and yields
+  byte-identical graph edges. Nothing is rewritten on disk until the role is edited.
+- **Graph edges** are keyed by outcome: a `setLabel` action's label drives the
+  same `emits ↔ labelFilter` edge (now tagged with the `outcome` id when
+  authored); `openPr`/`openIssue` fold into the github produce flags.
+- **Declarative only** (concept decision 4) — outcomes have no runtime effect in
+  this phase; the agent still sets its own signals. Prompt synchronisation is a
+  later phase.
 
 ### Notes & invariants
 

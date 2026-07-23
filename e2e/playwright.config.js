@@ -9,6 +9,7 @@
 //   - No global timeout knobs beyond Playwright's auto-waiting defaults; specs
 //     assert on user-visible state, never sleep (§7).
 const { defineConfig, devices } = require('@playwright/test');
+const path = require('path');
 
 const ADMIN_PORT = process.env.ADMIN_PORT || '4010';
 const BASE_URL = process.env.E2E_BASE_URL || `http://localhost:${ADMIN_PORT}`;
@@ -45,6 +46,14 @@ module.exports = defineConfig({
     // Authenticated state captured once in global-setup and reused by every
     // spec. The unauthenticated-redirect spec opts out via test.use.
     storageState: './.auth/state.json',
+    // Fake media device for the STT UI tests: Chromium serves the fixture WAV
+    // through MediaRecorder instead of requiring a real microphone.
+    launchOptions: {
+      args: [
+        '--use-fake-device-for-media-stream',
+        `--use-file-for-fake-audio-capture=${path.resolve(__dirname, 'fixtures/audio/stt-test.wav')}`,
+      ],
+    },
   },
   projects: [
     {

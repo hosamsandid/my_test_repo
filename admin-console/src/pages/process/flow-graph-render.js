@@ -13,6 +13,7 @@
 
 import { computeFlowLayout, assignCrossCoords } from './flow-layout';
 import { routeOrthogonalEdges, roundedPathD, laneLoadByChannel } from './edge-router';
+import { outcomeCardMinHeight, OUTCOME_COL_BOTTOM, OUTCOME_GROW_MIN } from './outcome-port-layout';
 
 export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutcome, onSelectEdge, actorSources, expandChildrenByDefault } = {}) {
 
@@ -1237,8 +1238,16 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       // hand-off dialog pre-filled with that outcome's label (onConnectOutcome).
       // Stacked as a labelled column on the node's right edge, below the ● port.
       if (state.editable && onConnectOutcome && bp.outcomes && Array.isArray(bp.outcomes.options) && bp.outcomes.options.length) {
+        const outCount = bp.outcomes.options.length;
+        // With 2+ outcomes the column is pinned to the card's bottom and the card
+        // is grown via min-height (below) so every row stays inside the borders
+        // and clears the centred ● connect port (#857). A single outcome keeps the
+        // original centre-anchored placement so 0/1-outcome nodes are unchanged.
+        const grow = outCount >= OUTCOME_GROW_MIN;
         const col = document.createElement('div');
-        col.style.cssText = 'position:absolute;right:-9px;top:calc(50% + 14px);display:flex;flex-direction:column;gap:5px;z-index:3;align-items:flex-end;';
+        col.style.cssText = grow
+          ? `position:absolute;right:-9px;bottom:${OUTCOME_COL_BOTTOM}px;display:flex;flex-direction:column;gap:5px;z-index:3;align-items:flex-end;`
+          : 'position:absolute;right:-9px;top:calc(50% + 14px);display:flex;flex-direction:column;gap:5px;z-index:3;align-items:flex-end;';
         bp.outcomes.options.forEach((o) => {
           const title = o.title || o.id;
           const setLabelAction = (o.actions || []).find(a => a.type === 'setLabel' && a.label);
@@ -1260,6 +1269,11 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
           col.appendChild(row);
         });
         node.appendChild(col);
+        // Grow the card so the bottom-pinned column is fully contained and the
+        // added height is reflected in layout + edge anchoring (all driven by the
+        // node's measured offsetHeight — see getNodeHeight / drawRoutedProcessEdges).
+        const minH = outcomeCardMinHeight(outCount);
+        if (minH) node.style.minHeight = minH + 'px';
       }
 
       // NOTE (#411): the separate PR/Issue drag pills are gone — the header

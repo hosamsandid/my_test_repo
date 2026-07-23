@@ -34,11 +34,21 @@
 
 - **Token Usage: per-team filter** — System Admins can now filter the Token Usage page (Summary and Work Items tabs, including CSV exports) by team. Selecting a specific team shows only that team's records; "All teams" remains the default and includes legacy entries with no team assigned. (#810)
 
+- **Consolidation migration: operator UI** — the Knowledge page now includes a **Consolidation panel** that walks operators through folding accumulated micro-skills and open candidates into confirmed domain playbooks. The panel opens with a preview showing how many skills and candidates collapse per domain, then steps through each domain one at a time: **Review playbook** synthesises a draft for approval, **Accept & merge** applies it (archives all sources with full lineage, swaps grants atomically), and **Skip** defers a domain without applying changes. Migration state is resumable — reopening the panel continues from the first undecided domain. Remaining unmatched candidates are routed automatically at the end of the run. The panel updates live via the knowledge feed as merges complete. (#842)
+
+- **Domains panel: AI-powered domain proposal** — a new **Propose with AI** action suggests 5–8 domain names and scopes derived from the team's lesson corpus; proposals are shown un-persisted for review and only applied on **Confirm**. When no LLM target is configured, a deterministic role-seed fallback is used and flagged with a visible warning. An over-budget nudge in both the domain list and the Add field steers operators toward merging existing domains before creating new ones. (#841)
+
+- **Structured outcomes port for agent roles (data model / API)** — process template roles and live agents now support a structured `outcomes` field: a named decision tree where each option maps a condition to one or more actions (`setLabel`, `openPr`, `openIssue`). When authored, `outcomes` supersedes the flat `emits` list and generates the same graph edges plus an `outcome` id tag for traceability. Process templates round-trip `outcomes` through materialisation, member configs, and export/import (with `{{var}}` substitution in label names and conditions). `PUT /api/agents/:id` with `outcomes` persists it and clears any existing `emits`. UI editing and runtime prompt injection are deferred to a later phase. (#827)
+
 ### Bug Fixes
 
 - **Auto-curated skills now show descriptions in the agent Skills section** — skills created by the knowledge curator were written without YAML frontmatter, causing agents to see only the skill name with no indication of what the skill covers. The curator now writes a `name` + `description` frontmatter block into every generated SKILL.md. Existing skills are backfilled automatically the next time they are amended. (#807)
 
 - **Process Canvas: "Add agent" button now shows a busy state during provisioning** — clicking "Add agent" on a live team previously gave no visual feedback while the backend provisioned the Matrix user and seeded the workspace (which can take several seconds), making the UI appear frozen. The button now shows a spinner and "Adding…" label, dims, and disables double-submit for the full request duration. (#833)
+
+- **Flow Editor: listener prompt now editable on existing label hand-off edges** — the *Listener prompt* field (the instruction the receiving agent wakes with) was shown when creating a label hand-off but was missing from the edit dialog, leaving it invisible and uneditable on existing edges. The edit dialog now pre-fills the stored prompt verbatim (or generates a default if none is stored) and persists any changes on save. (#834)
+
+- **GitHub channel listeners no longer fire multiple times per event** — when two or more producers handed work to the same consumer over the same label (e.g. two Business Analysts routing to one Dispatcher via `dispatch`), the system generated one trigger per producer and the GitHub poller fired all of them on every matching event, causing the consumer to be woken once per producer. Derived channel triggers are now consolidated into a single listener per unique (events, labelFilter) combination; the contributing producers are recorded for provenance only and have no runtime effect. Existing teams migrate automatically on their next flow edit. (#826)
 
 ### Changes
 
@@ -47,6 +57,10 @@
 - **Trigger cards no longer show the raw internal ID** — the grey monospace trigger ID line has been removed from each trigger card in the chat right-rail Triggers panel, reducing visual noise for non-technical readers. The ID is still visible in the trigger edit form, and HTTP-webhook cards continue to show their full webhook path. (#792)
 
 - **Session Log: system event content now visible** — `system_event` rows in the Session Log panel (e.g. `thinking_tokens`) previously rendered as a bare label. They now show an inline summary of their payload (e.g. `thinking_tokens: 1234`) and are click-to-expand to display the full raw JSON — mirroring how other detailed log entries are rendered. No log data format changed; existing persisted logs show content on reload. (#821)
+
+- **Token Usage → Work items: help text on each summary tile** — each of the 8 Work items summary tiles now shows a "?" InfoTip button that, when clicked, reveals a plain-English explanation of the metric. Covered terms include attributed vs. unattributed work items and what each count and cost figure represents. The InfoTip is also touch-reachable (tap to toggle). (#837)
+
+- **Flow Editor: `duplicate-listener` lint warns when a manual trigger duplicates a derived channel listener** — the Flow Editor now surfaces a warning lint when an agent has a manually-authored `github-event` trigger whose event type and label filter are identical to a derived channel listener. This makes the overlap visible before materialising, prompting the operator to remove the redundant trigger. (#826)
 
 ### Breaking Changes
 

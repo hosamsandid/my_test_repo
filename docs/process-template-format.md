@@ -112,11 +112,17 @@ way two agents are wired in the Flow editor. These are optional arrays on a role
   optionally only when `label` is present, and `gate: "human"` means a **human**
   applies that label (the inline approval gate on the edge). At materialise (and
   on live edits, via `reconcileTeamGithubChannels`) `expandGithubChannels` derives
-  the consumer's github-event trigger (`<consumer>-on-<artifact>-<producer>`,
+  the consumer's github-event trigger (`<consumer>-on-<artifact>[-<label>]`,
   marked `channel: true`) from the port — the derived triggers are **not** stored
-  in the portable bundle, only the ports. This supersedes the old
-  `kind: "pr-review"` construct; legacy `pr-review` roles are normalised onto
-  channels on import (`normalizeLegacyReview`).
+  in the portable bundle, only the ports. Channels from **several producers** that
+  resolve to the same `(events, labelFilter)` collapse into **one** derived
+  listener (#826) — the poller has no origin filter, so per-producer triggers were
+  functionally identical; the contributing producers are recorded on the trigger's
+  informational `sources: [producerId, …]` (no runtime meaning). Two triggers of
+  one agent sharing `(events, labelFilter)` — e.g. a hand-authored trigger left
+  beside a derived one — raise the advisory `duplicate-listener` lint. This
+  supersedes the old `kind: "pr-review"` construct; legacy `pr-review` roles are
+  normalised onto channels on import (`normalizeLegacyReview`).
 - **Gates & brakes are never emitted by agents.** `human:*` gate labels and the
   brakes (`hold`, `needs:human`) only ever appear as a *listener* `labelFilter`;
   an agent that declares them in `emits` is flagged `gate-violation` by the lint

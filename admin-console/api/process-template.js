@@ -223,6 +223,8 @@ function templateToCustomRoles(bundle) {
       // Trigger-level emits removed (#783) — label hand-offs ride on role `emits`.
       dataFlow: t.dataFlow,
       channel: t.channel,
+      // Informational provenance for a consolidated channel listener (#826).
+      ...(Array.isArray(t.sources) ? { sources: t.sources } : {}),
       description: t.description,
       promptTemplate: t.prompt || '',
       preCheckScript: t.preCheckScript,
@@ -289,8 +291,14 @@ const CHANNEL_EVENTS = {
 
 // Canonical id for a derived channel trigger, so reconciliation can find and
 // regenerate it (kept in sync with reconcileTeamGithubChannels in api.js).
-function channelTriggerId(consumerId, artifact, producerId) {
-  return `${consumerId}-on-${artifact}-${producerId}`;
+// The id is keyed on the (artifact, label) the trigger listens on — NOT on the
+// producer (#826): channels from several producers over the same label collapse
+// into ONE derived listener (the poller has no origin filter, so per-producer
+// triggers were functionally identical duplicates). The contributing producers
+// are recorded informationally on the trigger's `sources`.
+function channelTriggerId(consumerId, artifact, label) {
+  const lbl = typeof label === 'string' && label.trim() ? label.trim() : '';
+  return `${consumerId}-on-${artifact}${lbl ? `-${lbl}` : ''}`;
 }
 
 function isChannelTrigger(t) {
@@ -306,18 +314,51 @@ function isChannelTrigger(t) {
 // same-id trigger's `activatedAt` onto its regenerated replacement — keeping the
 // horizon fixed across reconciles — and stamps a genuinely new derived trigger
 // with `now`. Non-derived and already-stamped triggers pass through untouched.
+//
+// Consolidation (#826): the channel id scheme changed from `<c>-on-<art>-<prod>`
+// to `<c>-on-<art>[-<label>]` (producer dropped), so a reconcile that migrates an
+// old team's per-producer triggers onto the new consolidated one cannot match by
+// id — the ids differ. To keep the history horizon fixed across that migration, a
+// derived trigger with no exact id match falls back to matching prior derived
+// triggers by their (events, labelFilter) *listener signature* and carries the
+// **oldest** `activatedAt` of that merged set. So merging N old triggers into one
+// listener can never shove the poller's horizon forward to "now" and drop a
+// pending event that arrived before the oldest of them. Id match still wins first
+// (steady-state regeneration).
+//
+// The signature fallback is deliberately scoped to `channel` triggers: their id
+// scheme changed (#826), so a migrated trigger must re-find its predecessors by
+// signature. Data-flow (`<c>-on-push-<upstream>`) ids never changed and every
+// data-flow trigger of one consumer shares the same `push` signature, so a
+// signature fallback there would make a genuinely-new upstream inherit a
+// sibling's old horizon and replay stale pushes — data-flow stays id-match only.
 // Pure; `now` is injectable for tests.
+function derivedListenerSignature(t) {
+  const events = Array.isArray(t.events) ? t.events.slice().sort() : [];
+  const label = typeof t.labelFilter === 'string' ? t.labelFilter : '';
+  return `${events.join(',')}|${label}`;
+}
 function stampDerivedActivation(nextTriggers, prevTriggers, now) {
-  const prevAt = new Map();
+  const prevAt = new Map();           // id -> activatedAt (exact-id preservation)
+  const prevChannelBySig = new Map(); // channel listener signature -> oldest activatedAt
   for (const t of (Array.isArray(prevTriggers) ? prevTriggers : [])) {
-    if (t && typeof t.id === 'string' && t.activatedAt) prevAt.set(t.id, t.activatedAt);
+    if (!t || typeof t !== 'object' || !t.activatedAt) continue;
+    if (!(t.channel === true || t.dataFlow === true)) continue;
+    if (typeof t.id === 'string') prevAt.set(t.id, t.activatedAt);
+    if (t.channel === true) {
+      const sig = derivedListenerSignature(t);
+      const cur = prevChannelBySig.get(sig);
+      if (!cur || t.activatedAt < cur) prevChannelBySig.set(sig, t.activatedAt); // ISO strings sort lexicographically
+    }
   }
   const stamp = now || new Date().toISOString();
   return (Array.isArray(nextTriggers) ? nextTriggers : []).map((t) => {
     if (!t || typeof t !== 'object') return t;
     const derived = t.channel === true || t.dataFlow === true;
     if (!derived || t.activatedAt) return t;
-    return { ...t, activatedAt: prevAt.get(t.id) || stamp };
+    const carried = prevAt.get(t.id)
+      || (t.channel === true ? prevChannelBySig.get(derivedListenerSignature(t)) : undefined);
+    return { ...t, activatedAt: carried || stamp };
   });
 }
 
@@ -373,31 +414,56 @@ function expandGithubChannels(bundle, _opts = {}) {
   const byId = new Map(roles.map(r => [r.id, r]));
 
   for (const b of roles) {
+    // Group this consumer's channels by the (artifact, label) listener they
+    // resolve to (#826). Several producers over the same label yield ONE derived
+    // trigger: since the poller carries no origin filter, per-producer triggers
+    // were functionally identical (same events + labelFilter) and woke the agent
+    // once per producer. The contributing producers are kept on `sources` for
+    // provenance only. Insertion order (first channel wins the slot) is preserved
+    // so the derivation stays deterministic.
+    const groups = new Map(); // `${artifact}::${label}` -> { artifact, label, human, sources: [] }
     for (const ch of (b.channels || [])) {
       const artifact = ch.artifact === 'issue' ? 'issue' : 'pr';
       const from = typeof ch.from === 'string' ? ch.from : '';
       if (!from || from === b.id) continue;
       const label = typeof ch.label === 'string' && ch.label.trim() ? ch.label.trim() : '';
       const human = ch.gate === 'human';
-      const id = channelTriggerId(b.id, artifact, from);
+      const key = `${artifact}::${label}`;
+      let g = groups.get(key);
+      if (!g) { g = { artifact, label, human: false, sources: [] }; groups.set(key, g); }
+      // Gated iff any contributing channel gates it (a mixed gated/ungated set on
+      // the same label is degenerate — treat as gated, matching the old behaviour
+      // where the labelled trigger already reacted to the label change).
+      g.human = g.human || human;
+      if (!g.sources.includes(from)) g.sources.push(from);
+    }
+
+    for (const g of groups.values()) {
+      const id = channelTriggerId(b.id, g.artifact, g.label);
       if (b.triggers.some(t => t.id === id)) continue;
-      const events = (label ? CHANNEL_EVENTS[artifact].labeled : CHANNEL_EVENTS[artifact].open).slice();
-      const producerName = byId.get(from)?.displayName || from;
+      const events = (g.label ? CHANNEL_EVENTS[g.artifact].labeled : CHANNEL_EVENTS[g.artifact].open).slice();
+      const producerNames = g.sources.map(s => byId.get(s)?.displayName || s);
+      const producerLabel = producerNames.join(', ') || 'an upstream';
       b.triggers.push({
         id,
         type: 'github-event',
         events,
-        ...(label ? { labelFilter: label } : {}),
+        ...(g.label ? { labelFilter: g.label } : {}),
         // No origin filter: the trigger fires on any matching PR/issue event.
         // A human gate is expressed purely by the `human:*` label convention
         // (the labelFilter above) — humans apply it; agents don't, by convention.
         channel: true,
+        // Informational only (#826): which producers' channels contributed to
+        // this consolidated listener. No runtime meaning (the poller ignores it);
+        // kept for provenance and so the graph can map each channel edge onto the
+        // shared listener.
+        sources: g.sources.slice(),
         enabled: true,
-        description: `${artifact === 'pr' ? 'PR' : 'Issue'} from ${producerName}`
-          + `${label ? ` labelled ${label}` : ''}${human ? ' (human-approved)' : ''}`,
-        prompt: artifact === 'pr'
-          ? consumePrPrompt(producerName, { label, human })
-          : consumeIssuePrompt(producerName, { label, human }),
+        description: `${g.artifact === 'pr' ? 'PR' : 'Issue'} from ${producerLabel}`
+          + `${g.label ? ` labelled ${g.label}` : ''}${g.human ? ' (human-approved)' : ''}`,
+        prompt: g.artifact === 'pr'
+          ? consumePrPrompt(producerLabel, { label: g.label, human: g.human })
+          : consumeIssuePrompt(producerLabel, { label: g.label, human: g.human }),
       });
     }
     // Producer instruction block — idempotent (strip any prior block, re-append).
@@ -663,6 +729,8 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
       // GitHub-channel marker (#380) so reconciliation can regenerate it and the
       // graph builders skip it (the on:'github' edge comes from the port).
       if (tr.channel) out.channel = true;
+      // Consolidated-listener provenance (#826), informational only.
+      if (Array.isArray(tr.sources)) out.sources = tr.sources.slice();
       // Stamp the history horizon (#320/#446) on EVERY github-event trigger so
       // the poller starts a fresh member from "now", not the triggers.json mtime.
       const now = new Date().toISOString();

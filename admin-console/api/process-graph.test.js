@@ -281,6 +281,48 @@ test('github channel: derived channel triggers do not produce label/event edges'
   assert.ok(!g.lints.some(l => l.code === 'orphan-listener'));
 });
 
+test('lint: duplicate-listener flags a manual trigger duplicating a derived channel listener; removing it clears the lint (\#826)', () => {
+  const derived = { id: 'rev-on-pr', type: 'github-event', channel: true,
+    events: ['pull_request.opened', 'pull_request.reopened'] };
+  const manual = { id: 'rev-manual', type: 'github-event',
+    events: ['pull_request.reopened', 'pull_request.opened'] }; // same set, different order
+  // With the manual duplicate present.
+  const dup = buildProcessGraph([
+    { id: 'dev', triggers: [], github: { producesPr: true } },
+    { id: 'rev', channels: [{ artifact: 'pr', from: 'dev' }], triggers: [derived, manual] },
+  ]);
+  const l = dup.lints.find(x => x.code === 'duplicate-listener' && x.nodeId === 'rev');
+  assert.ok(l, 'duplicate-listener raised');
+  assert.equal(l.severity, 'warning');
+  assert.deepEqual([...l.triggerIds].sort(), ['rev-manual', 'rev-on-pr']);
+  // Deleting the manual trigger clears the lint.
+  const clean = buildProcessGraph([
+    { id: 'dev', triggers: [], github: { producesPr: true } },
+    { id: 'rev', channels: [{ artifact: 'pr', from: 'dev' }], triggers: [derived] },
+  ]);
+  assert.ok(!clean.lints.some(x => x.code === 'duplicate-listener'));
+});
+
+test('lint: duplicate-listener requires matching labelFilter, not just events (\#826)', () => {
+  const g = buildProcessGraph([
+    { id: 'a', triggers: [
+      { id: 't1', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' },
+      { id: 't2', type: 'github-event', events: ['issues.labeled'], labelFilter: 'dispatch' },
+    ] },
+  ]);
+  assert.ok(!g.lints.some(x => x.code === 'duplicate-listener'), 'different labels are distinct listeners');
+});
+
+test('lint: duplicate-listener does NOT fire on per-upstream data-flow push triggers (\#826)', () => {
+  const g = buildProcessGraph([
+    { id: 'c', triggers: [
+      { id: 'c-on-push-up1', type: 'github-event', dataFlow: true, events: ['push'] },
+      { id: 'c-on-push-up2', type: 'github-event', dataFlow: true, events: ['push'] },
+    ] },
+  ]);
+  assert.ok(!g.lints.some(x => x.code === 'duplicate-listener'), 'intentional one-per-upstream listeners');
+});
+
 test('lint: a producer whose artifact nobody consumes is flagged (info)', () => {
   const g = buildProcessGraph([{ id: 'dev', triggers: [], github: { producesPr: true } }]);
   assert.ok(g.lints.some(l => l.code === 'producer-unconsumed' && l.nodeId === 'dev'));

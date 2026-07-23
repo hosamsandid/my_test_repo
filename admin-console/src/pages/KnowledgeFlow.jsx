@@ -969,6 +969,7 @@ const TeamSection = React.forwardRef(function TeamSection({
             onReviewSuggestion={onReviewSuggestion}
             onShareSkill={onShareSkill}
             onControlsChanged={onControlsChanged}
+            lessons={allItems.map(i => i.text).filter(Boolean)}
           />
           {privateSkills.length > 0 && (
             <PrivateSkillsBlock teamId={team.id} skills={privateSkills} onLifted={onLifted} />
@@ -988,33 +989,104 @@ const SKILL_TABS = [
   ['suggested', 'Suggested', 'Knowledge the collector thinks is worth turning into a skill.'],
 ];
 
-/* ── Skill domains + budget (#780, skill-aggregation Phase 2) ────────────────── */
+/* ── Skill domains + budget (#780/#841, skill-aggregation Phase 2) ───────────── */
+
+const DOMAIN_SCOPES = ['team', 'role', 'cross-role'];
+const parseRolesInput = (s) => Array.from(new Set(
+  String(s || '').split(',').map(r => r.trim()).filter(Boolean),
+));
+
+// Render a domain's audience roles as small pills (mirrors the skill cards' "for:"
+// tags — the same roles[] drives both via the server-side augmentSkillRoles overlay).
+function DomainRoleTags({ roles }) {
+  if (!Array.isArray(roles) || roles.length === 0) return null;
+  return (
+    <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap' }}>
+      {roles.map(r => (
+        <span key={r} style={{
+          fontSize: 10, padding: '0 6px', borderRadius: 'var(--eb-radius-full)',
+          border: '1px solid var(--eb-border-default)', color: 'var(--eb-text-secondary)',
+        }}>{r}</span>
+      ))}
+    </span>
+  );
+}
 
 // A compact panel over the team's persistent skill domains — the routing targets
 // converged clusters are classified against — plus the soft skill-budget bar
-// (§3.5, AC5). Operator CRUD (add / rename) posts to /api/knowledge/domains; domain
-// changes are always a human decision. Collapsible; hidden when a team carries no
+// (§3.5, AC5). Operator ops post to /api/knowledge/domains (domain changes are always
+// a human decision): seed, LLM bootstrap (proposed → confirm), add, edit scope/roles,
+// merge (≥2 → 1), split (1 → ≥2), remove. Collapsible; hidden when a team carries no
 // domains yet and the operator hasn't expanded it.
-function DomainsPanel({ teamId, domains, budget, onChanged }) {
+function DomainsPanel({ teamId, domains, budget, lessons, onChanged }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
   const [adding, setAdding] = useState('');
-  const [renaming, setRenaming] = useState(null); // { id, name }
+  const [editing, setEditing] = useState(null);   // { id, name, scope, roles(csv) }
+  const [proposal, setProposal] = useState(null);  // { proposed:[...], fallback:bool }
+  const [selected, setSelected] = useState(() => new Set()); // ids picked for merge
+  const [merging, setMerging] = useState(null);    // { name, scope }
+  const [splitting, setSplitting] = useState(null); // { id, name, parts:[{name,scope}] }
   const list = Array.isArray(domains) ? domains : [];
 
-  const post = useCallback((body) => {
-    setBusy(true);
+  // Post an op. `reload:false` (bootstrap) skips onChanged since nothing is persisted.
+  // Returns the parsed response so callers can read `proposed`/`fallback`.
+  const post = useCallback((body, { reload = true } = {}) => {
+    setBusy(true); setErr('');
     return fetch('/api/knowledge/domains', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ teamId, ...body }),
     }).then(r => r.json().catch(() => ({}))).then((out) => {
       if (!out || out.ok !== true) throw new Error((out && out.error) || 'failed');
-      onChanged && onChanged();
-    }).finally(() => setBusy(false));
+      if (reload && onChanged) onChanged();
+      return out;
+    }).catch((e) => { setErr(e.message || 'failed'); throw e; }).finally(() => setBusy(false));
   }, [teamId, onChanged]);
 
   const over = budget && budget.over;
   const pct = budget && budget.cap ? Math.min(100, Math.round((budget.used / budget.cap) * 100)) : 0;
+
+  const toggleSelect = (id) => setSelected((prev) => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+
+  // Persist a scope/roles/name edit. There is no per-field backend op (rename only
+  // touches the name), so the edit goes through `confirm` with the full domain list —
+  // the taxonomy's canonical "set the domains to this" op — with the one row patched.
+  const saveEdit = () => {
+    const name = editing.name.trim();
+    if (!name) { setErr('name-required'); return; }
+    const next = list.map(d => (d.id === editing.id
+      ? { ...d, name, scope: editing.scope, roles: parseRolesInput(editing.roles) }
+      : d));
+    post({ op: 'confirm', domains: next }).then(() => setEditing(null)).catch(() => {});
+  };
+
+  const runBootstrap = () => {
+    post({ op: 'bootstrap', lessons: Array.isArray(lessons) ? lessons : [] }, { reload: false })
+      .then((out) => setProposal({ proposed: out.proposed || [], fallback: out.fallback === true }))
+      .catch(() => {});
+  };
+  const confirmProposal = () => {
+    post({ op: 'confirm', domains: proposal.proposed }).then(() => setProposal(null)).catch(() => {});
+  };
+
+  const runMerge = () => {
+    post({
+      op: 'merge', ids: Array.from(selected),
+      name: merging.name.trim() || undefined, scope: merging.scope || undefined,
+    }).then(() => { setMerging(null); setSelected(new Set()); }).catch(() => {});
+  };
+
+  const runSplit = () => {
+    const parts = splitting.parts.filter(p => p.name.trim())
+      .map(p => ({ name: p.name.trim(), scope: p.scope }));
+    post({ op: 'split', id: splitting.id, parts }).then(() => setSplitting(null)).catch(() => {});
+  };
+  const splitReady = splitting && splitting.parts.filter(p => p.name.trim()).length >= 2;
 
   return (
     <div style={{
@@ -1046,62 +1118,187 @@ function DomainsPanel({ teamId, domains, budget, onChanged }) {
       )}
       {open && (
         <div style={{ marginTop: 'var(--eb-space-2)' }}>
-          {list.length === 0 && (
+          {/* Toolbar: LLM bootstrap + merge action */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap', marginBottom: 'var(--eb-space-2)' }}>
+            <button disabled={busy} onClick={runBootstrap}
+              title="Let the model propose domains over this team’s lessons — you review before anything is saved"
+              style={{ ...miniBtn, display: 'inline-flex', alignItems: 'center', gap: 4, opacity: busy ? 0.5 : 1 }}>
+              <Sparkles size={12} /> Propose with AI
+            </button>
+            {selected.size >= 2 && (
+              <button disabled={busy} onClick={() => setMerging({ name: '', scope: '' })}
+                style={{ ...miniBtn, display: 'inline-flex', alignItems: 'center', gap: 4, opacity: busy ? 0.5 : 1 }}>
+                <Combine size={12} /> Merge {selected.size}
+              </button>
+            )}
+            {selected.size > 0 && (
+              <button style={linkBtn} onClick={() => setSelected(new Set())}>Clear selection</button>
+            )}
+          </div>
+
+          {/* Bootstrap proposal review — un-persisted until confirmed */}
+          {proposal && (
+            <div style={{
+              border: '1px solid var(--eb-accent-primary)', borderRadius: 'var(--eb-radius-md)',
+              padding: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-2)', background: 'var(--eb-bg-app)',
+            }}>
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', marginBottom: 'var(--eb-space-1)' }}>
+                Proposed domains ({proposal.proposed.length}) — review, then confirm to replace the taxonomy.
+              </div>
+              {proposal.fallback && (
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', marginBottom: 'var(--eb-space-1)' }}>
+                  ⚠ The AI target was unavailable — these are the deterministic role-seed defaults.
+                </div>
+              )}
+              {proposal.proposed.map(d => (
+                <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: '2px 0', fontSize: 'var(--eb-text-sm)' }}>
+                  <span style={{ flex: 1, overflowWrap: 'anywhere' }}>{d.name}</span>
+                  <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{d.scope}</span>
+                  <DomainRoleTags roles={d.roles} />
+                </div>
+              ))}
+              <div style={{ display: 'flex', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)' }}>
+                <button disabled={busy || proposal.proposed.length === 0} onClick={confirmProposal}
+                  style={{ ...primaryBtn, opacity: (busy || proposal.proposed.length === 0) ? 0.5 : 1 }}>Confirm</button>
+                <button disabled={busy} onClick={() => setProposal(null)}
+                  style={{ ...miniBtn, opacity: busy ? 0.5 : 1 }}>Discard</button>
+              </div>
+            </div>
+          )}
+
+          {list.length === 0 && !proposal && (
             <div style={{
               display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap',
               fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', marginBottom: 'var(--eb-space-2)',
             }}>
-              <span>No domains yet. Seed the defaults from the team’s roles, then edit them.</span>
+              <span>No domains yet. Seed the defaults from the team’s roles, or propose with AI, then edit them.</span>
               <button disabled={busy} onClick={() => post({ op: 'seed' })}
                 style={{ ...miniBtn, opacity: busy ? 0.5 : 1 }}>Seed defaults</button>
             </div>
           )}
+
           {list.map(d => (
             <div key={d.id} style={{
-              display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
               padding: 'var(--eb-space-1) 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)',
+              borderBottom: '1px solid var(--eb-border-default)',
             }}>
-              {renaming && renaming.id === d.id ? (
-                <>
-                  <input value={renaming.name} autoFocus
-                    onChange={e => setRenaming({ id: d.id, name: e.target.value })}
-                    style={{ ...inp, flex: 1 }} />
-                  <button disabled={busy || !renaming.name.trim()}
-                    onClick={() => post({ op: 'rename', id: d.id, name: renaming.name.trim() }).then(() => setRenaming(null))}
-                    style={{ ...primaryBtn, opacity: (busy || !renaming.name.trim()) ? 0.5 : 1 }}>Save</button>
-                  <button disabled={busy} onClick={() => setRenaming(null)}
-                    style={{ ...miniBtn, opacity: busy ? 0.5 : 1 }}>Cancel</button>
-                </>
+              {editing && editing.id === d.id ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+                  <input value={editing.name} autoFocus placeholder="Domain name"
+                    onChange={e => setEditing({ ...editing, name: e.target.value })} style={inp} />
+                  <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+                    <select value={editing.scope} onChange={e => setEditing({ ...editing, scope: e.target.value })}
+                      style={{ ...inp, flex: '0 0 auto', width: 'auto' }}>
+                      {DOMAIN_SCOPES.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                    <input value={editing.roles} placeholder="roles, comma-separated (e.g. developer, reworker)"
+                      onChange={e => setEditing({ ...editing, roles: e.target.value })} style={{ ...inp, flex: 1 }} />
+                  </div>
+                  <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+                    <button disabled={busy || !editing.name.trim()} onClick={saveEdit}
+                      style={{ ...primaryBtn, opacity: (busy || !editing.name.trim()) ? 0.5 : 1 }}>Save</button>
+                    <button disabled={busy} onClick={() => setEditing(null)}
+                      style={{ ...miniBtn, opacity: busy ? 0.5 : 1 }}>Cancel</button>
+                  </div>
+                </div>
+              ) : splitting && splitting.id === d.id ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Split “{d.name}” into:</div>
+                  {splitting.parts.map((p, i) => (
+                    <div key={i} style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+                      <input value={p.name} placeholder={`Part ${i + 1} name`}
+                        onChange={e => setSplitting({
+                          ...splitting,
+                          parts: splitting.parts.map((q, j) => (j === i ? { ...q, name: e.target.value } : q)),
+                        })} style={{ ...inp, flex: 1 }} />
+                      <select value={p.scope} onChange={e => setSplitting({
+                        ...splitting,
+                        parts: splitting.parts.map((q, j) => (j === i ? { ...q, scope: e.target.value } : q)),
+                      })} style={{ ...inp, flex: '0 0 auto', width: 'auto' }}>
+                        {DOMAIN_SCOPES.map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </div>
+                  ))}
+                  <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+                    <button style={linkBtn} onClick={() => setSplitting({ ...splitting, parts: [...splitting.parts, { name: '', scope: d.scope || 'team' }] })}>+ add part</button>
+                    <span style={{ flex: 1 }} />
+                    <button disabled={busy || !splitReady} onClick={runSplit}
+                      style={{ ...primaryBtn, opacity: (busy || !splitReady) ? 0.5 : 1 }}>Split</button>
+                    <button disabled={busy} onClick={() => setSplitting(null)}
+                      style={{ ...miniBtn, opacity: busy ? 0.5 : 1 }}>Cancel</button>
+                  </div>
+                </div>
               ) : (
-                <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+                  <input type="checkbox" checked={selected.has(d.id)} onChange={() => toggleSelect(d.id)}
+                    title="Select to merge" style={{ cursor: 'pointer' }} />
                   <span style={{ flex: 1, overflowWrap: 'anywhere' }}>{d.name}</span>
+                  <DomainRoleTags roles={d.roles} />
                   {d.scope && d.scope !== 'team' && (
                     <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{d.scope}</span>
                   )}
-                  <IconButton icon={Pencil} label="Rename" disabled={busy}
-                    onClick={() => setRenaming({ id: d.id, name: d.name })} />
+                  <IconButton icon={Pencil} label="Edit scope & roles" disabled={busy}
+                    onClick={() => { setSplitting(null); setEditing({ id: d.id, name: d.name, scope: d.scope || 'team', roles: (d.roles || []).join(', ') }); }} />
+                  <IconButton icon={Layers} label="Split" disabled={busy}
+                    onClick={() => { setEditing(null); setSplitting({ id: d.id, parts: [{ name: '', scope: d.scope || 'team' }, { name: '', scope: d.scope || 'team' }] }); }} />
                   <IconButton icon={Trash2} label="Remove" danger disabled={busy}
-                    onClick={() => post({ op: 'remove', id: d.id })} />
-                </>
+                    onClick={() => post({ op: 'remove', id: d.id }).catch(() => {})} />
+                </div>
               )}
             </div>
           ))}
+
+          {/* Merge form */}
+          {merging && (
+            <div style={{
+              border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+              padding: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)', display: 'flex',
+              flexDirection: 'column', gap: 'var(--eb-space-1)',
+            }}>
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Merge {selected.size} domains into one:</div>
+              <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+                <input value={merging.name} placeholder="Result name (optional — keeps the first)"
+                  onChange={e => setMerging({ ...merging, name: e.target.value })} style={{ ...inp, flex: 1 }} />
+                <select value={merging.scope} onChange={e => setMerging({ ...merging, scope: e.target.value })}
+                  style={{ ...inp, flex: '0 0 auto', width: 'auto' }}>
+                  <option value="">scope (keep)</option>
+                  {DOMAIN_SCOPES.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+                <button disabled={busy} onClick={runMerge}
+                  style={{ ...primaryBtn, opacity: busy ? 0.5 : 1 }}>Merge</button>
+                <button disabled={busy} onClick={() => setMerging(null)}
+                  style={{ ...miniBtn, opacity: busy ? 0.5 : 1 }}>Cancel</button>
+              </div>
+            </div>
+          )}
+
+          {/* Over-budget nudge: steer new domains into merge/override (AC2) */}
+          {over && (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', marginTop: 'var(--eb-space-2)' }}>
+              At the skill budget ({budget.used}/{budget.cap}). Prefer merging existing domains over adding new ones.
+            </div>
+          )}
+
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)' }}>
-            <input value={adding} placeholder="New domain name…"
+            <input value={adding} placeholder={over ? 'New domain (over budget — consider merging)…' : 'New domain name…'}
               onChange={e => setAdding(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter' && adding.trim()) post({ op: 'add', domain: { name: adding.trim() } }).then(() => setAdding('')); }}
+              onKeyDown={e => { if (e.key === 'Enter' && adding.trim()) post({ op: 'add', domain: { name: adding.trim() } }).then(() => setAdding('')).catch(() => {}); }}
               style={{ ...inp, flex: 1 }} />
             <button disabled={busy || !adding.trim()}
-              onClick={() => post({ op: 'add', domain: { name: adding.trim() } }).then(() => setAdding(''))}
+              onClick={() => post({ op: 'add', domain: { name: adding.trim() } }).then(() => setAdding('')).catch(() => {})}
               style={{ ...primaryBtn, opacity: (busy || !adding.trim()) ? 0.5 : 1 }}>Add</button>
           </div>
+
+          {err && (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', marginTop: 'var(--eb-space-2)' }}>{err}</div>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-function SkillsColumn({ team, skills, suggestions, pending, autonomy, domains, skillBudget, onReviewSuggestion, onShareSkill, onControlsChanged }) {
+function SkillsColumn({ team, skills, suggestions, pending, autonomy, domains, skillBudget, onReviewSuggestion, onShareSkill, onControlsChanged, lessons }) {
   const teamId = team.id;
   const tabKey = `kf.skillTab.${teamId}`;
   const seenKey = `kf.suggestSeen.${teamId}`;
@@ -1242,8 +1439,9 @@ function SkillsColumn({ team, skills, suggestions, pending, autonomy, domains, s
 
   return (
     <div>
-      {/* #780: the team's skill domains + soft skill-budget state */}
-      <DomainsPanel teamId={teamId} domains={domains} budget={skillBudget} onChanged={reload} />
+      {/* #780/#841: the team's skill domains + soft skill-budget state + operator ops */}
+      <DomainsPanel teamId={teamId} domains={domains} budget={skillBudget}
+        lessons={lessons} onChanged={reload} />
       {/* Lifecycle tabs */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
         {SKILL_TABS.map(([key, label, tip]) => {

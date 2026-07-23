@@ -9,7 +9,7 @@ RUN apt-get update && \
 RUN pip install --no-cache-dir "onnx-asr[cpu,hub]" fastapi uvicorn soundfile numpy python-multipart
 
 # Pre-download the model at build time so startup is instant.
-RUN python3 -c "import onnx_asr; onnx_asr.load_model('nemo-parakeet-tdt-0.6b-v3')"
+RUN python3 -c "import onnx_asr; onnx_asr.load_model('nemo-parakeet-tdt-0.6b-v3', quantization='int8')"
 
 COPY server.py .
 

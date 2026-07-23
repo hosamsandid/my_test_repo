@@ -7,7 +7,7 @@ import onnx_asr
 import soundfile as sf
 from fastapi import FastAPI, File, UploadFile
 
-model = onnx_asr.load_model("nemo-parakeet-tdt-0.6b-v3")
+model = onnx_asr.load_model("nemo-parakeet-tdt-0.6b-v3", quantization="int8")
 
 app = FastAPI()
 

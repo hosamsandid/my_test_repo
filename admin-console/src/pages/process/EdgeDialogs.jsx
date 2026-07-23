@@ -83,13 +83,16 @@ const LABEL_ACTIONS = [
   { value: 'unlabeled', label: 'removed' },
 ];
 
-export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = liveOps, onBack, onClose, onDone }) {
+export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = liveOps, onBack, onClose, onDone, initialLabel = '', emitSource = true }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
   const [toTriggers, setToTriggers] = useState([]);
-  const [label, setLabel] = useState('');
+  // `initialLabel` pre-fills the label when the dialog is opened from an outcome
+  // port drag (#828): the source already declares the emit via its outcome, so
+  // `emitSource` is false there and only the listener on the target is created.
+  const [label, setLabel] = useState(initialLabel || '');
   const [target, setTarget] = useState('issues');       // issues | pull_request
   const [action, setAction] = useState('labeled');       // labeled | unlabeled
   const [repo, setRepo] = useState('');
@@ -151,8 +154,10 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
       }
       // 2. Record A as emitting the label — an agent-level emit, so the edge is
       // wired without depending on a pre-existing trigger on A. Skipped for
-      // human gates/brakes (no agent may claim to set those).
-      if (!humanLabel) {
+      // human gates/brakes (no agent may claim to set those), and for outcome-port
+      // drags (#828) where A already declares the emit through its outcomes port —
+      // writing a flat `emits` there would leave a stale field beside `outcomes`.
+      if (!humanLabel && emitSource) {
         const current = await ops.getRoleEmits(from);
         await ops.setRoleEmits(from, uniq([...(Array.isArray(current) ? current : []), trimmed]));
       }

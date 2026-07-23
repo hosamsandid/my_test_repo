@@ -37,6 +37,7 @@ const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
 const { weaveProcess } = require('./flow-weaver');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
+const { heuristicOutcomeSuggestion, buildOutcomeSuggestionRequest, parseOutcomeSuggestion } = require('./outcome-suggestion');
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
 const { validateOutcomes, normalizeOutcomes, isAuthoredOutcomes } = require('./outcomes');
 const { membersOfTeam } = require('./agent-team-cascade');
@@ -7689,6 +7690,38 @@ app.post('/api/agent-ports/suggest', heavyLimiter, async (req, res) => {
   const result = await httpPostJson(url, headers, payload);
   if (result.error || result.status < 200 || result.status >= 300) return fallback();
   const suggestion = parsePortSuggestion(extractMessageText(result.body));
+  if (!suggestion) return fallback();
+  res.json({ suggestion, source: 'llm', model: target.model });
+});
+
+/* ─── Outcome suggestion for the Routing tab (#828) ─────────────────────
+ * Proposes a structured `outcomes` port (mode + options) for an agent/role
+ * from its name + system prompt. One stateless LLM call when a generation
+ * target resolves, deterministic keyword heuristic otherwise. The response is
+ * a SUGGESTION — the Routing tab renders it unconfirmed-highlighted and
+ * persists nothing until the operator confirms (concept decision 5). */
+app.post('/api/agent-outcomes/suggest', heavyLimiter, async (req, res) => {
+  const roleName = typeof req.body?.roleName === 'string' ? req.body.roleName.trim() : '';
+  let prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : '';
+  if (!roleName && !prompt) return res.status(400).json({ error: 'roleName or prompt is required' });
+
+  const fallback = () => res.json({
+    suggestion: heuristicOutcomeSuggestion({ roleName, prompt }),
+    source: 'heuristic',
+  });
+
+  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  if (target.error) return fallback();
+
+  const url = buildMessagesUrl(target.baseUrl);
+  const headers = {
+    'anthropic-version': '2023-06-01',
+    ...(target.token ? { Authorization: `Bearer ${target.token}`, 'x-api-key': target.token } : {}),
+  };
+  const payload = { model: target.model, ...buildOutcomeSuggestionRequest(roleName, prompt) };
+  const result = await httpPostJson(url, headers, payload);
+  if (result.error || result.status < 200 || result.status >= 300) return fallback();
+  const suggestion = parseOutcomeSuggestion(extractMessageText(result.body));
   if (!suggestion) return fallback();
   res.json({ suggestion, source: 'llm', model: target.model });
 });

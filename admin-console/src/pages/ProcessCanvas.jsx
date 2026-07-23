@@ -4,7 +4,7 @@ import { useApi, apiCall } from '../hooks/useApi';
 import { initFlowGraph } from './process/flow-graph-render';
 import NodeInspector from './process/NodeInspector';
 import StageManager from './process/StageManager';
-import { EditHandoffDialog, CreateEdgeDialog } from './process/EdgeDialogs';
+import { EditHandoffDialog, CreateEdgeDialog, CreateHandoffDialog } from './process/EdgeDialogs';
 import MaterializeDialog from './process/MaterializeDialog';
 import SidePanel from '../components/SidePanel';
 import { roleIcon } from '../components/role-icons';
@@ -189,7 +189,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
 
   const [selectedId, setSelectedId] = useState(null);
   const [connectPair, setConnectPair] = useState(null); // { from, to } — from may be an actor id (#411)
+  const [outcomeConnect, setOutcomeConnect] = useState(null); // { from, to, outcome } — outcome-port drag (#828)
   const [selectedEdge, setSelectedEdge] = useState(null);
+  const [routingFocus, setRoutingFocus] = useState(null); // { tab:'routing', outcome } — outcome-edge click (#828)
   const viewportRef = useRef(null);
   const graphRef = useRef(null);
   const editableRef = useRef(true);
@@ -199,9 +201,25 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   useEffect(() => {
     if (!viewportRef.current) return;
     const g = initFlowGraph(viewportRef.current, {
-      onSelectNode: (id) => setSelectedId(id),
+      onSelectNode: (id) => { setSelectedId(id); setRoutingFocus(null); },
       onConnect: (from, to) => { if (editableRef.current) setConnectPair({ from, to }); },
-      onSelectEdge: (edge) => { if (editableRef.current) setSelectedEdge(edge); },
+      // Outcome-port drag (#828): pre-fill a label hand-off from the outcome onto
+      // the drop target — only the listener is created (the source already emits
+      // via its outcome).
+      onConnectOutcome: (from, to, outcome) => { if (editableRef.current) setOutcomeConnect({ from, to, outcome }); },
+      // Clicking an outcome-keyed edge focuses the Routing tab on that outcome
+      // (#828); every other edge keeps its own edit dialog.
+      onSelectEdge: (edge) => {
+        if (!editableRef.current) return;
+        if (edge && edge.outcome && edge.from) {
+          setSelectedId(edge.from);
+          graphRef.current?.setSelected(edge.from);
+          setRoutingFocus({ tab: 'routing', outcome: edge.outcome });
+          setSelectedEdge(null);
+        } else {
+          setSelectedEdge(edge);
+        }
+      },
       actorSources: true, // offer @github/@external as drag sources (#411)
       expandChildrenByDefault: true, // process flows show the whole team; parents collapse on demand
     });
@@ -228,7 +246,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
 
   // Clear selection/dialogs when the scope (and thus the graph) changes. A
   // scope change from the parent also drops any imported blueprint preview.
-  useEffect(() => { setSelectedId(null); setConnectPair(null); setSelectedEdge(null); }, [scope, imported]);
+  useEffect(() => { setSelectedId(null); setConnectPair(null); setOutcomeConnect(null); setSelectedEdge(null); setRoutingFocus(null); }, [scope, imported]);
   useEffect(() => { setImported(null); setImportError(null); }, [scope]);
 
   // Sidebar-triggered import (#512): seed the read-only preview from the
@@ -421,13 +439,15 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
       {/* Inspector — ONE shared component drives both draft and live modes (#692). */}
       {isDraft && selectedRole && (
         <NodeInspector
-          key={selectedRole.id}
+          key={`${selectedRole.id}:${routingFocus?.outcome || ''}`}
           mode="draft"
           node={selectedRole}
           roles={draftBundle?.roles || []}
           stages={draftBundle?.stages || []}
+          lints={displayGraph?.lints || []}
+          focus={routingFocus}
           ops={draftOps}
-          onClose={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
+          onClose={() => { setSelectedId(null); setRoutingFocus(null); graphRef.current?.setSelected(null); }}
           onDeleted={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
           onRenamedId={(nid) => { setSelectedId(nid); graphRef.current?.setSelected(nid); }}
           onChanged={() => {}}
@@ -435,15 +455,17 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
       )}
       {!isDraft && selectedNode && (
         <NodeInspector
-          key={selectedNode.id}
+          key={`${selectedNode.id}:${routingFocus?.outcome || ''}`}
           mode="live"
           node={selectedNode}
           nodes={displayGraph?.nodes || []}
           stages={displayGraph?.stages || []}
+          lints={displayGraph?.lints || []}
+          focus={routingFocus}
           ops={liveOps}
           teamId={isTeamScope && !imported ? scope : undefined}
           level={imported ? 'template' : displayGraph?.level}
-          onClose={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
+          onClose={() => { setSelectedId(null); setRoutingFocus(null); graphRef.current?.setSelected(null); }}
           onChanged={() => refetch()}
         />
       )}
@@ -463,6 +485,21 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           fromNode={(displayGraph?.nodes || []).find(n => n.id === connectPair.from) || null}
           onClose={() => setConnectPair(null)}
           onDone={() => { setConnectPair(null); afterEdit(); }}
+        />
+      )}
+
+      {outcomeConnect && (
+        <CreateHandoffDialog
+          from={outcomeConnect.from}
+          to={outcomeConnect.to}
+          fromName={nodeName(outcomeConnect.from)}
+          toName={nodeName(outcomeConnect.to)}
+          labels={displayGraph?.labels || []}
+          ops={ops}
+          initialLabel={outcomeConnect.outcome?.label || ''}
+          emitSource={false}
+          onClose={() => setOutcomeConnect(null)}
+          onDone={() => { setOutcomeConnect(null); afterEdit(); }}
         />
       )}
 

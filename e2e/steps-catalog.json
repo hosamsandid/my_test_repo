@@ -288,6 +288,38 @@
       "example": "- action:\n    do: flows.addAgentFromScratch\n    name: Developer\n    notes: Take an issue and implement it. Create a PR at the end.\n    generate: true"
     },
     {
+      "name": "flows.addOutcome",
+      "module": "flows",
+      "description": "Add one outcome on the open Routing tab (#828): title, optional `when`, and the label it sets. Does NOT save (batched into flows.saveOutcomes). Leave `label` empty for a terminal (no-signal) outcome.",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Agent display name (Routing tab open)."
+        },
+        {
+          "name": "title",
+          "required": true,
+          "type": "string",
+          "description": "Outcome title (its persisted id is the slug)."
+        },
+        {
+          "name": "when",
+          "required": false,
+          "type": "string",
+          "description": "Human-readable condition (documentation)."
+        },
+        {
+          "name": "label",
+          "required": false,
+          "type": "string",
+          "description": "Label the outcome sets; empty = no signal."
+        }
+      ],
+      "example": "- action:\n    do: flows.addOutcome\n    name: Dispatcher\n    title: Route to Developer\n    when: Frontend/UI task\n    label: ready"
+    },
+    {
       "name": "flows.addStage",
       "module": "flows",
       "description": "Add an ordered stage to the draft (Stages dialog → \"Add\" → PUT). Stages are an organising layer; nodes are assigned to them in the node inspector.",
@@ -411,6 +443,60 @@
       "example": "- assert:\n    do: flows.expectMaterializeAvailable"
     },
     {
+      "name": "flows.expectNoOutcomes",
+      "module": "flows",
+      "description": "Assert the persisted draft role has NO authored outcomes port — the \"decline persists nothing\" check after a suggestion that was not saved (#828).",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Agent display name to check."
+        }
+      ],
+      "example": "- assert:\n    do: flows.expectNoOutcomes\n    name: Developer"
+    },
+    {
+      "name": "flows.expectOutcome",
+      "module": "flows",
+      "description": "Assert the persisted draft role carries an authored outcomes port with the given option id (and, optionally, mode). API-level, so it doesn't depend on canvas rendering.",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Agent display name (the producer role)."
+        },
+        {
+          "name": "outcomeId",
+          "required": true,
+          "type": "string",
+          "description": "Expected outcome option id (slug of its title)."
+        },
+        {
+          "name": "mode",
+          "required": false,
+          "type": "string",
+          "description": "Expected outcomes.mode (\"exactlyOne\"|\"anyOf\")."
+        }
+      ],
+      "example": "- assert:\n    do: flows.expectOutcome\n    name: Dispatcher\n    outcomeId: route-to-developer\n    mode: exactlyOne"
+    },
+    {
+      "name": "flows.expectSwitchNode",
+      "module": "flows",
+      "description": "Assert a node renders as a switch on the canvas — the ◇ switch badge (#828).",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Agent display name whose node must show the badge."
+        }
+      ],
+      "example": "- assert:\n    do: flows.expectSwitchNode\n    name: Dispatcher"
+    },
+    {
       "name": "flows.generateAgentPrompt",
       "module": "flows",
       "description": "Press \"Generate agent prompt\" (→ POST /api/agent-prompt/generate; the mock LLM in the E2E stack answers) and wait for the generated prose to land in the editable Agent-prompt textarea (capture point for the generated-prompt panel). Requires the Add-agent panel open with a name filled.",
@@ -445,6 +531,20 @@
       "example": "- action:\n    do: flows.openAddAgent\n    name: Business Analyst\n    notes: Take requirements and create a GitHub issue."
     },
     {
+      "name": "flows.openRouting",
+      "module": "flows",
+      "description": "Open a node's Routing tab in the inspector (#828): click the node, then the Routing tab. Waits for the Outcomes heading.",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Agent display name whose node to open."
+        }
+      ],
+      "example": "- action:\n    do: flows.openRouting\n    name: Dispatcher"
+    },
+    {
       "name": "flows.renameDraft",
       "module": "flows",
       "description": "Rename the open draft (inline title editor → PUT /api/process/drafts/:id). The fixed name is what the fixture pre-/post-cleans on, keeping the journey re-runnable.",
@@ -457,6 +557,54 @@
         }
       ],
       "example": "- action:\n    do: flows.renameDraft\n    name: Simple SDLC"
+    },
+    {
+      "name": "flows.saveOutcomes",
+      "module": "flows",
+      "description": "Save the outcomes on the open Routing tab (#828) → PUT (draft bundle or live agent). Waits for the persisted response + the \"Saved.\" confirmation.",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Agent display name (Routing tab open)."
+        }
+      ],
+      "example": "- action:\n    do: flows.saveOutcomes\n    name: Dispatcher"
+    },
+    {
+      "name": "flows.setOutcomeMode",
+      "module": "flows",
+      "description": "Set the outcome mode on the open Routing tab (#828): the switch (exactly one) or any-of. The two radios are ordered exactly-one, any-of.",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Agent display name (its Routing tab must be open)."
+        },
+        {
+          "name": "mode",
+          "required": true,
+          "type": "string",
+          "description": "\"exactlyOne\" (switch) | \"anyOf\"."
+        }
+      ],
+      "example": "- action:\n    do: flows.setOutcomeMode\n    name: Dispatcher\n    mode: exactlyOne"
+    },
+    {
+      "name": "flows.suggestOutcomes",
+      "module": "flows",
+      "description": "Press \"Suggest outcomes…\" on the open Routing tab (#828) → POST /api/agent-outcomes/suggest (mock LLM in the E2E stack, heuristic fallback). Waits for the proposal to land highlighted-unconfirmed — nothing is persisted until Save, so this alone is the \"decline persists nothing\" path.",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Agent display name (Routing tab open)."
+        }
+      ],
+      "example": "- action:\n    do: flows.suggestOutcomes\n    name: Developer"
     },
     {
       "name": "flows.wireIssueChannel",
@@ -490,6 +638,38 @@
         }
       ],
       "example": "- action:\n    do: flows.wireIssueChannel\n    from: Business Analyst\n    to: Developer\n    label: ready\n    humanGate: true"
+    },
+    {
+      "name": "flows.wireOutcome",
+      "module": "flows",
+      "description": "Wire an outcome to a target agent by dragging the outcome's output port onto it (#828). The drag opens the label hand-off dialog PRE-FILLED with the outcome's label; this confirms it (→ creates the listener on the target). Dismisses the node inspector first so it doesn't overlay the canvas.",
+      "params": [
+        {
+          "name": "from",
+          "required": true,
+          "type": "string",
+          "description": "Producer agent display name (owns the outcome)."
+        },
+        {
+          "name": "to",
+          "required": true,
+          "type": "string",
+          "description": "Target agent display name the outcome routes to."
+        },
+        {
+          "name": "outcome",
+          "required": true,
+          "type": "string",
+          "description": "Outcome title (the output port's label)."
+        },
+        {
+          "name": "label",
+          "required": false,
+          "type": "string",
+          "description": "Override the pre-filled routing label."
+        }
+      ],
+      "example": "- action:\n    do: flows.wireOutcome\n    from: Dispatcher\n    to: Developer\n    outcome: Route to Developer"
     },
     {
       "name": "gh.applyLabel",

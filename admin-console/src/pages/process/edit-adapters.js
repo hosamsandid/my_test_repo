@@ -8,6 +8,7 @@
 
 import { apiCall } from '../../hooks/useApi';
 import { wouldCreateCycle } from './hierarchy-utils';
+import { upsertChannel, removeChannelFrom } from './channel-ops';
 import {
   stagesAfterAdd, stagesAfterRename, stagesAfterRemove, stagesAfterReorder, membersToCascade,
 } from './stage-list-ops';
@@ -210,28 +211,12 @@ export const liveOps = {
     await apiCall('PUT', `/api/agents/${roleId}`, { channels });
   },
   updateChannel: async (roleId, spec) => liveOps.addChannel(roleId, spec),
-  removeChannel: async (roleId, { artifact, from }) => {
+  removeChannel: async (roleId, { artifact, from, label }) => {
     const a = await apiCall('GET', `/api/agents/${roleId}`);
-    const art = artifact === 'issue' ? 'issue' : 'pr';
-    const channels = (Array.isArray(a?.channels) ? a.channels : []).filter(c => !(c.artifact === art && c.from === from));
+    const channels = removeChannelFrom(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label });
     await apiCall('PUT', `/api/agents/${roleId}`, { channels });
   },
 };
-
-// Upsert a channel into a list, keyed on (artifact, from). Pure helper shared by
-// the live + draft adapters so a re-drawn edge edits in place rather than dupes.
-function upsertChannel(list, { artifact, from, label, gate }) {
-  const art = artifact === 'issue' ? 'issue' : 'pr';
-  const next = {
-    artifact: art, from,
-    ...(typeof label === 'string' && label.trim() ? { label: label.trim() } : {}),
-    ...(gate === 'human' ? { gate: 'human' } : {}),
-  };
-  const out = (Array.isArray(list) ? list : []).slice();
-  const i = out.findIndex(c => c.artifact === art && c.from === from);
-  if (i >= 0) out[i] = next; else out.push(next);
-  return out;
-}
 
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const uid = () => `t${Date.now()}${Math.floor(Math.random() * 1000)}`;
@@ -641,14 +626,14 @@ export function makeDraftOps(getBundle, persist) {
       r.channels = upsertChannel(r.channels, spec);
       await persist(b);
     },
-    // Upsert keyed on (artifact, from), so editing a channel's label/gate reuses it.
+    // Upsert keyed on (artifact, from, label) (#828), so editing a channel's
+    // gate reuses it while a new label adds a switch fan-in sibling.
     updateChannel: async (roleId, spec) => makeDraftOps(getBundle, persist).addChannel(roleId, spec),
-    removeChannel: async (roleId, { artifact, from }) => {
+    removeChannel: async (roleId, { artifact, from, label }) => {
       const b = clone(getBundle());
       const r = role(b, roleId);
       if (r) {
-        const art = artifact === 'issue' ? 'issue' : 'pr';
-        r.channels = (r.channels || []).filter(c => !(c.artifact === art && c.from === from));
+        r.channels = removeChannelFrom(r.channels, { artifact, from, label });
         if (!r.channels.length) delete r.channels;
       }
       await persist(b);

@@ -27,6 +27,29 @@ test('label edge: emitter → listener via emits ↔ labelFilter', () => {
   assert.ok(e.id, 'edge carries a stable id');
 });
 
+test('outcome-keyed label edge carries the outcome id (\#827/\#828)', () => {
+  // A reviewer with an authored exactlyOne outcomes port setting `ready-to-merge`
+  // → the merger's listener. The unified on:'label' edge must forward the outcome
+  // option id so the canvas can title the edge + focus the Routing tab on it.
+  const g = buildUnifiedGraph([
+    { id: 'rev', outcomes: { mode: 'exactlyOne', options: [
+      { id: 'accepted', title: 'Accepted', actions: [{ type: 'setLabel', label: 'ready-to-merge' }] },
+      { id: 'revisions-required', title: 'Revisions', actions: [{ type: 'setLabel', label: 'revisions-required' }] },
+    ] } },
+    { id: 'merger', triggers: [{ id: 'm1', type: 'github-event', labelFilter: 'ready-to-merge', from: 'any-except-self' }] },
+    { id: 'reworker', triggers: [{ id: 'r1', type: 'github-event', labelFilter: 'revisions-required', from: 'any-except-self' }] },
+  ]);
+  const toMerger = findEdge(g, x => x.on === 'label' && x.from === 'rev' && x.to === 'merger');
+  assert.ok(toMerger, 'expected rev → merger label edge');
+  assert.equal(toMerger.outcome, 'accepted');
+  const toReworker = findEdge(g, x => x.on === 'label' && x.from === 'rev' && x.to === 'reworker');
+  assert.ok(toReworker, 'expected rev → reworker label edge');
+  assert.equal(toReworker.outcome, 'revisions-required');
+  // The node carries the authored port through for the Routing tab.
+  const rev = g.nodes.find(n => n.id === 'rev');
+  assert.equal(rev.outcomes.mode, 'exactlyOne');
+});
+
 test('duplicate-listener lint surfaces through the unified /flows/graph builder (\#826)', () => {
   const g = buildUnifiedGraph([
     { id: 'rev', triggers: [

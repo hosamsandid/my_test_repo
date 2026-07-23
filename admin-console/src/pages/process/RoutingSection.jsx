@@ -120,7 +120,7 @@ export default function RoutingSection({ node, peers = [], lints = [], ops, onCh
         </div>
 
         <div style={{ display: 'flex', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
-          <button onClick={() => mutate({ ...outcomes, options: [...outcomes.options, newOption(outcomes.options)] })} style={ghost}>
+          <button onClick={() => mutate({ ...outcomes, options: [...outcomes.options, newOption()] })} style={ghost}>
             <Plus size={13} /> Add outcome
           </button>
           <button onClick={suggest} disabled={suggesting} style={ghost}>
@@ -289,12 +289,11 @@ function normalize(oc) {
 function slug(s) {
   return String(s || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
 }
-function newOption(existing) {
-  const ids = new Set((existing || []).map(o => o.id));
-  let n = existing.length + 1;
-  let id = `outcome-${n}`;
-  while (ids.has(id)) { n += 1; id = `outcome-${n}`; }
-  return { id, title: '', when: '', actions: [{ type: 'setLabel', label: '' }] };
+function newOption() {
+  // No id yet — finalize() derives a stable id from the title on Save (falling
+  // back to outcome-<n> for a still-blank title), so a titled outcome persists as
+  // a readable slug (e.g. "Route to Developer" → "route-to-developer").
+  return { id: '', title: '', when: '', actions: [{ type: 'setLabel', label: '' }] };
 }
 // Produce the persisted port: assign missing ids from title, drop empty setLabel
 // actions, keep only well-formed options. Server-side validateOutcomes is the gate.

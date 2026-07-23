@@ -209,8 +209,10 @@ Deliberately incremental; each phase ships alone and leaves the editor consisten
    editor; `[+ Add input]` chooser incl. channel/data-flow creation from the inspector. Derived
    triggers disappear as raw rows. Retire the Triggers tab (keep the raw-`triggers.json`
    disclosure).
-3. **Legacy output removal (#784 phase 6)** — #867. Remove `EmitsEditor` + produce checkboxes;
-   migrate templates/drafts still carrying flat `emits` on first save through the Routing tab.
+3. **Legacy output removal (#784 phase 6)** — #831 (the pre-existing phase-6 ticket; it also
+   covers template migration with `when` conditions, adapter/export retirement, and the
+   `github-io` prompt-block unification, and depends on #829/#830). Remove `EmitsEditor` +
+   produce checkboxes; migrate templates/drafts still carrying flat `emits`.
 4. **Optional later** — #868: per-channel wake-prompt override on derived inputs; artifacts as
    outcome actions; dropping the per-type edge edit dialogs in favour of the Routing jump.
 

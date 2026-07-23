@@ -969,6 +969,7 @@ const TeamSection = React.forwardRef(function TeamSection({
             onReviewSuggestion={onReviewSuggestion}
             onShareSkill={onShareSkill}
             onControlsChanged={onControlsChanged}
+            lessons={allItems.map(i => i.text).filter(Boolean)}
           />
           {privateSkills.length > 0 && (
             <PrivateSkillsBlock teamId={team.id} skills={privateSkills} onLifted={onLifted} />
@@ -1297,7 +1298,7 @@ function DomainsPanel({ teamId, domains, budget, lessons, onChanged }) {
   );
 }
 
-function SkillsColumn({ team, skills, suggestions, pending, autonomy, domains, skillBudget, onReviewSuggestion, onShareSkill, onControlsChanged }) {
+function SkillsColumn({ team, skills, suggestions, pending, autonomy, domains, skillBudget, onReviewSuggestion, onShareSkill, onControlsChanged, lessons }) {
   const teamId = team.id;
   const tabKey = `kf.skillTab.${teamId}`;
   const seenKey = `kf.suggestSeen.${teamId}`;
@@ -1440,7 +1441,7 @@ function SkillsColumn({ team, skills, suggestions, pending, autonomy, domains, s
     <div>
       {/* #780/#841: the team's skill domains + soft skill-budget state + operator ops */}
       <DomainsPanel teamId={teamId} domains={domains} budget={skillBudget}
-        lessons={allItems.map(i => i.text).filter(Boolean)} onChanged={reload} />
+        lessons={lessons} onChanged={reload} />
       {/* Lifecycle tabs */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
         {SKILL_TABS.map(([key, label, tip]) => {

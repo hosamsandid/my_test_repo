@@ -186,10 +186,10 @@ function buildUnifiedGraph(nodes, edges) {
       isParent: n.isParent === true || asArray(n.children).length > 0,
       stage: typeof n.stage === 'string' ? n.stage : '',  // own stage (#362 E)
       // GitHub artifact ports (#380): produce flags for the node badge/ports;
-      // channels drive the on:'github' edges below.
-      github: (n.github && (n.github.producesPr || n.github.producesIssue))
-        ? { ...(n.github.producesPr ? { producesPr: true } : {}), ...(n.github.producesIssue ? { producesIssue: true } : {}) }
-        : null,
+      // channels drive the on:'github' edges below. `base.github` (from
+      // buildProcessGraph, spread above) is already the EFFECTIVE set — it folds
+      // in any `openPr`/`openIssue` outcome actions (#827) — so we keep it rather
+      // than recompute from the raw `n.github`.
       channels: asArray(n.channels),
     };
   });
@@ -459,6 +459,9 @@ function processTemplateToUnified(bundle) {
       parent: typeof r.parent === 'string' && r.parent ? r.parent : null,
       // Agent-level emitted labels (operator-declared label hand-offs).
       emits: asArray(r.emits),
+      // Structured OUTCOMES port (#827): passed through raw so buildProcessGraph
+      // projects it (setLabel → emit index, openPr/openIssue → github flags).
+      ...(r.outcomes ? { outcomes: r.outcomes } : {}),
       // GitHub artifact ports (#380): produce flags + consumed channels.
       github: (r.github && (r.github.producesPr || r.github.producesIssue)) ? r.github : null,
       channels: asArray(r.channels),

@@ -104,6 +104,16 @@ export const liveOps = {
   },
   setRoleEmits: (roleId, emits) => apiCall('PUT', `/api/agents/${roleId}`, { emits }),
 
+  // Structured OUTCOMES port (#827) — the successor to `emits`. Shape-compatible
+  // with makeDraftOps.getRoleOutcomes/setRoleOutcomes so the phase-3 UI never
+  // branches on mode. Writing a non-empty port CLEARS `emits` server-side
+  // (PUT /api/agents/:id), so the two never coexist.
+  getRoleOutcomes: async (roleId) => {
+    const a = await apiCall('GET', `/api/agents/${roleId}`);
+    return a && typeof a.outcomes === 'object' && a.outcomes ? a.outcomes : null;
+  },
+  setRoleOutcomes: (roleId, outcomes) => apiCall('PUT', `/api/agents/${roleId}`, { outcomes: outcomes || null }),
+
   // ── unified edges (#367): dependency + data-flow + hierarchy + stage ──
   // Dependency A→B means "B depends on A" (A upstream), stored on B.dataFlow.dependsOn.
   addDependency: async (roleId, dependsOnId) => {
@@ -321,6 +331,9 @@ function templateToDraftRole(t, { id, displayName }) {
   if (typeof t.parent === 'string' && t.parent) role.parent = t.parent;
   if (typeof t.stage === 'string' && t.stage) role.stage = t.stage;
   if (Array.isArray(t.emits) && t.emits.length) role.emits = t.emits;
+  // Structured OUTCOMES port (#827) — carried verbatim like the other ports.
+  if (t.outcomes && typeof t.outcomes === 'object'
+    && Array.isArray(t.outcomes.options) && t.outcomes.options.length) role.outcomes = t.outcomes;
   if (t.github && (t.github.producesPr || t.github.producesIssue)) role.github = t.github;
   if (Array.isArray(t.channels) && t.channels.length) role.channels = t.channels;
   return role;
@@ -389,6 +402,25 @@ export function makeDraftOps(getBundle, persist) {
       const b = clone(getBundle());
       const r = role(b, roleId);
       if (r) { if (Array.isArray(emits) && emits.length) r.emits = emits; else delete r.emits; }
+      await persist(b);
+    },
+
+    // Structured OUTCOMES port (#827) — parallel to setRoleEmits above; the same
+    // surface as liveOps so the shared inspector never branches on mode. A
+    // non-empty port supersedes `emits` (mirrors the PUT clear-emits rule).
+    getRoleOutcomes: async (roleId) => {
+      const r = role(getBundle(), roleId);
+      return r && typeof r.outcomes === 'object' && r.outcomes ? clone(r.outcomes) : null;
+    },
+    setRoleOutcomes: async (roleId, outcomes) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (r) {
+        const authored = outcomes && typeof outcomes === 'object'
+          && Array.isArray(outcomes.options) && outcomes.options.length;
+        if (authored) { r.outcomes = outcomes; delete r.emits; }
+        else delete r.outcomes;
+      }
       await persist(b);
     },
 

@@ -38,6 +38,7 @@ const agentTemplateStore = require('./agent-templates-store');
 const { weaveProcess } = require('./flow-weaver');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
+const { validateOutcomes, normalizeOutcomes, isAuthoredOutcomes } = require('./outcomes');
 const { membersOfTeam } = require('./agent-team-cascade');
 const skillManifest = require('./skill-manifest');
 const skillDrift = require('./skill-drift');
@@ -1472,7 +1473,16 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, dataFlow, parentMemberId, stage, stages, github, channels } = req.body;
+  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, github, channels } = req.body;
+
+  // Validate the structured OUTCOMES port (#827) up front so a bad shape can't
+  // half-apply. `null`/[]/{} clears it (handled at persist below); a non-empty
+  // port must pass validateOutcomes (rejects human:*/brake labels, duplicate
+  // option ids, unknown action types).
+  if (isAuthoredOutcomes(outcomes)) {
+    const vo = validateOutcomes(outcomes);
+    if (!vo.ok) return res.status(400).json({ error: `Invalid outcomes: ${vo.error}` });
+  }
 
   // Reject a newly-introduced unknown skill name on a grant save (#633) — a
   // typo can no longer become a silent dead grant. Names already present in the
@@ -1564,6 +1574,20 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   if (emits !== undefined) {
     if (Array.isArray(emits) && emits.length) fresh.emits = emits.filter(e => typeof e === 'string' && e);
     else delete fresh.emits;
+  }
+
+  // ── Structured OUTCOMES port (#827) ───────────────────────────────────────
+  // The successor to `emits`: writing a non-empty outcomes port persists it and
+  // CLEARS `emits` (the two never coexist on a config). An empty/null/malformed
+  // value clears `outcomes` and leaves any `emits` set above untouched. Both
+  // fields are accepted during coexistence — outcomes wins when present.
+  if (outcomes !== undefined) {
+    if (isAuthoredOutcomes(outcomes)) {
+      fresh.outcomes = normalizeOutcomes(outcomes);
+      delete fresh.emits;
+    } else {
+      delete fresh.outcomes;
+    }
   }
 
   // ── Unified orchestration edges (Process Canvas) ──────────────────────────
@@ -2962,6 +2986,7 @@ app.get('/api/process/graph', (req, res) => {
         id: t.id, role: 'template', displayName: t.displayName || t.id,
         sessionPolicy: t.sessionPolicy || 'persistent', environmentId: null, triggers,
         emits: Array.isArray(t.emits) ? t.emits : [],
+        outcomes: t.outcomes || null, // structured OUTCOMES port (#827)
         github: t.github || null, channels: Array.isArray(t.channels) ? t.channels : [],
       });
     }
@@ -2988,6 +3013,7 @@ app.get('/api/process/graph', (req, res) => {
       triggers: Array.isArray(triggers) ? triggers : [],
       // Agent-level label hand-offs, lifting any legacy trigger-level emit (AC8).
       emits: liftAgentEmits(cfg.emits, triggers),
+      outcomes: cfg.outcomes || null, // structured OUTCOMES port (#827), supersedes emits
       github: cfg.github || null, channels: Array.isArray(cfg.channels) ? cfg.channels : [],
     });
   }
@@ -3009,6 +3035,8 @@ app.post('/api/process/graph', (req, res) => {
     // Agent-level emitted labels (#414 canonicalises emits to agent level) —
     // without them a bundle's label hand-offs render as human-set edges.
     emits: Array.isArray(r.emits) ? r.emits : [],
+    // Structured OUTCOMES port (#827) — projected by buildProcessGraph.
+    outcomes: r.outcomes || null,
     // GitHub artifact ports (#380) drive the badge/ports + channel edges.
     github: r.github || null, channels: Array.isArray(r.channels) ? r.channels : [],
     triggers: (r.triggers || []).map(t => ({ ...t, emits: Array.isArray(t.emits) ? t.emits : [] })),
@@ -4910,6 +4938,7 @@ app.get('/api/flows/graph', async (req, res) => {
       environmentId: cfg.environmentId || null, triggers,
       // Agent-level label hand-offs, lifting any legacy trigger-level emit (AC8).
       emits: liftAgentEmits(cfg.emits, triggers),
+      outcomes: cfg.outcomes || null, // structured OUTCOMES port (#827), supersedes emits
       inputs: Array.isArray(df.inputs) ? df.inputs : [],
       outputs: Array.isArray(df.outputs) ? df.outputs : [],
       dependsOn: Array.isArray(df.dependsOn) ? df.dependsOn : [],
@@ -4980,13 +5009,17 @@ app.get('/api/process/template', (req, res) => {
     // Lift any legacy trigger-level emit to the agent level (#783) so the export
     // carries label hand-offs canonically and loses no edge.
     const emits = liftAgentEmits(cfg.emits, tlist);
+    // Structured OUTCOMES port (#827): exported when authored, and it supersedes
+    // `emits` (the two never both ride an exported role — buildProcessTemplate
+    // enforces the same rule).
+    const authoredOutcomes = isAuthoredOutcomes(cfg.outcomes);
     roleEntries.push({
       id, displayName: cfg.displayName || id, role,
       sessionPolicy: cfg.sessionPolicy || 'persistent', systemPrompt, triggers: tlist,
-      ...(emits.length ? { emits } : {}),
+      ...(authoredOutcomes ? { outcomes: cfg.outcomes } : (emits.length ? { emits } : {})),
       ...(typeof cfg.stage === 'string' && cfg.stage ? { stage: cfg.stage } : {}),
     });
-    graphAgents.push({ id, role, triggers: tlist, emits });
+    graphAgents.push({ id, role, triggers: tlist, emits, outcomes: cfg.outcomes || null });
   }
   const g = buildProcessGraph(graphAgents);
   res.json(buildProcessTemplate({

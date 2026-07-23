@@ -27,6 +27,16 @@ test('label edge: emitter → listener via emits ↔ labelFilter', () => {
   assert.ok(e.id, 'edge carries a stable id');
 });
 
+test('duplicate-listener lint surfaces through the unified /flows/graph builder (\#826)', () => {
+  const g = buildUnifiedGraph([
+    { id: 'rev', triggers: [
+      { id: 'rev-on-pr', type: 'github-event', channel: true, events: ['pull_request.opened'] },
+      { id: 'rev-manual', type: 'github-event', events: ['pull_request.opened'] },
+    ] },
+  ]);
+  assert.ok(lintCodes(g).includes('duplicate-listener'));
+});
+
 test('timer edge (#410): cron trigger runs from the @timer actor', () => {
   const g = buildUnifiedGraph([
     { id: 'curator', triggers: [{ id: 'c', type: 'cron', cron: '0 9 * * 1', emits: [] }] },

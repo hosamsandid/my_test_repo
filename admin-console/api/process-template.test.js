@@ -208,10 +208,12 @@ test('expandGithubChannels: a consumer channel yields a scoped PR-opened trigger
   };
   const out = expandGithubChannels(bundle, { teamId: 'acme' });
   const reviewer = out.roles.find(r => r.id === 'reviewer');
-  const t = reviewer.triggers.find(t => t.id === 'reviewer-on-pr-developer');
+  // New id scheme drops the producer (#826): `<consumer>-on-<artifact>[-<label>]`.
+  const t = reviewer.triggers.find(t => t.id === 'reviewer-on-pr');
   assert.ok(t);
   assert.equal(t.channel, true);
   assert.deepEqual(t.events, ['pull_request.opened', 'pull_request.reopened']);
+  assert.deepEqual(t.sources, ['developer']); // provenance: the one contributing producer
   assert.ok(!('from' in t), 'no origin filter — the trigger fires on any matching PR event');
   assert.equal(t.labelFilter, undefined);
   // non-consumer roles untouched
@@ -246,8 +248,51 @@ test('expandGithubChannels: regenerates (strips stale) derived channel triggers,
   const once = expandGithubChannels(bundle);
   const twice = expandGithubChannels(once);
   const triage = twice.roles.find(r => r.id === 'triage');
-  assert.equal(triage.triggers.filter(t => t.id === 'triage-on-issue-dev').length, 1);
+  assert.equal(triage.triggers.filter(t => t.id === 'triage-on-issue').length, 1);
   assert.deepEqual(triage.triggers[0].events, ['issues.opened']);
+});
+
+test('expandGithubChannels: two same-label channels from different producers → ONE listener with both sources (\#826)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'consolidate', level: 'template',
+    roles: [
+      { id: 'ba1', displayName: 'BA One', github: { producesIssue: true }, triggers: [] },
+      { id: 'ba2', displayName: 'BA Two', github: { producesIssue: true }, triggers: [] },
+      { id: 'dispatcher', displayName: 'Dispatcher',
+        channels: [
+          { artifact: 'issue', from: 'ba1', label: 'dispatch' },
+          { artifact: 'issue', from: 'ba2', label: 'dispatch' },
+        ], triggers: [] },
+    ],
+  };
+  const out = expandGithubChannels(bundle);
+  const disp = out.roles.find(r => r.id === 'dispatcher');
+  const listeners = disp.triggers.filter(t => t.channel);
+  assert.equal(listeners.length, 1, 'exactly one derived trigger for the shared (events, labelFilter)');
+  const t = listeners[0];
+  assert.equal(t.id, 'dispatcher-on-issue-dispatch'); // new id scheme, producer dropped
+  assert.deepEqual(t.events, ['issues.labeled']);
+  assert.equal(t.labelFilter, 'dispatch');
+  assert.deepEqual(t.sources, ['ba1', 'ba2']); // both producers recorded (informational)
+  assert.ok(!('from' in t), 'no origin filter');
+  assert.match(t.description, /BA One, BA Two/); // display names of both sources
+});
+
+test('expandGithubChannels: distinct (artifact,label) pairs stay separate listeners (\#826)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'split', level: 'template',
+    roles: [
+      { id: 'dev', github: { producesPr: true }, triggers: [] },
+      { id: 'consumer', channels: [
+        { artifact: 'pr', from: 'dev' },                       // pr.opened, no label
+        { artifact: 'pr', from: 'dev', label: 'approved' },    // pr.labeled + approved
+      ], triggers: [] },
+    ],
+  };
+  const out = expandGithubChannels(bundle);
+  const c = out.roles.find(r => r.id === 'consumer');
+  const ids = c.triggers.filter(t => t.channel).map(t => t.id).sort();
+  assert.deepEqual(ids, ['consumer-on-pr', 'consumer-on-pr-approved']);
 });
 
 test('expandGithubChannels: appends an idempotent producer block; buildProcessTemplate strips it', () => {
@@ -530,6 +575,30 @@ test('stampDerivedActivation: preserves other fields and is non-mutating', () =>
   assert.equal(out[0].labelFilter, 'x');
   assert.deepEqual(out[0].events, ['pull_request.opened']);
   assert.equal('activatedAt' in next[0], false); // input not mutated
+});
+
+test('stampDerivedActivation: migrating per-producer channel triggers carries the OLDEST activatedAt (\#826)', () => {
+  // Old scheme: two per-producer triggers for the same (events, labelFilter).
+  const prev = [
+    { id: 'disp-on-issue-ba1', channel: true, events: ['issues.labeled'], labelFilter: 'dispatch', activatedAt: T0 },
+    { id: 'disp-on-issue-ba2', channel: true, events: ['issues.labeled'], labelFilter: 'dispatch', activatedAt: '2026-03-03T00:00:00.000Z' },
+  ];
+  // New scheme: one consolidated trigger, different id, SAME listener signature.
+  const next = [{ id: 'disp-on-issue-dispatch', channel: true, events: ['issues.labeled'], labelFilter: 'dispatch' }];
+  const out = stampDerivedActivation(next, prev, NOW);
+  assert.equal(out[0].activatedAt, T0, 'oldest of the merged set — horizon cannot jump to now');
+});
+
+test('stampDerivedActivation: signature fallback does NOT apply to data-flow (a new upstream gets NOW) (\#826)', () => {
+  // Two push triggers share the same `push` signature but are per-upstream.
+  const prev = [{ id: 'c-on-push-up1', dataFlow: true, events: ['push'], activatedAt: T0 }];
+  const next = [
+    { id: 'c-on-push-up1', dataFlow: true, events: ['push'] }, // regenerated — id match keeps T0
+    { id: 'c-on-push-up2', dataFlow: true, events: ['push'] }, // genuinely new — must be NOW, not T0
+  ];
+  const out = stampDerivedActivation(next, prev, NOW);
+  assert.equal(out.find(t => t.id === 'c-on-push-up1').activatedAt, T0);
+  assert.equal(out.find(t => t.id === 'c-on-push-up2').activatedAt, NOW);
 });
 
 test('stampDerivedActivation: non-array inputs yield []', () => {

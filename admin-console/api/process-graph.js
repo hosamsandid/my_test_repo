@@ -83,6 +83,10 @@ function triggerView(t) {
   // longer carries or contributes emits — a supplied `t.emits` is ignored.
   if (t.channel) v.channel = true; // derived GitHub-channel trigger (#380)
   if (t.dataFlow) v.dataFlow = true; // derived data-flow push trigger (#379)
+  // Consolidated-channel provenance (#826): which producers' channels share this
+  // one derived listener. Informational — the on:'github' edges still come one
+  // per channel port, mapped onto this shared listener.
+  if (Array.isArray(t.sources) && t.sources.length) v.sources = t.sources.slice();
   return v;
 }
 
@@ -341,6 +345,41 @@ function computeLints(nodes, edges) {
     if (stageEmits.size > 1) {
       lints.push({ code: 'competing-stage', severity: 'warning', nodeId: n.id,
         message: `\`${n.id}\` emits multiple stage labels: ${[...stageEmits].join(', ')}.` });
+    }
+  }
+
+  // duplicate-listener (#826): two github-event triggers of one agent reacting to
+  // the same (events, labelFilter). The poller has no origin filter, so both fire
+  // on every matching event and wake the agent redundantly. Channel consolidation
+  // (#826) removed the per-producer duplicates the derivation used to emit; this
+  // lint catches what remains — chiefly a hand-authored trigger left standing
+  // beside a derived channel/data-flow listener. A group made up SOLELY of
+  // data-flow push triggers is skipped: those are intentional one-per-upstream
+  // listeners, distinguished by their prompt rather than by (events, labelFilter).
+  for (const n of nodes) {
+    if (n.synthetic) continue;
+    const bySig = new Map(); // "events|label" -> trigger views
+    for (const t of (n.triggers || [])) {
+      if (!t || t.type !== 'github-event') continue;
+      const events = Array.isArray(t.events) ? t.events.slice().sort() : [];
+      const label = typeof t.labelFilter === 'string' && t.labelFilter.trim() ? t.labelFilter.trim() : '';
+      const sig = `${events.join(',')}|${label}`;
+      if (!bySig.has(sig)) bySig.set(sig, []);
+      bySig.get(sig).push(t);
+    }
+    for (const group of bySig.values()) {
+      if (group.length < 2) continue;
+      if (group.every(t => t.dataFlow)) continue; // intentional per-upstream push listeners
+      const label = group[0].labelFilter;
+      const ids = group.map(t => t.id).filter(Boolean);
+      lints.push({
+        code: 'duplicate-listener', severity: 'warning', nodeId: n.id,
+        ...(label ? { label } : {}),
+        triggerIds: ids,
+        message: `\`${n.id}\` has ${group.length} triggers listening on the same event`
+          + `${label ? ` + label \`${label}\`` : 's'}${ids.length ? ` (${ids.map(i => `\`${i}\``).join(', ')})` : ''}`
+          + ` — they fire redundantly.`,
+      });
     }
   }
   return lints;

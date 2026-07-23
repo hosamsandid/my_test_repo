@@ -1,23 +1,34 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { Plus, X, Trash2, Sparkles, Save, Loader2, AlertTriangle } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Plus, X, Trash2, Sparkles, Save, Loader2, AlertTriangle,
+  GitPullRequest, CircleDot, Link, RefreshCw, Package, ChevronDown, ChevronRight } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import { summarizeGithubEventTrigger } from '../agent-chat/trigger-summary.js';
 
-// Routing tab (#828, agent-outcomes concept §5.2) — ONE place for an agent's
-// whole routing decision. Shared by the draft + live inspector through the same
-// `ops` adapter; nothing branches on mode.
+// Routing tab (#828, agent-outcomes concept §5.2; absorbs the retired
+// Connections tab in #865) — ONE place for an agent's whole routing decision.
+// Shared by the draft + live inspector through the same `ops` adapter; nothing
+// branches on mode.
 //
-//   INPUTS   — the consolidated github-event listeners (#826) with their
-//              contributing `sources` and the inline `duplicate-listener` lint
-//              (delete the offending manual trigger inline).
+//   INPUTS   — what wakes this agent, in one unified list: the GitHub PR/issue
+//              channels it reacts to (channels[]), its data-flow inputs +
+//              dependencies (dataFlow.inputs / dependsOn), the manual
+//              github-event listeners with their contributing `sources`, and the
+//              derived (channel/dataFlow) triggers shown read-only as
+//              "⟲ derived from connection" rows that point at their owning port.
+//              The `duplicate-listener` lint offers an inline delete. The
+//              port rows (channels/inputs/deps) are remove-only in this phase.
 //   OUTCOMES — the structured `outcomes` port: mode toggle (exactly one / any
 //              of), editable option rows (title / when / actions), the derived
 //              read-only consumers per outcome, and "suggest outcomes…".
+//   ARTIFACTS — the data-flow outputs this agent produces (dataFlow.outputs):
+//              name, hint, computed consumers, remove.
+//   LEGACY   — a collapsed disclosure holding the emitted-labels editor and the
+//              GitHub-outputs checkboxes, kept reachable until phase 3 (#865).
 //
 // The Outcomes editor holds a local draft and persists only on Save (or when a
 // suggestion is confirmed) — nothing is written implicitly, so a declined
 // suggestion persists nothing (AC4).
-export default function RoutingSection({ node, peers = [], lints = [], ops, onChanged, focusOutcome = null, mode }) {
+export default function RoutingSection({ node, peers = [], lints = [], ops, onChanged, focusOutcome = null, focusSection = null, mode }) {
   const [outcomes, setOutcomes] = useState(null);   // { mode, options[] } local draft
   const [loaded, setLoaded] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -85,7 +96,7 @@ export default function RoutingSection({ node, peers = [], lints = [], ops, onCh
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <InputsPanel node={node} peers={peers} dupLints={dupLints} ops={ops} onChanged={onChanged} />
+      <InputsPanel node={node} peers={peers} dupLints={dupLints} ops={ops} onChanged={onChanged} focus={focusSection === 'inputs'} />
 
       <div style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -137,34 +148,90 @@ export default function RoutingSection({ node, peers = [], lints = [], ops, onCh
           {error && <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</span>}
         </div>
       </div>
+
+      <ArtifactsBlock node={node} peers={peers} ops={ops} onChanged={onChanged} focus={focusSection === 'artifacts'} />
+
+      <LegacyDisclosure node={node} ops={ops} onChanged={onChanged} focus={focusSection === 'legacy'} />
+
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>
   );
 }
 
 // ── Inputs ─────────────────────────────────────────────────────────────────
-function InputsPanel({ node, peers, dupLints, ops, onChanged }) {
+// Everything that wakes this agent, in one unified list (#865): the PR/issue
+// channels + data-flow inputs + dependencies it reacts to (remove-only ports),
+// the manual github-event listeners, and the derived triggers shown read-only.
+function InputsPanel({ node, peers, dupLints, ops, onChanged, focus }) {
+  const ref = useRef(null);
+  useFocusScroll(ref, focus);
   const listeners = (node.triggers || []).filter(t => t && t.type === 'github-event');
+  const derived = listeners.filter(t => t.channel || t.dataFlow);
+  const manual = listeners.filter(t => !t.channel && !t.dataFlow);
+  const channels = Array.isArray(node.channels) ? node.channels : [];
+  const deps = Array.isArray(node.dependsOn) ? node.dependsOn : [];
+  const inputs = Array.isArray(node.inputs) ? node.inputs : [];
   const nameOf = (id) => peers.find(p => p.id === id)?.displayName || id;
-  const [busyId, setBusyId] = useState(null);
+  const [busy, setBusy] = useState(null);
 
-  const removeTrigger = async (tid) => {
-    if (!ops.deleteTrigger) return;
-    setBusyId(tid);
-    try { await ops.deleteTrigger(node.id, tid); onChanged?.(); }
+  const run = async (key, fn) => {
+    setBusy(key);
+    try { await fn(); onChanged?.(); }
     catch (e) { window.alert(e?.message || String(e)); }
-    finally { setBusyId(null); }
+    finally { setBusy(null); }
   };
+  const removeTrigger = (tid) => { if (ops.deleteTrigger) run(`t:${tid}`, () => ops.deleteTrigger(node.id, tid)); };
+
+  const hasAny = channels.length || deps.length || inputs.length || manual.length || derived.length;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+    <div ref={ref} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)', ...(focus ? focusRing : {}) }}>
       <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 'var(--eb-font-medium)' }}>
         Inputs <span style={{ fontWeight: 'normal', color: 'var(--eb-text-muted)' }}>— what wakes this agent</span>
       </div>
-      {listeners.length === 0 && (
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>No GitHub listeners.</div>
+      {!hasAny && (
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+          Nothing wakes this agent yet — drag a connection onto it on the canvas.
+        </div>
       )}
-      {listeners.map(t => {
+
+      {/* GitHub PR/issue channels (#380) — remove-only in this phase. */}
+      {channels.map(c => {
+        const key = `ch:${c.artifact}:${c.from}:${c.label || ''}`;
+        const noun = c.artifact === 'pr' ? 'pull request' : 'issue';
+        return (
+          <InputRow key={key} busy={busy === key}
+            icon={c.artifact === 'pr' ? <GitPullRequest size={14} /> : <CircleDot size={14} />}
+            onRemove={ops.removeChannel ? () => run(key, () => ops.removeChannel(node.id, { artifact: c.artifact, from: c.from, label: c.label || '' })) : null}
+            text={<>Reacts to <strong>{nameOf(c.from)}</strong>'s {noun}
+              {c.label ? <> when labeled <code style={codeChip}>{c.label}</code></> : null}
+              {c.gate === 'human' ? ' · 👤 human gate' : null}</>} />
+        );
+      })}
+
+      {/* Dependencies (node-level) — remove-only. */}
+      {deps.map(d => {
+        const key = `dep:${d}`;
+        return (
+          <InputRow key={key} busy={busy === key} icon={<Link size={14} />}
+            onRemove={ops.removeDependency ? () => run(key, () => ops.removeDependency(node.id, d)) : null}
+            text={<>Depends on <strong>{nameOf(d)}</strong></>} />
+        );
+      })}
+
+      {/* Data-flow inputs (#382) — remove-only. */}
+      {inputs.map(a => {
+        const key = `in:${artifactKey(a)}`;
+        const h = a && typeof a === 'object' && a.name && a.hint ? a.hint : '';
+        return (
+          <InputRow key={key} busy={busy === key} icon={<Package size={14} />}
+            onRemove={ops.removeArtifact ? () => run(key, () => ops.removeArtifact(node.id, { direction: 'input', name: a && a.name, path: a && a.path })) : null}
+            text={<>Consumes artifact <code style={codeChip}>{artifactKey(a)}</code>{h ? ` · ${h}` : ''}</>} />
+        );
+      })}
+
+      {/* Manual github-event listeners — the raw triggers not derived from a port. */}
+      {manual.map(t => {
         const s = summarizeGithubEventTrigger(t);
         const sources = Array.isArray(t.sources) ? t.sources : [];
         return (
@@ -172,7 +239,6 @@ function InputsPanel({ node, peers, dupLints, ops, onChanged }) {
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
               <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>{s.events.join(', ') || t.type}</span>
               {s.label && <span style={labelChip}>🏷 {s.label}</span>}
-              {t.channel && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>· derived</span>}
             </div>
             {sources.length > 0 && (
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
@@ -182,19 +248,40 @@ function InputsPanel({ node, peers, dupLints, ops, onChanged }) {
           </div>
         );
       })}
+
+      {/* Derived triggers (channel/dataFlow) — read-only, they point back at the
+          owning port row above; never edited here (#865). */}
+      {derived.map(t => {
+        const s = summarizeGithubEventTrigger(t);
+        const origin = t.channel ? 'a PR/issue channel above' : 'a data-flow input above';
+        return (
+          <div key={t.id} style={{ ...derivedRow }}>
+            <RefreshCw size={13} style={{ flexShrink: 0, color: 'var(--eb-text-muted)' }} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                ⟲ derived from {origin}
+              </span>
+              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+                {s.events.join(', ') || t.type}{s.label ? ` · 🏷 ${s.label}` : ''}
+              </span>
+            </div>
+          </div>
+        );
+      })}
+
       {dupLints.map((l, i) => {
         // The duplicate is the trigger standing next to the derived one — offer to
         // delete the non-derived (manual) trigger of the flagged set inline.
-        const derivedIds = new Set(listeners.filter(t => t.channel || t.dataFlow).map(t => t.id));
-        const manual = (l.triggerIds || []).filter(id => !derivedIds.has(id));
-        const target = manual[0] || (l.triggerIds || [])[0];
+        const derivedIds = new Set(derived.map(t => t.id));
+        const manualIds = (l.triggerIds || []).filter(id => !derivedIds.has(id));
+        const target = manualIds[0] || (l.triggerIds || [])[0];
         return (
           <div key={i} style={warn}>
             <AlertTriangle size={13} style={{ flexShrink: 0, marginTop: 1 }} />
             <div style={{ flex: 1 }}>
               <div>{l.message || `Duplicate listener${l.label ? ` on "${l.label}"` : ''}.`}</div>
               {target && ops.deleteTrigger && (
-                <button onClick={() => removeTrigger(target)} disabled={busyId === target} style={{ ...ghost, marginTop: 4, color: 'var(--eb-status-error)', borderColor: 'var(--eb-status-error)' }}>
+                <button onClick={() => removeTrigger(target)} disabled={busy === `t:${target}`} style={{ ...ghost, marginTop: 4, color: 'var(--eb-status-error)', borderColor: 'var(--eb-status-error)' }}>
                   <Trash2 size={12} /> Delete duplicate trigger
                 </button>
               )}
@@ -204,6 +291,186 @@ function InputsPanel({ node, peers, dupLints, ops, onChanged }) {
       })}
     </div>
   );
+}
+
+// A unified input/artifact row: kind icon + plain-language sentence + optional
+// remove button (#865). Remove-only ports use this; read-only rows omit onRemove.
+function InputRow({ icon, text, subtitle, onRemove, busy }) {
+  return (
+    <div style={unifiedRow}>
+      <span style={{ flexShrink: 0, color: 'var(--eb-text-muted)', display: 'inline-flex', marginTop: 1 }}>{icon}</span>
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
+        <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>{text}</span>
+        {subtitle && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{subtitle}</span>}
+      </div>
+      {onRemove && (
+        <button onClick={onRemove} disabled={busy} title="Remove" style={iconBtn}>
+          {busy ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <X size={13} />}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── Artifacts ────────────────────────────────────────────────────────────────
+// The data-flow outputs this agent produces (dataFlow.outputs) — name, hint,
+// computed consumers, remove (#865). Below Outcomes so the reader goes
+// inputs → decisions → produced artifacts top to bottom.
+function ArtifactsBlock({ node, peers, ops, onChanged, focus }) {
+  const ref = useRef(null);
+  useFocusScroll(ref, focus);
+  const outputs = Array.isArray(node.outputs) ? node.outputs : [];
+  const [busy, setBusy] = useState(null);
+  const run = async (key, fn) => {
+    setBusy(key);
+    try { await fn(); onChanged?.(); }
+    catch (e) { window.alert(e?.message || String(e)); }
+    finally { setBusy(null); }
+  };
+  return (
+    <div ref={ref} style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)', ...(focus ? focusRing : {}) }}>
+      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 'var(--eb-font-medium)' }}>
+        Artifacts <span style={{ fontWeight: 'normal', color: 'var(--eb-text-muted)' }}>— what this agent produces</span>
+      </div>
+      {outputs.length === 0 && (
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>No output artifacts.</div>
+      )}
+      {outputs.map(a => {
+        const key = `out:${artifactKey(a)}`;
+        const h = a && typeof a === 'object' && a.name && a.hint ? a.hint : '';
+        const consumers = artifactConsumers(a, node, peers);
+        return (
+          <InputRow key={key} busy={busy === key} icon={<Package size={14} />}
+            onRemove={ops.removeArtifact ? () => run(key, () => ops.removeArtifact(node.id, { direction: 'output', name: a && a.name, path: a && a.path })) : null}
+            text={<><code style={codeChip}>{artifactKey(a)}</code>{h ? ` · ${h}` : ''}</>}
+            subtitle={consumers.length ? `consumers: ${consumers.join(', ')}` : 'no consumer yet'} />
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Legacy ───────────────────────────────────────────────────────────────────
+// Collapsed disclosure holding the emitted-labels editor and the GitHub-outputs
+// checkboxes, relocated from the retired Connections tab so nothing is lost
+// mid-transition (#865); these move to their final home in phase 3.
+function LegacyDisclosure({ node, ops, onChanged, focus }) {
+  const ref = useRef(null);
+  useFocusScroll(ref, focus);
+  const [open, setOpen] = useState(!!focus);
+  useEffect(() => { if (focus) setOpen(true); }, [focus]);
+  const gh = node.github || {};
+  const [producesPr, setPr] = useState(!!gh.producesPr);
+  const [producesIssue, setIssue] = useState(!!gh.producesIssue);
+  const hasEmits = !!ops.setRoleEmits;
+  const hasGithub = !!ops.setGithubProduces;
+  if (!hasEmits && !hasGithub) return null;
+
+  const saveProduces = async (pr, issue) => {
+    setPr(pr); setIssue(issue);
+    try { await ops.setGithubProduces(node.id, { pr, issue }); onChanged?.(); }
+    catch (e) { window.alert(e?.message || String(e)); }
+  };
+
+  return (
+    <div ref={ref} style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)', ...(focus ? focusRing : {}) }}>
+      <button onClick={() => setOpen(o => !o)} style={{
+        display: 'flex', alignItems: 'center', gap: 6, background: 'none', border: 'none', cursor: 'pointer',
+        color: 'var(--eb-text-secondary)', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', padding: 0,
+      }}>
+        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />} Legacy
+        <span style={{ fontWeight: 'normal', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)' }}>
+          — emitted labels &amp; GitHub outputs (moving in a later phase)
+        </span>
+      </button>
+      {open && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', marginTop: 'var(--eb-space-3)' }}>
+          {hasEmits && <EmitsEditor node={node} ops={ops} onChanged={onChanged} />}
+          {hasGithub && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>GitHub outputs</div>
+              <label style={check}>
+                <input type="checkbox" checked={producesPr} onChange={e => saveProduces(e.target.checked, producesIssue)} />
+                Opens pull requests
+              </label>
+              <label style={check}>
+                <input type="checkbox" checked={producesIssue} onChange={e => saveProduces(producesPr, e.target.checked)} />
+                Opens issues
+              </label>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Role-level emits editor (#414), relocated from ConnectionsSection (#865): the
+// labels this agent sets during its work, independent of any trigger.
+function EmitsEditor({ node, ops, onChanged }) {
+  const [emits, setEmits] = useState(Array.isArray(node.emits) ? node.emits : []);
+  const [newLabel, setNewLabel] = useState('');
+  const save = async (next) => {
+    try {
+      await ops.setRoleEmits(node.id, next);
+      setEmits(next);
+      onChanged?.();
+    } catch (e) { window.alert(e?.message || String(e)); }
+  };
+  const add = () => {
+    const l = newLabel.trim();
+    if (l && !emits.includes(l)) save([...emits, l]);
+    setNewLabel('');
+  };
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Emits labels</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
+        {emits.map(l => (
+          <button key={l} onClick={() => save(emits.filter(x => x !== l))} title="Remove" style={{
+            fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)',
+            background: '#3b82f61a', color: '#3b82f6', border: '1px solid #3b82f6',
+            borderRadius: 'var(--eb-radius-sm)', padding: '0 5px', cursor: 'pointer',
+            display: 'inline-flex', alignItems: 'center', gap: 3,
+          }}>{l} <X size={10} /></button>
+        ))}
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+          <input value={newLabel} onChange={e => setNewLabel(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
+            placeholder="add label…" style={{ ...input, width: 130, padding: '1px 6px', fontSize: 'var(--eb-text-xs)' }} />
+          <button onClick={add} title="Add emitted label" style={{
+            background: 'none', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+            padding: '1px 5px', cursor: 'pointer', color: 'var(--eb-text-secondary)', display: 'inline-flex',
+          }}><Plus size={11} /></button>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// Scroll a focused section into view when the inspector opens on it (jump link).
+function useFocusScroll(ref, focus) {
+  useEffect(() => {
+    if (focus && ref.current) {
+      try { ref.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch { /* jsdom / older browsers */ }
+    }
+  }, [focus]);
+}
+
+// An artifact is keyed by its logical name when set, else its path (#382).
+function artifactKey(a) {
+  return (typeof a === 'string' ? a : (a && (a.name || a.path))) || '';
+}
+// Peers that consume this output artifact (matched by logical name/path key).
+function artifactConsumers(output, node, peers) {
+  const key = artifactKey(output);
+  const names = new Set();
+  for (const p of peers) {
+    if (!p || p.id === node.id) continue;
+    const ins = Array.isArray(p.inputs) ? p.inputs : [];
+    if (ins.some(a => artifactKey(a) === key)) names.add(p.displayName || p.id);
+  }
+  return [...names];
 }
 
 // ── one outcome row ──────────────────────────────────────────────────────────
@@ -350,6 +617,11 @@ const primary = {
 const iconBtn = { background: 'none', border: 'none', color: 'var(--eb-text-muted)', cursor: 'pointer', display: 'inline-flex', padding: 2 };
 const rowBox = { display: 'flex', flexDirection: 'column', gap: 6, border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)' };
 const listenerRow = { display: 'flex', flexDirection: 'column', gap: 2, border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)' };
+const unifiedRow = { display: 'flex', alignItems: 'flex-start', gap: 8, border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)' };
+const derivedRow = { display: 'flex', alignItems: 'flex-start', gap: 8, borderLeft: '2px solid var(--eb-border-default)', paddingLeft: 'var(--eb-space-2)', marginLeft: 6 };
+const codeChip = { fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-sm)', padding: '0 4px' };
+const focusRing = { borderRadius: 'var(--eb-radius-md)', boxShadow: '0 0 0 2px var(--eb-accent-primary)', padding: 'var(--eb-space-2)' };
+const check = { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' };
 const labelChip = { fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-secondary)' };
 const radio = { display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer' };
 const banner = {

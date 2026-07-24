@@ -101,7 +101,7 @@ seed-memory:
 	  exit 1; \
 	fi
 	@echo "Seeding memory templates into volume $(SKILL_POOL_VOLUME)..."
-	podman run --rm \
+	podman run --rm --security-opt label=disable \
 	  -v $(SKILL_POOL_VOLUME):/pool \
 	  -v $(SKILL_POOL_DEFAULTS)/memory:/src:ro \
 	  alpine sh -c 'rm -rf /pool/memory && mkdir -p /pool/memory && cp -r /src/. /pool/memory/'
@@ -115,7 +115,7 @@ seed-skills:
 	  echo "WARNING: i-sase engineering skill not found - skipping (only ACE/BriefingPack agents need it)." >&2; \
 	else \
 	  echo "Seeding engineering skill into volume $(SKILL_POOL_VOLUME)..."; \
-	  podman run --rm \
+	  podman run --rm --security-opt label=disable \
 	    -v $(SKILL_POOL_VOLUME):/pool \
 	    -v $(ACE_PLUGIN_SKILLS_DIR):/src:ro \
 	    alpine sh -c 'mkdir -p /pool/skills && rm -rf /pool/skills/engineering && cp -r /src/engineering /pool/skills/engineering'; \
@@ -129,7 +129,7 @@ seed-templates:
 	  exit 1; \
 	fi
 	@echo "Seeding agent-templates into volume $(SKILL_POOL_VOLUME)..."
-	podman run --rm \
+	podman run --rm --security-opt label=disable \
 	  -v $(SKILL_POOL_VOLUME):/pool \
 	  -v $(SKILL_POOL_DEFAULTS)/agent-templates:/src:ro \
 	  alpine sh -c 'rm -rf /pool/agent-templates && mkdir -p /pool/agent-templates && cp -r /src/. /pool/agent-templates/'
@@ -142,7 +142,7 @@ seed-process-templates:
 	  exit 1; \
 	fi
 	@echo "Seeding process-templates into volume $(SKILL_POOL_VOLUME)..."
-	podman run --rm \
+	podman run --rm --security-opt label=disable \
 	  -v $(SKILL_POOL_VOLUME):/pool \
 	  -v $(SKILL_POOL_DEFAULTS)/process-templates:/src:ro \
 	  alpine sh -c 'rm -rf /pool/process-templates && mkdir -p /pool/process-templates && cp -r /src/. /pool/process-templates/'
@@ -155,7 +155,7 @@ seed-mcp-servers:
 	  exit 1; \
 	fi
 	@echo "Seeding mcp-servers into volume $(SKILL_POOL_VOLUME)..."
-	podman run --rm \
+	podman run --rm --security-opt label=disable \
 	  -v $(SKILL_POOL_VOLUME):/pool \
 	  -v $(CURDIR)/mcp-servers:/src:ro \
 	  alpine sh -c 'rm -rf /pool/mcp-servers && mkdir -p /pool/mcp-servers && cp -r /src/. /pool/mcp-servers/'

@@ -339,8 +339,18 @@ function computeLints(nodes, edges) {
         message: `\`${e.to}\` listens on \`${e.label}\` but no agent emits it.` });
     }
     if (e.deadEnd) {
-      lints.push({ code: 'dead-end-emitter', severity: 'warning', label: e.label, nodeId: e.from,
-        message: `\`${e.from}\` emits \`${e.label}\` but nothing listens on it.` });
+      // outcome-without-consumer (#830) is the successor of dead-end-emitter for
+      // OUTCOME edges: a dead-end carrying an `outcome` id comes from an authored
+      // outcomes port (a legacy flat-emit dead-end has no outcome field and keeps
+      // firing dead-end-emitter, so AC3 legacy output is byte-identical). `none`
+      // actions set no label → no edge → naturally exempt.
+      if (e.outcome) {
+        lints.push({ code: 'outcome-without-consumer', severity: 'warning', label: e.label, nodeId: e.from, outcome: e.outcome,
+          message: `\`${e.from}\` outcome \`${e.outcome}\` sets \`${e.label}\` but nothing listens on it.` });
+      } else {
+        lints.push({ code: 'dead-end-emitter', severity: 'warning', label: e.label, nodeId: e.from,
+          message: `\`${e.from}\` emits \`${e.label}\` but nothing listens on it.` });
+      }
     }
   }
   // GitHub-channel wiring checks (#380). A producer whose PR/issue nobody
@@ -427,6 +437,65 @@ function computeLints(nodes, edges) {
       });
     }
   }
+
+  // Outcome-port lints (#830, concept §8). These read the AUTHORED `outcomes`
+  // port that buildProcessGraph surfaces on a node only when authored — a legacy
+  // flat-`emits` agent has no `n.outcomes`, so none of these fire and its
+  // dead-end-emitter / gate-violation output stays byte-identical (AC3). The
+  // `outcome-without-consumer` case is derived from the dead-end edges above; the
+  // per-node inspection below covers the switch/branch shape checks that have no
+  // edge to hang off.
+  for (const n of nodes) {
+    if (n.synthetic) continue;
+    const oc = n.outcomes;
+    if (!oc || !Array.isArray(oc.options)) continue;
+
+    // switch-with-one-option (info): an `exactlyOne` switch with fewer than two
+    // options isn't a branch at all.
+    if (oc.mode === 'exactlyOne' && oc.options.length < 2) {
+      lints.push({ code: 'switch-with-one-option', severity: 'info', nodeId: n.id,
+        message: `\`${n.id}\` has an exactlyOne switch with ${oc.options.length} option${oc.options.length === 1 ? '' : 's'} — not a branch.` });
+    }
+
+    // human-label-as-outcome (error): an outcome action may not set a `human:*`
+    // gate or a brake label — only a human may. Extends `gate-violation` to the
+    // outcomes port (the label is filtered out of `n.emits` by the projection, so
+    // `gate-violation` cannot catch it — this covers imported/legacy data).
+    for (const o of oc.options) {
+      for (const a of (Array.isArray(o.actions) ? o.actions : [])) {
+        if (a && a.type === 'setLabel' && typeof a.label === 'string'
+            && (isHumanGate(a.label.trim()) || isBrake(a.label.trim()))) {
+          lints.push({ code: 'human-label-as-outcome', severity: 'error', nodeId: n.id, label: a.label.trim(), outcome: o.id,
+            message: `\`${n.id}\` outcome \`${o.id}\` sets gate/brake label \`${a.label.trim()}\` — only humans may set it.` });
+        }
+      }
+    }
+
+    // same-label-multiple-outcomes (warning): under `exactlyOne`, two options
+    // that set the same label leave consumers unable to tell the branches apart.
+    // (Gate/brake labels are excluded here — those are the human-label-as-outcome
+    // error above.)
+    if (oc.mode === 'exactlyOne') {
+      const optionsByLabel = new Map(); // label -> Set(optionId)
+      for (const o of oc.options) {
+        for (const a of (Array.isArray(o.actions) ? o.actions : [])) {
+          if (!a || a.type !== 'setLabel' || typeof a.label !== 'string') continue;
+          const lbl = a.label.trim();
+          if (!lbl || isHumanGate(lbl) || isBrake(lbl)) continue;
+          if (!optionsByLabel.has(lbl)) optionsByLabel.set(lbl, new Set());
+          optionsByLabel.get(lbl).add(o.id);
+        }
+      }
+      for (const [lbl, ids] of optionsByLabel) {
+        if (ids.size > 1) {
+          lints.push({ code: 'same-label-multiple-outcomes', severity: 'warning', nodeId: n.id, label: lbl,
+            message: `\`${n.id}\` sets \`${lbl}\` from ${ids.size} exactlyOne options (${[...ids].map(i => `\`${i}\``).join(', ')})`
+              + ` — consumers can't distinguish the branches.` });
+        }
+      }
+    }
+  }
+
   return lints;
 }
 

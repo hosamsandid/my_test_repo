@@ -42,6 +42,23 @@ test('upsert: label-less and labelled from the same producer coexist', () => {
   assert.equal(ch.length, 2);
 });
 
+test('upsert: an authored wakePrompt override is carried on the port, trimmed (#868)', () => {
+  const ch = upsertChannel([], { artifact: 'pr', from: 'dev', wakePrompt: '  Review carefully.  ' });
+  assert.equal(ch[0].wakePrompt, 'Review carefully.');
+});
+
+test('upsert: a blank wakePrompt is dropped from the port (#868)', () => {
+  const ch = upsertChannel([], { artifact: 'pr', from: 'dev', wakePrompt: '   ' });
+  assert.ok(!('wakePrompt' in ch[0]), 'a whitespace-only override is treated as no override');
+});
+
+test('upsert: re-drawing the same channel can clear a prior wakePrompt (#868)', () => {
+  let ch = upsertChannel([], { artifact: 'pr', from: 'dev', wakePrompt: 'Custom.' });
+  ch = upsertChannel(ch, { artifact: 'pr', from: 'dev' }); // same key, no override
+  assert.equal(ch.length, 1);
+  assert.ok(!('wakePrompt' in ch[0]), 'an in-place edit without an override clears the stale one');
+});
+
 test('remove: with a label drops only that fan-in sibling', () => {
   const list = [
     { artifact: 'pr', from: 'rev', label: 'ready-to-merge' },

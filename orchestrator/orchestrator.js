@@ -141,29 +141,29 @@ const { resolveSkillSourceDir } = makeSkillSourceResolver({
   defaultTeamId: DEFAULT_TEAM_ID,
 });
 
-// Resolve the LLM binding for an environment:
+// Resolve the LLM binding for an explicit endpoint id + model pin:
 //  - reads /workspace/llm-endpoints/index.json
-//  - looks up env.llmEndpointId
+//  - looks up the endpoint by id
 //  - reads the auth token from _keys/<authTokenId>
-// Returns { baseUrl, token, defaultModelId } or null if the env has no
-// binding or the endpoint is missing — in that case the caller falls back to
-// the global ANTHROPIC_* env vars from `.env`.
+// Returns { authType, baseUrl, token, defaultModelId } or null if no endpoint
+// id was given or the endpoint is missing — in that case the caller falls back
+// to the global ANTHROPIC_* env vars from `.env`.
 //
-// Model resolution order: env.defaultModelId (explicit pin) → endpoint
-// registry default → null (lets the Claude CLI pick from .env). The endpoint
-// fallback exists so legacy envs that never picked a model still inherit the
+// Model resolution order: modelPin (explicit env/agent pin) → endpoint registry
+// default → null (lets the Claude CLI pick from .env). The endpoint fallback
+// exists so legacy envs that never picked a model still inherit the
 // operator-configured default once one is set in the Model Registry.
-function loadLlmBindingForEnv(env) {
-  if (!env?.llmEndpointId) return null;
+function resolveLlmBinding(endpointId, modelPin, { context } = {}) {
+  if (!endpointId) return null;
   let list;
   try {
     list = JSON.parse(fs.readFileSync(LLM_ENDPOINTS_INDEX, "utf8"));
   } catch {
     return null;
   }
-  const ep = Array.isArray(list) ? list.find(e => e.id === env.llmEndpointId) : null;
+  const ep = Array.isArray(list) ? list.find(e => e.id === endpointId) : null;
   if (!ep) {
-    console.error(`[Orchestrator] LLM endpoint '${env.llmEndpointId}' (env=${env.id}) not found — falling back to .env`);
+    console.error(`[Orchestrator] LLM endpoint '${endpointId}'${context ? ` (${context})` : ""} not found — falling back to .env`);
     return null;
   }
   let token = "";
@@ -175,11 +175,25 @@ function loadLlmBindingForEnv(env) {
     }
   }
   return {
+    endpointId: ep.id,
     authType: ep.authType === "oauth-token" ? "oauth-token" : "api-key",
     baseUrl: ep.baseUrl || "",
     token,
-    defaultModelId: env.defaultModelId || ep.defaultModelId || null,
+    defaultModelId: modelPin || ep.defaultModelId || null,
   };
+}
+
+// Resolve the effective LLM binding for an agent: a per-agent provider override
+// (`cfg.llmEndpointOverride`) wins over the environment's `llmEndpointId`. The
+// model pin still comes from the environment (`env.defaultModelId`); the agent's
+// own `modelOverride` is applied later in startAgentProcess.
+function resolveLlmBindingForAgent(cfg, env) {
+  const endpointId = cfg?.llmEndpointOverride || env?.llmEndpointId || null;
+  if (!endpointId) return null;
+  const ctx = cfg?.llmEndpointOverride
+    ? `agent=${cfg.id} override`
+    : `env=${env?.id}`;
+  return resolveLlmBinding(endpointId, env?.defaultModelId, { context: ctx });
 }
 
 const { execFile, execFileSync } = require("child_process");
@@ -231,7 +245,7 @@ function startAgentProcess(config) {
   // the inherited ANTHROPIC_* values from `.env` in place — that keeps
   // pre-registry environments and the bp-explorer integration working.
   const env = environmentId ? loadEnvironment(environmentId) : null;
-  const llm = loadLlmBindingForEnv(env);
+  const llm = resolveLlmBindingForAgent(config, env);
   if (llm) {
     if (llm.authType === "oauth-token") {
       // Subscription auth (Claude Max / Enterprise seat): the Claude CLI reads
@@ -249,9 +263,13 @@ function startAgentProcess(config) {
       if (llm.token)   childEnv.ANTHROPIC_AUTH_TOKEN = llm.token;
     }
     if (llm.defaultModelId) childEnv.AGENT_DEFAULT_MODEL = llm.defaultModelId;
-    console.log(`[Orchestrator] Agent ${id} → LLM endpoint=${env.llmEndpointId} (${llm.authType}), model=${llm.defaultModelId || '(endpoint default)'}`);
-  } else if (env?.llmEndpointId) {
-    console.log(`[Orchestrator] Agent ${id} → LLM endpoint binding missing for env=${env.id}, using .env fallback`);
+    // Best-effort provider id for the runtime's usage records (#654); the
+    // orchestrator re-derives it authoritatively on ingest.
+    childEnv.AEE_LLM_PROVIDER_ID = llm.endpointId;
+    const via = config.llmEndpointOverride ? ' (agent override)' : '';
+    console.log(`[Orchestrator] Agent ${id} → LLM endpoint=${llm.endpointId}${via} (${llm.authType}), model=${llm.defaultModelId || '(endpoint default)'}`);
+  } else if (config.llmEndpointOverride || env?.llmEndpointId) {
+    console.log(`[Orchestrator] Agent ${id} → LLM endpoint binding missing (override=${config.llmEndpointOverride || '-'}, env=${env?.id || '-'}), using .env fallback`);
   }
 
   // Per-agent override (set via the chat UI) wins over the environment's
@@ -886,7 +904,8 @@ function enrichUsageRecord(agentId, record) {
   }
   if (out.provider == null) {
     const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-    out.provider = env?.llmEndpointId || null;
+    // A per-agent provider override wins over the environment binding.
+    out.provider = cfg.llmEndpointOverride || env?.llmEndpointId || null;
   }
   return out;
 }
@@ -6974,6 +6993,22 @@ class Orchestrator {
     return { envId, respawned, skipped };
   }
 
+  // Recreate a single running agent's container so a spawn-time change (e.g. a
+  // per-agent Model-Provider override) is re-injected. A disabled/stub agent is
+  // left untouched — it picks up the new binding on its next enable. Fresh-reads
+  // the on-disk config so a just-written override is honoured.
+  respawnAgent(id, { reason } = {}) {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) throw new Error(`Agent '${id}' not found`);
+    if (cfg.enabled === false || !cfg.token || !agentProcesses.has(id)) {
+      return { id, respawned: false };
+    }
+    this.agentConfigs.set(id, { config: cfg });
+    startAgentProcess(cfg); // stops old container, recreates with fresh env
+    console.log(`[Orchestrator] agent ${id} respawned (${reason || 'update'})`);
+    return { id, respawned: true };
+  }
+
   // Reset an agent back to its stub state: stop the process, deactivate the
   // Matrix user (best-effort), wipe the workspace, and strip the config of
   // any runtime identity (token, userId). The stub config keeps just the
@@ -9107,6 +9142,32 @@ async function main() {
             res.end(JSON.stringify({ error: err.message }));
           }
         })();
+      });
+      return;
+    }
+
+    // ── Respawn a single running agent ──────────────────────────────────
+    // Fired by the admin-console after a per-agent spawn-time change (e.g. the
+    // Model-Provider override) so the running container is recreated with the
+    // fresh binding. No-op for disabled/stub agents. Best-effort on the caller.
+    const respawnAgentMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/respawn$/);
+    if (respawnAgentMatch) {
+      const id = decodeURIComponent(respawnAgentMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* ignore */ }
+        try {
+          const result = orchestrator.respawnAgent(id, { reason: parsed.reason });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] respawnAgent error for ${id}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404 : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
       });
       return;
     }

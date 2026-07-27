@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight } from 'lucide-react';
+import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight, Zap, ChevronDown } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
 import { useMaintenanceMode } from '../../context/MaintenanceModeContext';
@@ -118,6 +118,10 @@ export default function ChatPanel({
   // override. `modelSwitching` blocks rapid double-clicks during the PATCH.
   const [modelOptions, setModelOptions] = useState(null);
   const [modelSwitching, setModelSwitching] = useState(false);
+  // Provider (LLM endpoint) switching lives in the same `modelOptions` snapshot
+  // (`endpoints` = curated set, `endpointOverride`, `canSwitch`). Switching the
+  // provider requires an agent respawn, so it blocks briefly.
+  const [providerSwitching, setProviderSwitching] = useState(false);
   // Context-window fill for the last completed request (#471, cache-tokens
   // fix #490, overcounting fix #509). `contextFill` (from the parent, fed by
   // SessionLogPanel) carries a plausible estimate of the tokens actually held
@@ -580,6 +584,25 @@ export default function ChatPanel({
     }
   }
 
+  async function handleProviderChange(newEndpointId) {
+    if (!agent?.id || providerSwitching) return;
+    setProviderSwitching(true);
+    setError(null);
+    try {
+      // Empty string means "back to the environment default" → send null.
+      const payload = { endpointId: newEndpointId ? newEndpointId : null };
+      await apiCall('PATCH', `/api/agents/${encodeURIComponent(agent.id)}/provider`, payload);
+      // The provider change may have cleared the model override and swapped the
+      // whole catalog — refetch the full snapshot rather than patching locally.
+      const fresh = await apiCall('GET', `/api/agents/${encodeURIComponent(agent.id)}/model-options`);
+      setModelOptions(fresh);
+    } catch (err) {
+      setError(`Provider-Wechsel fehlgeschlagen: ${err.message}`);
+    } finally {
+      setProviderSwitching(false);
+    }
+  }
+
   async function handleFullLearn() {
     if (!sessionApiBase || learnPending) return;
     setError(null);
@@ -885,6 +908,12 @@ export default function ChatPanel({
             Hand-off
           </button>
         )}
+        <ProviderChip
+          options={modelOptions}
+          switching={providerSwitching}
+          disabled={disabled}
+          onChange={handleProviderChange}
+        />
         <ModelPicker
           options={modelOptions}
           switching={modelSwitching}
@@ -1230,6 +1259,173 @@ function SessionBadge({ active }) {
       }} />
       {active ? 'Session active' : 'New session'}
     </span>
+  );
+}
+
+// Human label for an auth type. `null` (no endpoint) → the .env fallback.
+function authTypeLabel(authType) {
+  if (!authType) return 'Standard (.env)';
+  return authType === 'oauth-token' ? 'Subscription' : 'API-Key';
+}
+
+// Compact, always-visible Model-Provider indicator next to the model picker.
+// Shows which LLM endpoint + auth type the agent actually runs on (transparency)
+// and, on click, a popover with the full binding plus a per-agent provider
+// switcher restricted to the agent team's curated, usable providers.
+function ProviderChip({ options, switching, disabled, onChange }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+
+  // Close on outside click / Escape.
+  useEffect(() => {
+    if (!open) return undefined;
+    function onDocClick(e) {
+      if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false);
+    }
+    function onKey(e) { if (e.key === 'Escape') setOpen(false); }
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  if (!options) return null;
+
+  const endpoints = options.endpoints || [];
+  const overridden = !!options.endpointOverride;
+  const hasEndpoint = !!options.endpointId;
+  const effectiveModel = options.override || options.defaultModelId || null;
+  // Any-role team members may switch, but only within the curated team set.
+  const canSwitch = !!options.canSwitch && endpoints.length > 0 && !disabled;
+  // The <select> reflects the current binding: the override if set, else the
+  // env endpoint (empty string = "use the environment default").
+  const selectValue = options.endpointOverride || '';
+
+  const chipColor = overridden ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)';
+  const label = hasEndpoint ? (options.endpointName || options.endpointId) : 'Standard (.env)';
+
+  return (
+    <div ref={rootRef} style={{ position: 'relative', display: 'inline-flex' }}>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        title="Model Provider dieses Agenten — klicken für Details & Wechsel"
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 4,
+          padding: '3px 8px',
+          fontSize: 'var(--eb-text-xs)',
+          fontFamily: 'inherit',
+          color: chipColor,
+          background: 'transparent',
+          border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-sm)',
+          cursor: 'pointer',
+          maxWidth: 240,
+        }}
+      >
+        {switching
+          ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
+          : <Zap size={11} />}
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {hasEndpoint ? `${label} · ${authTypeLabel(options.authType)}` : label}
+        </span>
+        {overridden && <span style={{ fontSize: '0.9em' }}>•</span>}
+        <ChevronDown size={11} />
+      </button>
+
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 4px)',
+            right: 0,
+            zIndex: 50,
+            minWidth: 280,
+            padding: 12,
+            background: 'var(--eb-bg-elevated)',
+            border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-md)',
+            boxShadow: 'var(--eb-shadow-lg)',
+            fontSize: 'var(--eb-text-xs)',
+            color: 'var(--eb-text-primary)',
+            cursor: 'default',
+          }}
+        >
+          <ProviderInfoRow label="Provider" value={options.endpointName || (hasEndpoint ? options.endpointId : '— .env Fallback —')} />
+          <ProviderInfoRow label="Auth" value={authTypeLabel(options.authType)} />
+          {options.baseUrl && <ProviderInfoRow label="Endpoint" value={options.baseUrl} mono />}
+          <ProviderInfoRow label="Modell" value={effectiveModel || '(Provider-Default)'} mono />
+          {overridden && (
+            <div style={{ marginTop: 2, color: 'var(--eb-accent-primary)' }}>
+              Override aktiv — Umgebungs-Standard:{' '}
+              {options.envEndpointId || '(keiner)'}
+            </div>
+          )}
+
+          <div style={{ height: 1, background: 'var(--eb-border-default)', margin: '10px 0' }} />
+
+          <div style={{ marginBottom: 4, color: 'var(--eb-text-secondary)' }}>Provider wechseln</div>
+          {canSwitch ? (
+            <select
+              value={selectValue}
+              disabled={switching}
+              onChange={(e) => onChange(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '4px 6px',
+                fontSize: 'var(--eb-text-xs)',
+                fontFamily: 'inherit',
+                color: 'inherit',
+                background: 'var(--eb-bg-surface)',
+                border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-sm)',
+                cursor: switching ? 'not-allowed' : 'pointer',
+              }}
+            >
+              <option value="">
+                {options.envEndpointId ? 'Umgebungs-Standard' : '— Umgebungs-Standard (kein Provider) —'}
+              </option>
+              {endpoints.map(ep => (
+                <option key={ep.id} value={ep.id}>
+                  {ep.name} · {authTypeLabel(ep.authType)}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <div style={{ color: 'var(--eb-text-muted)' }}>
+              {endpoints.length === 0
+                ? 'Keine für dieses Team freigegebenen Provider.'
+                : 'Kein Recht, den Provider zu wechseln.'}
+            </div>
+          )}
+          {canSwitch && (
+            <div style={{ marginTop: 8, color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
+              Ein Wechsel startet den Agent-Container kurz neu; die Chat-Session
+              bleibt erhalten.
+              {switching && ' Wird neu gestartet…'}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProviderInfoRow({ label, value, mono }) {
+  return (
+    <div style={{ display: 'flex', gap: 8, padding: '2px 0' }}>
+      <span style={{ color: 'var(--eb-text-muted)', minWidth: 68 }}>{label}</span>
+      <span style={{
+        flex: 1,
+        wordBreak: 'break-all',
+        fontFamily: mono ? 'var(--eb-font-mono, monospace)' : 'inherit',
+        color: 'var(--eb-text-primary)',
+      }}>{value}</span>
+    </div>
   );
 }
 

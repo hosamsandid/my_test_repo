@@ -2827,27 +2827,85 @@ app.put('/api/agents/:id/prompt', apiLimiter, (req, res) => {
 
 /* ─── Agent Model Selection ─────────────────────────────────────────── */
 
-// Resolve everything the chat UI needs to render the model picker for an
-// agent: the endpoint+catalog reachable through its working environment, the
-// environment-level default, and the agent-level override (if any).
+// The team an agent belongs to (team members carry parentTeamId). Mirrors the
+// orchestrator's enrichUsageRecord derivation.
+function agentTeamId(cfg) {
+  return (cfg && (cfg.parentTeamId || cfg.teamId)) || 'default';
+}
+
+// The minimal agent shape visibleAgent() needs (team + private-ownership).
+function agentMetaForScope(cfg) {
+  return { teamId: agentTeamId(cfg), visibility: cfg && cfg.visibility, ownerId: cfg && cfg.ownerId };
+}
+
+// The Model Providers a given team is entitled to use — team-owned endpoints
+// plus system-scoped endpoints assigned to that team. This is the ONLY set an
+// agent may be switched to (no cross-team leakage), and — unlike
+// visibleCredential — it is role-independent, so a plain Team Member sees the
+// same curated set a Team Admin does (#302 credential listing stays closed to
+// members; this is a narrower, agent-scoped surface).
+function usableEndpointsForTeam(teamId) {
+  return listLlmEndpoints().filter(ep => credentialVisibleToTeam(ep, teamId));
+}
+
+// The non-secret projection of an endpoint sent to the chat UI (never a token).
+function publicEndpointView(ep) {
+  if (!ep) return null;
+  return {
+    id: ep.id,
+    name: ep.name || ep.id,
+    authType: ep.authType === 'oauth-token' ? 'oauth-token' : 'api-key',
+    baseUrl: ep.baseUrl || '',
+    defaultModelId: ep.defaultModelId || null,
+    models: ep.models || [],
+  };
+}
+
+// The effective endpoint id an agent runs on: a per-agent provider override
+// wins over the environment's binding (mirrors resolveLlmBindingForAgent in the
+// orchestrator).
+function effectiveEndpointId(cfg, env) {
+  return (cfg && cfg.llmEndpointOverride) || (env && env.llmEndpointId) || null;
+}
+
+// Resolve everything the chat UI needs to render the model + provider picker for
+// an agent: the effective endpoint+catalog (override wins over the env binding),
+// the environment-level default, the agent-level model override, and the curated
+// set of providers this agent's team may switch to.
 app.get('/api/agents/:id/model-options', (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  // Fail closed for team-foreign callers — a 404 avoids leaking existence.
+  const scope = getScope(req);
+  if (!visibleAgent(scope, agentMetaForScope(cfg))) {
+    return res.status(404).json({ error: 'Agent not found' });
+  }
   const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-  const endpoint = env?.llmEndpointId
-    ? listLlmEndpoints().find(e => e.id === env.llmEndpointId)
+  const effEndpointId = effectiveEndpointId(cfg, env);
+  const endpoint = effEndpointId
+    ? listLlmEndpoints().find(e => e.id === effEndpointId)
     : null;
+  const teamId = agentTeamId(cfg);
   res.json({
-    endpointId:    endpoint?.id || null,
-    endpointName:  endpoint?.name || null,
+    endpointId:     endpoint?.id || null,
+    endpointName:   endpoint?.name || null,
+    authType:       endpoint ? (endpoint.authType === 'oauth-token' ? 'oauth-token' : 'api-key') : null,
+    baseUrl:        endpoint?.baseUrl || null,
+    // The provider is bound at the env level unless the agent carries an override.
+    endpointOverride: cfg.llmEndpointOverride || null,
+    envEndpointId:  env?.llmEndpointId || null,
     // env-level pin wins; otherwise show whatever the registry default is so
     // the picker label matches what the agent will actually use.
     defaultModelId: env?.defaultModelId || endpoint?.defaultModelId || null,
-    override:      cfg.modelOverride || null,
-    models:        endpoint?.models || [],
+    override:       cfg.modelOverride || null,
+    models:         endpoint?.models || [],
+    // Curated set of providers this agent's team may switch to (never tokens).
+    endpoints:      usableEndpointsForTeam(teamId).map(publicEndpointView),
+    canSwitch:      visibleAgent(scope, agentMetaForScope(cfg)),
+    teamId,
   });
 });
 
@@ -2857,6 +2915,12 @@ app.patch('/api/agents/:id/model', apiLimiter, (req, res) => {
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  // Same team gate as the provider switch — only someone who can see the agent
+  // (in-team member/admin) may change its model.
+  const scope = getScope(req);
+  if (!visibleAgent(scope, agentMetaForScope(cfg))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   const { modelId } = req.body || {};
 
   // null / "" / undefined → clear override (fall back to env default)
@@ -2872,15 +2936,17 @@ app.patch('/api/agents/:id/model', apiLimiter, (req, res) => {
     return res.status(400).json({ error: 'modelId must be a string or null' });
   }
 
-  // Validate against the environment's endpoint catalog so an agent can't be
-  // pinned to a model the proxy doesn't actually serve.
+  // Validate against the EFFECTIVE endpoint's catalog (a per-agent provider
+  // override wins over the env binding) so an agent can't be pinned to a model
+  // the active provider doesn't actually serve.
   const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-  if (!env?.llmEndpointId) {
-    return res.status(400).json({ error: 'Environment has no LLM endpoint bound — set one before overriding the model' });
+  const effEndpointId = effectiveEndpointId(cfg, env);
+  if (!effEndpointId) {
+    return res.status(400).json({ error: 'No LLM endpoint bound — set a provider before overriding the model' });
   }
-  const endpoint = listLlmEndpoints().find(e => e.id === env.llmEndpointId);
+  const endpoint = listLlmEndpoints().find(e => e.id === effEndpointId);
   if (!endpoint) {
-    return res.status(400).json({ error: `LLM endpoint '${env.llmEndpointId}' not found` });
+    return res.status(400).json({ error: `LLM endpoint '${effEndpointId}' not found` });
   }
   if (!(endpoint.models || []).some(m => m.id === modelId)) {
     return res.status(400).json({ error: `Model '${modelId}' is not in endpoint '${endpoint.id}' catalog` });
@@ -2890,6 +2956,90 @@ app.patch('/api/agents/:id/model', apiLimiter, (req, res) => {
   writeJsonAtomic(cfgPath, cfg);
   res.json({ override: modelId });
 });
+
+// Switch the Model Provider (LLM endpoint) for a single agent. Unlike the model
+// override (read live by the runtime), the provider is injected at container
+// spawn time, so a change requires a one-agent respawn — done best-effort after
+// the config write. Permission model (see docs/multi-user-concept.md):
+//   • the caller must be able to see the agent (in-team member/admin) — 403 else
+//   • the target endpoint must be in the agent team's curated, usable set
+//     (credentialVisibleToTeam) — never a provider the team isn't entitled to,
+//     not even for a System Admin — 403 else
+app.patch('/api/agents/:id/provider', apiLimiter, async (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
+  const cfg = readJsonFile(cfgPath, null);
+  if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  const scope = getScope(req);
+  if (!visibleAgent(scope, agentMetaForScope(cfg))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
+
+  const { endpointId } = req.body || {};
+  const teamId = agentTeamId(cfg);
+
+  // null / "" / undefined → clear the override (back to the env default).
+  if (endpointId === null || endpointId === undefined || endpointId === '') {
+    if ('llmEndpointOverride' in cfg) {
+      delete cfg.llmEndpointOverride;
+      // A model pin that only made sense on the overridden provider is dropped;
+      // the env provider re-validates its own default anyway.
+      pruneIncompatibleModelOverride(cfg, effectiveEndpointId(cfg, cfg.environmentId ? loadEnvironment(cfg.environmentId) : null));
+      writeJsonAtomic(cfgPath, cfg);
+    }
+    const respawned = await respawnAgentBestEffort(id, 'provider-override-cleared');
+    return res.json({ endpointOverride: null, respawned });
+  }
+
+  if (typeof endpointId !== 'string') {
+    return res.status(400).json({ error: 'endpointId must be a string or null' });
+  }
+  const target = usableEndpointsForTeam(teamId).find(ep => ep.id === endpointId);
+  if (!target) {
+    return res.status(403).json({
+      error: `Model provider '${endpointId}' is not available for team '${teamId}'`,
+      code: 'forbidden',
+    });
+  }
+
+  cfg.llmEndpointOverride = endpointId;
+  // Drop a stale model pin the new provider doesn't serve, so the agent falls
+  // back to the new provider's default instead of failing at invocation.
+  pruneIncompatibleModelOverride(cfg, endpointId);
+  writeJsonAtomic(cfgPath, cfg);
+  const respawned = await respawnAgentBestEffort(id, 'provider-override-changed');
+  res.json({ endpointOverride: endpointId, respawned });
+});
+
+// Clear cfg.modelOverride when it isn't in the (resolved) endpoint's catalog.
+function pruneIncompatibleModelOverride(cfg, endpointId) {
+  if (!cfg.modelOverride) return;
+  const ep = endpointId ? listLlmEndpoints().find(e => e.id === endpointId) : null;
+  if (!ep || !(ep.models || []).some(m => m.id === cfg.modelOverride)) {
+    delete cfg.modelOverride;
+  }
+}
+
+// Ask the orchestrator to recreate the agent's running container so a new
+// spawn-time binding takes effect. Best-effort: a stopped orchestrator or a
+// disabled/stub agent simply yields respawned:false, never an API error.
+async function respawnAgentBestEffort(id, reason) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/respawn`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    });
+    if (!r.ok) return false;
+    const body = await r.json().catch(() => ({}));
+    return Boolean(body && body.respawned);
+  } catch (err) {
+    console.error(`[api] respawn ${id} failed: ${err.message}`);
+    return false;
+  }
+}
 
 /* ─── Agent Triggers ────────────────────────────────────────────────── */
 
@@ -8414,6 +8564,8 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
   const prevGithubTokenId = env.githubTokenId || null;
+  const prevLlmEndpointId = env.llmEndpointId || null;
+  const prevDefaultModelId = env.defaultModelId || null;
   // `skills` from old clients is accepted-and-discarded — the grant is
   // team-owned (see POST above); a legacy env.skills field on disk is left
   // untouched (dead after the orchestrator's startup migration).
@@ -8462,10 +8614,16 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   if (additionalContext !== undefined) env.additionalContext = additionalContext;
   env.updatedAt = new Date().toISOString();
   saveEnvironment(env.id, env);
-  // If the GitHub PAT the env points at changed, respawn its running agents so
-  // the new token is re-injected into their containers (baked in at spawn time).
+  // Spawn-time bindings (GitHub PAT, LLM provider/model) are baked into each
+  // agent container at start, so a change only takes effect on respawn. Respawn
+  // the env's running agents whenever any of them changed — otherwise a provider
+  // switch at the environment level would silently not apply until a manual
+  // disable→enable. (A per-agent override is handled by PATCH /agents/:id/provider.)
   if ((env.githubTokenId || null) !== prevGithubTokenId) {
     notifyEnvCredentialChange(env.id, 'githubTokenId-changed');
+  } else if ((env.llmEndpointId || null) !== prevLlmEndpointId
+          || (env.defaultModelId || null) !== prevDefaultModelId) {
+    notifyEnvCredentialChange(env.id, 'llm-endpoint-changed');
   }
   res.json(env);
 });

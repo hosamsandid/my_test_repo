@@ -308,3 +308,37 @@ test('canViewUsageStatistics: unknown subject / missing scope fail closed', () =
   assert.equal(canViewUsageStatistics(null), false);
   assert.equal(canViewUsageStatistics(undefined), false);
 });
+
+// ── Per-agent Model-Provider switch: curated target set (agent-provider-switch)
+//
+// The provider switcher must build its allowed target set from
+// credentialVisibleToTeam (does the AGENT's team own/get-assigned this
+// provider?), NOT from visibleCredential (which gates on the *caller's*
+// team-admin role and is intentionally closed to Team Members). These tests pin
+// that a plain Team Member can switch within their team's providers even though
+// the general credential listing shows them nothing.
+test('provider switch: a Team Member gets the team-usable set though visibleCredential is closed', () => {
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships }); // team-member of 'risk'
+  const teamEp   = { id: 'ep-risk', scope: 'team', teamId: 'risk' };
+  const otherEp  = { id: 'ep-pay', scope: 'team', teamId: 'payments' };
+  const systemEp = { id: 'ep-shared', scope: 'system', assignedTeamIds: ['risk'] };
+
+  // The curated set is by the agent's team — bob's team is 'risk'.
+  assert.equal(credentialVisibleToTeam(teamEp, 'risk'), true);
+  assert.equal(credentialVisibleToTeam(systemEp, 'risk'), true);
+  assert.equal(credentialVisibleToTeam(otherEp, 'risk'), false); // no cross-team leak
+
+  // …yet the member's own credential listing (role-gated) shows none of them.
+  assert.equal(visibleCredential(bob, teamEp), false);
+  assert.equal(visibleCredential(bob, systemEp), false);
+});
+
+test('provider switch: even a System Admin cannot target a provider the agent team lacks', () => {
+  // System Admin sees every credential (visibleCredential true) …
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  const otherEp = { id: 'ep-pay', scope: 'team', teamId: 'payments' };
+  assert.equal(visibleCredential(sys, otherEp), true);
+  // … but the switch is gated on the AGENT team's entitlement, not the caller's
+  // visibility: a 'risk' agent still can't be bound to a 'payments' provider.
+  assert.equal(credentialVisibleToTeam(otherEp, 'risk'), false);
+});

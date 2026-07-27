@@ -119,6 +119,12 @@ steps:
       outcome: Route to Developer 2
 
   # ── Suggest, then decline — nothing persists ────────────────────────────────
+  # Open the Developer's Routing tab first — every flows.* outcome step operates
+  # on an already-open inspector (cf. the Dispatcher above), and the last
+  # wireOutcome closed the Dispatcher panel via closeSidePanel.
+  - action:
+      do: flows.openRouting
+      name: Developer
   - id: suggest-decline
     voiceover: |
       The Routing tab can also propose outcomes for me. On the Developer I press "suggest outcomes" — the assistant drafts a set, highlighted as unconfirmed. I decide not to keep them and close the panel without saving. Nothing is persisted: suggestions never write until I confirm.

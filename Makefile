@@ -66,7 +66,13 @@ build:
 	$(COMPOSE) -f $(COMPOSE_FILE) build orchestrator admin-console stt
 
 agent-image:
-	podman build -t as-agent:latest -f agent-image/Dockerfile agent-image/
+	@n=0; max=3; \
+	until podman build -t as-agent:latest -f agent-image/Dockerfile agent-image/; do \
+		n=$$((n+1)); \
+		if [ $$n -ge $$max ]; then echo "agent-image: build failed after $$max attempts" >&2; exit 1; fi; \
+		echo "agent-image: build failed (attempt $$n/$$max) — likely a transient registry pull; retrying in 15s…" >&2; \
+		sleep 15; \
+	done
 
 update:
 	@echo "Pulling latest changes from git..."

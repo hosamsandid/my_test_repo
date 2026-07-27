@@ -33,14 +33,25 @@ function roleKeyOf(id, teamId) {
   return id;
 }
 
+// Normalize an optional authored wake-prompt override (#868) to a trimmed
+// non-empty string, else '' (falsy). A blank/whitespace override is treated as
+// "no override" so the derived listener keeps its generated prompt.
+function cleanWakePrompt(v) {
+  return typeof v === 'string' && v.trim() ? v.trim() : '';
+}
+
 // Remap a channel's `from` role reference through roleKeyOf so an exported team's
 // GitHub-channel wiring uses portable role keys (#380).
 function remapChannel(ch, teamId) {
+  const wakePrompt = cleanWakePrompt(ch.wakePrompt);
   return {
     artifact: ch.artifact === 'issue' ? 'issue' : 'pr',
     from: roleKeyOf(ch.from, teamId),
     ...(ch.label ? { label: ch.label } : {}),
     ...(ch.gate ? { gate: ch.gate } : {}),
+    // Optional authored wake-prompt override (#868) — carried on the portable
+    // bundle so an exported team round-trips its override.
+    ...(wakePrompt ? { wakePrompt } : {}),
   };
 }
 
@@ -153,6 +164,9 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
           return { ok: false, error: `role ${r.id}: each channel needs artifact 'pr' or 'issue'` };
         }
         if (typeof c.from !== 'string' || !c.from) return { ok: false, error: `role ${r.id}: each channel needs a string 'from'` };
+        if (c.wakePrompt !== undefined && typeof c.wakePrompt !== 'string') {
+          return { ok: false, error: `role ${r.id}: channel wakePrompt must be a string` };
+        }
       }
     }
   }
@@ -562,7 +576,7 @@ function expandGithubChannels(bundle, _opts = {}) {
     // once per producer. The contributing producers are kept on `sources` for
     // provenance only. Insertion order (first channel wins the slot) is preserved
     // so the derivation stays deterministic.
-    const groups = new Map(); // `${artifact}::${label}` -> { artifact, label, human, sources: [] }
+    const groups = new Map(); // `${artifact}::${label}` -> { artifact, label, human, wakePrompt, sources: [] }
     for (const ch of (b.channels || [])) {
       const artifact = ch.artifact === 'issue' ? 'issue' : 'pr';
       const from = typeof ch.from === 'string' ? ch.from : '';
@@ -571,11 +585,15 @@ function expandGithubChannels(bundle, _opts = {}) {
       const human = ch.gate === 'human';
       const key = `${artifact}::${label}`;
       let g = groups.get(key);
-      if (!g) { g = { artifact, label, human: false, sources: [] }; groups.set(key, g); }
+      if (!g) { g = { artifact, label, human: false, wakePrompt: '', sources: [] }; groups.set(key, g); }
       // Gated iff any contributing channel gates it (a mixed gated/ungated set on
       // the same label is degenerate — treat as gated, matching the old behaviour
       // where the labelled trigger already reacted to the label change).
       g.human = g.human || human;
+      // Optional authored wake-prompt override (#868): several channels can
+      // consolidate into one derived listener, so the first non-empty override in
+      // insertion order wins the slot (deterministic; the graph shows one edge).
+      if (!g.wakePrompt) g.wakePrompt = cleanWakePrompt(ch.wakePrompt);
       if (!g.sources.includes(from)) g.sources.push(from);
     }
 
@@ -602,9 +620,12 @@ function expandGithubChannels(bundle, _opts = {}) {
         enabled: true,
         description: `${g.artifact === 'pr' ? 'PR' : 'Issue'} from ${producerLabel}`
           + `${g.label ? ` labelled ${g.label}` : ''}${g.human ? ' (human-approved)' : ''}`,
-        prompt: g.artifact === 'pr'
-          ? consumePrPrompt(producerLabel, { label: g.label, human: g.human })
-          : consumeIssuePrompt(producerLabel, { label: g.label, human: g.human }),
+        // Authored override (#868) wins over the generated prompt when present;
+        // otherwise the derived listener keeps its generated wake prompt.
+        prompt: g.wakePrompt
+          || (g.artifact === 'pr'
+            ? consumePrPrompt(producerLabel, { label: g.label, human: g.human })
+            : consumeIssuePrompt(producerLabel, { label: g.label, human: g.human })),
       });
     }
     // Derived prompt blocks — idempotent (strip any prior blocks, re-append):
@@ -783,6 +804,10 @@ function expandDataFlowSteps(bundle) {
     // dependency edge (ordering only, no artifact).
     const upstream = new Map();
     const ensure = (id) => { if (!upstream.has(id)) upstream.set(id, new Map()); return upstream.get(id); };
+    // upstream role id -> authored wake-prompt override (#868). One derived
+    // "push from <upstream>" listener aggregates all of that upstream's artifact
+    // inputs, so the first non-empty override in insertion order wins the slot.
+    const overrides = new Map();
 
     for (const dep of (b.dependsOn || [])) {
       if (typeof dep === 'string' && dep && dep !== b.id && byId.has(dep)) ensure(dep);
@@ -793,6 +818,8 @@ function expandDataFlowSteps(bundle) {
       for (const producer of (producersByKey.get(k) || [])) {
         if (producer !== b.id) {
           ensure(producer).set(k, { key: k, hint: artifactHint(a), named: artifactIsNamed(a) });
+          const ov = cleanWakePrompt(a && a.wakePrompt);
+          if (ov && !overrides.get(producer)) overrides.set(producer, ov);
         }
       }
     }
@@ -811,7 +838,9 @@ function expandDataFlowSteps(bundle) {
         dataFlow: true,
         enabled: true,
         description: `Data flow: wake on push from ${byId.get(upId)?.displayName || upId}`,
-        prompt: dataFlowPrompt(byId.get(upId)?.displayName || upId, list),
+        // Authored override (#868) wins over the generated prompt when present.
+        prompt: overrides.get(upId)
+          || dataFlowPrompt(byId.get(upId)?.displayName || upId, list),
       });
     }
   }
@@ -936,5 +965,5 @@ module.exports = {
   outcomesBlock, stripOutcomesBlock, stripDerivedPromptBlocks, applyDerivedPromptBlocks,
   emptyDraftBundle, roleKeyOf, VERSION,
   artifactKey, artifactHint, artifactIsNamed,
-  slugifyDraft, deriveUniqueDraftId,
+  slugifyDraft, deriveUniqueDraftId, cleanWakePrompt,
 };

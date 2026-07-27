@@ -51,7 +51,8 @@ role's `{{vars}}` and the target repo are applied per member.
       },
       "github": { "producesPr": true, "producesIssue": false },  // GitHub outputs (#380)
       "channels": [                          // PR/issue channels this role consumes (#380)
-        { "artifact": "pr", "from": "developer", "label": "approved", "gate": "human" }
+        { "artifact": "pr", "from": "developer", "label": "approved", "gate": "human",
+          "wakePrompt": "…" }                 // optional authored wake-prompt override (#868)
       ],
       "triggers": [
         {
@@ -103,6 +104,13 @@ way two agents are wired in the Flow editor. These are optional arrays on a role
   when the upstream pushes. It is a notification, **not** a start-gate: nothing
   blocks the consumer from running before that. The derived trigger's prompt
   tells the consumer to `git pull` and resolve its inputs from the manifest.
+- **Optional `wakePrompt` override (#868).** A `channels[]` entry and a data-flow
+  `inputs[]` entry may each carry an optional `wakePrompt` string. When present
+  (non-blank) it is carried verbatim into the regenerated derived trigger's
+  `prompt`, replacing the auto-generated wake text; blank/absent keeps the
+  generated default. On a consolidated listener (several channels, or several
+  inputs from one upstream, collapse into one trigger) the first non-empty
+  override in port order wins.
 - In the Flow editor the *Dependency* and *Data flow* connect actions are unified
   into one "Data flow / hand-off" dialog: give it an artifact **name** for a data
   hand-off, or leave name+path empty for a plain dependency.

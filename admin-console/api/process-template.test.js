@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId, outcomesBlock, stripOutcomesBlock, applyDerivedPromptBlocks } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId, outcomesBlock, stripOutcomesBlock, applyDerivedPromptBlocks, cleanWakePrompt } = require('./process-template');
 
 // A tiny stand-in for the on-disk draft store: an id is "taken" iff present.
 const existsIn = (set) => (id) => set.has(id);
@@ -300,6 +300,110 @@ test('expandGithubChannels: distinct (artifact,label) pairs stay separate listen
   const c = out.roles.find(r => r.id === 'consumer');
   const ids = c.triggers.filter(t => t.channel).map(t => t.id).sort();
   assert.deepEqual(ids, ['consumer-on-pr', 'consumer-on-pr-approved']);
+});
+
+// ─── Per-channel wake-prompt override (#868) ────────────────────────────────
+
+test('expandGithubChannels: an authored wakePrompt overrides the derived listener prompt (#868)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'ov', level: 'template',
+    roles: [
+      { id: 'dev', displayName: 'Dev', github: { producesPr: true }, triggers: [] },
+      { id: 'reviewer', displayName: 'Reviewer',
+        channels: [{ artifact: 'pr', from: 'dev', wakePrompt: 'Custom: review the PR against the style guide only.' }],
+        triggers: [] },
+    ],
+  };
+  const out = expandGithubChannels(bundle);
+  const t = out.roles.find(r => r.id === 'reviewer').triggers.find(x => x.id === 'reviewer-on-pr');
+  assert.ok(t);
+  assert.equal(t.prompt, 'Custom: review the PR against the style guide only.',
+    'the derived trigger carries the authored override verbatim');
+});
+
+test('expandGithubChannels: no wakePrompt keeps the generated prompt (#868)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'ov', level: 'template',
+    roles: [
+      { id: 'dev', displayName: 'Dev', github: { producesPr: true }, triggers: [] },
+      { id: 'reviewer', displayName: 'Reviewer', channels: [{ artifact: 'pr', from: 'dev' }], triggers: [] },
+    ],
+  };
+  const t = expandGithubChannels(bundle).roles.find(r => r.id === 'reviewer').triggers[0];
+  assert.match(t.prompt, /pull request/i, 'falls back to the generated consume prompt');
+});
+
+test('expandGithubChannels: a blank/whitespace wakePrompt is ignored (#868)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'ov', level: 'template',
+    roles: [
+      { id: 'dev', displayName: 'Dev', github: { producesIssue: true }, triggers: [] },
+      { id: 'triage', displayName: 'Triage', channels: [{ artifact: 'issue', from: 'dev', wakePrompt: '   ' }], triggers: [] },
+    ],
+  };
+  const t = expandGithubChannels(bundle).roles.find(r => r.id === 'triage').triggers[0];
+  assert.match(t.prompt, /issue/i, 'a whitespace-only override does not replace the generated prompt');
+});
+
+test('expandGithubChannels: on a consolidated listener the first non-empty wakePrompt wins (#868)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'ov', level: 'template',
+    roles: [
+      { id: 'ba1', displayName: 'BA One', github: { producesIssue: true }, triggers: [] },
+      { id: 'ba2', displayName: 'BA Two', github: { producesIssue: true }, triggers: [] },
+      { id: 'dispatcher', displayName: 'Dispatcher',
+        channels: [
+          { artifact: 'issue', from: 'ba1', label: 'dispatch' },                                   // no override
+          { artifact: 'issue', from: 'ba2', label: 'dispatch', wakePrompt: 'Triage the dispatched issue.' },
+        ], triggers: [] },
+    ],
+  };
+  const listeners = expandGithubChannels(bundle).roles.find(r => r.id === 'dispatcher').triggers.filter(t => t.channel);
+  assert.equal(listeners.length, 1, 'still one consolidated listener');
+  assert.equal(listeners[0].prompt, 'Triage the dispatched issue.',
+    'the first non-empty override in insertion order is carried onto the shared listener');
+});
+
+test('expandDataFlowSteps: an authored input wakePrompt overrides the derived push prompt (#868)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'd', level: 'template',
+    roles: [
+      { id: 'producer', displayName: 'Producer', triggers: [], outputs: [{ name: 'Spec', hint: 'spec.md' }] },
+      { id: 'consumer', displayName: 'Consumer', triggers: [],
+        inputs: [{ name: 'Spec', hint: 'spec.md', wakePrompt: 'Custom: rebuild from the new Spec.' }] },
+    ],
+  };
+  const t = expandDataFlowSteps(bundle).roles.find(r => r.id === 'consumer').triggers.find(x => x.id === 'consumer-on-push-producer');
+  assert.ok(t);
+  assert.equal(t.prompt, 'Custom: rebuild from the new Spec.', 'the derived push trigger carries the authored override');
+});
+
+test('buildProcessTemplate round-trips a channel wakePrompt on export (#868)', () => {
+  const b = buildProcessTemplate({
+    name: 'x', level: 'live', teamId: 'acme',
+    roles: [
+      { id: 'acme-dev', displayName: 'Dev', github: { producesPr: true }, triggers: [] },
+      { id: 'acme-rev', displayName: 'Rev', channels: [{ artifact: 'pr', from: 'acme-dev', wakePrompt: 'Look here.' }], triggers: [] },
+    ],
+  });
+  const rev = b.roles.find(r => r.id === 'rev');
+  assert.equal(rev.channels[0].wakePrompt, 'Look here.', 'export preserves the authored override');
+  assert.equal(rev.channels[0].from, 'dev', 'and still remaps the portable role key');
+});
+
+test('validateProcessTemplate rejects a non-string channel wakePrompt (#868)', () => {
+  const bad = {
+    processTemplateVersion: 1, name: 'x', level: 'template',
+    roles: [{ id: 'r', channels: [{ artifact: 'pr', from: 'p', wakePrompt: 42 }], triggers: [] }],
+  };
+  assert.equal(validateProcessTemplate(bad).ok, false);
+});
+
+test('cleanWakePrompt trims and drops blank overrides (#868)', () => {
+  assert.equal(cleanWakePrompt('  hi  '), 'hi');
+  assert.equal(cleanWakePrompt('   '), '');
+  assert.equal(cleanWakePrompt(undefined), '');
+  assert.equal(cleanWakePrompt(42), '');
 });
 
 test('expandGithubChannels: appends an idempotent producer block; buildProcessTemplate strips it', () => {

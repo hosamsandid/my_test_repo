@@ -319,6 +319,9 @@ function buildUnifiedGraph(nodes, edges) {
         from: ch.from, to: n.id, on: 'github', artifact,
         ...(ch.label ? { label: ch.label } : {}),
         ...(ch.gate === 'human' ? { gate: 'human' } : {}),
+        // Authored wake-prompt override (#868), surfaced so the channel edit
+        // dialog can pre-fill and round-trip it.
+        ...(typeof ch.wakePrompt === 'string' && ch.wakePrompt.trim() ? { wakePrompt: ch.wakePrompt } : {}),
         ...(nodeIds.has(ch.from) ? {} : { orphan: true }),
       });
     }

@@ -684,6 +684,9 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, producerChan
   const artifact = art === 'issue' ? 'issue' : 'pr';
   const [label, setLabel] = useState(edge.label || '');
   const [human, setHuman] = useState(edge.gate === 'human');
+  // Optional authored wake-prompt override (#868): empty = keep the generated
+  // "a PR/issue arrived" prompt; any text overrides it on the derived listener.
+  const [wakePrompt, setWakePrompt] = useState(edge.wakePrompt || '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const noun = artifact === 'pr' ? 'pull request' : 'issue';
@@ -700,6 +703,7 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, producerChan
         artifact, from,
         ...(label.trim() ? { label: label.trim() } : {}),
         ...(human ? { gate: 'human' } : {}),
+        ...(wakePrompt.trim() ? { wakePrompt: wakePrompt.trim() } : {}),
       });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
@@ -733,6 +737,14 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, producerChan
           <input type="checkbox" checked={human} onChange={e => setHuman(e.target.checked)} />
           Human approval gate — a person applies the label
         </label>
+        <Field label="Wake prompt override (optional)">
+          <textarea value={wakePrompt} onChange={e => setWakePrompt(e.target.value)}
+            placeholder="Leave empty to use the generated prompt for this input."
+            style={{ ...input, minHeight: 90, fontFamily: 'var(--eb-font-mono)', resize: 'vertical' }} />
+          <span style={hint}>
+            Replaces the auto-generated prompt the derived listener wakes {toName || to} with. Empty keeps the default.
+          </span>
+        </Field>
         {lastChannel && (
           <label style={check}>
             <input type="checkbox" checked={clearProduces} onChange={e => setClearProduces(e.target.checked)} />

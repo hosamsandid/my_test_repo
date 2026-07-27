@@ -1887,8 +1887,8 @@ const CLAUDE_HOME_AGENT_DIR = "/root/.claude";
 // The agent container mounts neither the _keys store nor the host deploy key,
 // yet startAgentProcess copies the orchestrator's whole process.env into the
 // agent — including the GIT_SSH_COMMAND that docker-compose sets for the
-// orchestrator itself (pointing at /root/.ssh/id_accenturecodefoundry, a file
-// that only exists in the orchestrator). Inherited blindly, that var made every
+// orchestrator itself (pointing at /root/.ssh/id_orchestrator, an optional
+// baseline key that only exists in the orchestrator). Inherited blindly, that var made every
 // agent's `git push` reference a key it does not have ("SSH key missing").
 //
 // So we ALWAYS strip the inherited value first, then — only when the env has an
@@ -1951,9 +1951,9 @@ function materializeAgentSshKey(id, env, childEnv) {
 }
 
 // Build the GIT_SSH_COMMAND value for an env with an attached SSH key. Falls
-// back to null so the caller can leave process.env's default in place (the
-// orchestrator container ships with a baseline SSH identity mounted via
-// docker-compose).
+// back to null so the caller can leave process.env's default in place — the
+// optional baseline identity from docker-compose (ORCHESTRATOR_SSH_KEY), which
+// is a dud /dev/null key unless the operator configured one.
 function buildGitSshCommand(env) {
   const repos = Array.isArray(env?.repositories) ? env.repositories : [];
   const sshKeyId = repos.find((r) => r && r.sshKeyId)?.sshKeyId;

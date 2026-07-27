@@ -29,12 +29,14 @@ tar -xzf "$HOME/agent-studio.tar.gz" -C "${STACK_DIR}"
 cp "$HOME/agent-studio.env" "${STACK_DIR}/.env"
 
 echo "=== [3/6] host files the compose mounts expect ==="
-# The compose file bind-mounts an SSH identity + ~/.gitconfig into containers.
-# Generate a fresh (unused) keypair as placeholder — replace with a real
-# GitHub deploy key when agents should push.
-if [ ! -f "$HOME/.ssh/id_accenturecodefoundry" ]; then
+# bp-explorer bind-mounts ~/.gitconfig (required). The orchestrator's baseline
+# SSH identity is now OPTIONAL (ORCHESTRATOR_SSH_KEY, defaults to /dev/null in
+# docker-compose.yml). We still generate a fresh keypair for the pilot and point
+# the var at it in [4/6] so the orchestrator can pull briefings over SSH —
+# replace it with a real GitHub deploy key when the orchestrator should push.
+if [ ! -f "$HOME/.ssh/id_orchestrator" ]; then
   ssh-keygen -t ed25519 -N "" -C "agent-studio-pilot" \
-    -f "$HOME/.ssh/id_accenturecodefoundry"
+    -f "$HOME/.ssh/id_orchestrator"
 fi
 if [ ! -f "$HOME/.gitconfig" ]; then
   git config --global user.name  "Agent Studio Pilot"
@@ -47,6 +49,10 @@ cd "${STACK_DIR}"
 grep -q '^PODMAN_HOST_SOCKET=' .env \
   && sed -i "s|^PODMAN_HOST_SOCKET=.*|PODMAN_HOST_SOCKET=${SOCK}|" .env \
   || echo "PODMAN_HOST_SOCKET=${SOCK}" >> .env
+# Point the optional orchestrator baseline SSH key at the pilot key from [3/6].
+grep -q '^ORCHESTRATOR_SSH_KEY=' .env \
+  && sed -i "s|^ORCHESTRATOR_SSH_KEY=.*|ORCHESTRATOR_SSH_KEY=${HOME}/.ssh/id_orchestrator|" .env \
+  || echo "ORCHESTRATOR_SSH_KEY=${HOME}/.ssh/id_orchestrator" >> .env
 # Console credentials: never ship the admin/admin default on a cloud host.
 # (tr on /dev/urandom, not openssl — Fedora Cloud minimal doesn't ship openssl)
 if ! grep -q '^ADMIN_PASSWORD=' .env; then

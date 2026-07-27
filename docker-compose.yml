@@ -46,8 +46,14 @@ services:
       # admin-console ONLY (never on agents) so monitoring no longer depends on
       # reading an agent's (soon per-agent) workspace volume.
       - agent-control-plane:/control
-      - ~/.ssh/id_accenturecodefoundry:/root/.ssh/id_accenturecodefoundry:ro
-      - ~/.ssh/id_accenturecodefoundry.pub:/root/.ssh/id_accenturecodefoundry.pub:ro
+      # Optional baseline git identity for the ORCHESTRATOR's OWN git operations
+      # (ACE briefings pull + orchestrator-side push/PR fallback). NOT used by
+      # agents — each agent gets its per-environment deploy key (Admin Console →
+      # SSH Keys). Point ORCHESTRATOR_SSH_KEY at a host private key to enable a
+      # baseline identity; leave it unset and the mount resolves to /dev/null (a
+      # dud key), so the stack starts with NO host key file present and SSH repos
+      # are expected to carry their own deploy key. See .env.example.
+      - ${ORCHESTRATOR_SSH_KEY:-/dev/null}:/root/.ssh/id_orchestrator:ro
       # Rootless Podman socket. The default path is the macOS Podman-Desktop
       # value (core user UID 501 inside the podman-machine VM). On Windows
       # Podman Desktop the user is typically UID 1000; on Linux rootless it's
@@ -69,8 +75,13 @@ services:
       # http://localhost:${CONDUWUIT_PORT}/_matrix/client/v3/directory/room/%23admins%3Alocal
       CONDUWUIT_ADMIN_TOKEN: "${MATRIX_ACCESS_TOKEN}"
       CONDUWUIT_ADMIN_ROOM: "${CONDUWUIT_ADMIN_ROOM:-!cUxr0SyfINf9yEvBOD:local}"
-      # Git identity for agents that use git (push/PR)
-      GIT_SSH_COMMAND: "ssh -i /root/.ssh/id_accenturecodefoundry -o StrictHostKeyChecking=accept-new"
+      # Baseline git SSH identity for the ORCHESTRATOR's own git ops. Backed by
+      # ORCHESTRATOR_SSH_KEY (see volumes above); a dud /dev/null key when unset,
+      # in which case the per-environment deploy keys (which override this) are
+      # the only working SSH path. The container carries no other keys, so an
+      # unset baseline simply fails SSH auth for keyless envs (expected).
+      # Agents never inherit this — startAgentProcess strips it per spawn.
+      GIT_SSH_COMMAND: "ssh -i /root/.ssh/id_orchestrator -o StrictHostKeyChecking=accept-new"
       # LLM endpoint (LiteLLM proxy)
       ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL}"
       ANTHROPIC_AUTH_TOKEN: "${ANTHROPIC_AUTH_TOKEN}"

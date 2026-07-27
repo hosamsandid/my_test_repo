@@ -90,6 +90,8 @@
 
 - **Flow Editor: four new outcome lints** — the process graph linter now surfaces four additional advisory warnings for structured outcome nodes: `outcome-without-consumer` (an outcome option routes to a label nobody listens on), `switch-with-one-option` (a switch node with a single option — consider a plain label hand-off instead), `same-label-multiple-outcomes` (two or more outcome options emit the same label, making the switch ambiguous), and `human-label-as-outcome` (an outcome emits a `human:*`-prefixed label, which should only be set by a human). All four are advisory — they appear in the lint panel without blocking materialisation. (#830)
 
+- **Flat `emits` retired from role templates; existing templates auto-migrated to structured outcomes** — the flat `emits` list on role and agent configs is no longer the authoring surface for outbound routing in process templates. All built-in role templates have been migrated to use structured `outcomes`. Existing process templates and live teams that still carry flat `emits` are automatically upgraded to the equivalent structured outcomes on import or materialisation — no manual edits required. Authoring new flat `emits` via the API is still accepted for backwards compatibility but the Flow Editor surfaces outcomes exclusively. (#831)
+
 ### Breaking Changes
 
 - **Token Usage page now restricted to System Admins** — the `/token-usage` route and all five usage API endpoints (`/api/usage/summary`, `/summary/export`, `/work-items`, `/work-items/export`, `/work-items/:owner/:repo/:number`) now return 403 for any caller who is not a System Admin or environment admin. The nav entry is hidden for Team Members and Team Admins. (#810)

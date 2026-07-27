@@ -169,8 +169,6 @@ export default function RoutingSection({ node, peers = [], lints = [], labels = 
 
       <ArtifactsBlock node={node} peers={peers} ops={ops} onChanged={onChanged} focus={focusSection === 'artifacts'} />
 
-      <LegacyDisclosure node={node} ops={ops} onChanged={onChanged} focus={focusSection === 'legacy'} />
-
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>
   );
@@ -555,104 +553,6 @@ function ArtifactsBlock({ node, peers, ops, onChanged, focus }) {
           <Plus size={13} /> Add artifact
         </button>
       ))}
-    </div>
-  );
-}
-
-// ── Legacy ───────────────────────────────────────────────────────────────────
-// Collapsed disclosure holding the emitted-labels editor and the GitHub-outputs
-// checkboxes, relocated from the retired Connections tab so nothing is lost
-// mid-transition (#865); these move to their final home in phase 3.
-function LegacyDisclosure({ node, ops, onChanged, focus }) {
-  const ref = useRef(null);
-  useFocusScroll(ref, focus);
-  const [open, setOpen] = useState(!!focus);
-  useEffect(() => { if (focus) setOpen(true); }, [focus]);
-  const gh = node.github || {};
-  const [producesPr, setPr] = useState(!!gh.producesPr);
-  const [producesIssue, setIssue] = useState(!!gh.producesIssue);
-  const hasEmits = !!ops.setRoleEmits;
-  const hasGithub = !!ops.setGithubProduces;
-  if (!hasEmits && !hasGithub) return null;
-
-  const saveProduces = async (pr, issue) => {
-    setPr(pr); setIssue(issue);
-    try { await ops.setGithubProduces(node.id, { pr, issue }); onChanged?.(); }
-    catch (e) { window.alert(e?.message || String(e)); }
-  };
-
-  return (
-    <div ref={ref} style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)', ...(focus ? focusRing : {}) }}>
-      <button onClick={() => setOpen(o => !o)} style={{
-        display: 'flex', alignItems: 'center', gap: 6, background: 'none', border: 'none', cursor: 'pointer',
-        color: 'var(--eb-text-secondary)', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', padding: 0,
-      }}>
-        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />} Legacy
-        <span style={{ fontWeight: 'normal', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)' }}>
-          — emitted labels &amp; GitHub outputs (moving in a later phase)
-        </span>
-      </button>
-      {open && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', marginTop: 'var(--eb-space-3)' }}>
-          {hasEmits && <EmitsEditor node={node} ops={ops} onChanged={onChanged} />}
-          {hasGithub && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>GitHub outputs</div>
-              <label style={check}>
-                <input type="checkbox" checked={producesPr} onChange={e => saveProduces(e.target.checked, producesIssue)} />
-                Opens pull requests
-              </label>
-              <label style={check}>
-                <input type="checkbox" checked={producesIssue} onChange={e => saveProduces(producesPr, e.target.checked)} />
-                Opens issues
-              </label>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Role-level emits editor (#414), relocated from ConnectionsSection (#865): the
-// labels this agent sets during its work, independent of any trigger.
-function EmitsEditor({ node, ops, onChanged }) {
-  const [emits, setEmits] = useState(Array.isArray(node.emits) ? node.emits : []);
-  const [newLabel, setNewLabel] = useState('');
-  const save = async (next) => {
-    try {
-      await ops.setRoleEmits(node.id, next);
-      setEmits(next);
-      onChanged?.();
-    } catch (e) { window.alert(e?.message || String(e)); }
-  };
-  const add = () => {
-    const l = newLabel.trim();
-    if (l && !emits.includes(l)) save([...emits, l]);
-    setNewLabel('');
-  };
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Emits labels</div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
-        {emits.map(l => (
-          <button key={l} onClick={() => save(emits.filter(x => x !== l))} title="Remove" style={{
-            fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)',
-            background: '#3b82f61a', color: '#3b82f6', border: '1px solid #3b82f6',
-            borderRadius: 'var(--eb-radius-sm)', padding: '0 5px', cursor: 'pointer',
-            display: 'inline-flex', alignItems: 'center', gap: 3,
-          }}>{l} <X size={10} /></button>
-        ))}
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
-          <input value={newLabel} onChange={e => setNewLabel(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
-            placeholder="add label…" style={{ ...input, width: 130, padding: '1px 6px', fontSize: 'var(--eb-text-xs)' }} />
-          <button onClick={add} title="Add emitted label" style={{
-            background: 'none', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
-            padding: '1px 5px', cursor: 'pointer', color: 'var(--eb-text-secondary)', display: 'inline-flex',
-          }}><Plus size={11} /></button>
-        </span>
-      </div>
     </div>
   );
 }

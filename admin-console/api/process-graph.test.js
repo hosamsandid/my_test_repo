@@ -21,7 +21,9 @@ function templateNode(tpl) {
   const triggers = (tpl.triggers || []).map(tr => ({ ...tr, prompt: tr.promptTemplate }));
   return {
     id: tpl.id, role: 'template', displayName: tpl.displayName,
-    emits: Array.isArray(tpl.emits) ? tpl.emits : [], triggers,
+    emits: Array.isArray(tpl.emits) ? tpl.emits : [],
+    ...(tpl.outcomes ? { outcomes: tpl.outcomes } : {}),
+    triggers,
   };
 }
 function loadTpl(id) {

@@ -1635,11 +1635,20 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
       ? skills.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim())
       : [];
   }
-  // Agent-level emitted labels (label hand-offs wired from the process editor).
-  // `null` / [] clears the set.
-  if (emits !== undefined) {
-    if (Array.isArray(emits) && emits.length) fresh.emits = emits.filter(e => typeof e === 'string' && e);
-    else delete fresh.emits;
+  // Legacy `emits` input: lift to outcomes on write (#831). Ignored when `outcomes`
+  // is also in the request (outcomes wins). Non-empty emits create a degenerate
+  // anyOf outcomes unless the agent already has authored outcomes (those take
+  // priority). `null`/[] clears only the flat field; empty/clear does not touch
+  // any existing outcomes port.
+  if (emits !== undefined && outcomes === undefined) {
+    const validEmits = Array.isArray(emits) ? emits.filter(e => typeof e === 'string' && e) : [];
+    if (validEmits.length && !isAuthoredOutcomes(fresh.outcomes)) {
+      fresh.outcomes = normalizeOutcomes({
+        mode: 'anyOf',
+        options: validEmits.map(l => ({ id: l, title: l, actions: [{ type: 'setLabel', label: l }] })),
+      });
+    }
+    delete fresh.emits;
   }
 
   // ── Structured OUTCOMES port (#827) ───────────────────────────────────────

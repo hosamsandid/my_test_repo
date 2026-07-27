@@ -98,14 +98,7 @@ export const liveOps = {
   // change the agent id (that is immutable once materialized). Shape-compatible
   // with makeDraftOps.renameRole so the shared inspector never branches on mode.
   renameRole: (roleId, displayName) => apiCall('PUT', `/api/agents/${roleId}`, { displayName }),
-  // Agent-level emitted labels (label hand-offs) — independent of any trigger.
-  getRoleEmits: async (roleId) => {
-    const a = await apiCall('GET', `/api/agents/${roleId}`);
-    return Array.isArray(a?.emits) ? a.emits : [];
-  },
-  setRoleEmits: (roleId, emits) => apiCall('PUT', `/api/agents/${roleId}`, { emits }),
-
-  // Structured OUTCOMES port (#827) — the successor to `emits`. Shape-compatible
+  // Structured OUTCOMES port (#827) — the successor to flat `emits`. Shape-compatible
   // with makeDraftOps.getRoleOutcomes/setRoleOutcomes so the phase-3 UI never
   // branches on mode. Writing a non-empty port CLEARS `emits` server-side
   // (PUT /api/agents/:id), so the two never coexist.
@@ -376,21 +369,10 @@ export function makeDraftOps(getBundle, persist) {
       if (r) r.triggers = (r.triggers || []).filter(x => x.id !== tid);
       await persist(b);
     },
-    // Trigger-level `emits` was removed (#783) — label hand-offs live on the
-    // role level (setRoleEmits below), so there is no per-trigger setEmits.
-    // Agent-level emitted labels (label hand-offs) — on the role, no trigger.
-    getRoleEmits: async (roleId) => {
-      const r = role(getBundle(), roleId);
-      return Array.isArray(r?.emits) ? r.emits.slice() : [];
-    },
-    setRoleEmits: async (roleId, emits) => {
-      const b = clone(getBundle());
-      const r = role(b, roleId);
-      if (r) { if (Array.isArray(emits) && emits.length) r.emits = emits; else delete r.emits; }
-      await persist(b);
-    },
+    // Trigger-level `emits` was removed (#783) — label hand-offs now live
+    // in the structured OUTCOMES port (#831).
 
-    // Structured OUTCOMES port (#827) — parallel to setRoleEmits above; the same
+    // Structured OUTCOMES port (#827) — the same
     // surface as liveOps so the shared inspector never branches on mode. A
     // non-empty port supersedes `emits` (mirrors the PUT clear-emits rule).
     getRoleOutcomes: async (roleId) => {

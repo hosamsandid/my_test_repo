@@ -30,6 +30,7 @@
 
 const { normalizeTemplatePorts, intrinsicTriggers } = require('./catalog-ports');
 const { validateProcessTemplate } = require('./process-template');
+const { outcomeSetLabels, isAuthoredOutcomes } = require('./outcomes');
 
 const GENERIC_PATTERN_IDS = { scout: 'scout', 'stage-author': 'author', 'stage-companion': 'companion' };
 
@@ -203,7 +204,12 @@ function weaveProcess(input) {
         produces: { ...v2.ports.produces },
         basePrompt: renderStageVars(stripWeaverBlock(tpl.promptTemplate || tpl.systemPrompt || ''), vars),
         wiring: [],
-        emits: Array.isArray(tpl.emits) ? tpl.emits.map(e => renderStageVars(e, vars)) : [],
+        // Read emitted labels from flat emits OR structured outcomes (#831).
+        emits: Array.isArray(tpl.emits) && tpl.emits.length
+          ? tpl.emits.map(e => renderStageVars(e, vars))
+          : (isAuthoredOutcomes(tpl.outcomes)
+            ? outcomeSetLabels(tpl.outcomes).map(e => renderStageVars(e, vars))
+            : []),
         channels: [],
         triggers: kept,
       };

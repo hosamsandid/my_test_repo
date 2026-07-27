@@ -97,14 +97,19 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
       // portable bundle stays clean; they are regenerated from the `github` flag
       // and the `outcomes` port by expandGithubChannels on import/materialise.
       systemPrompt: stripDerivedPromptBlocks(r.systemPrompt),
-      // Agent-level OUTCOMES port (#827) — the structured successor to `emits`.
-      // When present it supersedes `emits` (writing outcomes clears emits,
-      // mirroring PUT /api/agents/:id), so the two never both ride the bundle.
-      ...(isAuthoredOutcomes(r.outcomes) ? { outcomes: normalizeOutcomes(r.outcomes) } : {}),
-      // Agent-level emitted labels (legacy flat hand-offs) — kept only when no
-      // structured outcomes supersede them.
-      ...(!isAuthoredOutcomes(r.outcomes) && Array.isArray(r.emits) && r.emits.length
-        ? { emits: r.emits.slice() } : {}),
+      // Agent-level OUTCOMES port (#827/#831). Authored outcomes are used directly;
+      // legacy flat `emits` are lifted to a degenerate anyOf so the exported bundle
+      // never carries a raw `emits` field. Import still works via liftOutcomes (#831).
+      ...((() => {
+        if (isAuthoredOutcomes(r.outcomes)) return { outcomes: normalizeOutcomes(r.outcomes) };
+        if (Array.isArray(r.emits) && r.emits.length) {
+          return { outcomes: normalizeOutcomes({
+            mode: 'anyOf',
+            options: r.emits.map(l => ({ id: l, title: l, actions: [{ type: 'setLabel', label: l }] })),
+          }) };
+        }
+        return {};
+      })()),
       // Process stage band — portable so an exported team round-trips its stage
       // layout back into a draft (Edit as draft) and re-materialises unchanged.
       ...(typeof r.stage === 'string' && r.stage ? { stage: r.stage } : {}),

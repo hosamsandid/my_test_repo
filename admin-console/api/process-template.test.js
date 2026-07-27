@@ -112,8 +112,11 @@ test('buildProcessTemplate shapes a versioned bundle and drops team-specifics', 
   assert.equal(r.id, 'developer');         // team prefix stripped
   assert.equal(r.sessionPolicy, 'per-invocation');
   assert.equal(r.systemPrompt, 'You implement issues.');
-  // Label hand-offs are carried at the role level (#783), not on triggers.
-  assert.deepEqual(r.emits, ['started:dev']);
+  // Legacy flat emits lifted to outcomes on export (#831) — no raw emits field.
+  assert.ok(!('emits' in r), 'emits field not exported');
+  assert.deepEqual(r.outcomes, { mode: 'anyOf', options: [
+    { id: 'started:dev', title: 'started:dev', actions: [{ type: 'setLabel', label: 'started:dev' }] },
+  ] });
   const t = r.triggers[0];
   assert.equal(t.labelFilter, 'assigned:dev');
   assert.ok(!('emits' in t), 'trigger-level emits removed (#783)');
@@ -145,8 +148,11 @@ test('templateToCustomRoles maps to the /api/teams pseudo-template shape', () =>
   assert.equal(t.promptTemplate, 'Implement it.');
   assert.equal(t.labelFilter, 'assigned:dev');
   assert.ok(!('emits' in t), 'trigger-level emits removed (#783)');
-  // Label hand-offs are carried at the role level.
-  assert.deepEqual(role.emits, ['started:dev']);
+  // Legacy flat emits lifted to outcomes on export (#831).
+  assert.ok(!('emits' in role), 'emits field not in customRoles');
+  assert.deepEqual(role.outcomes, { mode: 'anyOf', options: [
+    { id: 'started:dev', title: 'started:dev', actions: [{ type: 'setLabel', label: 'started:dev' }] },
+  ] });
 });
 
 test('stage: per-role stage + ordered stages survive build → customRoles (#stage-order)', () => {
@@ -174,8 +180,9 @@ test('round-trip: build → validate → customRoles preserves wiring', () => {
   assert.equal(validateProcessTemplate(b).ok, true);
   const cr = templateToCustomRoles(b);
   assert.deepEqual(cr.map(r => r.id), ['developer']);
-  // Label hand-off preserved at the role level through the round-trip (#783).
-  assert.deepEqual(cr[0].emits, ['started:dev']);
+  // Legacy flat emits lifted to outcomes through the round-trip (#831).
+  assert.ok(!('emits' in cr[0]), 'emits field not in round-tripped customRoles');
+  assert.ok(cr[0].outcomes, 'outcomes port present after round-trip');
   assert.ok(!('emits' in cr[0].triggers.find(t => t.id === 'dev-assigned')));
 });
 

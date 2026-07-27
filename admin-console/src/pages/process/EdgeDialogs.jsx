@@ -152,14 +152,25 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
           prompt: effectivePrompt,
         });
       }
-      // 2. Record A as emitting the label — an agent-level emit, so the edge is
-      // wired without depending on a pre-existing trigger on A. Skipped for
-      // human gates/brakes (no agent may claim to set those), and for outcome-port
-      // drags (#828) where A already declares the emit through its outcomes port —
-      // writing a flat `emits` there would leave a stale field beside `outcomes`.
+      // 2. Record A as emitting the label via an outcome — the structured successor
+      // to flat `emits`. Skipped for human gates/brakes (no agent emits those) and
+      // for outcome-port drags (#828) where A already declares the emit through its
+      // outcomes port (`emitSource = false`).
       if (!humanLabel && emitSource) {
-        const current = await ops.getRoleEmits(from);
-        await ops.setRoleEmits(from, uniq([...(Array.isArray(current) ? current : []), trimmed]));
+        const existing = await ops.getRoleOutcomes(from);
+        const cur = existing || { mode: 'anyOf', options: [] };
+        const alreadyHas = (cur.options || []).some(o =>
+          (o.actions || []).some(a => a.type === 'setLabel' && a.label === trimmed));
+        if (!alreadyHas) {
+          await ops.setRoleOutcomes(from, {
+            ...cur,
+            options: [...(cur.options || []), {
+              id: trimmed,
+              title: trimmed,
+              actions: [{ type: 'setLabel', label: trimmed }],
+            }],
+          });
+        }
       }
       onDone?.();
     } catch (e) {
@@ -820,12 +831,22 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
         // Never regenerated on a label rename (saved as-is per the edge cases).
         prompt: effectivePrompt,
       });
-      // Renaming the label keeps the source's emits in sync (agent-sourced
+      // Renaming the label keeps the source's outcomes in sync (agent-sourced
       // hand-offs only — human-set labels have no emitter to rewrite).
-      if (newLabel !== label && !humanSource && ops.getRoleEmits && ops.setRoleEmits) {
-        const cur = await ops.getRoleEmits(from);
-        if (Array.isArray(cur) && cur.includes(label)) {
-          await ops.setRoleEmits(from, uniq(cur.map(l => (l === label ? newLabel : l))));
+      if (newLabel !== label && !humanSource && ops.getRoleOutcomes && ops.setRoleOutcomes) {
+        const cur = await ops.getRoleOutcomes(from);
+        if (cur) {
+          const updated = {
+            ...cur,
+            options: (cur.options || []).map(o => ({
+              ...o,
+              actions: (o.actions || []).map(a =>
+                a.type === 'setLabel' && a.label === label ? { ...a, label: newLabel } : a),
+              id: o.id === label ? newLabel : o.id,
+              title: o.title === label ? newLabel : o.title,
+            })),
+          };
+          await ops.setRoleOutcomes(from, updated);
         }
       }
       onDone?.();
@@ -839,12 +860,16 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
         await ops.deleteTrigger(to, triggerId);
       }
       if (delEmit && !humanSource) {
-        // Strip the label from the source's agent-level emits — the sole emit
-        // surface now that trigger-level emits are removed (#783).
-        if (ops.getRoleEmits && ops.setRoleEmits) {
-          const cur = await ops.getRoleEmits(from);
-          if (Array.isArray(cur) && cur.includes(label)) {
-            await ops.setRoleEmits(from, cur.filter(l => l !== label));
+        // Strip the label from the source's outcomes port — the emit surface
+        // now that trigger-level and flat emits are retired (#783/#831).
+        if (ops.getRoleOutcomes && ops.setRoleOutcomes) {
+          const cur = await ops.getRoleOutcomes(from);
+          if (cur) {
+            const filtered = (cur.options || []).filter(o =>
+              !(o.actions || []).some(a => a.type === 'setLabel' && a.label === label));
+            await ops.setRoleOutcomes(from, filtered.length
+              ? { ...cur, options: filtered }
+              : null);
           }
         }
       }

@@ -597,7 +597,7 @@ export default function ChatPanel({
       const fresh = await apiCall('GET', `/api/agents/${encodeURIComponent(agent.id)}/model-options`);
       setModelOptions(fresh);
     } catch (err) {
-      setError(`Provider-Wechsel fehlgeschlagen: ${err.message}`);
+      setError(`Provider switch failed: ${err.message}`);
     } finally {
       setProviderSwitching(false);
     }
@@ -1264,8 +1264,8 @@ function SessionBadge({ active }) {
 
 // Human label for an auth type. `null` (no endpoint) → the .env fallback.
 function authTypeLabel(authType) {
-  if (!authType) return 'Standard (.env)';
-  return authType === 'oauth-token' ? 'Subscription' : 'API-Key';
+  if (!authType) return 'Default (.env)';
+  return authType === 'oauth-token' ? 'Subscription' : 'API key';
 }
 
 // Compact, always-visible Model-Provider indicator next to the model picker.
@@ -1304,14 +1304,14 @@ function ProviderChip({ options, switching, disabled, onChange }) {
   const selectValue = options.endpointOverride || '';
 
   const chipColor = overridden ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)';
-  const label = hasEndpoint ? (options.endpointName || options.endpointId) : 'Standard (.env)';
+  const label = hasEndpoint ? (options.endpointName || options.endpointId) : 'Default (.env)';
 
   return (
     <div ref={rootRef} style={{ position: 'relative', display: 'inline-flex' }}>
       <button
         type="button"
         onClick={() => setOpen(o => !o)}
-        title="Model Provider dieses Agenten — klicken für Details & Wechsel"
+        title="This agent's Model Provider — click for details & switch"
         style={{
           display: 'inline-flex',
           alignItems: 'center',
@@ -1355,20 +1355,20 @@ function ProviderChip({ options, switching, disabled, onChange }) {
             cursor: 'default',
           }}
         >
-          <ProviderInfoRow label="Provider" value={options.endpointName || (hasEndpoint ? options.endpointId : '— .env Fallback —')} />
+          <ProviderInfoRow label="Provider" value={options.endpointName || (hasEndpoint ? options.endpointId : '— .env fallback —')} />
           <ProviderInfoRow label="Auth" value={authTypeLabel(options.authType)} />
           {options.baseUrl && <ProviderInfoRow label="Endpoint" value={options.baseUrl} mono />}
-          <ProviderInfoRow label="Modell" value={effectiveModel || '(Provider-Default)'} mono />
+          <ProviderInfoRow label="Model" value={effectiveModel || '(provider default)'} mono />
           {overridden && (
             <div style={{ marginTop: 2, color: 'var(--eb-accent-primary)' }}>
-              Override aktiv — Umgebungs-Standard:{' '}
-              {options.envEndpointId || '(keiner)'}
+              Override active — environment default:{' '}
+              {options.envEndpointId || '(none)'}
             </div>
           )}
 
           <div style={{ height: 1, background: 'var(--eb-border-default)', margin: '10px 0' }} />
 
-          <div style={{ marginBottom: 4, color: 'var(--eb-text-secondary)' }}>Provider wechseln</div>
+          <div style={{ marginBottom: 4, color: 'var(--eb-text-secondary)' }}>Switch provider</div>
           {canSwitch ? (
             <select
               value={selectValue}
@@ -1387,7 +1387,7 @@ function ProviderChip({ options, switching, disabled, onChange }) {
               }}
             >
               <option value="">
-                {options.envEndpointId ? 'Umgebungs-Standard' : '— Umgebungs-Standard (kein Provider) —'}
+                {options.envEndpointId ? 'Environment default' : '— Environment default (no provider) —'}
               </option>
               {endpoints.map(ep => (
                 <option key={ep.id} value={ep.id}>
@@ -1398,15 +1398,15 @@ function ProviderChip({ options, switching, disabled, onChange }) {
           ) : (
             <div style={{ color: 'var(--eb-text-muted)' }}>
               {endpoints.length === 0
-                ? 'Keine für dieses Team freigegebenen Provider.'
-                : 'Kein Recht, den Provider zu wechseln.'}
+                ? 'No providers are available for this team.'
+                : 'You are not allowed to switch the provider.'}
             </div>
           )}
           {canSwitch && (
             <div style={{ marginTop: 8, color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
-              Ein Wechsel startet den Agent-Container kurz neu; die Chat-Session
-              bleibt erhalten.
-              {switching && ' Wird neu gestartet…'}
+              Switching briefly restarts the agent container; the chat session
+              is preserved.
+              {switching && ' Restarting…'}
             </div>
           )}
         </div>

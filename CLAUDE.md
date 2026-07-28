@@ -1,415 +1,234 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (claude.ai/code) when working in this repository.
+
+> High-level map. Deep specs live under `docs/`; ticket-level history lives in git.
 
 ## Project Overview
 
-**e-vgh-claw** is a local Matrix-to-Claude-Code stack for an enterprise context. It provides chat-based AI agents that can be extended with domain-specific skills for **Mainframe Migration** (COBOL, JCL, DB2, IMS, etc.).
+**e-vgh-claw** is a local Matrix-to-Claude-Code stack for an enterprise context. It provides chat-based AI agents extensible with domain-specific skills for **Mainframe Migration** (COBOL, JCL, DB2, IMS, etc.).
 
-The stack runs locally with Podman as a single compose file with these services:
+The stack runs locally with Podman as a single compose file: **Conduwuit** (Matrix homeserver); **Orchestrator** (control-plane, spawns/manages one container per agent, no Matrix identity); **Admin Console** (web UI on `:4000` for agents, environments, SSH keys, skills, etc.; embeds a chat UI at `/chats/:agentId`); **bp-explorer** (read-only viewer for ACE BriefingPack metadata).
 
-1. **Conduwuit** — Matrix homeserver
-2. **Orchestrator** — control-plane service that spawns and manages one Podman container per agent; no Matrix chat identity of its own
-3. **Admin Console** — web UI on `:4000` for managing agents, working environments, SSH keys, skills, etc. Includes an embedded chat UI at `/chats/:agentId` for direct 1:1 conversations with each agent.
-4. **bp-explorer** — read-only viewer for ACE BriefingPack metadata
+The LLM backend is reached via an Anthropic-compatible proxy: `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` in `.env` (gitignored). Default Sonnet/Haiku models set there too.
 
-The LLM backend is reached via an Anthropic-compatible proxy configured by `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` in `.env` (gitignored). Default Sonnet/Haiku models are set there too.
-
-**Model Provider auth types.** A registered Model Provider (`/workspace/llm-endpoints/index.json`, tokens in `_keys/` at 0600) carries an `authType`: the default **`api-key`** (Bearer token against the provider's `baseUrl` — legacy entries without the field behave like this) or **`oauth-token`** (Claude *subscription* auth: a long-lived token minted by the official `claude setup-token`, e.g. from a Max or Enterprise seat). For `oauth-token` providers the orchestrator injects `CLAUDE_CODE_OAUTH_TOKEN` into the agent container and strips `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` (they would win the CLI's credential precedence), so the CLI talks directly to `api.anthropic.com`. The Model Providers page can either run the login end-to-end — the orchestrator drives `claude setup-token` under a PTY (`orchestrator/llm-auth-flow.js`, internal API `/internal/llm-auth/flows/*`, proxied as `/api/llm-auth/flows/*`; the operator opens the authorize URL, pastes the confirmation code, and the token is claimed server-side on save, never reaching the browser) — or accept a manually pasted setup-token value. **Compliance:** consumer-subscription OAuth tokens are limited to the subscription owner's own single-user use by Anthropic's Consumer Terms; creating or re-keying an `oauth-token` provider therefore requires an explicit single-user confirmation in the UI, recorded on the entry as `complianceAck`. One-shot server-side generation (`resolveGenerationTarget`) deliberately skips `oauth-token` providers.
+**Model Provider auth types.** A registered Model Provider (`/workspace/llm-endpoints/index.json`, tokens in `_keys/` at 0600) carries an `authType`: default **`api-key`** (Bearer against `baseUrl`) or **`oauth-token`** (Claude *subscription* auth via `claude setup-token`). For `oauth-token` the orchestrator injects `CLAUDE_CODE_OAUTH_TOKEN` and strips `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` so the CLI talks directly to `api.anthropic.com`. The login flow runs server-side under a PTY (`orchestrator/llm-auth-flow.js`, `/api/llm-auth/flows/*`); the token is claimed server-side, never reaching the browser. **Compliance:** consumer-subscription OAuth tokens are single-user only (Anthropic Consumer Terms) — creating/re-keying one requires a single-user confirmation recorded as `complianceAck`. One-shot server-side generation (`resolveGenerationTarget`) skips `oauth-token` providers.
 
 ## Architecture
 
-All human↔agent communication happens through **direct messages**: each agent has its own Matrix user, and the human chats with that agent in a dedicated 1:1 room. There is no shared multi-agent room and no central routing identity.
+All human↔agent communication happens through **direct messages**: each agent has its own Matrix user; the human chats with it in a dedicated 1:1 room. There is no shared multi-agent room and no central routing identity.
 
 ```
-Admin Console chat UI (or any Matrix client, e.g. Element)
-  → Conduwuit (localhost:8448)
-       │
-       └── 1:1 DM rooms (one per agent)
-              ├── @cobol-agent:local      ← container: as-agent:latest
-              ├── @java-agent:local       ← container: as-agent:latest
-              └── @quality-gate:local     ← container: as-agent:latest (autonomous)
+Admin Console chat UI (or any Matrix client) → Conduwuit (localhost:8448)
+       └── 1:1 DM rooms (one per agent, e.g. @cobol-agent:local ← as-agent:latest)
 
-orchestrator.js  (control-plane container, no Matrix presence)
+orchestrator.js (control-plane container, no Matrix presence)
   ├── Manages agent lifecycle (create/update/delete via Admin Console)
-  ├── Spawns ONE Podman container per enabled agent — over the Podman
-  │     libpod socket (/var/run/podman.sock) via spawn-container.js,
-  │     NOT in-process child processes
-  ├── Provisions per-agent network + volume isolation, and reconciles
-  │     live containers (by the `aee.agent.id` label) against its map
-  ├── Uses the admin Matrix client to provision new agent users
+  ├── Spawns ONE Podman container per enabled agent over the libpod
+  │     socket (/var/run/podman.sock) via spawn-container.js
+  ├── Provisions per-agent network + volume isolation; reconciles live
+  │     containers (by the `aee.agent.id` label) against its map
+  ├── Provisions new agent Matrix users via the admin client
   └── Internal HTTP API on :4002 for the admin console
 ```
 
-- **Agents:** dynamically created Matrix users (e.g. `@cobol-agent:local`); each runs in its **own Podman container** (image `as-agent:latest`), spawned and lifecycle-managed by the orchestrator over the Podman socket
-- DM room IDs persisted at `/workspace/agents/<id>/dm-room.json` (created lazily by the admin console)
-- Agent configs persisted in `/workspace/agents/<id>/` (config.json + CLAUDE.md + AGENT-PROMPT.md)
-- Each agent is bound to a **Working Environment** (see below) which defines what gets seeded into its workspace.
-- Matrix users auto-created via Conduwuit admin room
-- **Container-per-agent.** The `orchestrator` is a control-plane container that manages **one container per agent** — it does not host agents in-process. Each agent container is isolated three ways: per-agent **network** (Seam #2), per-agent **filesystem** via a SubPath mount of the pool volume (Seam #3, `AEE_WORKSPACE_ISOLATION`, default on), and an optional **dedicated volume** (`AEE_PER_AGENT_VOLUME`, opt-in). Containers carry an `aee.agent.id` label so the orchestrator reconciles live container state against its in-memory process map.
-- **Agent runtime.** The agent container's entrypoint (`agent-image/scripts/agent-entrypoint.py`, with `sase_lib.py`) is the live per-agent runtime: Matrix client + Claude CLI invocations + trigger scheduler. It was originally built as a Node process (`orchestrator/agent-runner.js`); that file has since been removed as dead code, and the Python entrypoint is now the sole reference for this behaviour.
+- **Agents** are dynamically created Matrix users, each in its **own** Podman container (`as-agent:latest`), lifecycle-managed by the orchestrator. Configs persist in `/workspace/agents/<id>/` (`config.json` + `CLAUDE.md` + `AGENT-PROMPT.md`); DM room id in `dm-room.json` (created lazily by the console).
+- Each agent is bound to a **Working Environment** (below) defining what gets seeded into its workspace.
+- **Container-per-agent isolation** is three-way: per-agent **network**, per-agent **filesystem** via a SubPath mount of the pool volume (`AEE_WORKSPACE_ISOLATION`, default on), optional **dedicated volume** (`AEE_PER_AGENT_VOLUME`, opt-in).
+- **Agent runtime**: the container entrypoint `agent-image/scripts/agent-entrypoint.py` (+ `sase_lib.py`) — Matrix client + Claude CLI invocations + trigger scheduler.
 
 ### Teams (human collaboration & visibility scope)
 
-A **Team** (the *human* grouping) is the tenant/scope that resources and human users are assigned to — the foundation of the multi-user concept. **Do not confuse it with the `role: "team"` agent construct**, which is always called an **Agent Team** (an agent squad working a repo); the two only share a word. The data model is three JSON collections under `/workspace` (`teams/`, `users/`, `memberships/index.json`), with these roles: **System Admin** (global, `user.systemAdmin` flag), **Team Admin** and **Team Member** (per-team membership roles). Every agent construct, Working Environment, and credential carries a `teamId` and is owned by exactly one Team (default: `default`).
+A **Team** (the *human* grouping) is the tenant/scope resources and human users are assigned to. **Do not confuse it with the `role: "team"` agent construct**, always called an **Agent Team** (an agent squad working a repo); they only share a word. Data model: three JSON collections under `/workspace` (`teams/`, `users/`, `memberships/index.json`); roles: **System Admin** (global, `user.systemAdmin`), **Team Admin**, **Team Member** (per-team). Every agent construct, env, and credential carries a `teamId` (default `default`).
 
-**Resource scoping (#302).** List endpoints are filtered by the caller's team membership. `admin-console/api/scope.js` (`computeScope` / `visibleTeam` / `visibleAgent`, unit-tested) resolves the logged-in subject (from the #276/#374 session) to a scope: the **env admin** and any **System Admin** get `all: true` (full visibility — so the single-operator setup is unaffected); other users see only resources whose `teamId` is one of their memberships. `getScope(req)` reads the users/memberships indexes and is applied to `GET /api/{agents,environments,ssh-keys,github-tokens,mcp-servers,mcp-credentials,matrix/agents,skills}` (global/pool skills always visible). Agents also honour `visibility` (`private`→owner-only) + `ownerId`, inert until populated by #304. Enforcement on by-id reads and mutations, and SSO-driven identity, are follow-ups (#304/#307).
+Source of truth: `orchestrator/teams-store.js` (pure factory). The orchestrator bootstraps the default team + an optional System Admin (`BOOTSTRAP_SYSTEM_ADMIN_SUBJECT`) and backfills `teamId` at startup. CRUD at `/internal/admin/{teams,users,memberships}` (proxied `/api/admin/...`) — **distinct** from `/internal/teams/*` and `POST /api/teams`, which manage Agent Teams. Driven by the **Teams** page (`/teams`, `Teams.jsx`).
 
-The single source of truth is `orchestrator/teams-store.js` (a pure, unit-tested factory). The orchestrator bootstraps the default team + an optional System Admin (`BOOTSTRAP_SYSTEM_ADMIN_SUBJECT` env) and backfills `teamId` onto pre-existing resources at startup. CRUD lives at `/internal/admin/{teams,users,memberships}` (orchestrator), proxied as `/api/admin/...` by the admin console — distinct from `/internal/teams/*` and `POST /api/teams`, which manage **Agent Teams**. The **Teams** admin page (`/teams`, `admin-console/src/pages/Teams.jsx`, #308) drives all of this: team CRUD, user CRUD, per-team role assignment, and reassigning agents/environments to a team (agent reassign added `teamId` to `PUT /api/agents/:id`). Per-role *enforcement* and list-filtering remain follow-ups (#302/#304). Full spec: `docs/teams-data-model.md`.
+**Resource scoping.** List endpoints are filtered by the caller's team membership via `admin-console/api/scope.js`. The env admin + any System Admin get full visibility (`all: true`); others see only resources whose `teamId` is one of their memberships (global/pool skills always visible). Full spec: `docs/teams-data-model.md`.
 
 ### Working Environments
 
-A **Working Environment** is a reusable **infrastructure template**. It lives at `/workspace/environments/<envId>/environment.json` (in the orchestrator/admin volume) and contains:
+A **Working Environment** is a reusable **infrastructure template** at `/workspace/environments/<envId>/environment.json`: `id`/`name`/`description`; `repository` (optional `{url, branch, sshKeyId}`, cloned at creation); `mcpServers` (optional `{serverId, credentialId}` refs into the MCP registry); `additionalContext` (optional text appended to CLAUDE.md).
 
-| Field | Purpose |
-|---|---|
-| `id`, `name`, `description` | Identity |
-| `repository` | Optional `{ url, branch, sshKeyId }` — orchestrator clones it into the agent's workspace at creation time |
-| `mcpServers` | Optional list of `{ serverId, credentialId }` refs into the central MCP registry — see *MCP Servers* below |
-| `additionalContext` | Optional text appended to the agent's CLAUDE.md |
+**Environments do NOT carry skills — never re-add them.** The skill *grant* is **team-owned** (`orchestrator/skill-grants.js`): team agents (`role: team`) carry `skills[]` (inherited by every member without a `skillsOverride`); standalone agents/orchestrators carry their own; bp-instances inherit from their parent orchestrator. `effectiveSkills(cfg, loadCfg)` resolves the grant everywhere (seeding, CLAUDE.md gating, preview).
 
-**Environments do NOT carry skills.** The skill *grant* is **team-owned** (`orchestrator/skill-grants.js`, pure + unit-tested; concept in `docs/knowledge-skill-activation-concept.md`): team agents (`role: team`) carry `skills[]` — the team's active set, inherited by every member without a `skillsOverride` — and standalone agents / orchestrators carry their own `skills[]` on their config; bp-instances inherit from their parent orchestrator. `effectiveSkills(cfg, loadCfg)` resolves the grant everywhere (seeding, CLAUDE.md gating, prompt preview). A one-time startup migration (`migrateSkillGrantsToAgents`) copied each legacy `env.skills` onto its agents; the env API accepts-and-discards the field from old clients. The two-tier skill *pool* (files) is unchanged — only the grant moved. Never re-add skills to environments.
+**Skill seeding & activation.** Every seed writes a per-agent manifest `/workspace/agents/<id>/.aee/seeded-skills.json` (`{name: {tier, seededAt}}`) — the truth for whether a running member actually has a skill. One-click (de)activation is an **additive file sync, not a respawn** (skills are static files read per invocation): `POST /internal/teams/:teamId/skills/{activate,deactivate}` (or `/internal/agents/:id/skills/...`) edits the list + copies/removes per-member files via `planSkillSync`, rebuilds each CLAUDE.md, mirrors into isolated volumes (proxied `POST /api/knowledge/{activate,deactivate}`). At **autonomy level 3** the curator's auto-promotions are auto-activated (learn → bundle → promote → activate, no human).
 
-**Skill activation (phase 2).** Every seed writes a per-agent manifest `/workspace/agents/<id>/.aee/seeded-skills.json` (`{name: {tier, seededAt}}`) — the truth for "does this member actually have the skill", since the grant list can't tell whether a running member was seeded before the name was added. One-click (de)activation is an **additive file sync, not a respawn** (skills are static files the CLI reads per invocation): `POST /internal/teams/:teamId/skills/{activate,deactivate}` (and `/internal/agents/:id/skills/...` for standalone) does an idempotent list edit + per-member workspace copy/remove via `planSkillSync` (override members are skipped and surfaced unless opted in via `includeMembers`, which also persists the name on their `skillsOverride`), rebuilds each CLAUDE.md, and mirrors into isolated volumes. Proxied as `POST /api/knowledge/{activate,deactivate}`; `GET /api/knowledge/graph?scope=team:` overlays an `activation` block (`{active, members: [{agentId, state: active|pending|excluded-override|stub}]}`) on every skill node, and the Knowledge page renders it as status badges + Activate/Deactivate + an "Add global skill…" picker. **Activation is the default last step of every pool-filling flow** (phase 3): the Promotion and Share dialogs carry a checked-by-default "Activate … immediately" checkbox (never rolls the promote/share back on activation failure), Lift-to-team always activates; each (de)activation appends a `type: "activation"` event to the knowledge live feed. At **autonomy level 3** the curator's auto-promotions are **auto-activated** in the same pass (phase 4, `autoPromoteStep` → `setTeamSkillActive({auto: true})`) — learn → bundle → promote → activate closes without a human, transparently reported in the feed.
-
-When an agent is created via the Admin Console, the orchestrator:
-1. Always seeds `.claude/` and `memory/` from the skill-pool volume (or bundled defaults if empty)
-2. Copies the skills of the agent's resolved grant (team-first, then global pool)
-3. Patches absolute `/workspace/` paths in seeded memory
-4. Materializes the env's MCP server refs into the agent's own `.claude/settings.json` (substituting credentials per-agent — see *MCP Servers*)
-5. If the env has a repository, runs `git clone` — SSH URLs use `GIT_SSH_COMMAND` pointing at the env's SSH key; HTTPS GitHub URLs inject the GitHub token via `GIT_CONFIG_*` env vars
-6. Builds the agent's CLAUDE.md via the prompt-assembly pipeline (see below)
+**Agent creation seeding** (orchestrator): seed `.claude/` + `memory/` from the skill-pool volume (or bundled defaults); copy the resolved skill grant (team-first, then global); patch absolute `/workspace/` paths in memory; materialize the env's MCP refs into the agent's `.claude/settings.json` (per-agent credential substitution); `git clone` if the env has a repo (SSH URLs → `GIT_SSH_COMMAND`; HTTPS GitHub → PAT via `GIT_CONFIG_*`); build CLAUDE.md via the prompt-assembly pipeline.
 
 #### System-prompt assembly & preview
 
-What an agent actually receives is more than its authored role prompt: the seeded `CLAUDE.md` and a runtime `--append-system-prompt` memory hint are composed from several layers. All composition rules live in one pure, unit-tested module — **`orchestrator/prompt-assembly.js`** — which both the seed path (`buildAgentClaudeMd`) and the preview endpoint call, so the preview is byte-identical to what gets seeded.
+The seeded `CLAUDE.md` and a runtime `--append-system-prompt` memory hint are composed by one pure, unit-tested module — **`orchestrator/prompt-assembly.js`** — used by both the seed path (`buildAgentClaudeMd`) and the preview endpoint, so preview is byte-identical to what's seeded.
 
-- **Ordering.** The authored **Agent Role is hoisted to the top** (after a short identity + interaction-framing preamble), ahead of the generic blocks: Working Environment → Workspace → Response Formatting → Memory System → Skills → GitHub Actions → Trigger management → Important Notes → (Blueprint shared-memory). The base template text is read from disk (`/template-workspace/CLAUDE.md`, else `/defaults/CLAUDE.md`), split by H2, and re-ordered in code.
-- **Conditional gating (no dead weight).** The **Git/`gh-as-agent`** section is injected only when the env has a repository; the **Trigger-management** docs and the unattended-run framing only for **autonomous** agents (`sessionPolicy: per-invocation`, `orchestrator`/`bp-instance`, or an agent that already has triggers — `agentIsAutonomous()`); the **Skills** section only when the agent's resolved skill grant is non-empty (team-owned skills — `effectiveSkills`, not the env). A pure-DM agent with no repo therefore never sees the git wrapper or `triggers.json` docs. *Known limitation:* adding a trigger to a persistent agent later only injects the trigger docs at the next prompt edit / rebuild; the preview always reflects the live state.
-- **De-duplication / consistency.** The `/workspace` path-translation rule lives **once** (the Workspace section), no longer repeated in the runtime hint. The memory guidance is consistent across template and runtime hint (no more "read all five" vs "read two" contradiction). The relocated sections (Workspace / GitHub Actions / Trigger management) are **code-owned**: if a stale base template still carries them they are dropped, never double-injected.
-- **Runtime hint.** `buildMemoryHint(blueprintId)` in `prompt-assembly.js` is kept **byte-identical** to `_build_memory_hint()` in `agent-image/scripts/agent-entrypoint.py` (the live runtime); a test asserts the Python source contains the same sentences so the two can't drift.
-- **Preview.** `GET /api/agents/:id/prompt-preview` (proxied to the orchestrator's `/internal/agents/:id/prompt-preview`) renders the composed `claudeMd` + `appendSystemPrompt` + gating `meta`. Surfaced read-only as the **Prompt** tab in the agent chat's right rail (`PromptPreviewPanel.jsx`).
+- **Ordering.** The authored **Agent Role is hoisted to the top** (after a short identity preamble), ahead of generic blocks (Working Environment → Workspace → Response Formatting → Memory System → Skills → GitHub Actions → Trigger management → Important Notes). Base template read from `/template-workspace/CLAUDE.md` (else `/defaults/CLAUDE.md`), split by H2, re-ordered in code.
+- **Conditional gating.** Git/`gh-as-agent` only when the env has a repo; Trigger-management + unattended framing only for **autonomous** agents (`agentIsAutonomous()`: `sessionPolicy: per-invocation`, `orchestrator`/`bp-instance`, or already has triggers); Skills only when the grant is non-empty. *Known limitation:* adding a trigger to a persistent agent injects the trigger docs only at the next prompt rebuild.
+- **Runtime hint.** `buildMemoryHint(blueprintId)` is **byte-identical** to `_build_memory_hint()` in `agent-entrypoint.py` (test-asserted; change both in one commit).
+- **Preview.** `GET /api/agents/:id/prompt-preview` renders `claudeMd` + `appendSystemPrompt` + gating `meta`, shown read-only as the **Prompt** tab (`PromptPreviewPanel.jsx`).
 
-SSH keys are stored at `/workspace/environments/_keys/<keyId>` (mode 0600) with metadata in `_keys/index.json`. The private key value is **never** returned by the API after creation; only its fingerprint.
+SSH keys are stored at `/workspace/environments/_keys/<keyId>` (mode 0600), metadata in `_keys/index.json`. The private key is **never** returned by the API — only its fingerprint.
 
-#### Why both an SSH key and a GitHub PAT?
+#### Why both an SSH key and a GitHub PAT? (defense-in-depth)
 
-The two credentials are kept deliberately separate as **defense-in-depth** — they are not redundant.
+Not redundant. SSH key → git I/O on SSH URLs (via `GIT_SSH_COMMAND`); can be a per-repo read-only deploy key. GitHub PAT → git I/O on HTTPS GitHub URLs, Events API polling, and `gh pr create`/commit/review (`gh-as-agent`, via `GH_TOKEN`/`GITHUB_TOKEN`). **Blast-radius separation:** a leaked SSH key can't merge PRs; a leaked PAT didn't grant the initial clone. For HTTPS-only repos the PAT covers both — prefer SSH URLs + deploy keys.
 
-| | SSH key | GitHub PAT |
-|---|---|---|
-| `git clone` / `fetch` at workspace seed (SSH URL) | ✅ via `GIT_SSH_COMMAND` | — |
-| `git clone` / `fetch` at workspace seed (HTTPS GitHub URL) | — | ✅ via `GIT_CONFIG_*` env vars |
-| `git ls-remote` probe (SSH URL, env editor) | ✅ | — |
-| `git ls-remote` probe (HTTPS GitHub URL, env editor) | — | ✅ via `-c http.extraheader` |
-| GitHub Events API polling (`github-poller.js`) | — | ✅ Bearer auth |
-| `gh pr create` / commit / review (`gh-as-agent`) | — | ✅ via `GH_TOKEN` / `GITHUB_TOKEN` |
-
-**Blast-radius separation.** The SSH key can be a per-repo, read-only deploy key — its scope is "clone this one repo". The PAT carries higher privileges (push, PR creation, API actions across everything the account can reach). Splitting them means a leaked SSH key can't merge PRs and a leaked PAT didn't already grant the initial repo clone path. For HTTPS-only repos the PAT covers both git I/O and API actions on the same credential — operators who want tighter blast-radius should prefer SSH URL repos with a deploy key.
-
-The setup wizard and the SSH-keys / GitHub-tokens admin pages explain this rationale inline so that operators understand why both are required.
-
-**Credential rotation propagates to running agents.** Spawn-time credentials — the `GH_TOKEN`/`GITHUB_TOKEN` derived from `env.githubTokenId`, and the per-agent SSH identity — are read from disk and baked into each agent container's environment by `startAgentProcess`; they are immutable for the container's lifetime. So when an operator repoints an environment at a different GitHub token, the admin-console's `PUT /api/environments/:id` detects the `githubTokenId` change and best-effort calls the orchestrator's `POST /internal/environments/:id/respawn-agents` (`respawnAgentsForEnvironment`), which recreates every currently-running, materialized agent bound to that env so the new token is re-injected. Disabled/stopped agents are left alone — they pick up the fresh credential on their next enable. (GitHub tokens are create-only in the API, so a value rotation always surfaces as a `githubTokenId` change on the env, which is the trigger.)
+**Credential rotation propagates to running agents.** Spawn-time credentials (PAT from `env.githubTokenId`, per-agent SSH identity) are baked into each container at `startAgentProcess`, immutable for its lifetime. Repointing an env at a different token → `PUT /api/environments/:id` detects the `githubTokenId` change and best-effort calls `POST /internal/environments/:id/respawn-agents`, recreating every running agent bound to that env. Disabled agents pick up the fresh credential on next enable.
 
 ### MCP Servers
 
-Static skills live in the agent's workspace; **MCP servers** are how agents reach things they need to query at *runtime* — wikis, vector stores, graph DBs. The pattern intentionally mirrors the SSH-key / GitHub-PAT split: a *catalog* of servers, a *separate* credential store, and an environment that pairs the two.
+Static skills live in the workspace; **MCP servers** are how agents reach runtime data (wikis, vector stores, graph DBs). The pattern mirrors the SSH/PAT split: a *catalog* of servers, a *separate* credential store, an environment that pairs them.
 
-| Path | Role |
-|---|---|
-| `mcp-servers/<id>/server.js` (repo) | Reference implementations baked into the orchestrator image. The shipped `wiki/` server is a single-file stdio MCP that hits a configurable REST backend. |
-| `/template-workspace/mcp-servers/<id>/` | Where `make seed-mcp-servers` lays down those reference implementations inside the orchestrator. The server registry's default `command` / `args` reference these paths. |
-| `/workspace/mcp-servers/<id>/server.json` | Server **registry** — operator-managed catalog. Fields: `id, name, description, transport (stdio\|http\|sse)`, plus transport-specific: stdio carries `command, args, env`; http/sse carry `url, headers`. Both the `env` and `headers` maps support `${credential}` as a placeholder for the bound credential's secret — substituted per-agent at seed time. |
-| `/workspace/mcp-credentials/_keys/<credId>` | Raw secret (mode 0600). Never returned by the API after creation. |
-| `/workspace/mcp-credentials/_keys/index.json` | Credential metadata (`id, name, serverId, fingerprint, createdAt`). |
+- `mcp-servers/<id>/server.js` (repo) — reference implementations baked into the image; `make seed-mcp-servers` lays them into `/template-workspace/mcp-servers/<id>/`. The shipped `wiki/` server is a single-file stdio MCP over a REST backend.
+- `/workspace/mcp-servers/<id>/server.json` — operator-managed **registry**: `id, name, description, transport (stdio|http|sse)`, plus stdio `command, args, env` or http/sse `url, headers`. `env`/`headers` support `${credential}`, substituted per-agent at seed time.
+- `/workspace/mcp-credentials/_keys/<credId>` — raw secret (0600, never returned); `index.json` holds metadata. Credentials are global (one token can back two environments).
 
-**Per-agent isolation.** At seed time the orchestrator reads `env.mcpServers` (or the team-member's `mcpServersOverride`), loads each `server.json`, substitutes `${credential}` from the bound credential, and writes the merged stanza into **the agent's own** `.claude/settings.json` under `mcpServers[<serverId>]`. The output shape matches Claude Code's MCP config schema: stdio servers get `{command, args, env}` (no `type` field — stdio is the default); http servers get `{type: "http", url, headers}`; sse servers get `{type: "sse", url, headers}`. There is no longer a pool-wide MCP config — every agent sees only the servers and credentials its environment grants. The legacy `/api/mcp` endpoint that wrote `/pool/.claude/settings.json` has been replaced by `/api/mcp-servers` + `/api/mcp-credentials`.
-
-**Why a separate credential store?** Same logic as SSH-key vs. PAT: the registry says "this team can talk to the wiki"; the credentials say "with these tokens". Splitting them lets you rotate a Confluence token without touching the registry, and keeps the secret out of every environment editor's payload. Credentials are global (one Confluence token can back two environments) — the analogue of how SSH keys are global, not per-env.
-
-**Per-member override.** A team-member may carry an `mcpServersOverride` array (same `[{serverId, credentialId}, ...]` shape as `env.mcpServers`); when present it replaces the env's MCP set verbatim for that one member, parallel to `skillsOverride`. Absent = inherit. Edit it via the **MCP Servers** field on the agent edit form.
-
-**Team-Setup wizard.** The "Knowledge sources" step shows the team-wide MCP set read-only — it is inherited from the selected Working Environment (which binds servers to credentials); the step links to the environment editor for changes.
+**Per-agent isolation.** At seed time the orchestrator reads `env.mcpServers` (or a member's `mcpServersOverride`), substitutes `${credential}`, and writes the merged stanza into **the agent's own** `.claude/settings.json` under `mcpServers[<serverId>]` (Claude Code schema: stdio `{command, args, env}`; http/sse `{type, url, headers}`). No pool-wide MCP config. `mcpServersOverride` on a member replaces the env's MCP set for that member; absent = inherit.
 
 ### Agent Roles
 
-| Role | Behavior |
-|---|---|
-| `agent` | A standalone agent. Responds to direct messages from a human in its 1:1 DM room. With cron / GitHub triggers it can also run autonomously. |
-| `team` | A reusable system-prompt template + shared Working Environment that doesn't host an agent itself. Use **Add Member** on the team card (or the Team-Setup wizard) to spawn one or more `team-member` agents. |
-| `team-member` | A single member spawned from a team. Inherits the team's `systemPromptTemplate`, the **team agent's `skills[]`** (team-owned grant), and the env's `mcpServers` by default. Records its parent in `parentTeamId`. May override any or all of: `systemPrompt` (string) overrides the team prompt; `skillsOverride` (array of skill names) replaces the team's skill set; `mcpServersOverride` (array of `{serverId, credentialId}` refs) replaces the env's MCP set. Absence of a field = inherit. Editing the team's `systemPromptTemplate` eagerly rewrites every inheriting member's `AGENT-PROMPT.md` / `CLAUDE.md`; skill changes on the team and MCP changes on the team's env are picked up at the next member rebuild. |
-| `orchestrator` | Bound to a BriefingPack directory (`briefingsPath`). On creation and on every tick of its claim loop (~30s), it pulls main (60s-throttled), scans the directory, and writes one stub `bp-instance` agent per BP. When a BP transitions to `status: dispatched`, the orchestrator posts a DM suggestion to the user; on user confirmation the orchestrator agent runs a `curl` against `/internal/agents/:id/claim` which patches the BP's `brief.md` (status, agent-id, claimed timestamp), commits + pushes to make the claim visible to teammates, and then materialises the bp-instance. Manual Activate / Deactivate via the Admin Console bypasses the suggest flow. |
-| `bp-instance` | One per Briefing Pack under an orchestrator. Lives as a stub (no Matrix user, no workspace) until claimed or activated. The activated agent is bound to one specific BP and uses the ACE engineering skill to execute its LoopScript. |
+- `agent` — standalone. Responds to DMs in its 1:1 room; with cron/GitHub triggers it can run autonomously.
+- `team` — a reusable system-prompt template + shared Working Environment; hosts no agent itself. **Add Member** (or the wizard) spawns `team-member` agents.
+- `team-member` — spawned from a team. Inherits the team's `systemPromptTemplate`, the team agent's `skills[]`, and the env's `mcpServers`; records `parentTeamId`. May override `systemPrompt` / `skillsOverride` / `mcpServersOverride` — absence = inherit. Editing the team's `systemPromptTemplate` eagerly rewrites every inheriting member; skill/MCP changes apply at the next member rebuild.
+- `orchestrator` — bound to a BriefingPack dir (`briefingsPath`). On creation and each ~30s claim tick it pulls main (60s-throttled), scans the dir, writes one stub `bp-instance` per BP. On a BP → `status: dispatched` it DMs a suggestion; on user confirmation it `curl`s `/internal/agents/:id/claim` (patches `brief.md`, commits+pushes, materialises the bp-instance). Manual Activate/Deactivate bypasses the suggest flow.
+- `bp-instance` — one per Briefing Pack under an orchestrator. A stub (no Matrix user, no workspace) until claimed/activated; bound to one BP, uses the ACE engineering skill to execute its LoopScript.
 
-> **Legacy roles.** Earlier versions used `expert` / `expert-group` / `expert-instance`. The orchestrator rewrites these to `agent` / `team` / `team-member` (and renames `parentGroupId` → `parentTeamId`) on startup; reads also normalize on the fly, so any unmigrated config is loaded with the new shape.
+> **Legacy roles.** `expert`/`expert-group`/`expert-instance` → `agent`/`team`/`team-member` (and `parentGroupId` → `parentTeamId`) on startup and on read.
 
 ### Autonomous Agent Triggers
 
-Autonomous agents are driven by **triggers** stored in a per-agent `triggers.json` file (`/workspace/agents/<id>/triggers.json`). The trigger scheduler syncs every 60 seconds (using `node-cron`).
+Triggers live in a per-agent `/workspace/agents/<id>/triggers.json`; the scheduler syncs every 60s (`node-cron`). **Self-managed** (the agent can edit its own), **file-based sync**, **overlap protection** (a still-running trigger skips the next tick).
 
-**Key design properties:**
-- **Self-managed** — the agent can read/write its own `triggers.json` to adjust its schedule
-- **File-based sync** — agent processes pick up changes via filesystem polling
-- **Open for extension** — currently supports `cron` and `once`, future types (matrix-event, http-webhook, etc.) can be added
-- **Overlap protection** — if a trigger's previous execution is still running, the next tick is skipped
+- `cron` (`cron`, 5-field) — recurring. `once` (`at`, ISO) — one-shot, auto-removed after execution.
+- `http` (`secret`, auto-gen) — fired by external HTTP POST (see Webhook Server).
+- `github-event` (`repo` `owner/name`, `events` e.g. `pull_request.opened`, optional exact-match `labelFilter`) — fired by the GitHub poller. **No source/origin filtering** — fires on any matching event regardless of cause. Agent gets the `prompt` + full event payload as JSON.
 
-**Trigger types:**
-| Type | Fields | Behavior |
-|---|---|---|
-| `cron` | `cron` (5-field expression) | Recurring execution via node-cron |
-| `once` | `at` (ISO timestamp) | One-shot, auto-removed after execution |
-| `http` | `secret` (auto-generated) | Fired by an external HTTP POST; see Webhook Server below |
-| `github-event` | `repo` (`owner/name`), `events` (string list, e.g. `pull_request.opened`), optional `labelFilter` (fire only when that exact label is set) | Fired by the GitHub poller when the GitHub Events API reports a matching event for the repo. **No source/origin filtering** — it fires on any matching event regardless of who caused it (human, another agent, or the subscriber itself). The agent receives the trigger's `prompt` plus the full event payload as JSON. |
+Results post to `trigger.roomId` if set, else the agent's DM room. If no room exists yet the run is **skipped**. `[PASS]` suppresses output.
 
-**Optional `emits` field (Process Canvas, agent/role level — #414).** An agent/role may carry an optional `emits: string[]` on its `config.json` (a role in a bundle) — the label tokens the agent's work is expected to *set* (e.g. `["dispatch", "started:{{agentId}}"]`). It is purely declarative: the agent still sets the label itself at runtime; `emits` only records the outbound edge so the Process Canvas can draw "this agent → label → the trigger that listens on it". Edited on the node in the Flow Editor (`ConnectionsSection.jsx` `EmitsEditor`), persisted via `PUT /api/agents/:id` (`emits`). Role templates may author it (resolved per-member like `labelFilter`). **The trigger-level `emits` variant (#328) was removed (#783)** — it was redundant (the same edge is drawn from the agent level, which stays canonical), single-label, and did nothing at runtime. Old bundles/drafts/`triggers.json` carrying a trigger-level `emits` still load; the label is *lifted* to the agent/role level on import/materialisation and at graph-build (`liftTriggerEmits` / `liftAgentEmits`), so no hand-off edge is lost. The heuristic `emits-derivation.js` module and the `emit-suggestions`/`triggers/:tid/emits` endpoints are gone. The successor structured-outcome model (a switch / multiple outcomes) is #784.
+**Session policy.** With `sessionPolicy: per-invocation`, *triggered* runs start fresh (no `--resume`) and don't write the session pointer — DM continuity is untouched; the trigger prompt gets a learn-hint to extract lessons into `memory/log.md` first. Absent = `persistent` (legacy).
 
-**Process graph endpoint (Process Canvas, #329/#333).** `GET /api/process/graph` aggregates agents (or role templates) + their triggers into the orchestration graph in one call: `{ level, team, nodes, edges, gates, labels, lints }`. An edge `S→T` labelled `L` exists when agent `S` *emits* `L` (its agent-level `emits`, #414/#783 — trigger-level emits were removed) and a trigger of `T` *listens* on `L` via its **`labelFilter`**. Triggers that react to raw GitHub **events** (no `labelFilter`) are external (from an actor, not an agent emit) — recorded as `external: true` edges from `null` (the renderer drops them; lints ignore them). `human:*` gate labels and the brakes (`hold`, `needs:human`) have no agent emitter — their edges originate from `null` and are tagged (`kind: gate|brake`); `cron`/`once` become self-loop `timer` edges; orphan listeners (`orphan: true`) and dead-end emitters (`deadEnd: true`) are still represented. The `lints` array (advisory, never blocks) carries `orphan-listener`, `dead-end-emitter`, `competing-stage` (an agent emitting two `stage:*` labels), and `gate-violation` (an agent declaring emit of a `human:*` label — `error` severity). Levels: **live** (default, or `?team=<id>`) uses each agent's persisted agent-level `emits`; **template** (`?templates=1` or `?templates=a,b`) reads the role-template catalog's own role-level `emits`, keeping `{{var}}` tokens raw. Both are deterministic from the declared `emits` — there is no prompt-heuristic derivation any more (#783). Pure builder + `computeLints` in `admin-console/api/process-graph.js`.
+### Process Canvas / Flows (orchestration graph)
 
-**Process templates (export/import/materialise, #334).** `GET /api/process/template?team=<id>` exports a portable, git-committable **bundle** (`processTemplateVersion: 1` — roles with persona prompt, role-level `emits` (#414/#783), and triggers, plus gates + label registry; no repos/secrets). `POST /api/process/graph` `{processTemplate}` builds a graph from a bundle so the canvas renders an imported blueprint (read-only). Materialising feeds the bundle to `POST /api/teams` under `processTemplate` (or `customRoles`): inline roles run through the **same** env→team→members pipeline (with rollback) the Team-Setup wizard uses — each role's `{{vars}}` and the target repo applied per member. Pure builders/validators in `admin-console/api/process-template.js` (`buildProcessTemplate`, `validateProcessTemplate`, `templateToCustomRoles`); format documented in `docs/process-template-format.md`. The Process Canvas supersedes the old static workflow-diagram modal, which has been removed.
+Agents + their triggers form an **orchestration graph**, authored in the **Flows** view (`/flows`, `Briefings.jsx`). The graph/editor is the `ProcessGraphPanel` export in `ProcessCanvas.jsx`, driven by a `scope` prop (`'<teamId>' | 'draft:<id>' | 'import'`). The Flows left list selects scope: **Teams** (live graphs), **Drafts**, legacy **BriefingPack flows**. `/process` routes redirect to `/flows`.
 
-**Process Canvas lives inside Flows.** The Process Canvas is not a standalone page anymore — it is embedded in the **Flows** view (`/flows`, `admin-console/src/pages/Briefings.jsx`). The old scope dropdown is gone; scope selection moved to the Flows left list, which lists **Teams** (live process graphs), **Drafts**, and the legacy **BriefingPack flows** (Orchestrator agents → `BPGraph`). A **New process** button there creates a draft. The graph/editor itself is the named export `ProcessGraphPanel` in `admin-console/src/pages/ProcessCanvas.jsx` — a controlled component driven by a `scope` prop (`'<teamId>' | 'draft:<id>' | 'import'`) with `onNavigate` / `onDraftsChanged` callbacks. Flows tracks the selected process scope in the `?proc=` query param and BriefingPack flows in `?flow=`. The `/process` and `/process/:teamId` routes now redirect to `/flows` (the latter with `?proc=<teamId>`); there is no longer a "Process Canvas" nav entry.
+**Declarative ports are the single source of truth** for edges (siblings on a role/agent config, edited via `ConnectionsSection.jsx`, persisted via `PUT /api/agents/:id`): `emits: string[]` (label tokens the work sets — declarative only, the agent still sets the label at runtime; draws "agent → label → listening trigger"); `dataFlow.{dependsOn,inputs,outputs}` (live) ≡ role `dependsOn/inputs/outputs` (draft) — dependency/data-flow edges; `github: {producesPr?, producesIssue?}` (what a role opens — drives badges/ports + an "open a PR/issue" prompt block); `channels: [{artifact: 'pr'|'issue', from, label?, gate?}]` on the *consumer* (which producer's PR/issue it reacts to; `gate: 'human'` = inline approval gate); `parentMemberId` ≡ role `parent` (cycle-guarded); `stage`.
 
-**Process drafts (Process Canvas v2, #344).** A *draft* is an editable process-template bundle that exists **before** any team is materialised — the basis for authoring a process from scratch. CRUD at `/api/process/drafts[/:id]` (GET list / POST create / GET / PUT / DELETE), persisted at `/workspace/process-drafts/<id>.json` (pure document storage, no agent/Matrix side effects; traversal-guarded slug ids). Drafts allow an **empty** `roles` set (work-in-progress) — `validateProcessTemplate(bundle, { allowEmptyRoles: true })` — whereas materialisation via `/api/teams` stays strict (non-empty). The graph for a draft is derived through the existing `POST /api/process/graph { processTemplate }` (also relaxed to allow empty roles). `emptyDraftBundle()` + the relaxed validator live in `admin-console/api/process-template.js`. The Process Canvas's **draft mode** (#345) edits drafts in place: a write-target adapter (`admin-console/src/pages/process/edit-adapters.js`) routes the shared dialogs/inspector to either `liveOps` (HTTP to running agents) or `makeDraftOps` (mutate the bundle + PUT it); the scope selector gains a Drafts group + "＋ New process…", and an **Add role** toolbar action adds free-form roles (no catalog dependency). There are no dedicated PR-review / human-approval toolbar buttons any more: a PR reviewer is a plain per-invocation role consuming a GitHub PR channel (#380), and a **human-approval gate** (#346) is authored on the edge itself — an inline `gate: 'human'` on a channel, or a `human:*` label listener via the label / GitHub-trigger dialogs.
+**Functional triggers are derived from ports, not authored.** A draft derives them at materialise (`expandDataFlowSteps`, `expandGithubChannels`); a live team re-derives on every port write (`reconcileTeamDataFlow`, `reconcileTeamGithubChannels`) — regenerating `<consumer>-on-push-<upstream>` / `<consumer>-on-<artifact>-<producer>` triggers (marked `dataFlow`/`channel: true`), leaving hand-authored ones untouched. **A human-approval gate** is a `human:<slug>` label listener on a downstream step — the red gate node; never trips `gate-violation` since no agent emits it.
 
-**LLM-assisted agent-prompt authoring (Add role dialog).** Writing each role's system/agent prompt by hand is tedious, so the **Add role** dialog carries a *Notes* field plus a **Generate agent prompt** button (`AddRoleDialog` in `admin-console/src/pages/ProcessCanvas.jsx`). It POSTs `{ roleName, notes }` to `POST /api/agent-prompt/generate` (`admin-console/api/api.js`), which resolves an LLM target (`resolveGenerationTarget`: a registered Model Provider endpoint, preferring a Sonnet-class model, else the `ANTHROPIC_*` `.env` fallback), issues one stateless `/v1/messages` call (`buildMessagesUrl` + `httpPostJson`), and returns `{ prompt, model }`. The role name alone is often enough context (e.g. "Business Analyst"); notes are optional keywords. The draft lands in the editable *Agent prompt* textarea — nothing is persisted server-side.
+**Graph endpoint.** `GET /api/process/graph` (or `POST {processTemplate}`) → `{ level, team, nodes, edges, gates, labels, lints }`. Edge `S→T` labelled `L` exists when `S` emits `L` and a `T` trigger listens via `labelFilter`. Raw GitHub-event triggers (no `labelFilter`) are `external: true`; gate/brake labels (`human:*`, `hold`, `needs:human`) and `cron`/`once` self-loop `timer` edges originate from `null`. `lints` (advisory, never blocks): `orphan-listener`, `dead-end-emitter`, `competing-stage`, `producer-unconsumed`, `channel-from-non-producer`, `gate-violation` (error). Levels: **live** (`?team=<id>`) reads persisted `emits`; **template** (`?templates=...`) reads role-template `emits` (raw `{{var}}`). Pure builders: `process-graph.js` + `unified-graph.js`.
 
-**Unified role-connecting (live == draft).** Wiring roles together works identically on a live team and a draft: one `CreateEdgeDialog` offers the same edge types in both modes — **GitHub PR/Issue channel** (`on: 'github'`, #380), **label hand-off**, **data flow / hand-off** (the plain **dependency** is folded into this dialog — leave the artifact name empty; the BP viewer keeps dependency + artifact as separate path-based types, since BPs have a defined state and fixed artifact paths), **parent/child** — and the shared `ConnectionsSection` (`admin-console/src/pages/process/ConnectionsSection.jsx`, in both the draft and the live node inspector) lists + removes them and sets parent/stage. Every edge is also **clickable on the canvas** (`flow-graph-render.js` `addEdgeHit`): the type-aware `EditHandoffDialog` edits a label hand-off, edits/removes a GitHub PR/Issue channel (`on: 'github'`, #380), removes a dependency / data-flow port / parent link, and shows other derived edges read-only. Clicking is gated on the graph being editable, and the BP viewer (`FlowGraph.jsx`) wires no `onSelectEdge`, so its edges stay non-clickable (removal there is via the node inspector). The **declarative ports are the single source of truth** for these edges: `emits` (label), `dataFlow.{dependsOn,inputs,outputs}` (dependency/data flow, live) ≡ role `dependsOn/inputs/outputs` (draft), `parentMemberId` ≡ role `parent`, and `stage`. `liveOps` writes only these ports via `PUT /api/agents/:id` (which now accepts `dataFlow`, `parentMemberId` — cycle-guarded — and `stage`), so it is shape-compatible with `makeDraftOps`. The **functional** data-flow push triggers are *derived* from the ports, not authored: a draft derives them at materialise time (`expandDataFlowSteps`), and a live team derives them eagerly on every `dataFlow` write via `reconcileTeamDataFlow` (same pure builder, best-effort, idempotent — regenerates the `<consumer>-on-push-<upstream>` triggers, leaving manually-authored data-flow triggers untouched). Net: the editor never branches on mode, and there is no separate trigger bookkeeping when connecting roles. A human approval is authored as a `human:<slug>` label listener on the chosen downstream step — it renders as the red gate node and can never trip `gate-violation` because no agent emits it. The gate is enforced purely by the `human:*` label convention (a human applies it); there is no origin filter behind it.
+**Artifacts** are matched by **logical name** (`{name, hint?, description?}`, `artifactKey` in `process-template.js`), not physical path, since a re-instantiable agent writes to a varying path. Real location is resolved at runtime from a git-committed manifest `.aee/artifacts.jsonl`: the producer records with `aee-artifact add "<name>" <path>` (CLI `agent-image/scripts/aee-artifact`) + commits/pushes; the derived trigger tells the consumer to `git pull` and `aee-artifact path "<name>"`. A **wake, not a start-gate** — nothing blocks a downstream agent (agents have no "completed" state; that gating is BP-only).
 
-**Artifacts matched by logical name + runtime manifest (#382).** Agent artifact ports are `{name, hint?, description?}`: producer↔consumer are matched on the **logical name**, not the physical path (`artifactKey(a) = a.name || a.path` in `process-template.js`, reused by `unified-graph.js`/`api.js`/UI). This is because a re-instantiable agent writes to a path that varies per run (or a whole directory, or something unknowable up front), so `hint` is only informative. A port carrying only `path` (BriefingPack artifacts + legacy team ports) still matches by path exactly. The real location is resolved at **runtime** from a git-committed manifest `.aee/artifacts.jsonl`: the producer records what it actually made with `aee-artifact add "<name>" <path>` (CLI at `agent-image/scripts/aee-artifact`, on the agent PATH; guidance in `agent-image/CLAUDE.md`) and commits+pushes it; the derived `<consumer>-on-push-<upstream>` trigger's prompt (`dataFlowPrompt`) tells the woken consumer to `git pull` and `aee-artifact path "<name>"` to find it, and to flag a missing artifact to the user rather than guess. Still a wake, **not** a start-gate — nothing blocks a downstream agent from running (agents have no "completed" state; that gating lives only in the BP world).
+**Drafts** are editable bundles that exist before materialisation. CRUD `/api/process/drafts[/:id]`, persisted at `/workspace/process-drafts/<id>.json` (empty `roles` allowed). Draft mode edits in place via a write-target adapter (`edit-adapters.js`) routing shared dialogs to `liveOps` (HTTP to running agents) or `makeDraftOps` (mutate bundle + PUT); `liveOps` writes only ports, so it's shape-compatible — the editor never branches on mode.
 
-**Draft ⇄ team round-trip (Process Canvas v2, #348).** From a draft, **Materialize…** opens the v1 `MaterializeDialog` with the draft bundle and feeds it to `POST /api/teams` (`processTemplate`) — the same env→team→members pipeline (with rollback) the Team-Setup wizard uses. From a live team scope, **Edit as draft** calls `GET /api/process/template?team=<id>`, creates a draft seeded with that bundle plus a `sourceTeamId` marker, and switches to draft mode. When a draft carries `sourceTeamId` the dialog defaults `teamId` to it and ticks **extend** (`mode: 'extend'` — adds only the missing roles), so iterating on an existing team's process adds new members without colliding; a fresh draft defaults to `create` and surfaces a 409 on id collision. (Legacy PR-review `kind`/`review` meta is normalised onto GitHub PR channels per #380, so a re-imported team shows reviewers as plain agents consuming a PR channel.)
+**Templates & round-trip.** `GET /api/process/template?team=<id>` exports a portable `processTemplateVersion: 1` bundle (roles, `emits`, triggers, gates, labels, `stages` — no repos/secrets); materialising feeds it to `POST /api/teams`. **Edit as draft** seeds a draft with the team's bundle + `sourceTeamId` (defaults `mode: extend`). Format: `docs/process-template-format.md`.
 
-**Stage/lane view (Process Canvas v2, #349) — REMOVED.** The ordered-**stages** authoring view (a `Graph ⇄ Stages` toggle that generated wiring from a `stages[]` list via `buildStageBundle`) has been removed — it was superseded and caused confusion. `StageView.jsx` / `stage-model.js` are gone. Stages are now assigned **manually per node** in the graph view: each node carries an optional `stage` that inherits from its parent (`effectiveStage`, see the draft inspector), rendered as optional bands. The graph view and all its editing (add role, PR review, human approval, wire label/data-flow/dependency/hierarchy edges, materialize, import/export) are unchanged.
+**Stages** partition the flow axis: each node has an optional `stage` (inherits from parent via `effectiveStage`); an ordered `stages: string[]` on the bundle/team-agent defines column blocks. Authored via `StageManager.jsx`; carried through materialisation and round-tripped by Edit-as-draft. **Layout** is a layered DAG (`flow-layout.js`: `computeFlowLayout` + `assignCrossCoords`) — breaks rework cycles, layers by longest-path, reduces crossings, aligns via isotonic regression; parent-child hierarchy forms contiguous **sibling groups** drawn as a bezier fan. Canvas edges are clickable (`flow-graph-render.js`) with type-aware dialogs.
 
-**Layered layout + ordered stages (Flows readability).** Every flow — process, draft, member trees, BP packs — is laid out as an ordered **layered DAG** (the old BP tree layout is gone): `admin-console/src/pages/process/flow-layout.js` (pure, unit-tested — `computeFlowLayout` + `assignCrossCoords`) breaks rework cycles, assigns columns via longest-path layering (sources → sinks, so there's a visible start/end), reduces crossings with a median sweep, and aligns the cross axis via isotonic regression. Parent-child hierarchy participates in the layering: all children of one parent form a **sibling group** (`groupOf` option) that shares one column and stays contiguous within it (cluster contraction for the layering, block-wise median sort for the ordering), so a hierarchy reads as a clearly grouped row/column next to its parent; the gray hierarchy edge is drawn as a label-free, arrowless **bezier fan** beneath the process wiring (it takes no channel lanes/ports — the grouped layout guarantees the curves cross nothing), visually separating structure from work hand-offs. Children stay expandable per parent card (`Children (n)` toggle) — process/team views expand them by default (`expandChildrenByDefault` on `initFlowGraph`; user collapses survive data refreshes), BP-workspace views keep collapsed-by-default. A draft may carry an ordered **`stages: string[]`** on the bundle (schema in `process-template.js` — `buildProcessTemplate`/`validateProcessTemplate`/`emptyDraftBundle`; surfaced to the client via `stages` on the `POST /api/flows/graph` response). Stages **partition** the flow axis: every stage owns a contiguous, exclusive block of columns (as many as its internal flow needs), blocks ordered by the defined stage order — stages seen on nodes but missing from that order are appended in graph-flow order, so stage bands can never overlap even without an authored order. Unstaged nodes gravitate to their neighbours. Authored in the Flow editor via **StageManager.jsx** (a drag-reorderable ordered list, opened by the *Stages* toolbar button; draft ops `addStage`/`renameStage`/`removeStage`/`reorderStages` in `edit-adapters.js`); each node's stage is picked from a dropdown of defined stages in `DraftNodeInspector.jsx`. **Carried through `/api/teams` materialisation** so a materialised team reproduces the draft's stage layout: each role's `stage` rides on the member config (via `templateToCustomRoles` → the member-create body → `addTeamMember`), and the ordered `stages` list is stored on the **team agent** config (`createAgent` role `team`, from the `stages` field on `POST /internal/agents`). The live graph reads both back — per-node `stage` from each agent config and the top-level ordered `stages` from the team agent config — and returns `stages` on the `GET /api/flows/graph?team=<id>` response (same shape the draft's `POST /api/flows/graph` returns), so the renderer's layered layout matches. `GET /api/process/template?team=<id>` also exports the team's `stages` + per-role `stage`, so **Edit as draft** round-trips the layout. (Fresh materialisation, `mode: create`, is the covered path; `mode: extend` keeps the existing team's stored stage order.)
+**LLM-assisted authoring.** The **Add role** dialog's **Generate agent prompt** button → `POST /api/agent-prompt/generate` (`resolveGenerationTarget` picks a Model Provider, prefers Sonnet-class, else `.env` fallback; one stateless `/v1/messages` call). Wiring suggestions via `POST /api/agent-ports/suggest` (`port-suggestion.js`, LLM + keyword fallback, user-confirmed). Nothing persisted server-side.
 
-**GitHub PR/Issue channels (Flow Designer, #380).** The way agents hand work off over GitHub — opening an **Issue** or a **Pull Request**, and the labels/human-approvals that route them — is modelled as first-class, editable graph elements. Two declarative ports on a role/agent (siblings of `emits`, `dataFlow`, `parentMemberId`, `stage`): `github: { producesPr?, producesIssue? }` (what a role *opens* — drives the node's PR/Issue badge + draggable output ports, and appends an idempotent marker-delimited "open a PR/issue" block to its prompt at materialise) and `channels: [{ artifact: 'pr'|'issue', from, label?, gate? }]` on the *consumer* (which producer's PR/issue it reacts to; optional routing `label`; `gate: 'human'` = a human applies that label — the inline approval gate rendered on the edge). The ports are the single source of truth: `expandGithubChannels` (in `process-template.js`) derives the consumer's github-event trigger `<consumer>-on-<artifact>-<producer>` (marked `channel: true`) at materialise, and a live team re-derives eagerly on every `channels` write via `reconcileTeamGithubChannels` (mirrors `reconcileTeamDataFlow`). The graph builder emits an `on: 'github'` edge (producer→consumer, artifact/label/gate) from the port in `unified-graph.js`; `buildProcessGraph` skips `channel: true` triggers so they aren't double-drawn. Lints: `producer-unconsumed` (opens PR/issue nobody consumes), `channel-from-non-producer`. On the canvas (`flow-graph-render.js`) a producer node shows PR/Issue output ports you drag onto another node (`onConnectChannel` → `CreateChannelDialog`); channel edges are clickable (`EditChannelDialog`). Both draft and live are wired identically through `edit-adapters.js` (`setGithubProduces`, `addChannel`/`removeChannel`/`updateChannel`). **Supersedes the old `kind: 'pr-review'` construct** (#347, removed): a reviewer is now a plain per-invocation role consuming a PR channel; legacy `pr-review` bundles/drafts are mapped onto channels on read/import/materialise via `normalizeLegacyReview`. *Caveat:* the GitHub Events API reliably delivers `issues.labeled` but PR-label delivery (`pull_request.labeled`) is not guaranteed — issue-based human gates are the safe default.
+### Webhook Server (`http` triggers)
 
-**Webhook Server (`http` triggers)**
-
-The orchestrator exposes a second HTTP server on `HOOK_PORT` (default `4003`). External systems (GitHub, CI) can trigger an agent prompt with:
+Second HTTP server on `HOOK_PORT` (default `4003`). External systems trigger with:
 
 ```
 POST /hooks/:agentId/:hookId
 X-Hook-Secret: <trigger.secret>
 ```
 
-- The path components must match an existing agent id and a trigger with `type: "http"` and a matching `id` in its `triggers.json`.
-- The server enqueues the event in `/workspace/agents/:agentId/pending-triggers.json`; the agent-runner drains this queue every 5 seconds.
-- **Security:** every HTTP trigger carries its own `secret` in `triggers.json` (auto-generated when created via the Admin Console). The webhook server validates `X-Hook-Secret` against that field; triggers without a secret are rejected with 401. There is intentionally no global "open" mode.
-- No payload processing — the POST body is ignored. The prompt defined in the trigger is what Claude receives.
-- **Known limitation (#504, partially addressed by #506):** the queue in `pending-triggers.json` only protects against the *Maintenance Mode flag* being active — an event delivered while the receiving agent container (or the orchestrator's webhook server) is genuinely down for other reasons (crash, redeploy, host restart) is **not automatically retried**. However, since #506 the scheduler now detects triggers that were in-flight when the container crashed: durable markers are written to `in-flight-triggers.json` (in the agent workdir) before each trigger execution and cleared on completion; orphaned markers found at the next startup trigger a visible "⚠️ Trigger possibly lost" DM notification so operators can decide whether to rerun manually. No automatic re-execution — the human decides. Prefer `github-event` triggers over `http` for anything that must not silently drop deliveries during downtime.
+Path must match an existing agent + an `http` trigger with matching `id`. The event is enqueued in `pending-triggers.json` (drained every 5s). **Security:** the secret is validated against `X-Hook-Secret`; secretless triggers are rejected 401 (no global "open" mode). The POST body is ignored — the trigger's `prompt` is what Claude receives.
 
-**Maintenance Mode and triggers (#504)**
+*Known limitation:* the queue only protects against the **Maintenance Mode flag**. An event delivered while the container/webhook server is genuinely down (crash, redeploy) is **not auto-retried** — but the scheduler writes durable `in-flight-triggers.json` markers before each execution; orphaned markers at next startup trigger a "⚠️ Trigger possibly lost" DM (the human decides). Prefer `github-event` over `http` for anything that must not drop during downtime.
 
-While platform-wide Maintenance Mode (see the admin console's Maintenance page) is active, every agent's trigger scheduler checks the flag via the orchestrator's `GET /internal/maintenance-mode` before firing:
+### Maintenance Mode and triggers
 
-- `cron` and `once` triggers whose scheduled time falls inside the window do not fire.
-- `http` / `github-event` events keep queuing in `pending-triggers.json` as normal, but are left undrained until maintenance ends, then processed normally.
-- For `cron`, exactly one catch-up run executes right after maintenance ends for a trigger that would have fired during the window — never a backlog flood, no matter how many fires were missed.
-- `once` and `github-event` triggers need no special catch-up logic: an overdue `once` self-heals on the next 60 s sync tick, and `github-event` is already polling-based and self-heals on poller restart — both already true across container restarts, independent of Maintenance Mode.
+While platform-wide Maintenance Mode is active, each scheduler checks `GET /internal/maintenance-mode` before firing: `cron`/`once` inside the window don't fire; `http`/`github-event` keep queuing but stay undrained until maintenance ends; for `cron`, exactly **one** catch-up run executes after the window (never a backlog flood); `once` self-heals on the next 60s tick, `github-event` on poller restart.
 
-**GitHub poller (`github-event` triggers)**
+### GitHub poller (`github-event` triggers)
 
-`orchestrator/github-poller.js` runs inside the orchestrator process and polls the [GitHub Events API](https://docs.github.com/en/rest/activity/events) every 30 s for every repo that appears in some Working Environment with a `githubTokenId` attached. Designed for environments where GitHub cannot reach the local stack (no public ingress) — polling replaces webhooks.
+`orchestrator/github-poller.js` polls the GitHub Events API every 30s for every repo in some env with a `githubTokenId` — for local stacks with no public ingress (polling replaces webhooks).
 
-- **Repo discovery**: walks all environments, deduplicating repos. Picks one token per repo (first environment wins). Repos without an associated token are skipped.
-- **Bandwidth**: the page-1 request uses `If-None-Match` with the previously stored ETag, so unchanged repos cost no rate-limit budget (304 responses don't count). Effective rate is ~120 conditional GETs/h per repo.
-- **Pagination (#449)**: page 1 is the newest `PER_PAGE` (100) events; a burst of >100 events between polls pushes older-but-unseen events onto later pages. The poller reads further pages (`shouldFetchNextPage`, unconditional GETs since the ETag is page 1's) until it reaches an already-seen id, a partial page, or the `MAX_PAGES` cap — so a burst can't silently drop the events that scrolled off page 1. Steady state stops at page 1 (its tail is already seen); a later-page fetch failure just stops paging (page 1 is never lost).
-- **Cursor (#320)**: a per-repo sliding **seen-id set** (`state.seen[]`, capped at `SEEN_MAX`), not a `created_at` high-water-mark — an event is fresh iff its id is unseen, so GitHub's lack of ordering and its 30 s–6 h delivery lag can't drop events. Persisted to `/workspace/github-poller/state.json`; the first poll (and legacy state carrying `lastCreatedAt`/`lastEventId`) only re-baselines the set — no startup/upgrade flood. Fan-out is oldest-`created_at`-first.
-- **History horizon (#320)**: each subscriber is gated by `effectiveHorizon = activatedAt ?? createdAt ?? triggers.json mtime` — the trigger's own activation stamp (set on create by the API/wizard, refreshed on re-enable) instead of the file mtime, so a `triggers.json` rewrite (member rebuild, edit) no longer shoves the horizon to "now". A 5-min grace (`GRACE_MS`) widens the horizon so late/out-of-order events near the boundary still pass. Unstamped legacy triggers fall back to mtime (unchanged behaviour). Derived `channel`/`dataFlow` triggers are stamped too (#446): they're regenerated on every reconcile, so `reconcileTeamGithubChannels`/`reconcileTeamDataFlow` run the regenerated set through `stampDerivedActivation` (in `process-template.js`), which **preserves** the prior same-id trigger's `activatedAt` (and stamps a genuinely new one `now`) — a reconcile rewrite therefore can't shove the horizon to "now" and drop a pending PR/issue event.
-- **Fan-out**: matched events are enqueued in the same `/workspace/agents/:agentId/pending-triggers.json` that HTTP triggers write to — the agent-runner picks them up via its existing 5 s drain. Pending entries carry `github.{event, eventId, repo, actor, createdAt, payload}` and are appended to the agent's prompt as a fenced JSON block.
-- **Event keys**: `<lowercase_type_without_event>.<action>` (e.g. `pull_request.opened`, `pull_request_review.submitted`). Bare `push` (no action). The Events API does not emit every webhook action — for instance there's no `pull_request.synchronize`.
-- **Identity**: agents share one GitHub PAT, so the actor field in events is the same for everyone. The `gh-as-agent` wrapper (`/usr/local/bin/gh-as-agent` in the orchestrator image) still routes `push`/`pr` through the orchestrator (managed-policy bypass) and stamps agent identity — `commit` sets the author email to `<agentId>@agents.local`; `stamp <file>` appends `<!-- agent: <id> -->` to a body file. **This stamping is now vestigial for delivery**: the poller no longer reads origin, so an agent's own events reach it like anyone else's. (The stamps remain useful for human-readable attribution in the GitHub Event Log / PR bodies.)
+- **Repo discovery**: walks all envs, dedupes, picks one token per repo (first env wins); tokenless repos skipped.
+- **Bandwidth**: page-1 uses `If-None-Match`; 304s cost no rate budget (~120 conditional GETs/h/repo). **Pagination**: reads further pages on a >100-event burst until an already-seen id / partial page / `MAX_PAGES`, so bursts don't drop events.
+- **Cursor**: a per-repo sliding **seen-id set** (`state.seen[]`, `state.json`), not a `created_at` high-water-mark — an event is fresh iff its id is unseen. First poll only baselines. Fan-out oldest-first.
+- **History horizon**: each subscriber gated by `effectiveHorizon = activatedAt ?? createdAt ?? triggers.json mtime` + 5-min grace, so a `triggers.json` rewrite doesn't shove it to "now". Derived triggers preserve prior same-id `activatedAt` (`stampDerivedActivation`).
+- **Fan-out**: matched events → `pending-triggers.json` (drained every 5s), appended as a fenced JSON block. Event keys `<lowercase_type_without_event>.<action>` (e.g. `pull_request.opened`); bare `push`. The Events API omits some actions (no `pull_request.synchronize`).
+- **Identity**: agents share one PAT (same actor for everyone). `gh-as-agent` stamps human-readable attribution (`commit` → author email `<agentId>@agents.local`; `stamp <file>` → `<!-- agent: <id> -->`) but this is **vestigial for delivery** — the poller doesn't read origin.
 
-**Loop protection — frequency only, no source filtering.** Source/origin filtering was removed deliberately (it silently dropped legitimate events on brittle origin heuristics): a `github-event` trigger now fires on **any** matching event, including ones the subscriber itself caused. There is no self-loop gate and no per-trigger `from` filter. A single frequency-based backstop remains so a self-triggering loop can't flood the stack:
-
-| Layer | Where | What it blocks |
-|---|---|---|
-| Conversation throttle | `_checkAndIncThrottle` | Per `(agent, conversationKey)` sliding window — default 5 events/h. `conversationKey` groups by PR/issue/branch (`pr:42`, `issue:99`, `push:refs/heads/x`, …). On the first over-threshold drop the poller writes a `kind: "throttle-warning"` entry to `pending-triggers.json`; the agent-runner posts a plain DM warning (no Claude call) and then drops further events silently until the window resets. Buckets persist in `/workspace/github-poller/throttle-state.json` and self-prune at 2× the window. |
-
-Event-type matching (`sub.events.has(key)`), the optional exact-match `labelFilter`, and the per-subscriber history horizon are content/recency routing, not source filters — they stay. Narrowly-scoped events per role (template discipline) is the first line of defence and lives in the role templates, not in code.
-
-**Burst-cap digest (#449).** The fan-out is batched per poll (`_fanOutBatch`). After the throttle, the events that would be delivered are grouped by `(agent, conversationKey)`; when a group has **more than `BURST_CAP` (default 3)** events in one poll, they collapse into a single **lossless** `kind: "github-digest"` queue entry (carrying a summary of every bundled event) instead of that many individual agent wake-ups. The agent runtime (`_execute_github_digest`) posts it as a plain DM — no Claude call — so a reactivation backlog or a real activity spike surfaces once for the human to look at, rather than launching a flood of sessions. This is the poll-scoped, *lossless* sibling of the conversation throttle (hour-scoped, *drops*); the digest deliberately bypasses the throttle since it is itself the anti-flood response. Pure splitter `planBurstHandoffs` in `github-poller.js` (unit-tested).
-
-Results are posted to `trigger.roomId` if set, otherwise to the agent's DM room with the admin (read from `/workspace/agents/<id>/dm-room.json`). If neither is available — i.e. the user has not yet opened a chat with this agent — the trigger run is skipped. `[PASS]` suppresses output.
-
-**Session policy on triggered runs.** Agents may declare `sessionPolicy: per-invocation` in `config.json`. When set, *triggered* runs (`github-event`, `cron`, `http`) start with a fresh Claude session (no `--resume`) and don't write the session pointer at run end — the DM session continuity is preserved untouched. The trigger prompt also gets a learn-hint instructing Claude to extract reusable lessons into `memory/log.md` before responding, so persona persists even though the conversational context doesn't. DM messages are unaffected: chat continuity is always honoured. Agents without the field default to `persistent` (legacy behaviour).
+**Loop protection — frequency only, no source filtering.** A trigger fires on **any** matching event, including self-caused. One frequency backstop: the **conversation throttle** (`_checkAndIncThrottle`) — per `(agent, conversationKey)` sliding window, default 5 events/h (`conversationKey` groups by `pr:42`/`issue:99`/`push:refs/heads/x`). First over-threshold drop enqueues a `kind: "throttle-warning"` (plain DM), then drops silently until reset. Event-type matching, `labelFilter`, horizon are content/recency routing, not source filters. **Burst-cap digest** (`_fanOutBatch`, `planBurstHandoffs`): a group exceeding `BURST_CAP` (default 3) in one poll collapses into a single **lossless** `kind: "github-digest"` entry (plain DM) — the poll-scoped sibling of the hour-scoped throttle.
 
 ### BP-event router
 
-The orchestrator hosts a central ingestion endpoint that any signaling source (today: ACE `bp-transition.py`; future: GitHub-poller diff path) can call to announce a Briefing Pack change. The signaler announces what changed; the orchestrator owns the routing.
-
-**Endpoint:** `POST /internal/bp-events` (port 4002, no auth — internal-only)
-
-**Payload shape:**
+Central ingestion endpoint any signaler (today ACE `bp-transition.py`) calls to announce a Briefing Pack change; the orchestrator owns routing. **Endpoint:** `POST /internal/bp-events` (port 4002, internal-only, no auth).
 
 ```json
-{
-  "source": "<agent-id-or-script-identifier>",
-  "events": [
-    { "type": "bp:revised|bp:completed|bp:input-changed", "bp": "<12-char hex>", "details": { ... } }
-  ]
-}
+{ "source": "<id>", "events": [ { "type": "bp:revised|bp:completed|bp:input-changed", "bp": "<12-char hex>", "details": {} } ] }
 ```
 
-**Routing algorithm (`orchestrator.routeBpEvents` + `bp-event-router.js`):**
+**Routing** (`routeBpEvents` + `bp-event-router.js`): build a reverse index `bpId → {stubId, parentOrchestratorId}`; group by hosting orchestrator (unknown BP → `unknown-bp`); force-pull the briefings clone, build the dependency graph via `loadBriefingsGraphFromExplorer()` (bp-explorer's `/api/briefings`); compute affected BPs (**`depends-on` dependents** + **input-artifact dependents** matched output→input path); apply each agent's `bp-trigger-policy`, `enableAgent` (idempotent), append a `bp-event-batch` entry to `pending-triggers.json` (a `kind`-tagged queue entry handled inline by `executeBpEvent`, not a `triggers.json` type). Dedup on `(type, bp)`; best-effort (per-target failures surface in `routed[].error`/`skipped[]`).
 
-1. Build a one-shot reverse index `bpId → { stubId, parentOrchestratorId }` from the bp-instance configs.
-2. Group events by hosting orchestrator. Events whose BP is unknown to any stub are skipped with `unknown-bp`.
-3. For each orchestrator: force-pull its briefings clone (so bp-explorer reads up-to-date `brief.md` files), then build the dependency graph via `loadBriefingsGraphFromExplorer()` — this calls bp-explorer's `GET /api/briefings` and translates the response with `bpsToBriefingsMap` (`orchestrator/briefings-graph.js`). The `artifacts/briefings/.index.json` file is no longer used.
-4. For each event, compute affected BPs:
-   - **`depends-on` dependents** — any leaf BP whose `depends-on` array contains the event's BP hash.
-   - **input-artifact dependents** — any leaf BP with an `artifacts[]` entry where `direction: input` and `path` matches a `direction: output` path of the event's BP.
-5. For each affected BP, locate its bp-instance stub. Apply the agent's `bp-trigger-policy` (see below), then `enableAgent` (idempotent — materializes stubs, respawns disabled agents) and append a `bp-event-batch` entry to its `pending-triggers.json`.
-6. Add an awareness entry to the hosting orchestrator's `pending-triggers.json` listing all downstream effects.
+**Situation classification** tags each entry from the affected BP's status — each requires an explicit closing question so the chat shows the agent waiting for input:
+- `kickoff` — BP `ready`, all `depends-on` `completed`/`reviewed`. Agent posts a 2–3-sentence mission summary + approach, asks for greenlight. No claim/LoopScript/commit before user OK.
+- `cascade-stale` — BP already `completed`/`reviewed`/`stale`, possibly invalidated. Agent posts a summary, asks whether to `/confirm-valid` or `/revise`.
+- `other` — defensive fallback → cascade-stale prompt.
 
-**`bp-event-batch` is not a triggers.json type.** It's a `kind`-tagged entry that the agent-runner's drain loop handles inline (`executeBpEvent`) — no triggers.json registration required.
-
-**Situation classification.** Before enqueuing, the orchestrator inspects the affected BP's current status in the briefings graph (loaded from bp-explorer) and tags each `bp-event-batch` entry with one of:
-
-- `kickoff` — affected BP is `ready` and all its `depends-on` are now `completed`/`reviewed`. The receiving agent reads its brief, posts a 2–3-sentence mission summary plus its planned approach, and asks the user to greenlight starting. No claim, no LoopScript run, no commits before user OK.
-- `cascade-stale` — affected BP was already `completed`/`reviewed`/`stale` and may now be invalidated. The receiving agent posts a lay-of-the-land summary and asks whether to run `/confirm-valid` or `/revise`.
-- `other` — defensive fallback (e.g. BP already `dispatched`/`claimed`); falls through to the cascade-stale prompt.
-
-In every situation the agent's prompt requires an explicit closing question to the user, so the chat clearly shows the agent waiting for input rather than emitting a bare status statement.
-
-**Agent `bp-trigger-policy`** (optional field in `config.json`, defaults applied when absent):
-
-| Field | Values | Default | Effect |
-|---|---|---|---|
-| `mode` | `off` / `notify-only` / `notify-on-activate` | `notify-on-activate` | `off` ignores events; `notify-only` enqueues only when the process is already running; `notify-on-activate` materializes stubs and respawns disabled agents before enqueuing |
-| `respect-manual-disable` | `true` / `false` | `false` | When `true` and an agent was manually disabled, skip activation despite the event |
-
-**Idempotency.** Multiple events for the same `(type, bp)` within one request are deduplicated. `enableAgent` is itself idempotent. Re-firing the same signal is safe — the receiving agent simply gets one more notification entry.
-
-**Best-effort posture.** The signaler treats endpoint failures as silent (connection refused → no AEE running, fine). The endpoint never throws on routing errors per-target; failures are surfaced in the response's `routed[].error` / `skipped[]` arrays.
+**`bp-trigger-policy`** (optional, `config.json`): `mode` = `off` / `notify-only` / `notify-on-activate` (default) — `off` ignores; `notify-only` enqueues only when already running; `notify-on-activate` materializes stubs + respawns disabled agents first. `respect-manual-disable` (default `false`) — when `true`, skip activation for a manually-disabled agent.
 
 ### BP-instance hand-off (manual)
 
-Every bp-instance chat in the Admin Console has a hand-off action that lets the user activate downstream agents at end-of-session. Because each agent has its own workspace and its own clone of the relevant repos, **the only durable bridge between them is git** — the dialog enforces this contract.
+Every bp-instance chat has a hand-off action to activate downstream agents at end-of-session. Because each agent has its own workspace + repo clones, **git is the only durable bridge** — the dialog enforces this. Opening it fetches candidates (briefings graph) + per-repo git-status; submit is disabled while any repo is dirty/unpushed unless the user opts into an override (checkbox + reason quoted into every target's note). Pre-flight nudge buttons (`POST .../handover/nudge`) post a canned commit/push prompt into the source agent's own DM; **Re-check** refreshes. On submit, `POST .../handover` re-fetches git-status server-side and returns `409 git-not-ready` unless ready or the override carries a reason. For each target it materialize/enables the stub, ensures a DM room, and posts a structured body (source-of-work per repo, input-artifact paths, user note, override reason, consistency warnings, and a "Before you start" checklist).
 
-**Flow:**
+### Admin Console authentication
 
-1. Opening the dialog calls two endpoints in parallel: `GET /api/agents/:id/handover/candidates` (proxy to the orchestrator's briefings graph, sourced from bp-explorer's `/api/briefings`) and `GET /api/agents/:id/handover/git-status` (per-repo `branch`, `head`, `headSubject`, `upstream`, `ahead`/`behind`, `dirty`, `pushed`, `ready`).
-2. The dialog renders a per-repo pre-flight card. The submit button is disabled while any repo is dirty or has unpushed commits, unless the user opts into an explicit override (checkbox + free-text reason that gets quoted into every target's hand-off note).
-3. Two pre-flight buttons — **Ask agent to commit & push** and **Ask agent to push pending commits** — POST `/api/agents/:id/handover/nudge` which posts a canned prompt into the source agent's own DM. The agent does the git work itself, the chat history captures the audit trail, and a **Re-check** button refreshes the git status without closing the dialog.
-4. On submit, `POST /api/agents/:id/handover` re-fetches git-status server-side and returns `409 git-not-ready` unless the workspace is ready or the override carries a reason — a stale browser snapshot cannot bypass the gate.
-5. For each target, the server materializes/enables the stub, ensures a DM room, and posts a structured Markdown body containing: the source-of-work block (per repo: name, branch, `headShort`, last-commit subject, remote URL, upstream, dirty markers), input-artifact paths from the briefings graph when present, the user's free-text note, the override reason (if any), per-target consistency warnings, and an explicit "Before you start" checklist (`cd <repo> && git fetch && git checkout <branch> && git pull --ff-only`, `git log --oneline -5`, confirm with user). The receiving agent picks the message up via the standard DM heuristic.
-6. **Repo consistency check.** Each target's environment is compared against the source repos: missing repo URLs and branch mismatches surface as warnings both inline in the DM body (so the receiving agent reads them) and in the dialog's per-target results list (so the user sees them).
+The console is gated by a login screen; every `/api/*` data endpoint requires a valid session cookie (`admin-console/api/auth.js` mounts `auth.gate` over `/api`). A single env credential pair (`ADMIN_USERNAME`/`ADMIN_PASSWORD`, default `admin`/`admin`) is checked by `verifyCredentials()` — the **only** seam an SSO/OIDC integration replaces. HMAC-signed HttpOnly cookie (`aee_session`); static assets + SPA fallback stay open.
 
-### Admin Console authentication (#276)
+**Per-user local passwords (interim).** Teams-page users can get a local scrypt password (never returned). Login checks the user store first (`POST /internal/admin/users/verify`), then falls back to the env admin (best-effort — no lock-out if the orchestrator is down). A per-user session's `sub` is the user's `subject`, so audit names the person.
 
-The whole console is gated by a login screen — every `/api/*` data endpoint requires a valid session cookie (`admin-console/api/auth.js` registers public `POST/GET /api/auth/{login,session,logout}` then mounts `auth.gate` over `/api`). A single env-configured credential pair (`ADMIN_USERNAME` / `ADMIN_PASSWORD`, default `admin`/`admin`) is checked by `verifyCredentials()`, which is the **only** seam an SSO/OIDC integration replaces; the HMAC-signed HttpOnly cookie (`aee_session`), the gate, and the React `AuthProvider` + `Login` screen are provider-agnostic. Static assets and the SPA fallback stay open so the login screen can load. See `docs/admin-console.md` → *Authentication* and `docs/multi-user-concept.md`.
+### Admin Console audit trail
 
-**Per-user local passwords (#374, interim).** Users created on the Teams page can be given a local scrypt password (stored on the user record in the orchestrator's teams-store, never returned by the API). The login route checks the user store first (match by `subject`, via the orchestrator's internal `POST /internal/admin/users/verify`), then falls back to the env admin — best-effort, so the env admin always works even if the orchestrator is down (no lock-out). A per-user session's `sub` is the user's `subject`, so audit (#305) names the person. Set via Teams → Manage Users (🔑). Superseded by SSO (#307).
+Every mutating `/api` request is one append-only JSONL line at `/workspace/audit/audit-<date>.jsonl` (override `AUDIT_DIR`). `admin-console/api/audit.js` `auditMutations` is mounted **before** the auth gate (so it sees denied attempts), logging from `res.on('finish')` (actor from `req.user`): `ts, actor, action, method, resource, teamId, status, outcome, ip`. Best-effort. Read via `GET /api/audit?limit=<n>`. Matrix chat history is intentionally **not** the config-mutation audit log.
 
-### Admin Console audit trail (#305)
+### GitHub poller event-transparency log
 
-Every mutating `/api` request (`POST`/`PUT`/`PATCH`/`DELETE`) is recorded as one append-only JSONL line at `/workspace/audit/audit-<date>.jsonl` (override via `AUDIT_DIR`). `admin-console/api/audit.js` exposes `auditMutations` — a global middleware mounted **before** the auth gate (so it sees denied/unauthenticated attempts too) that logs from a `res.on('finish')` handler reading the acting human from `req.user` (#276). Each entry carries `ts, actor, action, method, resource, teamId (best-effort from body, pending #302), status, outcome, ip`. Logging is strictly best-effort — wrapped so it can never block or break a request. Read via `GET /api/audit?limit=<n>` (protected, newest-first). Matrix chat history is intentionally **not** the config-mutation audit log. See `docs/admin-console.md` → *Audit trail*.
-
-### GitHub poller event-transparency log (#469)
-
-Separate from the audit trail above (which covers human/API mutations), this log answers "what did the GitHub poller see, and what happened to it" — every event the poller confirms **fresh** (survived the #320 seen-id dedup) is recorded, whether it was delivered to an agent, dropped by a loop-protection layer, folded into a #449 burst digest, or matched no subscriber's trigger at all. It is purely observational: it never influences delivery decisions, only records them, so an admin can distinguish "a bug dropped this" from "a protection layer correctly dropped this".
-
-Writer/reader split across the shared-volume boundary, mirroring the audit trail's day-bucketed JSONL pattern but with its own directory since the two packages don't cross-require:
-
-- **Writer** (`orchestrator/github-event-log.js`) — invoked from `github-poller.js`'s `_fanOutBatch` once per fresh event, after all gates have resolved. `buildEventEntry` records `ts, eventId, repo, event, actor, createdAt, label`, plus one `outcomes[]` entry **per subscriber whose trigger's event-type filter matched** (`{agentId, triggerId, status: delivered|dropped|digest, reason?}`) — a subscriber that doesn't listen to this event type at all is not represented, which is what makes `outcomes.length === 0` (`noMatchingTrigger: true`) a precise "nobody's listening" signal rather than an artifact of gating. `label` (#487) is `payload.label.name` for `*.labeled`/`*.unlabeled` events (the same field the poller's `labelFilter` gate reads), `null` for event types that don't carry one. Appended as JSONL to `/workspace/github-event-log/github-events-<date>.jsonl` (override via `GITHUB_EVENT_LOG_DIR`), best-effort like the audit log. Rolling retention (`cleanupOldEntries`, default 7 days) runs once per calendar day from the poller's existing tick loop.
-- **Reader** (`admin-console/api/github-event-log.js`) — `queryEntries({since, until, limit})` merges entries across day files, newest-first, capped at `MAX_LIMIT` (5000). Exposed as `GET /api/github-events` (protected by the auth gate), which additionally enriches each outcome with the subscriber's display name from its `config.json`.
-- **UI** — the **GitHub Event Log** page (`/github-events`, `admin-console/src/pages/GithubEventLog.jsx`) lists events for a selectable time range (default last 24 hours), with an outcome chip per subscriber, a distinct "nobody's listening" badge for unmatched events, and the label name appended to the Event cell (e.g. `issues.labeled (ready)`) when the entry carries one — entries persisted before #487 simply show none.
-
-### Agent Management
-
-All agent lifecycle operations (create / enable / disable / edit prompt / delete) happen via the **Admin Console** at `http://localhost:4000`.
+Separate from the audit trail: answers "what did the poller see and what happened to it". Every **fresh** event (survived seen-id dedup) is recorded — delivered, dropped by a protection layer, folded into a digest, or matched no subscriber. Purely observational. **Writer** `orchestrator/github-event-log.js` (from `_fanOutBatch`): `ts, eventId, repo, event, actor, createdAt, label` + one `outcomes[]` entry per subscriber whose event-type filter matched (`{agentId, triggerId, status: delivered|dropped|digest, reason?}`); `outcomes.length === 0` → `noMatchingTrigger: true`. JSONL at `/workspace/github-event-log/`, best-effort, 7-day retention. **Reader** → `GET /api/github-events` (merges day files newest-first, cap 5000). **UI**: the **GitHub Event Log** page (`/github-events`).
 
 ### Team-Setup wizard
 
-`POST /api/teams` (driven by the **Team Setup** wizard at `/team-setup`) materialises a team-shaped agent group in one atomic-with-rollback transaction. The wizard sits on top of the existing `team` / `team-member` machinery — the result is identical in shape to a manually-created team plus members. The wizard is **create-only** — growing an existing team now happens in the Flow Editor (#588; old `?mode=extend` deep links redirect to `/flows?proc=<team>`). After the process choice (step 1, see below) the wizard picks an existing **Working Environment** (card grid: name + repo/skills summary; empty state links to `/environments`) and sends its id as `environmentId` — the backend resolves repository, branch, SSH key, PAT and the MCP set from the env and skips env auto-creation. The team name + id are then pre-filled from the env's name (uniqueness-resolved against existing agent ids / team names; both editable). The API also still accepts the legacy direct inputs (`repository` (URL, branch, `sshKeyId`) + `githubTokenId` + `mcpServers`), which auto-create an env id `<teamId>`. The wizard always ships a **process-template bundle** from the Process step below. The backend `mode: "extend"` path is retained — the wizard uses it only when an id collision surfaces, re-submitting the *same* bundle to add just the missing members (see below); the Flow Editor's Edit-as-draft → Materialize round-trip also drives it.
+`POST /api/teams` (wizard at `/team-setup`) materialises a team-shaped agent group in one atomic-with-rollback transaction on top of the `team`/`team-member` machinery. **Create-only** — growing an existing team happens in the Flow Editor. Steps: **Process → Working Environment → Team → Knowledge (optional) → Review**. It picks an existing env and sends `environmentId` (backend resolves repo/branch/SSH/PAT/MCP); also accepts legacy direct inputs (`repository` + `githubTokenId` + `mcpServers`, auto-creating env id `<teamId>`). Always ships a `processTemplateVersion: 1` bundle; `mode: "extend"` only on an id collision.
 
-**Process-first creation (#419–#424 + #428, `docs/wizard-flow-integration.md`).** The wizard's **first** step is the **Process** step (`admin-console/src/pages/team-setup/StepProcess.jsx`) — the process choice is the entry decision (order per #428: Process → Working Environment → Team → Knowledge (optional) → Review), so "Start blank in the canvas" exits loss-free and the bundle name is bound to the team name at submit time (not at weave time, when the name isn't known yet). The flat role-checkbox list is retired (the old extend-mode roles step went away with the Extend Team UI, #588). The step produces one `processTemplateVersion: 1` bundle via three entries:
+**Process step** (`StepProcess.jsx`) produces the bundle three ways: (1) **Use a template** — curated registry (`orchestrator/skill-pool/process-templates/` → `make seed-process-templates` → `GET /api/process-templates`; ships `core-sdlc` + `extended-sdlc`) plus saved drafts; (2) **Compose a process** — stage columns with Scout/Author/Companion slots + custom roles, wired live by the **Flow-Weaver** (`admin-console/api/flow-weaver.js`, `POST /api/process/weave`): a deterministic pure engine that chains stages via human-gated `<prefix>:approved` issue channels, generates intra-stage loops + rework/human-feedback triggers, staggers curation crons, compensates gaps (missing duties merge into the Author) — the woven bundle is **lint-clean**; uses **catalog v2** (`catalog-ports.js`: `patternRole`/`stageAffinity`/`ports` + `intrinsic` filtering); (3) **Start blank** — empty draft → `/flows?proc=draft:<id>`. Inline preview + authoritative lints (`POST /api/flows/graph`); error lints block submission. Exits: **Create team** (`POST /api/teams/stream`, full parity) or **Save as draft**.
 
-1. **Use a template** — gallery of curated process templates (registry `orchestrator/skill-pool/process-templates/` → `make seed-process-templates` → `GET /api/process-templates[/:id]`; ships `core-sdlc` + `extended-sdlc`, CI-guarded to render lint-clean) plus saved process drafts.
-2. **Compose a process** — stage columns with Scout/Author/Companion slots (the reduced per-stage pattern *Scout (gap+evidence) → Author → Companion (review, feedback routing, escalation)*) plus intake/standalone extras and **custom roles** (LLM-drafted prompt via `POST /api/agent-prompt/generate`, suggested wiring via `POST /api/agent-ports/suggest` with a keyword-heuristic fallback in `admin-console/api/port-suggestion.js` — always user-confirmed). The selection is wired live by the **Flow-Weaver** (`admin-console/api/flow-weaver.js`, `POST /api/process/weave`): a deterministic, pure engine that chains stages via human-gated (opt-out per boundary) `<prefix>:approved` issue channels, generates the intra-stage `<prefix>:author-go` / `<prefix>:escalate` loops + rework/human-feedback triggers, auto-staggers self-curation crons, and compensates gaps (missing Companion/Scout duties merge into the Author via a marker-delimited *Wiring notes* prompt block; passive stages are skipped by the chain; every rule is surfaced in `notes[]`). Its tested contract: the woven bundle is **lint-clean** (zero error/warning lints). Catalog roles carry the composition surface for this (**catalog v2**, `admin-console/api/catalog-ports.js`): `patternRole` / `stageAffinity` / `ports` (abstract slots `stage-entry` / `stage-author`), and `intrinsic: true` on essence triggers — non-intrinsic dispatcher wiring is dropped when composing; generic pattern templates `scout` / `stage-author` / `stage-companion` ship in the catalog (`category: "pattern"`).
-3. **Start blank in the canvas** — creates an empty draft and jumps to `/flows?proc=draft:<id>`.
+**Role templates** live under `/template-workspace/agent-templates/` (from `orchestrator/skill-pool/agent-templates/` via `make seed-templates`). **Deliberately rudimentary**: parameter-free prompts (only weave-time `{{stageName}}`/`{{stagePrefix}}` remain), at most **one** role-specific trigger + a daily self-curation cron (staggered in the 03:00 hour, `intrinsic: true`) pruning `memory/`. 24 roles; sample:
 
-The step shows an inline SVG flow preview + authoritative lints (`POST /api/flows/graph`); error lints block submission. Exits: **Create team** (`POST /api/teams/stream`, which now has full `processTemplate`/`customRoles`/ports parity with `POST /api/teams`) or **Save as draft** (canvas round-trip). Bundle-path collisions stay on the bundle: the collision card re-submits with `mode: "extend"`, adding only missing members.
+- `business-analyst` (persistent) — `issues.labeled` `req:refine` (intake pair with `issue-triage`)
+- `developer` (per-invocation) — wiring from the flow; `code-reviewer`/`security-`/`test-`/`performance-reviewer` — `pull_request.opened/reopened`
+- `reworker` — `pull_request.labeled` `revisions-required`; `documentation-sync` — `pull_request.closed` (merged-guard)
+- `issue-triage` — `issues.opened`, emits `req:refine`; `dispatcher` — `issues.labeled` `ready`, releases via `dispatch`
+- `generic` (persistent) — blank slate, no curation cron
 
-Role templates live as JSON files under `/template-workspace/agent-templates/` (seeded from `orchestrator/skill-pool/agent-templates/` via `make seed-templates`). **Templates are deliberately rudimentary** (rework 2026-07): prompts are parameter-free (no `{{teamName}}`/`{{repoFullName}}`/`{{dispatchLabel}}` tokens — only the weave-time `{{stageName}}`/`{{stagePrefix}}` in the `pattern` trio remain), and every template ships at most **one** role-specific trigger plus a daily self-curation cron (staggered minutes in the 03:00 hour, `intrinsic: true`) that reviews and prunes the agent's `memory/`. The old bidding/safety-net/monitoring trigger sets from the retired all-roles mega-flow are gone; extra wiring is authored in the Flow Editor / Composer. Core SDLC roles (BA, Developer, Code Reviewer, Reworker) carry the more mature prompts from the `core-sdlc` process template. Sample of the catalog (24 roles total):
-
-| Role | Session | Role-specific trigger |
-|---|---|---|
-| `business-analyst` | persistent | `issues.labeled` (`req:refine`, intrinsic — intake pair with `issue-triage`) |
-| `developer` | per-invocation | — (wiring comes from the flow) |
-| `code-reviewer` | per-invocation | `pull_request.opened/reopened` |
-| `reworker` | per-invocation | `pull_request.labeled` (`revisions-required`) |
-| `security-/test-/performance-reviewer` | per-invocation | `pull_request.opened/reopened` |
-| `documentation-sync` | per-invocation | `pull_request.closed` (merged-guard in prompt) |
-| `issue-triage` | per-invocation | `issues.opened` (intrinsic, emits `req:refine`) |
-| `dispatcher` | per-invocation | `issues.labeled` (`ready`) — releases via `dispatch` label |
-| `generic` | persistent | — (blank slate, also no curation cron) |
-
-**Materialisation flow:**
-1. One shared Working Environment: the reused env when `environmentId` is supplied (kept untouched, keeps its own id), else auto-created under id `<teamId>` carrying the repo, SSH key, PAT, and an empty skill set.
-2. One `team` agent id `<teamId>` with a generic shared `systemPromptTemplate` and `skipFirstMember: true` (so the wizard adds members itself with role overrides instead of getting an auto-numbered `<teamId>-1`).
-3. One `team-member` agent per selected role, id `<teamId>-<roleId>`. Each member carries:
-   - `systemPrompt` = role-specific prompt from the template (override against the team default).
-   - `skillsOverride` deliberately omitted — members inherit the team agent's `skills[]` (the wizard's Knowledge step supplies the initial set via the top-level `skills` field on `POST /api/teams(/stream)`). Once role-specific skill packs ship they slot in here.
-   - `sessionPolicy: per-invocation` (for reactive roles).
-   - Full `triggers.json` rendered from the template (`{{repoFullName}}` and `{{agentId}}` substituted per-member), with `repo` set to the team's repo.
-4. One DM room pre-created per member (best-effort — failure here doesn't roll back the team).
-
-On any failure the wizard rolls back members (`DELETE /internal/agents/:id`), then the team agent, then the env, in reverse creation order. `mode: "extend"` keeps a pre-existing team and adds only the missing role-members; `mode: "create"` (default) returns 409 if the env or team or any member already exists.
-
-Members can be edited later via the standard agent edit form: System Prompt and Skills each toggle between **Inherit from team** (override field cleared) and **Custom** (override stored on the member). Editing the team's prompt-template eagerly pushes the new value to every inheriting member; skill changes on the team's env are picked up at the next member rebuild (lazy push, by design).
+**Materialisation:** one shared env (reused or auto-created id `<teamId>`); one `team` agent id `<teamId>` (`skipFirstMember: true`); one `team-member` per role id `<teamId>-<roleId>` carrying `systemPrompt` (role override), `sessionPolicy: per-invocation`, and a full `triggers.json` (`{{repoFullName}}`/`{{agentId}}` substituted); one DM room per member (best-effort). `skillsOverride` omitted — members inherit the team `skills[]`. On any failure, roll back members → team → env. Members are later editable with Inherit ↔ Custom toggles.
 
 ### Direct Messages & Session Log
 
-Each agent runs the Claude CLI as:
+Each agent runs:
 
 ```
 claude [--resume <sessionId>] -p <prompt> \
-  --output-format stream-json --verbose \
-  --permission-mode acceptEdits
+  --output-format stream-json --verbose --permission-mode acceptEdits
 ```
 
-NDJSON lines from stdout are parsed event-by-event and written, together with wrapper events (`message.received`, `claude.invoke`, `message.posted`, `error`, `trigger.fired`), to an append-only file at:
+NDJSON stdout is parsed and written with wrapper events (`message.received`, `claude.invoke`, `message.posted`, `error`, `trigger.fired`) to `/workspace/agents/<agentId>/sessions/<roomId>.jsonl` (schema: `docs/agent-chat-plan.md` §4.1). Every entry carries a `correlationId` (Matrix `event_id`, or `trigger:<id>:<ts>`) tying log rows to chat bubbles.
 
-```
-/workspace/agents/<agentId>/sessions/<roomId>.jsonl
-```
+**Per-room session pinning.** After each successful run the runner writes `session_id` to `<roomId>.current.json`; the next message in that room uses `--resume` (on failure it clears the pointer and retries once). `GET`/`DELETE /api/agents/:agentId/session/:roomId/current` read/drop it; the chat header shows *Reset* / *Reset & lernen*. Snapshots live under `~/.claude/projects/<encoded-cwd>/` (persisted via the `claude-home` volume so `--resume` survives restarts).
 
-**Per-room session pinning.** After every successful Claude run, the runner captures `session_id` from the stream-json `system_init` / `result` events and writes it to `/workspace/agents/<agentId>/sessions/<roomId>.current.json`. The next message in the same chat room is invoked with `--resume <sessionId>` so Claude keeps the conversation in-context. If `--resume` fails (stale session, e.g. after a CLI upgrade) the runner clears the pointer and retries once without it. The Admin Console exposes `GET` / `DELETE /api/agents/:agentId/session/:roomId/current` to read or drop the pointer; the chat header shows a "Session aktiv" badge plus *Reset* (drop pointer) and *Reset & lernen* (send a learn-prompt as a normal user message, then auto-drop after the agent's reply) buttons. Claude's per-session conversation snapshots live under `~/.claude/projects/<encoded-cwd>/`, persisted via the `claude-home` volume so `--resume` survives orchestrator restarts.
-
-The schema is defined in `docs/agent-chat-plan.md` §4.1 and includes `assistant_text`, `tool_use`, `tool_result`, `thinking`, and `result` events. Every entry carries a `correlationId` (the originating Matrix `event_id`, or a synthetic `trigger:<id>:<ts>` for cron triggers) so the Admin Console can tie log rows to chat bubbles.
-
-**DM heuristic.** Every message the agent receives is checked against a single rule (in `agent-image/scripts/agent-entrypoint.py`): `getJoinedRoomMembers(roomId)` returns exactly two members (this agent + one other) AND the sender is not this agent. Anything else is ignored. Membership counts are cached for 30 s.
+**DM heuristic** (`agent-entrypoint.py`): act iff `getJoinedRoomMembers(roomId)` is exactly two (this agent + one other) AND the sender isn't this agent (cached 30s).
 
 ### Agent Chat UI
 
-The Admin Console embeds a Matrix client at `/chats` (and `/chats/:agentId`) so users can talk to any enabled agent without leaving the console.
+The Admin Console embeds a Matrix client at `/chats` (+ `/chats/:agentId`). Under `admin-console/src/pages/`: `AgentChat.jsx` (top-level) + `agent-chat/` (`AgentList`, `ChatPanel` — backfill/pagination/optimistic-send/SSE tail/session toolbar; `Message` — markdown via `react-markdown` + `remark-gfm` + `rehype-pretty-code` + `rehype-sanitize`; `MessageInput`; `RightRail` — tabbed, toggle `Cmd/Ctrl+Shift+L`; `SessionLogPanel`; `WorkspaceBrowser`) + `hooks/{useSSE,useColorScheme}.js`.
 
-**Where it lives**
+**DM rooms.** First open lazily POSTs `/api/matrix/agents/:id/dm`; server creates/reuses a 1:1 room, invites the admin, persists `dm-room.json`; subsequent loads short-circuit on that file. **Session log rendering**: SSE `/api/agents/:id/session/:roomId/stream` (`since=<byte-offset>` cursor); `correlationId` pairs log rows with bubbles (hover dims non-matching); adjacent `tool_use`/`tool_result` with the same `toolId` fold into one block.
 
-| File | Role |
-|---|---|
-| `admin-console/src/pages/AgentChat.jsx` | Top-level page: owns selected agent, log-panel toggle, last-agent persistence |
-| `admin-console/src/pages/agent-chat/AgentList.jsx` | Left rail of enabled agents |
-| `admin-console/src/pages/agent-chat/ChatPanel.jsx` | Chat view: backfill, scroll-up history pagination, optimistic send, SSE live tail, session-control toolbar (Reset / Reset & lernen) |
-| `admin-console/src/pages/agent-chat/Message.jsx` | Single bubble; markdown via `react-markdown` + `remark-gfm` + `rehype-pretty-code` (dual themes) + `rehype-sanitize` |
-| `admin-console/src/pages/agent-chat/MessageInput.jsx` | Auto-resizing textarea with IME-safe Cmd/Ctrl+Enter submit |
-| `admin-console/src/pages/agent-chat/RightRail.jsx` | Tabbed right rail (toggle `Cmd/Ctrl+Shift+L`) — hosts `SessionLogPanel` and `WorkspaceBrowser`; persists active tab in localStorage |
-| `admin-console/src/pages/agent-chat/SessionLogPanel.jsx` | SSE tail of the JSONL session log; renders headerless when `embedded` |
-| `admin-console/src/pages/agent-chat/WorkspaceBrowser.jsx` | Lazy-loading file tree of `/workspace/agents/<id>/` plus inline read-only file viewer (text + binary detection, 512 KB cap) |
-| `admin-console/src/hooks/useSSE.js` | Generic SSE consumer with exponential-backoff reconnect |
-| `admin-console/src/hooks/useColorScheme.js` | Tracks `<html data-theme>` so Shiki blocks switch with the page theme |
+**Workspace browser** (read-only over `/workspace/agents/<agentId>/`): `GET .../workspace/{tree,file,download,image}?path=<rel>` — all reject paths outside the agent root. Reads capped at 512 KB; binary files (NUL in first 8 KB) flagged; raster images (PNG/JPEG/GIF/WebP by magic bytes, SVG excluded) rendered inline via `/image` (no cap).
 
-**DM rooms.** When the user opens an agent for the first time, the UI lazily POSTs `/api/matrix/agents/:id/dm`; the server creates (or reuses) a 1:1 Matrix room, invites the admin user, and persists `{ roomId, createdAt, createdBy }` to `/workspace/agents/<id>/dm-room.json`. Subsequent loads short-circuit on that file, so the room id round-trips through `GET /api/matrix/agents`.
-
-**Session log rendering.** The right panel subscribes to `/api/agents/:id/session/:roomId/stream` (SSE, with a `since=<byte-offset>` cursor for replay). Each JSONL line carries a `correlationId` (the originating Matrix `event_id`) which lets the UI pair log rows with chat bubbles: hovering a message dims log entries with non-matching ids, and vice versa. Adjacent `tool_use` / `tool_result` entries with the same `toolId` are folded into a single collapsible block.
-
-**Workspace browser.** The right rail's second tab is a read-only file explorer over `/workspace/agents/<agentId>/`. It calls `GET /api/agents/:agentId/workspace/tree?path=<rel>` for lazy directory listings, `GET /api/agents/:agentId/workspace/file?path=<rel>` for inline content, and `GET /api/agents/:agentId/workspace/download?path=<rel>` to trigger a browser file download (`Content-Disposition: attachment`, `application/octet-stream`; no size cap). All three endpoints reject any path that resolves outside the agent root (path traversal, escaping symlinks). File reads are capped at 512 KB and binary files (NUL byte in the first 8 KB) are flagged so the UI can show a placeholder instead of garbled text. Supported raster images (PNG/JPEG/GIF/WebP, detected by magic bytes so a wrong extension still works — SVG is deliberately excluded) are flagged with an `imageType` on the `/file` response and rendered inline via `GET /api/agents/:agentId/workspace/image?path=<rel>`, which streams the full bytes (no 512 KB cap) with the correct image `Content-Type` and `Content-Disposition: inline` under the same `safeAgentPath` guard; the maximize action shows the image fit-to-window. A per-file download button fades in on hover for every file row (text and binary alike). The tab is intended as an at-a-glance peek at memory files, skills and the cloned repo — agent-side edits should still go through the agent itself.
-
-**Markdown safety.** Agent output is sanitized with `rehype-sanitize` using the GitHub-flavoured `defaultSchema`, extended only to allow `style` and the `data-*` attributes that `rehype-pretty-code` emits on `span` / `code` / `pre` / `figure` / `div`. Sanitize runs *after* pretty-code in the rehype pipeline so the syntax-highlighting markup survives. Code blocks ship both Shiki themes (`github-light`, `github-dark`); the active theme is selected by CSS rules in `admin-console/src/theme/tokens.css` keyed off `<html data-theme>`.
+**Markdown safety.** Sanitized with `rehype-sanitize` (GFM `defaultSchema` + `style`/`data-*` for `rehype-pretty-code`), run *after* pretty-code so highlighting survives. Both Shiki themes shipped; active theme via CSS keyed off `<html data-theme>`.
 
 ## Key Files
 
@@ -417,28 +236,19 @@ The Admin Console embeds a Matrix client at `/chats` (and `/chats/:agentId`) so 
 |---|---|
 | `docker-compose.yml` | All four services + volumes |
 | `.env` | Secrets: Matrix tokens, LLM proxy URL + auth token (gitignored) |
-| `Makefile` | Build + start convenience targets (`make up`, `make down`, `make logs`, ...) |
-| `orchestrator/orchestrator.js` | Backend service: agent lifecycle, child-process spawning, environment-aware workspace seeding, internal HTTP API for the admin console |
-| `orchestrator/spawn-container.js` | Spawns/kills the per-agent Podman container over the libpod socket; provisions per-agent network (Seam #2), filesystem SubPath (Seam #3), and dedicated-volume (`AEE_PER_AGENT_VOLUME`) isolation. |
-| `orchestrator/teams-store.js` | Single source of truth for the human **Team** data model (#299): pure factory for Teams / users / memberships CRUD, referential integrity, default-team + System-Admin bootstrap. Unit-tested in `teams-store.test.js`. See `docs/teams-data-model.md`. |
-| `agent-image/` | The per-agent container image `as-agent:latest` (`python:3.12-slim`). Entrypoint `scripts/agent-entrypoint.py` (+ `sase_lib.py`) is the live agent runtime: Matrix client + Claude CLI invocations + trigger scheduler. Honors `sessionPolicy: per-invocation` and posts plain-text throttle warnings on `kind: throttle-warning` queue entries. |
-| `orchestrator/github-poller.js` | Polls the GitHub Events API; matches events by type + optional `labelFilter` + history horizon (no source/origin filtering), then applies the frequency throttle (`_checkAndIncThrottle`) and the #449 burst-cap digest (`planBurstHandoffs`) before fanning events out to per-agent `pending-triggers.json`. |
-| `orchestrator/Dockerfile` | Node 22 + Claude Code CLI + git + openssh-client |
-| `orchestrator/CLAUDE-template.md` | Base template baked into the image as `/defaults/CLAUDE.md`, used as fallback when the skill-pool volume has no CLAUDE.md |
-| `orchestrator/prompt-assembly.js` | Pure, unit-tested single source of truth for system-prompt composition: CLAUDE.md ordering, conditional gating (git/trigger/skills), de-duplication, and the runtime memory hint. Used by both `buildAgentClaudeMd` (seeding) and the prompt-preview endpoint. See *System-prompt assembly & preview*. |
-| `orchestrator/skill-pool/agent-templates/` | Role-template JSON files for the Team-Setup wizard (seeded into `/template-workspace/agent-templates/` via `make seed-templates`). |
-| `orchestrator/setup.sh` | Initial setup: register the admin Matrix user, print the access token |
-| `admin-console/api/api.js` | Express API: agents, environments, ssh-keys, skills, models, mcp, **`POST /api/teams`** (Team-Setup wizard backend), `GET /api/agent-templates`. |
-| `admin-console/src/pages/WorkingEnvironments.jsx` | UI: CRUD for environments (optional repo + ssh key + MCP; no skills — grants are team-owned) |
-| `orchestrator/skill-grants.js` | Pure, unit-tested source of truth for the team-owned skill grant: `effectiveSkills` (member override → own `skills[]` → parent construct) + the one-time `migrateSkillGrant` (env.skills → config.skills). |
-| `admin-console/src/pages/SshKeys.jsx` | UI: CRUD for SSH keys (paste private key, see fingerprint only) |
-| `admin-console/src/pages/Agents.jsx` | UI: CRUD for agents (env dropdown, role-aware cards, team-member edit form with inherit/override toggles for `systemPrompt` and `skillsOverride`). |
-| `admin-console/src/pages/TeamSetup.jsx` | UI: 5-step wizard (Process → Working Environment → Team → Knowledge (optional) → Review) that drives `POST /api/teams(/stream)` with `environmentId`. |
-| `admin-console/src/pages/team-setup/StepProcess.jsx` | UI: the wizard's Process step (#422) — template gallery, stage composer with custom-role dialog, flow preview + lints. |
-| `admin-console/api/flow-weaver.js` | Deterministic wiring engine (#421): stages + catalog-v2 roles → lint-clean process-template bundle (`POST /api/process/weave`). |
-| `admin-console/api/catalog-ports.js` | Catalog v2 (#420): normalises `patternRole` / `stageAffinity` / `ports` + `intrinsic` trigger filtering on agent templates. |
-| `admin-console/api/process-template-registry.js` | Curated process-template registry (#419): `orchestrator/skill-pool/process-templates/` → `GET /api/process-templates`. |
-| `admin-console/api/port-suggestion.js` | Wiring suggestion for custom roles (#423): LLM parse + keyword heuristic behind `POST /api/agent-ports/suggest`. |
+| `Makefile` | Build/start targets (`up`, `down`, `logs`, `build`, `ps`, `seed-*`) |
+| `orchestrator/orchestrator.js` | Backend: agent lifecycle, container spawning, env-aware seeding, internal HTTP API |
+| `orchestrator/spawn-container.js` | Spawns/kills the per-agent Podman container over libpod; network + FS SubPath + dedicated-volume isolation |
+| `orchestrator/teams-store.js` | Source of truth for the human **Team** data model (pure factory) |
+| `orchestrator/skill-grants.js` | Source of truth for the team-owned skill grant (`effectiveSkills`) |
+| `orchestrator/prompt-assembly.js` | Pure single source for system-prompt composition (ordering, gating, memory hint) |
+| `orchestrator/github-poller.js` | GitHub Events API polling: match, throttle, burst digest, fan-out |
+| `orchestrator/setup.sh` | Register the admin Matrix user, print the access token |
+| `agent-image/` | Per-agent image `as-agent:latest`; entrypoint `scripts/agent-entrypoint.py` (+ `sase_lib.py`) is the live runtime |
+| `admin-console/api/api.js` | Express API: agents, environments, ssh-keys, skills, models, mcp, `POST /api/teams`, agent-templates |
+| `admin-console/api/flow-weaver.js` | Deterministic wiring engine: stages + catalog-v2 roles → lint-clean bundle |
+| `admin-console/api/process-template.js` | Pure builders/validators for process-template bundles |
+| `admin-console/src/pages/{Agents,WorkingEnvironments,TeamSetup,ProcessCanvas}.jsx` | Agent CRUD; env CRUD; the 5-step wizard; the Flows graph/editor (`ProcessGraphPanel`) |
 
 ## Commands
 
@@ -447,66 +257,38 @@ The Admin Console embeds a Matrix client at `/chats` (and `/chats/:agentId`) so 
 # registers the admin user and prints the access token to add to .env.
 ./orchestrator/setup.sh
 
-# Start / stop / restart the full stack
-make up
+make up           # start / stop / restart the full stack
 make down
 make restart
+make build        # rebuild orchestrator image (= podman compose build orchestrator)
+make ps           # container status
+make logs         # stream orchestrator + admin-console + conduwuit logs
 
-# Rebuild orchestrator image only
-make build
-# (equivalent to `podman compose build orchestrator`)
-
-# Container status + log streaming for orchestrator + admin-console + conduwuit
-make ps
-make logs
-
-# Per-service logs
-podman logs -f orchestrator
+podman logs -f orchestrator      # per-service logs
 podman logs -f admin-console
 podman logs -f conduwuit
 ```
 
 ## Conduwuit Admin
 
-Matrix users are managed via the Conduwuit admin room (`!cUxr0SyfINf9yEvBOD:local`). The orchestrator automates user creation when adding agents through the Admin Console.
-
-```
-!admin users list                           — list all users
-!admin users create-user <name> <password>  — create user
-!admin users deactivate @user:local         — deactivate user
-```
+Matrix users are managed via the Conduwuit admin room (`!cUxr0SyfINf9yEvBOD:local`); the orchestrator automates creation when adding agents. `!admin users list` / `create-user <name> <password>` / `deactivate @user:local`.
 
 ## Skills
 
-Skills are added to the skill-pool volume (`vgh-claw_claude-workspace`) under `skills/<name>/SKILL.md`. They are granted per **agent construct** (team agent's `skills[]` / standalone agent's `skills[]` / member `skillsOverride`) — via the Agents page, the Team-Setup wizard's Knowledge step, or the Knowledge page. Working Environments no longer have a skill picker.
+Skills live in the skill-pool volume (`vgh-claw_claude-workspace`) under `skills/<name>/SKILL.md`, granted per **agent construct** (team `skills[]` / standalone `skills[]` / member `skillsOverride`) via the Agents page, the wizard's Knowledge step, or the Knowledge page. Environments have **no** skill picker. Intended domain: **Mainframe Migration** (COBOL, JCL, DB2, IMS/VSAM).
 
-The intended domain is **Mainframe Migration** — skills will cover COBOL analysis, JCL conversion, DB2 schema mapping, IMS/VSAM migration patterns, and related topics.
+### Two-tier skill pool
 
-### Two-tier skill pool (#306)
-
-Skills live on two tiers, resolved **team-first then global** at agent seeding:
-
-| Tier | Path | Managed by | Visibility |
-|---|---|---|---|
-| **Global** | `/template-workspace/skills/` (orchestrator, RO) = `/pool/skills/` (admin-console, RW) | System Admin | All teams |
-| **Team** | `/workspace/teams/<teamId>/skills/` (both mount `agent-pool-workspace` at `/workspace`, RW) | Team Admin | That team's agents only |
-
-`orchestrator/skill-source.js` (`makeSkillSourceResolver`, unit-tested) does the resolution: `seedAgentWorkspace(id, env, { teamId, skills })` copies each name of the agent's resolved grant (team-owned — `skill-grants.js`, not the env) from the owning team's pool when present, else the global pool — so a team with no own pool behaves exactly as before. The admin-console `/api/skills` endpoints carry a `source` of `pool` (global) / `team` (+`teamId`) / `agent`: `GET /api/skills[?teamId=]` lists global + team skills tagged with tier; POST/PUT/DELETE accept `source:'team'`+`teamId`; `POST /api/skills/promote-to-global` lifts a team skill into the global pool (two-stage promotion, relates to #173). The Skills Registry UI exposes the tier (Global/Team), a target selector on create, team-skill edit/delete, and *Promote to global*. Membership-based filtering of which team skills a caller sees is a follow-up (#302).
+Resolved **team-first then global** at seeding. **Global**: `/template-workspace/skills/` (orchestrator RO) = `/pool/skills/` (admin-console RW), System-Admin-managed, all teams. **Team**: `/workspace/teams/<teamId>/skills/` (RW), Team-Admin-managed, that team only. `orchestrator/skill-source.js` (`makeSkillSourceResolver`) copies each grant name from the team's pool when present, else global. `/api/skills` tags `source` = `pool`/`team`/`agent`; `POST /api/skills/promote-to-global` lifts a team skill into the global pool.
 
 ### Knowledge digest (guaranteed context injection)
 
-Phase 1 of the memory/knowledge unification (`docs/memory-knowledge-unification-concept.md`): every KB-provisioned agent carries a generated **`knowledge-digest.md`** in its workspace root, `@`-imported by the seeded CLAUDE.md (same native mechanism as `@AGENT-PROMPT.md`) — so the team's conventions, converged (independently learned ≥2×) and recent lessons are **guaranteed in context at session start**, no tool call required; `knowledge search` remains the long-tail complement. The digest is deterministic (no LLM), budgeted (~3k tokens), and built by **one pure module on two sides**: `orchestrator/knowledge-digest.js` ↔ `build_knowledge_digest()` in `agent-image/scripts/agent-entrypoint.py`, kept byte-identical via the shared golden fixture `orchestrator/knowledge-digest.fixture.json` asserted by both test suites (change both sides in one commit). Two writers, one contract: the agent runtime rebuilds it **pre-invocation** (after a throttled, ff-only-safe checkout sync), and `refreshKnowledgeClone` fans it out to every materialized team agent **post-KB-change** (content-diffed ignoring the timestamp; mirrored into isolated volumes via `reseedAgent`). Seeding writes the initial digest so the import never dangles; the `@`-import is gated (`knowledgeDigestRef` in `prompt-assembly.js`) on an actually-provisioned checkout, so autonomy-0/KB-less agents see nothing. Transparency (§4 of the concept, hard requirement): the digest is a real, browsable, always-current workspace file with a self-explanatory banner — the only injection path, no hidden channels.
+Part of the memory/knowledge unification (`docs/memory-knowledge-unification-concept.md`). Every KB-provisioned agent carries a generated **`knowledge-digest.md`** at its workspace root, `@`-imported by the seeded CLAUDE.md — so team conventions, converged (learned ≥2×) and recent lessons are **guaranteed in context at session start**; `knowledge search` is the long-tail complement. Deterministic (no LLM), ~3k-token budget, built by one pure module kept byte-identical on two sides: `orchestrator/knowledge-digest.js` ↔ `build_knowledge_digest()` in `agent-entrypoint.py` (golden fixture `knowledge-digest.fixture.json`; change both in one commit). Runtime rebuilds pre-invocation; `refreshKnowledgeClone` fans out post-KB-change. The `@`-import is gated (`knowledgeDigestRef`) on a provisioned checkout, so autonomy-0/KB-less agents see nothing.
 
-**Phase 2 — semantic rerouting.** One gate, three surfaces: `agentKnowledgeDigestRef(id, env)` (autonomy ≥ 1 **and** provisioned checkout ≡ `_memory_model_unified()` in the runtime) flips the digest `@`-import, swaps the CLAUDE.md **Memory System** section to the code-owned unified variant (`MEMORY_SECTION_UNIFIED`: three episodic files `context.md`/`log.md`/`users.md`; `facts.md`/`entities.md` are read-only legacy — new semantic knowledge goes to `knowledge add`), and selects the **unified memory hint** (`buildMemoryHint(blueprintId, {unified})` ↔ `_build_memory_hint()`, a byte-identical two-sided contract — change both sides in one commit; the unified text absorbs the harvest hint, so no separate append). The legacy five-file model stays byte-stable as the autonomy-0/KB-less/blueprint fallback, and flipping a team's dial back to 0 reverts every surface together. `users.md` is personal data — never shared, never migrated.
+**Semantic rerouting.** `agentKnowledgeDigestRef(id, env)` (autonomy ≥ 1 + provisioned checkout ≡ `_memory_model_unified()`) flips the digest import, swaps the Memory System section to the unified variant (episodic `context.md`/`log.md`/`users.md`; `facts.md`/`entities.md` read-only legacy — new semantic knowledge goes to `knowledge add`), and selects the unified memory hint. The legacy five-file model is the autonomy-0/KB-less/blueprint fallback. `users.md` is personal data — never shared, never migrated.
 
-**Phase 3 — migration + digest indicator.** One-shot per unified agent (`migrateAgentMemoryToKb`, startup pass `migrateUnifiedAgentsMemory` retried until success, plus a seed-time hook): legacy `memory/facts.md`/`entities.md` are parsed (`orchestrator/memory-migration.js`, pure + unit-tested — dated fact bullets keep their date as `createdAt`; one entity entry per H2/H3 section, flattened + capped) into KB entries with provenance `correlationId: migration:<agentId>`, appended to a **dedicated** shard `<kind>/shards/<agentId>.migrated.jsonl` in the canonical clone (never the agent's own shard — two writers on one append-only file would race), committed + pushed with a one-retry rebase; only after the push succeeds are the files archived to `memory/_archive/` (visible, not deleted — headings-only template boilerplate is deleted instead, so fresh unified agents simply start on the three-file model). Migration emits harvest feed events and triggers convergence + digest fan-out. The **"in digest" indicator**: `buildKnowledgeDigest` returns `includedIds` (both ports), `GET /internal/teams/:teamId/knowledge/digest-status` serves them from the canonical clone, the admin-console graph route overlays `inDigest` on item nodes (best-effort), and the agent-chat Knowledge tab renders a green `digest` badge — guaranteed-in-context vs search-only long tail.
+**Migration.** One-shot per unified agent (`migrateAgentMemoryToKb`, `orchestrator/memory-migration.js`): legacy `facts.md`/`entities.md` → KB entries in a dedicated shard `<kind>/shards/<agentId>.migrated.jsonl` (never the agent's own — avoids a two-writer race), committed+pushed; only after the push are files archived to `memory/_archive/`. **"in digest" indicator**: `buildKnowledgeDigest` returns `includedIds`; `GET /internal/teams/:teamId/knowledge/digest-status`; the Knowledge tab renders a green `digest` badge.
 
 ## MCP Servers (operator notes)
 
-Reference servers ship in-repo under `mcp-servers/<id>/`. `make seed-mcp-servers` (chained from `make seed-pool`) syncs them into the pool volume at `/template-workspace/mcp-servers/`. Operators add new servers through the **MCP Servers** admin page (catalog + credentials), and Working Environments / team-members reference them by id. Adding a new backend (vector store, graph DB) is a matter of:
-
-1. Drop a new server under `mcp-servers/<id>/` (any single-file MCP, stdio or http).
-2. `make seed-mcp-servers` to copy it into the pool.
-3. Register it via the admin UI; bind a credential; attach to environments.
-
-The wiki reference server is intentionally tiny and dependency-free so that "what's the contract" is readable at a glance — clone it as a starting point for the next backend.
+Reference servers ship under `mcp-servers/<id>/`; `make seed-mcp-servers` (chained from `make seed-pool`) syncs them to `/template-workspace/mcp-servers/`. Add a backend by: (1) drop a single-file MCP (stdio or http) under `mcp-servers/<id>/`, (2) `make seed-mcp-servers`, (3) register via the **MCP Servers** admin page + bind a credential + attach to environments. The `wiki/` reference server is tiny and dependency-free — clone it as a starting point.

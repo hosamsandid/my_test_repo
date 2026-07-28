@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
   Activity, Loader2, Square, MessageCircle, Clock, Zap, Github, Terminal,
   History, ChevronDown, ChevronUp, ArrowLeft, RefreshCw, RotateCcw,
@@ -6,6 +6,7 @@ import {
 import { apiCall } from '../../hooks/useApi';
 import SessionLogPanel from './SessionLogPanel';
 import { canResumeSession, resumeNeedsConfirm } from './resume-session';
+import { resolveHistoricalId, historyFetchLimit } from './session-default';
 import { findActiveSessionMatch, findFinishedSessionMatch } from '../github-event-session';
 
 /**
@@ -28,6 +29,15 @@ import { findActiveSessionMatch, findFinishedSessionMatch } from '../github-even
  * (`GET .../sessions/history`). A session stopped/ended while the tab is open
  * drops out of the active sub-tabs and, once the dropdown refreshes, becomes
  * reachable here (closing the loop left open in #543).
+ *
+ * Default view (#910): with no session running the panel does **not** fall back
+ * to an empty state — it shows the most recently finished session's log, so the
+ * run that just ended stays on screen (and keeps tracking the newest finished
+ * session as further runs end). The empty state remains for an agent that has
+ * never run. A newly started session still takes over the view automatically,
+ * but only from that auto-default — a session the user *picked* from the
+ * dropdown is left alone (the toolbar's Live button is the way back). The pure
+ * rules live in `session-default.js`.
  *
  * Cost/context: the chat toolbar's cost + context-window indicators derive from
  * the *viewed* session (active sub-tab or selected historical session),
@@ -120,8 +130,9 @@ export default function SessionsPanel({
   // Force a re-render every second so elapsed-time labels tick between polls.
   const [, setTick] = useState(0);
 
-  // Historical sessions (#544). Collapsed by default — only fetched/rendered
-  // once the user expands the control.
+  // Historical sessions (#544). The dropdown is collapsed by default; the list
+  // itself is fetched regardless since the newest entry is the default view
+  // (#910) — collapsed we only pull a small slice (see historyFetchLimit).
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -130,6 +141,13 @@ export default function SessionsPanel({
   // session id (Claude session-ID, or a correlationId fallback) of the
   // finished session currently being viewed (or null) — #555.
   const [historicalId, setHistoricalId] = useState(null);
+  // Whether that view was *chosen* (dropdown pick or #642 deep-link) rather
+  // than auto-defaulted to the newest finished session (#910). A chosen session
+  // is never replaced behind the user's back; the auto-default is.
+  const [historyPinned, setHistoryPinned] = useState(false);
+
+  // Guards against a superseded history response overwriting a newer one.
+  const historyReqRef = useRef(0);
 
   // Non-blocking notice shown when a deep-link (#642) couldn't locate the
   // requested session (outside the history window, log pruned, no DM room, …).
@@ -168,43 +186,59 @@ export default function SessionsPanel({
     };
   }, [active, agentId, fetchSessions]);
 
+  // Only the expanded dropdown (or a session picked out of it) needs the whole
+  // page; resolving the default view needs just the newest slice (#910).
+  const fetchLimit = historyFetchLimit({
+    historyOpen, pinned: historyPinned, fullLimit: HISTORY_LIMIT,
+  });
+
   const fetchHistory = useCallback(async () => {
     if (!agentId || !roomId) {
       setHistory([]);
       return;
     }
+    // History is now fetched on its own (poll-driven) schedule, so an in-flight
+    // request can be superseded by an agent/room switch or a newer refresh —
+    // drop its result rather than leak it into the new view (AC8).
+    const reqId = ++historyReqRef.current;
     setHistoryLoading(true);
     try {
       const data = await apiCall(
         'GET',
         `/api/agents/${encodeURIComponent(agentId)}/sessions/history`
-          + `?roomId=${encodeURIComponent(roomId)}&limit=${HISTORY_LIMIT}`,
+          + `?roomId=${encodeURIComponent(roomId)}&limit=${fetchLimit}`,
       );
+      if (historyReqRef.current !== reqId) return;
       setHistory(Array.isArray(data?.sessions) ? data.sessions : []);
-      setHistoryTruncated(!!data?.truncated);
+      // "…showing the N most recent" only means something once we asked for the
+      // full page; a deliberately short idle slice isn't a truncation notice.
+      setHistoryTruncated(fetchLimit >= HISTORY_LIMIT && !!data?.truncated);
       setHistoryError(null);
     } catch (err) {
+      if (historyReqRef.current !== reqId) return;
       setHistoryError(err.message || 'failed to load history');
     } finally {
-      setHistoryLoading(false);
+      if (historyReqRef.current === reqId) setHistoryLoading(false);
     }
-  }, [agentId, roomId]);
+  }, [agentId, roomId, fetchLimit]);
 
-  // Fetch history when the control is open, and refresh it whenever the set of
-  // active sessions changes — so a run that just ended (dropped from the active
-  // poll) shows up as a finished session without a manual refresh (AC4).
+  // Fetch history up front — the newest finished session is the default view
+  // (#910 AC1/AC5), so it can no longer wait for the control to be expanded —
+  // and refresh it whenever the set of active sessions changes, so a run that
+  // just ended (dropped from the active poll) becomes the default without a
+  // manual refresh (AC4).
   const activeCidKey = useMemo(
     () => sessions.map(s => s.correlationId || s.id).join(','),
     [sessions],
   );
   useEffect(() => {
-    if (!historyOpen) return;
     fetchHistory();
-  }, [historyOpen, activeCidKey, fetchHistory]);
+  }, [activeCidKey, fetchHistory]);
 
   // Switching agent/room invalidates the historical selection and list.
   useEffect(() => {
     setHistoricalId(null);
+    setHistoryPinned(false);
     setHistory([]);
     setHistoryOpen(false);
     setNotFound(null);
@@ -234,6 +268,7 @@ export default function SessionsPanel({
       if (activeMatch) {
         setSessions(activeList);
         setHistoricalId(null);
+        setHistoryPinned(false);
         setSelectedId(activeMatch.id);
         return;
       }
@@ -257,6 +292,8 @@ export default function SessionsPanel({
       if (histMatch) {
         setHistory(hist);
         setHistoryOpen(true);
+        // An explicit preselection outranks the #910 auto-default.
+        setHistoryPinned(true);
         setHistoricalId(histMatch.id);
         return;
       }
@@ -275,6 +312,18 @@ export default function SessionsPanel({
       return sessions.length ? sessions[0].id : null;
     });
   }, [sessions]);
+
+  const hasActive = sessions.length > 0;
+
+  // Default view (#910): with nothing running, show the most recently finished
+  // session; when a session starts, hand the view back to it. A session the user
+  // picked (or a #642 deep-link preselected) is pinned and left alone — the
+  // toolbar's Live button is how they go back to a live session.
+  useEffect(() => {
+    setHistoricalId(prev => resolveHistoricalId({
+      pinned: historyPinned, hasActive, history, current: prev,
+    }));
+  }, [historyPinned, hasActive, history]);
 
   const selected = useMemo(
     () => sessions.find(s => s.id === selectedId) || null,
@@ -313,7 +362,20 @@ export default function SessionsPanel({
 
   const selectActive = useCallback((id) => {
     setHistoricalId(null);
+    setHistoryPinned(false);
     setSelectedId(id);
+  }, []);
+
+  // Still working out what to show: either the active poll or the first history
+  // load is outstanding. Without this the panel would flash "No active
+  // sessions." before the finished-session default resolves (#910).
+  const resolving = loading || (!!roomId && historyLoading && history.length === 0);
+
+  // Dropdown pick: an empty value releases the pin and hands the view back to
+  // the #910 auto-default.
+  const selectHistorical = useCallback((id) => {
+    setHistoryPinned(!!id);
+    setHistoricalId(id || null);
   }, []);
 
   // Resume the selected finished session (#574). There is exactly one pointer
@@ -334,10 +396,9 @@ export default function SessionsPanel({
     onResumeSession(historical.sessionId);
     // Switch from the read-only historical view to the live view; the resumed
     // session appears as the active session once the run starts.
+    setHistoryPinned(false);
     setHistoricalId(null);
   }, [historical, onResumeSession, sessions]);
-
-  const hasActive = sessions.length > 0;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
@@ -481,6 +542,22 @@ export default function SessionsPanel({
                 · {formatRange(historical.startedAt, historical.endedAt)}
               </span>
               <span>· {countLabel(historical)}</span>
+              {!historyPinned && (
+                <span
+                  title="Shown by default because no session is running"
+                  style={{
+                    padding: '1px 6px',
+                    borderRadius: 'var(--eb-radius-full)',
+                    background: 'var(--eb-bg-app)',
+                    border: '1px solid var(--eb-border-default)',
+                    color: 'var(--eb-text-muted)',
+                    whiteSpace: 'nowrap',
+                    flexShrink: 0,
+                  }}
+                >
+                  last session
+                </span>
+              )}
               <div style={{ flex: 1 }} />
               {canResumeSession(historical) && onResumeSession && (
                 <button
@@ -506,28 +583,32 @@ export default function SessionsPanel({
                   Resume session
                 </button>
               )}
-              <button
-                type="button"
-                onClick={() => setHistoricalId(null)}
-                title="Return to live sessions"
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 4,
-                  padding: '4px 8px',
-                  background: 'none',
-                  border: '1px solid var(--eb-border-default)',
-                  borderRadius: 'var(--eb-radius-sm)',
-                  color: 'var(--eb-text-secondary)',
-                  cursor: 'pointer',
-                  fontSize: 'var(--eb-text-xs)',
-                  fontFamily: 'inherit',
-                  flexShrink: 0,
-                }}
-              >
-                <ArrowLeft size={11} />
-                Live
-              </button>
+              {/* Only offered when there IS a live session to return to: with
+                  nothing running this view *is* the default (#910). */}
+              {hasActive && (
+                <button
+                  type="button"
+                  onClick={() => selectHistorical(null)}
+                  title="A session is running — return to it"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 4,
+                    padding: '4px 8px',
+                    background: 'none',
+                    border: '1px solid var(--eb-accent-primary)',
+                    borderRadius: 'var(--eb-radius-sm)',
+                    color: 'var(--eb-accent-primary)',
+                    cursor: 'pointer',
+                    fontSize: 'var(--eb-text-xs)',
+                    fontFamily: 'inherit',
+                    flexShrink: 0,
+                  }}
+                >
+                  <ArrowLeft size={11} />
+                  Live
+                </button>
+              )}
             </div>
             <div style={{ flex: 1, minHeight: 0 }}>
               <SessionLogPanel
@@ -620,14 +701,15 @@ export default function SessionsPanel({
             fontSize: 'var(--eb-text-xs)',
             textAlign: 'center',
           }}>
-            {loading
+            {resolving
               ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
               : <Activity size={16} style={{ opacity: 0.5 }} />}
-            <span>{loading ? 'Loading sessions…' : 'No active sessions.'}</span>
-            {!loading && (
+            <span>{resolving ? 'Loading sessions…' : 'No active sessions.'}</span>
+            {!resolving && (
               <span style={{ maxWidth: 240, lineHeight: 1.5 }}>
                 Send a message or wait for a trigger to fire — running sessions
-                appear here as sub-tabs. Finished sessions are available below.
+                appear here as sub-tabs, and once a run has finished its log is
+                shown here by default.
               </span>
             )}
           </div>
@@ -685,7 +767,7 @@ export default function SessionsPanel({
                 aria-label="Select a finished session"
                 value={historicalId || ''}
                 disabled={historyLoading || history.length === 0}
-                onChange={(e) => setHistoricalId(e.target.value || null)}
+                onChange={(e) => selectHistorical(e.target.value)}
                 style={{
                   flex: 1,
                   minWidth: 0,

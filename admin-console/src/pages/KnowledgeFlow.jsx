@@ -5,8 +5,10 @@ import {
   Archive, Share2, ShieldCheck, Ban, MessageSquare, Search, ArrowRight, Users,
   HelpCircle, BookOpen, Combine, Trash2, MoreHorizontal, FileText,
   Inbox, Filter, RotateCcw, CheckCircle2, Circle, Play, SkipForward, Layers,
+  Pencil,
 } from 'lucide-react';
 import InfoTip from '../components/InfoTip';
+import IconButton from '../components/IconButton';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import SkillMarkdown from '../components/SkillMarkdown';
@@ -21,6 +23,11 @@ import {
   partitionSkills, tabCounts, buildInbox, skillMatchesQuery, hasNewEvidence,
   INBOX_CAP, SUGGESTION_SOURCES,
 } from './skill-inbox-view';
+import {
+  PHASE_LABELS, nextPendingDomain, migrationProgress,
+  isResumable, mergeForDomain, planDomainRows, planFoldTotals,
+  consolidationStartGate,
+} from './consolidation-view';
 
 /*
  * Knowledge Flow — team-scoped (#560).
@@ -152,6 +159,8 @@ export default function KnowledgeFlow() {
   const [selected, setSelected] = useState(null); // { id, teamId }
   const [detail, setDetail] = useState(null);
   const [pulseId, setPulseId] = useState(null);
+  // #842: incremented on each `consolidation` feed event so ConsolidationPanel re-reads.
+  const [consolidationSignal, setConsolidationSignal] = useState(0);
   const [promoting, setPromoting] = useState(null); // { suggestion, teamId }
   const [sharing, setSharing] = useState(null); // { node, teamId }
   // "How it works" intro: open on first visit, dismissible, reopenable anytime.
@@ -312,6 +321,9 @@ export default function KnowledgeFlow() {
       setPulseId(ev.entry.id);
       setTimeout(() => setPulseId(p => (p === ev.entry.id ? null : p)), 1000);
     }
+    // #842: a consolidation-migration step — bump the signal so the panel re-reads
+    // its progress state, and reload team data so the collapse shows live (AC3/AC4).
+    if (ev.type === 'consolidation') setConsolidationSignal(s => s + 1);
     scheduleTeamReload(ev.teamId);
   }, [scheduleTeamReload, selectedTeam]);
 
@@ -542,6 +554,7 @@ export default function KnowledgeFlow() {
               data={data[selectedTeamObj.id]}
               filters={filters}
               pulseId={pulseId}
+              consolidationSignal={consolidationSignal}
               selectedId={selected?.teamId === selectedTeamObj.id ? selected.id : null}
               onOpenItem={openItem}
               onRetireItem={(item) => {
@@ -737,7 +750,7 @@ function ChooseTeam() {
 /* ── One team = one section showing its whole flow ──────────────────────────── */
 
 const TeamSection = React.forwardRef(function TeamSection({
-  team, data, filters, pulseId, selectedId,
+  team, data, filters, pulseId, selectedId, consolidationSignal,
   onOpenItem, onRetireItem, onUnarchiveItem, onOpenChat,
   onReviewSuggestion, onShareSkill, onCombineItems, onControlsChanged, onLifted,
 }, ref) {
@@ -967,6 +980,8 @@ const TeamSection = React.forwardRef(function TeamSection({
             onReviewSuggestion={onReviewSuggestion}
             onShareSkill={onShareSkill}
             onControlsChanged={onControlsChanged}
+            lessons={allItems.map(i => i.text).filter(Boolean)}
+            consolidationSignal={consolidationSignal}
           />
           {privateSkills.length > 0 && (
             <PrivateSkillsBlock teamId={team.id} skills={privateSkills} onLifted={onLifted} />
@@ -986,88 +1001,640 @@ const SKILL_TABS = [
   ['suggested', 'Suggested', 'Knowledge the collector thinks is worth turning into a skill.'],
 ];
 
-/* ── Skill domains + budget (#780, skill-aggregation Phase 2) ────────────────── */
+/* ── Skill domains + budget (#780/#841, skill-aggregation Phase 2) ───────────── */
+
+const DOMAIN_SCOPES = ['team', 'role', 'cross-role'];
+const parseRolesInput = (s) => Array.from(new Set(
+  String(s || '').split(',').map(r => r.trim()).filter(Boolean),
+));
+
+// Shared layout for a domain row's name cell and its trailing controls (#856).
+// The name truncates with an ellipsis instead of wrapping character-by-character
+// (`minWidth: 0` lets it shrink inside the flex row; `nowrap`+`overflow:hidden`
+// stops the one-letter-per-line stack the old `overflowWrap: 'anywhere'` produced
+// once the column was crushed). The controls group never shrinks and wraps onto a
+// second line when the rail is too narrow, so tags/scope/actions stay reachable
+// without crushing the name. Full name is preserved in the element `title`.
+const domainNameCell = {
+  flex: '1 1 10rem', minWidth: '7rem',
+  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+};
+const domainRowControls = {
+  display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+  flexWrap: 'wrap', flex: '0 0 auto', maxWidth: '100%',
+};
+
+// Render a domain's audience roles as small pills (mirrors the skill cards' "for:"
+// tags — the same roles[] drives both via the server-side augmentSkillRoles overlay).
+function DomainRoleTags({ roles }) {
+  if (!Array.isArray(roles) || roles.length === 0) return null;
+  return (
+    <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap' }}>
+      {roles.map(r => (
+        <span key={r} style={{
+          fontSize: 10, padding: '0 6px', borderRadius: 'var(--eb-radius-full)',
+          border: '1px solid var(--eb-border-default)', color: 'var(--eb-text-secondary)',
+        }}>{r}</span>
+      ))}
+    </span>
+  );
+}
 
 // A compact panel over the team's persistent skill domains — the routing targets
 // converged clusters are classified against — plus the soft skill-budget bar
-// (§3.5, AC5). Operator CRUD (add / rename) posts to /api/knowledge/domains; domain
-// changes are always a human decision. Collapsible; hidden when a team carries no
+// (§3.5, AC5). Operator ops post to /api/knowledge/domains (domain changes are always
+// a human decision): seed, LLM bootstrap (proposed → confirm), add, edit scope/roles,
+// merge (≥2 → 1), split (1 → ≥2), remove. Collapsible; hidden when a team carries no
 // domains yet and the operator hasn't expanded it.
-function DomainsPanel({ teamId, domains, budget, onChanged }) {
+function DomainsPanel({ teamId, domains, budget, lessons, onChanged }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
   const [adding, setAdding] = useState('');
-  const [renaming, setRenaming] = useState(null); // { id, name }
+  const [editing, setEditing] = useState(null);   // { id, name, scope, roles(csv) }
+  const [proposal, setProposal] = useState(null);  // { proposed:[...], fallback:bool }
+  const [selected, setSelected] = useState(() => new Set()); // ids picked for merge
+  const [merging, setMerging] = useState(null);    // { name, scope }
+  const [splitting, setSplitting] = useState(null); // { id, name, parts:[{name,scope}] }
   const list = Array.isArray(domains) ? domains : [];
 
-  const post = useCallback((body) => {
-    setBusy(true);
+  // Post an op. `reload:false` (bootstrap) skips onChanged since nothing is persisted.
+  // Returns the parsed response so callers can read `proposed`/`fallback`.
+  const post = useCallback((body, { reload = true } = {}) => {
+    setBusy(true); setErr('');
     return fetch('/api/knowledge/domains', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ teamId, ...body }),
     }).then(r => r.json().catch(() => ({}))).then((out) => {
       if (!out || out.ok !== true) throw new Error((out && out.error) || 'failed');
-      onChanged && onChanged();
-    }).finally(() => setBusy(false));
+      if (reload && onChanged) onChanged();
+      return out;
+    }).catch((e) => { setErr(e.message || 'failed'); throw e; }).finally(() => setBusy(false));
   }, [teamId, onChanged]);
 
   const over = budget && budget.over;
   const pct = budget && budget.cap ? Math.min(100, Math.round((budget.used / budget.cap) * 100)) : 0;
 
+  const toggleSelect = (id) => setSelected((prev) => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+
+  // Persist a scope/roles/name edit. There is no per-field backend op (rename only
+  // touches the name), so the edit goes through `confirm` with the full domain list —
+  // the taxonomy's canonical "set the domains to this" op — with the one row patched.
+  const saveEdit = () => {
+    const name = editing.name.trim();
+    if (!name) { setErr('name-required'); return; }
+    const next = list.map(d => (d.id === editing.id
+      ? { ...d, name, scope: editing.scope, roles: parseRolesInput(editing.roles) }
+      : d));
+    post({ op: 'confirm', domains: next }).then(() => setEditing(null)).catch(() => {});
+  };
+
+  const runBootstrap = () => {
+    post({ op: 'bootstrap', lessons: Array.isArray(lessons) ? lessons : [] }, { reload: false })
+      .then((out) => setProposal({ proposed: out.proposed || [], fallback: out.fallback === true }))
+      .catch(() => {});
+  };
+  const confirmProposal = () => {
+    post({ op: 'confirm', domains: proposal.proposed }).then(() => setProposal(null)).catch(() => {});
+  };
+
+  const runMerge = () => {
+    post({
+      op: 'merge', ids: Array.from(selected),
+      name: merging.name.trim() || undefined, scope: merging.scope || undefined,
+    }).then(() => { setMerging(null); setSelected(new Set()); }).catch(() => {});
+  };
+
+  const runSplit = () => {
+    const parts = splitting.parts.filter(p => p.name.trim())
+      .map(p => ({ name: p.name.trim(), scope: p.scope }));
+    post({ op: 'split', id: splitting.id, parts }).then(() => setSplitting(null)).catch(() => {});
+  };
+  const splitReady = splitting && splitting.parts.filter(p => p.name.trim()).length >= 2;
+
   return (
-    <div style={{ marginBottom: 'var(--eb-space-3)', border: '1px solid var(--eb-border)', borderRadius: 8, padding: 'var(--eb-space-2)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }} onClick={() => setOpen(o => !o)}>
-        <strong style={{ fontSize: 13 }}>Domains</strong>
-        <span style={{ fontSize: 12, opacity: 0.7 }}>{list.length}</span>
+    <div style={{
+      marginBottom: 'var(--eb-space-3)', border: '1px solid var(--eb-border-default)',
+      borderRadius: 'var(--eb-radius-lg)', background: 'var(--eb-bg-surface)', padding: 'var(--eb-space-3)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', cursor: 'pointer' }}
+        onClick={() => setOpen(o => !o)}>
+        <strong style={{ fontSize: 'var(--eb-text-base)', color: 'var(--eb-text-primary)' }}>Domains</strong>
+        <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>{list.length}</span>
         {budget && (
           <span title={`${budget.used} of ${budget.cap} skills used${over ? ' — at budget; new domains need a merge or override' : ''}`}
-            style={{ marginLeft: 'auto', fontSize: 11, color: over ? 'var(--eb-danger, #b91c1c)' : 'var(--eb-muted, #6b7280)' }}>
+            style={{
+              marginLeft: 'auto', fontSize: 'var(--eb-text-xs)',
+              color: over ? 'var(--eb-status-error)' : 'var(--eb-text-muted)',
+            }}>
             budget {budget.used}/{budget.cap}
           </span>
         )}
-        <span aria-hidden style={{ fontSize: 11, opacity: 0.6 }}>{open ? '▾' : '▸'}</span>
+        <span aria-hidden style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{open ? '▾' : '▸'}</span>
       </div>
       {budget && (
-        <div style={{ height: 4, borderRadius: 2, background: 'var(--eb-border)', marginTop: 6, overflow: 'hidden' }}>
-          <div style={{ width: `${pct}%`, height: '100%', background: over ? 'var(--eb-danger, #b91c1c)' : 'var(--eb-accent, #2563eb)' }} />
+        <div style={{
+          height: 4, borderRadius: 'var(--eb-radius-full)', background: 'var(--eb-border-default)',
+          marginTop: 'var(--eb-space-1)', overflow: 'hidden',
+        }}>
+          <div style={{ width: `${pct}%`, height: '100%', background: over ? 'var(--eb-status-error)' : 'var(--eb-accent-primary)' }} />
         </div>
       )}
       {open && (
         <div style={{ marginTop: 'var(--eb-space-2)' }}>
-          {list.length === 0 && (
-            <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 6 }}>
-              No domains yet. Seed the defaults from the team’s roles, then edit them.
-              <button disabled={busy} onClick={() => post({ op: 'seed' })} style={{ marginLeft: 6 }}>Seed defaults</button>
+          {/* Toolbar: LLM bootstrap + merge action */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap', marginBottom: 'var(--eb-space-2)' }}>
+            <button disabled={busy} onClick={runBootstrap}
+              title="Let the model propose domains over this team’s lessons — you review before anything is saved"
+              style={{ ...miniBtn, display: 'inline-flex', alignItems: 'center', gap: 4, opacity: busy ? 0.5 : 1 }}>
+              <Sparkles size={12} /> Propose with AI
+            </button>
+            {selected.size >= 2 && (
+              <button disabled={busy} onClick={() => setMerging({ name: '', scope: '' })}
+                style={{ ...miniBtn, display: 'inline-flex', alignItems: 'center', gap: 4, opacity: busy ? 0.5 : 1 }}>
+                <Combine size={12} /> Merge {selected.size}
+              </button>
+            )}
+            {selected.size > 0 && (
+              <button style={linkBtn} onClick={() => setSelected(new Set())}>Clear selection</button>
+            )}
+          </div>
+
+          {/* Bootstrap proposal review — un-persisted until confirmed */}
+          {proposal && (
+            <div style={{
+              border: '1px solid var(--eb-accent-primary)', borderRadius: 'var(--eb-radius-md)',
+              padding: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-2)', background: 'var(--eb-bg-app)',
+            }}>
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', marginBottom: 'var(--eb-space-1)' }}>
+                Proposed domains ({proposal.proposed.length}) — review, then confirm to replace the taxonomy.
+              </div>
+              {proposal.fallback && (
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', marginBottom: 'var(--eb-space-1)' }}>
+                  ⚠ The AI target was unavailable — these are the deterministic role-seed defaults.
+                </div>
+              )}
+              {proposal.proposed.map(d => (
+                <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap', padding: '2px 0', fontSize: 'var(--eb-text-sm)' }}>
+                  <span title={d.name} style={domainNameCell}>{d.name}</span>
+                  <div style={domainRowControls}>
+                    <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{d.scope}</span>
+                    <DomainRoleTags roles={d.roles} />
+                  </div>
+                </div>
+              ))}
+              <div style={{ display: 'flex', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)' }}>
+                <button disabled={busy || proposal.proposed.length === 0} onClick={confirmProposal}
+                  style={{ ...primaryBtn, opacity: (busy || proposal.proposed.length === 0) ? 0.5 : 1 }}>Confirm</button>
+                <button disabled={busy} onClick={() => setProposal(null)}
+                  style={{ ...miniBtn, opacity: busy ? 0.5 : 1 }}>Discard</button>
+              </div>
             </div>
           )}
+
+          {list.length === 0 && !proposal && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap',
+              fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', marginBottom: 'var(--eb-space-2)',
+            }}>
+              <span>No domains yet. Seed the defaults from the team’s roles, or propose with AI, then edit them.</span>
+              <button disabled={busy} onClick={() => post({ op: 'seed' })}
+                style={{ ...miniBtn, opacity: busy ? 0.5 : 1 }}>Seed defaults</button>
+            </div>
+          )}
+
           {list.map(d => (
-            <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0', fontSize: 12 }}>
-              {renaming && renaming.id === d.id ? (
-                <>
-                  <input value={renaming.name} autoFocus
-                    onChange={e => setRenaming({ id: d.id, name: e.target.value })}
-                    style={{ flex: 1, fontSize: 12 }} />
-                  <button disabled={busy || !renaming.name.trim()}
-                    onClick={() => post({ op: 'rename', id: d.id, name: renaming.name.trim() }).then(() => setRenaming(null))}>Save</button>
-                  <button disabled={busy} onClick={() => setRenaming(null)}>Cancel</button>
-                </>
+            <div key={d.id} style={{
+              padding: 'var(--eb-space-1) 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)',
+              borderBottom: '1px solid var(--eb-border-default)',
+            }}>
+              {editing && editing.id === d.id ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+                  <input value={editing.name} autoFocus placeholder="Domain name"
+                    onChange={e => setEditing({ ...editing, name: e.target.value })} style={inp} />
+                  <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+                    <select value={editing.scope} onChange={e => setEditing({ ...editing, scope: e.target.value })}
+                      style={{ ...inp, flex: '0 0 auto', width: 'auto' }}>
+                      {DOMAIN_SCOPES.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                    <input value={editing.roles} placeholder="roles, comma-separated (e.g. developer, reworker)"
+                      onChange={e => setEditing({ ...editing, roles: e.target.value })} style={{ ...inp, flex: 1 }} />
+                  </div>
+                  <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+                    <button disabled={busy || !editing.name.trim()} onClick={saveEdit}
+                      style={{ ...primaryBtn, opacity: (busy || !editing.name.trim()) ? 0.5 : 1 }}>Save</button>
+                    <button disabled={busy} onClick={() => setEditing(null)}
+                      style={{ ...miniBtn, opacity: busy ? 0.5 : 1 }}>Cancel</button>
+                  </div>
+                </div>
+              ) : splitting && splitting.id === d.id ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Split “{d.name}” into:</div>
+                  {splitting.parts.map((p, i) => (
+                    <div key={i} style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+                      <input value={p.name} placeholder={`Part ${i + 1} name`}
+                        onChange={e => setSplitting({
+                          ...splitting,
+                          parts: splitting.parts.map((q, j) => (j === i ? { ...q, name: e.target.value } : q)),
+                        })} style={{ ...inp, flex: 1 }} />
+                      <select value={p.scope} onChange={e => setSplitting({
+                        ...splitting,
+                        parts: splitting.parts.map((q, j) => (j === i ? { ...q, scope: e.target.value } : q)),
+                      })} style={{ ...inp, flex: '0 0 auto', width: 'auto' }}>
+                        {DOMAIN_SCOPES.map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </div>
+                  ))}
+                  <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+                    <button style={linkBtn} onClick={() => setSplitting({ ...splitting, parts: [...splitting.parts, { name: '', scope: d.scope || 'team' }] })}>+ add part</button>
+                    <span style={{ flex: 1 }} />
+                    <button disabled={busy || !splitReady} onClick={runSplit}
+                      style={{ ...primaryBtn, opacity: (busy || !splitReady) ? 0.5 : 1 }}>Split</button>
+                    <button disabled={busy} onClick={() => setSplitting(null)}
+                      style={{ ...miniBtn, opacity: busy ? 0.5 : 1 }}>Cancel</button>
+                  </div>
+                </div>
               ) : (
-                <>
-                  <span style={{ flex: 1, overflowWrap: 'anywhere' }}>{d.name}</span>
-                  {d.scope && d.scope !== 'team' && <span style={{ fontSize: 10, opacity: 0.6 }}>{d.scope}</span>}
-                  <button disabled={busy} title="Rename" onClick={() => setRenaming({ id: d.id, name: d.name })}>✎</button>
-                  <button disabled={busy} title="Remove" onClick={() => post({ op: 'remove', id: d.id })}>✕</button>
-                </>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+                  <input type="checkbox" checked={selected.has(d.id)} onChange={() => toggleSelect(d.id)}
+                    title="Select to merge" style={{ cursor: 'pointer', flex: '0 0 auto' }} />
+                  <span title={d.name} style={domainNameCell}>{d.name}</span>
+                  <div style={domainRowControls}>
+                    <DomainRoleTags roles={d.roles} />
+                    {d.scope && d.scope !== 'team' && (
+                      <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{d.scope}</span>
+                    )}
+                    <IconButton icon={Pencil} label="Edit scope & roles" disabled={busy}
+                      onClick={() => { setSplitting(null); setEditing({ id: d.id, name: d.name, scope: d.scope || 'team', roles: (d.roles || []).join(', ') }); }} />
+                    <IconButton icon={Layers} label="Split" disabled={busy}
+                      onClick={() => { setEditing(null); setSplitting({ id: d.id, parts: [{ name: '', scope: d.scope || 'team' }, { name: '', scope: d.scope || 'team' }] }); }} />
+                    <IconButton icon={Trash2} label="Remove" danger disabled={busy}
+                      onClick={() => post({ op: 'remove', id: d.id }).catch(() => {})} />
+                  </div>
+                </div>
               )}
             </div>
           ))}
-          <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-            <input value={adding} placeholder="New domain name…"
+
+          {/* Merge form */}
+          {merging && (
+            <div style={{
+              border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+              padding: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)', display: 'flex',
+              flexDirection: 'column', gap: 'var(--eb-space-1)',
+            }}>
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Merge {selected.size} domains into one:</div>
+              <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+                <input value={merging.name} placeholder="Result name (optional — keeps the first)"
+                  onChange={e => setMerging({ ...merging, name: e.target.value })} style={{ ...inp, flex: 1 }} />
+                <select value={merging.scope} onChange={e => setMerging({ ...merging, scope: e.target.value })}
+                  style={{ ...inp, flex: '0 0 auto', width: 'auto' }}>
+                  <option value="">scope (keep)</option>
+                  {DOMAIN_SCOPES.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+                <button disabled={busy} onClick={runMerge}
+                  style={{ ...primaryBtn, opacity: busy ? 0.5 : 1 }}>Merge</button>
+                <button disabled={busy} onClick={() => setMerging(null)}
+                  style={{ ...miniBtn, opacity: busy ? 0.5 : 1 }}>Cancel</button>
+              </div>
+            </div>
+          )}
+
+          {/* Over-budget nudge: steer new domains into merge/override (AC2) */}
+          {over && (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', marginTop: 'var(--eb-space-2)' }}>
+              At the skill budget ({budget.used}/{budget.cap}). Prefer merging existing domains over adding new ones.
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)' }}>
+            <input value={adding} placeholder={over ? 'New domain (over budget — consider merging)…' : 'New domain name…'}
               onChange={e => setAdding(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter' && adding.trim()) post({ op: 'add', domain: { name: adding.trim() } }).then(() => setAdding('')); }}
-              style={{ flex: 1, fontSize: 12 }} />
+              onKeyDown={e => { if (e.key === 'Enter' && adding.trim()) post({ op: 'add', domain: { name: adding.trim() } }).then(() => setAdding('')).catch(() => {}); }}
+              style={{ ...inp, flex: 1 }} />
             <button disabled={busy || !adding.trim()}
-              onClick={() => post({ op: 'add', domain: { name: adding.trim() } }).then(() => setAdding(''))}>Add</button>
+              onClick={() => post({ op: 'add', domain: { name: adding.trim() } }).then(() => setAdding('')).catch(() => {})}
+              style={{ ...primaryBtn, opacity: (busy || !adding.trim()) ? 0.5 : 1 }}>Add</button>
+          </div>
+
+          {err && (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', marginTop: 'var(--eb-space-2)' }}>{err}</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Consolidation migration (#842, skill-aggregation Phase 3) ───────────────── */
+// The operator surface for the one-time-per-team consolidation migration (§4):
+// collapse a team's accumulated micro-skills + open candidates into a few domain
+// playbooks. Drives POST /api/knowledge/consolidation (read | plan | start |
+// advance | route-remaining); the per-domain synthesis + archive + atomic grant
+// swap runs through the EXISTING POST /api/skills/merge-draft (preview) +
+// /api/skills/merge (apply) fed the plan's `merge` inputs — reusing the promotion
+// review surface. Resumable (AC2): on open it reads the persisted state and
+// continues from the first pending domain rather than restarting.
+function ConsolidationPanel({ teamId, domains, onChanged, signal }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [state, setState] = useState(null);       // migration doc | null
+  const [planData, setPlanData] = useState(null);  // { plan, merges } | null
+  const [loaded, setLoaded] = useState(false);
+  const [review, setReview] = useState(null);      // { domainId, name, skill, merge, loading, error, draft, source }
+  const hasDomains = Array.isArray(domains) && domains.length > 0;
+
+  const call = useCallback((body) => (
+    fetch('/api/knowledge/consolidation', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, ...body }),
+    }).then(r => r.json().catch(() => ({}))).then((out) => {
+      if (!out || out.ok !== true) throw new Error((out && out.error) || 'failed');
+      return out;
+    })
+  ), [teamId]);
+
+  // Read the persisted migration state + a FRESH plan. The plan's `merges` reflect
+  // the current corpus, so a resumed run always folds the right sources for the
+  // domain it's on. Fail-soft — an error just surfaces in the panel.
+  const refresh = useCallback(() => {
+    setBusy(true); setErr('');
+    return Promise.all([call({ op: 'read' }), call({ op: 'plan' })])
+      .then(([r, p]) => { setState(r.state || null); setPlanData({ plan: p.plan || null, merges: p.merges || [] }); })
+      .catch((e) => setErr(e.message || 'failed'))
+      .finally(() => { setBusy(false); setLoaded(true); });
+  }, [call]);
+
+  // Load once when first expanded; re-read whenever a consolidation feed event
+  // arrives while open (AC4 — the live feed drives the panel).
+  useEffect(() => { if (open && !loaded) refresh(); }, [open, loaded, refresh]);
+  useEffect(() => { if (open && loaded) refresh(); }, [signal]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Reset when the team changes underneath us.
+  useEffect(() => { setState(null); setPlanData(null); setLoaded(false); setReview(null); setOpen(false); }, [teamId]);
+
+  const progress = migrationProgress(state);
+  const pending = nextPendingDomain(state);
+  const running = !!state && !progress.complete;
+  const allDecided = running && progress.pending === 0;
+  const fold = planData ? planFoldTotals(planData.plan) : null;
+  const planRows = planData ? planDomainRows(planData.plan, planData.merges) : [];
+  // Startable whenever any skill or candidate maps to a confirmed domain — a
+  // ≥2-skill domain is not required (#871). `busy` still disables (in-flight).
+  const startGate = consolidationStartGate(fold, { busy });
+
+  // Run a consolidation op then refresh; `reload` also refetches team data so the
+  // collapse (archived skills / cleared suggestions, AC3) shows immediately.
+  const run = useCallback((fn, reload = false) => {
+    setBusy(true); setErr('');
+    return fn()
+      .then(() => refresh())
+      .then(() => { if (reload && onChanged) onChanged(); })
+      .catch((e) => setErr(e.message || 'failed'))
+      .finally(() => setBusy(false));
+  }, [refresh, onChanged]);
+
+  const start = () => run(() => call({ op: 'start' }));
+  const skip = (domainId) => run(() => call({ op: 'advance', domainId, status: 'skipped' }));
+  const routeRemaining = () => run(() => call({ op: 'route-remaining' }), true);
+
+  // Open the per-domain review. A ≥2-member domain synthesises a playbook draft via
+  // /api/skills/merge-draft (persists nothing); a 0/1-member domain has nothing to
+  // merge, so accepting only records the decision.
+  const openReview = (dom) => {
+    const merge = mergeForDomain(planData && planData.merges, dom.domainId);
+    if (!merge) { setReview({ domainId: dom.domainId, name: dom.name, skill: dom.skill, merge: null, draft: '' }); return; }
+    setReview({ domainId: dom.domainId, name: dom.name, skill: dom.skill, merge, loading: true, draft: '' });
+    fetch('/api/skills/merge-draft', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(merge),
+    }).then(r => r.json().catch(() => ({}))).then((out) => {
+      if (!out || !out.draft) throw new Error((out && out.error) || 'draft failed');
+      setReview(rv => (rv && rv.domainId === dom.domainId ? { ...rv, loading: false, draft: out.draft.skillMd || '', source: out.source } : rv));
+    }).catch((e) => setReview(rv => (rv && rv.domainId === dom.domainId ? { ...rv, loading: false, error: e.message } : rv)));
+  };
+
+  const canAccept = review && !review.loading && !review.error && (!review.merge || (review.draft && review.draft.trim()));
+
+  // Accept: for a ≥2-member domain, POST /api/skills/merge with the reviewed draft
+  // (synthesise + archive sources with lineage + atomic grant swap), then record the
+  // decision via advance. A record-only domain just advances.
+  const accept = () => {
+    const rv = review;
+    if (!rv) return;
+    setBusy(true); setErr('');
+    const applyMerge = rv.merge
+      ? fetch('/api/skills/merge', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...rv.merge, draft: rv.draft }),
+      }).then(async (r) => { const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || `merge failed (${r.status})`); return d; })
+      : Promise.resolve(null);
+    applyMerge
+      .then(() => call({ op: 'advance', domainId: rv.domainId, status: 'accepted' }))
+      .then(() => { setReview(null); return refresh(); })
+      .then(() => { if (onChanged) onChanged(); })
+      .catch((e) => setReview(rv2 => (rv2 ? { ...rv2, error: e.message } : rv2)))
+      .finally(() => setBusy(false));
+  };
+
+  const statusIcon = (st) => {
+    if (st === 'accepted') return <CheckCircle2 size={14} style={{ color: 'var(--eb-status-success, #16a34a)', flexShrink: 0 }} />;
+    if (st === 'skipped') return <SkipForward size={14} style={{ color: 'var(--eb-text-muted)', flexShrink: 0 }} />;
+    return <Circle size={14} style={{ color: 'var(--eb-text-muted)', flexShrink: 0 }} />;
+  };
+
+  return (
+    <div style={{
+      marginBottom: 'var(--eb-space-3)', border: '1px solid var(--eb-border-default)',
+      borderRadius: 'var(--eb-radius-lg)', background: 'var(--eb-bg-surface)', padding: 'var(--eb-space-3)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', cursor: 'pointer' }}
+        onClick={() => setOpen(o => !o)}>
+        <Layers size={15} style={{ color: 'var(--eb-accent-primary)' }} />
+        <strong style={{ fontSize: 'var(--eb-text-base)', color: 'var(--eb-text-primary)' }}>Consolidation</strong>
+        {running && (
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            {progress.decided}/{progress.total} domains
+          </span>
+        )}
+        {state && (
+          <span style={{
+            marginLeft: 'auto', fontSize: 'var(--eb-text-xs)',
+            color: progress.complete ? 'var(--eb-status-success, #16a34a)' : 'var(--eb-accent-primary)',
+          }}>{PHASE_LABELS[progress.status] || progress.status}</span>
+        )}
+        <span aria-hidden style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginLeft: state ? 0 : 'auto' }}>{open ? '▾' : '▸'}</span>
+      </div>
+
+      {open && (
+        <div style={{ marginTop: 'var(--eb-space-2)' }}>
+          {!hasDomains ? (
+            <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
+              Confirm this team’s domains first (Domains panel above). Consolidation folds the existing
+              micro-skills + open candidates into those domain playbooks.
+            </div>
+          ) : !loaded ? (
+            <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>Loading…</div>
+          ) : progress.complete ? (
+            <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 'var(--eb-space-1)' }}>
+                <CheckCircle2 size={15} style={{ color: 'var(--eb-status-success, #16a34a)' }} />
+                <strong>Migration complete.</strong>
+              </div>
+              <div style={{ color: 'var(--eb-text-muted)' }}>
+                {progress.accepted} playbook{progress.accepted === 1 ? '' : 's'} synthesised, {progress.skipped} skipped, remainder routed.
+              </div>
+            </div>
+          ) : !running ? (
+            /* ── Preview + start (no migration yet) ── */
+            <div>
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', marginBottom: 'var(--eb-space-2)' }}>
+                {fold && (fold.skills + fold.candidates) > 0
+                  ? <>Collapse <strong style={{ color: 'var(--eb-text-primary)' }}>{fold.skills}</strong> skill{fold.skills === 1 ? '' : 's'} + <strong style={{ color: 'var(--eb-text-primary)' }}>{fold.candidates}</strong> candidate{fold.candidates === 1 ? '' : 's'} across <strong style={{ color: 'var(--eb-text-primary)' }}>{fold.domains}</strong> domain{fold.domains === 1 ? '' : 's'} into domain playbooks. Review each playbook before it is applied.</>
+                  : <>Nothing to consolidate yet — no existing skills or candidates map to the confirmed domains.</>}
+              </div>
+              {planRows.length > 0 && (
+                <div style={{ marginBottom: 'var(--eb-space-2)' }}>
+                  {planRows.map(r => (
+                    <div key={r.domainId} style={{
+                      display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: '3px 0',
+                      fontSize: 'var(--eb-text-sm)', borderBottom: '1px solid var(--eb-border-default)',
+                    }}>
+                      <span style={{ flex: 1, overflowWrap: 'anywhere', color: 'var(--eb-text-primary)' }}>{r.name}</span>
+                      <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                        {r.memberCount} skill{r.memberCount === 1 ? '' : 's'} · {r.candidateCount} cand.
+                      </span>
+                      {r.mergeable
+                        ? <span title="Two or more skills — a playbook will be synthesised" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)' }}>→ playbook</span>
+                        : <span title="Fewer than two skills — nothing to merge" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>—</span>}
+                    </div>
+                  ))}
+                  {fold && (fold.unassignedSkills + fold.unassignedCandidates) > 0 && (
+                    <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+                      {fold.unassignedSkills} skill{fold.unassignedSkills === 1 ? '' : 's'} + {fold.unassignedCandidates} candidate{fold.unassignedCandidates === 1 ? '' : 's'} match no domain — routed in the final step.
+                    </div>
+                  )}
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+                <button disabled={!startGate.enabled} onClick={start}
+                  title={startGate.enabled ? 'Begin the migration — you review each playbook before it is applied' : startGate.reason}
+                  style={{ ...primaryBtn, opacity: startGate.enabled ? 1 : 0.5 }}>
+                  <Play size={13} /> Start migration
+                </button>
+                <button disabled={busy} onClick={refresh} style={{ ...miniBtn, display: 'inline-flex', alignItems: 'center', gap: 4, opacity: busy ? 0.5 : 1 }}>
+                  <RotateCcw size={12} /> Refresh plan
+                </button>
+              </div>
+              {!startGate.enabled && startGate.reason && (
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+                  {startGate.reason}
+                </div>
+              )}
+            </div>
+          ) : (
+            /* ── In-progress: step through domains, then route remainder ── */
+            <div>
+              {isResumable(state) && progress.decided > 0 && (
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginBottom: 'var(--eb-space-2)' }}>
+                  Resumed — {progress.decided} of {progress.total} domains already decided.
+                </div>
+              )}
+              {state.domains.map(d => {
+                const isNext = pending && d.domainId === pending.domainId && d.status === 'pending';
+                return (
+                  <div key={d.domainId} style={{
+                    display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: '4px 0',
+                    fontSize: 'var(--eb-text-sm)', borderBottom: '1px solid var(--eb-border-default)',
+                  }}>
+                    {statusIcon(d.status)}
+                    <span style={{ flex: 1, overflowWrap: 'anywhere', color: 'var(--eb-text-primary)' }}>{d.name}</span>
+                    <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                      {(d.memberSkills || []).length} skill{(d.memberSkills || []).length === 1 ? '' : 's'}
+                    </span>
+                    {isNext && (
+                      <>
+                        <button disabled={busy} onClick={() => openReview(d)}
+                          style={{ ...miniBtn, display: 'inline-flex', alignItems: 'center', gap: 4, borderColor: 'var(--eb-accent-primary)', color: 'var(--eb-accent-primary)', opacity: busy ? 0.5 : 1 }}>
+                          <Sparkles size={12} /> Review playbook
+                        </button>
+                        <button disabled={busy} onClick={() => skip(d.domainId)} style={{ ...linkBtn, opacity: busy ? 0.5 : 1 }}>Skip</button>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+              <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', marginTop: 'var(--eb-space-2)' }}>
+                {allDecided ? (
+                  <button disabled={busy} onClick={routeRemaining}
+                    title="Route the leftover candidates (digest-only / amendments) and finish the migration"
+                    style={{ ...primaryBtn, opacity: busy ? 0.5 : 1 }}>
+                    <ArrowRight size={13} /> Route the remainder & finish
+                  </button>
+                ) : (
+                  <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                    Review or skip each domain, then route the remainder.
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {err && (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', marginTop: 'var(--eb-space-2)' }}>{err}</div>
+          )}
+        </div>
+      )}
+
+      {/* ── Per-domain playbook review (reuses the promotion editable-draft surface) ── */}
+      {review && (
+        <div onClick={() => !busy && setReview(null)}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 70, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+          <div onClick={(e) => e.stopPropagation()}
+            style={{ background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', boxShadow: 'var(--eb-shadow-lg)', maxWidth: 820, width: '100%', maxHeight: '85vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <div style={{ padding: 'var(--eb-space-3) var(--eb-space-4)', borderBottom: '1px solid var(--eb-border-default)', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Combine size={15} style={{ color: 'var(--eb-accent-primary)' }} />
+              <strong style={{ fontSize: 'var(--eb-text-sm)' }}>Review playbook — {review.name}</strong>
+            </div>
+            <div style={{ padding: 'var(--eb-space-4)', overflow: 'auto', flex: 1 }}>
+              {review.merge ? (
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginBottom: 'var(--eb-space-2)' }}>
+                  Folding {review.merge.sources.length} skills into <code>{review.skill}</code>:{' '}
+                  {review.merge.sources.map(s => s.name).join(', ')}. The source skills are archived with lineage
+                  (reversible) and grants swap atomically on accept.
+                </div>
+              ) : (
+                <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
+                  This domain has fewer than two member skills — there is no playbook to synthesise. Accepting only records it as reviewed.
+                </div>
+              )}
+              {review.loading && <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Synthesising the playbook…</div>}
+              {review.error && <div style={{ color: 'var(--eb-status-error, #d33)', fontSize: 'var(--eb-text-sm)' }}>{review.error}</div>}
+              {review.merge && !review.loading && !review.error && (
+                <>
+                  <div style={{ ...lbl, marginBottom: 4 }}>Synthesised playbook — review &amp; edit</div>
+                  <textarea value={review.draft} onChange={(e) => setReview(rv => ({ ...rv, draft: e.target.value }))}
+                    spellCheck={false}
+                    style={{ ...inp, minHeight: 320, fontFamily: 'var(--eb-font-mono, monospace)', fontSize: 'var(--eb-text-xs)', whiteSpace: 'pre', overflowWrap: 'normal' }} />
+                  {review.source && (
+                    <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 4 }}>
+                      Draft: {review.source === 'llm' ? 'AI-synthesised' : 'heuristic (AI unavailable)'} — edit before accepting.
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+            <div style={{ padding: 'var(--eb-space-3) var(--eb-space-4)', borderTop: '1px solid var(--eb-border-default)', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button onClick={() => setReview(null)} disabled={busy} style={btn}>Cancel</button>
+              <button onClick={accept} disabled={busy || !canAccept}
+                style={{ ...primaryBtn, opacity: (busy || !canAccept) ? 0.5 : 1 }}>
+                <Check size={13} /> {review.merge ? (busy ? 'Applying…' : 'Accept & merge') : 'Accept'}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1075,7 +1642,7 @@ function DomainsPanel({ teamId, domains, budget, onChanged }) {
   );
 }
 
-function SkillsColumn({ team, skills, suggestions, pending, autonomy, domains, skillBudget, onReviewSuggestion, onShareSkill, onControlsChanged }) {
+function SkillsColumn({ team, skills, suggestions, pending, autonomy, domains, skillBudget, onReviewSuggestion, onShareSkill, onControlsChanged, lessons, consolidationSignal }) {
   const teamId = team.id;
   const tabKey = `kf.skillTab.${teamId}`;
   const seenKey = `kf.suggestSeen.${teamId}`;
@@ -1216,8 +1783,11 @@ function SkillsColumn({ team, skills, suggestions, pending, autonomy, domains, s
 
   return (
     <div>
-      {/* #780: the team's skill domains + soft skill-budget state */}
-      <DomainsPanel teamId={teamId} domains={domains} budget={skillBudget} onChanged={reload} />
+      {/* #780/#841: the team's skill domains + soft skill-budget state + operator ops */}
+      <DomainsPanel teamId={teamId} domains={domains} budget={skillBudget}
+        lessons={lessons} onChanged={reload} />
+      {/* #842: one-time consolidation migration — fold micro-skills into domain playbooks */}
+      <ConsolidationPanel teamId={teamId} domains={domains} onChanged={reload} signal={consolidationSignal} />
       {/* Lifecycle tabs */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
         {SKILL_TABS.map(([key, label, tip]) => {

@@ -1,10 +1,10 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
-import { AlertTriangle, Download, Boxes, X, Plus, Layers, Sparkles, Pencil } from 'lucide-react';
+import { AlertTriangle, Download, Boxes, X, Plus, Layers, Sparkles, Pencil, Loader2 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { initFlowGraph } from './process/flow-graph-render';
 import NodeInspector from './process/NodeInspector';
 import StageManager from './process/StageManager';
-import { EditHandoffDialog, CreateEdgeDialog } from './process/EdgeDialogs';
+import { EditHandoffDialog, CreateEdgeDialog, CreateHandoffDialog } from './process/EdgeDialogs';
 import MaterializeDialog from './process/MaterializeDialog';
 import SidePanel from '../components/SidePanel';
 import { roleIcon } from '../components/role-icons';
@@ -189,7 +189,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
 
   const [selectedId, setSelectedId] = useState(null);
   const [connectPair, setConnectPair] = useState(null); // { from, to } — from may be an actor id (#411)
+  const [outcomeConnect, setOutcomeConnect] = useState(null); // { from, to, outcome } — outcome-port drag (#828)
   const [selectedEdge, setSelectedEdge] = useState(null);
+  const [routingFocus, setRoutingFocus] = useState(null); // { tab:'routing', outcome } — outcome-edge click (#828)
   const viewportRef = useRef(null);
   const graphRef = useRef(null);
   const editableRef = useRef(true);
@@ -199,9 +201,25 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   useEffect(() => {
     if (!viewportRef.current) return;
     const g = initFlowGraph(viewportRef.current, {
-      onSelectNode: (id) => setSelectedId(id),
+      onSelectNode: (id) => { setSelectedId(id); setRoutingFocus(null); },
       onConnect: (from, to) => { if (editableRef.current) setConnectPair({ from, to }); },
-      onSelectEdge: (edge) => { if (editableRef.current) setSelectedEdge(edge); },
+      // Outcome-port drag (#828): pre-fill a label hand-off from the outcome onto
+      // the drop target — only the listener is created (the source already emits
+      // via its outcome).
+      onConnectOutcome: (from, to, outcome) => { if (editableRef.current) setOutcomeConnect({ from, to, outcome }); },
+      // Clicking an outcome-keyed edge focuses the Routing tab on that outcome
+      // (#828); every other edge keeps its own edit dialog.
+      onSelectEdge: (edge) => {
+        if (!editableRef.current) return;
+        if (edge && edge.outcome && edge.from) {
+          setSelectedId(edge.from);
+          graphRef.current?.setSelected(edge.from);
+          setRoutingFocus({ tab: 'routing', outcome: edge.outcome });
+          setSelectedEdge(null);
+        } else {
+          setSelectedEdge(edge);
+        }
+      },
       actorSources: true, // offer @github/@external as drag sources (#411)
       expandChildrenByDefault: true, // process flows show the whole team; parents collapse on demand
     });
@@ -228,7 +246,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
 
   // Clear selection/dialogs when the scope (and thus the graph) changes. A
   // scope change from the parent also drops any imported blueprint preview.
-  useEffect(() => { setSelectedId(null); setConnectPair(null); setSelectedEdge(null); }, [scope, imported]);
+  useEffect(() => { setSelectedId(null); setConnectPair(null); setOutcomeConnect(null); setSelectedEdge(null); setRoutingFocus(null); }, [scope, imported]);
   useEffect(() => { setImported(null); setImportError(null); }, [scope]);
 
   // Sidebar-triggered import (#512): seed the read-only preview from the
@@ -254,6 +272,18 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     : null;
 
   function afterEdit() { if (!isDraft) refetch(); /* draft re-derives via persist */ }
+
+  // "Open in Routing" jump (#865): an edge edit dialog hands control to the
+  // owning node's inspector, focused on the row/section that carries the edge —
+  // the same setRoutingFocus mechanism the canvas uses for outcome-edge clicks.
+  // A 'structure' section targets the Details tab (Parent lives there now).
+  function openRouting(nodeId, section) {
+    if (!nodeId) return;
+    setSelectedEdge(null);
+    setSelectedId(nodeId);
+    graphRef.current?.setSelected(nodeId);
+    setRoutingFocus({ tab: section === 'structure' ? 'details' : 'routing', section });
+  }
 
   // Round-trip (#348): open a live team as an editable draft copy.
   async function editAsDraft() {
@@ -421,13 +451,16 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
       {/* Inspector — ONE shared component drives both draft and live modes (#692). */}
       {isDraft && selectedRole && (
         <NodeInspector
-          key={selectedRole.id}
+          key={`${selectedRole.id}:${routingFocus?.outcome || ''}`}
           mode="draft"
           node={selectedRole}
           roles={draftBundle?.roles || []}
           stages={draftBundle?.stages || []}
+          lints={displayGraph?.lints || []}
+          labels={displayGraph?.labels || []}
+          focus={routingFocus}
           ops={draftOps}
-          onClose={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
+          onClose={() => { setSelectedId(null); setRoutingFocus(null); graphRef.current?.setSelected(null); }}
           onDeleted={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
           onRenamedId={(nid) => { setSelectedId(nid); graphRef.current?.setSelected(nid); }}
           onChanged={() => {}}
@@ -435,15 +468,18 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
       )}
       {!isDraft && selectedNode && (
         <NodeInspector
-          key={selectedNode.id}
+          key={`${selectedNode.id}:${routingFocus?.outcome || ''}`}
           mode="live"
           node={selectedNode}
           nodes={displayGraph?.nodes || []}
           stages={displayGraph?.stages || []}
+          lints={displayGraph?.lints || []}
+          labels={displayGraph?.labels || []}
+          focus={routingFocus}
           ops={liveOps}
           teamId={isTeamScope && !imported ? scope : undefined}
           level={imported ? 'template' : displayGraph?.level}
-          onClose={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
+          onClose={() => { setSelectedId(null); setRoutingFocus(null); graphRef.current?.setSelected(null); }}
           onChanged={() => refetch()}
         />
       )}
@@ -466,6 +502,21 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         />
       )}
 
+      {outcomeConnect && (
+        <CreateHandoffDialog
+          from={outcomeConnect.from}
+          to={outcomeConnect.to}
+          fromName={nodeName(outcomeConnect.from)}
+          toName={nodeName(outcomeConnect.to)}
+          labels={displayGraph?.labels || []}
+          ops={ops}
+          initialLabel={outcomeConnect.outcome?.label || ''}
+          emitSource={false}
+          onClose={() => setOutcomeConnect(null)}
+          onDone={() => { setOutcomeConnect(null); afterEdit(); }}
+        />
+      )}
+
       {selectedEdge && (
         <EditHandoffDialog
           edge={selectedEdge}
@@ -476,6 +527,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
             ? (displayGraph?.edges || []).filter(e =>
                 e.on === 'github' && e.from === selectedEdge.from && e.artifact === selectedEdge.artifact).length
             : undefined}
+          onOpenRouting={openRouting}
           onClose={() => setSelectedEdge(null)}
           onDone={() => { setSelectedEdge(null); afterEdit(); }}
         />
@@ -636,6 +688,10 @@ function AddRoleDialog({ onClose, onCreate }) {
     boxSizing: 'border-box', width: '100%', outline: 'none',
   };
   const hasTemplates = templates.length > 0;
+  // Primary button is disabled both while a request is in flight (busy, prevents
+  // double-submit — AC3) and when there is no agent name yet; both now read as
+  // disabled visually (dim + not-allowed), matching the sibling Generate button.
+  const addDisabled = busy || !displayName.trim();
   return (
     <SidePanel open onClose={onClose} title="Add agent" width="480px">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
@@ -759,17 +815,30 @@ function AddRoleDialog({ onClose, onCreate }) {
         {submitError && (
           <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error, #d33)' }}>{submitError}</div>
         )}
+        {/* #820: agent provisioning on a live team is genuinely slow (create the
+            chat user → seed workspace → git clone), so surface the already-existing
+            `busy` flag on the primary button — spinner + "Adding…" + dim/not-allowed —
+            mirroring the sibling "Generate agent prompt" button and the ConfirmDialog
+            pattern, so the click is visibly registered. Presentation-only; submit()
+            and onCreate are untouched. */}
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)' }}>
           <button onClick={onClose} disabled={busy} style={{
             background: 'none', color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', cursor: 'pointer',
+            borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
+            cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.6 : 1,
           }}>Cancel</button>
-          <button onClick={submit} disabled={busy || !displayName.trim()} style={{
+          <button onClick={submit} disabled={addDisabled} style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6,
             background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
-            borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
-          }}>Add agent</button>
+            borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+            cursor: addDisabled ? 'not-allowed' : 'pointer', opacity: addDisabled ? 0.6 : 1,
+          }}>
+            {busy && <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />}
+            {busy ? 'Adding…' : 'Add agent'}
+          </button>
         </div>
       </div>
+      {busy && <style>{'@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }'}</style>}
     </SidePanel>
   );
 }

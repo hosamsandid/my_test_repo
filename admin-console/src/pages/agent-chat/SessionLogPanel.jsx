@@ -4,6 +4,7 @@ import { useSSE } from '../../hooks/useSSE';
 import LogEvent from './LogEvent';
 import PinnedTodoPanel from './PinnedTodoPanel';
 import { sumContextTokens, resolveContextTokensForResult } from './context-window';
+import { mergeThinkingTokens } from './system-event.js';
 
 /**
  * Right-rail panel showing the structured timeline of internal agent
@@ -214,7 +215,13 @@ export default function SessionLogPanel({
     return events.filter(ev => set.has(ev?.correlationId) || ev?.type === '_truncated');
   }, [events, scopeCids]);
 
-  const renderable = useMemo(() => mergeToolPairs(scopedEvents), [scopedEvents]);
+  // Collapse each run's stream of thinking_tokens ticks into one live row
+  // (#870) before pairing tool_use/tool_result. Runs on every recompute, so it
+  // applies to live SSE appends and backfilled/legacy logs alike.
+  const renderable = useMemo(
+    () => mergeToolPairs(mergeThinkingTokens(scopedEvents)),
+    [scopedEvents],
+  );
 
   /* ─── 5. Session cost aggregation ──────────────────────────────────── */
   const costTotals = useMemo(() => {
@@ -528,7 +535,10 @@ function mergeToolPairs(events) {
       };
       return;
     }
-    out.push({ ...ev, _key: `e${idx}` });
+    // Preserve a stable _key set upstream (e.g. the consolidated thinking_tokens
+    // row, #870) so React updates it in place instead of remounting; otherwise
+    // fall back to a positional key.
+    out.push({ ...ev, _key: ev._key ?? `e${idx}` });
   });
   return out;
 }

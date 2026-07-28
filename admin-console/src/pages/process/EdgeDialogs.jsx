@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { Loader2 } from 'lucide-react';
+import { Loader2, ArrowUpRight } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
 import { liveOps } from './edit-adapters';
 import { TriggerForm } from '../agent-chat/TriggersPanel';
+import { defaultListenerPrompt, handoffVerb, handoffTargetNoun } from './handoff-prompt';
 
 // Only these GitHub events carry a label name, so a labelFilter is meaningful.
 const LABEL_EVENTS = [
@@ -82,13 +83,16 @@ const LABEL_ACTIONS = [
   { value: 'unlabeled', label: 'removed' },
 ];
 
-export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = liveOps, onBack, onClose, onDone }) {
+export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = liveOps, onBack, onClose, onDone, initialLabel = '', emitSource = true }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
   const [toTriggers, setToTriggers] = useState([]);
-  const [label, setLabel] = useState('');
+  // `initialLabel` pre-fills the label when the dialog is opened from an outcome
+  // port drag (#828): the source already declares the emit via its outcome, so
+  // `emitSource` is false there and only the listener on the target is created.
+  const [label, setLabel] = useState(initialLabel || '');
   const [target, setTarget] = useState('issues');       // issues | pull_request
   const [action, setAction] = useState('labeled');       // labeled | unlabeled
   const [repo, setRepo] = useState('');
@@ -114,8 +118,8 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
   }, [from, to]);
 
   const event = `${target}.${action}`; // e.g. issues.labeled, pull_request.unlabeled
-  const verb = action === 'labeled' ? 'added to' : 'removed from';
-  const targetNoun = target === 'issues' ? 'an issue' : 'a pull request';
+  const verb = handoffVerb(action);
+  const targetNoun = handoffTargetNoun(target);
 
   // Human gates (human:*) and the universal brakes are set by humans, never by
   // an agent — wire only the listener, never an agent emit (#333).
@@ -124,7 +128,7 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
   const humanLabel = isGate || isBrake;
 
   const effectivePrompt = prompt
-    || `\`${label || '<label>'}\` was ${verb} ${targetNoun} in \`${repo || '<repo>'}\` by ${fromName || from}. The event payload above has the details.\n\n<Describe what ${toName || to} should do.> Reply \`[PASS]\` if there's nothing to do.`;
+    || defaultListenerPrompt({ label, verb, targetNoun, repo, fromLabel: fromName || from, toLabel: toName || to });
 
   async function submit() {
     const trimmed = label.trim();
@@ -148,12 +152,25 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
           prompt: effectivePrompt,
         });
       }
-      // 2. Record A as emitting the label — an agent-level emit, so the edge is
-      // wired without depending on a pre-existing trigger on A. Skipped for
-      // human gates/brakes (no agent may claim to set those).
-      if (!humanLabel) {
-        const current = await ops.getRoleEmits(from);
-        await ops.setRoleEmits(from, uniq([...(Array.isArray(current) ? current : []), trimmed]));
+      // 2. Record A as emitting the label via an outcome — the structured successor
+      // to flat `emits`. Skipped for human gates/brakes (no agent emits those) and
+      // for outcome-port drags (#828) where A already declares the emit through its
+      // outcomes port (`emitSource = false`).
+      if (!humanLabel && emitSource) {
+        const existing = await ops.getRoleOutcomes(from);
+        const cur = existing || { mode: 'anyOf', options: [] };
+        const alreadyHas = (cur.options || []).some(o =>
+          (o.actions || []).some(a => a.type === 'setLabel' && a.label === trimmed));
+        if (!alreadyHas) {
+          await ops.setRoleOutcomes(from, {
+            ...cur,
+            options: [...(cur.options || []), {
+              id: trimmed,
+              title: trimmed,
+              actions: [{ type: 'setLabel', label: trimmed }],
+            }],
+          });
+        }
       }
       onDone?.();
     } catch (e) {
@@ -305,6 +322,136 @@ export function CreateEdgeDialog({
           </button>
         ))}
       </div>
+    </SidePanel>
+  );
+}
+
+/* ── Add input chooser (Routing → Inputs, #866) ─────────────────────────────
+ * The inspector-side sibling of the canvas CreateEdgeDialog: one [+ Add input]
+ * entry point onto the SAME plain-language vocabulary and the SAME ops the
+ * canvas drags use, so an input can be authored from the inspector without
+ * dragging on the canvas (closes the create-on-canvas / remove-only-in-inspector
+ * asymmetry of §3). `node` is the consumer being woken; connection tiles
+ * (channel / artifact) first pick the upstream producer, then reuse the exact
+ * canvas form. Trigger tiles create a manual trigger directly on this node. */
+export function AddInputDialog({ node, peers = [], labels = [], ops = liveOps, onClose, onDone }) {
+  const [step, setStep] = useState(null);       // null = tile chooser
+  const [fromPeer, setFromPeer] = useState(null);
+  const toName = node.displayName || node.id;
+  const sources = peers.filter(p => p && p.id !== node.id);
+  const toTiles = () => { setFromPeer(null); setStep(null); };
+  const common = { to: node.id, toName, ops, onClose, onDone };
+
+  if (step === 'event') return <GithubTriggerForm {...common} labels={labels} onBack={toTiles} />;
+  if (step === 'label') return <GithubTriggerForm {...common} labels={labels} initialEvent="issues.labeled" onBack={toTiles} />;
+  if (step === 'webhook') return <WebhookForm {...common} onBack={toTiles} />;
+  if (step === 'schedule') return <ScheduleInputForm {...common} onBack={toTiles} />;
+
+  if (step === 'channel:pick' || step === 'artifact:pick') {
+    const artifactStep = step === 'artifact:pick';
+    return (
+      <PeerPicker
+        title={artifactStep ? 'Artifact from another agent' : 'PR / issue from another agent'}
+        prompt={artifactStep
+          ? `Which agent's artifact wakes ${toName}?`
+          : `Which agent's pull request / issue wakes ${toName}?`}
+        peers={sources}
+        onPick={(p) => { setFromPeer(p); setStep(artifactStep ? 'artifact' : 'channel'); }}
+        onBack={toTiles}
+        onClose={onClose}
+      />
+    );
+  }
+  if (step === 'channel' && fromPeer) {
+    return <CreateChannelDialog {...common} from={fromPeer.id} fromName={fromPeer.displayName || fromPeer.id}
+      onBack={() => setStep('channel:pick')} />;
+  }
+  if (step === 'artifact' && fromPeer) {
+    return <ArtifactEdgeForm {...common} from={fromPeer.id} fromName={fromPeer.displayName || fromPeer.id}
+      onBack={() => setStep('artifact:pick')} />;
+  }
+
+  const choices = [
+    { id: 'event', title: 'GitHub event', desc: `${toName} wakes on a repo event (issue/PR opened, push, …).` },
+    { id: 'label', title: 'Label applied', desc: `${toName} wakes when a specific label is set — by an agent or a human.` },
+    { id: 'channel:pick', title: 'PR / issue from another agent', desc: `${toName} reacts to a pull request or issue another agent opens.` },
+    { id: 'schedule', title: 'Schedule', desc: `${toName} wakes on a recurring cron or a one-shot time.` },
+    { id: 'webhook', title: 'Webhook', desc: `An external system (CI, tooling) wakes ${toName} via an HTTP call.` },
+    { id: 'artifact:pick', title: 'Artifact from another agent', desc: `${toName} consumes an artifact another agent produces.` },
+  ];
+
+  return (
+    <SidePanel open onClose={onClose} title="Add input" width="520px">
+      <p style={hint}>What should wake <strong>{toName}</strong>?</p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+        {choices.map(c => (
+          <button key={c.id} onClick={() => setStep(c.id)} style={{
+            textAlign: 'left', background: 'var(--eb-bg-app)', cursor: 'pointer',
+            border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+            padding: 'var(--eb-space-3)', fontFamily: 'inherit',
+          }}>
+            <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>{c.title}</div>
+            <div style={{ ...small, marginTop: 2 }}>{c.desc}</div>
+          </button>
+        ))}
+      </div>
+    </SidePanel>
+  );
+}
+
+// Pick the upstream agent for a channel / artifact input authored from the
+// inspector (the canvas supplies this by which node you drag from).
+function PeerPicker({ title, prompt, peers, onPick, onBack, onClose }) {
+  return (
+    <SidePanel open onClose={onClose} title={title} width="520px">
+      <p style={hint}>{prompt}</p>
+      {peers.length === 0 ? (
+        <p style={small}>No other agents to connect from yet — add one to the flow first.</p>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+          {peers.map(p => (
+            <button key={p.id} onClick={() => onPick(p)} style={{
+              textAlign: 'left', background: 'var(--eb-bg-app)', cursor: 'pointer',
+              border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+              padding: 'var(--eb-space-3)', fontFamily: 'inherit',
+              fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)',
+            }}>{p.displayName || p.id}</button>
+          ))}
+        </div>
+      )}
+      <div style={{ ...actions, marginTop: 'var(--eb-space-4)' }}>
+        <button onClick={onBack} style={{ ...ghost, marginRight: 'auto' }}>Back</button>
+        <button onClick={onClose} style={ghost}>Cancel</button>
+      </div>
+    </SidePanel>
+  );
+}
+
+// Schedule input — wraps the reused TriggersPanel form (cron / once, with its
+// cron builder) in a SidePanel and persists via ops.createTrigger. The form's
+// own type selector still lets the user flip to another trigger kind, so nothing
+// the Triggers tab offered is lost (concept §6 capability parity).
+function ScheduleInputForm({ to, toName, ops = liveOps, onBack, onClose, onDone }) {
+  const [saving, setSaving] = useState(false);
+  async function save(body) {
+    setSaving(true);
+    try { await ops.createTrigger(to, body); onDone?.(); }
+    finally { setSaving(false); }
+  }
+  return (
+    <SidePanel open onClose={onClose} title="Add a schedule" width="520px">
+      <p style={hint}>
+        <strong>{toName}</strong> wakes on a recurring schedule or at a one-shot time.
+      </p>
+      {/* No initialValues → create mode: the Type selector stays open (cron is
+          the default; the user can flip to Once), the ID auto-generates. */}
+      <TriggerForm
+        agentId={to}
+        ops={ops}
+        saving={saving}
+        onSave={save}
+        onCancel={onBack || onClose}
+      />
     </SidePanel>
   );
 }
@@ -532,11 +679,14 @@ export function EditHandoffDialog(props) {
 /* ── Edit / remove a GitHub channel edge (#380) ─────────────────────────────
  * The channel is a port on the consumer; editing changes the routing label +
  * human-gate, removing drops the port (the backend re-derives the trigger). */
-function EditChannelDialog({ edge, fromName, toName, ops = liveOps, producerChannelCount, onClose, onDone }) {
+function EditChannelDialog({ edge, fromName, toName, ops = liveOps, producerChannelCount, onClose, onDone, onOpenRouting }) {
   const { from, to, artifact: art } = edge;
   const artifact = art === 'issue' ? 'issue' : 'pr';
   const [label, setLabel] = useState(edge.label || '');
   const [human, setHuman] = useState(edge.gate === 'human');
+  // Optional authored wake-prompt override (#868): empty = keep the generated
+  // "a PR/issue arrived" prompt; any text overrides it on the derived listener.
+  const [wakePrompt, setWakePrompt] = useState(edge.wakePrompt || '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const noun = artifact === 'pr' ? 'pull request' : 'issue';
@@ -553,6 +703,7 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, producerChan
         artifact, from,
         ...(label.trim() ? { label: label.trim() } : {}),
         ...(human ? { gate: 'human' } : {}),
+        ...(wakePrompt.trim() ? { wakePrompt: wakePrompt.trim() } : {}),
       });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
@@ -576,7 +727,8 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, producerChan
       <p style={hint}>
         <strong>{fromName || from}</strong>'s {noun} → <strong>{toName || to}</strong>
       </p>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={to} section="inputs" />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)', marginTop: 'var(--eb-space-3)' }}>
         <Field label="Routing label (optional)">
           <input value={label} onChange={e => setLabel(e.target.value)}
             placeholder="e.g. approved" style={input} />
@@ -585,6 +737,14 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, producerChan
           <input type="checkbox" checked={human} onChange={e => setHuman(e.target.checked)} />
           Human approval gate — a person applies the label
         </label>
+        <Field label="Wake prompt override (optional)">
+          <textarea value={wakePrompt} onChange={e => setWakePrompt(e.target.value)}
+            placeholder="Leave empty to use the generated prompt for this input."
+            style={{ ...input, minHeight: 90, fontFamily: 'var(--eb-font-mono)', resize: 'vertical' }} />
+          <span style={hint}>
+            Replaces the auto-generated prompt the derived listener wakes {toName || to} with. Empty keeps the default.
+          </span>
+        </Field>
         {lastChannel && (
           <label style={check}>
             <input type="checkbox" checked={clearProduces} onChange={e => setClearProduces(e.target.checked)} />
@@ -605,7 +765,7 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, producerChan
   );
 }
 
-function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDone }) {
+function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDone, onOpenRouting }) {
   const { from, to, label, triggerId } = edge;
   // Actor-sourced hand-off (#412): the label is set by a human, not an agent —
   // there is no emit to edit or strip, only the listener trigger.
@@ -618,6 +778,11 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
   const [action, setAction] = useState('labeled');
   const [labelName, setLabelName] = useState(label || '');
   const [initialEvents, setInitialEvents] = useState([]);
+  const [repo, setRepo] = useState('');
+  // The stored listener prompt. `null` = untouched / not yet loaded (AC3: seed
+  // the auto-generated default); any string (incl. '') = an operator-owned value
+  // shown verbatim and saved as-is (AC2 + the empty-prompt / rename edge cases).
+  const [prompt, setPrompt] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [delListener, setDelListener] = useState(true);
   const [delEmit, setDelEmit] = useState(!humanSource);
@@ -638,6 +803,11 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
           if (typeof t.labelFilter === 'string' && t.labelFilter.trim()) {
             setLabelName(t.labelFilter.trim());
           }
+          if (typeof t.repo === 'string') setRepo(t.repo);
+          // Prefill the stored prompt verbatim (AC2). A trigger with no stored
+          // prompt (undefined / non-string — e.g. created before this field
+          // existed) stays `null`, so the default seeds it below (AC3).
+          if (typeof t.prompt === 'string') setPrompt(t.prompt);
         }
       } catch (e) {
         if (alive) setError(e.message);
@@ -649,8 +819,17 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
   }, [to, triggerId]);
 
   const event = `${target}.${action}`;
-  const verb = action === 'labeled' ? 'added to' : 'removed from';
-  const targetNoun = target === 'issues' ? 'an issue' : 'a pull request';
+  const verb = handoffVerb(action);
+  const targetNoun = handoffTargetNoun(target);
+  // While untouched (prompt === null), show the same auto-generated default the
+  // create dialog offers, derived live from the current label/kind (AC3). Once
+  // loaded from storage or edited, show that value verbatim.
+  const effectivePrompt = prompt !== null
+    ? prompt
+    : defaultListenerPrompt({
+        label: labelName, verb, targetNoun, repo,
+        fromLabel: fromName || from, toLabel: toName || to,
+      });
 
   async function saveEdits() {
     const newLabel = labelName.trim();
@@ -659,13 +838,27 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
     try {
       await ops.updateTrigger(to, triggerId, {
         events: [event], labelFilter: newLabel,
+        // Persist the prompt verbatim (AC4) — the seeded default when untouched,
+        // the operator's text otherwise (incl. an intentionally empty value).
+        // Never regenerated on a label rename (saved as-is per the edge cases).
+        prompt: effectivePrompt,
       });
-      // Renaming the label keeps the source's emits in sync (agent-sourced
+      // Renaming the label keeps the source's outcomes in sync (agent-sourced
       // hand-offs only — human-set labels have no emitter to rewrite).
-      if (newLabel !== label && !humanSource && ops.getRoleEmits && ops.setRoleEmits) {
-        const cur = await ops.getRoleEmits(from);
-        if (Array.isArray(cur) && cur.includes(label)) {
-          await ops.setRoleEmits(from, uniq(cur.map(l => (l === label ? newLabel : l))));
+      if (newLabel !== label && !humanSource && ops.getRoleOutcomes && ops.setRoleOutcomes) {
+        const cur = await ops.getRoleOutcomes(from);
+        if (cur) {
+          const updated = {
+            ...cur,
+            options: (cur.options || []).map(o => ({
+              ...o,
+              actions: (o.actions || []).map(a =>
+                a.type === 'setLabel' && a.label === label ? { ...a, label: newLabel } : a),
+              id: o.id === label ? newLabel : o.id,
+              title: o.title === label ? newLabel : o.title,
+            })),
+          };
+          await ops.setRoleOutcomes(from, updated);
         }
       }
       onDone?.();
@@ -679,12 +872,16 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
         await ops.deleteTrigger(to, triggerId);
       }
       if (delEmit && !humanSource) {
-        // Strip the label from the source's agent-level emits — the sole emit
-        // surface now that trigger-level emits are removed (#783).
-        if (ops.getRoleEmits && ops.setRoleEmits) {
-          const cur = await ops.getRoleEmits(from);
-          if (Array.isArray(cur) && cur.includes(label)) {
-            await ops.setRoleEmits(from, cur.filter(l => l !== label));
+        // Strip the label from the source's outcomes port — the emit surface
+        // now that trigger-level and flat emits are retired (#783/#831).
+        if (ops.getRoleOutcomes && ops.setRoleOutcomes) {
+          const cur = await ops.getRoleOutcomes(from);
+          if (cur) {
+            const filtered = (cur.options || []).filter(o =>
+              !(o.actions || []).some(a => a.type === 'setLabel' && a.label === label));
+            await ops.setRoleOutcomes(from, filtered.length
+              ? { ...cur, options: filtered }
+              : null);
           }
         }
       }
@@ -697,6 +894,7 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
       <p style={hint}>
         <strong>{fromName || from}</strong> → <code>{label}</code> → <strong>{toName || to}</strong>
       </p>
+      <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={to} section="inputs" />
       {loading ? (
         <Center><Loader2 size={14} style={spin} /> Loading…</Center>
       ) : (
@@ -723,6 +921,15 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
               </small>
             )}
           </Field>
+
+          <Field label="Listener prompt">
+            <textarea value={effectivePrompt} onChange={e => setPrompt(e.target.value)}
+              style={{ ...input, minHeight: 120, fontFamily: 'var(--eb-font-mono)', resize: 'vertical' }} />
+          </Field>
+          <small style={small}>
+            The instruction <strong>{toName || to}</strong> is woken with. Leave the
+            default or refine it; clearing it saves an empty prompt.
+          </small>
 
           {error && <span style={errStyle}>{error}</span>}
 
@@ -767,7 +974,7 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
 }
 
 /* ── Remove a dependency or parent edge ─────────────────────────────────── */
-function RemoveEdgeDialog({ kind, edge, fromName, toName, ops = liveOps, onClose, onDone }) {
+function RemoveEdgeDialog({ kind, edge, fromName, toName, ops = liveOps, onClose, onDone, onOpenRouting }) {
   const { from, to } = edge;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -791,6 +998,8 @@ function RemoveEdgeDialog({ kind, edge, fromName, toName, ops = liveOps, onClose
           <><strong>{fromName || from}</strong> is the parent of <strong>{toName || to}</strong>.</>
         )}
       </p>
+      <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={to} section={isDep ? 'inputs' : 'structure'} />
+      <div style={{ marginTop: 'var(--eb-space-3)' }} />
       {error && <span style={errStyle}>{error}</span>}
       <div style={actions}>
         <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
@@ -805,7 +1014,7 @@ function RemoveEdgeDialog({ kind, edge, fromName, toName, ops = liveOps, onClose
 /* ── Remove one side of a data-flow (artifact) edge ─────────────────────────
  * The graph routes data flow through a shared artifact node, so a click targets
  * exactly one port — a producer's output or a consumer's input of that path. */
-function RemoveArtifactEdgeDialog({ edge, fromName, ops = liveOps, onClose, onDone }) {
+function RemoveArtifactEdgeDialog({ edge, fromName, ops = liveOps, onClose, onDone, onOpenRouting }) {
   const { from, direction, path } = edge;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -822,6 +1031,8 @@ function RemoveArtifactEdgeDialog({ edge, fromName, ops = liveOps, onClose, onDo
       <p style={hint}>
         <strong>{fromName || from}</strong> {isOutput ? 'produces' : 'consumes'} <code>{path}</code>.
       </p>
+      <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={from} section={isOutput ? 'artifacts' : 'inputs'} />
+      <div style={{ marginTop: 'var(--eb-space-3)' }} />
       <div style={{ ...small, marginBottom: 'var(--eb-space-3)' }}>
         Removes this {isOutput ? 'output' : 'input'} port only. The other side of the flow (if any) stays —
         remove it from its own node to clear the whole hand-off.
@@ -846,7 +1057,7 @@ function RemoveArtifactEdgeDialog({ edge, fromName, ops = liveOps, onClose, onDo
 // lets the user turn the schedule into a different trigger kind (the graph
 // re-derives the edge on refresh); Save patches the trigger through the ops
 // adapter, so unrelated fields (emits, dataFlow, channel markers) stay intact.
-function EditTimerDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
+function EditTimerDialog({ edge, toName, ops = liveOps, onClose, onDone, onOpenRouting }) {
   const { to, triggerId } = edge;
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -881,6 +1092,7 @@ function EditTimerDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
   return (
     <SidePanel open onClose={onClose} title="Schedule" width="520px">
       <p style={hint}>⏰ Schedule → <strong>{toName || to}</strong></p>
+      <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={to} section="inputs" />
       {loading ? (
         <Center><Loader2 size={14} style={spin} /> Loading…</Center>
       ) : !initialValues ? (
@@ -908,7 +1120,7 @@ function EditTimerDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
 // 🐙 → agent: edit the event, the optional label filter + origin filter,
 // or delete. The same unified GitHub-trigger surface the create dialog offers —
 // one event per trigger; legacy multi-event triggers surface a notice.
-function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
+function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone, onOpenRouting }) {
   const { to, triggerId } = edge;
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -964,6 +1176,7 @@ function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
   return (
     <SidePanel open onClose={onClose} title="GitHub trigger" width="520px">
       <p style={hint}>🐙 GitHub → <strong>{toName || to}</strong></p>
+      <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={to} section="inputs" />
       {loading ? <Center><Loader2 size={14} style={spin} /> Loading…</Center> : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
           <Field label="Event">
@@ -995,7 +1208,7 @@ function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
 }
 
 // ⚡ → agent: show the hook URL, rotate the secret (shown once), or delete.
-function EditWebhookDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
+function EditWebhookDialog({ edge, toName, ops = liveOps, onClose, onDone, onOpenRouting }) {
   const { to, triggerId, label } = edge;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -1020,7 +1233,8 @@ function EditWebhookDialog({ edge, toName, ops = liveOps, onClose, onDone }) {
   return (
     <SidePanel open onClose={onClose} title="Webhook" width="520px">
       <p style={hint}>⚡ {label || 'Webhook'} → <strong>{toName || to}</strong></p>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={to} section="inputs" />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)', marginTop: 'var(--eb-space-3)' }}>
         {isDraft ? (
           <div style={small}>The URL exists once the team is materialised.</div>
         ) : (
@@ -1081,8 +1295,8 @@ function ReadonlyEdgeDialog({ edge, fromName, toName, onClose }) {
 // regardless of who caused it. No repo input either: the repo is resolved from
 // the agent's working environment (live) or at materialise time (draft), since
 // it is unknown while modelling the flow.
-export function GithubTriggerForm({ to, toName, labels, ops = liveOps, onBack, onClose, onDone }) {
-  const [event, setEvent] = useState('');
+export function GithubTriggerForm({ to, toName, labels, ops = liveOps, onBack, onClose, onDone, initialEvent = '' }) {
+  const [event, setEvent] = useState(initialEvent);
   const [label, setLabel] = useState('');
   const [prompt, setPrompt] = useState('');
   const [saving, setSaving] = useState(false);
@@ -1264,6 +1478,26 @@ function Field({ label, children }) {
     </label>
   );
 }
+
+// "Open in Routing" jump link (#865): closes the edge dialog and opens the owning
+// node's inspector focused on the row/section that carries this edge — the same
+// setRoutingFocus pattern the canvas uses for outcome edges. `section` of
+// 'structure' targets the Details tab (Parent lives there now); everything else
+// targets a Routing section (inputs / artifacts / legacy).
+function OpenRoutingLink({ onOpenRouting, nodeId, section }) {
+  if (typeof onOpenRouting !== 'function' || !nodeId) return null;
+  const where = section === 'structure' ? 'Details' : 'Routing';
+  return (
+    <button type="button" onClick={() => onOpenRouting(nodeId, section)} style={jumpLink}>
+      <ArrowUpRight size={12} /> Open in {where}
+    </button>
+  );
+}
+const jumpLink = {
+  display: 'inline-flex', alignItems: 'center', gap: 4, alignSelf: 'flex-start',
+  background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+  color: 'var(--eb-accent-primary)', fontFamily: 'inherit', fontSize: 'var(--eb-text-xs)',
+};
 function Center({ children }) {
   return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: 'var(--eb-space-6)', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>{children}</div>;
 }

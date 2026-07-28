@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId, outcomesBlock, stripOutcomesBlock, applyDerivedPromptBlocks, cleanWakePrompt } = require('./process-template');
 
 // A tiny stand-in for the on-disk draft store: an id is "taken" iff present.
 const existsIn = (set) => (id) => set.has(id);
@@ -112,8 +112,11 @@ test('buildProcessTemplate shapes a versioned bundle and drops team-specifics', 
   assert.equal(r.id, 'developer');         // team prefix stripped
   assert.equal(r.sessionPolicy, 'per-invocation');
   assert.equal(r.systemPrompt, 'You implement issues.');
-  // Label hand-offs are carried at the role level (#783), not on triggers.
-  assert.deepEqual(r.emits, ['started:dev']);
+  // Legacy flat emits lifted to outcomes on export (#831) — no raw emits field.
+  assert.ok(!('emits' in r), 'emits field not exported');
+  assert.deepEqual(r.outcomes, { mode: 'anyOf', options: [
+    { id: 'started:dev', title: 'started:dev', actions: [{ type: 'setLabel', label: 'started:dev' }] },
+  ] });
   const t = r.triggers[0];
   assert.equal(t.labelFilter, 'assigned:dev');
   assert.ok(!('emits' in t), 'trigger-level emits removed (#783)');
@@ -145,8 +148,11 @@ test('templateToCustomRoles maps to the /api/teams pseudo-template shape', () =>
   assert.equal(t.promptTemplate, 'Implement it.');
   assert.equal(t.labelFilter, 'assigned:dev');
   assert.ok(!('emits' in t), 'trigger-level emits removed (#783)');
-  // Label hand-offs are carried at the role level.
-  assert.deepEqual(role.emits, ['started:dev']);
+  // Legacy flat emits lifted to outcomes on export (#831).
+  assert.ok(!('emits' in role), 'emits field not in customRoles');
+  assert.deepEqual(role.outcomes, { mode: 'anyOf', options: [
+    { id: 'started:dev', title: 'started:dev', actions: [{ type: 'setLabel', label: 'started:dev' }] },
+  ] });
 });
 
 test('stage: per-role stage + ordered stages survive build → customRoles (#stage-order)', () => {
@@ -174,8 +180,9 @@ test('round-trip: build → validate → customRoles preserves wiring', () => {
   assert.equal(validateProcessTemplate(b).ok, true);
   const cr = templateToCustomRoles(b);
   assert.deepEqual(cr.map(r => r.id), ['developer']);
-  // Label hand-off preserved at the role level through the round-trip (#783).
-  assert.deepEqual(cr[0].emits, ['started:dev']);
+  // Legacy flat emits lifted to outcomes through the round-trip (#831).
+  assert.ok(!('emits' in cr[0]), 'emits field not in round-tripped customRoles');
+  assert.ok(cr[0].outcomes, 'outcomes port present after round-trip');
   assert.ok(!('emits' in cr[0].triggers.find(t => t.id === 'dev-assigned')));
 });
 
@@ -208,10 +215,12 @@ test('expandGithubChannels: a consumer channel yields a scoped PR-opened trigger
   };
   const out = expandGithubChannels(bundle, { teamId: 'acme' });
   const reviewer = out.roles.find(r => r.id === 'reviewer');
-  const t = reviewer.triggers.find(t => t.id === 'reviewer-on-pr-developer');
+  // New id scheme drops the producer (#826): `<consumer>-on-<artifact>[-<label>]`.
+  const t = reviewer.triggers.find(t => t.id === 'reviewer-on-pr');
   assert.ok(t);
   assert.equal(t.channel, true);
   assert.deepEqual(t.events, ['pull_request.opened', 'pull_request.reopened']);
+  assert.deepEqual(t.sources, ['developer']); // provenance: the one contributing producer
   assert.ok(!('from' in t), 'no origin filter — the trigger fires on any matching PR event');
   assert.equal(t.labelFilter, undefined);
   // non-consumer roles untouched
@@ -246,8 +255,155 @@ test('expandGithubChannels: regenerates (strips stale) derived channel triggers,
   const once = expandGithubChannels(bundle);
   const twice = expandGithubChannels(once);
   const triage = twice.roles.find(r => r.id === 'triage');
-  assert.equal(triage.triggers.filter(t => t.id === 'triage-on-issue-dev').length, 1);
+  assert.equal(triage.triggers.filter(t => t.id === 'triage-on-issue').length, 1);
   assert.deepEqual(triage.triggers[0].events, ['issues.opened']);
+});
+
+test('expandGithubChannels: two same-label channels from different producers → ONE listener with both sources (\#826)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'consolidate', level: 'template',
+    roles: [
+      { id: 'ba1', displayName: 'BA One', github: { producesIssue: true }, triggers: [] },
+      { id: 'ba2', displayName: 'BA Two', github: { producesIssue: true }, triggers: [] },
+      { id: 'dispatcher', displayName: 'Dispatcher',
+        channels: [
+          { artifact: 'issue', from: 'ba1', label: 'dispatch' },
+          { artifact: 'issue', from: 'ba2', label: 'dispatch' },
+        ], triggers: [] },
+    ],
+  };
+  const out = expandGithubChannels(bundle);
+  const disp = out.roles.find(r => r.id === 'dispatcher');
+  const listeners = disp.triggers.filter(t => t.channel);
+  assert.equal(listeners.length, 1, 'exactly one derived trigger for the shared (events, labelFilter)');
+  const t = listeners[0];
+  assert.equal(t.id, 'dispatcher-on-issue-dispatch'); // new id scheme, producer dropped
+  assert.deepEqual(t.events, ['issues.labeled']);
+  assert.equal(t.labelFilter, 'dispatch');
+  assert.deepEqual(t.sources, ['ba1', 'ba2']); // both producers recorded (informational)
+  assert.ok(!('from' in t), 'no origin filter');
+  assert.match(t.description, /BA One, BA Two/); // display names of both sources
+});
+
+test('expandGithubChannels: distinct (artifact,label) pairs stay separate listeners (\#826)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'split', level: 'template',
+    roles: [
+      { id: 'dev', github: { producesPr: true }, triggers: [] },
+      { id: 'consumer', channels: [
+        { artifact: 'pr', from: 'dev' },                       // pr.opened, no label
+        { artifact: 'pr', from: 'dev', label: 'approved' },    // pr.labeled + approved
+      ], triggers: [] },
+    ],
+  };
+  const out = expandGithubChannels(bundle);
+  const c = out.roles.find(r => r.id === 'consumer');
+  const ids = c.triggers.filter(t => t.channel).map(t => t.id).sort();
+  assert.deepEqual(ids, ['consumer-on-pr', 'consumer-on-pr-approved']);
+});
+
+// ─── Per-channel wake-prompt override (#868) ────────────────────────────────
+
+test('expandGithubChannels: an authored wakePrompt overrides the derived listener prompt (#868)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'ov', level: 'template',
+    roles: [
+      { id: 'dev', displayName: 'Dev', github: { producesPr: true }, triggers: [] },
+      { id: 'reviewer', displayName: 'Reviewer',
+        channels: [{ artifact: 'pr', from: 'dev', wakePrompt: 'Custom: review the PR against the style guide only.' }],
+        triggers: [] },
+    ],
+  };
+  const out = expandGithubChannels(bundle);
+  const t = out.roles.find(r => r.id === 'reviewer').triggers.find(x => x.id === 'reviewer-on-pr');
+  assert.ok(t);
+  assert.equal(t.prompt, 'Custom: review the PR against the style guide only.',
+    'the derived trigger carries the authored override verbatim');
+});
+
+test('expandGithubChannels: no wakePrompt keeps the generated prompt (#868)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'ov', level: 'template',
+    roles: [
+      { id: 'dev', displayName: 'Dev', github: { producesPr: true }, triggers: [] },
+      { id: 'reviewer', displayName: 'Reviewer', channels: [{ artifact: 'pr', from: 'dev' }], triggers: [] },
+    ],
+  };
+  const t = expandGithubChannels(bundle).roles.find(r => r.id === 'reviewer').triggers[0];
+  assert.match(t.prompt, /pull request/i, 'falls back to the generated consume prompt');
+});
+
+test('expandGithubChannels: a blank/whitespace wakePrompt is ignored (#868)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'ov', level: 'template',
+    roles: [
+      { id: 'dev', displayName: 'Dev', github: { producesIssue: true }, triggers: [] },
+      { id: 'triage', displayName: 'Triage', channels: [{ artifact: 'issue', from: 'dev', wakePrompt: '   ' }], triggers: [] },
+    ],
+  };
+  const t = expandGithubChannels(bundle).roles.find(r => r.id === 'triage').triggers[0];
+  assert.match(t.prompt, /issue/i, 'a whitespace-only override does not replace the generated prompt');
+});
+
+test('expandGithubChannels: on a consolidated listener the first non-empty wakePrompt wins (#868)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'ov', level: 'template',
+    roles: [
+      { id: 'ba1', displayName: 'BA One', github: { producesIssue: true }, triggers: [] },
+      { id: 'ba2', displayName: 'BA Two', github: { producesIssue: true }, triggers: [] },
+      { id: 'dispatcher', displayName: 'Dispatcher',
+        channels: [
+          { artifact: 'issue', from: 'ba1', label: 'dispatch' },                                   // no override
+          { artifact: 'issue', from: 'ba2', label: 'dispatch', wakePrompt: 'Triage the dispatched issue.' },
+        ], triggers: [] },
+    ],
+  };
+  const listeners = expandGithubChannels(bundle).roles.find(r => r.id === 'dispatcher').triggers.filter(t => t.channel);
+  assert.equal(listeners.length, 1, 'still one consolidated listener');
+  assert.equal(listeners[0].prompt, 'Triage the dispatched issue.',
+    'the first non-empty override in insertion order is carried onto the shared listener');
+});
+
+test('expandDataFlowSteps: an authored input wakePrompt overrides the derived push prompt (#868)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'd', level: 'template',
+    roles: [
+      { id: 'producer', displayName: 'Producer', triggers: [], outputs: [{ name: 'Spec', hint: 'spec.md' }] },
+      { id: 'consumer', displayName: 'Consumer', triggers: [],
+        inputs: [{ name: 'Spec', hint: 'spec.md', wakePrompt: 'Custom: rebuild from the new Spec.' }] },
+    ],
+  };
+  const t = expandDataFlowSteps(bundle).roles.find(r => r.id === 'consumer').triggers.find(x => x.id === 'consumer-on-push-producer');
+  assert.ok(t);
+  assert.equal(t.prompt, 'Custom: rebuild from the new Spec.', 'the derived push trigger carries the authored override');
+});
+
+test('buildProcessTemplate round-trips a channel wakePrompt on export (#868)', () => {
+  const b = buildProcessTemplate({
+    name: 'x', level: 'live', teamId: 'acme',
+    roles: [
+      { id: 'acme-dev', displayName: 'Dev', github: { producesPr: true }, triggers: [] },
+      { id: 'acme-rev', displayName: 'Rev', channels: [{ artifact: 'pr', from: 'acme-dev', wakePrompt: 'Look here.' }], triggers: [] },
+    ],
+  });
+  const rev = b.roles.find(r => r.id === 'rev');
+  assert.equal(rev.channels[0].wakePrompt, 'Look here.', 'export preserves the authored override');
+  assert.equal(rev.channels[0].from, 'dev', 'and still remaps the portable role key');
+});
+
+test('validateProcessTemplate rejects a non-string channel wakePrompt (#868)', () => {
+  const bad = {
+    processTemplateVersion: 1, name: 'x', level: 'template',
+    roles: [{ id: 'r', channels: [{ artifact: 'pr', from: 'p', wakePrompt: 42 }], triggers: [] }],
+  };
+  assert.equal(validateProcessTemplate(bad).ok, false);
+});
+
+test('cleanWakePrompt trims and drops blank overrides (#868)', () => {
+  assert.equal(cleanWakePrompt('  hi  '), 'hi');
+  assert.equal(cleanWakePrompt('   '), '');
+  assert.equal(cleanWakePrompt(undefined), '');
+  assert.equal(cleanWakePrompt(42), '');
 });
 
 test('expandGithubChannels: appends an idempotent producer block; buildProcessTemplate strips it', () => {
@@ -532,6 +688,30 @@ test('stampDerivedActivation: preserves other fields and is non-mutating', () =>
   assert.equal('activatedAt' in next[0], false); // input not mutated
 });
 
+test('stampDerivedActivation: migrating per-producer channel triggers carries the OLDEST activatedAt (\#826)', () => {
+  // Old scheme: two per-producer triggers for the same (events, labelFilter).
+  const prev = [
+    { id: 'disp-on-issue-ba1', channel: true, events: ['issues.labeled'], labelFilter: 'dispatch', activatedAt: T0 },
+    { id: 'disp-on-issue-ba2', channel: true, events: ['issues.labeled'], labelFilter: 'dispatch', activatedAt: '2026-03-03T00:00:00.000Z' },
+  ];
+  // New scheme: one consolidated trigger, different id, SAME listener signature.
+  const next = [{ id: 'disp-on-issue-dispatch', channel: true, events: ['issues.labeled'], labelFilter: 'dispatch' }];
+  const out = stampDerivedActivation(next, prev, NOW);
+  assert.equal(out[0].activatedAt, T0, 'oldest of the merged set — horizon cannot jump to now');
+});
+
+test('stampDerivedActivation: signature fallback does NOT apply to data-flow (a new upstream gets NOW) (\#826)', () => {
+  // Two push triggers share the same `push` signature but are per-upstream.
+  const prev = [{ id: 'c-on-push-up1', dataFlow: true, events: ['push'], activatedAt: T0 }];
+  const next = [
+    { id: 'c-on-push-up1', dataFlow: true, events: ['push'] }, // regenerated — id match keeps T0
+    { id: 'c-on-push-up2', dataFlow: true, events: ['push'] }, // genuinely new — must be NOW, not T0
+  ];
+  const out = stampDerivedActivation(next, prev, NOW);
+  assert.equal(out.find(t => t.id === 'c-on-push-up1').activatedAt, T0);
+  assert.equal(out.find(t => t.id === 'c-on-push-up2').activatedAt, NOW);
+});
+
 test('stampDerivedActivation: non-array inputs yield []', () => {
   assert.deepEqual(stampDerivedActivation(null, null, NOW), []);
   assert.deepEqual(stampDerivedActivation(undefined, undefined, NOW), []);
@@ -644,4 +824,176 @@ test('buildMemberFromTemplate: unknown {{vars}} stay literal; materialize passes
     { teamId: 'acme', memberId: 'acme-x', memberDisplayName: 'X', vars: {}, materialize: true });
   assert.equal(m.systemPromptOverride, 'Hi {{missing}}.'); // no silent "undefined"
   assert.equal(m.materialize, true);
+});
+
+// ─── Outcomes prompt block (#829, concept §6) ────────────────────────────────
+
+const EXACTLY_ONE = {
+  mode: 'exactlyOne',
+  options: [
+    { id: 'dev', title: 'Route to Developer', when: 'frontend/UI task', actions: [{ type: 'setLabel', label: 'ready' }] },
+    { id: 'dev2', title: 'Route to Developer 2', when: 'backend/DB task', actions: [{ type: 'setLabel', label: 'ready-2' }] },
+    { id: 'hold', title: 'Hold for clarification', when: 'ambiguous', notify: 'dm', actions: [{ type: 'none' }] },
+  ],
+};
+
+test('outcomesBlock: exactlyOne — lead, per-option label/when, and the single-label footer', () => {
+  const block = outcomesBlock(EXACTLY_ONE);
+  assert.match(block, /<!-- outcomes:start -->/);
+  assert.match(block, /<!-- outcomes:end -->/);
+  assert.match(block, /## Outcomes/);
+  assert.match(block, /choose \*\*exactly one\*\* of the following outcomes:/);
+  assert.match(block, /1\. \*\*Route to Developer\*\* — when: frontend\/UI task\. Then: apply label `ready`\./);
+  assert.match(block, /2\. \*\*Route to Developer 2\*\* — when: backend\/DB task\. Then: apply label `ready-2`\./);
+  // `none` action → "set no label"; notify:"dm" → DM reporting instruction.
+  assert.match(block, /3\. \*\*Hold for clarification\*\* — when: ambiguous\. Then: set no label; report to the user in the DM\./);
+  assert.match(block, /Never apply more than one of these labels in a single run\./);
+});
+
+test('outcomesBlock: anyOf — "all that apply, zero allowed" lead and NO single-label footer', () => {
+  const block = outcomesBlock({
+    mode: 'anyOf',
+    options: [
+      { id: 'sec', title: 'Security concern', actions: [{ type: 'setLabel', label: 'security' }] },
+      { id: 'perf', actions: [{ type: 'setLabel', label: 'perf' }] }, // no title → falls back to id
+    ],
+  });
+  assert.match(block, /choose \*\*all outcomes that apply\*\* — zero is allowed:/);
+  assert.doesNotMatch(block, /Never apply more than one/);
+  assert.match(block, /1\. \*\*Security concern\*\* — Then: apply label `security`\./); // no `when:` when absent
+  assert.match(block, /2\. \*\*perf\*\* — Then: apply label `perf`\./); // id fallback for missing title
+});
+
+test('outcomesBlock: openPr/openIssue reuse the produce wording (once)', () => {
+  const block = outcomesBlock({
+    mode: 'anyOf',
+    options: [
+      { id: 'ship', title: 'Ship it', actions: [{ type: 'openPr' }] },
+      { id: 'file', title: 'File follow-up', actions: [{ type: 'openIssue' }] },
+    ],
+  });
+  assert.match(block, /Then: open a pull request\./);
+  assert.match(block, /Then: open a GitHub issue\./);
+  // The full how-to (reused producePrText/produceIssueText) appears once each.
+  assert.equal((block.match(/gh pr create/g) || []).length, 1);
+  assert.equal((block.match(/gh issue create/g) || []).length, 1);
+});
+
+test('outcomesBlock: a non-authored port projects nothing (legacy no-block, AC4)', () => {
+  assert.equal(outcomesBlock(null), '');
+  assert.equal(outcomesBlock(undefined), '');
+  assert.equal(outcomesBlock({ mode: 'anyOf', options: [] }), ''); // empty options is not authored
+  assert.equal(outcomesBlock({ options: [{ id: 'x', actions: [] }] }), ''); // no mode is not authored
+});
+
+test('stripOutcomesBlock + applyDerivedPromptBlocks are byte-idempotent (AC1)', () => {
+  const base = 'You are the dispatcher.';
+  const once = applyDerivedPromptBlocks(base, { outcomes: EXACTLY_ONE });
+  assert.match(once, /You are the dispatcher\./);
+  assert.match(once, /outcomes:start/);
+  // Re-applying over the already-blocked prompt yields byte-identical output.
+  const twice = applyDerivedPromptBlocks(once, { outcomes: EXACTLY_ONE });
+  assert.equal(twice, once);
+  assert.equal((twice.match(/outcomes:start/g) || []).length, 1);
+  // Stripping restores the base exactly.
+  assert.equal(stripOutcomesBlock(once), base);
+});
+
+test('applyDerivedPromptBlocks: legacy emits-only agent gets a byte-identical prompt (AC4)', () => {
+  const base = 'Plain agent prompt.';
+  // No github, no authored outcomes → nothing appended.
+  assert.equal(applyDerivedPromptBlocks(base, {}), base);
+  assert.equal(applyDerivedPromptBlocks(base, { outcomes: null }), base);
+  // A github-only agent keeps its produce block unchanged (no outcomes block).
+  const gh = applyDerivedPromptBlocks(base, { github: { producesPr: true } });
+  assert.match(gh, /github-io:start/);
+  assert.doesNotMatch(gh, /outcomes:start/);
+});
+
+test('applyDerivedPromptBlocks: github-io + outcomes coexist without a doubled open-PR instruction (AC3)', () => {
+  const outcomes = {
+    mode: 'exactlyOne',
+    options: [
+      { id: 'ship', title: 'Ship', actions: [{ type: 'openPr' }] },
+      { id: 'hold', title: 'Hold', actions: [{ type: 'none' }] },
+    ],
+  };
+  // The agent ALSO carries a github.producesPr flag — the produce how-to must
+  // still appear exactly once (absorbed into the outcomes block; the github-io
+  // block drops the covered flag).
+  const out = applyDerivedPromptBlocks('Reviewer.', { github: { producesPr: true }, outcomes });
+  assert.match(out, /outcomes:start/);
+  assert.equal((out.match(/gh pr create/g) || []).length, 1);
+  // producesPr is fully covered by the outcome → no empty github-io block.
+  assert.doesNotMatch(out, /github-io:start/);
+
+  // A producesIssue NOT covered by any outcome still yields its github-io block.
+  const out2 = applyDerivedPromptBlocks('Reviewer.', { github: { producesPr: true, producesIssue: true }, outcomes });
+  assert.match(out2, /github-io:start/);
+  assert.equal((out2.match(/gh pr create/g) || []).length, 1); // still once (from the outcome)
+  assert.equal((out2.match(/gh issue create/g) || []).length, 1); // from the github-io block
+});
+
+test('expandGithubChannels: materialises the outcomes block; export round-trip does not duplicate it (AC2)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'x', level: 'template',
+    roles: [{
+      id: 'dispatch', displayName: 'Dispatcher', systemPrompt: 'Route issues.',
+      outcomes: EXACTLY_ONE, triggers: [],
+    }],
+  };
+  const once = expandGithubChannels(bundle);
+  const p1 = once.roles[0].systemPrompt;
+  assert.match(p1, /Route issues\./);
+  assert.match(p1, /outcomes:start/);
+  assert.match(p1, /apply label `ready`/);
+  // Re-expanding does not duplicate the block.
+  const twice = expandGithubChannels(once);
+  assert.equal((twice.roles[0].systemPrompt.match(/outcomes:start/g) || []).length, 1);
+  // Export strips the block back out so the portable bundle stays clean, and the
+  // structured `outcomes` port survives — a re-import regenerates it (no dup).
+  const b = buildProcessTemplate({ name: 'x', level: 'live', roles: twice.roles });
+  assert.equal(b.roles[0].systemPrompt, 'Route issues.');
+  assert.ok(!b.roles[0].systemPrompt.includes('outcomes:start'));
+  assert.equal(b.roles[0].outcomes.mode, 'exactlyOne');
+  const reimport = expandGithubChannels({ ...b });
+  assert.equal((reimport.roles[0].systemPrompt.match(/outcomes:start/g) || []).length, 1);
+});
+
+test('materialise: the outcomes block reaches the member override with {{vars}} substituted', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'x', level: 'template',
+    roles: [{
+      id: 'dispatch', displayName: 'Dispatcher', systemPrompt: 'Route.',
+      outcomes: { mode: 'exactlyOne', options: [{ id: 'go', title: 'Go', actions: [{ type: 'setLabel', label: '{{dispatchLabel}}' }] }] },
+      triggers: [],
+    }],
+  };
+  const expanded = expandGithubChannels(bundle);
+  const custom = templateToCustomRoles(expanded, 'acme');
+  const m = buildMemberFromTemplate(custom[0], {
+    teamId: 'acme', memberId: 'acme-dispatch', memberDisplayName: 'Dispatcher',
+    vars: { dispatchLabel: 'dispatch' }, materialize: true,
+  });
+  assert.match(m.systemPromptOverride, /outcomes:start/);
+  assert.match(m.systemPromptOverride, /apply label `dispatch`/); // {{dispatchLabel}} substituted
+  // The member also carries the structured outcomes port, itself substituted.
+  assert.equal(m.outcomes.options[0].actions[0].label, 'dispatch');
+});
+
+test('reconcile fan-out (per-member transform): only authored-outcomes members get a block, idempotently', () => {
+  // Model the reconciler's core: for each member config, re-render from its base
+  // prompt + ports. Authored-outcomes members gain the block; legacy (emits-only)
+  // and plain members are unchanged; a second pass is a no-op (byte-idempotent).
+  const members = [
+    { id: 'a', systemPrompt: 'A.', outcomes: EXACTLY_ONE },
+    { id: 'b', systemPrompt: 'B.', emits: ['ready'] }, // legacy flat emits → no block
+    { id: 'c', systemPrompt: 'C.' },                    // plain → no block
+  ];
+  const pass1 = members.map(m => applyDerivedPromptBlocks(m.systemPrompt, { github: m.github, outcomes: m.outcomes }));
+  assert.match(pass1[0], /outcomes:start/);
+  assert.equal(pass1[1], 'B.');
+  assert.equal(pass1[2], 'C.');
+  const pass2 = pass1.map((p, i) => applyDerivedPromptBlocks(p, { github: members[i].github, outcomes: members[i].outcomes }));
+  assert.deepEqual(pass2, pass1); // idempotent fan-out
 });

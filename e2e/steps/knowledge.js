@@ -62,15 +62,28 @@ async function activateGlobalSkill(ctx, { skillName }) {
   await row.getByRole('button', { name: 'Activate' }).click();
 }
 
-// Assert member-level activation state through the UI: the node badge shows
-// every member active (`active · n/n`), and expanding it reveals one `✓ active`
-// chip per member — proving activation reached each workspace, not just that the
-// team toggle flipped.
-async function expectAllMembersActive(ctx, { memberCount }) {
+// Assert member-level activation state through the UI. Since #774 the skill card
+// no longer carries an `active · n/n` expandable badge: it shows an "In use" pill
+// + a health sentence (`Installed on all n agents`), and the per-member `✓ active`
+// chips moved into the skill-inspector drawer's Rollout tab. So: check the card's
+// pill + sentence, then open the inspector and count one `✓ active` chip per
+// member — proving activation reached each workspace, not just the team toggle.
+async function expectAllMembersActive(ctx, { memberCount, skillName }) {
   const { page } = ctx;
-  const badge = page.getByText(new RegExp(`^active · ${memberCount}/${memberCount}$`));
-  await expect(badge).toBeVisible();
-  await badge.click(); // expand the per-member list
+  const card = page
+    .locator('[role="button"][title="Open the skill inspector"]')
+    .filter({ hasText: skillName });
+  await expect(card).toBeVisible();
+  await expect(card.getByText('In use', { exact: true })).toBeVisible();
+  const agents = `agent${memberCount === 1 ? '' : 's'}`;
+  await expect(
+    card.getByText(new RegExp(`^Installed on all ${memberCount} ${agents}$`)),
+  ).toBeVisible();
+
+  // Open the inspector (clicking the card body) and switch to the Rollout tab,
+  // where the per-member chips live now.
+  await card.click();
+  await page.getByRole('button', { name: /^Rollout/ }).click();
   await expect(page.getByText('✓ active', { exact: true })).toHaveCount(memberCount);
 }
 

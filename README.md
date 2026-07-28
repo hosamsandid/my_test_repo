@@ -217,8 +217,18 @@ The most-used pages:
 | Model Providers | [docs/model-providers.md](./docs/model-providers.md) |
 | MCP servers | [docs/mcp-servers.md](./docs/mcp-servers.md) |
 | Admin Console reference | [docs/admin-console.md](./docs/admin-console.md) |
-| Teams & multi-user model | [docs/teams-data-model.md](./docs/teams-data-model.md) |
+| Teams & multi-user model | [docs/teams-data-model.md](./docs/teams-data-model.md) · [docs/multi-user-concept.md](./docs/multi-user-concept.md) |
+| GCP hosting (pilot VM): access, deploy, operations | [docs/hosting/gcp/vm-podman-runbook.md](./docs/hosting/gcp/vm-podman-runbook.md) |
 | Key files & project layout | [docs/key-files.md](./docs/key-files.md) |
+
+## Third-party Models
+
+Speech-to-text powered by [NVIDIA Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3).
+
+- **Model license:** [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/) — Copyright NVIDIA Corporation
+- **ONNX conversion:** [istupakov/parakeet-tdt-0.6b-v3-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx) — [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/)
+- **Inference library:** [onnx-asr](https://github.com/istupakov/onnx-asr) — [MIT](https://opensource.org/licenses/MIT)
+- No retraining or fine-tuning performed.
 
 ## Contributing
 

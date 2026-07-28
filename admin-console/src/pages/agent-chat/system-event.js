@@ -52,3 +52,58 @@ export function systemEventSummary(raw) {
 export function systemEventHasDetail(event) {
   return systemEventExtras(event?.raw).length > 0;
 }
+
+// A `thinking_tokens` system_event? The CLI emits these many times per run as a
+// live running-count progress signal (#870).
+export function isThinkingTokensEvent(ev) {
+  return !!ev && ev.type === 'system_event' && ev.subtype === 'thinking_tokens';
+}
+
+function thinkingTokenCount(ev) {
+  const n = Number(ev?.raw?.estimated_tokens);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Collapse a run's stream of `thinking_tokens` ticks into ONE row per run
+// (per correlationId), matching how the runtime is now a live self-updating
+// counter rather than a log of distinct events (#870, D2). Walks the event
+// list once, preserving order:
+//   * the first tick of a run anchors the single row at that position;
+//   * every later tick for the same correlationId updates that row in place —
+//     no new row is appended, and interleaved non-thinking events between ticks
+//     still render normally in sequence;
+//   * the row carries the raw payload of the tick with the HIGHEST
+//     estimated_tokens seen, so the count is coherent and non-decreasing even
+//     if the CLI's counter resets at the start of a new thinking phase.
+// Applies identically to live SSE tails and backfilled/reloaded logs (including
+// legacy logs already full of per-tick lines — AC5). Non-thinking events pass
+// through untouched.
+export function mergeThinkingTokens(events) {
+  if (!Array.isArray(events)) return events;
+  const out = [];
+  const indexByCid = new Map();  // correlationId → index in `out` of its row
+  for (const ev of events) {
+    if (!isThinkingTokensEvent(ev)) {
+      out.push(ev);
+      continue;
+    }
+    const cid = ev.correlationId ?? '';
+    if (!indexByCid.has(cid)) {
+      indexByCid.set(cid, out.length);
+      // Stable key so React reconciles the same DOM node and updates the count
+      // in place across re-renders (AC4).
+      out.push({ ...ev, _key: `tt-${cid}` });
+      continue;
+    }
+    const i = indexByCid.get(cid);
+    const prev = out[i];
+    const prevCount = thinkingTokenCount(prev);
+    const nextCount = thinkingTokenCount(ev);
+    // Keep the payload with the greater count; on a tie or missing counts keep
+    // the latest so the raw JSON reflects the most recent update (AC6).
+    if (prevCount == null || (nextCount != null && nextCount >= prevCount)) {
+      out[i] = { ...ev, _key: prev._key };
+    }
+  }
+  return out;
+}

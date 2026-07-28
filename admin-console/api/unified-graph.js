@@ -135,6 +135,10 @@ function processEdgeToUnified(e) {
   // label events (issue/PR × added/removed) ride along for display.
   const u = { from: e.from, to: e.to, on: 'label', label: e.label, triggerId: e.triggerId };
   if (Array.isArray(e.events) && e.events.length) u.events = e.events;
+  // Outcome-keyed edge (#827/#828): the emitter set this label as part of a
+  // structured outcome; carry the outcome option id so the canvas can title the
+  // edge with it and clicking focuses the Routing tab on that outcome.
+  if (e.outcome) u.outcome = e.outcome;
   if (e.kind === 'gate' || e.kind === 'brake' || isHumanGate(e.label) || isBrake(e.label)) {
     u.gate = 'human';
   }
@@ -186,10 +190,10 @@ function buildUnifiedGraph(nodes, edges) {
       isParent: n.isParent === true || asArray(n.children).length > 0,
       stage: typeof n.stage === 'string' ? n.stage : '',  // own stage (#362 E)
       // GitHub artifact ports (#380): produce flags for the node badge/ports;
-      // channels drive the on:'github' edges below.
-      github: (n.github && (n.github.producesPr || n.github.producesIssue))
-        ? { ...(n.github.producesPr ? { producesPr: true } : {}), ...(n.github.producesIssue ? { producesIssue: true } : {}) }
-        : null,
+      // channels drive the on:'github' edges below. `base.github` (from
+      // buildProcessGraph, spread above) is already the EFFECTIVE set — it folds
+      // in any `openPr`/`openIssue` outcome actions (#827) — so we keep it rather
+      // than recompute from the raw `n.github`.
       channels: asArray(n.channels),
     };
   });
@@ -315,6 +319,9 @@ function buildUnifiedGraph(nodes, edges) {
         from: ch.from, to: n.id, on: 'github', artifact,
         ...(ch.label ? { label: ch.label } : {}),
         ...(ch.gate === 'human' ? { gate: 'human' } : {}),
+        // Authored wake-prompt override (#868), surfaced so the channel edit
+        // dialog can pre-fill and round-trip it.
+        ...(typeof ch.wakePrompt === 'string' && ch.wakePrompt.trim() ? { wakePrompt: ch.wakePrompt } : {}),
         ...(nodeIds.has(ch.from) ? {} : { orphan: true }),
       });
     }
@@ -459,6 +466,9 @@ function processTemplateToUnified(bundle) {
       parent: typeof r.parent === 'string' && r.parent ? r.parent : null,
       // Agent-level emitted labels (operator-declared label hand-offs).
       emits: asArray(r.emits),
+      // Structured OUTCOMES port (#827): passed through raw so buildProcessGraph
+      // projects it (setLabel → emit index, openPr/openIssue → github flags).
+      ...(r.outcomes ? { outcomes: r.outcomes } : {}),
       // GitHub artifact ports (#380): produce flags + consumed channels.
       github: (r.github && (r.github.producesPr || r.github.producesIssue)) ? r.github : null,
       channels: asArray(r.channels),

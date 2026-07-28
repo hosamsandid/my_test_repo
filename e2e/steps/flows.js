@@ -446,6 +446,244 @@ async function expectMaterializeAvailable(ctx) {
   await expect(ctx.page.getByRole('button', { name: 'Materialize…' })).toBeEnabled();
 }
 
+/**
+ * Open a node's Routing tab in the inspector (#828): click the node, then the
+ * Routing tab. Waits for the Outcomes heading.
+ *
+ * @param {string} params.name - Agent display name whose node to open.
+ * @example
+ * - action:
+ *     do: flows.openRouting
+ *     name: Dispatcher
+ */
+async function openRouting(ctx, { name }) {
+  const { page } = ctx;
+  await page.locator(`.bp-node[data-id="${slugRole(name)}"]`).click();
+  const inspector = page.getByRole('dialog', { name });
+  await expect(inspector).toBeVisible();
+  await inspector.getByRole('button', { name: 'Routing' }).click();
+  await expect(inspector.getByText('Outcomes', { exact: true })).toBeVisible();
+}
+
+/**
+ * Set the outcome mode on the open Routing tab (#828): the switch (exactly one)
+ * or any-of. The two radios are ordered exactly-one, any-of.
+ *
+ * @param {string} params.name - Agent display name (its Routing tab must be open).
+ * @param {string} params.mode - "exactlyOne" (switch) | "anyOf".
+ * @example
+ * - action:
+ *     do: flows.setOutcomeMode
+ *     name: Dispatcher
+ *     mode: exactlyOne
+ */
+async function setOutcomeMode(ctx, { name, mode }) {
+  const inspector = ctx.page.getByRole('dialog', { name });
+  await inspector.getByRole('radio').nth(mode === 'anyOf' ? 1 : 0).check();
+}
+
+/**
+ * Add one outcome on the open Routing tab (#828): title, optional `when`, and the
+ * label it sets. Does NOT save (batched into flows.saveOutcomes). Leave `label`
+ * empty for a terminal (no-signal) outcome.
+ *
+ * @param {string} params.name - Agent display name (Routing tab open).
+ * @param {string} params.title - Outcome title (its persisted id is the slug).
+ * @param {string} [params.when] - Human-readable condition (documentation).
+ * @param {string} [params.label] - Label the outcome sets; empty = no signal.
+ * @example
+ * - action:
+ *     do: flows.addOutcome
+ *     name: Dispatcher
+ *     title: Route to Developer
+ *     when: Frontend/UI task
+ *     label: ready
+ */
+async function addOutcome(ctx, { name, title, when, label }) {
+  const inspector = ctx.page.getByRole('dialog', { name });
+  await inspector.getByRole('button', { name: 'Add outcome' }).click();
+  await inspector.getByPlaceholder(/Outcome title/).last().fill(title);
+  if (when) await inspector.getByPlaceholder(/^when:/).last().fill(when);
+  if (label !== undefined) await inspector.getByPlaceholder('label').last().fill(label);
+}
+
+/**
+ * Save the outcomes on the open Routing tab (#828) → PUT (draft bundle or live
+ * agent). Waits for the persisted response + the "Saved." confirmation.
+ *
+ * @param {string} params.name - Agent display name (Routing tab open).
+ * @example
+ * - action:
+ *     do: flows.saveOutcomes
+ *     name: Dispatcher
+ */
+async function saveOutcomes(ctx, { name }) {
+  const { page } = ctx;
+  const inspector = page.getByRole('dialog', { name });
+  const persisted = page.waitForResponse(
+    (r) => (/\/api\/process\/drafts\/[^/]+$/.test(r.url()) || /\/api\/agents\/[^/]+$/.test(r.url()))
+      && r.request().method() === 'PUT'
+      && r.ok(),
+  );
+  await inspector.getByRole('button', { name: 'Save outcomes' }).click();
+  await persisted;
+  await expect(inspector.getByText('Saved.')).toBeVisible();
+}
+
+/**
+ * Press "Suggest outcomes…" on the open Routing tab (#828) → POST
+ * /api/agent-outcomes/suggest (mock LLM in the E2E stack, heuristic fallback).
+ * Waits for the proposal to land highlighted-unconfirmed — nothing is persisted
+ * until Save, so this alone is the "decline persists nothing" path.
+ *
+ * @param {string} params.name - Agent display name (Routing tab open).
+ * @example
+ * - action:
+ *     do: flows.suggestOutcomes
+ *     name: Developer
+ */
+async function suggestOutcomes(ctx, { name }) {
+  const { page } = ctx;
+  const inspector = page.getByRole('dialog', { name });
+  const suggested = page.waitForResponse(
+    (r) => r.url().includes('/api/agent-outcomes/suggest')
+      && r.request().method() === 'POST'
+      && r.ok(),
+  );
+  await inspector.getByRole('button', { name: /Suggest outcomes/ }).click();
+  await suggested;
+  await expect(inspector.getByText(/Suggested outcomes/)).toBeVisible();
+}
+
+// Drag an outcome's output port (the amber square, title `Outcome "<title>" …`)
+// onto the target node — the #828 sibling of connectPort for the ● port.
+async function connectOutcomePort(page, fromSlug, outcomeTitle, toSlug) {
+  const fromNode = page.locator(`.bp-node[data-id="${fromSlug}"]`);
+  const toNode = page.locator(`.bp-node[data-id="${toSlug}"]`);
+  await expect(fromNode).toBeVisible();
+  await expect(toNode).toBeVisible();
+  const port = fromNode.locator(`div[title*="Outcome"][title*="${outcomeTitle}"]`).first();
+  await expect(port).toBeVisible();
+  const pb = await port.boundingBox();
+  const tb = await toNode.boundingBox();
+  if (!pb || !tb) throw new Error('flows.connectOutcomePort: could not resolve port/target geometry');
+  const sx = pb.x + pb.width / 2;
+  const sy = pb.y + pb.height / 2;
+  const tx = tb.x + tb.width / 2;
+  const ty = tb.y + tb.height / 2;
+  await page.mouse.move(sx, sy);
+  await page.mouse.down();
+  await page.mouse.move(sx + (tx - sx) / 2, sy + (ty - sy) / 2, { steps: 10 });
+  await page.mouse.move(tx, ty, { steps: 10 });
+  await page.mouse.move(tx, ty);
+  await page.mouse.up();
+}
+
+/**
+ * Wire an outcome to a target agent by dragging the outcome's output port onto it
+ * (#828). The drag opens the label hand-off dialog PRE-FILLED with the outcome's
+ * label; this confirms it (→ creates the listener on the target). Dismisses the
+ * node inspector first so it doesn't overlay the canvas.
+ *
+ * @param {string} params.from - Producer agent display name (owns the outcome).
+ * @param {string} params.to - Target agent display name the outcome routes to.
+ * @param {string} params.outcome - Outcome title (the output port's label).
+ * @param {string} [params.label] - Override the pre-filled routing label.
+ * @example
+ * - action:
+ *     do: flows.wireOutcome
+ *     from: Dispatcher
+ *     to: Developer
+ *     outcome: Route to Developer
+ */
+async function wireOutcome(ctx, { from, to, outcome, label }) {
+  const { page } = ctx;
+  await closeSidePanel(page, from);
+  await connectOutcomePort(page, slugRole(from), outcome, slugRole(to));
+  const d = page.getByRole('dialog', { name: 'Wire a label hand-off' });
+  await expect(d).toBeVisible();
+  if (label !== undefined) await d.getByPlaceholder(/dispatch, stage/).fill(label);
+  const persisted = page.waitForResponse(
+    (r) => /\/api\/process\/drafts\/[^/]+$/.test(r.url())
+      && r.request().method() === 'PUT'
+      && r.ok(),
+  );
+  await d.getByRole('button', { name: 'Create hand-off' }).click();
+  await persisted;
+  await expect(d).toBeHidden();
+}
+
+/**
+ * Assert the persisted draft role carries an authored outcomes port with the
+ * given option id (and, optionally, mode). API-level, so it doesn't depend on
+ * canvas rendering.
+ *
+ * @param {string} params.name - Agent display name (the producer role).
+ * @param {string} params.outcomeId - Expected outcome option id (slug of its title).
+ * @param {string} [params.mode] - Expected outcomes.mode ("exactlyOne"|"anyOf").
+ * @example
+ * - assert:
+ *     do: flows.expectOutcome
+ *     name: Dispatcher
+ *     outcomeId: route-to-developer
+ *     mode: exactlyOne
+ */
+async function expectOutcome(ctx, { name, outcomeId, mode }) {
+  const { page, request } = ctx;
+  const draftId = draftIdFromUrl(page);
+  expect(draftId, 'a draft must be open (proc=draft:<id> in the URL)').toBeTruthy();
+  await expect(async () => {
+    const res = await request.get(`/api/process/drafts/${encodeURIComponent(draftId)}`);
+    expect(res.ok(), `GET draft HTTP ${res.status()}`).toBeTruthy();
+    const draft = await res.json();
+    const roles = draft.roles || draft.bundle?.roles || [];
+    const role = roles.find((r) => r.id === slugRole(name) || r.name === name);
+    expect(role, `role ${name} present`).toBeTruthy();
+    expect(role.outcomes, `role ${name} has an outcomes port`).toBeTruthy();
+    if (mode) expect(role.outcomes.mode).toBe(mode);
+    const opt = (role.outcomes.options || []).find((o) => o.id === outcomeId);
+    expect(opt, `outcome option ${outcomeId} present`).toBeTruthy();
+  }).toPass({ timeout: 15_000 });
+}
+
+/**
+ * Assert a node renders as a switch on the canvas — the ◇ switch badge (#828).
+ *
+ * @param {string} params.name - Agent display name whose node must show the badge.
+ * @example
+ * - assert:
+ *     do: flows.expectSwitchNode
+ *     name: Dispatcher
+ */
+async function expectSwitchNode(ctx, { name }) {
+  const node = ctx.page.locator(`.bp-node[data-id="${slugRole(name)}"]`);
+  await expect(node.getByText(/switch/)).toBeVisible();
+}
+
+/**
+ * Assert the persisted draft role has NO authored outcomes port — the "decline
+ * persists nothing" check after a suggestion that was not saved (#828).
+ *
+ * @param {string} params.name - Agent display name to check.
+ * @example
+ * - assert:
+ *     do: flows.expectNoOutcomes
+ *     name: Developer
+ */
+async function expectNoOutcomes(ctx, { name }) {
+  const { page, request } = ctx;
+  const draftId = draftIdFromUrl(page);
+  expect(draftId, 'a draft must be open').toBeTruthy();
+  const res = await request.get(`/api/process/drafts/${encodeURIComponent(draftId)}`);
+  expect(res.ok(), `GET draft HTTP ${res.status()}`).toBeTruthy();
+  const draft = await res.json();
+  const roles = draft.roles || draft.bundle?.roles || [];
+  const role = roles.find((r) => r.id === slugRole(name) || r.name === name);
+  expect(role, `role ${name} present`).toBeTruthy();
+  const opts = role.outcomes && Array.isArray(role.outcomes.options) ? role.outcomes.options : [];
+  expect(opts.length, `role ${name} has no persisted outcomes`).toBe(0);
+}
+
 // Canvas nodes/edges are laid out deterministically (fixed viewport, reduced
 // motion) and carry only authored names — no timestamps/ids to mask.
 function volatileLocators() {
@@ -468,5 +706,14 @@ module.exports = {
   closeStages,
   assignStage,
   expectMaterializeAvailable,
+  openRouting,
+  setOutcomeMode,
+  addOutcome,
+  saveOutcomes,
+  suggestOutcomes,
+  wireOutcome,
+  expectOutcome,
+  expectSwitchNode,
+  expectNoOutcomes,
   volatileLocators,
 };

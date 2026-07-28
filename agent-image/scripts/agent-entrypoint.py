@@ -2276,6 +2276,76 @@ def _git_branch(repo_dir: Path | None) -> str | None:
         return None
 
 
+class _ThinkingTokenThrottle:
+    """Coalesce a run's stream of `thinking_tokens` system events so the session
+    log records far fewer than one JSONL line per CLI tick (#870).
+
+    The Claude CLI emits a `thinking_tokens` `system` message many times per
+    second, each carrying a running `estimated_tokens` total plus the tiny
+    per-tick `estimated_tokens_delta`. The newest tick subsumes all earlier ones
+    — they are a live progress signal, not distinct events — so persisting every
+    one both floods the log file and (since #811) grows the Session Log one row
+    per tick. This gate lets through only a throttled subset:
+
+      * the FIRST tick of a run (so a row appears promptly), then
+      * at most one further tick per `min_interval_s` seconds OR once the count
+        has climbed by `min_delta` tokens since the last write — whichever comes
+        first.
+
+    `flush()` returns the last suppressed tick (if any) so the run's final
+    `estimated_tokens` is always recorded and never left stale at an early
+    throttled sample (AC2). `clock` is injectable for tests.
+    """
+
+    def __init__(self, *, min_interval_s: float = 2.0, min_delta: int = 200,
+                 clock=time.monotonic):
+        self._min_interval_s = min_interval_s
+        self._min_delta = min_delta
+        self._clock = clock
+        self._last_emit_t: float | None = None
+        self._last_emit_tokens: int | None = None
+        self._pending: dict | None = None  # latest tick seen since the last emit
+
+    @staticmethod
+    def _tokens(event: dict) -> int | None:
+        raw = event.get("raw") if isinstance(event, dict) else None
+        val = raw.get("estimated_tokens") if isinstance(raw, dict) else None
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return None
+
+    def offer(self, event: dict) -> dict | None:
+        """Register a `thinking_tokens` event; return it to write now, or None
+        to suppress it (its total is retained for a later `flush()`)."""
+        tokens = self._tokens(event)
+        now = self._clock()
+        if self._last_emit_t is None:
+            return self._emit(event, tokens, now)
+        if (now - self._last_emit_t) >= self._min_interval_s:
+            return self._emit(event, tokens, now)
+        if (tokens is not None and self._last_emit_tokens is not None
+                and (tokens - self._last_emit_tokens) >= self._min_delta):
+            return self._emit(event, tokens, now)
+        self._pending = event
+        return None
+
+    def _emit(self, event: dict, tokens: int | None, now: float) -> dict:
+        self._last_emit_t = now
+        self._last_emit_tokens = tokens
+        self._pending = None
+        return event
+
+    def flush(self) -> dict | None:
+        """Return the last suppressed tick so its total is persisted, else None.
+        Idempotent — a second call after a flush returns None."""
+        ev = self._pending
+        self._pending = None
+        if ev is not None:
+            self._last_emit_tokens = self._tokens(ev)
+        return ev
+
+
 def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
                       resume_id: str | None, blueprint_id: str | None,
                       timeout_sec: int, run_context: dict | None = None) -> tuple[str, str | None]:
@@ -2345,10 +2415,21 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     stderr_chunks: list[str] = []
     ask_question_input: dict | None = None  # first AskUserQuestion tool input (#447)
     context_usage: dict = {}  # last assistant-message usage this invocation (#509)
+    # Coalesce the CLI's high-frequency thinking_tokens ticks into a throttled
+    # subset of JSONL lines (#870) — the UI collapses them to one live row.
+    tt_throttle = _ThinkingTokenThrottle()
 
     def handle_line(line: str) -> None:
         nonlocal final_result, observed_session, ask_question_input, result_event
         for ev in _map_stream_json_line(line, correlation_id, context_usage):
+            if (ev.get("type") == "system_event"
+                    and ev.get("subtype") == "thinking_tokens"):
+                # Throttle: persist only a sampled subset, never one line per
+                # tick. The final total is guaranteed by the flush() below.
+                gated = tt_throttle.offer(ev)
+                if gated is not None:
+                    _append_event(room_id, gated)
+                continue
             _append_event(room_id, ev)  # log tab is unchanged (#447 AC6)
             if ev.get("type") == "system_init" and isinstance(ev.get("sessionId"), str):
                 observed_session = ev["sessionId"]
@@ -2395,6 +2476,12 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     finally:
         if _active_claude_proc is proc:
             _active_claude_proc = None
+        # Record the run's final thinking-token total so it is never left stale
+        # at an early throttled sample — even if the run was killed/interrupted
+        # right after a burst of ticks (#870 AC2).
+        tail = tt_throttle.flush()
+        if tail is not None:
+            _append_event(room_id, tail)
 
     rc = proc.returncode
     stderr_blob = "".join(stderr_chunks)

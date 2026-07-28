@@ -124,6 +124,33 @@ export function workItemAverages(data) {
   };
 }
 
+// Help copy for the eight Work-items summary tiles (#832). Kept here — pure,
+// React-free — so the wording is unit-testable and so the tiles stay a thin
+// presentational shell. Keyed by a stable tile id; the value is the plain
+// English explanation shown on hover / focus / tap (see StatCard + InfoTip).
+// Copy is the source of truth in "What the numbers mean" (work-items.js /
+// workItemAverages above): a work item is one issue↔PR chain, an attributed
+// run is one tied to such a chain, and the Ø…/work item averages are per
+// ATTRIBUTED work item with unattributed tokens excluded.
+export const WORK_ITEM_TILE_HELP = {
+  attributed:
+    'Share of token spend in this period that could be tied to a specific work item — a GitHub issue and the pull request(s) that resolve it. The remainder is reported under “Unattributed tokens”.',
+  attributedTokens:
+    'Total tokens used by agent runs that could be linked to a work item (a GitHub issue ↔ PR chain).',
+  unattributedTokens:
+    'Tokens used by runs that could not be tied to any single work item — e.g. direct chats, scheduled self-maintenance, or triggers not linked to an issue/PR. Always shown so the totals add up.',
+  unattributedRuns:
+    'Number of agent runs in this period whose tokens could not be attributed to a work item.',
+  totalRuns:
+    'All agent runs in this period (attributed plus unattributed).',
+  avgTotal:
+    'Average total tokens (input + output) per attributed work item. Unattributed tokens are excluded, so this reflects the typical cost of resolving one issue ↔ PR chain.',
+  avgInput:
+    'Average input (prompt) tokens per attributed work item. Unattributed tokens are excluded.',
+  avgOutput:
+    'Average output (generated) tokens per attributed work item. Unattributed tokens are excluded.',
+};
+
 // Build the flat-export download URL (#656) for a view. `kind` is
 // 'summary' | 'work-items', `format` is 'csv' | 'json'. Carries the current
 // time window (`since`) so the export matches what's on screen; the server

@@ -2,19 +2,26 @@ import React, { useEffect, useState } from 'react';
 import { Save, Trash2, Loader2 } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
 import { apiCall } from '../../hooks/useApi';
-import TriggersPanel from '../agent-chat/TriggersPanel';
-import ConnectionsSection from './ConnectionsSection';
+import RoutingSection from './RoutingSection';
 import { resolveInheritedStage } from './hierarchy-utils';
 import { applyDetailsSave } from './node-inspector-save';
 import { summarizeGithubEventTrigger } from '../agent-chat/trigger-summary.js';
 
 // Shared node inspector for the Flow Editor (#692). ONE component drives both
-// modes so the first-page layout, tab set, and Connections/Triggers wiring live
-// in a single place:
+// modes so the first-page layout, tab set, and routing wiring live in a single
+// place:
 //   - DRAFT (mode='draft'): edits a process-template bundle role via draftOps.
 //   - LIVE  (mode='live') : edits a materialized agent via liveOps (HTTP).
+// Tabs are Details · Routing — two tabs, one flow surface (concept §2). The
+// Connections tab was retired in #865 (its Parent/Stage moved to Details →
+// Structure, its flow controls to Routing); the Triggers tab was retired in
+// #866 once Routing → Inputs reached full CRUD parity (manual triggers are now
+// authored/edited there via the reused TriggersPanel form, and a channel/
+// data-flow trigger is never editable raw). A read-only raw-triggers.json
+// disclosure inside Inputs preserves workspace transparency.
 // Behavioural differences are mode-aware props, never duplicated components:
-//   - Details tab, page 1: Display name, Agent ID, Agent prompt, Stage.
+//   - Details tab, page 1: Display name, Agent ID, Agent prompt, then a
+//     Structure section (Stage + Parent — both static placement, not flow).
 //   - Agent ID is editable in draft (rewires references on rename) and
 //     read-only in live (a materialized agent's id is its identity).
 //   - The prompt is a plain textarea in draft (batched into the Details Save)
@@ -28,27 +35,41 @@ export default function NodeInspector({
   roles = [],       // draft peer list
   nodes = [],       // live peer list
   stages = [],
+  lints = [],       // graph lints (Routing tab surfaces duplicate-listener for this node)
+  labels = [],      // known label registry (label-name suggestions in the Add-input chooser)
   ops,
   teamId,           // live: binds a brand-new stage to the team's ordered list
   level,            // live: 'template' renders read-only
+  focus,            // { tab, outcome? } — open a specific tab (canvas outcome-edge click → Routing)
   onClose,
   onChanged,
   onDeleted,        // draft
   onRenamedId,      // draft
 }) {
   const isLive = mode === 'live';
-  const [tab, setTab] = useState('details');
+  const structureFocus = focus?.section === 'structure' && (focus?.tab || 'details') === 'details';
+  const [tab, setTab] = useState(focus?.tab || 'details');
   const [name, setName] = useState(node.displayName || node.id);
   const [id, setId] = useState(node.id);
   const [prompt, setPrompt] = useState(node.systemPrompt || '');  // draft only
   const [stage, setStage] = useState(node.stage || '');
   const [newStage, setNewStage] = useState('');
+  const [parent, setParentState] = useState(node.parent || '');
+  const [parentErr, setParentErr] = useState(null);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
 
+  // A jump (edge dialog "Open in Routing/Details", or outcome-edge click) can
+  // change `focus` while this inspector is already mounted on the same node —
+  // follow it to the requested tab (#865). Normal node selection clears focus.
+  useEffect(() => { if (focus?.tab) setTab(focus.tab); }, [focus]);
+
   if (!node) return null;
   const isTemplate = level === 'template' || node.role === 'template';
+  // Warning dot on the Routing tab when any lint it surfaces fires for this node
+  // (today: duplicate-listener), so problems are findable without opening it (§3).
+  const routingHasLint = (lints || []).some(l => l.code === 'duplicate-listener' && l.nodeId === node.id);
 
   const peers = isLive ? nodes : roles;
   const siblings = peers.filter(n => n.id !== node.id).map(n => ({ id: n.id, displayName: n.displayName || n.id }));
@@ -85,6 +106,16 @@ export default function NodeInspector({
     } finally { setBusy(false); }
   }
 
+  // Parent is static placement, not flow — it applies immediately (like it did
+  // in the retired Connections tab), independent of the batched Details Save.
+  // The cycle guard lives server/adapter-side; we just surface its error.
+  async function applyParent(v) {
+    const next = v || '';
+    setParentState(next); setParentErr(null);
+    try { await ops.setParent(node.id, next || null); onChanged?.(); }
+    catch (e) { setParentState(node.parent || ''); setParentErr(e?.message || String(e)); }
+  }
+
   return (
     <SidePanel open onClose={onClose} title={node.displayName || node.id} width="560px">
       <div style={{ display: 'flex', gap: 6, marginBottom: 'var(--eb-space-4)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
@@ -105,8 +136,7 @@ export default function NodeInspector({
         <>
           <div style={{ display: 'flex', borderBottom: '1px solid var(--eb-border-default)', marginBottom: 'var(--eb-space-4)' }}>
             <TabButton active={tab === 'details'} onClick={() => setTab('details')}>Details</TabButton>
-            <TabButton active={tab === 'triggers'} onClick={() => setTab('triggers')}>Triggers</TabButton>
-            <TabButton active={tab === 'connections'} onClick={() => setTab('connections')}>Connections</TabButton>
+            <TabButton active={tab === 'routing'} onClick={() => setTab('routing')} dot={routingHasLint}>Routing</TabButton>
           </div>
 
           {tab === 'details' && (
@@ -142,19 +172,42 @@ export default function NodeInspector({
                 )}
               </Field>
 
-              {canStage && (
-                <Field label="Stage (layout column)">
-                  <select value={stages.includes(stage) ? stage : ''}
-                    onChange={e => { setStage(e.target.value); setNewStage(''); setSaved(false); }} style={input}>
-                    <option value="">{inheritedStage ? `— inherit (${inheritedStage}) —` : '— none —'}</option>
-                    {stages.map(s => <option key={s} value={s}>{s}</option>)}
-                  </select>
-                  <input value={newStage} onChange={e => { setNewStage(e.target.value); setSaved(false); }}
-                    placeholder="＋ or type a new stage name…" style={{ ...input, marginTop: 4 }} />
-                  <span style={hint}>
-                    Stages are the ordered columns of the flow — manage the order under <strong>Stages</strong> in the toolbar.
-                  </span>
-                </Field>
+              {/* Structure — static placement (Stage + Parent), not flow. Moved
+                  here from the retired Connections tab (#865). Parent applies
+                  immediately; Stage is part of the batched Save below. */}
+              {(canStage || ops.setParent) && (
+                <div style={{
+                  borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)',
+                  display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)',
+                  ...(structureFocus ? { borderRadius: 'var(--eb-radius-md)', boxShadow: '0 0 0 2px var(--eb-accent-primary)', padding: 'var(--eb-space-3)' } : {}),
+                }}>
+                  <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 'var(--eb-font-medium)' }}>Structure</div>
+                  {canStage && (
+                    <Field label="Stage (layout column)">
+                      <select value={stages.includes(stage) ? stage : ''}
+                        onChange={e => { setStage(e.target.value); setNewStage(''); setSaved(false); }} style={input}>
+                        <option value="">{inheritedStage ? `— inherit (${inheritedStage}) —` : '— none —'}</option>
+                        {stages.map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                      <input value={newStage} onChange={e => { setNewStage(e.target.value); setSaved(false); }}
+                        placeholder="＋ or type a new stage name…" style={{ ...input, marginTop: 4 }} />
+                      <span style={hint}>
+                        Stages are the ordered columns of the flow — manage the order under <strong>Stages</strong> in the toolbar.
+                      </span>
+                    </Field>
+                  )}
+                  {ops.setParent && (
+                    <Field label="Parent (optional)">
+                      <select value={siblings.some(s => s.id === parent) ? parent : ''}
+                        onChange={e => applyParent(e.target.value)} style={input}>
+                        <option value="">— none —</option>
+                        {siblings.map(s => <option key={s.id} value={s.id}>{s.displayName || s.id}</option>)}
+                      </select>
+                      <span style={hint}>Nests this agent under a parent for the hierarchy layout. Applied immediately.</span>
+                      {parentErr && <span style={{ ...hint, color: 'var(--eb-status-error)' }}>{parentErr}</span>}
+                    </Field>
+                  )}
+                </div>
               )}
 
               <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
@@ -176,21 +229,16 @@ export default function NodeInspector({
             </div>
           )}
 
-          {tab === 'triggers' && (
-            <div style={{ height: 'min(60vh, 540px)', display: 'flex', flexDirection: 'column', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', overflow: 'hidden' }}>
-              <TriggersPanel agentId={node.id} active ops={ops} onChanged={onChanged} />
-            </div>
-          )}
-
-          {/* Stage lives on the Details page now, so the shared Connections panel
-              renders without its own stage picker in both modes (#692). */}
-          {tab === 'connections' && (
-            <ConnectionsSection
+          {tab === 'routing' && (
+            <RoutingSection
               node={node}
-              siblings={siblings}
-              showStage={false}
-              stages={stages}
+              peers={peers}
+              lints={lints}
+              labels={labels}
               ops={ops}
+              mode={mode}
+              focusOutcome={focus?.tab === 'routing' ? focus?.outcome : null}
+              focusSection={focus?.tab === 'routing' ? focus?.section : null}
               onChanged={onChanged}
             />
           )}
@@ -340,14 +388,20 @@ function TemplateReadonly({ node }) {
   );
 }
 
-function TabButton({ active, onClick, children }) {
+function TabButton({ active, onClick, dot, children }) {
   return (
     <button onClick={onClick} style={{
+      display: 'inline-flex', alignItems: 'center', gap: 5,
       background: 'none', border: 'none', borderBottom: active ? '2px solid var(--eb-accent-primary)' : '2px solid transparent',
       color: active ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
       padding: 'var(--eb-space-2) var(--eb-space-3)', cursor: 'pointer',
       fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: active ? 'var(--eb-font-medium)' : 'normal',
-    }}>{children}</button>
+    }}>
+      {children}
+      {dot && <span title="This tab has a warning" style={{
+        width: 6, height: 6, borderRadius: '50%', background: 'var(--eb-status-warning, #d97706)', flexShrink: 0,
+      }} />}
+    </button>
   );
 }
 

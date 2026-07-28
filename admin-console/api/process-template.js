@@ -19,6 +19,11 @@
 //     labels: [ { name, humanGate, brake } ],
 //   }
 
+const {
+  validateOutcomes, normalizeOutcomes, isAuthoredOutcomes, substituteOutcomes,
+  outcomesToGithub,
+} = require('./outcomes');
+
 const VERSION = 1;
 
 // Strip a leading `<teamId>-` so an exported member id becomes a reusable role
@@ -28,14 +33,25 @@ function roleKeyOf(id, teamId) {
   return id;
 }
 
+// Normalize an optional authored wake-prompt override (#868) to a trimmed
+// non-empty string, else '' (falsy). A blank/whitespace override is treated as
+// "no override" so the derived listener keeps its generated prompt.
+function cleanWakePrompt(v) {
+  return typeof v === 'string' && v.trim() ? v.trim() : '';
+}
+
 // Remap a channel's `from` role reference through roleKeyOf so an exported team's
 // GitHub-channel wiring uses portable role keys (#380).
 function remapChannel(ch, teamId) {
+  const wakePrompt = cleanWakePrompt(ch.wakePrompt);
   return {
     artifact: ch.artifact === 'issue' ? 'issue' : 'pr',
     from: roleKeyOf(ch.from, teamId),
     ...(ch.label ? { label: ch.label } : {}),
     ...(ch.gate ? { gate: ch.gate } : {}),
+    // Optional authored wake-prompt override (#868) — carried on the portable
+    // bundle so an exported team round-trips its override.
+    ...(wakePrompt ? { wakePrompt } : {}),
   };
 }
 
@@ -88,11 +104,23 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
       displayName: r.displayName || r.id,
       role: r.role || 'team-member',
       sessionPolicy: r.sessionPolicy || 'persistent',
-      // Drop the derived producer block (#380) so the portable bundle stays clean;
-      // it is regenerated from the `github` flag by expandGithubChannels.
-      systemPrompt: stripProduceBlock(r.systemPrompt),
-      // Agent-level emitted labels (label hand-offs) — keep in the portable bundle.
-      ...(Array.isArray(r.emits) && r.emits.length ? { emits: r.emits.slice() } : {}),
+      // Drop the derived prompt blocks (github-io #380 + outcomes #829) so the
+      // portable bundle stays clean; they are regenerated from the `github` flag
+      // and the `outcomes` port by expandGithubChannels on import/materialise.
+      systemPrompt: stripDerivedPromptBlocks(r.systemPrompt),
+      // Agent-level OUTCOMES port (#827/#831). Authored outcomes are used directly;
+      // legacy flat `emits` are lifted to a degenerate anyOf so the exported bundle
+      // never carries a raw `emits` field. Import still works via liftOutcomes (#831).
+      ...((() => {
+        if (isAuthoredOutcomes(r.outcomes)) return { outcomes: normalizeOutcomes(r.outcomes) };
+        if (Array.isArray(r.emits) && r.emits.length) {
+          return { outcomes: normalizeOutcomes({
+            mode: 'anyOf',
+            options: r.emits.map(l => ({ id: l, title: l, actions: [{ type: 'setLabel', label: l }] })),
+          }) };
+        }
+        return {};
+      })()),
       // Process stage band — portable so an exported team round-trips its stage
       // layout back into a draft (Edit as draft) and re-materialises unchanged.
       ...(typeof r.stage === 'string' && r.stage ? { stage: r.stage } : {}),
@@ -125,6 +153,10 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
   for (const r of b.roles) {
     if (!r || typeof r.id !== 'string' || !r.id) return { ok: false, error: 'each role needs a string id' };
     if (r.triggers && !Array.isArray(r.triggers)) return { ok: false, error: `role ${r.id}: triggers must be an array` };
+    if (r.outcomes !== undefined) {
+      const vo = validateOutcomes(r.outcomes);
+      if (!vo.ok) return { ok: false, error: `role ${r.id}: ${vo.error}` };
+    }
     if (r.channels !== undefined) {
       if (!Array.isArray(r.channels)) return { ok: false, error: `role ${r.id}: channels must be an array` };
       for (const c of r.channels) {
@@ -132,6 +164,9 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
           return { ok: false, error: `role ${r.id}: each channel needs artifact 'pr' or 'issue'` };
         }
         if (typeof c.from !== 'string' || !c.from) return { ok: false, error: `role ${r.id}: each channel needs a string 'from'` };
+        if (c.wakePrompt !== undefined && typeof c.wakePrompt !== 'string') {
+          return { ok: false, error: `role ${r.id}: channel wakePrompt must be a string` };
+        }
       }
     }
   }
@@ -204,8 +239,13 @@ function templateToCustomRoles(bundle) {
     // live graph reproduces the draft's stage layout instead of collapsing to
     // the auto-layered columns.
     ...(typeof r.stage === 'string' && r.stage ? { stage: r.stage } : {}),
-    // Agent-level emitted labels (label hand-offs) — recorded on member config.
-    ...(Array.isArray(r.emits) && r.emits.length ? { emits: r.emits } : {}),
+    // Agent-level OUTCOMES port (#827) — recorded on member config; supersedes
+    // `emits` when present (the two never coexist on a materialised member).
+    ...(isAuthoredOutcomes(r.outcomes) ? { outcomes: normalizeOutcomes(r.outcomes) } : {}),
+    // Agent-level emitted labels (legacy flat hand-offs) — recorded on member
+    // config only when no structured outcomes supersede them.
+    ...(!isAuthoredOutcomes(r.outcomes) && Array.isArray(r.emits) && r.emits.length
+      ? { emits: r.emits } : {}),
     // GitHub artifact ports (#380) — carried to member config so the live graph
     // renders channel edges + the orchestrator instructs the agent to open
     // PRs/issues. The functional consumer triggers are already expanded by
@@ -223,6 +263,8 @@ function templateToCustomRoles(bundle) {
       // Trigger-level emits removed (#783) — label hand-offs ride on role `emits`.
       dataFlow: t.dataFlow,
       channel: t.channel,
+      // Informational provenance for a consolidated channel listener (#826).
+      ...(Array.isArray(t.sources) ? { sources: t.sources } : {}),
       description: t.description,
       promptTemplate: t.prompt || '',
       preCheckScript: t.preCheckScript,
@@ -282,6 +324,121 @@ function produceBlock(github) {
   return `${PRODUCE_MARK_START}\n\n## GitHub outputs\n\n${parts.join('\n\n')}\n\n${PRODUCE_MARK_END}`;
 }
 
+// ─── Outcomes prompt block (#829, agent-outcomes concept §6) ─────────────────
+//
+// The structured `outcomes` declaration (#827) is the source of truth; this is
+// its generated *prompt projection* — the same marker-delimited, strip-then-
+// reappend idempotency as the github-io produce block above, so a re-import /
+// re-reconcile never duplicates it. Only an **authored** outcomes port projects
+// a block: an agent carrying just flat `emits` (the degenerate read-path lift)
+// gets nothing, so a migration alone changes no behaviour (concept §7, AC4).
+//
+// It closes the gap the produce block leaves open — today's producePrText /
+// produceIssueText never mention the routing *label* the consumer filters on, so
+// agent-driven labelling only worked if the author remembered to put it in
+// prose. With outcomes the projection is guaranteed consistent with the switch.
+const OUTCOMES_MARK_START = '<!-- outcomes:start -->';
+const OUTCOMES_MARK_END = '<!-- outcomes:end -->';
+
+function stripOutcomesBlock(text) {
+  if (typeof text !== 'string' || !text.includes(OUTCOMES_MARK_START)) {
+    return typeof text === 'string' ? text : '';
+  }
+  return text.replace(
+    new RegExp(`\\n*${OUTCOMES_MARK_START}[\\s\\S]*?${OUTCOMES_MARK_END}\\n*`, 'g'), '',
+  ).trimEnd();
+}
+
+// The "Then: …" action clause for one option — a human-readable summary of its
+// actions joined with " and ". `setLabel` names the label; `openPr`/`openIssue`
+// use the produce verbs (the full how-to is appended once below, reusing
+// producePrText/produceIssueText); a `none`-only / empty action set is
+// "set no label". A `notify: "dm"` option appends the DM-reporting instruction.
+// Returns the clause plus whether this option opens a PR/issue.
+function outcomeActionClause(option) {
+  const parts = [];
+  let opensPr = false;
+  let opensIssue = false;
+  for (const a of (option && Array.isArray(option.actions) ? option.actions : [])) {
+    if (!a || typeof a !== 'object') continue;
+    if (a.type === 'setLabel' && typeof a.label === 'string' && a.label.trim()) {
+      parts.push(`apply label \`${a.label.trim()}\``);
+    } else if (a.type === 'openPr') {
+      parts.push('open a pull request'); opensPr = true;
+    } else if (a.type === 'openIssue') {
+      parts.push('open a GitHub issue'); opensIssue = true;
+    }
+  }
+  if (!parts.length) parts.push('set no label');
+  let clause = parts.join(' and ');
+  if (option && option.notify === 'dm') clause += '; report to the user in the DM';
+  return { clause, opensPr, opensIssue };
+}
+
+// Generate the marker-delimited `## Outcomes` block for an authored outcomes
+// port (concept §6). Empty string for a non-authored port (nothing to project).
+// Pure; the caller (expandGithubChannels / reconcileTeamOutcomes) does the
+// strip-then-reappend into the systemPrompt.
+function outcomesBlock(outcomes) {
+  if (!isAuthoredOutcomes(outcomes)) return '';
+  const exactlyOne = outcomes.mode === 'exactlyOne';
+  const lead = exactlyOne
+    ? 'At the end of every run you choose **exactly one** of the following outcomes:'
+    : 'At the end of every run you choose **all outcomes that apply** — zero is allowed:';
+  const items = [];
+  let anyPr = false;
+  let anyIssue = false;
+  outcomes.options.forEach((o, i) => {
+    const title = (typeof o.title === 'string' && o.title.trim()) ? o.title.trim() : o.id;
+    const { clause, opensPr, opensIssue } = outcomeActionClause(o);
+    anyPr = anyPr || opensPr;
+    anyIssue = anyIssue || opensIssue;
+    const when = (typeof o.when === 'string' && o.when.trim()) ? ` when: ${o.when.trim()}.` : '';
+    items.push(`${i + 1}. **${title}** —${when} Then: ${clause}.`);
+  });
+  const body = [lead, '', ...items];
+  if (exactlyOne) {
+    body.push('', 'Never apply more than one of these labels in a single run.');
+  }
+  // Absorb the produce how-to once for any option that opens a PR/issue —
+  // reusing the exact producePrText/produceIssueText wording. The github-io
+  // produce block omits the flags an outcome already covers (see
+  // expandGithubChannels), so the "open a PR/issue" instruction never doubles.
+  const tail = [];
+  if (anyPr) tail.push(producePrText());
+  if (anyIssue) tail.push(produceIssueText());
+  const full = tail.length ? `${body.join('\n')}\n\n${tail.join('\n\n')}` : body.join('\n');
+  return `${OUTCOMES_MARK_START}\n\n## Outcomes\n\n${full}\n\n${OUTCOMES_MARK_END}`;
+}
+
+// Strip both derived prompt blocks (github-io #380 + outcomes #829) from a
+// systemPrompt — the portable/base form. Used on export and by the reconciler
+// before re-appending freshly-generated blocks.
+function stripDerivedPromptBlocks(text) {
+  return stripOutcomesBlock(stripProduceBlock(text));
+}
+
+// Re-render a role/agent's systemPrompt with both derived prompt blocks from its
+// declarative ports (`github` + `outcomes`) — strip-then-reappend, idempotent.
+// Coexistence (AC3): an outcome that opens a PR/issue already carries the produce
+// how-to inside the outcomes block, so the produce flags it covers are dropped
+// from the github-io block — the instruction never appears twice. Order is
+// produce-then-outcomes so a github-only agent's prompt stays byte-identical to
+// before #829 (the outcomes block is empty and appends nothing). Pure.
+function applyDerivedPromptBlocks(systemPrompt, { github, outcomes } = {}) {
+  const base = stripDerivedPromptBlocks(systemPrompt || '');
+  const covered = isAuthoredOutcomes(outcomes) ? outcomesToGithub(outcomes) : {};
+  const effGithub = github && typeof github === 'object'
+    ? {
+      producesPr: !!(github.producesPr && !covered.producesPr),
+      producesIssue: !!(github.producesIssue && !covered.producesIssue),
+    }
+    : github;
+  const appended = [produceBlock(effGithub), outcomesBlock(outcomes)]
+    .filter(Boolean).join('\n\n');
+  return appended ? `${base ? `${base}\n\n` : ''}${appended}` : base;
+}
+
 const CHANNEL_EVENTS = {
   pr: { open: ['pull_request.opened', 'pull_request.reopened'], labeled: ['pull_request.labeled'] },
   issue: { open: ['issues.opened'], labeled: ['issues.labeled'] },
@@ -289,8 +446,14 @@ const CHANNEL_EVENTS = {
 
 // Canonical id for a derived channel trigger, so reconciliation can find and
 // regenerate it (kept in sync with reconcileTeamGithubChannels in api.js).
-function channelTriggerId(consumerId, artifact, producerId) {
-  return `${consumerId}-on-${artifact}-${producerId}`;
+// The id is keyed on the (artifact, label) the trigger listens on — NOT on the
+// producer (#826): channels from several producers over the same label collapse
+// into ONE derived listener (the poller has no origin filter, so per-producer
+// triggers were functionally identical duplicates). The contributing producers
+// are recorded informationally on the trigger's `sources`.
+function channelTriggerId(consumerId, artifact, label) {
+  const lbl = typeof label === 'string' && label.trim() ? label.trim() : '';
+  return `${consumerId}-on-${artifact}${lbl ? `-${lbl}` : ''}`;
 }
 
 function isChannelTrigger(t) {
@@ -306,18 +469,51 @@ function isChannelTrigger(t) {
 // same-id trigger's `activatedAt` onto its regenerated replacement — keeping the
 // horizon fixed across reconciles — and stamps a genuinely new derived trigger
 // with `now`. Non-derived and already-stamped triggers pass through untouched.
+//
+// Consolidation (#826): the channel id scheme changed from `<c>-on-<art>-<prod>`
+// to `<c>-on-<art>[-<label>]` (producer dropped), so a reconcile that migrates an
+// old team's per-producer triggers onto the new consolidated one cannot match by
+// id — the ids differ. To keep the history horizon fixed across that migration, a
+// derived trigger with no exact id match falls back to matching prior derived
+// triggers by their (events, labelFilter) *listener signature* and carries the
+// **oldest** `activatedAt` of that merged set. So merging N old triggers into one
+// listener can never shove the poller's horizon forward to "now" and drop a
+// pending event that arrived before the oldest of them. Id match still wins first
+// (steady-state regeneration).
+//
+// The signature fallback is deliberately scoped to `channel` triggers: their id
+// scheme changed (#826), so a migrated trigger must re-find its predecessors by
+// signature. Data-flow (`<c>-on-push-<upstream>`) ids never changed and every
+// data-flow trigger of one consumer shares the same `push` signature, so a
+// signature fallback there would make a genuinely-new upstream inherit a
+// sibling's old horizon and replay stale pushes — data-flow stays id-match only.
 // Pure; `now` is injectable for tests.
+function derivedListenerSignature(t) {
+  const events = Array.isArray(t.events) ? t.events.slice().sort() : [];
+  const label = typeof t.labelFilter === 'string' ? t.labelFilter : '';
+  return `${events.join(',')}|${label}`;
+}
 function stampDerivedActivation(nextTriggers, prevTriggers, now) {
-  const prevAt = new Map();
+  const prevAt = new Map();           // id -> activatedAt (exact-id preservation)
+  const prevChannelBySig = new Map(); // channel listener signature -> oldest activatedAt
   for (const t of (Array.isArray(prevTriggers) ? prevTriggers : [])) {
-    if (t && typeof t.id === 'string' && t.activatedAt) prevAt.set(t.id, t.activatedAt);
+    if (!t || typeof t !== 'object' || !t.activatedAt) continue;
+    if (!(t.channel === true || t.dataFlow === true)) continue;
+    if (typeof t.id === 'string') prevAt.set(t.id, t.activatedAt);
+    if (t.channel === true) {
+      const sig = derivedListenerSignature(t);
+      const cur = prevChannelBySig.get(sig);
+      if (!cur || t.activatedAt < cur) prevChannelBySig.set(sig, t.activatedAt); // ISO strings sort lexicographically
+    }
   }
   const stamp = now || new Date().toISOString();
   return (Array.isArray(nextTriggers) ? nextTriggers : []).map((t) => {
     if (!t || typeof t !== 'object') return t;
     const derived = t.channel === true || t.dataFlow === true;
     if (!derived || t.activatedAt) return t;
-    return { ...t, activatedAt: prevAt.get(t.id) || stamp };
+    const carried = prevAt.get(t.id)
+      || (t.channel === true ? prevChannelBySig.get(derivedListenerSignature(t)) : undefined);
+    return { ...t, activatedAt: carried || stamp };
   });
 }
 
@@ -373,37 +569,69 @@ function expandGithubChannels(bundle, _opts = {}) {
   const byId = new Map(roles.map(r => [r.id, r]));
 
   for (const b of roles) {
+    // Group this consumer's channels by the (artifact, label) listener they
+    // resolve to (#826). Several producers over the same label yield ONE derived
+    // trigger: since the poller carries no origin filter, per-producer triggers
+    // were functionally identical (same events + labelFilter) and woke the agent
+    // once per producer. The contributing producers are kept on `sources` for
+    // provenance only. Insertion order (first channel wins the slot) is preserved
+    // so the derivation stays deterministic.
+    const groups = new Map(); // `${artifact}::${label}` -> { artifact, label, human, wakePrompt, sources: [] }
     for (const ch of (b.channels || [])) {
       const artifact = ch.artifact === 'issue' ? 'issue' : 'pr';
       const from = typeof ch.from === 'string' ? ch.from : '';
       if (!from || from === b.id) continue;
       const label = typeof ch.label === 'string' && ch.label.trim() ? ch.label.trim() : '';
       const human = ch.gate === 'human';
-      const id = channelTriggerId(b.id, artifact, from);
+      const key = `${artifact}::${label}`;
+      let g = groups.get(key);
+      if (!g) { g = { artifact, label, human: false, wakePrompt: '', sources: [] }; groups.set(key, g); }
+      // Gated iff any contributing channel gates it (a mixed gated/ungated set on
+      // the same label is degenerate — treat as gated, matching the old behaviour
+      // where the labelled trigger already reacted to the label change).
+      g.human = g.human || human;
+      // Optional authored wake-prompt override (#868): several channels can
+      // consolidate into one derived listener, so the first non-empty override in
+      // insertion order wins the slot (deterministic; the graph shows one edge).
+      if (!g.wakePrompt) g.wakePrompt = cleanWakePrompt(ch.wakePrompt);
+      if (!g.sources.includes(from)) g.sources.push(from);
+    }
+
+    for (const g of groups.values()) {
+      const id = channelTriggerId(b.id, g.artifact, g.label);
       if (b.triggers.some(t => t.id === id)) continue;
-      const events = (label ? CHANNEL_EVENTS[artifact].labeled : CHANNEL_EVENTS[artifact].open).slice();
-      const producerName = byId.get(from)?.displayName || from;
+      const events = (g.label ? CHANNEL_EVENTS[g.artifact].labeled : CHANNEL_EVENTS[g.artifact].open).slice();
+      const producerNames = g.sources.map(s => byId.get(s)?.displayName || s);
+      const producerLabel = producerNames.join(', ') || 'an upstream';
       b.triggers.push({
         id,
         type: 'github-event',
         events,
-        ...(label ? { labelFilter: label } : {}),
+        ...(g.label ? { labelFilter: g.label } : {}),
         // No origin filter: the trigger fires on any matching PR/issue event.
         // A human gate is expressed purely by the `human:*` label convention
         // (the labelFilter above) — humans apply it; agents don't, by convention.
         channel: true,
+        // Informational only (#826): which producers' channels contributed to
+        // this consolidated listener. No runtime meaning (the poller ignores it);
+        // kept for provenance and so the graph can map each channel edge onto the
+        // shared listener.
+        sources: g.sources.slice(),
         enabled: true,
-        description: `${artifact === 'pr' ? 'PR' : 'Issue'} from ${producerName}`
-          + `${label ? ` labelled ${label}` : ''}${human ? ' (human-approved)' : ''}`,
-        prompt: artifact === 'pr'
-          ? consumePrPrompt(producerName, { label, human })
-          : consumeIssuePrompt(producerName, { label, human }),
+        description: `${g.artifact === 'pr' ? 'PR' : 'Issue'} from ${producerLabel}`
+          + `${g.label ? ` labelled ${g.label}` : ''}${g.human ? ' (human-approved)' : ''}`,
+        // Authored override (#868) wins over the generated prompt when present;
+        // otherwise the derived listener keeps its generated wake prompt.
+        prompt: g.wakePrompt
+          || (g.artifact === 'pr'
+            ? consumePrPrompt(producerLabel, { label: g.label, human: g.human })
+            : consumeIssuePrompt(producerLabel, { label: g.label, human: g.human })),
       });
     }
-    // Producer instruction block — idempotent (strip any prior block, re-append).
-    const stripped = stripProduceBlock(b.systemPrompt || '');
-    const block = produceBlock(b.github);
-    b.systemPrompt = block ? `${stripped ? stripped + '\n\n' : ''}${block}` : stripped;
+    // Derived prompt blocks — idempotent (strip any prior blocks, re-append):
+    // the github-io producer instruction (#380) and the outcomes projection
+    // (#829). Coexistence is handled inside applyDerivedPromptBlocks.
+    b.systemPrompt = applyDerivedPromptBlocks(b.systemPrompt, { github: b.github, outcomes: b.outcomes });
   }
   return { ...bundle, roles };
 }
@@ -576,6 +804,10 @@ function expandDataFlowSteps(bundle) {
     // dependency edge (ordering only, no artifact).
     const upstream = new Map();
     const ensure = (id) => { if (!upstream.has(id)) upstream.set(id, new Map()); return upstream.get(id); };
+    // upstream role id -> authored wake-prompt override (#868). One derived
+    // "push from <upstream>" listener aggregates all of that upstream's artifact
+    // inputs, so the first non-empty override in insertion order wins the slot.
+    const overrides = new Map();
 
     for (const dep of (b.dependsOn || [])) {
       if (typeof dep === 'string' && dep && dep !== b.id && byId.has(dep)) ensure(dep);
@@ -586,6 +818,8 @@ function expandDataFlowSteps(bundle) {
       for (const producer of (producersByKey.get(k) || [])) {
         if (producer !== b.id) {
           ensure(producer).set(k, { key: k, hint: artifactHint(a), named: artifactIsNamed(a) });
+          const ov = cleanWakePrompt(a && a.wakePrompt);
+          if (ov && !overrides.get(producer)) overrides.set(producer, ov);
         }
       }
     }
@@ -604,7 +838,9 @@ function expandDataFlowSteps(bundle) {
         dataFlow: true,
         enabled: true,
         description: `Data flow: wake on push from ${byId.get(upId)?.displayName || upId}`,
-        prompt: dataFlowPrompt(byId.get(upId)?.displayName || upId, list),
+        // Authored override (#868) wins over the generated prompt when present.
+        prompt: overrides.get(upId)
+          || dataFlowPrompt(byId.get(upId)?.displayName || upId, list),
       });
     }
   }
@@ -663,6 +899,8 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
       // GitHub-channel marker (#380) so reconciliation can regenerate it and the
       // graph builders skip it (the on:'github' edge comes from the port).
       if (tr.channel) out.channel = true;
+      // Consolidated-listener provenance (#826), informational only.
+      if (Array.isArray(tr.sources)) out.sources = tr.sources.slice();
       // Stamp the history horizon (#320/#446) on EVERY github-event trigger so
       // the poller starts a fresh member from "now", not the triggers.json mtime.
       const now = new Date().toISOString();
@@ -705,7 +943,11 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
     // hierarchy (#377), agent-level emits, stage band, GitHub ports (#380).
     ...(dataFlow ? { dataFlow } : {}),
     ...(typeof t.parent === 'string' && t.parent ? { parentMemberId: `${teamId}-${t.parent}` } : {}),
-    ...(Array.isArray(t.emits) && t.emits.length ? { emits: t.emits } : {}),
+    // OUTCOMES port (#827): `{{var}}` substituted inside label/when like trigger
+    // fields; supersedes `emits` when present. Only one of the two is carried.
+    ...(isAuthoredOutcomes(t.outcomes)
+      ? { outcomes: normalizeOutcomes(substituteOutcomes(t.outcomes, subst)) }
+      : (Array.isArray(t.emits) && t.emits.length ? { emits: t.emits } : {})),
     ...(typeof t.stage === 'string' && t.stage ? { stage: t.stage } : {}),
     ...(t.github && (t.github.producesPr || t.github.producesIssue) ? { github: t.github } : {}),
     ...(Array.isArray(t.channels) && t.channels.length
@@ -720,7 +962,8 @@ module.exports = {
   buildMemberFromTemplate, liftTriggerEmits,
   expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview,
   channelTriggerId, isChannelTrigger, stampDerivedActivation,
+  outcomesBlock, stripOutcomesBlock, stripDerivedPromptBlocks, applyDerivedPromptBlocks,
   emptyDraftBundle, roleKeyOf, VERSION,
   artifactKey, artifactHint, artifactIsNamed,
-  slugifyDraft, deriveUniqueDraftId,
+  slugifyDraft, deriveUniqueDraftId, cleanWakePrompt,
 };

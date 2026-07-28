@@ -13,8 +13,9 @@
 
 import { computeFlowLayout, assignCrossCoords } from './flow-layout';
 import { routeOrthogonalEdges, roundedPathD, laneLoadByChannel } from './edge-router';
+import { outcomeCardMinHeight, OUTCOME_COL_BOTTOM, OUTCOME_GROW_MIN } from './outcome-port-layout';
 
-export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge, actorSources, expandChildrenByDefault } = {}) {
+export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutcome, onSelectEdge, actorSources, expandChildrenByDefault } = {}) {
 
   // ─── Constants ──────────────────────────────────────────────────────
   const NODE_W      = 320;
@@ -120,6 +121,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
       .bp-badge-revision       { background:rgba(99,102,241,0.15);  color:#818cf8; border:1px solid rgba(99,102,241,0.4); }
       .bp-badge-gh-pr          { background:rgba(139,92,246,0.15);  color:#a78bfa; border:1px solid rgba(139,92,246,0.4); }
       .bp-badge-gh-issue       { background:rgba(20,184,166,0.15);  color:#2dd4bf; border:1px solid rgba(20,184,166,0.4); }
+      .bp-badge-outcome        { background:rgba(234,179,8,0.15);   color:#eab308; border:1px solid rgba(234,179,8,0.45); }
 
       /* ── Status backgrounds (dark, default) ─────────────────────────── */
       .bp-node-status-draft      { background: #1e1318; }
@@ -148,6 +150,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
       :root[data-theme="admin-light"] .bp-badge-rigor-high     { color:#c2410c; border-color:rgba(194,65,12,0.4); }
       :root[data-theme="admin-light"] .bp-badge-rigor-standard { color:#4b5563; border-color:rgba(75,85,99,0.4); }
       :root[data-theme="admin-light"] .bp-badge-revision       { color:#4338ca; border-color:rgba(67,56,202,0.4); }
+      :root[data-theme="admin-light"] .bp-badge-outcome        { color:#a16207; border-color:rgba(161,98,7,0.45); }
     `;
     document.head.appendChild(style);
   }
@@ -299,7 +302,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     briefings:          [],
     byId:               {},
     roots:              [],
-    contentVisible:     new Set(),
     childrenVisible:    new Set(),
     userCollapsed:      new Set(), // parents the user explicitly collapsed (with expandChildrenByDefault)
     outputsVisible:     new Set(),
@@ -392,6 +394,9 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
       // GitHub artifact ports (#380): produce flags → badge + output ports.
       github: (n.github && (n.github.producesPr || n.github.producesIssue)) ? n.github : null,
       channels: Array.isArray(n.channels) ? n.channels : [],
+      // Structured outcomes port (#828): drives the ◇ switch badge + per-outcome
+      // output ports. Only authored ports reach the graph (see process-graph.js).
+      outcomes: (n.outcomes && Array.isArray(n.outcomes.options) && n.outcomes.options.length) ? n.outcomes : null,
       _role: n.role,
       _isParent: n.isParent === true,
     }));
@@ -605,9 +610,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
   function getNodeHeight(id) {
     const el = canvas.querySelector(`.bp-node[data-id="${id}"]`);
     if (el) return el.offsetHeight;
-    let h = 90;
-    if (state.contentVisible.has(id)) h += 300;
-    return h;
+    return 90;
   }
 
   function getArtifactNodeHeight(path) {
@@ -1115,6 +1118,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
         badgeParts.push(`<span class="bp-badge bp-badge-gh-pr" title="Opens pull requests">⇅ PR</span>`);
       if (bp.github && bp.github.producesIssue)
         badgeParts.push(`<span class="bp-badge bp-badge-gh-issue" title="Opens issues">◉ Issue</span>`);
+      // Switch badge (#828): an exactlyOne outcomes port picks exactly one branch
+      // per run — render the ◇ glyph so the node reads as a switch.
+      if (bp.outcomes && bp.outcomes.mode === 'exactlyOne')
+        badgeParts.push(`<span class="bp-badge bp-badge-outcome" title="Switch — exactly one outcome per run">◇ switch</span>`);
       if (badgeParts.length > 0) {
         const badges = document.createElement('div');
         badges.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px;';
@@ -1198,16 +1205,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
       }
 
       // Only append the actions row when it carries something (children /
-      // artifact toggles). The Agent Prompt is a separate disclosure below.
+      // artifact toggles).
       if (actions.childElementCount > 0) node.appendChild(actions);
-
-      // Agent Prompt — a collapsible disclosure (not a named button). Expanding
-      // reveals the read-only prompt/content; editing happens in the inspector.
-      if (bp.body) {
-        const promptToggle = makeDisclosure('Agent Prompt', state.contentVisible.has(n.id));
-        promptToggle.addEventListener('click', () => toggleContent(n.id));
-        node.appendChild(promptToggle);
-      }
 
       // Connect-to-wire port (#362 Phase C2): drag to another node to wire a
       // hand-off / link. Only when editable and a handler is wired.
@@ -1223,20 +1222,53 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
         node.appendChild(port);
       }
 
+      // Outcome output ports (#828): one small square port per outcome option on
+      // an authored outcomes port. Dragging one onto another node opens the label
+      // hand-off dialog pre-filled with that outcome's label (onConnectOutcome).
+      // Stacked as a labelled column on the node's right edge, below the ● port.
+      if (state.editable && onConnectOutcome && bp.outcomes && Array.isArray(bp.outcomes.options) && bp.outcomes.options.length) {
+        const outCount = bp.outcomes.options.length;
+        // With 2+ outcomes the column is pinned to the card's bottom and the card
+        // is grown via min-height (below) so every row stays inside the borders
+        // and clears the centred ● connect port (#857). A single outcome keeps the
+        // original centre-anchored placement so 0/1-outcome nodes are unchanged.
+        const grow = outCount >= OUTCOME_GROW_MIN;
+        const col = document.createElement('div');
+        col.style.cssText = grow
+          ? `position:absolute;right:-9px;bottom:${OUTCOME_COL_BOTTOM}px;display:flex;flex-direction:column;gap:5px;z-index:3;align-items:flex-end;`
+          : 'position:absolute;right:-9px;top:calc(50% + 14px);display:flex;flex-direction:column;gap:5px;z-index:3;align-items:flex-end;';
+        bp.outcomes.options.forEach((o) => {
+          const title = o.title || o.id;
+          const setLabelAction = (o.actions || []).find(a => a.type === 'setLabel' && a.label);
+          const row = document.createElement('div');
+          row.style.cssText = 'display:flex;align-items:center;gap:4px;';
+          const tag = document.createElement('span');
+          tag.textContent = title;
+          tag.style.cssText = 'font-size:9px;color:#a16207;background:rgba(234,179,8,0.12);border:1px solid rgba(234,179,8,0.4);border-radius:3px;padding:0 4px;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+          const dot = document.createElement('div');
+          dot.title = `Outcome “${title}” — drag to the agent it routes to`;
+          dot.style.cssText = 'width:12px;height:12px;border-radius:2px;background:#eab308;border:2px solid var(--eb-bg-surface);cursor:crosshair;flex-shrink:0;';
+          dot.addEventListener('mousedown', (ev) => {
+            ev.stopPropagation();
+            ev.preventDefault();
+            startConnect(n.id, { id: o.id, title, label: setLabelAction ? setLabelAction.label : '' });
+          });
+          row.appendChild(tag);
+          row.appendChild(dot);
+          col.appendChild(row);
+        });
+        node.appendChild(col);
+        // Grow the card so the bottom-pinned column is fully contained and the
+        // added height is reflected in layout + edge anchoring (all driven by the
+        // node's measured offsetHeight — see getNodeHeight / drawRoutedProcessEdges).
+        const minH = outcomeCardMinHeight(outCount);
+        if (minH) node.style.minHeight = minH + 'px';
+      }
+
       // NOTE (#411): the separate PR/Issue drag pills are gone — the header
       // badges above keep the "opens PRs/issues" information visible, and the
       // single ● port creates every connection type (the create dialog ranks
       // the PR/Issue channel first for producers).
-
-      // Agent Prompt panel — the node's prompt/content, read-only markdown.
-      // Editing (prompt, stage, links) is in the right-side inspector.
-      if (state.contentVisible.has(n.id) && bp.body) {
-        const body = document.createElement('div');
-        body.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid var(--eb-border-default);font-size:11px;max-height:300px;overflow-y:auto;line-height:1.5;';
-        body.innerHTML = renderMarkdown(bp.body);
-        body.addEventListener('wheel', e => e.stopPropagation());
-        node.appendChild(body);
-      }
 
       canvas.appendChild(node);
     });
@@ -1535,27 +1567,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     return btn;
   }
 
-  // A collapsible disclosure row (caret + label). Used for the read-only
-  // Agent Prompt panel — reads as a dropdown, not a named action button.
-  function makeDisclosure(label, active) {
-    const btn = document.createElement('button');
-    btn.style.cssText = `
-      display:flex;align-items:center;gap:6px;width:100%;margin-top:6px;
-      padding:2px 0;font-size:11px;font-family:inherit;
-      background:transparent;border:none;
-      color:${active ? '#3b82f6' : 'var(--eb-text-secondary)'};
-      cursor:pointer;text-align:left;
-    `;
-    const caret = document.createElement('span');
-    caret.textContent = active ? '▾' : '▸';
-    caret.style.cssText = 'font-size:9px;line-height:1;';
-    const text = document.createElement('span');
-    text.textContent = label;
-    btn.appendChild(caret);
-    btn.appendChild(text);
-    return btn;
-  }
-
   // ─── Edge Drawing ────────────────────────────────────────────────────
 
   function drawEdges() {
@@ -1630,6 +1641,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     // lanes, side gutters for long/backward edges, labels on the edge.
     const EXTRA_COLOR = { label: EDGE_STYLES.label.color, review: EDGE_STYLES.review.color, manual: EDGE_STYLES.label.color };
     const GH_COLOR = { pr: EDGE_STYLES.pr.color, issue: EDGE_STYLES.issue.color };
+    const OUTCOME_EDGE_COLOR = '#eab308';  // amber — matches the ◇ switch badge (#828)
 
     function drawRoutedProcessEdges() {
       const nodes = [];
@@ -1680,18 +1692,23 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
         if (!visibleIds.has(e.from) || !visibleIds.has(e.to)) return;
         const isGithub = e.on === 'github';
         const artifact = e.artifact === 'issue' ? 'issue' : 'pr';
+        // Outcome-keyed label edge (#828): the emitter set this label as part of a
+        // structured outcome. Title the edge with the outcome, colour it like the
+        // switch badge, and tag the hit payload so a click focuses the Routing tab.
+        const isOutcome = e.on === 'label' && !!e.outcome;
         list.push({
           from: e.from, to: e.to,
-          color: isGithub ? GH_COLOR[artifact] : (EXTRA_COLOR[e.on] || EDGE_STYLES.label.color),
+          color: isGithub ? GH_COLOR[artifact] : (isOutcome ? OUTCOME_EDGE_COLOR : (EXTRA_COLOR[e.on] || EDGE_STYLES.label.color)),
           width: isGithub ? 2 : 1.5,
           dash: '',
           opacity: 1,
           labelText: isGithub ? channelChipText(e)
-            : (e.on === 'label' ? labelChipText(e) : (e.label || '')),
+            : (isOutcome ? outcomeEdgeText(e) : (e.on === 'label' ? labelChipText(e) : (e.label || ''))),
           chip: isGithub,
           gate: e.gate === 'human',
           hit: { from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on,
-            artifact: isGithub ? artifact : undefined, gate: e.gate, triggerId: e.triggerId },
+            artifact: isGithub ? artifact : undefined, gate: e.gate, triggerId: e.triggerId,
+            ...(e.outcome ? { outcome: e.outcome } : {}) },
         });
       });
       visible.forEach(n => {
@@ -1897,6 +1914,16 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     const tag = labelEventTag(e.events);
     return tag ? `${e.label || ''} · ${tag}` : (e.label || '');
   }
+  // The producer's title for an outcome-keyed edge (#828): resolve the outcome
+  // option's title from the source node so the edge reads `◇ Accepted` rather
+  // than the raw label. Falls back to the option id, then the label.
+  function outcomeEdgeText(e) {
+    const src = state.byId[e.from];
+    const opt = src && src.outcomes && Array.isArray(src.outcomes.options)
+      ? src.outcomes.options.find(o => o.id === e.outcome) : null;
+    const title = (opt && (opt.title || opt.id)) || e.outcome || e.label || '';
+    return `◇ ${title}`;
+  }
 
   // The chip text for a GitHub-channel edge (#380): artifact + optional human-gate
   // glyph + optional routing label. Shared with the layout so widths line up.
@@ -2093,12 +2120,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
 
   // ─── Interactions ────────────────────────────────────────────────────
 
-  function toggleContent(id) {
-    if (state.contentVisible.has(id)) state.contentVisible.delete(id);
-    else state.contentVisible.add(id);
-    render();
-  }
-
   function toggleChildren(id) {
     if (state.childrenVisible.has(id)) {
       collapseSubtree(id);
@@ -2145,7 +2166,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     state.briefings.forEach(bp => {
       if (bp.children && bp.children.length > 0) state.userCollapsed.add(bp.id);
     });
-    state.contentVisible.clear();
     state.outputsVisible.clear();
     state.inputsVisible.clear();
     render();
@@ -2252,8 +2272,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
       y: (clientY - r.top - state.pan.y) / state.zoom,
     };
   }
-  function startConnect(fromId) {
-    state.connecting = { fromId };
+  function startConnect(fromId, outcome) {
+    state.connecting = { fromId, outcome: outcome || null };
     viewport.style.cursor = 'crosshair';
     tempEdge = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     tempEdge.setAttribute('stroke', 'var(--eb-accent-primary)');
@@ -2285,6 +2305,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
   }
   function finishConnect(e) {
     const fromId = state.connecting.fromId;
+    const outcome = state.connecting.outcome;
     state.connecting = null;
     viewport.style.cursor = 'grab';
     if (tempEdge) { tempEdge.remove(); tempEdge = null; }
@@ -2293,7 +2314,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
     const nodeEl = el && el.closest ? el.closest('.bp-node') : null;
     const toId = nodeEl && nodeEl.dataset ? nodeEl.dataset.id : null;
     if (!toId || toId === fromId) return;
-    if (onConnect) onConnect(fromId, toId);
+    // A drag from an outcome port pre-fills the outcome's label hand-off (#828);
+    // the plain ● port creates any edge type via onConnect.
+    if (outcome && onConnectOutcome) onConnectOutcome(fromId, toId, outcome);
+    else if (onConnect) onConnect(fromId, toId);
   }
 
   function onWheel(e) {
@@ -2320,112 +2344,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onSelectEdge,
   function applyTransform() {
     canvas.style.transform = `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.zoom})`;
     if (document.activeElement !== zoomInput) zoomInput.value = Math.round(state.zoom * 100) + '%';
-  }
-
-  // ─── Markdown Renderer ────────────────────────────────────────────────
-
-  function renderMarkdown(text) {
-    if (!text) return '';
-
-    let html = esc(text);
-
-    const codeBlocks = [];
-    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
-      let rendered = code.replace(/\n$/, '').split('\n').map(line => {
-        if (line.startsWith('+') && !line.startsWith('+++')) return `<span style="color:#34d399">${line}</span>`;
-        if (line.startsWith('-') && !line.startsWith('---')) return `<span style="color:#f87171">${line}</span>`;
-        return line;
-      }).join('\n');
-      const placeholder = `\x00CB${codeBlocks.length}\x00`;
-      codeBlocks.push(`<pre style="background:var(--eb-bg-app);border:1px solid var(--eb-border-default);padding:8px;border-radius:4px;overflow-x:auto;"><code${lang ? ` data-lang="${lang}"` : ''}>${rendered}</code></pre>`);
-      return placeholder;
-    });
-
-    const inlineCodes = [];
-    html = html.replace(/`([^`]+)`/g, (_, code) => {
-      const placeholder = `\x00IC${inlineCodes.length}\x00`;
-      inlineCodes.push(`<code style="background:var(--eb-bg-app);border:1px solid var(--eb-border-default);padding:1px 4px;border-radius:3px;">${code}</code>`);
-      return placeholder;
-    });
-
-    {
-      const lines  = html.split('\n');
-      const result = [];
-      for (let i = 0; i < lines.length; i++) {
-        const prev = result.length > 0 ? result[result.length - 1] : '';
-        if (/^\s+\S/.test(lines[i]) && !/^\s*- /.test(lines[i]) && /^\s*- /.test(prev)) {
-          result[result.length - 1] += ' ' + lines[i].trim();
-        } else {
-          result.push(lines[i]);
-        }
-      }
-      html = result.join('\n');
-    }
-
-    html = html.replace(/^(\|.+\|)\n(\|[-: |]+\|)\n((?:\|.+\|\n?)*)/gm, (match, header, sep, body) => {
-      const stripOuter = parts => { let a = parts; if (!a[0].trim()) a = a.slice(1); if (!a[a.length-1].trim()) a = a.slice(0,-1); return a; };
-      const sepCells = stripOuter(sep.split('|'));
-      const aligns = sepCells.map(c => {
-        const t = c.trim();
-        if (t.startsWith(':') && t.endsWith(':')) return 'center';
-        if (t.endsWith(':')) return 'right';
-        return 'left';
-      });
-      const ths = stripOuter(header.split('|')).map((c, i) =>
-        `<th style="text-align:${aligns[i] || 'left'};padding:4px 8px;border:1px solid var(--eb-border-default);">${c.trim()}</th>`
-      ).join('');
-      const rows = body.trim().split('\n').filter(r => r.trim()).map(row => {
-        const tds = stripOuter(row.split('|')).map((c, i) =>
-          `<td style="text-align:${aligns[i] || 'left'};padding:4px 8px;border:1px solid var(--eb-border-default);">${c.trim()}</td>`
-        ).join('');
-        return `<tr>${tds}</tr>`;
-      }).join('');
-      return `<table style="border-collapse:collapse;width:100%;"><thead><tr>${ths}</tr></thead><tbody>${rows}</tbody></table>`;
-    });
-
-    html = html.replace(/(^&gt; .+(\n&gt; .+)*)/gm, (match) => {
-      const content = match.replace(/^&gt; ?/gm, '');
-      return `<blockquote style="border-left:3px solid var(--eb-border-default);padding-left:8px;color:var(--eb-text-secondary);margin:4px 0;">${content}</blockquote>`;
-    });
-
-    html = html.replace(/^#### (.+)$/gm, '<h4 style="margin:6px 0 2px;">$1</h4>');
-    html = html.replace(/^### (.+)$/gm,  '<h3 style="margin:6px 0 2px;">$1</h3>');
-    html = html.replace(/^## (.+)$/gm,   '<h2 style="margin:6px 0 2px;">$1</h2>');
-    html = html.replace(/^# (.+)$/gm,    '<h1 style="margin:6px 0 2px;">$1</h1>');
-    html = html.replace(/^---$/gm, '<hr style="border:none;border-top:1px solid var(--eb-border-default);">');
-
-    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    html = html.replace(/\*(.+?)\*/g,     '<em>$1</em>');
-
-    html = html.replace(/^- \[ \] (.+)$/gm, '<li style="list-style:none">&#9744; $1</li>');
-    html = html.replace(/^- \[x\] (.+)$/gm, '<li style="list-style:none">&#9745; $1</li>');
-    html = html.replace(/^\s*- (.+)$/gm, '<li>$1</li>');
-    html = html.replace(/^\d+\. (.+)$/gm, '<oli>$1</oli>');
-
-    html = html.replace(/((?:<li[^>]*>.*<\/li>\n?)+)/g, '<ul style="padding-left:16px;margin:4px 0;">$1</ul>');
-    html = html.replace(/((?:<oli>.*<\/oli>\n?)+)/g, (m) => {
-      return '<ol style="padding-left:16px;margin:4px 0;">' + m.replace(/<\/?oli>/g, t => t.replace('oli', 'li')) + '</ol>';
-    });
-
-    html = html.replace(/\n\n+/g, '</p><p>');
-    html = '<p style="margin:0 0 4px;">' + html + '</p>';
-
-    const blocks = ['h[1234]', 'table', 'ul', 'ol', 'pre', 'hr', 'blockquote'];
-    html = html.replace(/<p[^>]*>\s*<\/p>/g, '');
-    blocks.forEach(tag => {
-      html = html.replace(new RegExp(`<p[^>]*>\\s*(<${tag}[> ])`, 'g'), '$1');
-      html = html.replace(new RegExp(`<p[^>]*>\\s*(<${tag}>)`, 'g'), '$1');
-      html = html.replace(new RegExp(`(</${tag}>)\\s*</p>`, 'g'), '$1');
-    });
-
-    codeBlocks.forEach((block, i) => {
-      html = html.replace(`\x00CB${i}\x00`, block);
-    });
-    inlineCodes.forEach((code, i) => {
-      html = html.replace(`\x00IC${i}\x00`, code);
-    });
-
-    return html;
   }
 
   // ─── Utilities ────────────────────────────────────────────────────────

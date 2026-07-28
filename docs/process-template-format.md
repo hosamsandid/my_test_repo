@@ -7,10 +7,11 @@ are wired*, deliberately **not** secrets, repos, or Matrix identities (those are
 supplied when the bundle is materialised into a real team).
 
 It is the machine-readable sibling of the `agent-studio/` reference concept: one
-manifest holding every role's persona prompt, its role-level declarative `emits`
-(the labels it sets — these draw the hand-off edges), its triggers, the human
-gates, and the label registry. (`emits` is authored at the **role/agent** level;
-the earlier per-trigger `emits` variant was removed in #783.)
+manifest holding every role's persona prompt, its structured **`outcomes`** port
+(the labels it sets and the conditions under which it sets them — these draw the
+hand-off edges), its triggers, the human gates, and the label registry.
+(`outcomes` supersedes the old flat `emits` list, retired in #831; legacy bundles
+that still carry `emits` are lifted transparently on read.)
 
 ## Producing / consuming
 
@@ -39,10 +40,19 @@ role's `{{vars}}` and the target repo are applied per member.
       "role": "team-member",
       "sessionPolicy": "persistent" | "per-invocation",
       "systemPrompt": "You implement issues…",
-      "emits": ["ready-for-review"],         // labels this role sets → outbound edges (#414)
+      "outcomes": {                          // structured successor to flat emits (#827/#831)
+        "mode": "exactlyOne",                //   "exactlyOne" (switch) | "anyOf" (zero or more per run)
+        "options": [
+          { "id": "accepted", "title": "Accepted", "when": "Review clean",
+            "actions": [ { "type": "setLabel", "label": "ready-to-merge" } ] },
+          { "id": "revisions", "title": "Revisions required", "when": "Issues found",
+            "actions": [ { "type": "setLabel", "label": "revisions-required" } ] }
+        ]
+      },
       "github": { "producesPr": true, "producesIssue": false },  // GitHub outputs (#380)
       "channels": [                          // PR/issue channels this role consumes (#380)
-        { "artifact": "pr", "from": "developer", "label": "approved", "gate": "human" }
+        { "artifact": "pr", "from": "developer", "label": "approved", "gate": "human",
+          "wakePrompt": "…" }                 // optional authored wake-prompt override (#868)
       ],
       "triggers": [
         {
@@ -94,17 +104,73 @@ way two agents are wired in the Flow editor. These are optional arrays on a role
   when the upstream pushes. It is a notification, **not** a start-gate: nothing
   blocks the consumer from running before that. The derived trigger's prompt
   tells the consumer to `git pull` and resolve its inputs from the manifest.
+- **Optional `wakePrompt` override (#868).** A `channels[]` entry and a data-flow
+  `inputs[]` entry may each carry an optional `wakePrompt` string. When present
+  (non-blank) it is carried verbatim into the regenerated derived trigger's
+  `prompt`, replacing the auto-generated wake text; blank/absent keeps the
+  generated default. On a consolidated listener (several channels, or several
+  inputs from one upstream, collapse into one trigger) the first non-empty
+  override in port order wins.
 - In the Flow editor the *Dependency* and *Data flow* connect actions are unified
   into one "Data flow / hand-off" dialog: give it an artifact **name** for a data
   hand-off, or leave name+path empty for a plain dependency.
 
+### Outcomes — structured successor to `emits` (#827)
+
+A role may carry a first-class **`outcomes`** port — the structured successor to
+the flat `emits` list (concept `docs/agent-outcomes-concept.md` §3/§5.1/§7). It
+describes *which signals the agent sets and when*: a code reviewer's *accepted*
+vs *revisions required*, a dispatcher's *route to Developer 1 / 2 / hold*.
+
+```jsonc
+{
+  "outcomes": {
+    "mode": "exactlyOne",              // switch — exactly one option per run | "anyOf" — zero or more
+    "options": [
+      {
+        "id": "to-developer",          // stable slug, unique within the role
+        "title": "Route to Developer", // display name (optional)
+        "when": "Frontend task, or Dev 2 at capacity",  // human-readable condition (optional, {{var}}-substituted)
+        "actions": [ { "type": "setLabel", "label": "ready-{{stagePrefix}}" } ],
+        "notify": "dm"                 // optional: post a DM summary when this outcome is chosen
+      },
+      { "id": "hold", "title": "Hold", "when": "Ambiguous", "actions": [ { "type": "none" } ] }
+    ]
+  }
+}
+```
+
+- **Action types.** `setLabel` (apply a GitHub label — `label` required),
+  `openPr`, `openIssue` (absorb `github.producesPr/producesIssue`), `none`
+  (terminal, no outbound signal). An option may carry several actions.
+- **Validation.** `mode` must be `exactlyOne` | `anyOf`; option `id`s are unique;
+  action types must be known; a `setLabel` label may **not** be a `human:*` /
+  brake (`hold`, `needs:human`) label (same gate convention as `gate-violation`).
+  `exactlyOne` with fewer than two options is valid (a phase-5 lint, not an error).
+- **`{{var}}` substitution** applies to `label` and `when` at materialise time,
+  exactly like trigger fields.
+- **Supersedes `emits` (#831).** The flat `emits` field is retired. All shipped
+  templates carry `outcomes`; no `emits` field appears in newly exported bundles.
+  Old bundles that carry `emits` still import correctly: `buildProcessTemplate`
+  lifts them to a degenerate `anyOf` port on export, and the graph builder
+  (`liftOutcomes`) derives byte-identical edges from them on read. `PUT /api/agents/:id`
+  also lifts a legacy `emits` input to outcomes on write. The process editor no
+  longer exposes a flat-emits surface.
+- **Graph edges** are keyed by outcome: a `setLabel` action's label drives the
+  same `emits ↔ labelFilter` edge (now tagged with the `outcome` id when
+  authored); `openPr`/`openIssue` fold into the github produce flags.
+- **Declarative only** (concept decision 4) — outcomes have no runtime effect in
+  this phase; the agent still sets its own signals. Prompt synchronisation is a
+  later phase.
+
 ### Notes & invariants
 
-- **Wiring is `emits` ↔ `labelFilter`.** An edge *A → label L → B* exists when
-  role `A` lists `L` in its **role-level** `emits` (#414/#783) and a trigger of
-  role `B` filters on `L` (`labelFilter`). Raw events (no `labelFilter`) are
-  external triggers, not hand-offs. (A legacy bundle carrying a per-trigger
-  `emits` still works — the label is lifted to the role level on import.)
+- **Wiring is `outcomes` ↔ `labelFilter`.** An edge *A → label L → B* exists when
+  a `setLabel` action in role `A`'s `outcomes` port names `L` (#831), and a
+  trigger of role `B` filters on `L` (`labelFilter`). Raw events (no `labelFilter`)
+  are external triggers, not hand-offs. Legacy bundles carrying a flat `emits`
+  field still work — labels are lifted to a degenerate `anyOf` outcomes on read
+  (`liftOutcomes`); a per-trigger `emits` variant (removed in #783) is also lifted.
 - **GitHub channels (#380) are declarative ports.** `github.{producesPr,producesIssue}`
   marks what a role opens (drives the node badge/ports and appends the producer
   instruction block to its prompt at materialise). A consumer's `channels` entry
@@ -112,11 +178,17 @@ way two agents are wired in the Flow editor. These are optional arrays on a role
   optionally only when `label` is present, and `gate: "human"` means a **human**
   applies that label (the inline approval gate on the edge). At materialise (and
   on live edits, via `reconcileTeamGithubChannels`) `expandGithubChannels` derives
-  the consumer's github-event trigger (`<consumer>-on-<artifact>-<producer>`,
+  the consumer's github-event trigger (`<consumer>-on-<artifact>[-<label>]`,
   marked `channel: true`) from the port — the derived triggers are **not** stored
-  in the portable bundle, only the ports. This supersedes the old
-  `kind: "pr-review"` construct; legacy `pr-review` roles are normalised onto
-  channels on import (`normalizeLegacyReview`).
+  in the portable bundle, only the ports. Channels from **several producers** that
+  resolve to the same `(events, labelFilter)` collapse into **one** derived
+  listener (#826) — the poller has no origin filter, so per-producer triggers were
+  functionally identical; the contributing producers are recorded on the trigger's
+  informational `sources: [producerId, …]` (no runtime meaning). Two triggers of
+  one agent sharing `(events, labelFilter)` — e.g. a hand-authored trigger left
+  beside a derived one — raise the advisory `duplicate-listener` lint. This
+  supersedes the old `kind: "pr-review"` construct; legacy `pr-review` roles are
+  normalised onto channels on import (`normalizeLegacyReview`).
 - **Gates & brakes are never emitted by agents.** `human:*` gate labels and the
   brakes (`hold`, `needs:human`) only ever appear as a *listener* `labelFilter`;
   an agent that declares them in `emits` is flagged `gate-violation` by the lint

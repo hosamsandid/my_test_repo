@@ -8,6 +8,7 @@
 
 import { apiCall } from '../../hooks/useApi';
 import { wouldCreateCycle } from './hierarchy-utils';
+import { upsertChannel, removeChannelFrom } from './channel-ops';
 import {
   stagesAfterAdd, stagesAfterRename, stagesAfterRemove, stagesAfterReorder, membersToCascade,
 } from './stage-list-ops';
@@ -97,12 +98,15 @@ export const liveOps = {
   // change the agent id (that is immutable once materialized). Shape-compatible
   // with makeDraftOps.renameRole so the shared inspector never branches on mode.
   renameRole: (roleId, displayName) => apiCall('PUT', `/api/agents/${roleId}`, { displayName }),
-  // Agent-level emitted labels (label hand-offs) — independent of any trigger.
-  getRoleEmits: async (roleId) => {
+  // Structured OUTCOMES port (#827) — the successor to flat `emits`. Shape-compatible
+  // with makeDraftOps.getRoleOutcomes/setRoleOutcomes so the phase-3 UI never
+  // branches on mode. Writing a non-empty port CLEARS `emits` server-side
+  // (PUT /api/agents/:id), so the two never coexist.
+  getRoleOutcomes: async (roleId) => {
     const a = await apiCall('GET', `/api/agents/${roleId}`);
-    return Array.isArray(a?.emits) ? a.emits : [];
+    return a && typeof a.outcomes === 'object' && a.outcomes ? a.outcomes : null;
   },
-  setRoleEmits: (roleId, emits) => apiCall('PUT', `/api/agents/${roleId}`, { emits }),
+  setRoleOutcomes: (roleId, outcomes) => apiCall('PUT', `/api/agents/${roleId}`, { outcomes: outcomes || null }),
 
   // ── unified edges (#367): dependency + data-flow + hierarchy + stage ──
   // Dependency A→B means "B depends on A" (A upstream), stored on B.dataFlow.dependsOn.
@@ -193,35 +197,19 @@ export const liveOps = {
     apiCall('PUT', `/api/agents/${roleId}`, { github: { producesPr: !!pr, producesIssue: !!issue } }),
   // Channels live on the *consumer*; the backend re-derives the github-event
   // triggers from them (reconcileTeamGithubChannels). Upsert keyed on (artifact, from).
-  addChannel: async (roleId, { artifact, from, label, gate }) => {
+  addChannel: async (roleId, { artifact, from, label, gate, wakePrompt }) => {
     if (!from || from === roleId) return;
     const a = await apiCall('GET', `/api/agents/${roleId}`);
-    const channels = upsertChannel(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label, gate });
+    const channels = upsertChannel(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label, gate, wakePrompt });
     await apiCall('PUT', `/api/agents/${roleId}`, { channels });
   },
   updateChannel: async (roleId, spec) => liveOps.addChannel(roleId, spec),
-  removeChannel: async (roleId, { artifact, from }) => {
+  removeChannel: async (roleId, { artifact, from, label }) => {
     const a = await apiCall('GET', `/api/agents/${roleId}`);
-    const art = artifact === 'issue' ? 'issue' : 'pr';
-    const channels = (Array.isArray(a?.channels) ? a.channels : []).filter(c => !(c.artifact === art && c.from === from));
+    const channels = removeChannelFrom(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label });
     await apiCall('PUT', `/api/agents/${roleId}`, { channels });
   },
 };
-
-// Upsert a channel into a list, keyed on (artifact, from). Pure helper shared by
-// the live + draft adapters so a re-drawn edge edits in place rather than dupes.
-function upsertChannel(list, { artifact, from, label, gate }) {
-  const art = artifact === 'issue' ? 'issue' : 'pr';
-  const next = {
-    artifact: art, from,
-    ...(typeof label === 'string' && label.trim() ? { label: label.trim() } : {}),
-    ...(gate === 'human' ? { gate: 'human' } : {}),
-  };
-  const out = (Array.isArray(list) ? list : []).slice();
-  const i = out.findIndex(c => c.artifact === art && c.from === from);
-  if (i >= 0) out[i] = next; else out.push(next);
-  return out;
-}
 
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const uid = () => `t${Date.now()}${Math.floor(Math.random() * 1000)}`;
@@ -321,6 +309,9 @@ function templateToDraftRole(t, { id, displayName }) {
   if (typeof t.parent === 'string' && t.parent) role.parent = t.parent;
   if (typeof t.stage === 'string' && t.stage) role.stage = t.stage;
   if (Array.isArray(t.emits) && t.emits.length) role.emits = t.emits;
+  // Structured OUTCOMES port (#827) — carried verbatim like the other ports.
+  if (t.outcomes && typeof t.outcomes === 'object'
+    && Array.isArray(t.outcomes.options) && t.outcomes.options.length) role.outcomes = t.outcomes;
   if (t.github && (t.github.producesPr || t.github.producesIssue)) role.github = t.github;
   if (Array.isArray(t.channels) && t.channels.length) role.channels = t.channels;
   return role;
@@ -378,17 +369,25 @@ export function makeDraftOps(getBundle, persist) {
       if (r) r.triggers = (r.triggers || []).filter(x => x.id !== tid);
       await persist(b);
     },
-    // Trigger-level `emits` was removed (#783) — label hand-offs live on the
-    // role level (setRoleEmits below), so there is no per-trigger setEmits.
-    // Agent-level emitted labels (label hand-offs) — on the role, no trigger.
-    getRoleEmits: async (roleId) => {
+    // Trigger-level `emits` was removed (#783) — label hand-offs now live
+    // in the structured OUTCOMES port (#831).
+
+    // Structured OUTCOMES port (#827) — the same
+    // surface as liveOps so the shared inspector never branches on mode. A
+    // non-empty port supersedes `emits` (mirrors the PUT clear-emits rule).
+    getRoleOutcomes: async (roleId) => {
       const r = role(getBundle(), roleId);
-      return Array.isArray(r?.emits) ? r.emits.slice() : [];
+      return r && typeof r.outcomes === 'object' && r.outcomes ? clone(r.outcomes) : null;
     },
-    setRoleEmits: async (roleId, emits) => {
+    setRoleOutcomes: async (roleId, outcomes) => {
       const b = clone(getBundle());
       const r = role(b, roleId);
-      if (r) { if (Array.isArray(emits) && emits.length) r.emits = emits; else delete r.emits; }
+      if (r) {
+        const authored = outcomes && typeof outcomes === 'object'
+          && Array.isArray(outcomes.options) && outcomes.options.length;
+        if (authored) { r.outcomes = outcomes; delete r.emits; }
+        else delete r.outcomes;
+      }
       await persist(b);
     },
 
@@ -609,14 +608,14 @@ export function makeDraftOps(getBundle, persist) {
       r.channels = upsertChannel(r.channels, spec);
       await persist(b);
     },
-    // Upsert keyed on (artifact, from), so editing a channel's label/gate reuses it.
+    // Upsert keyed on (artifact, from, label) (#828), so editing a channel's
+    // gate reuses it while a new label adds a switch fan-in sibling.
     updateChannel: async (roleId, spec) => makeDraftOps(getBundle, persist).addChannel(roleId, spec),
-    removeChannel: async (roleId, { artifact, from }) => {
+    removeChannel: async (roleId, { artifact, from, label }) => {
       const b = clone(getBundle());
       const r = role(b, roleId);
       if (r) {
-        const art = artifact === 'issue' ? 'issue' : 'pr';
-        r.channels = (r.channels || []).filter(c => !(c.artifact === art && c.from === from));
+        r.channels = removeChannelFrom(r.channels, { artifact, from, label });
         if (!r.channels.length) delete r.channels;
       }
       await persist(b);

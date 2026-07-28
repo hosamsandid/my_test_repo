@@ -1430,5 +1430,89 @@ class SessionRotation(unittest.TestCase):
                 self.assertEqual(entrypoint._session_rotation_config()["maxBytes"], 8_000_000)
 
 
+class ThinkingTokenThrottleTests(unittest.TestCase):
+    """The #870 write-layer coalescing of thinking_tokens ticks."""
+
+    class _FakeClock:
+        def __init__(self):
+            self.t = 0.0
+        def __call__(self):
+            return self.t
+
+    @staticmethod
+    def _tick(n):
+        return {"type": "system_event", "subtype": "thinking_tokens",
+                "raw": {"type": "system", "subtype": "thinking_tokens",
+                        "estimated_tokens": n, "estimated_tokens_delta": 1}}
+
+    def _throttle(self, clock, **kw):
+        return entrypoint._ThinkingTokenThrottle(clock=clock, **kw)
+
+    def test_first_tick_emits_immediately(self):
+        clk = self._FakeClock()
+        thr = self._throttle(clk)
+        self.assertIsNotNone(thr.offer(self._tick(10)))
+
+    def test_suppresses_within_interval_and_below_delta(self):
+        clk = self._FakeClock()
+        thr = self._throttle(clk, min_interval_s=2.0, min_delta=200)
+        self.assertIsNotNone(thr.offer(self._tick(10)))   # first → emit
+        clk.t = 0.5
+        self.assertIsNone(thr.offer(self._tick(11)))       # too soon, tiny delta
+
+    def test_emits_after_interval_elapses(self):
+        clk = self._FakeClock()
+        thr = self._throttle(clk, min_interval_s=2.0, min_delta=1000)
+        thr.offer(self._tick(10))
+        clk.t = 2.5
+        self.assertIsNotNone(thr.offer(self._tick(12)))    # interval crossed
+
+    def test_emits_when_token_delta_exceeds_threshold(self):
+        clk = self._FakeClock()
+        thr = self._throttle(clk, min_interval_s=1000.0, min_delta=200)
+        thr.offer(self._tick(10))
+        clk.t = 0.1
+        self.assertIsNotNone(thr.offer(self._tick(250)))   # +240 ≥ 200
+
+    def test_flush_returns_last_suppressed_final_total(self):
+        """AC2: the run's final total is recorded even after a burst is dropped."""
+        clk = self._FakeClock()
+        thr = self._throttle(clk, min_interval_s=2.0, min_delta=1000)
+        thr.offer(self._tick(10))                          # emitted
+        clk.t = 0.2
+        self.assertIsNone(thr.offer(self._tick(50)))
+        clk.t = 0.3
+        self.assertIsNone(thr.offer(self._tick(90)))       # latest suppressed
+        tail = thr.flush()
+        self.assertIsNotNone(tail)
+        self.assertEqual(tail["raw"]["estimated_tokens"], 90)
+
+    def test_flush_none_when_nothing_pending(self):
+        clk = self._FakeClock()
+        thr = self._throttle(clk)
+        thr.offer(self._tick(10))                          # emitted, nothing pending
+        self.assertIsNone(thr.flush())
+
+    def test_flush_is_idempotent(self):
+        clk = self._FakeClock()
+        thr = self._throttle(clk, min_interval_s=2.0, min_delta=1000)
+        thr.offer(self._tick(10))
+        clk.t = 0.1
+        thr.offer(self._tick(20))                          # suppressed
+        self.assertIsNotNone(thr.flush())
+        self.assertIsNone(thr.flush())                     # second call → None
+
+    def test_non_numeric_tokens_do_not_crash(self):
+        clk = self._FakeClock()
+        thr = self._throttle(clk, min_interval_s=1000.0, min_delta=200)
+        thr.offer({"type": "system_event", "subtype": "thinking_tokens",
+                   "raw": {"estimated_tokens": None}})
+        clk.t = 0.1
+        # No usable delta and interval not crossed → suppressed, no exception.
+        self.assertIsNone(thr.offer({"type": "system_event",
+                                     "subtype": "thinking_tokens", "raw": {}}))
+        self.assertIsNotNone(thr.flush())
+
+
 if __name__ == "__main__":
     unittest.main()

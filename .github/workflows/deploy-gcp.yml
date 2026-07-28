@@ -1,0 +1,42 @@
+# Deploy Agent Studio to the GCP pilot VM (agent-studio-pilot, acn-projectroots).
+#
+# Runs on a SELF-HOSTED runner installed ON the pilot VM itself (label
+# `gcp-pilot`, running as the stack's service user `aee`). That fits the
+# pilot's security posture: the VM accepts no inbound connections, the runner
+# polls GitHub outbound, and — crucially — NO GCP credentials are stored in
+# GitHub at all. The deploy is a local operation on the VM.
+#
+# The actual update logic lives in deploy/gcp/vm-update.sh — the same script
+# the manual path (deploy/gcp/deploy.sh) uses, so both flows stay identical.
+#
+# Trigger: manual (Actions tab -> "deploy-gcp" -> Run workflow). To switch to
+# auto-deploy on every merge, uncomment the push trigger — left off for now
+# because a deploy restarts changed services, which interrupts any agent
+# sessions running on the pilot at that moment.
+
+name: deploy-gcp
+
+on:
+  workflow_dispatch:
+  # push:
+  #   branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gcp-pilot-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, gcp-pilot]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Package repo
+        run: git ls-files -co --exclude-standard | tar -czf "$RUNNER_TEMP/agent-studio-update.tar.gz" -T -
+
+      - name: Update stack
+        run: bash deploy/gcp/vm-update.sh "$RUNNER_TEMP/agent-studio-update.tar.gz"

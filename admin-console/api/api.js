@@ -11279,15 +11279,38 @@ app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
 // 5. Redact (delete) all m.room.message events in a room
 //
 // Paginates backward through the full timeline, collecting every m.room.message
-// event_id, then issues a Matrix redaction (PUT .../redact/...) for each one.
-// The admin token is used throughout. Events the homeserver rejects (e.g.
-// already redacted) are silently skipped so the call is idempotent.
+// event, then issues a Matrix redaction (PUT .../redact/...) for each one.
+//
+// Token routing per sender: the DM room is CREATED BY THE AGENT (see
+// ensureAgentDmRoom), and on current homeserver room versions the creator
+// holds implicit top power while the PL content is empty — so the admin token
+// can only redact the admin's own messages (m.room.power_levels `redact`
+// defaults to 50, users_default to 0). Redacting the agent's messages with the
+// admin token silently 403'd, and "Clear History" came back after the next
+// backfill. Events sent by the agent are therefore redacted with the agent's
+// own token (from its config.json, same source ensureAgentDmRoom uses).
+// Already-redacted events (empty content) are skipped so the call stays
+// idempotent.
+function findAgentTokenByDmRoom(roomId) {
+  try {
+    for (const agentId of fs.readdirSync(AGENTS_DIR)) {
+      const dm = readJsonFile(path.join(AGENTS_DIR, agentId, 'dm-room.json'), null);
+      if (dm?.roomId !== roomId) continue;
+      const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
+      return cfg?.token ? { token: cfg.token, userId: cfg.userId || `@${agentId}:local` } : null;
+    }
+  } catch { /* fall through */ }
+  return null;
+}
+
 app.delete('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
   if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
   const { roomId } = req.params;
+  const agent = findAgentTokenByDmRoom(roomId);
 
-  // Collect all m.room.message event_ids by paginating dir=b until exhausted.
-  const eventIds = [];
+  // Collect all unredacted m.room.message events (id + sender) by paginating
+  // dir=b until exhausted.
+  const events = [];
   let from = undefined;
   try {
     while (true) {
@@ -11301,7 +11324,9 @@ app.delete('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) =>
       }
       const chunk = Array.isArray(resp.data?.chunk) ? resp.data.chunk : [];
       for (const ev of chunk) {
-        if (ev.type === 'm.room.message' && ev.event_id) eventIds.push(ev.event_id);
+        if (ev.type !== 'm.room.message' || !ev.event_id) continue;
+        if (!ev.content || Object.keys(ev.content).length === 0) continue; // already redacted
+        events.push({ eventId: ev.event_id, sender: ev.sender });
       }
       const next = resp.data?.end;
       if (!next || chunk.length === 0) break;
@@ -11311,23 +11336,31 @@ app.delete('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) =>
     return res.status(502).json({ error: `Chat service unreachable: ${err.message}` });
   }
 
-  // Redact each event. Failures per event are non-fatal (may already be redacted).
+  // Redact each event with the token that has the right to do so: the sender's
+  // own token where we hold it (the agent's), the admin token otherwise.
   let redacted = 0;
-  let skipped  = 0;
-  for (const eventId of eventIds) {
+  let failed = 0;
+  for (const { eventId, sender } of events) {
+    const token = agent && sender === agent.userId ? agent.token : matrix.ADMIN_TOKEN;
     const txnId = crypto.randomUUID();
     try {
-      const r = await matrix.matrixFetch(matrix.ADMIN_TOKEN,
+      const r = await matrix.matrixFetch(token,
         `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/redact/${encodeURIComponent(eventId)}/${encodeURIComponent(txnId)}`,
         { method: 'PUT', body: { reason: 'Chat history cleared by admin' } });
       if (r.status < 400) redacted++;
-      else skipped++;
+      else failed++;
     } catch {
-      skipped++;
+      failed++;
     }
   }
 
-  res.json({ redacted, skipped, total: eventIds.length });
+  // Surface partial failure instead of a silent 200 — the UI clears its view
+  // optimistically, so a quiet failure looks like success until the next
+  // backfill resurrects the history.
+  if (failed > 0) {
+    return res.status(502).json({ error: `Failed to redact ${failed} of ${events.length} message(s)`, redacted, failed, total: events.length });
+  }
+  res.json({ redacted, skipped: 0, failed: 0, total: events.length });
 });
 
 // 6. SSE stream — long-poll /sync filtered to this room

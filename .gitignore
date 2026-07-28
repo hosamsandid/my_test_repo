@@ -1,5 +1,7 @@
 .env
 .env.e2e
+.env.k8s
+.env.gke
 .DS_Store
 /.claude/audit.log
 /.claude/settings.local.json

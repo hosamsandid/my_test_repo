@@ -87,6 +87,25 @@ winget install RedHat.Podman-Desktop
 npm install -g @anthropic-ai/claude-code
 ```
 
+### 8. jq
+
+```powershell
+winget install --id jqlang.jq
+```
+
+> **`jq` is not optional.** `orchestrator/setup.sh` aborts with `ERROR: jq is required` if
+> it is missing. Restart your shell afterwards so it is on `PATH`.
+
+### 9. A global git identity
+
+`bp-explorer` bind-mounts `~/.gitconfig` read-only and **fails to start if the file does
+not exist** — which is the default on a fresh machine. From Git Bash:
+
+```bash
+git config --global user.name "Your Name"
+git config --global user.email "you@example.com"
+```
+
 ### Verify all prerequisites
 
 Open **Git Bash** and run each command. All tools should be available:
@@ -96,9 +115,11 @@ wsl --status               # Default Version: 2
 git --version              # git version 2.x
 node -v                    # v22.x or higher
 gh --version               # gh version 2.x
+jq --version               # jq-1.x
 make --version             # GNU Make 3.x or 4.x
 podman --version           # podman version 5.x
 claude --version           # @anthropic-ai/claude-code x.x.x
+cat ~/.gitconfig           # must exist and be non-empty
 ```
 
 > **PATH troubleshooting:** If any tool is not recognized after installation, close and reopen your terminal. If still not found, verify the install directory is in your system PATH via **System Settings** → **Environment Variables**. Use `where.exe <tool>` (e.g., `where.exe make`) to locate the install path.
@@ -153,6 +174,7 @@ Open `.env` in a text editor and fill in:
 | `ANTHROPIC_AUTH_TOKEN` | Your LiteLLM auth token — ask a project admin |
 | `ANTHROPIC_BASE_URL` | LiteLLM proxy URL — ask a project admin |
 | `ADMIN_USER` | Your desired Matrix admin username (e.g. `admin`) |
+| `ADMIN_PASS` | Password for that Matrix admin user. Not in `.env.example` — **add the line yourself.** On Windows this is effectively required: without it `setup.sh` falls back to an interactive prompt that is unreliable in Git Bash |
 | `PODMAN_HOST_SOCKET` | Path to your Podman socket inside WSL2 |
 
 > **Discover your Podman socket path (Windows Podman Desktop default):**
@@ -179,7 +201,9 @@ podman compose up -d conduwuit
 ./orchestrator/setup.sh
 ```
 
-The script prints a `MATRIX_ACCESS_TOKEN` and `CONDUWUIT_ADMIN_ROOM`. Copy both values into your `.env`.
+The script prints a `MATRIX_ACCESS_TOKEN` and a `CONDUWUIT_ADMIN_ROOM` — and **writes both
+into your `.env` for you**. You do not need to copy them by hand; it confirms with
+`.env updated: …`.
 
 ---
 
@@ -199,27 +223,54 @@ The project uses **`podman compose`** (Compose v2 subcommand built into Podman).
 
 ### If you don't have `make`
 
-Use `podman compose` directly from Git Bash or PowerShell:
+Use `podman compose` directly from Git Bash or PowerShell — but **you must build the
+per-agent image yourself first**. It is not a compose service, so `podman compose build`
+never builds it, and without it every agent you create fails to start with an
+image-not-found error:
 
 ```bash
+podman build -t as-agent:latest -f agent-image/Dockerfile agent-image/
 podman compose -f docker-compose.yml build
 podman compose -f docker-compose.yml up -d
 ```
 
+Installing GNU Make is strongly preferred — `make up` does all three steps in the right
+order.
+
 ### Troubleshooting the build
 
 - **VPN blocks image pulls:** Disconnect from corporate VPN before running `make up`. The VPN may block access to Docker Hub and other registries. Reconnect after images are pulled.
-- **CRLF line endings in .sh files:** If a shell script fails with `/bin/bash^M: bad interpreter`, the file has Windows-style line endings. The `.gitattributes` file should prevent this on fresh clones. If it happens, fix with: `git checkout -- <path/to/script.sh>`
+- **CRLF line endings in .sh files:** If a shell script fails with `/bin/bash^M: bad interpreter`, the file has Windows-style line endings. The repository's `.gitattributes` pins shell and Python scripts to LF, so a fresh clone is protected. If you have an **older clone** made before that file existed, a plain `git checkout --` will restore the same CRLF content — renormalize instead:
+  ```bash
+  git rm --cached -r . && git reset --hard
+  ```
 
 ---
 
 ## Step 6: Seed the Pool (first time only)
 
-After the first `make up`, seed the shared skill pool so the Team Setup wizard has agent role templates:
+Seed the shared pool so the Team-Setup wizard has role templates to offer:
 
 ```bash
 make seed-pool
 ```
+
+This copies five things into the pool volume: skills, baseline memory, agent role
+templates, process templates, and the reference MCP servers.
+
+> **`make up` does not seed for you.** Skip this and the Team-Setup wizard will present an
+> empty process/role catalog — the most common "why is it empty?" first-run experience.
+
+> **A `WARNING` about the engineering skill is expected** if you have not installed the
+> ACE plugin. Everything else seeds normally — see
+> [ACE plugin installation](ace-plugin-installation.md) if you actually need it.
+
+> **If you changed `COMPOSE_PROJECT_NAME` in `.env`, seeding silently targets the wrong
+> volume.** `make` does not read `.env`, so it falls back to the `vgh-claw_claude-workspace`
+> volume while compose creates `<yourname>_claude-workspace`. Pass it explicitly:
+> ```bash
+> COMPOSE_PROJECT_NAME=<yourname> make seed-pool
+> ```
 
 ---
 
@@ -246,10 +297,10 @@ Log in at <http://localhost:4000> with the credentials from your `.env` (`ADMIN_
 | `make restart` | down + up |
 | `make build` | Rebuild orchestrator + admin-console images only |
 | `make agent-image` | Rebuild the per-agent container image (`as-agent:latest`) |
-| `make update` | `git pull` + down + up in one step |
-| `make ps` | Show container status |
-| `make logs` | Follow logs of all stack containers |
-| `make seed-pool` | Seed skills, templates, and memory into the shared pool volume |
+| `make update` | `git pull --ff-only` + down + up in one step. Fails (rather than merging) if you have local commits or a dirty tree |
+| `make ps` | Show container status for `conduwuit`, `orchestrator`, `admin-console` |
+| `make logs` | Follow logs of those three. **`bp-explorer` is not included** — use `podman logs -f <project>-bp-explorer` for it |
+| `make seed-pool` | Seed skills, memory, agent role templates, process templates and reference MCP servers into the shared pool volume |
 
 ---
 
@@ -312,3 +363,8 @@ You do not need to repeat the full setup. Next time:
 | Admin Console not loading at :4000 | Check `podman ps` — ensure `admin-console` container is running. Rebuild with `make build` if needed. |
 | `podman-compose` errors (dockerfile key ignored, pull_policy issues) | Use `podman compose` (Compose v2 subcommand), not `podman-compose` (Python package). Do not `pip install podman-compose`. |
 | Orchestrator cannot spawn agent containers | Verify `PODMAN_HOST_SOCKET` in `.env` points to the correct socket path. Run `podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}'` to find it. |
+| `setup.sh` hangs at the password prompt | Set `ADMIN_PASS=<yourpassword>` in `.env` before running it — the interactive prompt is unreliable in Git Bash. Run it as `bash orchestrator/setup.sh`. |
+| `ERROR: jq is required` | Install it: `winget install --id jqlang.jq`, then restart your shell. |
+| `bp-explorer` will not start | `~/.gitconfig` is missing. Create it with `git config --global user.name …` and restart. |
+| Team-Setup wizard shows no processes or roles | You skipped `make seed-pool`, or it seeded a different volume — see Step 6. |
+| Agent creation fails with an image-not-found error | The `as-agent:latest` image was never built. Run `make agent-image`, or `podman build -t as-agent:latest -f agent-image/Dockerfile agent-image/`. |

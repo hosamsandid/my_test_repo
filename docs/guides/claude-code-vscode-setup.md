@@ -13,8 +13,6 @@ Quick guide for installing and configuring the Claude Code extension in VS Code 
 
 Open the Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`), search for **Preferences: Open User Settings (JSON)**, and add the following:
 
-![Command Palette — Open User Settings (JSON)](assets/vscode/command-palette-settings.png)
-
 ```json
 {
   "claudeCode.preferredLocation": "panel",
@@ -58,10 +56,6 @@ VS Code stores `claudeCode.environmentVariables` in plain text inside `settings.
 2. Click the Claude icon in the sidebar or open the panel via `Cmd+Shift+P` → **Claude Code: Open**
 3. Check that the model selector shows available models (Sonnet, Opus, etc.)
 4. Type a test message (e.g. `say hello`) and confirm Claude responds without a login prompt
-
-![Model selector showing available models](assets/vscode/model-selector.png)
-
-![VS Code layout with Claude in the panel and terminal below](assets/vscode/panel-layout.png)
 
 ## 4. Troubleshooting
 

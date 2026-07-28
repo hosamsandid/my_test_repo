@@ -1,0 +1,31 @@
+# Keep LF line endings on files that are executed inside Linux containers or by
+# bash on the host. Without this, a Windows checkout with core.autocrlf=true
+# rewrites them to CRLF and they fail with:
+#   /bin/bash^M: bad interpreter: No such file or directory
+#
+# Deliberately scoped to executable/config files rather than a blanket
+# `* text=auto`, so adding this file does not renormalize the whole tree for
+# people with an existing checkout.
+
+*.sh            text eol=lf
+*.py            text eol=lf
+Dockerfile      text eol=lf
+*.Dockerfile    text eol=lf
+Makefile        text eol=lf
+*.mk            text eol=lf
+.env.example    text eol=lf
+docker-compose*.yml text eol=lf
+
+# The agent runtime and its entrypoint scripts run in the per-agent container.
+agent-image/scripts/*   text eol=lf
+orchestrator/setup.sh   text eol=lf
+orchestrator/entrypoint.sh text eol=lf
+
+# Binary assets — never touch.
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.gif           binary
+*.webp          binary
+*.pptx          binary
+*.ico           binary

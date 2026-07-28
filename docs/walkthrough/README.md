@@ -1,4 +1,20 @@
-# Agent Studio walkthrough — narrative source
+# Agent Studio walkthrough
+
+**Reading the tour?** Start here and go in order — it follows one realistic story
+end to end:
+
+1. [Team Setup — the wizard](01-team-setup.md)
+2. [Working with agents — the IBAN story](02-working-with-agents.md)
+3. [Triggers — making agents autonomous](03-triggers.md)
+4. [Flows — the visual editor](04-flows.md)
+5. [Agent Templates](05-agent-templates.md)
+6. [Knowledge](06-knowledge.md)
+
+← Back to the [documentation index](../README.md).
+
+---
+
+## For maintainers — this is also the narrative source
 
 **This directory is the authoritative, in-repo source of the product walkthrough
 storyline.** It was extracted verbatim from the hand-authored demo deck

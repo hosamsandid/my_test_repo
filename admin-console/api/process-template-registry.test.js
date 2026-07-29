@@ -111,29 +111,13 @@ test('curated repo templates render with no error/warning lints', () => {
   }
 });
 
-// #928 AC7 (forward half) — after #927 retires the `human:` prefix, the SAME
-// bundle must still classify its gate from the flag. Simulate the rename here so
-// the guarantee is proven before that ticket lands: rename every `human:*` token
-// across the registry, the role triggers and the channels, and assert the gate
-// survives and the bundle stays lint-clean.
-test('#928 AC7: renaming the human:* tokens away keeps the gate and the lints clean', () => {
-  const rename = (s) => (typeof s === 'string' && s.startsWith('human:')
-    ? `approved-for-${s.slice('human:'.length)}` : s);
+// #928 AC7, now realised by #927: the `human:` prefix is gone from the shipped
+// bundles, so every gate must classify from its `humanGate` flag alone. What was
+// a rename *simulation* while #927 was pending is now a direct assertion on the
+// shipped files.
+test('#928 AC7: shipped gates classify from the flag, with no human:* token left', () => {
   for (const t of listProcessTemplates(CURATED_DIR)) {
-    const b = JSON.parse(JSON.stringify(loadProcessTemplate(CURATED_DIR, t.id)));
-    const renamed = new Set();
-    for (const l of (b.labels || [])) {
-      if (l.name !== rename(l.name)) renamed.add(l.name);
-      l.name = rename(l.name);
-    }
-    for (const g of (b.gates || [])) g.label = rename(g.label);
-    for (const r of b.roles) {
-      if (Array.isArray(r.emits)) r.emits = r.emits.map(rename);
-      for (const ch of (r.channels || [])) if (ch.label) ch.label = rename(ch.label);
-      for (const tr of (r.triggers || [])) if (tr.labelFilter) tr.labelFilter = rename(tr.labelFilter);
-    }
-    assert.ok(validateProcessTemplate(b).ok, `${t.id} must still validate after the rename`);
-
+    const b = loadProcessTemplate(CURATED_DIR, t.id);
     const agents = b.roles.map(r => ({
       id: r.id, role: r.role || 'team-member', displayName: r.displayName,
       sessionPolicy: r.sessionPolicy, emits: r.emits, github: r.github,
@@ -141,20 +125,143 @@ test('#928 AC7: renaming the human:* tokens away keeps the gate and the lints cl
     }));
     const graph = buildProcessGraph(agents, { labels: b.labels });
 
-    // Every renamed gate label still classifies as a gate — on the flag alone.
-    for (const old of renamed) {
-      const now = rename(old);
-      const entry = graph.labels.find(l => l.name === now);
-      assert.ok(entry, `${t.id}: renamed label ${now} must survive into the registry`);
-      assert.equal(entry.humanGate, true, `${t.id}: ${now} must still be a gate`);
-      assert.ok(!graph.labels.some(l => l.name === old), `${t.id}: the old token ${old} must be gone`);
-      // Its listener edge still originates outside the agent set (a human acts).
-      for (const e of graph.edges.filter(x => x.label === now)) {
-        assert.equal(e.kind, 'gate', `${t.id}: ${now} edge must stay a gate`);
+    for (const entry of graph.labels) {
+      assert.ok(!entry.name.startsWith('human:'),
+        `${t.id}: ${entry.name} still carries the retired human: prefix`);
+      if (!entry.humanGate) continue;
+      // A flagged gate's listener edge originates outside the agent set (a human
+      // acts), proving classification came from the flag and not the name.
+      for (const e of graph.edges.filter(x => x.label === entry.name)) {
+        assert.equal(e.kind, 'gate', `${t.id}: ${entry.name} edge must be a gate`);
         assert.equal(e.from, null);
       }
     }
-    const bad = graph.lints.filter(l => l.severity === 'error' || l.severity === 'warning');
-    assert.deepEqual(bad, [], `${t.id} must stay lint-clean after the rename, got: ${JSON.stringify(bad)}`);
   }
+});
+
+// ── #927 label vocabulary ────────────────────────────────────────────────────
+// The rename table from #901. Every token here was retired; the guard is that
+// none of them can creep back into a shipped surface.
+const RETIRED_TOKENS = [
+  'ready', 'ready-2', 'req:refine', 'req:approved', 'design:author-go',
+  'design:escalate', 'design:approved', 'build:author-go', 'build:escalate',
+  'human:dispatch', 'dispatch',
+];
+// Explicitly kept (decision D5): GitHub-standard classification labels and
+// priority hints are not hand-off routing tokens and are NOT renamed.
+const NON_ROUTING_LABELS = new Set([
+  'bug', 'feature-request', 'question', 'duplicate', 'needs-triage',
+  'priority:high', 'priority:critical',
+]);
+const CATALOG_DIR = path.join(__dirname, '..', '..', 'orchestrator', 'skill-pool', 'agent-templates');
+
+// Every label-bearing surface of a bundle: the registry, the gates, and each
+// role's emits / channels / labelFilters / outcome setLabel actions.
+function routingLabels(bundle) {
+  const s = new Set();
+  for (const l of bundle.labels || []) s.add(l.name);
+  for (const g of bundle.gates || []) s.add(g.label);
+  for (const r of bundle.roles || []) {
+    for (const e of r.emits || []) s.add(e);
+    for (const c of r.channels || []) if (c.label) s.add(c.label);
+    for (const tr of r.triggers || []) if (tr.labelFilter) s.add(tr.labelFilter);
+    for (const o of (r.outcomes && r.outcomes.options) || []) {
+      for (const a of o.actions || []) if (a.type === 'setLabel' && a.label) s.add(a.label);
+    }
+  }
+  return s;
+}
+
+// Backtick-quoted tokens in prose — the surface AC3 audits. A label token never
+// contains whitespace, so ``[^`\s]+`` is a superset we then filter by vocabulary.
+function backtickedTokens(...texts) {
+  const out = [];
+  for (const t of texts) {
+    if (typeof t !== 'string') continue;
+    for (const m of t.matchAll(/`([^`\s]+)`/g)) out.push(m[1]);
+  }
+  return out;
+}
+
+function bundleProse(bundle) {
+  const out = [bundle.description];
+  for (const r of bundle.roles || []) {
+    out.push(r.systemPrompt);
+    for (const tr of r.triggers || []) out.push(tr.prompt, tr.description);
+  }
+  return out;
+}
+
+test('#927 AC2: no retired label token survives in the shipped process templates', () => {
+  for (const t of listProcessTemplates(CURATED_DIR)) {
+    const b = loadProcessTemplate(CURATED_DIR, t.id);
+    for (const label of routingLabels(b)) {
+      assert.ok(!RETIRED_TOKENS.includes(label),
+        `${t.id}: retired token "${label}" is still routed`);
+    }
+    // Prose is checked on the delimited form only, so the English words "ready"
+    // and "dispatch" in ordinary sentences stay legal.
+    for (const tok of backtickedTokens(...bundleProse(b))) {
+      assert.ok(!RETIRED_TOKENS.includes(tok),
+        `${t.id}: prose still names the retired token \`${tok}\``);
+    }
+  }
+});
+
+test('#927 AC2: no retired label token survives in the catalog role templates', () => {
+  for (const f of fs.readdirSync(CATALOG_DIR).filter(n => n.endsWith('.json'))) {
+    const r = JSON.parse(fs.readFileSync(path.join(CATALOG_DIR, f), 'utf8'));
+    // `envSuffix` is an environment-name segment, not a label — deliberately not
+    // part of this sweep (dispatcher.json still ships envSuffix "dispatch").
+    const labels = routingLabels({ roles: [r] });
+    for (const label of labels) {
+      assert.ok(!RETIRED_TOKENS.includes(label), `${f}: retired token "${label}" is still routed`);
+    }
+    const prose = [r.description, r.promptTemplate, r.additionalContextSnippet];
+    for (const tr of r.triggers || []) prose.push(tr.promptTemplate, tr.description);
+    for (const tok of backtickedTokens(...prose)) {
+      assert.ok(!RETIRED_TOKENS.includes(tok), `${f}: prose still names the retired token \`${tok}\``);
+    }
+  }
+});
+
+test('#927 AC7: the conformant tokens are kept unchanged', () => {
+  const core = routingLabels(loadProcessTemplate(CURATED_DIR, 'core-sdlc'));
+  for (const kept of ['ready-for-review', 'ready-to-merge', 'revisions-required', 'human-decision-required']) {
+    assert.ok(core.has(kept), `core-sdlc must keep ${kept}`);
+  }
+});
+
+test('#927 AC3: every label token in prose is routed by that same template', () => {
+  const bundles = listProcessTemplates(CURATED_DIR)
+    .map(t => ({ id: t.id, b: loadProcessTemplate(CURATED_DIR, t.id) }));
+  // Vocabulary = every token any shipped template routes. A backticked token in
+  // this set but absent from the *own* template's routing is prompt↔routing
+  // drift: the agent would be told to apply a label its flow never listens for.
+  const vocabulary = new Set(bundles.flatMap(({ b }) => [...routingLabels(b)]));
+  for (const { id, b } of bundles) {
+    const own = routingLabels(b);
+    for (const tok of backtickedTokens(...bundleProse(b))) {
+      if (NON_ROUTING_LABELS.has(tok) || !vocabulary.has(tok) || own.has(tok)) continue;
+      assert.fail(`${id}: prose names \`${tok}\`, which this template does not route`);
+    }
+  }
+});
+
+test('#927 AC4: no label is a prefix of another within one template (decision D1)', () => {
+  for (const t of listProcessTemplates(CURATED_DIR)) {
+    const labels = [...routingLabels(loadProcessTemplate(CURATED_DIR, t.id))];
+    for (const a of labels) {
+      for (const c of labels) {
+        assert.ok(a === c || !c.startsWith(a),
+          `${t.id}: "${a}" is a prefix of "${c}" — breaks the team-label-suffix scheme (#902)`);
+      }
+    }
+  }
+  // The lane split is the case that motivated D1: the two developer lanes carry
+  // distinct non-nesting tokens and the bare form is deliberately absent.
+  const dispatched = routingLabels(loadProcessTemplate(CURATED_DIR, 'dispatched-sdlc'));
+  assert.ok(dispatched.has('ready-for-implementation-a'));
+  assert.ok(dispatched.has('ready-for-implementation-b'));
+  assert.ok(!dispatched.has('ready-for-implementation'));
 });

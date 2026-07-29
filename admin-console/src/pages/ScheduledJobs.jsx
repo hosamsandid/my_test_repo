@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from 'react';
-import { Plus, Trash2, Clock, CalendarClock, Globe, Github, AlertCircle, Edit } from 'lucide-react';
+import { Plus, Trash2, Clock, CalendarClock, Globe, Github, AlertCircle, Edit, Repeat } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
@@ -8,6 +8,7 @@ import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
+import { summarizeLoopTrigger } from './agent-chat/trigger-summary.js';
 
 /* ── Type badge ─────────────────────────────────────────────────────── */
 function TypeBadge({ type }) {
@@ -15,10 +16,11 @@ function TypeBadge({ type }) {
   const isOnce   = type === 'once';
   const isHttp   = type === 'http';
   const isGithub = type === 'github-event';
-  const bg    = isCron ? 'var(--eb-accent-muted)'   : isOnce ? 'var(--eb-bg-elevated)'    : isHttp ? 'var(--eb-status-success-bg)' : isGithub ? 'var(--eb-status-info-bg, var(--eb-bg-elevated))' : 'var(--eb-status-warning-bg)';
-  const color = isCron ? 'var(--eb-accent-primary)' : isOnce ? 'var(--eb-text-secondary)' : isHttp ? 'var(--eb-status-success)'    : isGithub ? 'var(--eb-text-primary)' : 'var(--eb-status-warning)';
-  const label = isCron ? 'cron'                     : isOnce ? 'once'                     : isHttp ? 'http'                        : isGithub ? 'github-event' : type || 'unknown';
-  const Icon  = isCron ? Clock                      : isOnce ? CalendarClock              : isHttp ? Globe                         : isGithub ? Github : AlertCircle;
+  const isLoop   = type === 'loop';
+  const bg    = isLoop ? 'var(--eb-status-warning-bg)' : isCron ? 'var(--eb-accent-muted)'   : isOnce ? 'var(--eb-bg-elevated)'    : isHttp ? 'var(--eb-status-success-bg)' : isGithub ? 'var(--eb-status-info-bg, var(--eb-bg-elevated))' : 'var(--eb-status-warning-bg)';
+  const color = isLoop ? 'var(--eb-status-warning)'    : isCron ? 'var(--eb-accent-primary)' : isOnce ? 'var(--eb-text-secondary)' : isHttp ? 'var(--eb-status-success)'    : isGithub ? 'var(--eb-text-primary)' : 'var(--eb-status-warning)';
+  const label = isLoop ? 'loop'                        : isCron ? 'cron'                     : isOnce ? 'once'                     : isHttp ? 'http'                        : isGithub ? 'github-event' : type || 'unknown';
+  const Icon  = isLoop ? Repeat                        : isCron ? Clock                      : isOnce ? CalendarClock              : isHttp ? Globe                         : isGithub ? Github : AlertCircle;
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 3,
@@ -131,8 +133,19 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
     // github-event fields
     repo: initial?.repo || '',
     events: Array.isArray(initial?.events) ? initial.events : [],
+    // loop fields (kept as strings; parsed on save)
+    maxIterations: initial?.maxIterations != null ? String(initial.maxIterations) : '',
+    maxTokens:     initial?.maxTokens     != null ? String(initial.maxTokens)     : '',
+    minGapSeconds: initial?.minGapSeconds != null ? String(initial.minGapSeconds) : '',
+    untilCommand:  (initial?.until && typeof initial.until === 'object' && initial.until.command) || '',
+    verifyMode:    (initial?.verify && typeof initial.verify === 'object')
+      ? (initial.verify.agentId ? 'agent' : initial.verify.command ? 'command' : 'none')
+      : 'none',
+    verifyCommand: (initial?.verify && typeof initial.verify === 'object' && initial.verify.command) || '',
+    verifyAgentId: (initial?.verify && typeof initial.verify === 'object' && initial.verify.agentId) || '',
   });
   const update = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  const [formError, setFormError] = useState(null);
   const isEdit = !!initial;
   const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
     setName: v => update('description', v),
@@ -169,11 +182,38 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
     if (form.type === 'cron') body.cron = form.cron;
     else if (form.type === 'once') body.at = form.at;
     else if (form.type === 'http') body.secret = form.secret;
+    else if (form.type === 'loop') {
+      body.maxIterations = Number(form.maxIterations);
+      const untilCmd = form.untilCommand.trim();
+      if (untilCmd) body.until = { command: untilCmd };
+      if (form.verifyMode === 'command' && form.verifyCommand.trim()) {
+        body.verify = { command: form.verifyCommand.trim() };
+      } else if (form.verifyMode === 'agent' && form.verifyAgentId.trim()) {
+        body.verify = { agentId: form.verifyAgentId.trim() };
+      }
+      const mt = Number(form.maxTokens);
+      if (form.maxTokens.trim() && Number.isFinite(mt) && mt > 0) body.maxTokens = mt;
+      const mg = Number(form.minGapSeconds);
+      if (form.minGapSeconds.trim() && Number.isFinite(mg) && mg >= 0) body.minGapSeconds = mg;
+    }
     else if (form.type === 'github-event') {
       body.repo = form.repo;
       body.events = form.events;
     }
     return { agentId: form.agentId, body };
+  }
+
+  // Client-side gate: block save without a valid, positive maxIterations for a
+  // loop (mirrors the shared TriggerForm / concept §4.4).
+  function handleSaveClick() {
+    setFormError(null);
+    if (form.type === 'loop') {
+      const n = Number(form.maxIterations);
+      if (!Number.isInteger(n) || n <= 0) { setFormError('Max iterations is required and must be a positive whole number.'); return; }
+      if (form.verifyMode === 'command' && !form.verifyCommand.trim()) { setFormError('Enter the verifier command, or choose a different verifier mode.'); return; }
+      if (form.verifyMode === 'agent' && !form.verifyAgentId.trim()) { setFormError('Select the verifier agent, or choose a different verifier mode.'); return; }
+    }
+    onSave(buildSavePayload());
   }
 
   return (
@@ -219,6 +259,7 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
         >
           <option value="cron">Cron (recurring)</option>
           <option value="once">Once (one-shot)</option>
+          <option value="loop">Loop (re-run until done)</option>
           <option value="http">HTTP webhook</option>
           <option value="github-event">GitHub event</option>
         </select>
@@ -232,6 +273,71 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
       )}
       {form.type === 'once' && (
         <FormInput label="Run at (ISO timestamp)" value={form.at} onChange={v => update('at', v)} placeholder="2026-05-01T09:00:00Z" />
+      )}
+      {form.type === 'loop' && (
+        <>
+          <div style={{
+            padding: 'var(--eb-space-2) var(--eb-space-3)',
+            background: 'var(--eb-status-warning-bg)', border: '1px solid var(--eb-status-warning)',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5,
+          }}>
+            <Repeat size={11} style={{ verticalAlign: 'middle', marginRight: 4, color: 'var(--eb-status-warning)' }} />
+            Re-runs the agent with the prompt below, chaining each iteration until
+            <code> until</code> exits <code>0</code> (done), the iteration/token cap is
+            reached (exhausted), or the safety backstop trips (paused).
+          </div>
+          <FormInput
+            label="Max iterations (required)"
+            type="number"
+            value={form.maxIterations}
+            onChange={v => update('maxIterations', v)}
+            placeholder="e.g. 25"
+          />
+          <FormInput
+            label="Stop condition — until command (optional)"
+            value={form.untilCommand}
+            onChange={v => update('untilCommand', v)}
+            placeholder="e.g. npm test && test ! -s fix_plan.md"
+          />
+          <div>
+            <div style={fieldLabelStyle}>Verifier (optional, recommended)</div>
+            <select value={form.verifyMode} onChange={e => update('verifyMode', e.target.value)} style={selectStyle}>
+              <option value="none">No verifier (self-graded)</option>
+              <option value="command">Command — must exit 0 for the iteration to count</option>
+              <option value="agent">Agent — a separate role grades the work</option>
+            </select>
+            {form.verifyMode === 'command' && (
+              <div style={{ marginTop: 'var(--eb-space-2)' }}>
+                <FormInput label="" value={form.verifyCommand} onChange={v => update('verifyCommand', v)} placeholder="e.g. npm run lint && npm test" />
+              </div>
+            )}
+            {form.verifyMode === 'agent' && (
+              <div style={{ marginTop: 'var(--eb-space-2)' }}>
+                {agentOptions && agentOptions.length > 0 ? (
+                  <select value={form.verifyAgentId} onChange={e => update('verifyAgentId', e.target.value)} style={selectStyle}>
+                    <option value="">— Select a verifier agent —</option>
+                    {agentOptions.filter(a => a.id !== form.agentId).map(a => (
+                      <option key={a.id} value={a.id}>{a.displayName || a.id}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <FormInput label="" value={form.verifyAgentId} onChange={v => update('verifyAgentId', v)} placeholder="verifier agent id" />
+                )}
+                <div style={fieldHintStyle}>
+                  Pick a role other than the worker — an agent must not grade its own work.
+                </div>
+              </div>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-3)' }}>
+            <div style={{ flex: 1 }}>
+              <FormInput label="Token budget (optional)" type="number" value={form.maxTokens} onChange={v => update('maxTokens', v)} placeholder="e.g. 2000000" />
+            </div>
+            <div style={{ flex: 1 }}>
+              <FormInput label="Min gap seconds (optional)" type="number" value={form.minGapSeconds} onChange={v => update('minGapSeconds', v)} placeholder="0 = chain immediately" />
+            </div>
+          </div>
+        </>
       )}
       {form.type === 'http' && (
         <div style={{
@@ -316,8 +422,15 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
         <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Enabled</span>
       </div>
 
+      {formError && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>
+          <AlertCircle size={13} style={{ flexShrink: 0 }} />
+          {formError}
+        </div>
+      )}
+
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
-        <button onClick={() => onSave(buildSavePayload())} style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit' }}>
+        <button onClick={handleSaveClick} style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit' }}>
           {isEdit ? 'Save Changes' : 'Add Trigger'}
         </button>
         <button onClick={onCancel} style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-secondary)', cursor: 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit' }}>
@@ -379,6 +492,9 @@ export default function ScheduledJobs() {
       }
       if (row.type === 'http') {
         return <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>/hooks/{row._agentId}/{row.id}</span>;
+      }
+      if (row.type === 'loop') {
+        return <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{summarizeLoopTrigger(row)}</span>;
       }
       return <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{row.cron || row.at || '—'}</span>;
     }},

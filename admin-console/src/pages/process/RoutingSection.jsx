@@ -8,6 +8,7 @@ import { TriggerForm } from '../agent-chat/TriggersPanel';
 import { AddInputDialog, EditHandoffDialog } from './EdgeDialogs';
 import { summarizeGithubEventTrigger } from '../agent-chat/trigger-summary.js';
 import { partitionTriggers, scheduleText } from './input-rows.js';
+import { consumersFor } from './outcome-consumers.js';
 
 // Routing tab (#828, agent-outcomes concept §5.2; absorbs the retired
 // Connections tab in #865) — ONE place for an agent's whole routing decision.
@@ -693,23 +694,10 @@ function finalize(oc) {
   return { mode: oc.mode === 'exactlyOne' ? 'exactlyOne' : 'anyOf', options };
 }
 
-// Derived, read-only consumers of an outcome: peers that listen on any label the
-// outcome sets, or (openPr/openIssue) consume a channel from this node.
-function consumersFor(option, node, peers) {
-  const names = new Set();
-  const labels = (option.actions || []).filter(a => a.type === 'setLabel' && a.label).map(a => a.label);
-  const opensPr = (option.actions || []).some(a => a.type === 'openPr');
-  const opensIssue = (option.actions || []).some(a => a.type === 'openIssue');
-  for (const p of peers) {
-    if (p.id === node.id) continue;
-    const listensLabel = (p.triggers || []).some(t => typeof t.labelFilter === 'string' && labels.includes(t.labelFilter));
-    const chans = Array.isArray(p.channels) ? p.channels : [];
-    const consumesPr = opensPr && chans.some(c => c.artifact === 'pr' && c.from === node.id);
-    const consumesIssue = opensIssue && chans.some(c => c.artifact === 'issue' && c.from === node.id);
-    if (listensLabel || consumesPr || consumesIssue) names.add(p.displayName || p.id);
-  }
-  return [...names];
-}
+// `consumersFor` (derived, read-only consumers of an outcome) moved to the pure
+// ./outcome-consumers.js module in #963 so the read-only Outcomes tab in the
+// Agent-Chat right rail derives the same consumer set from the same code.
+// Imported above.
 
 const input = {
   background: 'var(--eb-bg-app)', color: 'var(--eb-text-primary)', border: '1px solid var(--eb-border-default)',

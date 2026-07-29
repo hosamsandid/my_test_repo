@@ -16,6 +16,13 @@ import {
   canManageCredentialClient, canReassignCredentialClient, adminTeamIdsOf,
   normalizeCredential,
 } from './credential-scope-view';
+import {
+  resolveProbeState,
+  probeBlockedMessage,
+  probeNote,
+  probeTitle,
+  probeRequest,
+} from './llm-probe-state';
 
 /* ───────────────────────── shared styles ───────────────────────── */
 
@@ -281,44 +288,33 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
   const canSubmit = name.trim() && ownershipReady && (isOauth
     ? ((!requireCompliance || complianceOk) && oauthTokenReady)
     : !!baseUrl.trim());
-  // Probing an oauth provider needs a token the server can reach: the stored
-  // one, or a pasted value. A wizard-obtained token is only claimable on save,
-  // so it can't be probed pre-save.
-  const canProbe = isOauth
-    ? ((isEdit && wasOauth && endpoint.hasToken && !authToken.trim()) || !!authToken.trim())
-    : !!baseUrl.trim();
-
-  // Pick the probe target: when the user is editing an existing endpoint and
-  // hasn't typed a new token, hit the stored-id route so the server's persisted
-  // token is used (we never round-trip the raw token through the UI). In every
-  // other case — create mode, or edit with an unsaved token change — call the
-  // stateless probe route with the form's auth type, baseUrl + typed token.
-  function probeRequest(kind) {
-    const sameAuthType = authType === (endpoint?.authType ?? 'api-key');
-    const useStored = isEdit && !authToken.trim() && !clearToken && sameAuthType;
-    if (useStored) {
-      const suffix = kind === 'test' ? 'test' : 'discover-models';
-      return { path: `/api/llm-endpoints/${endpoint.id}/${suffix}`, body: undefined };
-    }
-    const suffix = kind === 'test' ? 'probe-test' : 'probe-discover-models';
-    return {
-      path: `/api/llm-endpoints/${suffix}`,
-      body: {
-        authType,
-        baseUrl: isOauth ? '' : baseUrl.trim(),
-        authToken: clearToken ? '' : authToken.trim(),
-      },
-    };
-  }
+  // Which credential a probe would use, and whether it may run at all —
+  // resolved in one pure place (llm-probe-state.js) so the button state and the
+  // request target cannot disagree. Notably, a completed-but-unsaved
+  // subscription login blocks the probe instead of silently testing the old
+  // stored token (#912): the fresh token is only claimed on save.
+  const probeForm = {
+    authType,
+    endpointAuthType: endpoint?.authType ?? 'api-key',
+    endpointId: endpoint?.id,
+    isEdit,
+    hasStoredToken: !!endpoint?.hasToken,
+    pastedToken: authToken,
+    clearToken,
+    oauthFlowId,
+    baseUrl,
+  };
+  const probe = resolveProbeState(probeForm);
+  const canProbe = probe.canProbe;
 
   async function runTest() {
     if (!canProbe) {
-      setProbeMsg({ ok: false, text: isOauth ? 'No token available to test — paste one, or save and test afterwards.' : 'Enter a Base URL first.' });
+      setProbeMsg({ ok: false, text: probeBlockedMessage(probe, 'test') });
       return;
     }
     setProbing('test'); setProbeMsg(null);
     try {
-      const { path, body } = probeRequest('test');
+      const { path, body } = probeRequest(probeForm, 'test');
       const r = await apiCall('POST', path, body);
       setProbeMsg({
         ok: r.ok,
@@ -335,12 +331,12 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
 
   async function runDiscover() {
     if (!canProbe) {
-      setProbeMsg({ ok: false, text: isOauth ? 'No token available — paste one, or save and discover afterwards.' : 'Enter a Base URL first.' });
+      setProbeMsg({ ok: false, text: probeBlockedMessage(probe, 'discover') });
       return;
     }
     setProbing('discover'); setProbeMsg(null);
     try {
-      const { path, body } = probeRequest('discover');
+      const { path, body } = probeRequest(probeForm, 'discover');
       const r = await apiCall('POST', path, body);
       setDiscovered(r.models || []);
       setProbeMsg({ ok: true, text: `Found ${r.count ?? r.models?.length ?? 0} model(s) at ${r.url}` });
@@ -565,7 +561,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
                 <Check size={14} /> Login completed — the token is stored when you save.
                 <button
                   type="button"
-                  onClick={() => { setOauthFlowId(null); setWizardOpen(false); }}
+                  onClick={() => { setOauthFlowId(null); setWizardOpen(false); setProbeMsg(null); }}
                   style={buttonGhost}
                 >
                   Discard
@@ -573,7 +569,10 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
               </div>
             ) : wizardOpen ? (
               <OAuthLoginWizard
-                onToken={(flowId) => { setOauthFlowId(flowId); setWizardOpen(false); }}
+                // Drop any earlier probe result: it describes the token the
+                // fresh login is about to replace, and a lingering red 401
+                // reads as "this login failed" (#912).
+                onToken={(flowId) => { setOauthFlowId(flowId); setWizardOpen(false); setProbeMsg(null); }}
                 onClose={() => setWizardOpen(false)}
               />
             ) : (
@@ -686,7 +685,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
           onClick={runTest}
           disabled={!canProbe || probing === 'test'}
           style={{ ...buttonGhost, opacity: !canProbe || probing === 'test' ? 0.6 : 1 }}
-          title={canProbe ? 'Send GET /v1/models to verify connectivity' : 'Enter a Base URL first'}
+          title={probeTitle(probe, 'test')}
         >
           <PlugZap size={13} /> {probing === 'test' ? 'Testing…' : 'Test connection'}
         </button>
@@ -695,7 +694,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
           onClick={runDiscover}
           disabled={!canProbe || probing === 'discover'}
           style={{ ...buttonGhost, opacity: !canProbe || probing === 'discover' ? 0.6 : 1 }}
-          title={canProbe ? 'Fetch /v1/models from the proxy' : 'Enter a Base URL first'}
+          title={probeTitle(probe, 'discover')}
         >
           <RefreshCw size={13} /> {probing === 'discover' ? 'Loading…' : 'Discover models'}
         </button>
@@ -705,6 +704,13 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
             color: probeMsg.ok ? 'var(--eb-status-success)' : 'var(--eb-status-error)',
           }}>{probeMsg.text}</span>
         )}
+        {/* Always name the credential a probe would use, so a 401 can never be
+            mistaken for a failed login (#912). */}
+        <span style={{
+          flexBasis: '100%',
+          fontSize: 'var(--eb-text-xs)',
+          color: canProbe ? 'var(--eb-text-muted)' : 'var(--eb-status-warning)',
+        }}>{probeNote(probe)}</span>
       </div>
 
       {discovered && (

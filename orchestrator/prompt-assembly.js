@@ -101,6 +101,42 @@ const TRIGGER_SECTION =
   '  "prompt": "What you should do"\n' +
   "}\n" +
   "```\n\n" +
+  "**Loop (loop):**\n" +
+  "A loop re-runs itself: it fires one iteration, and the moment that iteration " +
+  "finishes it arms the next — no wall-clock schedule. `cron`/`once` say *when to " +
+  "start*; a loop says *repeat until a goal is reached*. Use it to drain a worklist " +
+  "or converge on a fix, not to poll on a timer.\n" +
+  "```json\n" +
+  "{\n" +
+  '  "id": "unique-id",\n' +
+  '  "type": "loop",\n' +
+  '  "enabled": true,\n' +
+  '  "prompt": "Read fix_plan.md, do the single highest-priority item, run the tests, update fix_plan.md and commit.",\n' +
+  '  "maxIterations": 25,\n' +
+  '  "until": { "command": "npm test && test ! -s fix_plan.md" },\n' +
+  '  "maxTokens": 2000000,\n' +
+  '  "verify": { "agentId": "team-x-code-reviewer" }\n' +
+  "}\n" +
+  "```\n" +
+  "- **Fresh context every iteration.** Each iteration starts with an empty context " +
+  "window (loops default to `sessionPolicy: per-invocation`), so persist everything " +
+  "the next iteration needs on disk — re-read `memory/` and your worklist at the top " +
+  "of every run. Nothing carries over in memory.\n" +
+  "- **Stop contract.** `maxIterations` is **required** (a positive integer — no " +
+  "unbounded loop may be authored). The loop ends and posts one summary when any " +
+  "terminal state is reached: `until.command` exits `0` → **done** (goal met); the " +
+  "iteration cap is hit → **exhausted**; the optional `maxTokens` budget is exceeded " +
+  "→ **exhausted**; the platform runaway backstop trips → **paused**.\n" +
+  "- **Don't grade your own work.** `verify` (optional but recommended) is a *separate* " +
+  "gate that must pass for an iteration's work to count; a failed check is fed back " +
+  "into the next iteration's prompt. Give it exactly one of: `{\"command\": \"<sh>\"}` " +
+  "(exit-code gate), `{\"agentId\": \"<other-agent>\"}` (a *different* agent reviews and " +
+  "returns a verdict), or `{\"selfGraded\": true}` (explicit opt-out — self-checking, " +
+  "only for standalone agents). If you are a team agent and leave `verify` empty or " +
+  "self-graded, the system re-fills a sibling reviewer role for you — the separation " +
+  "can't be silently removed.\n" +
+  "- **Optional `minGapSeconds`** (non-negative) throttles the gap between iterations; " +
+  "`0` (default) chains immediately.\n\n" +
   "### Managing triggers\n\n" +
   "1. Read `triggers.json`\n" +
   "2. Add, modify or remove triggers\n" +

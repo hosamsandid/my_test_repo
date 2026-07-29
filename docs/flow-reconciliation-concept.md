@@ -1,9 +1,10 @@
 # Flow Reconciliation & Claim Labels — Concept
 
-> Status: **concept / partially implemented**. Layer 1 (runner retry + loud
-> failure) exists as a working-tree change to `agent-image/scripts/agent-entrypoint.py`;
-> Layers 2 and 3 are design. Grounded in a real production stall analyzed on
-> 2026-07-29 (issue #902 / PR #949 in the Agent Studio team's repo).
+> Status: **Layers 1 and 2 implemented** (PR #953, PR #974); Layer 3 is design.
+> Layer 1: runner retry + loud failure (`agent-image/scripts/agent-entrypoint.py`).
+> Layer 2: declarative `claim` field on `github-event` triggers — runtime label swap + rollback
+> on final failure (`agent-image/scripts/agent-entrypoint.py`, PR #974).
+> Grounded in a real production stall analyzed on 2026-07-29 (issue #902 / PR #949 in the Agent Studio team's repo).
 
 ## 1. The incident that motivates this
 

@@ -9,7 +9,7 @@ Agents are driven by triggers defined in a per-agent `triggers.json` file. The s
 | **cron** | Recurring execution on a 5-field cron expression. Skips if the previous run is still in progress. |
 | **once** | Fires once at a specific ISO timestamp, then removes itself automatically. |
 | **http** | Fired by an external `POST /hooks/:agentId/:triggerId` with an `X-Hook-Secret` header. Every trigger carries its own auto-generated secret — there is no global open mode. |
-| **github-event** | Fired by the built-in GitHub poller when the GitHub Events API reports a matching event (e.g. `pull_request.opened`, `push`). Requires a GitHub token on the Working Environment. The full event payload is appended to the agent prompt as JSON. |
+| **github-event** | Fired by the built-in GitHub poller when the GitHub Events API reports a matching event (e.g. `pull_request.opened`, `push`). Requires a GitHub token on the Working Environment. The full event payload is appended to the agent prompt as JSON. Supports an optional `claim` field (`{"remove": "<wakeLabel>", "add": "<claimLabel>"}`) — the runner swaps the labels before invoking the agent so "in progress" is visible on GitHub, and rolls the swap back automatically if the run fails both attempts (which re-fires the chain via the poller). |
 
 Cron format: `Minute Hour Day Month Weekday`
 

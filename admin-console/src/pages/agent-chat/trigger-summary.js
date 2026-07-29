@@ -67,15 +67,7 @@ export function summarizeLoopTrigger(trigger) {
   const max = trigger?.maxIterations;
   if (Number.isFinite(max) && max > 0) parts.push(`≤${max} iter`);
   const maxTokens = trigger?.maxTokens;
-  if (Number.isFinite(maxTokens) && maxTokens > 0) {
-    // Compact large token budgets (2000000 → "2M", 500000 → "500k").
-    const t = maxTokens >= 1_000_000
-      ? `${+(maxTokens / 1_000_000).toFixed(1)}M`
-      : maxTokens >= 1_000
-        ? `${Math.round(maxTokens / 1_000)}k`
-        : String(maxTokens);
-    parts.push(`≤${t} tok`);
-  }
+  if (Number.isFinite(maxTokens) && maxTokens > 0) parts.push(`≤${compactTokens(maxTokens)} tok`);
   const untilCmd = trigger?.until && typeof trigger.until === 'object'
     ? trigger.until.command : null;
   if (untilCmd && String(untilCmd).trim()) parts.push(`until: ${String(untilCmd).trim()}`);
@@ -83,6 +75,43 @@ export function summarizeLoopTrigger(trigger) {
   if (v && typeof v === 'object') {
     if (v.agentId && String(v.agentId).trim()) parts.push(`✓ ${String(v.agentId).trim()}`);
     else if (v.command && String(v.command).trim()) parts.push(`✓ ${String(v.command).trim()}`);
+  }
+  return parts.length ? parts.join(' · ') : 'loop';
+}
+
+// Compact a token budget for a badge: 2000000 → "2M", 500000 → "500k",
+// 750 → "750". Shared by the trigger-row and canvas loop summaries.
+function compactTokens(n) {
+  return n >= 1_000_000
+    ? `${+(n / 1_000_000).toFixed(1)}M`
+    : n >= 1_000
+      ? `${Math.round(n / 1_000)}k`
+      : String(n);
+}
+
+// Compact one-line summary of a `loop` self-edge for the Flows-canvas
+// stop-contract badge (#936). It takes the *graph-edge* loop summary emitted by
+// `process-graph.js` (`buildProcessGraph` → `unified-graph`), which redacts the
+// verifier internals: `verify` here is `{ mode, agentId? }` (never the command
+// string), not the raw trigger's `{ command | agentId | selfGraded }`. Surfaces
+// the three loop-defining facts (concept §4.5): budget (`≤N iter`, optional
+// token cap), stop condition (`until: <cmd>`) and verifier (`✓ <role>` for an
+// agent verifier, `✓ check` for a command verifier, `✓ self` when self-graded).
+// Returns a string (never blank — falls back to "loop").
+export function summarizeLoopEdge(loop) {
+  if (!loop || typeof loop !== 'object') return 'loop';
+  const parts = [];
+  const max = loop.maxIterations;
+  if (Number.isFinite(max) && max > 0) parts.push(`≤${max} iter`);
+  const maxTokens = loop.maxTokens;
+  if (Number.isFinite(maxTokens) && maxTokens > 0) parts.push(`≤${compactTokens(maxTokens)} tok`);
+  const untilCmd = loop.until && typeof loop.until === 'object' ? loop.until.command : null;
+  if (untilCmd && String(untilCmd).trim()) parts.push(`until: ${String(untilCmd).trim()}`);
+  const v = loop.verify;
+  if (v && typeof v === 'object') {
+    if (v.mode === 'agent' && v.agentId && String(v.agentId).trim()) parts.push(`✓ ${String(v.agentId).trim()}`);
+    else if (v.mode === 'command') parts.push('✓ check');
+    else if (v.mode === 'self-graded') parts.push('✓ self');
   }
   return parts.length ? parts.join(' · ') : 'loop';
 }

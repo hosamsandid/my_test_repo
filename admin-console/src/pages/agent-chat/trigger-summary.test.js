@@ -6,6 +6,7 @@ import {
   eventsAreLabelFilterable,
   summarizeGithubEventTrigger,
   summarizeLoopTrigger,
+  summarizeLoopEdge,
   GITHUB_EVENT_OPTIONS,
   LABEL_FILTERABLE_EVENTS,
 } from './trigger-summary.js';
@@ -126,4 +127,34 @@ test('summarizeLoopTrigger: command-form verifier and bare loop fallback', () =>
   assert.equal(summarizeLoopTrigger({ type: 'loop' }), 'loop');
   assert.equal(summarizeLoopTrigger({}), 'loop');
   assert.equal(summarizeLoopTrigger(null), 'loop');
+});
+
+test('summarizeLoopEdge: budget + until + agent verifier from the redacted edge summary (#936 AC2)', () => {
+  // The graph-edge summary carries verify as { mode, agentId? } — never the
+  // raw command string (redacted by process-graph triggerView).
+  const s = summarizeLoopEdge({
+    maxIterations: 25,
+    until: { command: 'npm test' },
+    verify: { mode: 'agent', agentId: 'team-x-code-reviewer' },
+  });
+  assert.equal(s, '≤25 iter · until: npm test · ✓ team-x-code-reviewer');
+});
+
+test('summarizeLoopEdge: command verifier renders "✓ check" (no command string leaks)', () => {
+  const s = summarizeLoopEdge({ maxIterations: 10, maxTokens: 2_000_000, verify: { mode: 'command' } });
+  assert.equal(s, '≤10 iter · ≤2M tok · ✓ check');
+});
+
+test('summarizeLoopEdge: self-graded verifier renders "✓ self"; token budget compacts (500k)', () => {
+  assert.equal(
+    summarizeLoopEdge({ maxIterations: 3, maxTokens: 500_000, verify: { mode: 'self-graded' } }),
+    '≤3 iter · ≤500k tok · ✓ self',
+  );
+});
+
+test('summarizeLoopEdge: missing/blank summary never blank (edge case)', () => {
+  assert.equal(summarizeLoopEdge({ maxIterations: 5 }), '≤5 iter');
+  assert.equal(summarizeLoopEdge({}), 'loop');
+  assert.equal(summarizeLoopEdge(null), 'loop');
+  assert.equal(summarizeLoopEdge(undefined), 'loop');
 });

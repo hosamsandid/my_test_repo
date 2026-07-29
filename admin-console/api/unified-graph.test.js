@@ -74,6 +74,39 @@ test('timer edge (#410): cron trigger runs from the @timer actor', () => {
   assert.equal(actor.actor, 'timer');
 });
 
+test('loop edge (#936): a loop trigger stays a self-edge (on:loop) carrying its stop-contract summary', () => {
+  const g = buildUnifiedGraph([
+    { id: 'dev', triggers: [{
+      id: 'l', type: 'loop', maxIterations: 25, maxTokens: 2000000,
+      until: { command: 'npm test' }, verify: { agentId: 'dev-reviewer' }, emits: [],
+    }] },
+  ]);
+  const e = findEdge(g, x => x.on === 'loop');
+  assert.ok(e, 'a loop self-edge is emitted');
+  // Unlike the cron timer (rerouted from @timer), the loop is the agent
+  // re-arming itself — from === to and no @timer/@github actor is introduced.
+  assert.equal(e.from, 'dev');
+  assert.equal(e.to, 'dev');
+  assert.equal(e.triggerId, 'l');
+  assert.deepEqual(e.loop, {
+    maxIterations: 25, maxTokens: 2000000,
+    until: { command: 'npm test' }, verify: { mode: 'agent', agentId: 'dev-reviewer' },
+  });
+  assert.ok(!g.nodes.some(n => n.id === '@timer'), 'no @timer actor for a loop');
+});
+
+test('loop edges (#936): two loops on one agent stay two independently-keyed edges', () => {
+  const g = buildUnifiedGraph([
+    { id: 'dev', triggers: [
+      { id: 'a', type: 'loop', maxIterations: 5, emits: [] },
+      { id: 'b', type: 'loop', maxIterations: 9, emits: [] },
+    ] },
+  ]);
+  const loops = (g.edges || []).filter(x => x.on === 'loop');
+  assert.equal(loops.length, 2);
+  assert.deepEqual(loops.map(l => l.triggerId).sort(), ['a', 'b']);
+});
+
 test('event edge (#410): raw github-event runs from the @github actor', () => {
   const g = buildUnifiedGraph([
     { id: 'triage', triggers: [{ id: 't', type: 'github-event', events: ['issues.opened'], from: 'humans', emits: [] }] },

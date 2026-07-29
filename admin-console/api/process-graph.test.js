@@ -780,11 +780,40 @@ test('triggerView: loop without an until command omits the until summary', () =>
   assert.ok(!('minGapSeconds' in t));
 });
 
-test('a loop trigger contributes no graph edge or lint (canvas rendering is a separate ticket)', () => {
+test('a loop trigger emits a kind:loop self-edge carrying its stop-contract summary (#936)', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', role: 'agent', triggers: [{
+      id: 'l', type: 'loop', maxIterations: 25, maxTokens: 2000000,
+      until: { command: 'npm test', env: { CI: '1' } },
+      verify: { agentId: 'team-x-reviewer' },
+      prompt: 'work it', roomId: '!r:local',
+    }] },
+  ]);
+  // One self-edge (like a cron timer) but a distinct kind so the canvas can
+  // draw the stop-contract badge instead of a schedule row.
+  assert.equal(g.edges.length, 1);
+  const e = g.edges[0];
+  assert.equal(e.kind, 'loop');
+  assert.equal(e.from, 'dev');
+  assert.equal(e.to, 'dev');
+  assert.equal(e.triggerId, 'l');
+  // The render-ready summary carries budget / until / verifier — and nothing
+  // secret (the command string / env were already redacted by triggerView).
+  assert.deepEqual(e.loop, {
+    maxIterations: 25,
+    maxTokens: 2000000,
+    until: { command: 'npm test' },
+    verify: { mode: 'agent', agentId: 'team-x-reviewer' },
+  });
+  // No orphan/dead-end noise from a self-edge.
+  assert.equal(g.lints.length, 0);
+});
+
+test('a loop trigger self-edge omits absent stop-contract fields (#936)', () => {
   const g = buildProcessGraph([
     { id: 'dev', role: 'agent', triggers: [{ id: 'l', type: 'loop', maxIterations: 5 }] },
   ]);
-  // No self-edge (unlike cron/once timers) and no orphan/dead-end noise.
-  assert.equal(g.edges.length, 0);
+  assert.equal(g.edges.length, 1);
+  assert.deepEqual(g.edges[0].loop, { maxIterations: 5 });
   assert.equal(g.lints.length, 0);
 });

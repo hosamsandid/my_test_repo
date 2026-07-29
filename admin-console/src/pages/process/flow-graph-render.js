@@ -14,6 +14,7 @@
 import { computeFlowLayout, assignCrossCoords } from './flow-layout';
 import { routeOrthogonalEdges, roundedPathD, laneLoadByChannel } from './edge-router';
 import { outcomeCardMinHeight, OUTCOME_COL_BOTTOM, OUTCOME_GROW_MIN } from './outcome-port-layout';
+import { summarizeLoopEdge } from '../agent-chat/trigger-summary';
 
 export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutcome, onSelectEdge, actorSources, expandChildrenByDefault } = {}) {
 
@@ -54,6 +55,9 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     event:      { color: '#f97316', label: 'GitHub event', dashed: true },
     timer:      { color: '#0ea5e9', label: 'schedule', dashed: true },
     webhook:    { color: '#eab308', label: 'webhook', dashed: true },
+    // A loop self-edge (#936): an agent re-arming itself. Distinct fuchsia so
+    // the stop-contract badge never reads as a schedule (⏰) or a PR edge.
+    loop:       { color: '#d946ef', label: 'loop' },
   };
   const ARROW_SIZE = 12; // arrowhead length in px (#402 — was 7, hard to see)
 
@@ -411,13 +415,14 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     state.extraEdges = (Array.isArray(g.edges) ? g.edges : [])
       .filter(e => EXTRA.has(e.on) && e.from && e.to && e.from !== e.to);
 
-    // The trigger rows shown inside each card: schedules (⏰, no line) plus
-    // every actor-sourced trigger edge (🐙/🏷/⚡ — each with a 👁 line toggle).
+    // The trigger rows shown inside each card: schedules (⏰, no line), loop
+    // self-edges (↻, no line — #936) plus every actor-sourced trigger edge
+    // (🐙/🏷/⚡ — each with a 👁 line toggle).
     state.nodeTriggerEdges = new Map();
     (Array.isArray(g.edges) ? g.edges : []).forEach(e => {
       if (!e || !e.to) return;
       const fromActor = typeof e.from === 'string' && e.from.startsWith('@');
-      if (e.on === 'timer' || (fromActor && ['event', 'webhook', 'label'].includes(e.on))) {
+      if (e.on === 'timer' || e.on === 'loop' || (fromActor && ['event', 'webhook', 'label'].includes(e.on))) {
         if (!state.nodeTriggerEdges.has(e.to)) state.nodeTriggerEdges.set(e.to, []);
         state.nodeTriggerEdges.get(e.to).push(e);
       }
@@ -1155,11 +1160,14 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
                 triggerId: e.triggerId, gate: e.gate,
                 ...(e.events ? { events: e.events } : {}),
                 ...(e.schedule ? { schedule: e.schedule } : {}),
+                ...(e.loop ? { loop: e.loop } : {}),
               });
             });
           }
           row.appendChild(lbl);
-          if (e.on !== 'timer' && e.triggerId) {
+          // ⏰ schedules and ↻ loop self-edges (#936) draw no line on the canvas,
+          // so they have no line to toggle — skip the 👁 button for them.
+          if (e.on !== 'timer' && e.on !== 'loop' && e.triggerId) {
             const hidden = state.hiddenTriggerEdges.has(`${n.id}|${e.triggerId}`);
             const eye = document.createElement('button');
             eye.textContent = '👁';
@@ -1865,6 +1873,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       const text = e.schedule && e.schedule.cron ? cronText(e.schedule.cron)
         : (e.schedule && e.schedule.at ? `once ${e.schedule.at}` : (e.label || 'schedule'));
       return { icon: '⏰', text, color: EDGE_STYLES.timer.color, title: 'Schedule' };
+    }
+    if (e.on === 'loop') {
+      // Loop self-edge (#936): the stop-contract badge — budget (≤N iter / token
+      // cap), stop condition (until:) and verifier (✓) at a glance. Click opens
+      // the shared loop TriggerForm for the full contract.
+      return {
+        icon: '↻', text: summarizeLoopEdge(e.loop), color: EDGE_STYLES.loop.color,
+        title: 'Loop — re-arms until the stop contract is met',
+      };
     }
     if (e.on === 'event') {
       return { icon: '🐙', text: (e.events || []).join(', '), color: EDGE_STYLES.event.color, title: 'GitHub trigger' };

@@ -143,18 +143,20 @@ function triggerView(t) {
   } else if (t.type === 'loop') {
     // Loop trigger (#932): a continuation primitive that re-arms itself until
     // `until.command` exits 0 or `maxIterations` is hit. Carry the stop-contract
-    // summary so the graph view knows the fields; the self-edge + stop-contract
-    // badge on the canvas are a separate (UI) ticket.
+    // summary so the graph view can render the self-edge + stop-contract badge
+    // (#936).
     if (t.maxIterations != null) v.maxIterations = t.maxIterations;
+    // Token budget (#934) — carried so the stop-contract badge can show it.
+    if (t.maxTokens != null) v.maxTokens = t.maxTokens;
     if (t.until && typeof t.until === 'object'
         && typeof t.until.command === 'string' && t.until.command.trim()) {
       v.until = { command: t.until.command };
     }
     if (t.minGapSeconds != null) v.minGapSeconds = t.minGapSeconds;
     // Verifier gate summary (#933) so the graph view knows a separate check
-    // exists — the stop-contract badge that renders it is a separate UI ticket.
-    // Only the shape is surfaced (command presence / target agent), never the
-    // command string or its env.
+    // exists — the stop-contract badge (#936) renders it. Only the shape is
+    // surfaced (command presence / target agent), never the command string or
+    // its env.
     if (t.verify && typeof t.verify === 'object') {
       if (typeof t.verify.command === 'string' && t.verify.command.trim()) {
         v.verify = { mode: 'command' };
@@ -319,6 +321,21 @@ function buildProcessGraph(agents, options) {
           label: t.type === 'cron' ? (t.cron || 'cron') : (t.at || 'once'),
           kind: 'timer', triggerId: t.id,
         });
+        continue;
+      }
+      if (t.type === 'loop') {
+        // Loop trigger (#936): an agent re-arming itself until its stop contract
+        // is met — the same self-edge shape as the cron `timer`, but a distinct
+        // `kind: 'loop'` so the canvas draws it with a stop-contract badge
+        // instead of a schedule row. Carry a render-ready summary (budget /
+        // until / verifier) onto the edge; the command string and verifier
+        // internals were already redacted by `triggerView`.
+        const loop = {};
+        if (t.maxIterations != null) loop.maxIterations = t.maxIterations;
+        if (t.maxTokens != null) loop.maxTokens = t.maxTokens;
+        if (t.until) loop.until = t.until;
+        if (t.verify) loop.verify = t.verify;
+        edges.push({ from: n.id, to: n.id, kind: 'loop', triggerId: t.id, loop });
         continue;
       }
       if (t.type === 'http') {

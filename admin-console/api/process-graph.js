@@ -11,9 +11,9 @@
 // Edge model: a trigger *listens* on a key (a label via `labelFilter`, or an
 // event name when it has none). A trigger *emits* labels (its `emits` array).
 // An edge S→T with label L exists when some trigger of S emits L and some
-// trigger of T listens on L. Labels only a human can set (`human:*`) and the
-// universal brakes (`hold`, `needs:human`) have no agent emitter — their edges
-// originate from `null` and are tagged so the renderer can colour them.
+// trigger of T listens on L. Labels only a human can set (human gates) and
+// brake labels have no agent-wired listener edge — their edges originate from
+// `null` and are tagged so the renderer can colour them.
 
 // Structured OUTCOMES port (#827): the successor to flat `emits`. Legacy agents
 // (flat `emits`, no `outcomes`) are untouched below and yield byte-identical
@@ -26,13 +26,69 @@ const {
   isAuthoredOutcomes, normalizeOutcomes, outcomeEmitPairs, outcomeSetLabels, outcomesToGithub,
 } = require('./outcomes');
 
-const BRAKES = new Set(['hold', 'needs:human']);
+// ─── gate/brake classification (#928) ────────────────────────────────────────
+//
+// Gate-ness and brake-ness are CONFIGURATION, not a naming convention. The
+// authoritative sources are the persisted flags:
+//
+//   labels:   [ { name, humanGate: true } ]      → the label is a human gate
+//             [ { name, brake: true } ]          → the label pauses the loop
+//   channels: [ { label, gate: 'human' } ]       → that routing label is a gate
+//
+// The former `human:*` prefix match and the hardcoded `hold`/`needs:human`
+// brake set are GONE as a classification source (#901 decision D3): a label
+// carrying neither a registry flag nor a channel gate flag is a plain agent
+// label, whatever it is called. That is what lets the vocabulary rename (#927)
+// give human-applied labels ordinary action-style names (`approved-for-dispatch`).
+//
+// A human gate may not be set by an agent (`gate-violation` / the outcomes
+// validator). A brake MAY be agent-applied — e.g. the reworker setting
+// `human-decision-required` to pause the loop pending a human decision — so it
+// is deliberately NOT forbidden as an emit/outcome.
 
-function isHumanGate(label) {
-  return typeof label === 'string' && label.startsWith('human:');
-}
-function isBrake(label) {
-  return BRAKES.has(label);
+/**
+ * Build the authoritative gate/brake classifier from the config flags.
+ *
+ * @param {object} [sources]
+ * @param {Array}  [sources.labels] - the bundle/team label registry:
+ *   [{ name, humanGate?, brake? }]. Absent = no flags known.
+ * @param {Array}  [sources.agents] - nodes/roles whose `channels[]` ports may
+ *   carry `gate: 'human'` on a routing label. Read straight off the agents, so
+ *   a channel gate classifies even when no `labels[]` registry is threaded in
+ *   (imported drafts, the flow-weaver's `<prefix>:approved` boundaries).
+ * @returns {{ isHumanGate, isBrake, classifyKind, registryNames }}
+ */
+function makeLabelClassifier(sources) {
+  const { labels, agents } = sources || {};
+  const gates = new Set();
+  const brakes = new Set();
+  const registryNames = [];
+  for (const l of (Array.isArray(labels) ? labels : [])) {
+    const name = (l && typeof l.name === 'string') ? l.name.trim() : '';
+    if (!name) continue;
+    registryNames.push(name);
+    if (l.humanGate) gates.add(name);
+    if (l.brake) brakes.add(name);
+  }
+  for (const a of (Array.isArray(agents) ? agents : [])) {
+    for (const ch of (a && Array.isArray(a.channels) ? a.channels : [])) {
+      if (!ch || ch.gate !== 'human') continue;
+      const label = (typeof ch.label === 'string') ? ch.label.trim() : '';
+      if (label) gates.add(label);
+    }
+  }
+
+  const isHumanGate = label => typeof label === 'string' && gates.has(label);
+  const isBrake = label => typeof label === 'string' && brakes.has(label);
+  // Gate wins over brake when a label carries both flags (a gate is the stricter
+  // claim: no agent may set it), matching the old name-match precedence.
+  const classifyKind = (key) => {
+    if (isHumanGate(key)) return 'gate';
+    if (isBrake(key)) return 'brake';
+    if (typeof key === 'string' && key.startsWith('pull_request_review')) return 'review';
+    return 'agent';
+  };
+  return { isHumanGate, isBrake, classifyKind, registryNames };
 }
 
 // The keys a trigger reacts to. A github-event trigger with a labelFilter reacts
@@ -67,11 +123,11 @@ function channelLabels(node) {
   return out;
 }
 
-function classifyKind(key) {
-  if (isHumanGate(key)) return 'gate';
-  if (isBrake(key)) return 'brake';
-  if (typeof key === 'string' && key.startsWith('pull_request_review')) return 'review';
-  return 'agent';
+// Convenience wrapper for a one-off classification: `classifyKind(key, sources)`
+// builds a throw-away classifier from the same flag sources. Prefer
+// `makeLabelClassifier(...).classifyKind` in a loop.
+function classifyKind(key, sources) {
+  return makeLabelClassifier(sources).classifyKind(key);
 }
 
 // Slim, render-ready view of a trigger.
@@ -107,10 +163,21 @@ function triggerView(t) {
  * @param {Array} agents - [{ id, role, displayName, sessionPolicy,
  *   environmentId, triggers: [{ id, type, events, labelFilter, from, cron, at,
  *   emits, emitsDerived }] }]. `emits` must already be the effective set.
+ * @param {object} [options]
+ * @param {Array}  [options.labels] - the authoritative label registry
+ *   ([{ name, humanGate?, brake? }], #928): the bundle's `labels[]`, or the one
+ *   persisted on the team agent for a live graph. Gate/brake classification
+ *   reads these flags (plus each node's channel `gate: 'human'`) — never the
+ *   label's name.
  * @returns {{ nodes, edges, gates, labels }}
  */
-function buildProcessGraph(agents) {
+function buildProcessGraph(agents, options) {
   const list = Array.isArray(agents) ? agents : [];
+  // Authoritative gate/brake source (#928): the registry flags the caller
+  // threads in, plus every channel port's `gate: 'human'`.
+  const classifierSources = { labels: options && options.labels, agents: list };
+  const classifier = makeLabelClassifier(classifierSources);
+  const { isHumanGate, isBrake, classifyKind: classify } = classifier;
 
   const nodes = list.map(a => {
     const triggers = (a.triggers || []).map(triggerView);
@@ -122,7 +189,7 @@ function buildProcessGraph(agents) {
     // — is byte-identical to before.
     const authored = isAuthoredOutcomes(a.outcomes);
     const emits = authored
-      ? outcomeSetLabels(a.outcomes)
+      ? outcomeSetLabels(a.outcomes, classifierSources)
       : (Array.isArray(a.emits) ? a.emits.filter(e => typeof e === 'string' && e) : []);
     const baseGh = a.github || {};
     const ocGh = authored ? outcomesToGithub(a.outcomes) : {};
@@ -168,6 +235,12 @@ function buildProcessGraph(agents) {
       labelMeta.set(name, { humanGate: isHumanGate(name), brake: isBrake(name) });
     }
   };
+  // Seed the registry's own entries (#928) so a flagged label survives the
+  // graph round-trip (live team → `GET /api/process/template` → re-import) even
+  // when no port references it yet — otherwise the flag that makes it a gate or
+  // a brake would be silently dropped on export and the label would come back
+  // as a plain agent label.
+  for (const name of classifier.registryNames) noteLabel(name);
 
   const addEmit = (label, agentId) => {
     if (!emitIndex.has(label)) emitIndex.set(label, new Set());
@@ -202,7 +275,7 @@ function buildProcessGraph(agents) {
   const outcomeByEmit = new Map();
   for (const a of list) {
     if (!isAuthoredOutcomes(a.outcomes)) continue;
-    for (const { label, outcome } of outcomeEmitPairs(a.outcomes)) {
+    for (const { label, outcome } of outcomeEmitPairs(a.outcomes, classifierSources)) {
       if (!outcomeByEmit.has(label)) outcomeByEmit.set(label, new Map());
       const m = outcomeByEmit.get(label);
       if (!m.has(a.id)) m.set(a.id, outcome); // first outcome setting the label wins
@@ -240,7 +313,7 @@ function buildProcessGraph(agents) {
         // events (issues/pull_request × labeled/unlabeled) ride along so the
         // renderer can show WHICH label change wakes the listener.
         const evs = Array.isArray(t.events) && t.events.length ? { events: t.events.slice() } : {};
-        const kind = classifyKind(key);
+        const kind = classify(key);
         if (kind === 'gate') gateSet.add(key);
         if (kind === 'gate' || kind === 'brake') {
           // No agent may emit these — the edge comes from outside (a human).
@@ -264,7 +337,7 @@ function buildProcessGraph(agents) {
         // Raw GitHub events (no label filter) come from external actors, not
         // agent emits — record as external (renderer drops, lints ignore).
         for (const ev of (Array.isArray(t.events) ? t.events : [])) {
-          edges.push({ from: null, to: n.id, label: ev, kind: classifyKind(ev), triggerId: t.id, external: true });
+          edges.push({ from: null, to: n.id, label: ev, kind: classify(ev), triggerId: t.id, external: true });
         }
       }
     }
@@ -302,7 +375,7 @@ function buildProcessGraph(agents) {
       // de-duplication because edgeId() suffixes the trigger-backed edge with
       // #<triggerId> while this one has none; skip at the source instead.
       if (wiredByTrigger.has(label)) continue;
-      const kind = classifyKind(label);
+      const kind = classify(label);
       if (kind === 'gate' || kind === 'brake') continue; // human-set, edge comes from null
       for (const s of (emitIndex.get(label) || [])) {
         if (s === n.id || s === ch.from) continue; // self / already the github edge
@@ -318,7 +391,7 @@ function buildProcessGraph(agents) {
     if (!allListenKeys.has(label)) {
       for (const s of emitters) {
         const oc = ocOf(label, s);
-        edges.push({ from: s, to: null, label, kind: classifyKind(label), ...(oc ? { outcome: oc } : {}), deadEnd: true });
+        edges.push({ from: s, to: null, label, kind: classify(label), ...(oc ? { outcome: oc } : {}), deadEnd: true });
       }
     }
   }
@@ -326,12 +399,18 @@ function buildProcessGraph(agents) {
   const gates = [...gateSet].sort().map(label => ({ label, humanOnly: true }));
   const labels = [...labelMeta.keys()].sort().map(name => ({ name, ...labelMeta.get(name) }));
 
-  return { nodes, edges, gates, labels, lints: computeLints(nodes, edges) };
+  return { nodes, edges, gates, labels, lints: computeLints(nodes, edges, classifier) };
 }
 
 // Advisory wiring checks (#333) — surfaced as a panel + inline badges, never
 // block saving. Derived purely from the built nodes/edges.
-function computeLints(nodes, edges) {
+//
+// `classifier` (#928) carries the authoritative gate/brake flags. It is optional
+// so `computeLints(nodes, edges)` keeps working for callers that only have the
+// nodes: the fallback still picks up every channel `gate: 'human'`, it just
+// cannot see a `labels[]` registry that was never threaded in.
+function computeLints(nodes, edges, classifier) {
+  const { isHumanGate } = classifier || makeLabelClassifier({ agents: nodes });
   const lints = [];
   for (const e of edges) {
     if (e.orphan) {
@@ -391,6 +470,8 @@ function computeLints(nodes, edges) {
     // source now that trigger-level emits are gone.
     const stageEmits = new Set();
     for (const lbl of n.emits || []) {
+      // Flag-based (#928): fires for a `humanGate` label whatever it is named, and
+      // NOT for a `brake` label — a brake is agent-appliable by design.
       if (isHumanGate(lbl)) {
         lints.push({ code: 'gate-violation', severity: 'error', nodeId: n.id, label: lbl,
           message: `\`${n.id}\` declares emit of gate label \`${lbl}\` — only humans may set it.` });
@@ -457,23 +538,25 @@ function computeLints(nodes, edges) {
         message: `\`${n.id}\` has an exactlyOne switch with ${oc.options.length} option${oc.options.length === 1 ? '' : 's'} — not a branch.` });
     }
 
-    // human-label-as-outcome (error): an outcome action may not set a `human:*`
-    // gate or a brake label — only a human may. Extends `gate-violation` to the
-    // outcomes port (the label is filtered out of `n.emits` by the projection, so
-    // `gate-violation` cannot catch it — this covers imported/legacy data).
+    // human-label-as-outcome (error): an outcome action may not set a human-GATE
+    // label — only a human may. Extends `gate-violation` to the outcomes port (the
+    // label is filtered out of `n.emits` by the projection, so `gate-violation`
+    // cannot catch it — this covers imported/legacy data). Flag-based (#928), and
+    // brake labels are deliberately exempt: a brake is agent-applied (the reworker
+    // setting `human-decision-required` to pause the loop for a human decision).
     for (const o of oc.options) {
       for (const a of (Array.isArray(o.actions) ? o.actions : [])) {
         if (a && a.type === 'setLabel' && typeof a.label === 'string'
-            && (isHumanGate(a.label.trim()) || isBrake(a.label.trim()))) {
+            && isHumanGate(a.label.trim())) {
           lints.push({ code: 'human-label-as-outcome', severity: 'error', nodeId: n.id, label: a.label.trim(), outcome: o.id,
-            message: `\`${n.id}\` outcome \`${o.id}\` sets gate/brake label \`${a.label.trim()}\` — only humans may set it.` });
+            message: `\`${n.id}\` outcome \`${o.id}\` sets gate label \`${a.label.trim()}\` — only humans may set it.` });
         }
       }
     }
 
     // same-label-multiple-outcomes (warning): under `exactlyOne`, two options
     // that set the same label leave consumers unable to tell the branches apart.
-    // (Gate/brake labels are excluded here — those are the human-label-as-outcome
+    // (Gate labels are excluded here — those are the human-label-as-outcome
     // error above.)
     if (oc.mode === 'exactlyOne') {
       const optionsByLabel = new Map(); // label -> Set(optionId)
@@ -481,7 +564,7 @@ function computeLints(nodes, edges) {
         for (const a of (Array.isArray(o.actions) ? o.actions : [])) {
           if (!a || a.type !== 'setLabel' || typeof a.label !== 'string') continue;
           const lbl = a.label.trim();
-          if (!lbl || isHumanGate(lbl) || isBrake(lbl)) continue;
+          if (!lbl || isHumanGate(lbl)) continue;
           if (!optionsByLabel.has(lbl)) optionsByLabel.set(lbl, new Set());
           optionsByLabel.get(lbl).add(o.id);
         }
@@ -499,4 +582,4 @@ function computeLints(nodes, edges) {
   return lints;
 }
 
-module.exports = { buildProcessGraph, computeLints, listenKeys, classifyKind, isHumanGate, isBrake };
+module.exports = { buildProcessGraph, computeLints, listenKeys, classifyKind, makeLabelClassifier };

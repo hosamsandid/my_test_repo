@@ -4,6 +4,7 @@ import SidePanel from '../../components/SidePanel';
 import { liveOps } from './edit-adapters';
 import { TriggerForm } from '../agent-chat/TriggersPanel';
 import { defaultListenerPrompt, handoffVerb, handoffTargetNoun } from './handoff-prompt';
+import { isGateLabel, isBrakeLabel } from './label-flags';
 
 // Only these GitHub events carry a label name, so a labelFilter is meaningful.
 const LABEL_EVENTS = [
@@ -121,10 +122,13 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
   const verb = handoffVerb(action);
   const targetNoun = handoffTargetNoun(target);
 
-  // Human gates (human:*) and the universal brakes are set by humans, never by
-  // an agent — wire only the listener, never an agent emit (#333).
-  const isGate = label.trim().startsWith('human:');
-  const isBrake = label.trim() === 'hold' || label.trim() === 'needs:human';
+  // Gate/brake classification is CONFIGURATION, not a naming convention (#928):
+  // it comes from the graph's label registry (`humanGate` / `brake` flags), never
+  // from the label's name. A human gate is set by a human, never by an agent, so
+  // we wire only the listener and never an agent emit (#333). A brake also has no
+  // agent-wired hand-off edge — it pauses the loop rather than passing work on.
+  const isGate = isGateLabel(labels, label);
+  const isBrake = isBrakeLabel(labels, label);
   const humanLabel = isGate || isBrake;
 
   const effectivePrompt = prompt
@@ -212,7 +216,7 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
 
           {humanLabel ? (
             <div style={{ ...small, padding: 'var(--eb-space-2)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-status-warning)' }}>
-              <code>{label.trim()}</code> is a {isGate ? 'human gate' : 'brake'} — only a human sets it.
+              <code>{label.trim()}</code> is configured as a {isGate ? 'human gate — only a human sets it' : 'brake — it pauses the loop'}.
               This wires <strong>{toName || to}</strong> to wait on it; <strong>{fromName || from}</strong> is not recorded as emitting it.
             </div>
           ) : (
@@ -1190,7 +1194,7 @@ function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone, onOpenR
           {showLabelFilter && (
             <Field label="Label name filter (optional)">
               <input value={label} onChange={e => setLabel(e.target.value)}
-                placeholder="e.g. priorisiert, human:approved — empty = any label" style={input} />
+                placeholder="e.g. priorisiert, ready-for-review — empty = any label" style={input} />
             </Field>
           )}
           {error && <span style={errStyle}>{error}</span>}
@@ -1288,8 +1292,9 @@ function ReadonlyEdgeDialog({ edge, fromName, toName, onClose }) {
  * inspector's trigger tab writes, reachable with the same ● drag gesture. */
 
 // The ONE GitHub-trigger dialog: raw repo events AND label-based triggers
-// (including labels a human sets — a `human:*` label renders as an approval
-// gate). One trigger reacts to exactly ONE event — reacting to a second event
+// (including labels a human sets — a label the registry flags `humanGate`
+// renders as an approval gate, #928). One trigger reacts to exactly ONE event —
+// reacting to a second event
 // (e.g. label removed as well as added) is a second, independently configured
 // trigger. There is no origin filter: the trigger fires on any matching event
 // regardless of who caused it. No repo input either: the repo is resolved from
@@ -1304,7 +1309,8 @@ export function GithubTriggerForm({ to, toName, labels, ops = liveOps, onBack, o
 
   const showLabelFilter = LABEL_FILTERABLE.has(event);
   const trimmedLabel = label.trim();
-  const isGate = trimmedLabel.startsWith('human:');
+  // Flag-based (#928) — the registry says whether this label is an approval gate.
+  const isGate = isGateLabel(labels, trimmedLabel);
   const labelActive = showLabelFilter && !!trimmedLabel;
 
   const effectivePrompt = prompt
@@ -1350,7 +1356,7 @@ export function GithubTriggerForm({ to, toName, labels, ops = liveOps, onBack, o
         {showLabelFilter && (
           <Field label="Label name filter (optional)">
             <input list="pc-gh-label-list" value={label} onChange={e => setLabel(e.target.value)}
-              placeholder="e.g. priorisiert, stage:td, human:approved" style={input} />
+              placeholder="e.g. priorisiert, stage:td, ready-for-review" style={input} />
             <datalist id="pc-gh-label-list">
               {(labels || []).map(l => <option key={l.name} value={l.name} />)}
             </datalist>
@@ -1358,7 +1364,7 @@ export function GithubTriggerForm({ to, toName, labels, ops = liveOps, onBack, o
               Only fire when the {event.endsWith('.unlabeled') ? 'removed' : 'added'} label matches
               this name exactly — leave empty to fire on any label.
             </small>
-            {isGate && <small style={small}><code>{trimmedLabel}</code> is an approval-gate label — it renders as a gate on the edge.</small>}
+            {isGate && <small style={small}><code>{trimmedLabel}</code> is configured as an approval-gate label — it renders as a gate on the edge.</small>}
           </Field>
         )}
         <Field label="Listener prompt">

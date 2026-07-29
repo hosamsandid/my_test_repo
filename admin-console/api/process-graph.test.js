@@ -46,12 +46,37 @@ test('listenKeys: labelFilter wins over the carrying event', () => {
   assert.deepEqual(listenKeys({ type: 'cron', cron: '* * * * *' }), []);
 });
 
-test('classifyKind', () => {
-  assert.equal(classifyKind('human:fdd-approved'), 'gate');
-  assert.equal(classifyKind('hold'), 'brake');
-  assert.equal(classifyKind('needs:human'), 'brake');
-  assert.equal(classifyKind('pull_request_review.submitted'), 'review');
-  assert.equal(classifyKind('stage:td'), 'agent');
+// #928 AC1 — classification reads the CONFIG FLAGS, never the label's name.
+test('classifyKind reads the label-registry flags', () => {
+  const reg = { labels: [
+    { name: 'approved-for-dispatch', humanGate: true, brake: false },
+    { name: 'human-decision-required', humanGate: false, brake: true },
+    { name: 'ready-for-review', humanGate: false, brake: false },
+  ] };
+  assert.equal(classifyKind('approved-for-dispatch', reg), 'gate');
+  assert.equal(classifyKind('human-decision-required', reg), 'brake');
+  assert.equal(classifyKind('ready-for-review', reg), 'agent');
+  assert.equal(classifyKind('pull_request_review.submitted', reg), 'review');
+});
+
+test("classifyKind reads a channel's gate: 'human' flag", () => {
+  const src = { agents: [{ id: 'dev', channels: [{ artifact: 'issue', from: 'ba', label: 'design-approved', gate: 'human' }] }] };
+  assert.equal(classifyKind('design-approved', src), 'gate');
+  // An ungated channel label stays a plain agent label.
+  const plain = { agents: [{ id: 'dev', channels: [{ artifact: 'pr', from: 'ba', label: 'ready-for-review' }] }] };
+  assert.equal(classifyKind('ready-for-review', plain), 'agent');
+});
+
+// #928 AC8 — the retired name convention carries no meaning of its own any more.
+test('classifyKind: the retired human:* / hold / needs:human names are plain agent labels', () => {
+  assert.equal(classifyKind('human:fdd-approved'), 'agent');
+  assert.equal(classifyKind('hold'), 'agent');
+  assert.equal(classifyKind('needs:human'), 'agent');
+});
+
+test('classifyKind: a gate flag wins over a brake flag on the same label', () => {
+  const reg = { labels: [{ name: 'both', humanGate: true, brake: true }] };
+  assert.equal(classifyKind('both', reg), 'gate');
 });
 
 test('emitter→listener edge forms on a matching label', () => {
@@ -114,19 +139,41 @@ test('dead-end emitter: nothing listens on the emitted label', () => {
   assert.equal(e.label, 'stage:done');
 });
 
+// #928 AC1/AC2 — edge origination is flag-driven; both labels carry ordinary,
+// action-style names with no `human:` prefix anywhere.
 test('human gate and brake edges originate from null and are tagged', () => {
+  const g = buildProcessGraph([
+    { id: 'rel', triggers: [
+      { id: 't1', type: 'github-event', labelFilter: 'approved-for-go-live' },
+      { id: 't2', type: 'github-event', labelFilter: 'human-decision-required' },
+    ] },
+  ], { labels: [
+    { name: 'approved-for-go-live', humanGate: true, brake: false },
+    { name: 'human-decision-required', humanGate: false, brake: true },
+  ] });
+  const gate = g.edges.find(e => e.label === 'approved-for-go-live');
+  assert.equal(gate.from, null);
+  assert.equal(gate.kind, 'gate');
+  const brake = g.edges.find(e => e.label === 'human-decision-required');
+  assert.equal(brake.kind, 'brake');
+  assert.deepEqual(g.gates, [{ label: 'approved-for-go-live', humanOnly: true }]);
+});
+
+// #928 AC8 — without the flags the very same wiring is plain agent routing:
+// two orphan listeners, no gate, no brake.
+test('the same listeners WITHOUT flags are plain agent labels (name convention retired)', () => {
   const g = buildProcessGraph([
     { id: 'rel', triggers: [
       { id: 't1', type: 'github-event', labelFilter: 'human:go-live-approved' },
       { id: 't2', type: 'github-event', labelFilter: 'hold' },
     ] },
   ]);
-  const gate = g.edges.find(e => e.label === 'human:go-live-approved');
-  assert.equal(gate.from, null);
-  assert.equal(gate.kind, 'gate');
-  const brake = g.edges.find(e => e.label === 'hold');
-  assert.equal(brake.kind, 'brake');
-  assert.deepEqual(g.gates, [{ label: 'human:go-live-approved', humanOnly: true }]);
+  assert.deepEqual(g.gates, []);
+  for (const label of ['human:go-live-approved', 'hold']) {
+    const e = g.edges.find(x => x.label === label);
+    assert.equal(e.kind, 'agent');
+    assert.equal(e.orphan, true);
+  }
 });
 
 test('cron/once become self-loop timer edges; node is not an entry point if it has a github trigger', () => {
@@ -158,17 +205,30 @@ test('one emitter feeding two listeners yields two edges', () => {
   assert.equal(edgesBetween(g, 'src', 'l2').length, 1);
 });
 
-test('label registry tags gates and brakes', () => {
+test('label registry tags gates and brakes from the config flags', () => {
   const g = buildProcessGraph([
     { id: 'a', emits: ['stage:build'], triggers: [
-      { id: 't', type: 'github-event', labelFilter: 'human:td-approved' },
-      { id: 'h', type: 'github-event', labelFilter: 'hold' },
+      { id: 't', type: 'github-event', labelFilter: 'td-approved' },
+      { id: 'h', type: 'github-event', labelFilter: 'human-decision-required' },
     ] },
-  ]);
+  ], { labels: [
+    { name: 'td-approved', humanGate: true, brake: false },
+    { name: 'human-decision-required', humanGate: false, brake: true },
+  ] });
   const byName = Object.fromEntries(g.labels.map(l => [l.name, l]));
-  assert.equal(byName['human:td-approved'].humanGate, true);
-  assert.equal(byName['hold'].brake, true);
+  assert.equal(byName['td-approved'].humanGate, true);
+  assert.equal(byName['human-decision-required'].brake, true);
   assert.equal(byName['stage:build'].humanGate, false);
+});
+
+// #928 AC6 — a flagged label survives the export round-trip even when no port
+// references it yet, so re-importing the bundle does not silently lose the gate.
+test('label registry echoes back unreferenced registry entries with their flags', () => {
+  const g = buildProcessGraph([{ id: 'a', triggers: [] }], {
+    labels: [{ name: 'approved-for-dispatch', humanGate: true, brake: false }],
+  });
+  const byName = Object.fromEntries(g.labels.map(l => [l.name, l]));
+  assert.deepEqual(byName['approved-for-dispatch'], { name: 'approved-for-dispatch', humanGate: true, brake: false });
 });
 
 test('template level: shipped dispatcher carries its role-level emits onto its node', () => {
@@ -250,14 +310,33 @@ test('lint: competing stage labels', () => {
   assert.ok(g.lints.some(l => l.code === 'competing-stage' && l.nodeId === 'a'));
 });
 
-test('lint: gate-violation when an agent emits a human:* label (error severity)', () => {
+// #928 AC2 — gate-violation fires on the FLAG, independent of the label's name.
+test('lint: gate-violation when an agent emits a flagged gate label (error severity)', () => {
   const g = buildProcessGraph([
-    { id: 'a', emits: ['human:fdd-approved'], triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['x'] }] },
-  ]);
+    { id: 'a', emits: ['fdd-approved'], triggers: [{ id: 't', type: 'github-event', events: ['x'] }] },
+  ], { labels: [{ name: 'fdd-approved', humanGate: true, brake: false }] });
   const v = g.lints.find(l => l.code === 'gate-violation');
   assert.ok(v);
   assert.equal(v.severity, 'error');
   assert.equal(v.nodeId, 'a');
+});
+
+test("lint: gate-violation also fires for a gate declared only by a channel's gate: 'human'", () => {
+  const g = buildProcessGraph([
+    { id: 'a', emits: ['design-approved'], triggers: [] },
+    { id: 'b', triggers: [], channels: [{ artifact: 'issue', from: 'a', label: 'design-approved', gate: 'human' }] },
+  ]);
+  assert.ok(g.lints.some(l => l.code === 'gate-violation' && l.nodeId === 'a' && l.label === 'design-approved'));
+});
+
+// #928 AC3 — a brake is AGENT-applied (the reworker pausing the loop for a human
+// decision), so emitting it must stay clean: no gate-violation, no dead-end.
+test('lint: a brake label emitted by an agent trips NOTHING', () => {
+  const g = buildProcessGraph([
+    { id: 'reworker', emits: ['human-decision-required'], triggers: [] },
+  ], { labels: [{ name: 'human-decision-required', humanGate: false, brake: true }] });
+  assert.ok(!g.lints.some(l => l.code === 'gate-violation'));
+  assert.ok(!g.lints.some(l => l.code === 'dead-end-emitter'));
 });
 
 test('lint: a clean wired pair produces no lints', () => {
@@ -409,20 +488,35 @@ test('channel without a routing label contributes no label-listen key', () => {
   assert.ok(g.lints.some(l => l.code === 'dead-end-emitter' && l.label === 'whatever'));
 });
 
-test('a human-approval gate (downstream waits on human:*) renders as a gate and never trips gate-violation', () => {
-  // The #346 shape: downstream listens on the gate label; nobody emits it.
+test('a human-approval gate (downstream waits on a flagged label) renders as a gate and never trips gate-violation', () => {
+  // The #346 shape: downstream listens on the gate label; nobody emits it. The
+  // label is named as a plain action (#928/#927) — the flag makes it a gate.
   const g = buildProcessGraph([
     { id: 'release', triggers: [
-      { id: 'gate', type: 'github-event', from: 'humans', events: ['issues.labeled'], labelFilter: 'human:go-live-approved' },
+      { id: 'gate', type: 'github-event', events: ['issues.labeled'], labelFilter: 'approved-for-go-live' },
     ] },
-  ]);
-  const gateEdge = g.edges.find(e => e.label === 'human:go-live-approved');
+  ], { labels: [{ name: 'approved-for-go-live', humanGate: true, brake: false }] });
+  const gateEdge = g.edges.find(e => e.label === 'approved-for-go-live');
   assert.equal(gateEdge.kind, 'gate');
   assert.equal(gateEdge.from, null);
-  assert.deepEqual(g.gates, [{ label: 'human:go-live-approved', humanOnly: true }]);
+  assert.deepEqual(g.gates, [{ label: 'approved-for-go-live', humanOnly: true }]);
   assert.ok(!g.lints.some(l => l.code === 'gate-violation'));
   // and it is NOT an orphan-listener (gates are external, not orphans)
   assert.ok(!g.lints.some(l => l.code === 'orphan-listener'));
+});
+
+// #928 edge case — a label that is BOTH listened-for and flagged humanGate keeps
+// its human-origin edge; the agent that also emits it does not get an agent edge.
+test('a listened-for label flagged humanGate keeps the human-origin edge', () => {
+  const g = buildProcessGraph([
+    { id: 'rogue', emits: ['approved-for-go-live'], triggers: [] },
+    { id: 'release', triggers: [{ id: 'g', type: 'github-event', events: ['issues.labeled'], labelFilter: 'approved-for-go-live' }] },
+  ], { labels: [{ name: 'approved-for-go-live', humanGate: true, brake: false }] });
+  const edges = g.edges.filter(e => e.label === 'approved-for-go-live');
+  assert.equal(edges.length, 1);
+  assert.equal(edges[0].from, null);
+  assert.equal(edges[0].kind, 'gate');
+  assert.ok(!g.edges.some(e => e.from === 'rogue' && e.label === 'approved-for-go-live'));
 });
 
 
@@ -592,20 +686,23 @@ test('lint: same-label-multiple-outcomes does NOT fire under anyOf (both branche
   assert.ok(!g.lints.some(l => l.code === 'same-label-multiple-outcomes'));
 });
 
-test('lint: human-label-as-outcome fires (error) for a human:* or brake outcome label', () => {
+test('lint: human-label-as-outcome fires (error) for a FLAGGED gate outcome label', () => {
   const human = buildProcessGraph([
-    withOutcomes('rogue', 'anyOf', [{ id: 'approve', actions: [{ type: 'setLabel', label: 'human:approved' }] }]),
-  ]);
+    withOutcomes('rogue', 'anyOf', [{ id: 'approve', actions: [{ type: 'setLabel', label: 'approved-for-dispatch' }] }]),
+  ], { labels: [{ name: 'approved-for-dispatch', humanGate: true, brake: false }] });
   const hlo = human.lints.find(l => l.code === 'human-label-as-outcome');
-  assert.ok(hlo && hlo.severity === 'error' && hlo.nodeId === 'rogue' && hlo.label === 'human:approved' && hlo.outcome === 'approve');
-  // The human label is filtered out of the emit index, so gate-violation must not
+  assert.ok(hlo && hlo.severity === 'error' && hlo.nodeId === 'rogue' && hlo.label === 'approved-for-dispatch' && hlo.outcome === 'approve');
+  // The gate label is filtered out of the emit index, so gate-violation must not
   // also fire (human-label-as-outcome is its outcome-port successor).
   assert.ok(!human.lints.some(l => l.code === 'gate-violation'));
 
+  // #928 AC3 — a BRAKE outcome is legitimate (the reworker pausing the loop) and
+  // must NOT fire human-label-as-outcome any more.
   const brake = buildProcessGraph([
-    withOutcomes('rogue', 'anyOf', [{ id: 'pause', actions: [{ type: 'setLabel', label: 'hold' }] }]),
-  ]);
-  assert.ok(brake.lints.some(l => l.code === 'human-label-as-outcome' && l.severity === 'error'));
+    withOutcomes('rogue', 'anyOf', [{ id: 'pause', actions: [{ type: 'setLabel', label: 'human-decision-required' }] }]),
+  ], { labels: [{ name: 'human-decision-required', humanGate: false, brake: true }] });
+  assert.ok(!brake.lints.some(l => l.code === 'human-label-as-outcome'));
+  assert.ok(!brake.lints.some(l => l.code === 'gate-violation'));
 
   // A clean, non-gate outcome label → no human-label-as-outcome.
   const clean = buildProcessGraph([

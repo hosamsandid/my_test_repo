@@ -153,9 +153,18 @@ finished a stage; another agent's trigger **listens** on that label (`labelFilte
 wakes up. This is the primary hand-off mechanism between agents in a flow.
 
 ### Human approval gate
-An edge in a flow that waits for a *person* to apply an approving label
-(`human:<something>`) before work flows on. No agent can emit such a label, which is
-exactly what makes it a gate rather than a suggestion.
+An edge in a flow that waits for a *person* to apply an approving label before work
+flows on. No agent can emit such a label, which is exactly what makes it a gate rather
+than a suggestion. Which labels are gates is **configuration, not a naming
+convention** (#928): the flow's `labels[]` registry flags them `humanGate: true` (or a
+GitHub channel gates its routing label with `gate: 'human'`), so a gate can carry an
+ordinary action-style name like `approved-for-dispatch`.
+
+### Brake
+A label that **pauses** the automated loop pending a human decision — flagged
+`brake: true` in the flow's `labels[]` registry. Unlike a gate, a brake *is*
+agent-applied (e.g. a reworker setting `human-decision-required` when review
+feedback is contradictory), so declaring it as an outcome is legitimate.
 
 ---
 

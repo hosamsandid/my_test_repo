@@ -16,7 +16,10 @@ const tpl = (id) => JSON.parse(fs.readFileSync(path.join(CATALOG, id + '.json'),
 // warning lints (info allowed). Mirrors the canvas' unified-graph path.
 function nonInfoLints(bundle) {
   const flow = processTemplateToUnified(bundle);
-  const g = buildUnifiedGraph(flow.nodes, flow.edges);
+  // The woven bundle's own `labels[]` registry is the authoritative gate/brake
+  // source (#928) — thread it in exactly as POST /api/flows/graph does, or the
+  // weaver's human-gated stage boundaries look like orphan listeners.
+  const g = buildUnifiedGraph(flow.nodes, flow.edges, { labels: flow.labels });
   return g.lints.filter(l => l.severity === 'error' || l.severity === 'warning');
 }
 
@@ -218,4 +221,39 @@ test('stripWeaverBlock removes the wiring notes for round-trips', () => {
   const author = bundle.roles.find(r => r.id === 'build-author');
   assert.ok(author.systemPrompt.includes('## Wiring notes'));
   assert.ok(!stripWeaverBlock(author.systemPrompt).includes('## Wiring notes'));
+});
+
+// #928 AC6 — the weaver registers `humanGate` on every gated stage boundary and
+// puts `gate: 'human'` on the consuming channel, so the woven bundle classifies
+// its gates from the FLAGS alone (no `human:` prefix is ever produced) and stays
+// lint-clean under the flag model.
+test('#928: woven gates come from the flags, not the label name, and stay lint-clean', () => {
+  const { bundle } = weaveProcess({
+    name: 'Flagged',
+    stages: [
+      { name: 'Requirements', roles: [tpl('issue-triage'), tpl('business-analyst')] },
+      { name: 'Build', roles: [tpl('developer'), tpl('code-reviewer')] },
+    ],
+  });
+  const gated = bundle.labels.filter(l => l.humanGate);
+  assert.ok(gated.length >= 1, 'the weaver must register at least one human gate');
+  for (const l of gated) {
+    assert.ok(!l.name.startsWith('human:'), `woven gate ${l.name} must not use the retired prefix`);
+  }
+  // Each gated label is also carried as a channel gate on its consumer.
+  for (const l of gated) {
+    assert.ok(
+      bundle.roles.some(r => (r.channels || []).some(c => c.label === l.name && c.gate === 'human')),
+      `gate ${l.name} must ride a channel gate: 'human'`,
+    );
+  }
+  // Flag-driven classification: the gate renders from @github, and dropping the
+  // registry would demote it to a plain label (proving the name plays no part).
+  const flow = processTemplateToUnified(bundle);
+  const withFlags = buildUnifiedGraph(flow.nodes, flow.edges, { labels: flow.labels });
+  for (const l of gated) {
+    const e = withFlags.edges.find(x => x.label === l.name && x.on === 'label');
+    if (e) assert.equal(e.gate, 'human', `${l.name} must render as a gate`);
+  }
+  assert.deepEqual(nonInfoLints(bundle), []);
 });

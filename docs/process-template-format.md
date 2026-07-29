@@ -144,8 +144,10 @@ vs *revisions required*, a dispatcher's *route to Developer 1 / 2 / hold*.
   `openPr`, `openIssue` (absorb `github.producesPr/producesIssue`), `none`
   (terminal, no outbound signal). An option may carry several actions.
 - **Validation.** `mode` must be `exactlyOne` | `anyOf`; option `id`s are unique;
-  action types must be known; a `setLabel` label may **not** be a `human:*` /
-  brake (`hold`, `needs:human`) label (same gate convention as `gate-violation`).
+  action types must be known; a `setLabel` label may **not** be a label the
+  bundle's `labels[]` registry flags `humanGate` (or that a channel gates with
+  `gate: 'human'`) — same rule as `gate-violation`. A `brake` label *is* allowed:
+  a brake pauses the loop and is agent-applied (#928).
   `exactlyOne` with fewer than two options is valid (a phase-5 lint, not an error).
 - **`{{var}}` substitution** applies to `label` and `when` at materialise time,
   exactly like trigger fields.
@@ -189,10 +191,20 @@ vs *revisions required*, a dispatcher's *route to Developer 1 / 2 / hold*.
   beside a derived one — raise the advisory `duplicate-listener` lint. This
   supersedes the old `kind: "pr-review"` construct; legacy `pr-review` roles are
   normalised onto channels on import (`normalizeLegacyReview`).
-- **Gates & brakes are never emitted by agents.** `human:*` gate labels and the
-  brakes (`hold`, `needs:human`) only ever appear as a *listener* `labelFilter`;
-  an agent that declares them in `emits` is flagged `gate-violation` by the lint
-  layer. The materialiser/canvas wires them listener-only.
+- **Gate-ness is configuration, not a naming convention (#928).** `labels[]` is
+  the authoritative registry: `humanGate: true` makes a label a human approval
+  gate, `brake: true` makes it pause the loop — whatever the label is *called*.
+  A channel's `gate: 'human'` gates its routing label the same way. The retired
+  `human:*` prefix and the hardcoded `hold`/`needs:human` brakes carry no meaning
+  of their own; a label with no flag is a plain agent label. Consumers thread the
+  registry into the graph builders (`buildProcessGraph(agents, { labels })`), so a
+  bundle that drops a flag silently loses that gate.
+- **Human gates are never emitted by agents.** A `humanGate` label only ever
+  appears as a *listener* `labelFilter`; an agent that declares it in `emits` is
+  flagged `gate-violation` (error), and in an `outcomes` `setLabel` action
+  `human-label-as-outcome` (error). The materialiser/canvas wires it
+  listener-only. A `brake` label is the deliberate exception — an agent may set it
+  to pause the loop pending a human decision.
 - **No team-specifics in the bundle.** `repo`, credentials and Matrix tokens are
   intentionally excluded; they are bound at materialise time.
 - **Stability.** The format is versioned. Bumping shape ⇒ bump

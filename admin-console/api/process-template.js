@@ -18,6 +18,11 @@
 //     gates:  [ { label } ],
 //     labels: [ { name, humanGate, brake } ],
 //   }
+//
+// `labels[]` is the AUTHORITATIVE gate/brake registry (#928): `humanGate: true`
+// makes the label a human approval gate (no agent may set it) and `brake: true`
+// makes it pause the loop — whatever the label is called. Nothing is inferred
+// from the label's name any more.
 
 const {
   validateOutcomes, normalizeOutcomes, isAuthoredOutcomes, substituteOutcomes,
@@ -154,7 +159,9 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
     if (!r || typeof r.id !== 'string' || !r.id) return { ok: false, error: 'each role needs a string id' };
     if (r.triggers && !Array.isArray(r.triggers)) return { ok: false, error: `role ${r.id}: triggers must be an array` };
     if (r.outcomes !== undefined) {
-      const vo = validateOutcomes(r.outcomes);
+      // The bundle's own label registry is the gate authority (#928) — an outcome
+      // may not set a `humanGate` label, whatever it is named.
+      const vo = validateOutcomes(r.outcomes, { labels: b.labels, agents: b.roles });
       if (!vo.ok) return { ok: false, error: `role ${r.id}: ${vo.error}` };
     }
     if (r.channels !== undefined) {
@@ -171,7 +178,26 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
     }
   }
   if (b.gates && !Array.isArray(b.gates)) return { ok: false, error: 'gates must be an array' };
-  if (b.labels && !Array.isArray(b.labels)) return { ok: false, error: 'labels must be an array' };
+  if (b.labels !== undefined) {
+    if (!Array.isArray(b.labels)) return { ok: false, error: 'labels must be an array' };
+    // The registry carries the authoritative gate/brake flags (#928), so its
+    // shape is checked rather than merely tolerated: a mistyped `humanGate` used
+    // to be harmless (the name decided) and would now silently drop a gate.
+    const seen = new Set();
+    for (const l of b.labels) {
+      if (!l || typeof l !== 'object' || Array.isArray(l)) return { ok: false, error: 'each label must be an object' };
+      if (typeof l.name !== 'string' || !l.name.trim()) return { ok: false, error: 'each label needs a non-empty string name' };
+      const name = l.name.trim();
+      if (seen.has(name)) return { ok: false, error: `duplicate label \`${name}\` in the registry` };
+      seen.add(name);
+      if (l.humanGate !== undefined && typeof l.humanGate !== 'boolean') {
+        return { ok: false, error: `label ${name}: humanGate must be a boolean` };
+      }
+      if (l.brake !== undefined && typeof l.brake !== 'boolean') {
+        return { ok: false, error: `label ${name}: brake must be a boolean` };
+      }
+    }
+  }
   if (b.stages) {
     if (!Array.isArray(b.stages)) return { ok: false, error: 'stages must be an array' };
     if (!b.stages.every(s => typeof s === 'string')) return { ok: false, error: 'stages must be an array of strings' };
@@ -609,8 +635,9 @@ function expandGithubChannels(bundle, _opts = {}) {
         events,
         ...(g.label ? { labelFilter: g.label } : {}),
         // No origin filter: the trigger fires on any matching PR/issue event.
-        // A human gate is expressed purely by the `human:*` label convention
-        // (the labelFilter above) — humans apply it; agents don't, by convention.
+        // A human gate is expressed by the channel's `gate: 'human'` flag and/or
+        // the label registry's `humanGate` flag (#928) — humans apply the label,
+        // agents don't. The listener itself is the same either way.
         channel: true,
         // Informational only (#826): which producers' channels contributed to
         // this consolidated listener. No runtime meaning (the poller ignores it);

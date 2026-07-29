@@ -120,16 +120,31 @@ test('webhook edge (#410): http trigger runs from the @external actor', () => {
   assert.ok(g.nodes.some(n => n.id === '@external' && n.kind === 'actor'));
 });
 
-test('gate flag: human:* listener edge is a gate from the @github actor (a human acts via a GitHub label)', () => {
-  const g = buildUnifiedGraph([
-    { id: 'deployer', triggers: [{ id: 't', type: 'github-event', labelFilter: 'human:approved', emits: [] }] },
-  ]);
-  const e = findEdge(g, x => x.label === 'human:approved');
+// #928 — the gate comes from the label registry's `humanGate` flag threaded in as
+// options.labels; the label itself is named as a plain action.
+test('gate flag: a FLAGGED listener edge is a gate from the @github actor (a human acts via a GitHub label)', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'deployer', triggers: [{ id: 't', type: 'github-event', labelFilter: 'approved-for-deploy', emits: [] }] }],
+    undefined,
+    { labels: [{ name: 'approved-for-deploy', humanGate: true, brake: false }] },
+  );
+  const e = findEdge(g, x => x.label === 'approved-for-deploy');
   assert.ok(e);
   assert.equal(e.on, 'label');
   assert.equal(e.gate, 'human');
   assert.equal(e.from, '@github');
   assert.ok(g.nodes.some(n => n.id === '@github' && n.kind === 'actor'));
+});
+
+test('gate flag: an UNFLAGGED `human:`-named listener is a plain orphan label (#928 AC8)', () => {
+  const g = buildUnifiedGraph([
+    { id: 'deployer', triggers: [{ id: 't', type: 'github-event', labelFilter: 'human:approved', emits: [] }] },
+  ]);
+  const e = findEdge(g, x => x.label === 'human:approved');
+  assert.ok(e);
+  assert.ok(!e.gate, 'the name convention no longer implies a gate');
+  assert.equal(e.from, null);
+  assert.ok(e.orphan);
 });
 
 test('label edges carry the trigger events so the UI can show Issue/PR × added/removed', () => {
@@ -161,9 +176,9 @@ test('two triggers on the SAME label (added vs removed) stay two independent edg
 test('plain label listener with no emitter is an orphan (origin filters removed)', () => {
   // Without a `from` origin filter we can no longer infer that a human sets a
   // plain (non-gate) label, so it renders as an orphan — not a @github edge.
-  // Genuine human-approval GATES (`human:*` labels) still wire from @github via
-  // the label-name convention (see the gate test above); this is only about
-  // arbitrary non-gate labels nobody emits.
+  // Genuine human-approval GATES (labels flagged `humanGate`, #928) still wire
+  // from @github via the config flag (see the gate test above); this is only
+  // about arbitrary non-gate labels nobody emits.
   const g = buildUnifiedGraph([
     { id: 'dev', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'priorisiert', emits: [] }] },
   ]);
@@ -305,11 +320,28 @@ test('dependency-cycle lint fires on a cyclic depends_on', () => {
   assert.ok(cycle.nodes.length >= 2);
 });
 
-test('process lints carried through (gate-violation when an agent emits a gate)', () => {
-  const g = buildUnifiedGraph([
-    { id: 'rogue', emits: ['human:approved'], triggers: [{ id: 't', type: 'github-event', events: ['x'], from: 'any-except-self' }] },
-  ]);
+test('process lints carried through (gate-violation when an agent emits a flagged gate)', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'rogue', emits: ['approved-for-deploy'], triggers: [{ id: 't', type: 'github-event', events: ['x'] }] }],
+    undefined,
+    { labels: [{ name: 'approved-for-deploy', humanGate: true, brake: false }] },
+  );
   assert.ok(lintCodes(g).includes('gate-violation'));
+});
+
+// #928 AC6 — the draft path (POST /api/flows/graph) forwards the bundle's own
+// registry, so a gate authored in a draft renders as a gate end-to-end.
+test('processTemplateToUnified carries labels[] so a bundle gate renders as a gate', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'd', level: 'template',
+    roles: [{ id: 'deployer', triggers: [{ id: 't', type: 'github-event', labelFilter: 'approved-for-deploy' }] }],
+    gates: [], labels: [{ name: 'approved-for-deploy', humanGate: true, brake: false }],
+  };
+  const flow = processTemplateToUnified(bundle);
+  const g = buildUnifiedGraph(flow.nodes, flow.edges, { labels: flow.labels });
+  const e = findEdge(g, x => x.label === 'approved-for-deploy');
+  assert.equal(e.gate, 'human');
+  assert.equal(e.from, '@github');
 });
 
 // ── adapters ─────────────────────────────────────────────────────────────────

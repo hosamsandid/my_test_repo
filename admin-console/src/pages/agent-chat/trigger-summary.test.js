@@ -5,6 +5,7 @@ import {
   eventLabel,
   eventsAreLabelFilterable,
   summarizeGithubEventTrigger,
+  summarizeLoopTrigger,
   GITHUB_EVENT_OPTIONS,
   LABEL_FILTERABLE_EVENTS,
 } from './trigger-summary.js';
@@ -88,4 +89,41 @@ test('constants: options and filterable set are consistent with the map', () => 
       `${key} should be a known event option`,
     );
   }
+});
+
+test('summarizeLoopTrigger: budget + until + verifier joined with · (concept §4.5)', () => {
+  const s = summarizeLoopTrigger({
+    type: 'loop',
+    maxIterations: 25,
+    until: { command: 'npm test' },
+    verify: { agentId: 'team-x-code-reviewer' },
+  });
+  assert.equal(s, '≤25 iter · until: npm test · ✓ team-x-code-reviewer');
+});
+
+test('summarizeLoopTrigger: compacts a token budget (2M / 500k) and prefers agentId over command', () => {
+  assert.equal(
+    summarizeLoopTrigger({ maxIterations: 10, maxTokens: 2_000_000 }),
+    '≤10 iter · ≤2M tok',
+  );
+  assert.equal(
+    summarizeLoopTrigger({ maxIterations: 3, maxTokens: 500_000 }),
+    '≤3 iter · ≤500k tok',
+  );
+  // agentId wins when both are (unusually) present
+  assert.equal(
+    summarizeLoopTrigger({ maxIterations: 1, verify: { command: 'x', agentId: 'rev' } }),
+    '≤1 iter · ✓ rev',
+  );
+});
+
+test('summarizeLoopTrigger: command-form verifier and bare loop fallback', () => {
+  assert.equal(
+    summarizeLoopTrigger({ maxIterations: 5, verify: { command: 'npm run lint' } }),
+    '≤5 iter · ✓ npm run lint',
+  );
+  // No usable fields → never blank
+  assert.equal(summarizeLoopTrigger({ type: 'loop' }), 'loop');
+  assert.equal(summarizeLoopTrigger({}), 'loop');
+  assert.equal(summarizeLoopTrigger(null), 'loop');
 });

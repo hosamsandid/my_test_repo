@@ -56,6 +56,37 @@ export function eventsAreLabelFilterable(events) {
   return (Array.isArray(events) ? events : []).some(e => LABEL_FILTERABLE_EVENTS.has(e));
 }
 
+// Compact one-line summary of a `loop` trigger's stop contract, for the
+// trigger-row header (`TriggerRow` in TriggersPanel.jsx). Surfaces the three
+// loop-defining facts the design calls out (concept §4.5): budget (`≤N iter`,
+// optional token cap), stop condition (`until: <cmd>`) and verifier
+// (`✓ <role|command>`). Framework-free so it has a single source of truth and
+// its own unit tests. Returns a string (never blank — falls back to "loop").
+export function summarizeLoopTrigger(trigger) {
+  const parts = [];
+  const max = trigger?.maxIterations;
+  if (Number.isFinite(max) && max > 0) parts.push(`≤${max} iter`);
+  const maxTokens = trigger?.maxTokens;
+  if (Number.isFinite(maxTokens) && maxTokens > 0) {
+    // Compact large token budgets (2000000 → "2M", 500000 → "500k").
+    const t = maxTokens >= 1_000_000
+      ? `${+(maxTokens / 1_000_000).toFixed(1)}M`
+      : maxTokens >= 1_000
+        ? `${Math.round(maxTokens / 1_000)}k`
+        : String(maxTokens);
+    parts.push(`≤${t} tok`);
+  }
+  const untilCmd = trigger?.until && typeof trigger.until === 'object'
+    ? trigger.until.command : null;
+  if (untilCmd && String(untilCmd).trim()) parts.push(`until: ${String(untilCmd).trim()}`);
+  const v = trigger?.verify;
+  if (v && typeof v === 'object') {
+    if (v.agentId && String(v.agentId).trim()) parts.push(`✓ ${String(v.agentId).trim()}`);
+    else if (v.command && String(v.command).trim()) parts.push(`✓ ${String(v.command).trim()}`);
+  }
+  return parts.length ? parts.join(' · ') : 'loop';
+}
+
 // Structured, human-readable summary of a github-event trigger's firing
 // condition. Returns `{ events: string[] (friendly labels), label: string|null }`.
 // The label is present only when a `labelFilter` is set AND at least one of the

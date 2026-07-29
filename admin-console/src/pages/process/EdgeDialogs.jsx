@@ -674,6 +674,7 @@ export function EditHandoffDialog(props) {
   }
   if (on === 'github') return <EditChannelDialog {...props} />;
   if (on === 'timer') return <EditTimerDialog {...props} />;
+  if (on === 'loop') return <EditLoopDialog {...props} />;
   if (on === 'event') return <EditEventDialog {...props} />;
   if (on === 'webhook') return <EditWebhookDialog {...props} />;
   if (on === 'review' || on === 'manual') return <ReadonlyEdgeDialog {...props} />;
@@ -1096,6 +1097,73 @@ function EditTimerDialog({ edge, toName, ops = liveOps, onClose, onDone, onOpenR
   return (
     <SidePanel open onClose={onClose} title="Schedule" width="520px">
       <p style={hint}>⏰ Schedule → <strong>{toName || to}</strong></p>
+      <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={to} section="inputs" />
+      {loading ? (
+        <Center><Loader2 size={14} style={spin} /> Loading…</Center>
+      ) : !initialValues ? (
+        <span style={errStyle}>{error || 'Trigger not found.'}</span>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+          {error && <span style={errStyle}>{error}</span>}
+          <TriggerForm
+            initialValues={initialValues}
+            agentId={to}
+            ops={ops}
+            allowTypeChange
+            saving={saving}
+            onSave={handleSave}
+            onCancel={onClose}
+            onRemove={handleRemove}
+          />
+        </div>
+      )}
+      <style>{`@keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}`}</style>
+    </SidePanel>
+  );
+}
+
+// ↻ self-edge → agent: edit the loop trigger via the shared chat TriggerForm
+// (#936). Same shell as EditTimerDialog — the form is the single source of
+// truth for every trigger type, so it renders the loop's full stop contract
+// (max iterations / token budget / `until` command / verifier) pre-filled from
+// the clicked self-edge's trigger. `allowTypeChange` lets the loop be turned
+// into another trigger kind; Save patches through the ops adapter so unrelated
+// fields (emits, dataFlow, channel markers) stay intact.
+function EditLoopDialog({ edge, toName, ops = liveOps, onClose, onDone, onOpenRouting }) {
+  const { to, triggerId } = edge;
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [initialValues, setInitialValues] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const tt = await ops.listTriggers(to);
+        if (!alive) return;
+        const t = (Array.isArray(tt) ? tt : []).find(x => x.id === triggerId);
+        setInitialValues(t || null);
+      } catch (e) { if (alive) setError(e.message); }
+      finally { if (alive) setLoading(false); }
+    })();
+    return () => { alive = false; };
+  }, [to, triggerId]);
+
+  async function handleSave(body) {
+    setSaving(true); setError(null);
+    try { await ops.updateTrigger(to, triggerId, body); onDone?.(); }
+    catch (e) { setError(e.message); setSaving(false); }
+  }
+  async function handleRemove() {
+    setSaving(true); setError(null);
+    try { await ops.deleteTrigger(to, triggerId); onDone?.(); }
+    catch (e) { setError(e.message); setSaving(false); }
+  }
+
+  return (
+    <SidePanel open onClose={onClose} title="Loop" width="520px">
+      <p style={hint}>↻ Loop → <strong>{toName || to}</strong> re-arms itself until its stop contract is met.</p>
       <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={to} section="inputs" />
       {loading ? (
         <Center><Loader2 size={14} style={spin} /> Loading…</Center>

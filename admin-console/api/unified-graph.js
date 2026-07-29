@@ -79,7 +79,7 @@ function edgeId(e) {
   // two triggers on the same agent never collapse into one edge. For label
   // edges this keeps e.g. "wake when L is added" and "wake when L is removed"
   // (two triggers on the same label) as two independently editable edges.
-  const trig = (e.triggerId && (e.on === 'event' || e.on === 'webhook' || e.on === 'timer' || e.on === 'label'))
+  const trig = (e.triggerId && (e.on === 'event' || e.on === 'webhook' || e.on === 'timer' || e.on === 'label' || e.on === 'loop'))
     ? `#${e.triggerId}` : '';
   return `${kind}|${e.from == null ? '∅' : e.from}→${e.to == null ? '∅' : e.to}|${tail}${trig}`;
 }
@@ -113,6 +113,17 @@ function processEdgeToUnified(e) {
       ? { cron: e.label } : { at: e.label };
     // The scheduler is the source (#410) — no more self-loop.
     return { from: ACTORS.timer, to: e.to, on: 'timer', label: e.label, schedule, triggerId: e.triggerId };
+  }
+  if (e.kind === 'loop') {
+    // Loop self-edge (#936): unlike the cron `timer` (rerouted from the @timer
+    // actor), a loop is genuinely the agent re-arming *itself*, so it stays a
+    // self-edge (from === to). The canvas renders it as a stop-contract badge
+    // inside the agent card (following the cron precedent, where schedules also
+    // render in-card rather than as a drawn line).
+    return {
+      from: e.from, to: e.to, on: 'loop', triggerId: e.triggerId,
+      ...(e.loop ? { loop: e.loop } : {}),
+    };
   }
   if (e.kind === 'webhook') {
     // http trigger — fired by an external system via the webhook server (#410).

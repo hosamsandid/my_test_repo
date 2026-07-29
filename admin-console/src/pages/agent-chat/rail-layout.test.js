@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { COLLAPSED_RAIL_WIDTH, resolveRailWidths } from './rail-layout.js';
+import {
+  COLLAPSED_RAIL_WIDTH,
+  OVERFLOW_BTN_WIDTH,
+  fitTabCount,
+  resolveRailWidths,
+} from './rail-layout.js';
 
 // Roomy container: nothing needs clamping.
 const WIDE = 2000;
@@ -101,4 +106,77 @@ test('before the first measure the collapsed rail still renders collapsed', () =
 
 test('the icon-rail budget matches the --eb-sidebar-collapsed token', () => {
   assert.equal(COLLAPSED_RAIL_WIDTH, 56);
+});
+
+// --- fitTabCount -----------------------------------------------------------
+// The five real tabs, roughly to scale (icon + label + padding); Sessions is
+// the widest because it can carry a count badge.
+const TABS = [104, 108, 96, 82, 108];
+const CLOSE = 40;
+const TOTAL = TABS.reduce((a, b) => a + b, 0); // 498
+
+test('every tab is shown when the strip has room for all of them plus the close button', () => {
+  assert.equal(fitTabCount({ stripWidth: 800, tabWidths: TABS, closeWidth: CLOSE }), TABS.length);
+});
+
+test('an exact fit does not spill a tab into the overflow menu', () => {
+  // No overflow menu is needed, so no budget is reserved for the toggle.
+  assert.equal(fitTabCount({ stripWidth: TOTAL + CLOSE, tabWidths: TABS, closeWidth: CLOSE }), TABS.length);
+});
+
+test('one pixel short of an exact fit spills, and pays for the overflow toggle', () => {
+  const count = fitTabCount({ stripWidth: TOTAL + CLOSE - 1, tabWidths: TABS, closeWidth: CLOSE });
+  assert.ok(count < TABS.length, 'expected at least one tab to spill');
+  // budget = 497 - 40 - 40 = 417 → 104+108+96 = 308 fit, +82 = 390 fit, +108 over.
+  assert.equal(count, 4);
+});
+
+test('a narrow strip keeps only the tabs that fit inside the reserved budget', () => {
+  // budget = 300 - 40 - 40 = 220 → 104 + 108 = 212 fits, +96 would be 308.
+  assert.equal(fitTabCount({ stripWidth: 300, tabWidths: TABS, closeWidth: CLOSE }), 2);
+});
+
+test('AC1: a strip too narrow for even one tab still reports one, so a "..." toggle appears', () => {
+  // The regression in #924 showed every tab clipped with no overflow access;
+  // the fit must always leave a real tab beside the toggle, never zero.
+  for (const stripWidth of [0, 40, 90, 120]) {
+    const count = fitTabCount({ stripWidth, tabWidths: TABS, closeWidth: CLOSE });
+    assert.equal(count, 1, `stripWidth=${stripWidth}`);
+    assert.ok(count < TABS.length, `stripWidth=${stripWidth} must still overflow`);
+  }
+});
+
+test('a strip measured before layout (width 0) overflows rather than rendering every tab', () => {
+  assert.ok(fitTabCount({ stripWidth: 0, tabWidths: TABS, closeWidth: CLOSE }) < TABS.length);
+});
+
+test('the collapsed rail width cannot fit the tab strip, so expanding always re-measures wider', () => {
+  // Mirrors the expand animation: the first measure happens at the collapsed
+  // width and must converge upwards as the transition advances.
+  const atCollapsed = fitTabCount({ stripWidth: COLLAPSED_RAIL_WIDTH, tabWidths: TABS, closeWidth: CLOSE });
+  const atExpanded = fitTabCount({ stripWidth: 520, tabWidths: TABS, closeWidth: CLOSE });
+  assert.equal(atCollapsed, 1);
+  assert.ok(atExpanded > atCollapsed);
+});
+
+test('a wider close button eats into the tab budget', () => {
+  const roomy = fitTabCount({ stripWidth: 400, tabWidths: TABS, closeWidth: 0 });
+  const tight = fitTabCount({ stripWidth: 400, tabWidths: TABS, closeWidth: 120 });
+  assert.ok(tight < roomy, `expected ${tight} < ${roomy}`);
+});
+
+test('a growing tab (the Sessions badge appearing) can push a tab into overflow', () => {
+  const strip = TOTAL + CLOSE; // exactly fits today
+  assert.equal(fitTabCount({ stripWidth: strip, tabWidths: TABS, closeWidth: CLOSE }), TABS.length);
+  const withBadge = [TABS[0] + 22, ...TABS.slice(1)];
+  assert.ok(fitTabCount({ stripWidth: strip, tabWidths: withBadge, closeWidth: CLOSE }) < TABS.length);
+});
+
+test('no tabs at all means nothing to show and nothing to overflow', () => {
+  assert.equal(fitTabCount({ stripWidth: 400, tabWidths: [], closeWidth: CLOSE }), 0);
+  assert.equal(fitTabCount({ stripWidth: 400, tabWidths: undefined, closeWidth: CLOSE }), 0);
+});
+
+test('the overflow toggle budget is a positive width', () => {
+  assert.ok(OVERFLOW_BTN_WIDTH > 0);
 });

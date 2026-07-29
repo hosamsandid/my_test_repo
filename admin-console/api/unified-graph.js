@@ -40,8 +40,6 @@
 
 const {
   buildProcessGraph,
-  isHumanGate,
-  isBrake,
 } = require('./process-graph');
 const {
   buildProcessTemplate,
@@ -139,7 +137,10 @@ function processEdgeToUnified(e) {
   // structured outcome; carry the outcome option id so the canvas can title the
   // edge with it and clicking focuses the Routing tab on that outcome.
   if (e.outcome) u.outcome = e.outcome;
-  if (e.kind === 'gate' || e.kind === 'brake' || isHumanGate(e.label) || isBrake(e.label)) {
+  // `kind` is already the authoritative, flag-derived classification (#928) —
+  // no name re-match here (the old `isHumanGate(e.label) || isBrake(e.label)`
+  // fallback keyed off the `human:*` convention and is gone).
+  if (e.kind === 'gate' || e.kind === 'brake') {
     u.gate = 'human';
   }
   // Human-approval gates and brakes have no agent emitter (from: null in the
@@ -164,15 +165,19 @@ function processEdgeToUnified(e) {
  * @param {Array} [edges] - explicit UnifiedEdge[] (e.g. on:'manual' hand-offs,
  *   operator-drawn dependencies). Derived label/timer/review/event/dependency/
  *   artifact edges are computed here and merged in.
+ * @param {object} [options]
+ * @param {Array}  [options.labels] - the authoritative label registry (#928),
+ *   forwarded to buildProcessGraph so gate/brake classification reads the
+ *   `humanGate`/`brake` flags instead of the label's name.
  * @returns {{ nodes, edges, gates, labels, lints }}
  */
-function buildUnifiedGraph(nodes, edges) {
+function buildUnifiedGraph(nodes, edges, options) {
   const list = asArray(nodes);
   const nodeIds = new Set(list.map(n => n.id));
 
   // 1) Process-style edges (label / timer / review / event) + gates/labels +
   //    the Process lints — reuse the existing builder verbatim.
-  const pg = buildProcessGraph(list);
+  const pg = buildProcessGraph(list, { labels: options && options.labels });
   const pgNodeById = new Map(pg.nodes.map(n => [n.id, n]));
 
   // Output nodes = Process node view enriched with the BP data-flow ports,

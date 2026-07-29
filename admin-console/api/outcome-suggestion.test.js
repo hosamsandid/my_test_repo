@@ -24,9 +24,20 @@ test('scoreShape: unremarkable text is generic', () => {
 });
 
 // ── harvestLabels ──────────────────────────────────────────────────────────────
-test('harvestLabels: pulls backtick label tokens, drops gate/brake labels', () => {
-  const labels = harvestLabels('apply `ready-to-merge`, else `revisions-required`; never `hold` or `human:approve`');
-  assert.deepEqual(labels, ['ready-to-merge', 'revisions-required']);
+// Gate-ness is CONFIGURATION (#928): a token is dropped because the registry
+// flags it `humanGate`, never because of how it is spelled.
+test('harvestLabels: pulls backtick label tokens, drops flagged human-gate labels', () => {
+  const registry = { labels: [{ name: 'approved-for-dispatch', humanGate: true }] };
+  const text = 'apply `ready-to-merge`, else `revisions-required`; never `approved-for-dispatch`';
+  assert.deepEqual(harvestLabels(text, registry), ['ready-to-merge', 'revisions-required']);
+});
+test('harvestLabels: an unflagged `human:`-looking token is a plain label now (#928 AC8)', () => {
+  assert.deepEqual(harvestLabels('apply `human:approve` then `hold`'), ['human:approve', 'hold']);
+});
+test('harvestLabels: a brake label is NOT dropped — a brake is agent-appliable (#928 AC3)', () => {
+  const registry = { labels: [{ name: 'human-decision-required', brake: true }] };
+  assert.deepEqual(harvestLabels('escalate with `human-decision-required`', registry),
+    ['human-decision-required']);
 });
 test('harvestLabels: dedups and caps at 6', () => {
   const labels = harvestLabels('`a` `a` `b` `c` `d` `e` `f` `g` `h`');
@@ -126,9 +137,19 @@ test('parse: missing actions default to a terminal none', () => {
   const s = parseOutcomeSuggestion('{"mode":"anyOf","options":[{"id":"x","title":"X"}]}');
   assert.equal(s.options[0].actions[0].type, 'none');
 });
-test('parse: rejects a forbidden gate label (data-model validator is the gate)', () => {
-  const txt = JSON.stringify({ mode: 'anyOf', options: [{ id: 'g', actions: [{ type: 'setLabel', label: 'human:approve' }] }] });
-  assert.equal(parseOutcomeSuggestion(txt), null);
+test('parse: rejects a FLAGGED gate label (data-model validator is the gate)', () => {
+  const txt = JSON.stringify({ mode: 'anyOf', options: [{ id: 'g', actions: [{ type: 'setLabel', label: 'approved-for-dispatch' }] }] });
+  assert.equal(parseOutcomeSuggestion(txt, { labels: [{ name: 'approved-for-dispatch', humanGate: true }] }), null);
+  // Without the flag the very same label is a legitimate agent outcome (#928 AC8).
+  assert.ok(parseOutcomeSuggestion(txt));
+});
+test('buildOutcomeSuggestionRequest names the flagged gate labels the model must avoid (#928)', () => {
+  const req = buildOutcomeSuggestionRequest('Dispatcher', 'routes work',
+    [{ name: 'approved-for-dispatch', humanGate: true }, { name: 'ready-for-review', humanGate: false }]);
+  const text = req.messages[0].content;
+  assert.match(text, /"approved-for-dispatch"/);
+  assert.ok(!text.includes('"ready-for-review"'), 'a non-gate label must not be forbidden');
+  assert.ok(!text.includes('human:'), 'the retired name convention must not be taught to the model');
 });
 test('parse: rejects garbage / non-JSON / missing mode', () => {
   assert.equal(parseOutcomeSuggestion('not json'), null);

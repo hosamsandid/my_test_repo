@@ -5508,6 +5508,17 @@ class Orchestrator {
         // live graph reproduces a materialised draft's stage layout.
         ...(Array.isArray(extra.stages) && extra.stages.length
           ? { stages: extra.stages.filter(s => typeof s === 'string') } : {}),
+        // Authoritative gate/brake label registry (#928). Gate-ness is
+        // configuration, not a naming convention, and the LIVE graph has no
+        // bundle to read `labels[]` from — so the team agent holds the registry
+        // (same reasoning as `stages` above) and the graph builders read the
+        // `humanGate`/`brake` flags off it.
+        ...(Array.isArray(extra.labels) && extra.labels.length
+          ? {
+            labels: extra.labels
+              .filter(l => l && typeof l.name === 'string' && l.name.trim())
+              .map(l => ({ name: l.name.trim(), humanGate: !!l.humanGate, brake: !!l.brake })),
+          } : {}),
         enabled: true,
       };
       saveAgentConfig(id, teamConfig);
@@ -10420,6 +10431,10 @@ async function main() {
           skipFirstMember,
           // For role: 'team' — ordered stage names for the process graph layout.
           stages,
+          // For role: 'team' — the gate/brake label registry (#928): the
+          // authoritative source for which labels are human approval gates
+          // (`humanGate`) and which pause the loop (`brake`).
+          labels,
           // Initial skill grant (team-owned skills, skill-grants.js): the
           // team's active set / the standalone agent's own list. The
           // environment no longer contributes skills.
@@ -10458,6 +10473,7 @@ async function main() {
         if (skipFirstMember) extra.skipFirstMember = true;
         if (teamId) extra.teamId = teamId;
         if (Array.isArray(stages)) extra.stages = stages;
+        if (Array.isArray(labels)) extra.labels = labels;
         if (Array.isArray(skills)) extra.skills = skills;
         const result = await orchestrator.createAgent(id, displayName, role, systemPrompt, environmentId, extra);
         res.writeHead(201, { 'Content-Type': 'application/json' });

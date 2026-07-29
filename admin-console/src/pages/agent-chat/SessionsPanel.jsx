@@ -523,92 +523,98 @@ export default function SessionsPanel({
             {/* Historical-session toolbar: read-only meta + return-to-live. */}
             <div style={{
               display: 'flex',
-              alignItems: 'center',
-              gap: 'var(--eb-space-2)',
+              flexDirection: 'column',
+              gap: 'var(--eb-space-1)',
               padding: 'var(--eb-space-2) var(--eb-space-4)',
               borderBottom: '1px solid var(--eb-border-default)',
               fontSize: 'var(--eb-text-xs)',
               color: 'var(--eb-text-muted)',
               flexShrink: 0,
             }}>
-              <History size={12} />
-              <span style={{ fontWeight: 'var(--eb-font-medium)', letterSpacing: 0.3, color: 'var(--eb-text-secondary)' }}>
-                {sourceLabel(historical)}
-              </span>
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                · {historical.label || '(session)'}
-              </span>
-              <span title={`${historical.startedAt || ''} – ${historical.endedAt || ''}`}>
-                · {formatRange(historical.startedAt, historical.endedAt)}
-              </span>
-              <span>· {countLabel(historical)}</span>
-              {!historyPinned && (
-                <span
-                  title="Shown by default because no session is running"
-                  style={{
-                    padding: '1px 6px',
-                    borderRadius: 'var(--eb-radius-full)',
-                    background: 'var(--eb-bg-app)',
-                    border: '1px solid var(--eb-border-default)',
-                    color: 'var(--eb-text-muted)',
-                    whiteSpace: 'nowrap',
-                    flexShrink: 0,
-                  }}
-                >
-                  last session
+              {/* Row 1: source type + session name (truncates) + action buttons */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', minWidth: 0 }}>
+                <History size={12} style={{ flexShrink: 0 }} />
+                <span style={{ fontWeight: 'var(--eb-font-medium)', letterSpacing: 0.3, color: 'var(--eb-text-secondary)', flexShrink: 0 }}>
+                  {sourceLabel(historical)}
                 </span>
-              )}
-              <div style={{ flex: 1 }} />
-              {canResumeSession(historical) && onResumeSession && (
-                <button
-                  type="button"
-                  onClick={handleResume}
-                  title="Resume this session and continue the conversation"
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 4,
-                    padding: '4px 8px',
-                    background: 'none',
-                    border: '1px solid var(--eb-accent-primary)',
-                    borderRadius: 'var(--eb-radius-sm)',
-                    color: 'var(--eb-accent-primary)',
-                    cursor: 'pointer',
-                    fontSize: 'var(--eb-text-xs)',
-                    fontFamily: 'inherit',
-                    flexShrink: 0,
-                  }}
-                >
-                  <RotateCcw size={11} />
-                  Resume session
-                </button>
-              )}
-              {/* Only offered when there IS a live session to return to: with
-                  nothing running this view *is* the default (#910). */}
-              {hasActive && (
-                <button
-                  type="button"
-                  onClick={() => selectHistorical(null)}
-                  title="A session is running — return to it"
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 4,
-                    padding: '4px 8px',
-                    background: 'none',
-                    border: '1px solid var(--eb-accent-primary)',
-                    borderRadius: 'var(--eb-radius-sm)',
-                    color: 'var(--eb-accent-primary)',
-                    cursor: 'pointer',
-                    fontSize: 'var(--eb-text-xs)',
-                    fontFamily: 'inherit',
-                    flexShrink: 0,
-                  }}
-                >
-                  <ArrowLeft size={11} />
-                  Live
-                </button>
-              )}
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }}>
+                  · {historical.label || '(session)'}
+                </span>
+                {canResumeSession(historical) && onResumeSession && (
+                  <button
+                    type="button"
+                    onClick={handleResume}
+                    title="Resume this session and continue the conversation"
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 4,
+                      padding: '4px 8px',
+                      background: 'none',
+                      border: '1px solid var(--eb-accent-primary)',
+                      borderRadius: 'var(--eb-radius-sm)',
+                      color: 'var(--eb-accent-primary)',
+                      cursor: 'pointer',
+                      fontSize: 'var(--eb-text-xs)',
+                      fontFamily: 'inherit',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <RotateCcw size={11} />
+                    Resume session
+                  </button>
+                )}
+                {/* Only offered when there IS a live session to return to: with
+                    nothing running this view *is* the default (#910). */}
+                {hasActive && (
+                  <button
+                    type="button"
+                    onClick={() => selectHistorical(null)}
+                    title="A session is running — return to it"
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 4,
+                      padding: '4px 8px',
+                      background: 'none',
+                      border: '1px solid var(--eb-accent-primary)',
+                      borderRadius: 'var(--eb-radius-sm)',
+                      color: 'var(--eb-accent-primary)',
+                      cursor: 'pointer',
+                      fontSize: 'var(--eb-text-xs)',
+                      fontFamily: 'inherit',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <ArrowLeft size={11} />
+                    Live
+                  </button>
+                )}
+              </div>
+              {/* Row 2: timestamp + count + "last session" badge — all nowrap so
+                  the date string never breaks mid-word at narrow widths. */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+                <span style={{ whiteSpace: 'nowrap' }} title={`${historical.startedAt || ''} – ${historical.endedAt || ''}`}>
+                  {formatRange(historical.startedAt, historical.endedAt)}
+                </span>
+                <span style={{ whiteSpace: 'nowrap' }}>· {countLabel(historical)}</span>
+                {!historyPinned && (
+                  <span
+                    title="Shown by default because no session is running"
+                    style={{
+                      padding: '1px 6px',
+                      borderRadius: 'var(--eb-radius-full)',
+                      background: 'var(--eb-bg-app)',
+                      border: '1px solid var(--eb-border-default)',
+                      color: 'var(--eb-text-muted)',
+                      whiteSpace: 'nowrap',
+                      flexShrink: 0,
+                    }}
+                  >
+                    last session
+                  </span>
+                )}
+              </div>
             </div>
             <div style={{ flex: 1, minHeight: 0 }}>
               <SessionLogPanel

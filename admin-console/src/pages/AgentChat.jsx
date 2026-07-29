@@ -629,6 +629,10 @@ export default function AgentChat() {
       }}>
         <RightRail
           agentId={selectedAgent?.id || null}
+          // Outcomes are team hand-offs, so that tab only applies to a team
+          // member (#963 AC1). `/api/matrix/agents` already carries the
+          // membership, so the rail needs no extra fetch to decide.
+          agentTeamId={selectedAgent?.parentTeamId || null}
           roomId={effectiveRoomId}
           hoveredCorrelationId={hoveredCorrelationId}
           onHoverCorrelation={setHoveredCorrelationId}

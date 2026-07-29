@@ -1,9 +1,10 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronRight, ChevronLeft, FolderTree, CalendarClock, Activity, FileText, MoreHorizontal, Brain } from 'lucide-react';
+import { ChevronRight, ChevronLeft, FolderTree, CalendarClock, Activity, FileText, MoreHorizontal, Brain, Target } from 'lucide-react';
 import SessionsPanel from './SessionsPanel';
 import WorkspaceBrowser from './WorkspaceBrowser';
 import TriggersPanel from './TriggersPanel';
+import OutcomesPanel from './OutcomesPanel';
 import PromptPreviewPanel from './PromptPreviewPanel';
 import AgentKnowledgePanel from './AgentKnowledgePanel';
 import { fitTabCount } from './rail-layout';
@@ -12,7 +13,7 @@ import { apiCall } from '../../hooks/useApi';
 const TAB_KEY = 'agentChat.rightRailTab';
 const SESSION_POLL_MS = 3_000;
 
-const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'prompt', 'knowledge'];
+const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'outcomes', 'prompt', 'knowledge'];
 
 /**
  * Tabbed right rail for the agent chat page.
@@ -22,6 +23,9 @@ const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'prompt', 'knowledge'];
  *     shows that session's log + an in-tab Stop (merged Log+Sessions, #543)
  *   - "Workspace" — read-only file tree of /workspace/agents/<id>/
  *   - "Triggers"  — the agent's triggers.json
+ *   - "Outcomes"  — read-only view of the agent's outcome options (#963); the
+ *     outputs counterpart of Triggers, so it sits next to it. Team members only
+ *     (an outcome is a hand-off), hence `agentTeamId` gating the tab.
  *   - "Prompt"    — read-only preview of the composed system prompt
  *   - "Knowledge" — the agent's knowledge base
  *
@@ -45,10 +49,13 @@ const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'prompt', 'knowledge'];
  * remount — see the `collapsed` dependency below (#924).
  */
 export default function RightRail({
-  agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onOpen, onCostUpdate, onContextUpdate,
+  agentId, agentTeamId = null, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onOpen, onCostUpdate, onContextUpdate,
   todoCloseSignal = 0, workspaceRefreshKey = 0, knowledgeRefreshKey = 0, openTabRequest = null,
   onResumeSession, sessionSelectRequest = null, collapsed = false,
 }) {
+  // Outcomes describe hand-offs to teammates, so the tab is meaningless for a
+  // standalone agent (#963 AC1).
+  const showOutcomes = !!agentTeamId;
   const [tab, setTab] = useState(() => {
     try {
       const v = localStorage.getItem(TAB_KEY);
@@ -65,6 +72,17 @@ export default function RightRail({
   useEffect(() => {
     if (openTabRequest && TAB_KEYS.includes(openTabRequest.tab)) setTab(openTabRequest.tab);
   }, [openTabRequest]);
+
+  // The persisted tab outlives the agent selection, so switching from a team
+  // member to a standalone agent can leave 'outcomes' active with no such tab
+  // rendered — fall back to the default rather than showing an empty body.
+  // Gated on `agentId`: until a selection resolves, `agentTeamId` is null for
+  // "not loaded yet" as much as for "not in a team", and reacting to that would
+  // throw away a persisted Outcomes tab on every page load.
+  useEffect(() => {
+    if (!agentId) return;
+    if (!showOutcomes && tab === 'outcomes') setTab('sessions');
+  }, [agentId, showOutcomes, tab]);
 
   // Lightweight poll of just the session COUNT — so the "Sessions" tab
   // can show a badge regardless of which tab is currently visible. The
@@ -96,9 +114,10 @@ export default function RightRail({
     { key: 'sessions', Icon: Activity, label: 'Sessions', badge: sessionCount > 0 ? sessionCount : null },
     { key: 'workspace', Icon: FolderTree, label: 'Workspace' },
     { key: 'triggers', Icon: CalendarClock, label: 'Triggers' },
+    ...(showOutcomes ? [{ key: 'outcomes', Icon: Target, label: 'Outcomes' }] : []),
     { key: 'prompt', Icon: FileText, label: 'Prompt' },
     { key: 'knowledge', Icon: Brain, label: 'Knowledge' },
-  ], [sessionCount]);
+  ], [sessionCount, showOutcomes]);
 
   // --- Overflow measurement ---------------------------------------------
   // We render a hidden, full-width copy of the tab row to learn each tab's
@@ -349,6 +368,11 @@ export default function RightRail({
         <div style={{ display: tab === 'triggers' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           <TriggersPanel agentId={agentId} active={tab === 'triggers'} />
         </div>
+        {showOutcomes && (
+          <div style={{ display: tab === 'outcomes' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+            <OutcomesPanel agentId={agentId} active={tab === 'outcomes'} />
+          </div>
+        )}
         <div style={{ display: tab === 'prompt' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           <PromptPreviewPanel agentId={agentId} embedded />
         </div>

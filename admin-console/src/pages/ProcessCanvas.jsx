@@ -95,7 +95,13 @@ function EditableDraftTitle({ name, onRename }) {
 //   onImportClosed    — tell the parent the import preview was closed without
 //                        continuing/materializing (scope 'import' has no
 //                        underlying graph to fall back to)
-export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingImport, onImportConsumed, onImportClosed }) {
+//   pendingFocus      — { nodeId, tab } deep link (#963): select that node and
+//                        open the given inspector tab once the graph has loaded.
+//                        Fed by the `?node=&tab=` query params, so the right
+//                        rail's read-only Outcomes tab can hand editing over.
+//   onFocusConsumed   — tell the parent the pendingFocus was applied, so it can
+//                        strip the params and not re-apply a stale selection
+export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingImport, onImportConsumed, onImportClosed, pendingFocus = null, onFocusConsumed }) {
   const navigate = useCallback((s) => { if (onNavigate) onNavigate(s); }, [onNavigate]);
 
   const { data: agents } = useApi('/api/agents');
@@ -260,6 +266,27 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
       if (onImportConsumed) onImportConsumed();
     }
   }, [isImportPreview, pendingImport, onImportConsumed]);
+
+  // Deep-link focus (#963): `?node=<id>&tab=routing` selects a node and opens
+  // that inspector tab. Like the import effect above, this is declared AFTER the
+  // scope-reset effect so its selection isn't immediately cleared. It waits for
+  // the graph — the node has to exist in it, and `setSelected` before `setData`
+  // would be overwritten by the render. A one-shot ref keeps a re-render from
+  // fighting the user's next click, and the parent strips the params once
+  // applied.
+  const focusConsumedRef = useRef(null);
+  useEffect(() => {
+    const nodeId = pendingFocus?.nodeId;
+    if (!nodeId || !displayGraph) return;
+    if (focusConsumedRef.current === nodeId) return;
+    if (!(displayGraph.nodes || []).some(n => n.id === nodeId)) return;
+    focusConsumedRef.current = nodeId;
+    setSelectedEdge(null);
+    setSelectedId(nodeId);
+    graphRef.current?.setSelected(nodeId);
+    if (pendingFocus.tab) setRoutingFocus({ tab: pendingFocus.tab });
+    if (onFocusConsumed) onFocusConsumed();
+  }, [pendingFocus, displayGraph, onFocusConsumed]);
 
   const nodeName = (id) =>
     (displayGraph?.nodes || []).find(n => n.id === id)?.displayName || ACTOR_NAMES[id] || id;

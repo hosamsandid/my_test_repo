@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, FileText, Plus, Trash2, Upload } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
@@ -373,6 +373,23 @@ export default function Briefings() {
   // flow (`flow`). `proc` is a team id, 'draft:<id>', or 'import'.
   const proc = searchParams.get('proc');
   const selectedFlow = proc ? null : searchParams.get('flow');
+  // Deep link into a node's inspector tab (#963): `?proc=<team>&node=<agentId>
+  // &tab=routing`, as used by the Agent-Chat right rail's read-only Outcomes tab
+  // to hand editing over to the Flow Editor. Bookmarkable query params rather
+  // than router state, so the link survives a cold navigation (the pattern
+  // established for `?session=` in #642). Consumed once by the graph panel,
+  // which then asks us to strip them so a later scope change or reload doesn't
+  // re-apply a stale selection.
+  const focusNode = searchParams.get('node');
+  const focusTab = searchParams.get('tab');
+  const pendingFocus = useMemo(
+    () => (proc && focusNode ? { nodeId: focusNode, tab: focusTab || 'routing' } : null),
+    [proc, focusNode, focusTab],
+  );
+  const clearPendingFocus = useCallback(() => {
+    if (!focusNode && !focusTab) return;
+    setSearchParams({ proc }, { replace: true });
+  }, [proc, focusNode, focusTab, setSearchParams]);
 
   // The former read-only "Role templates" blueprint scope was removed; an old
   // bookmark on ?proc=templates would otherwise render a broken graph, so drop
@@ -715,6 +732,8 @@ export default function Briefings() {
                 pendingImport={pendingImport}
                 onImportConsumed={clearPendingImport}
                 onImportClosed={closeImportPreview}
+                pendingFocus={pendingFocus}
+                onFocusConsumed={clearPendingFocus}
               />
             </Suspense>
           ) : !selectedAgent ? (

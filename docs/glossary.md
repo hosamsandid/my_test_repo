@@ -292,17 +292,17 @@ dependencies and artifact declarations. Relevant only if you use the `orchestrat
 
 ## What is this thing called?
 
-You will encounter three names in this repository. They are not leftovers of a rename —
-they are three different layers, and knowing which is which saves confusion:
+You will encounter three names in this repository. They are three different layers,
+and knowing which is which saves confusion:
 
 | Name | What it names | Where you see it |
 |---|---|---|
 | **Agent Studio** | the **product** | the UI, the browser tab, the login screen, the README |
-| **vgh-claw** | the **compose project** (container and volume name prefix) | `podman ps`, volume names, `COMPOSE_PROJECT_NAME` in `.env` |
+| **agent-studio** | the **compose project** (default container and volume name prefix) | `podman ps`, volume names, `COMPOSE_PROJECT_NAME` in `.env` |
 | **AEE** / `AEE_*` | the **runtime/env-var namespace** ("Agent Execution Environment") | environment variables, operator docs |
 
-When in doubt: what you *use* is Agent Studio; what you *operate* is the `vgh-claw`
-compose project; what you *configure* uses `AEE_*` variables.
+When in doubt: what you *use* is Agent Studio; what you *operate* is the `agent-studio`
+compose project (the default `COMPOSE_PROJECT_NAME`); what you *configure* uses `AEE_*` variables.
 
 ---
 

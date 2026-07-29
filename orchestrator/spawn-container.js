@@ -6,7 +6,7 @@ const { EventEmitter, PassThrough } = require('stream');
 
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 const AGENT_IMAGE = process.env.AGENT_IMAGE || 'as-agent:latest';
-const COMPOSE_PROJECT = process.env.COMPOSE_PROJECT_NAME || 'vgh-claw-314092';
+const COMPOSE_PROJECT = process.env.COMPOSE_PROJECT_NAME || 'agent-studio-314092';
 const WORKSPACE_VOLUME = process.env.AGENT_WORKSPACE_VOLUME ||
   `${COMPOSE_PROJECT}_agent-pool-workspace`;
 

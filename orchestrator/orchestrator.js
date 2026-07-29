@@ -75,7 +75,7 @@ const BP_EXPLORER_URL = process.env.BP_EXPLORER_URL || "http://bp-explorer:8765"
 // to THIS stack when multiple instances share one Podman store. Configured via
 // AEE_INSTANCE_ID in .env, defaulting to COMPOSE_PROJECT_NAME. MUST resolve to
 // the same value as spawn-container.js's INSTANCE_ID (identical precedence).
-const INSTANCE_ID = process.env.AEE_INSTANCE_ID || process.env.COMPOSE_PROJECT_NAME || 'vgh-claw-314092';
+const INSTANCE_ID = process.env.AEE_INSTANCE_ID || process.env.COMPOSE_PROJECT_NAME || 'agent-studio-314092';
 const INSTANCE_LABEL_KEY = 'aee.instance';
 
 const AGENTS_DIR = "/workspace/agents";
@@ -7203,7 +7203,7 @@ class Orchestrator {
       if (hasChanges) {
         runGit([
           "-c", "user.name=Orchestrator",
-          "-c", "user.email=orchestrator@e-vgh-claw.local",
+          "-c", "user.email=orchestrator@agent-studio.local",
           "commit",
           "-m", `[claim] BP ${cfg.bpSlug || cfg.bpId} by ${stubId}`,
         ]);

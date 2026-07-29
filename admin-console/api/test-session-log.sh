@@ -18,11 +18,11 @@
 #    Because the host bind-mounts `/workspace` into the admin-console container
 #    (see docker-compose.yml), creating the file on the *host* makes it visible
 #    to the API. Adapt as needed for your setup. For a quick host-side test
-#    (without containers) run the API with `WORKSPACE=/tmp/vgh-test`:
+#    (without containers) run the API with `WORKSPACE=/tmp/agent-studio-test`:
 #
-#        mkdir -p /tmp/vgh-test/agents/foo/sessions
+#        mkdir -p /tmp/agent-studio-test/agents/foo/sessions
 #        printf '{"ts":"2026-01-01T00:00:00Z","type":"message.received","from":"@u:local","body":"hi"}\n{"ts":"2026-01-01T00:00:01Z","type":"assistant_text","text":"hello"}\n' \
-#          > '/tmp/vgh-test/agents/foo/sessions/!room123:local.jsonl'
+#          > '/tmp/agent-studio-test/agents/foo/sessions/!room123:local.jsonl'
 #
 # Usage:
 #   ./admin-console/api/test-session-log.sh

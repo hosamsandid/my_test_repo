@@ -3,7 +3,7 @@
 # (#666, docs/e2e-testing-concept.md §5). Best-effort: never abort on a single
 # cleanup failure, so a partial bring-up still gets cleaned. Everything is
 # project-prefixed or instance-labelled, so this cannot touch the developer's
-# normal `vgh-claw` stack.
+# normal `agent-studio` stack.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

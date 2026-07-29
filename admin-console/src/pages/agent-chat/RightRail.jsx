@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { PanelRightClose, FolderTree, CalendarClock, Activity, FileText, MoreHorizontal, Brain } from 'lucide-react';
+import { ChevronRight, ChevronLeft, FolderTree, CalendarClock, Activity, FileText, MoreHorizontal, Brain } from 'lucide-react';
 import SessionsPanel from './SessionsPanel';
 import WorkspaceBrowser from './WorkspaceBrowser';
 import TriggersPanel from './TriggersPanel';
@@ -35,11 +35,19 @@ const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'prompt', 'knowledge'];
  * always render icon + label, and whichever ones no longer fit spill into an
  * overflow "⋯" menu. This adapts to any rail width and any number of tabs
  * (rather than a single hard-coded icons-only breakpoint).
+ *
+ * Collapsing follows the left navigation sidebar's pattern (#905): the owner
+ * animates the rail's width down to `--eb-sidebar-collapsed` and passes
+ * `collapsed`, at which point the rail renders a slim icon-only strip — an
+ * inline expand chevron plus the tab icons, each of which re-expands straight
+ * to its tab. The component stays mounted across a collapse, so the active tab
+ * survives the cycle; the tab bodies do not render while collapsed, so a
+ * hidden rail costs no polling.
  */
 export default function RightRail({
-  agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate,
+  agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onOpen, onCostUpdate, onContextUpdate,
   todoCloseSignal = 0, workspaceRefreshKey = 0, knowledgeRefreshKey = 0, openTabRequest = null,
-  onResumeSession, sessionSelectRequest = null,
+  onResumeSession, sessionSelectRequest = null, collapsed = false,
 }) {
   const [tab, setTab] = useState(() => {
     try {
@@ -81,12 +89,15 @@ export default function RightRail({
     };
   }, [agentId]);
 
+  // `Icon` is the component (not a rendered element) because the tab strip and
+  // the collapsed icon rail render it at different sizes — 13 inline next to a
+  // label, 20 standalone to match the left nav's icon-only items.
   const tabs = useMemo(() => [
-    { key: 'sessions', icon: <Activity size={13} />, label: 'Sessions', badge: sessionCount > 0 ? sessionCount : null },
-    { key: 'workspace', icon: <FolderTree size={13} />, label: 'Workspace' },
-    { key: 'triggers', icon: <CalendarClock size={13} />, label: 'Triggers' },
-    { key: 'prompt', icon: <FileText size={13} />, label: 'Prompt' },
-    { key: 'knowledge', icon: <Brain size={13} />, label: 'Knowledge' },
+    { key: 'sessions', Icon: Activity, label: 'Sessions', badge: sessionCount > 0 ? sessionCount : null },
+    { key: 'workspace', Icon: FolderTree, label: 'Workspace' },
+    { key: 'triggers', Icon: CalendarClock, label: 'Triggers' },
+    { key: 'prompt', Icon: FileText, label: 'Prompt' },
+    { key: 'knowledge', Icon: Brain, label: 'Knowledge' },
   ], [sessionCount]);
 
   // --- Overflow measurement ---------------------------------------------
@@ -175,6 +186,19 @@ export default function RightRail({
   }, [menuOpen]);
   // Close the menu if everything fits again after a resize.
   useEffect(() => { if (overflowTabs.length === 0) setMenuOpen(false); }, [overflowTabs.length]);
+  // An overflow dropdown must not outlive a collapse.
+  useEffect(() => { if (collapsed) setMenuOpen(false); }, [collapsed]);
+
+  if (collapsed) {
+    return (
+      <CollapsedRail
+        tabs={tabs}
+        activeTab={tab}
+        onExpandTo={(key) => { setTab(key); if (onOpen) onOpen(); }}
+        onExpand={onOpen}
+      />
+    );
+  }
 
   return (
     <div style={{
@@ -198,7 +222,7 @@ export default function RightRail({
         {visibleTabs.map((t) => (
           <TabButton
             key={t.key}
-            icon={t.icon}
+            Icon={t.Icon}
             label={t.label}
             badge={t.badge ?? null}
             active={tab === t.key}
@@ -253,7 +277,7 @@ export default function RightRail({
                 {overflowTabs.map((t) => (
                   <MenuItem
                     key={t.key}
-                    icon={t.icon}
+                    Icon={t.Icon}
                     label={t.label}
                     badge={t.badge ?? null}
                     active={tab === t.key}
@@ -270,8 +294,8 @@ export default function RightRail({
         <button
           ref={closeRef}
           onClick={onClose}
-          title="Hide panel (Cmd+Shift+L)"
-          aria-label="Hide panel"
+          title="Collapse panel (Cmd+Shift+L)"
+          aria-label="Collapse panel"
           style={{
             background: 'none',
             border: 'none',
@@ -284,7 +308,9 @@ export default function RightRail({
           onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
           onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
         >
-          <PanelRightClose size={16} />
+          {/* Mirror of the left nav's collapse chevron: the rail sits on the
+              right, so "toward the edge" points right. */}
+          <ChevronRight size={16} />
         </button>
 
         {/* Hidden measurement row: full-width copy of all tabs so we can learn
@@ -299,7 +325,7 @@ export default function RightRail({
           whiteSpace: 'nowrap',
         }}>
           {tabs.map((t) => (
-            <TabButton key={t.key} icon={t.icon} label={t.label} badge={t.badge ?? null} active={false} onClick={() => {}} />
+            <TabButton key={t.key} Icon={t.Icon} label={t.label} badge={t.badge ?? null} active={false} onClick={() => {}} />
           ))}
         </div>
       </div>
@@ -338,7 +364,108 @@ export default function RightRail({
   );
 }
 
-function TabButton({ icon, label, active, onClick, badge = null }) {
+/**
+ * The collapsed rail — the right-hand mirror of the left navigation sidebar's
+ * icon-only rail (`Shell.jsx`): an inline expand chevron at the top, then the
+ * tab icons stacked vertically, each with a native tooltip and centred in the
+ * strip. The active tab is marked with the accent bar on the *content* side
+ * (borderRight here vs. borderLeft in the left nav), and clicking any icon
+ * expands the rail straight to that tab.
+ */
+function CollapsedRail({ tabs, activeTab, onExpandTo, onExpand }) {
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      height: '100%',
+      minWidth: 0,
+      overflow: 'hidden',
+      background: 'var(--eb-bg-surface)',
+      borderLeft: '1px solid var(--eb-border-default)',
+    }}>
+      {/* Expand chevron — same slot the tab strip's collapse button occupies. */}
+      <div style={{
+        height: 'var(--eb-header-height)',
+        flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderBottom: '1px solid var(--eb-border-default)',
+      }}>
+        <button
+          type="button"
+          onClick={onExpand}
+          title="Expand panel (Cmd+Shift+L)"
+          aria-label="Expand panel"
+          style={{
+            background: 'none',
+            border: 'none',
+            color: 'var(--eb-text-secondary)',
+            cursor: 'pointer',
+            padding: 'var(--eb-space-1)',
+            display: 'flex',
+          }}
+          onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
+          onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-secondary)'; }}
+        >
+          {/* Mirror of the left nav's expand chevron: points toward the content. */}
+          <ChevronLeft size={16} />
+        </button>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', padding: 'var(--eb-space-2) 0' }}>
+        {tabs.map(({ key, Icon, label, badge }) => {
+          const active = activeTab === key;
+          return (
+            <button
+              key={key}
+              type="button"
+              onClick={() => onExpandTo(key)}
+              title={label}
+              aria-label={label}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: '100%',
+                padding: 'var(--eb-space-2) 0',
+                background: active ? 'var(--eb-bg-selected)' : 'transparent',
+                border: 'none',
+                borderRight: active ? '3px solid var(--eb-accent-primary)' : '3px solid transparent',
+                color: active ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+                transition: 'background var(--eb-transition-fast)',
+              }}
+              onMouseEnter={e => { if (!active) e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
+              onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent'; }}
+            >
+              {/* Counts don't fit the icon rail, so a badge becomes a dot — the
+                  same treatment the left nav gives its collapsed chat badge. */}
+              <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
+                <Icon size={20} />
+                {badge !== null && badge !== undefined && (
+                  <span style={{
+                    position: 'absolute',
+                    top: -2,
+                    right: -2,
+                    width: 7,
+                    height: 7,
+                    borderRadius: 'var(--eb-radius-full)',
+                    background: 'var(--eb-accent-primary)',
+                    border: '1.5px solid var(--eb-bg-surface)',
+                  }} />
+                )}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TabButton({ Icon, label, active, onClick, badge = null }) {
   return (
     <button
       type="button"
@@ -362,14 +489,14 @@ function TabButton({ icon, label, active, onClick, badge = null }) {
       onMouseEnter={e => { if (!active) e.currentTarget.style.color = 'var(--eb-text-secondary)'; }}
       onMouseLeave={e => { if (!active) e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
     >
-      {icon}
+      <Icon size={13} />
       {label}
       {badge !== null && badge !== undefined && <Badge value={badge} />}
     </button>
   );
 }
 
-function MenuItem({ icon, label, active, onClick, badge = null }) {
+function MenuItem({ Icon, label, active, onClick, badge = null }) {
   return (
     <button
       type="button"
@@ -395,7 +522,7 @@ function MenuItem({ icon, label, active, onClick, badge = null }) {
       onMouseEnter={e => { e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
       onMouseLeave={e => { e.currentTarget.style.background = active ? 'var(--eb-bg-hover)' : 'none'; }}
     >
-      {icon}
+      <Icon size={13} />
       <span style={{ flex: 1 }}>{label}</span>
       {badge !== null && badge !== undefined && <Badge value={badge} />}
     </button>

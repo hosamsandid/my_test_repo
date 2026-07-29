@@ -712,6 +712,20 @@ class LoopTriggerValidation(unittest.TestCase):
         self.assertFalse(entrypoint._validate_loop_trigger(
             {"maxIterations": 5, "minGapSeconds": True})[0])
 
+    def test_maxTokens_optional_positive_int(self):
+        # #934: an optional token budget, positive-int when present.
+        self.assertTrue(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "maxTokens": 2_000_000})[0])
+        self.assertTrue(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5})[0])  # absent is fine
+
+    def test_bad_maxTokens_rejected(self):
+        for bad in (0, -10, 2.5, "1000", True):
+            ok, reason = entrypoint._validate_loop_trigger(
+                {"maxIterations": 5, "maxTokens": bad})
+            self.assertFalse(ok, f"maxTokens={bad!r} should be rejected")
+            self.assertIn("maxTokens", reason)
+
 
 class LoopStopDecision(unittest.TestCase):
     """#932: the pure done-vs-exhausted decision evaluated after each iteration."""
@@ -733,6 +747,74 @@ class LoopStopDecision(unittest.TestCase):
     def test_done_wins_over_exhausted_on_final_iteration(self):
         # Goal met on the last permitted iteration reports done, not exhausted.
         self.assertEqual(entrypoint._loop_stop_decision(25, 25, 0), "done")
+
+    # -- #934: token budget + backstop → paused ------------------------------
+
+    def test_token_budget_exhausted(self):
+        # Cumulative output tokens over the budget → exhausted, below → continue.
+        self.assertEqual(
+            entrypoint._loop_stop_decision(
+                1, 25, 1, tokens_spent=2000, max_tokens=1500),
+            "exhausted")
+        self.assertIsNone(
+            entrypoint._loop_stop_decision(
+                1, 25, 1, tokens_spent=1000, max_tokens=1500))
+
+    def test_token_budget_boundary_is_inclusive(self):
+        # Spend == budget is "exceeded" (>=), matching the concept wording.
+        self.assertEqual(
+            entrypoint._loop_stop_decision(
+                1, 25, None, tokens_spent=1500, max_tokens=1500),
+            "exhausted")
+
+    def test_no_budget_never_exhausts_on_tokens(self):
+        # max_tokens None → tokens are ignored, only the iteration cap applies.
+        self.assertIsNone(
+            entrypoint._loop_stop_decision(
+                1, 25, None, tokens_spent=10_000_000, max_tokens=None))
+
+    def test_done_wins_over_token_budget(self):
+        # A goal met on the iteration that also crosses the budget reports done.
+        self.assertEqual(
+            entrypoint._loop_stop_decision(
+                1, 25, 0, tokens_spent=9999, max_tokens=10),
+            "done")
+
+    def test_backstop_trip_is_paused(self):
+        # #611 backstop → paused, and it wins over every other stop condition
+        # (the spawn was dropped — no work happened this iteration).
+        self.assertEqual(
+            entrypoint._loop_stop_decision(
+                1, 25, 0, tokens_spent=9999, max_tokens=10,
+                backstop_tripped=True),
+            "paused")
+
+
+class RecordOutputTokens(unittest.TestCase):
+    """#934: summing an invocation's output tokens for the loop budget."""
+
+    def test_sums_per_model_output(self):
+        rec = {"modelUsage": {
+            "claude-opus-4-8": {"output": 300, "input": 5},
+            "claude-haiku-4-5": {"output": 200, "input": 1},
+        }, "tokens": {"output": 999}}
+        # modelUsage wins over the top-level tokens.output.
+        self.assertEqual(entrypoint._record_output_tokens(rec), 500)
+
+    def test_falls_back_to_tokens_output_when_no_model_usage(self):
+        self.assertEqual(
+            entrypoint._record_output_tokens(
+                {"modelUsage": {}, "tokens": {"output": 42}}),
+            42)
+
+    def test_robust_to_garbage(self):
+        self.assertEqual(entrypoint._record_output_tokens(None), 0)
+        self.assertEqual(entrypoint._record_output_tokens({}), 0)
+        self.assertEqual(entrypoint._record_output_tokens(
+            {"modelUsage": {"m": {"output": None}}, "tokens": {}}), 0)
+        # bool must not be counted as an int output.
+        self.assertEqual(entrypoint._record_output_tokens(
+            {"tokens": {"output": True}}), 0)
 
 
 class LoopRunner(unittest.IsolatedAsyncioTestCase):
@@ -831,6 +913,70 @@ class LoopRunner(unittest.IsolatedAsyncioTestCase):
         execute_mock.assert_not_awaited()
         scheduler._send_formatted.assert_not_awaited()
         self.assertNotIn("lp", scheduler._loop_done)
+
+    # -- #934: token budget + backstop → paused ------------------------------
+
+    async def test_loop_stops_exhausted_when_token_budget_exceeded(self):
+        # Each iteration reports 400 output tokens; a 1000-token budget is
+        # exceeded after the 3rd iteration → exhausted before the iteration cap.
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(
+            until={"command": "false"}, maxIterations=25, maxTokens=1000)
+
+        async def fake_execute(_trigger, loop_sink=None, **_kw):
+            if loop_sink is not None:
+                loop_sink["outputTokens"] = 400
+
+        with patch.object(scheduler, "_execute", side_effect=fake_execute) as execute_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
+             patch.object(entrypoint, "_run_pre_check", return_value=(1, "nope")):
+            await scheduler._loop_runner(trigger)
+        self.assertEqual(execute_mock.await_count, 3)  # 400*3 = 1200 >= 1000
+        scheduler._send_formatted.assert_awaited_once()
+        body = scheduler._send_formatted.await_args.args[1]
+        self.assertIn("exhausted", body)
+        # tokens spent vs budget is surfaced in the report.
+        self.assertIn("1200 / 1000", body)
+        self.assertIn("lp", scheduler._loop_done)
+
+    async def test_loop_pauses_when_backstop_trips(self):
+        # The backstop drops the very first spawn → paused, no iteration counted,
+        # `until` never consulted.
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(until={"command": "npm test"}, maxIterations=5)
+
+        async def fake_execute(_trigger, loop_sink=None, **_kw):
+            if loop_sink is not None:
+                loop_sink["backstopTripped"] = True
+
+        precheck = patch.object(entrypoint, "_run_pre_check",
+                                side_effect=AssertionError("until must not run"))
+        with patch.object(scheduler, "_execute", side_effect=fake_execute) as execute_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
+             precheck:
+            await scheduler._loop_runner(trigger)
+        execute_mock.assert_awaited_once()
+        scheduler._send_formatted.assert_awaited_once()
+        body = scheduler._send_formatted.await_args.args[1]
+        self.assertIn("paused", body)
+        self.assertIn("backstop", body.lower())
+        # No iteration counted (spawn was dropped before any work).
+        self.assertIn("0 / 5", body)
+        self.assertIn("lp", scheduler._loop_done)
+
+    async def test_execute_flags_backstop_trip_into_loop_sink(self):
+        # #934 wiring: _execute writes backstopTripped into the sink a loop
+        # runner passes when the #611 backstop denies the spawn.
+        scheduler = self._scheduler()
+        scheduler._backstop = entrypoint.TriggerBackstop(
+            max_concurrent=1, max_per_window=10, window_sec=60)
+        scheduler._backstop.try_acquire()  # fill to the ceiling
+        trigger = {"id": "t1", "type": "loop", "maxIterations": 3}
+        sink: dict = {}
+        with patch.object(entrypoint, "_under_test_harness", return_value=False), \
+             patch.object(scheduler, "_post_backstop_warning", AsyncMock()):
+            await scheduler._execute(trigger, loop_sink=sink)
+        self.assertTrue(sink.get("backstopTripped"))
 
 
 class LoopSyncScheduling(unittest.IsolatedAsyncioTestCase):

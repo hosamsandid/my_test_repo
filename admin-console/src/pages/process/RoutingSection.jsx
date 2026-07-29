@@ -6,8 +6,8 @@ import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
 import { TriggerForm } from '../agent-chat/TriggersPanel';
 import { AddInputDialog, EditHandoffDialog } from './EdgeDialogs';
-import { summarizeGithubEventTrigger } from '../agent-chat/trigger-summary.js';
-import { partitionTriggers, scheduleText } from './input-rows.js';
+import { summarizeGithubEventTrigger, claimTooltip } from '../agent-chat/trigger-summary.js';
+import { partitionTriggers, scheduleText, derivedChannelTrigger } from './input-rows.js';
 import { consumersFor } from './outcome-consumers.js';
 
 // Routing tab (#828, agent-outcomes concept §5.2; absorbs the retired
@@ -232,6 +232,14 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
       {channels.map(c => {
         const key = `ch:${c.artifact}:${c.from}:${c.label || ''}`;
         const noun = c.artifact === 'pr' ? 'pull request' : 'issue';
+        // Claim (#958): only a LABELLED channel derives one — an "opened" channel
+        // has no wake label to take over, so the toggle would be meaningless.
+        // The claim shown is READ BACK from the derived listener the backend
+        // actually generated (never re-derived here): the `<wake>:wip` convention
+        // has exactly one implementation, in process-template.js.
+        const claimable = !!(c.label && c.label.trim());
+        const autoClaim = c.autoClaim !== false;
+        const claim = claimable ? (derivedChannelTrigger(derived, c)?.claim || null) : null;
         return (
           <InputRow key={key} busy={busy === key}
             icon={c.artifact === 'pr' ? <GitPullRequest size={14} /> : <CircleDot size={14} />}
@@ -239,7 +247,30 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
             onRemove={ops.removeChannel ? () => run(key, () => ops.removeChannel(node.id, { artifact: c.artifact, from: c.from, label: c.label || '' })) : null}
             text={<>Reacts to <strong>{nameOf(c.from)}</strong>'s {noun}
               {c.label ? <> when labeled <code style={codeChip}>{c.label}</code></> : null}
-              {c.gate === 'human' ? ' · 👤 human gate' : null}</>} />
+              {c.gate === 'human' ? ' · 👤 human gate' : null}
+              {/* Derived claim, read-only (auto) + per-listener opt-out. The flag
+                  lives on the PORT because the derived trigger is regenerated on
+                  every reconcile — a trigger-level flag would be wiped. */}
+              {claimable ? (
+                <>
+                  {' · '}
+                  {claim
+                    ? <span title={claimTooltip(claim)}>⇥ claims <code style={codeChip}>{claim.add}</code></span>
+                    : <span style={{ color: 'var(--eb-text-muted)' }}>⇥ claim off</span>}
+                  {ops.updateChannel ? (
+                    <button type="button" disabled={busy === key}
+                      onClick={() => run(key, () => ops.updateChannel(node.id, { ...c, autoClaim: !autoClaim ? undefined : false }))}
+                      title={autoClaim
+                        ? 'Turn the auto-claim off for this listener — it will keep the wake label instead of taking it over.'
+                        : 'Turn the auto-claim back on (derived by convention).'}
+                      style={{ marginLeft: 6, background: 'none', border: 'none', padding: 0,
+                        color: 'var(--eb-text-muted)', cursor: 'pointer', font: 'inherit',
+                        fontSize: 'var(--eb-text-xs)', textDecoration: 'underline' }}>
+                      {autoClaim ? 'disable' : 'enable'}
+                    </button>
+                  ) : null}
+                </>
+              ) : null}</>} />
         );
       })}
 
@@ -291,6 +322,8 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
               </span>
               <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
                 {s.events.join(', ') || t.type}{s.label ? ` · 🏷 ${s.label}` : ''}
+                {/* Derived claim (#958), read-only — toggled on the owning port. */}
+                {t.claim ? <span title={claimTooltip(t.claim)}> · ⇥ {t.claim.add}</span> : null}
               </span>
             </div>
           </div>

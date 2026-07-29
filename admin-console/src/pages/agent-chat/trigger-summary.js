@@ -116,6 +116,42 @@ export function summarizeLoopEdge(loop) {
   return parts.length ? parts.join(' · ') : 'loop';
 }
 
+// ── claim labels (#958, concept §3.4–§3.5) ───────────────────────────────────
+// A label listener's claim is what it TAKES OVER when it wakes: the runtime swaps
+// the wake label for `<wake>:wip` before the Claude call, so a stalled run is
+// visible on GitHub. These helpers are the single source of the editor's claim
+// wording, mirroring summarizeLoopEdge above (pure, unit-tested, no JSX).
+
+// The glyph used for the claim badge on a listener edge. Deliberately one
+// character wide: it is appended to an already-crowded edge chip.
+export const CLAIM_MARKER = '⇥';
+
+// Whether a claim blob is well-formed enough to render.
+export function hasClaim(claim) {
+  return !!(claim && typeof claim === 'object'
+    && typeof claim.remove === 'string' && claim.remove.trim()
+    && typeof claim.add === 'string' && claim.add.trim());
+}
+
+// Compact edge-badge text, e.g. `⇥ wip`. Kept short so the chip stays readable —
+// the full swap goes in the tooltip via claimTooltip().
+export function summarizeClaimEdge(claim) {
+  if (!hasClaim(claim)) return '';
+  const add = claim.add.trim();
+  const remove = claim.remove.trim();
+  // `ready` → `ready:wip` is the convention, so show only the distinguishing
+  // suffix; a hand-authored claim that doesn't extend the wake label is shown
+  // whole rather than mis-abbreviated.
+  const suffix = add.startsWith(`${remove}:`) ? add.slice(remove.length + 1) : add;
+  return `${CLAIM_MARKER} ${suffix}`;
+}
+
+// Full, human-readable claim for a tooltip / read-only readout.
+export function claimTooltip(claim) {
+  if (!hasClaim(claim)) return '';
+  return `Claims the label when it wakes: ${claim.remove.trim()} → ${claim.add.trim()}`;
+}
+
 // Structured, human-readable summary of a github-event trigger's firing
 // condition. Returns `{ events: string[] (friendly labels), label: string|null }`.
 // The label is present only when a `labelFilter` is set AND at least one of the

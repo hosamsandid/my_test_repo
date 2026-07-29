@@ -9,7 +9,7 @@
 #
 # Isolation comes from COMPOSE_PROJECT_NAME=aee-e2e (in .env.e2e): every named
 # volume and container is project-prefixed, so this stack can never touch the
-# developer's normal `vgh-claw` stack. Teardown is `-p aee-e2e down -v` plus
+# developer's normal `agent-studio` stack. Teardown is `-p aee-e2e down -v` plus
 # label-scoped agent-container/volume cleanup (make e2e-down).
 
 services:

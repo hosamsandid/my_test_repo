@@ -155,9 +155,9 @@ Then:
 
 You now have a live, persistent AI agent running inside your own infrastructure.
 
-> **Wait, why does `podman ps` say `vgh-claw`?** You will meet three names in this project:
-> **Agent Studio** is the product (what the UI says), **vgh-claw** is the compose project
-> (the container and volume name prefix, configurable via `COMPOSE_PROJECT_NAME`), and
+> **A note on names.** You will meet three names in this project:
+> **Agent Studio** is the product (what the UI says), **agent-studio** is the compose project
+> (the default container and volume name prefix, configurable via `COMPOSE_PROJECT_NAME`), and
 > `AEE_*` is the environment-variable namespace. See the
 > [Glossary](./docs/glossary.md#what-is-this-thing-called).
 

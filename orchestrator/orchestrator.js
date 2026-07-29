@@ -49,6 +49,7 @@ const { computeTeamRoster, createVerdictStore } = require("./loop-verify");
 const { assembleClaudeMd, buildMemoryHint } = require("./prompt-assembly");
 const { readMaintenanceState } = require("./maintenance-state-reader");
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
+const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
 const { buildEnsureUserCommands } = require("./matrix-admin-commands");
 const matrixLoginRetry = require("./matrix-login-retry");
 const skillManifest = require("./skill-manifest");
@@ -814,18 +815,21 @@ function resolveOwnerTeamId(teamId) {
 // sessionPolicy=per-invocation, which is the signal we rely on there.
 function agentIsAutonomous(id, role) {
   if (role === "orchestrator" || role === "bp-instance") return true;
+  let sessionPolicy;
   try {
-    const cfg = loadAgentConfig(id);
-    if (cfg?.sessionPolicy === "per-invocation") return true;
+    sessionPolicy = loadAgentConfig(id)?.sessionPolicy;
   } catch { /* no config yet */ }
+  let triggers = [];
   try {
     const p = controlOrPoolPath(id, "triggers.json");
     if (fs.existsSync(p)) {
       const arr = JSON.parse(fs.readFileSync(p, "utf8"));
-      if (Array.isArray(arr) && arr.length > 0) return true;
+      if (Array.isArray(arr)) triggers = arr;
     }
   } catch { /* unparsable / missing triggers */ }
-  return false;
+  // Pure predicate (agent-autonomy.js) so the trigger-write autonomy-flip
+  // rebuild (#962) shares one testable definition of "autonomous".
+  return isAutonomousState({ role, sessionPolicy, triggers });
 }
 
 // Unified-memory / digest gate (Memory/Knowledge unification, Phases 1+2):
@@ -866,6 +870,42 @@ function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
     path.join(dir, "CLAUDE.md"),
     buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, skillDescriptions, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef }),
   );
+}
+
+// #962: adding or removing a trigger can flip agentIsAutonomous(), which gates
+// the Trigger-management docs + unattended-run framing in the agent's CLAUDE.md.
+// Only saveAgentPrompt rebuilds CLAUDE.md and it isn't called on a trigger
+// write, so an agent that gained autonomy via the Flow Editor would never see
+// the trigger docs (and one that lost it would keep them). Called from the
+// trigger PUT chokepoint with the pre-write autonomy state; rebuilds CLAUDE.md
+// and mirrors it into an isolated agent's volume — but ONLY when the state
+// actually flipped, so a no-op edit (e.g. adding a 2nd trigger) never churns
+// (AC4). Reconstructs prompt/env/blueprintId exactly like the skill-sync
+// rebuild + prompt-preview. Best-effort: a rebuild failure never fails the
+// (already-persisted) trigger write.
+async function reconcileAgentAutonomyPrompt(id, wasAutonomous) {
+  try {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) return false;
+    const nowAutonomous = agentIsAutonomous(id, cfg.role);
+    if (!autonomyChanged(wasAutonomous, nowAutonomous)) return false;
+    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+    const promptPath = path.join(agentDir(id), AGENT_PROMPT_FILENAME);
+    const prompt = fs.existsSync(promptPath)
+      ? fs.readFileSync(promptPath, "utf8")
+      : (cfg.systemPrompt || cfg.systemPromptTemplate || "");
+    saveAgentPrompt(id, prompt, cfg.role, env, cfg.blueprintId || null);
+    // Mirror the rebuilt CLAUDE.md into a dedicated volume (no-op unless
+    // isolated + running). CLAUDE.md is re-read by the CLI on every invocation,
+    // so the new prompt takes effect on the agent's next run — no respawn, same
+    // as the skill-sync path (AC3).
+    await reseedAgent(id, ["CLAUDE.md"]);
+    console.log(`[Orchestrator] Rebuilt CLAUDE.md for ${id} (autonomy ${nowAutonomous ? "gained" : "lost"} via trigger change)`);
+    return true;
+  } catch (err) {
+    console.warn(`[Orchestrator] autonomy reconcile ${id}: ${err.message}`);
+    return false;
+  }
 }
 
 // ============================================================
@@ -8988,7 +9028,7 @@ async function main() {
       const id = decodeURIComponent(putTriggersMatch[1]);
       let body = '';
       req.on('data', (d) => { body += d; if (body.length > 4_000_000) req.destroy(); });
-      req.on('end', () => {
+      req.on('end', async () => {
         if (!isSafePathSeg(id)) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
@@ -9001,9 +9041,17 @@ async function main() {
             res.end(JSON.stringify({ ok: false, error: 'triggers must be an array' }));
             return;
           }
+          // #962: capture the autonomy state BEFORE the write; if this add/
+          // remove flips it, the agent's CLAUDE.md must be rebuilt (the
+          // Trigger-management docs are gated on autonomy). The role comes from
+          // config; agentIsAutonomous falls back safely if it's missing.
+          const wasAutonomous = agentIsAutonomous(id, loadAgentConfig(id)?.role);
           saveTriggers(id, triggers);
           const proc = agentProcesses.get(id);
           if (proc) proc.kill('SIGUSR2');
+          // Rebuild + reseed CLAUDE.md only when autonomy actually flipped
+          // (no-op otherwise). Best-effort — never fails the trigger write.
+          await reconcileAgentAutonomyPrompt(id, wasAutonomous);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true }));
         } catch (err) {

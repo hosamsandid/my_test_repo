@@ -868,7 +868,7 @@ class GitHubPoller {
         path: u.pathname + u.search,
         method: 'GET',
         headers: {
-          'User-Agent': 'e-vgh-claw-poller',
+          'User-Agent': 'agent-studio-poller',
           'Accept': 'application/vnd.github+json',
           'Authorization': `Bearer ${token}`,
           'X-GitHub-Api-Version': '2022-11-28',
@@ -935,7 +935,7 @@ class GitHubPoller {
     return new Promise((resolve, reject) => {
       const [owner, repo] = repoFullName.split('/');
       const headers = {
-        'User-Agent': 'e-vgh-claw-poller',
+        'User-Agent': 'agent-studio-poller',
         'Accept': 'application/vnd.github+json',
         'Authorization': `Bearer ${token}`,
         'X-GitHub-Api-Version': '2022-11-28',

@@ -10646,7 +10646,7 @@ app.post('/api/github/probe', heavyLimiter, async (req, res) => {
   const headers = {
     'Authorization': `Bearer ${token}`,
     'Accept': 'application/vnd.github+json',
-    'User-Agent': 'e-vgh-claw-wizard',
+    'User-Agent': 'agent-studio-wizard',
     'X-GitHub-Api-Version': '2022-11-28',
   };
   const apiBase = `${githubApiBase()}/repos/${encodeURIComponent(parsed.org)}/${encodeURIComponent(parsed.repo)}`;
@@ -10717,7 +10717,7 @@ app.get('/api/repos/coordinator-workflow', coordinatorWorkflowLimiter, async (re
   const headers = {
     'Authorization': `Bearer ${token}`,
     'Accept': 'application/vnd.github+json',
-    'User-Agent': 'e-vgh-claw-wizard',
+    'User-Agent': 'agent-studio-wizard',
     'X-GitHub-Api-Version': '2022-11-28',
   };
   const url = `${githubApiBase()}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/contents/.github/workflows/coordinator.yml`;
@@ -10760,7 +10760,7 @@ app.post('/api/repos/coordinator-workflow', coordinatorWorkflowLimiter, async (r
   const headers = {
     'Authorization': `Bearer ${token}`,
     'Accept': 'application/vnd.github+json',
-    'User-Agent': 'e-vgh-claw-wizard',
+    'User-Agent': 'agent-studio-wizard',
     'X-GitHub-Api-Version': '2022-11-28',
   };
   const contentsUrl = `${githubApiBase()}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/contents/.github/workflows/coordinator.yml`;

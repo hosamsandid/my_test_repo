@@ -84,7 +84,7 @@ test('extended-SDLC-like composition is valid, complete and lint-clean', () => {
   // Dispatcher wiring on developer was dropped; intrinsic essence kept.
   assert.ok(!byId.get('developer').triggers.some(t => t.id === 'developer-assigned'));
   assert.ok(byId.get('issue-triage').triggers.some(t => t.id === 'triage-issue-opened'));
-  assert.equal(byId.get('business-analyst').triggers.find(t => t.id === 'ba-on-refine').labelFilter, 'req:refine');
+  assert.equal(byId.get('business-analyst').triggers.find(t => t.id === 'ba-on-refine').labelFilter, 'needs-refinement');
 
   // Gap notes: Build has no scout; Release is passive.
   assert.ok(notes.some(n => n.rule === 'no-scout' && n.stage === 'Build'));

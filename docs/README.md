@@ -132,7 +132,7 @@ only to understand how the project got here.
 | [architecture-story.html](architecture-story.html) | Earlier visual tour built on the single-agent / shared-pool model. Superseded by [platform-story.html](platform-story.html) |
 | [briefing-pack-integration-plan.md](briefing-pack-integration-plan.md) | Self-declared superseded; assumed a multi-agent room and a central router |
 | [agent-chat-plan.md](agent-chat-plan.md) | Build plan for the agent chat, which has shipped; still describes the removed Node agent runner |
-| [vergleich-valkren-vs-e-vgh-claw.md](vergleich-valkren-vs-e-vgh-claw.md) | April-2026 comparison whose premise (agent pool, shared room) was rolled back *(German)* |
+| [vergleich-valkren-vs-agent-studio.md](vergleich-valkren-vs-agent-studio.md) | April-2026 comparison whose premise (agent pool, shared room) was rolled back *(German)* |
 | [manual-test-agent-deactivation.md](manual-test-agent-deactivation.md) | One-off manual test script for a closed issue |
 | [test-207-deactivation-stops-triggers.md](test-207-deactivation-stops-triggers.md) | Older duplicate of the above |
 

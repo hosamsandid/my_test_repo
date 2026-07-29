@@ -6,7 +6,7 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 ## Project Overview
 
-**e-vgh-claw** is a local Matrix-to-Claude-Code stack for an enterprise context. It provides chat-based AI agents extensible with domain-specific skills for **Mainframe Migration** (COBOL, JCL, DB2, IMS, etc.).
+**agent-studio** is a local Matrix-to-Claude-Code stack for an enterprise context. It provides chat-based AI agents extensible with domain-specific skills for **Mainframe Migration** (COBOL, JCL, DB2, IMS, etc.).
 
 The stack runs locally with Podman as a single compose file: **Conduwuit** (Matrix homeserver); **Orchestrator** (control-plane, spawns/manages one container per agent, no Matrix identity); **Admin Console** (web UI on `:4000` for agents, environments, SSH keys, skills, etc.; embeds a chat UI at `/chats/:agentId`); **bp-explorer** (read-only viewer for ACE BriefingPack metadata).
 
@@ -275,7 +275,7 @@ Matrix users are managed via the Conduwuit admin room (`!cUxr0SyfINf9yEvBOD:loca
 
 ## Skills
 
-Skills live in the skill-pool volume (`vgh-claw_claude-workspace`) under `skills/<name>/SKILL.md`, granted per **agent construct** (team `skills[]` / standalone `skills[]` / member `skillsOverride`) via the Agents page, the wizard's Knowledge step, or the Knowledge page. Environments have **no** skill picker. Intended domain: **Mainframe Migration** (COBOL, JCL, DB2, IMS/VSAM).
+Skills live in the skill-pool volume (`agent-studio_claude-workspace`) under `skills/<name>/SKILL.md`, granted per **agent construct** (team `skills[]` / standalone `skills[]` / member `skillsOverride`) via the Agents page, the wizard's Knowledge step, or the Knowledge page. Environments have **no** skill picker. Intended domain: **Mainframe Migration** (COBOL, JCL, DB2, IMS/VSAM).
 
 ### Two-tier skill pool
 

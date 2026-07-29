@@ -1,14 +1,14 @@
-# Vergleich: Valkren Starter Kit vs. e-vgh-claw
+# Vergleich: Valkren Starter Kit vs. agent-studio
 
 > Analyse vom 2026-04-24 — Beide Systeme sind Wrapper um Claude Code für Enterprise-Arbeit.
 >
-> **Update 2026-05-06:** Das in diesem Vergleich beschriebene "Multi-Agent Pool"-Modell (Orchestrator als Router + gemeinsamer Multi-Agent-Room + Expert-Broadcast/Synthese) gibt es nicht mehr. e-vgh-claw nutzt jetzt ein DM-only-Modell: jeder Agent hat einen eigenen Matrix-User, der Mensch chattet 1:1. Die Adversarial-Review-/Synthese-Vorschläge in diesem Dokument sind damit hypothetisch — sie waren auf eine Architektur gemünzt, die zurückgebaut wurde.
+> **Update 2026-05-06:** Das in diesem Vergleich beschriebene "Multi-Agent Pool"-Modell (Orchestrator als Router + gemeinsamer Multi-Agent-Room + Expert-Broadcast/Synthese) gibt es nicht mehr. agent-studio nutzt jetzt ein DM-only-Modell: jeder Agent hat einen eigenen Matrix-User, der Mensch chattet 1:1. Die Adversarial-Review-/Synthese-Vorschläge in diesem Dokument sind damit hypothetisch — sie waren auf eine Architektur gemünzt, die zurückgebaut wurde.
 
 ## Auf abstrakter Flughöhe: Das Gemeinsame
 
 Beide Systeme sind **Wrapper um Claude Code**, die das rohe CLI in eine strukturierte, teamfähige Arbeitsumgebung verwandeln. Beide lösen das gleiche Grundproblem: *Wie orchestriert man Claude Code für Enterprise-Arbeit mit Prozessdisziplin, Gedächtnis und Qualitätssicherung?*
 
-| Dimension | Valkren | e-vgh-claw |
+| Dimension | Valkren | agent-studio |
 |-----------|---------|------------|
 | **Interface** | Direkt in IDE/Terminal | Matrix Chat (Element) |
 | **Agent-Modell** | "Oracle" Adversarial Review (3+ parallele Reviewer) | Multi-Agent Pool (Expert/Synthesizer/Autonomous) |
@@ -132,7 +132,7 @@ Expert + Synthesizer + Autonomous ist ein differenzierteres Modell als Valkrens 
 
 ---
 
-## Konkrete Verbesserungspotentiale für e-vgh-claw
+## Konkrete Verbesserungspotentiale für agent-studio
 
 | # | Idee von Valkren | Umsetzung bei uns | Aufwand |
 |---|---|---|---|
@@ -150,6 +150,6 @@ Expert + Synthesizer + Autonomous ist ein differenzierteres Modell als Valkrens 
 
 **Valkren** ist ein **Prozess-Enforcement-System** — es geht darum, dass Claude Code nach strengen Regeln arbeitet, nichts überspringt und aus Fehlern lernt. Die Stärke liegt in der **Tiefe der Disziplin** (27 Steps, 142 Lessons, 80 Memory-Files).
 
-**e-vgh-claw** ist ein **Agent-Orchestrierungs-System** — es geht darum, mehrere spezialisierte Agents dynamisch zu koordinieren und über Chat zugänglich zu machen. Die Stärke liegt in der **Breite der Kollaboration** (dynamische Agents, Chat-Interface, Rollen, Routing).
+**agent-studio** ist ein **Agent-Orchestrierungs-System** — es geht darum, mehrere spezialisierte Agents dynamisch zu koordinieren und über Chat zugänglich zu machen. Die Stärke liegt in der **Breite der Kollaboration** (dynamische Agents, Chat-Interface, Rollen, Routing).
 
 Die grösste Lücke bei uns ist das **institutionelle Gedächtnis** — Valkren zeigt eindrucksvoll, wie 80+ Memory-Dateien + 142 Lessons Learned die Qualität über Sessions hinweg dramatisch verbessern können. Das wäre der höchste ROI-Hebel für uns: domänenspezifisches Memory für Mainframe-Migration aufbauen und systematisch in alle Agent-Workspaces seeden.

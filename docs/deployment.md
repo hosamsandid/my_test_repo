@@ -148,6 +148,12 @@ are created dynamically, so enumerate Podman volumes rather than reading the com
 Snapshot the whole volume set together: `conduwuit-db` and `agent-pool-workspace` reference
 each other, and a half-restored pair leaves agents pointing at rooms that no longer exist.
 
+> **Upgrading past the `vgh-claw` → `agent-studio` rename.** The default `COMPOSE_PROJECT_NAME`
+> changed, which changes the prefix on every named volume above. On an existing stack this
+> orphans your volumes unless you either pin the old prefix (`COMPOSE_PROJECT_NAME=vgh-claw`
+> in `.env`) or copy the data across to the new prefix. Step-by-step migration commands are in
+> `RELEASE_NOTES` under **Unreleased → Breaking Changes**.
+
 ### Sizing
 
 Agent containers are started **eagerly** — every enabled agent has a container running,

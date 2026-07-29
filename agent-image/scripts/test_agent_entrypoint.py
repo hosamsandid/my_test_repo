@@ -923,7 +923,7 @@ class LoopRunner(unittest.IsolatedAsyncioTestCase):
         trigger = self._loop_trigger(
             until={"command": "false"}, maxIterations=25, maxTokens=1000)
 
-        async def fake_execute(_trigger, loop_sink=None, **_kw):
+        async def fake_execute(_trigger, ctx=None, loop_sink=None, **_kw):
             if loop_sink is not None:
                 loop_sink["outputTokens"] = 400
 
@@ -945,7 +945,7 @@ class LoopRunner(unittest.IsolatedAsyncioTestCase):
         scheduler = self._scheduler()
         trigger = self._loop_trigger(until={"command": "npm test"}, maxIterations=5)
 
-        async def fake_execute(_trigger, loop_sink=None, **_kw):
+        async def fake_execute(_trigger, ctx=None, loop_sink=None, **_kw):
             if loop_sink is not None:
                 loop_sink["backstopTripped"] = True
 
@@ -977,6 +977,453 @@ class LoopRunner(unittest.IsolatedAsyncioTestCase):
              patch.object(scheduler, "_post_backstop_warning", AsyncMock()):
             await scheduler._execute(trigger, loop_sink=sink)
         self.assertTrue(sink.get("backstopTripped"))
+
+
+class VerifySpecValidation(unittest.TestCase):
+    """#933: `verify` must take exactly one of command / agentId / selfGraded."""
+
+    def test_command_form_ok(self):
+        ok, _ = entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "verify": {"command": "npm test", "env": {}}})
+        self.assertTrue(ok)
+
+    def test_agent_form_ok(self):
+        ok, _ = entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "verify": {"agentId": "team-x-reviewer"}})
+        self.assertTrue(ok)
+
+    def test_self_graded_form_ok(self):
+        ok, _ = entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "verify": {"selfGraded": True}})
+        self.assertTrue(ok)
+
+    def test_empty_verify_object_rejected(self):
+        ok, reason = entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "verify": {}})
+        self.assertFalse(ok)
+        self.assertIn("one of", reason)
+
+    def test_two_forms_rejected(self):
+        ok, reason = entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "verify": {"command": "x", "agentId": "y"}})
+        self.assertFalse(ok)
+        self.assertIn("exactly one", reason)
+
+    def test_non_object_verify_rejected(self):
+        self.assertFalse(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "verify": "npm test"})[0])
+
+    def test_blank_command_rejected(self):
+        self.assertFalse(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "verify": {"command": "   "}})[0])
+
+    def test_bad_env_rejected(self):
+        self.assertFalse(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "verify": {"command": "x", "env": []}})[0])
+
+    def test_selfgraded_must_be_bool(self):
+        self.assertFalse(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "verify": {"selfGraded": "yes"}})[0])
+
+
+class ParseVerifyVerdict(unittest.TestCase):
+    """#933: read a machine verdict out of a verifier agent's free-form reply."""
+
+    def test_pass_marker(self):
+        passed, out = entrypoint._parse_verify_verdict("Looks good.\n[PASS]")
+        self.assertTrue(passed)
+        self.assertIn("Looks good", out)
+
+    def test_fail_marker(self):
+        passed, out = entrypoint._parse_verify_verdict("Missing tests.\n[FAIL]")
+        self.assertFalse(passed)
+        self.assertIn("Missing tests", out)
+
+    def test_fail_wins_over_pass(self):
+        passed, _ = entrypoint._parse_verify_verdict("[PASS] but actually [FAIL]")
+        self.assertFalse(passed)
+
+    def test_alternate_markers(self):
+        self.assertTrue(entrypoint._parse_verify_verdict("VERDICT: PASS")[0])
+        self.assertFalse(entrypoint._parse_verify_verdict("ace:fail")[0])
+
+    def test_no_marker_is_fail_closed(self):
+        passed, out = entrypoint._parse_verify_verdict("I think it's probably fine")
+        self.assertFalse(passed)
+        self.assertIn("probably fine", out)
+
+    def test_empty_reply_fail_closed(self):
+        passed, out = entrypoint._parse_verify_verdict("")
+        self.assertFalse(passed)
+        self.assertIn("no verdict", out)
+
+
+class SelectSiblingVerifier(unittest.TestCase):
+    """#933: prefer a reviewer sibling; never the worker itself."""
+
+    def test_prefers_reviewer_by_role(self):
+        roster = [
+            {"agentId": "t-dev2", "role": "team-member"},
+            {"agentId": "t-rev", "role": "code-reviewer"},
+        ]
+        sel = entrypoint._select_sibling_verifier("t-dev", roster)
+        self.assertEqual(sel["agentId"], "t-rev")
+        self.assertTrue(sel["reviewer"])
+        self.assertFalse(sel["ambiguous"])
+
+    def test_reviewer_hint_in_id_or_displayname(self):
+        roster = [{"agentId": "t-quality-gate", "role": "team-member",
+                   "displayName": "Quality Gate"}]
+        sel = entrypoint._select_sibling_verifier("t-dev", roster)
+        self.assertEqual(sel["agentId"], "t-quality-gate")
+        self.assertTrue(sel["reviewer"])
+
+    def test_never_selects_self(self):
+        roster = [{"agentId": "t-dev", "role": "reviewer"}]  # self, reviewer-ish
+        sel = entrypoint._select_sibling_verifier("t-dev", roster)
+        self.assertIsNone(sel["agentId"])
+
+    def test_falls_back_to_any_sibling_when_no_reviewer(self):
+        roster = [
+            {"agentId": "t-zeta", "role": "team-member"},
+            {"agentId": "t-alpha", "role": "team-member"},
+        ]
+        sel = entrypoint._select_sibling_verifier("t-dev", roster)
+        self.assertEqual(sel["agentId"], "t-alpha")  # sorted, deterministic
+        self.assertFalse(sel["reviewer"])
+        self.assertTrue(sel["ambiguous"])
+
+    def test_ambiguous_when_several_reviewers(self):
+        roster = [
+            {"agentId": "t-rev-b", "role": "reviewer"},
+            {"agentId": "t-rev-a", "role": "reviewer"},
+        ]
+        sel = entrypoint._select_sibling_verifier("t-dev", roster)
+        self.assertEqual(sel["agentId"], "t-rev-a")  # sorted tie-break
+        self.assertTrue(sel["ambiguous"])
+
+    def test_no_siblings(self):
+        sel = entrypoint._select_sibling_verifier("t-dev", [])
+        self.assertIsNone(sel["agentId"])
+        self.assertEqual(sel["candidates"], 0)
+
+
+class ResolveLoopVerify(unittest.TestCase):
+    """#933: enforced-separate-role default (concept §4.6 decision 1)."""
+
+    def test_authored_command_honoured(self):
+        plan = entrypoint._resolve_loop_verify(
+            {"verify": {"command": "npm test", "env": {"A": "1"}}},
+            "dev", is_team=True, roster=[{"agentId": "rev", "role": "reviewer"}])
+        self.assertEqual(plan["mode"], "command")
+        self.assertEqual(plan["command"], "npm test")
+        self.assertEqual(plan["source"], "authored")
+
+    def test_authored_agent_honoured(self):
+        plan = entrypoint._resolve_loop_verify(
+            {"verify": {"agentId": "some-other"}}, "dev",
+            is_team=True, roster=[])
+        self.assertEqual(plan["mode"], "agent")
+        self.assertEqual(plan["agentId"], "some-other")
+        self.assertEqual(plan["source"], "authored")
+
+    def test_team_empty_verify_enforces_sibling(self):
+        plan = entrypoint._resolve_loop_verify(
+            {}, "dev", is_team=True,
+            roster=[{"agentId": "rev", "role": "reviewer"}])
+        self.assertEqual(plan["mode"], "agent")
+        self.assertEqual(plan["agentId"], "rev")
+        self.assertEqual(plan["source"], "enforced-sibling")
+
+    def test_team_cannot_self_grade_out_of_separation(self):
+        # An explicit selfGraded ack on a team agent is overridden by a sibling.
+        plan = entrypoint._resolve_loop_verify(
+            {"verify": {"selfGraded": True}}, "dev", is_team=True,
+            roster=[{"agentId": "rev", "role": "reviewer"}])
+        self.assertEqual(plan["mode"], "agent")
+        self.assertEqual(plan["agentId"], "rev")
+
+    def test_team_agentid_pointing_at_self_is_re_enforced(self):
+        # The worker can never be its own verifier — even if authored so.
+        plan = entrypoint._resolve_loop_verify(
+            {"verify": {"agentId": "dev"}}, "dev", is_team=True,
+            roster=[{"agentId": "rev", "role": "reviewer"}])
+        self.assertEqual(plan["mode"], "agent")
+        self.assertEqual(plan["agentId"], "rev")
+        self.assertNotEqual(plan["agentId"], "dev")
+
+    def test_lone_member_team_degrades_to_self_graded(self):
+        plan = entrypoint._resolve_loop_verify(
+            {}, "dev", is_team=True, roster=[])
+        self.assertEqual(plan["mode"], "self-graded")
+        self.assertEqual(plan["source"], "team-no-sibling")
+
+    def test_standalone_defaults_to_self_graded(self):
+        plan = entrypoint._resolve_loop_verify({}, "solo", is_team=False, roster=[])
+        self.assertEqual(plan["mode"], "self-graded")
+        self.assertEqual(plan["source"], "standalone-default")
+
+
+class LoopVerifierGate(unittest.IsolatedAsyncioTestCase):
+    """#933: the per-iteration verifier gate in `_loop_runner`."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir",
+                               return_value=Path(self._tmpdir.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+
+    def _loop_trigger(self, **kw):
+        t = {"id": "lp", "type": "loop", "enabled": True, "roomId": "!room:local",
+             "maxIterations": 10, "prompt": "do it"}
+        t.update(kw)
+        return t
+
+    async def test_command_verify_failure_blocks_until_and_feeds_forward(self):
+        # verify fails twice (blocks progress each time — `until` never checked),
+        # then passes; only after a pass does `until` (also green) end the loop.
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(
+            verify={"command": "lint"}, until={"command": "npm test"},
+            maxIterations=10)
+        verify_results = iter([(1, "lint error A"), (1, "lint error B"), (0, "clean")])
+        until_results = iter([(0, "tests green")])
+
+        async def fake_verify_plan(_t):
+            return {"mode": "command", "command": "lint", "env": {},
+                    "note": "command verifier (authored)"}
+
+        def fake_pre_check(cmd, env):
+            return next(verify_results) if cmd == "lint" else next(until_results)
+
+        ctxs = []
+
+        async def fake_execute(trig, ctx=None, loop_sink=None):
+            ctxs.append(ctx)
+
+        with patch.object(scheduler, "_resolve_verify_plan", fake_verify_plan), \
+             patch.object(scheduler, "_execute", fake_execute), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
+             patch.object(entrypoint, "_run_pre_check", side_effect=fake_pre_check):
+            await scheduler._loop_runner(trigger)
+
+        # 3 iterations: fail, fail, pass→until green→done.
+        self.assertEqual(len(ctxs), 3)
+        # First iteration has no feedback; the next two carry the prior failure.
+        self.assertIsNone(ctxs[0])
+        self.assertIn("lint error A", ctxs[1]["loopFeedback"])
+        self.assertIn("lint error B", ctxs[2]["loopFeedback"])
+        body = scheduler._send_formatted.await_args.args[1]
+        self.assertIn("done", body)
+        self.assertIn("Verifier-blocked iterations: 2", body)
+
+    async def test_verify_never_passes_exhausts_at_cap(self):
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(verify={"command": "lint"}, maxIterations=3)
+
+        async def fake_verify_plan(_t):
+            return {"mode": "command", "command": "lint", "env": {}, "note": "cmd"}
+
+        with patch.object(scheduler, "_resolve_verify_plan", fake_verify_plan), \
+             patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
+             patch.object(entrypoint, "_run_pre_check", return_value=(1, "still broken")):
+            await scheduler._loop_runner(trigger)
+
+        # maxIterations bounds the loop even when verify never passes (guardrail).
+        self.assertEqual(execute_mock.await_count, 3)
+        body = scheduler._send_formatted.await_args.args[1]
+        self.assertIn("exhausted", body)
+        self.assertIn("Verifier-blocked iterations: 3", body)
+
+    async def test_agent_form_verify_routes_and_gates(self):
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(
+            verify={"agentId": "reviewer-1"}, until={"command": "npm test"},
+            maxIterations=5)
+
+        async def fake_verify_plan(_t):
+            return {"mode": "agent", "agentId": "reviewer-1", "note": "agent verifier"}
+
+        verify_calls = []
+
+        async def fake_agent_verify(target, trig, iteration):
+            verify_calls.append((target, iteration))
+            return (False, "please fix X") if iteration == 1 else (True, "ok [PASS]")
+
+        with patch.object(scheduler, "_resolve_verify_plan", fake_verify_plan), \
+             patch.object(scheduler, "_execute", AsyncMock()), \
+             patch.object(scheduler, "_run_agent_verify", fake_agent_verify), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
+             patch.object(entrypoint, "_run_pre_check", return_value=(0, "green")):
+            await scheduler._loop_runner(trigger)
+
+        self.assertEqual(verify_calls, [("reviewer-1", 1), ("reviewer-1", 2)])
+        self.assertIn("done", scheduler._send_formatted.await_args.args[1])
+
+
+class RunAgentVerify(unittest.IsolatedAsyncioTestCase):
+    """#933 AC2: the requester side enqueues + polls for a verdict."""
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="dev", user_id="@dev:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+
+    async def test_enqueues_then_polls_verdict(self):
+        scheduler = self._scheduler()
+        trigger = {"id": "lp", "roomId": "!r:local", "prompt": "task",
+                   "verify": {"agentId": "rev"}}
+        posts = []
+
+        def fake_post(route, payload):
+            posts.append((route, payload))
+            return 202, ""
+
+        # First poll: not found; second: the verdict landed.
+        gets = iter([(200, '{"found": false}'),
+                     (200, '{"found": true, "passed": true, "output": "great"}')])
+
+        with patch.object(scheduler, "_orch_post_json", side_effect=fake_post), \
+             patch.object(scheduler, "_orch_get", side_effect=lambda r: next(gets)), \
+             patch.object(entrypoint.asyncio, "sleep", AsyncMock(return_value=None)):
+            passed, output = await scheduler._run_agent_verify("rev", trigger, 1)
+
+        self.assertTrue(passed)
+        self.assertEqual(output, "great")
+        # The artifact was routed to the target agent's pending queue.
+        self.assertIn("/internal/agents/rev/enqueue-pending", posts[0][0])
+        self.assertEqual(posts[0][1]["kind"], "loop-verify")
+        self.assertEqual(posts[0][1]["iteration"], 1)
+
+    async def test_undeliverable_request_fails_closed(self):
+        scheduler = self._scheduler()
+        trigger = {"id": "lp", "prompt": "t", "verify": {"agentId": "rev"}}
+        with patch.object(scheduler, "_orch_post_json", return_value=(500, "boom")), \
+             patch.object(scheduler, "_orch_get") as get_mock:
+            passed, output = await scheduler._run_agent_verify("rev", trigger, 1)
+        self.assertFalse(passed)
+        self.assertIn("could not deliver", output)
+        get_mock.assert_not_called()  # never polled — delivery failed
+
+    async def test_timeout_fails_closed(self):
+        scheduler = self._scheduler()
+        with patch.object(entrypoint, "VERIFY_WAIT_SEC", 0):
+            passed, output = await scheduler._poll_verify_verdict("tok", "rev")
+        self.assertFalse(passed)
+        self.assertIn("did not return a verdict", output)
+
+
+class ExecuteLoopVerify(unittest.IsolatedAsyncioTestCase):
+    """#933 AC2: the verifier side runs Claude and posts a verdict back."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir",
+                               return_value=Path(self._tmpdir.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="rev", user_id="@rev:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+
+    async def test_runs_claude_and_posts_verdict(self):
+        scheduler = self._scheduler()
+        entry = {"kind": "loop-verify", "token": "tok-1", "requestedBy": "dev",
+                 "loopId": "lp", "iteration": 2, "task": "build the thing"}
+        posts = []
+        with patch.object(entrypoint, "_call_claude",
+                          return_value="Reviewed. Looks correct.\n[PASS]"), \
+             patch.object(entrypoint, "_load_dm_room_id", return_value="!rev:local"), \
+             patch.object(scheduler, "_orch_post_json",
+                          side_effect=lambda r, p: posts.append((r, p)) or (202, "")):
+            await scheduler._execute_loop_verify(entry)
+
+        self.assertEqual(posts[0][0], "/internal/loop-verify/verdict")
+        self.assertEqual(posts[0][1]["token"], "tok-1")
+        self.assertTrue(posts[0][1]["passed"])
+
+    async def test_claude_failure_posts_fail_closed_verdict(self):
+        scheduler = self._scheduler()
+        entry = {"kind": "loop-verify", "token": "tok-2", "task": "x"}
+        posts = []
+        with patch.object(entrypoint, "_call_claude", side_effect=RuntimeError("boom")), \
+             patch.object(entrypoint, "_load_dm_room_id", return_value="!rev:local"), \
+             patch.object(scheduler, "_orch_post_json",
+                          side_effect=lambda r, p: posts.append((r, p)) or (202, "")):
+            await scheduler._execute_loop_verify(entry)
+
+        self.assertFalse(posts[0][1]["passed"])
+        self.assertIn("failed", posts[0][1]["output"])
+
+    async def test_missing_token_skips(self):
+        scheduler = self._scheduler()
+        with patch.object(scheduler, "_orch_post_json") as post_mock:
+            await scheduler._execute_loop_verify({"kind": "loop-verify"})
+        post_mock.assert_not_called()
+
+
+class ResolveVerifyPlan(unittest.IsolatedAsyncioTestCase):
+    """#933: `_resolve_verify_plan` threads team membership + roster."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir",
+                               return_value=Path(self._tmpdir.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="dev", user_id="@dev:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+
+    async def test_team_empty_verify_fetches_roster_and_enforces(self):
+        scheduler = self._scheduler()
+        trigger = {"id": "lp", "maxIterations": 5, "prompt": "x"}
+        with patch.object(entrypoint, "_load_dm_agent_config",
+                          return_value={"role": "team-member", "parentTeamId": "t"}), \
+             patch.object(scheduler, "_fetch_team_roster",
+                          AsyncMock(return_value=[{"agentId": "rev", "role": "reviewer"}])) as roster_mock:
+            plan = await scheduler._resolve_verify_plan(trigger)
+        roster_mock.assert_awaited_once()
+        self.assertEqual(plan["mode"], "agent")
+        self.assertEqual(plan["agentId"], "rev")
+
+    async def test_authored_verifier_skips_roster_fetch(self):
+        scheduler = self._scheduler()
+        trigger = {"id": "lp", "maxIterations": 5, "prompt": "x",
+                   "verify": {"command": "npm test"}}
+        with patch.object(entrypoint, "_load_dm_agent_config",
+                          return_value={"role": "team-member", "parentTeamId": "t"}), \
+             patch.object(scheduler, "_fetch_team_roster", AsyncMock()) as roster_mock:
+            plan = await scheduler._resolve_verify_plan(trigger)
+        roster_mock.assert_not_awaited()
+        self.assertEqual(plan["mode"], "command")
+
+    async def test_standalone_skips_roster_fetch(self):
+        scheduler = self._scheduler()
+        trigger = {"id": "lp", "maxIterations": 5, "prompt": "x"}
+        with patch.object(entrypoint, "_load_dm_agent_config", return_value={"role": "agent"}), \
+             patch.object(scheduler, "_fetch_team_roster", AsyncMock()) as roster_mock:
+            plan = await scheduler._resolve_verify_plan(trigger)
+        roster_mock.assert_not_awaited()
+        self.assertEqual(plan["mode"], "self-graded")
 
 
 class LoopSyncScheduling(unittest.IsolatedAsyncioTestCase):

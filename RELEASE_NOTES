@@ -110,6 +110,30 @@
 
 ### Breaking Changes
 
+- **Default `COMPOSE_PROJECT_NAME` renamed from `vgh-claw` to `agent-studio`** — the legacy customer name has been removed from the codebase. The compose project prefix (used for all container and named-volume names) now defaults to `agent-studio`. **This orphans your existing named volumes:** compose will create fresh, empty volumes under the new prefix, so the skill pool, agent workspaces, chat history and Claude `--resume` state will appear "lost" until you migrate. Package names (`agent-studio-admin-console`, `agent-studio-admin-api`), the poller/wizard `User-Agent` strings, and the orchestrator git-author email (`orchestrator@agent-studio.local`) changed too, but those are cosmetic. Choose one upgrade path before running `make up` on an existing stack:
+
+  **Option 1 — keep your old volumes (zero-risk, recommended for existing deployments).** Pin the old prefix in `.env` so nothing moves:
+  ```bash
+  echo 'COMPOSE_PROJECT_NAME=vgh-claw' >> .env   # or your existing custom prefix
+  ```
+
+  **Option 2 — adopt the new prefix and migrate volume data.** Podman has no in-place volume rename on older versions, so copy each volume via a helper container while the stack is stopped:
+  ```bash
+  make down
+  OLD=vgh-claw; NEW=agent-studio          # use your actual old prefix
+  for v in conduwuit-db agent-pool-workspace claude-workspace claude-home agent-control-plane; do
+    podman volume create "${NEW}_$v"
+    podman run --rm -v "${OLD}_$v":/from:ro -v "${NEW}_$v":/to \
+      docker.io/library/busybox sh -c 'cp -a /from/. /to/'
+  done
+  # If AEE_PER_AGENT_VOLUME=1, repeat for each ${OLD}_agent-<id> volume
+  # (list them with: podman volume ls | grep "^.*${OLD}_agent-")
+  make up
+  # After verifying the stack is healthy, remove the old volumes:
+  #   podman volume rm ${OLD}_conduwuit-db ${OLD}_agent-pool-workspace ${OLD}_claude-workspace ${OLD}_claude-home ${OLD}_agent-control-plane
+  ```
+  A live-deploy checkout previously kept at `~/Projects/e-vgh-claw` can be renamed for tidiness, but the directory name does not drive the compose prefix — only `COMPOSE_PROJECT_NAME` does. Fresh installs need no action. (#913)
+
 - **Token Usage page now restricted to System Admins** — the `/token-usage` route and all five usage API endpoints (`/api/usage/summary`, `/summary/export`, `/work-items`, `/work-items/export`, `/work-items/:owner/:repo/:number`) now return 403 for any caller who is not a System Admin or environment admin. The nav entry is hidden for Team Members and Team Admins. (#810)
 
 - **Credential and Model Provider visibility now requires Team Admin role** — SSH keys, GitHub tokens, and Model Providers are no longer visible to plain Team Members in the Working Environment editor's credential pickers, or on the respective admin pages. Only Team Admins (and System Admins) can view and manage these resources. (#803, #806)

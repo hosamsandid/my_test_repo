@@ -45,6 +45,7 @@ const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
+const { computeTeamRoster, createVerdictStore } = require("./loop-verify");
 const { assembleClaudeMd, buildMemoryHint } = require("./prompt-assembly");
 const { readMaintenanceState } = require("./maintenance-state-reader");
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
@@ -212,6 +213,9 @@ function randomHex(bytes) {
   return crypto.randomBytes(bytes).toString("hex");
 }
 const agentProcesses = new Map(); // id → ChildProcess
+// #933: rendezvous for agent-form loop verifiers — a requester loop polls here
+// for the verdict the target verifier agent posts back.
+const loopVerifyStore = createVerdictStore();
 
 // Subscription-OAuth login flows (`claude setup-token` under a PTY) — driven
 // by the Model Providers page in the admin console. See llm-auth-flow.js.
@@ -8706,6 +8710,70 @@ async function main() {
           res.end(JSON.stringify({ ok: false, error: err.message }));
         }
       });
+      return;
+    }
+
+    // ── Team roster for the loop verifier (#933) ──────────────────────────
+    // A team loop agent with an empty `verify` reads its sibling roster to
+    // enforce a *different* verifier (concept §4.6 decision 1). Read-only.
+    const teamRosterMatch = req.method === 'GET' && req.url.match(/^\/internal\/agents\/([^/]+)\/team-roster$/);
+    if (teamRosterMatch) {
+      const id = decodeURIComponent(teamRosterMatch[1]);
+      if (!isSafePathSeg(id)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+        return;
+      }
+      try {
+        const configs = listAgentIds().map((aid) => {
+          const c = loadAgentConfig(aid);
+          return c ? { ...c, id: aid } : null;
+        });
+        const roster = computeTeamRoster(id, configs);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, ...roster }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+      return;
+    }
+
+    // ── Loop verifier verdict rendezvous (#933, AC2) ──────────────────────
+    // POST: the target verifier agent posts its pass/fail verdict for a token.
+    // GET:  the requesting loop polls for that verdict.
+    if (req.method === 'POST' && req.url.split('?')[0] === '/internal/loop-verify/verdict') {
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 4_000_000) req.destroy(); });
+      req.on('end', () => {
+        try {
+          const payload = JSON.parse(body || '{}');
+          const token = payload && payload.token;
+          if (typeof token !== 'string' || !token) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'token required' }));
+            return;
+          }
+          loopVerifyStore.set(token, payload.passed, payload.output);
+          res.writeHead(202, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+    if (req.method === 'GET' && req.url.split('?')[0] === '/internal/loop-verify/verdict') {
+      const token = new URL(req.url, 'http://localhost').searchParams.get('token') || '';
+      if (!token) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'token required' }));
+        return;
+      }
+      const verdict = loopVerifyStore.get(token);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, ...verdict }));
       return;
     }
 

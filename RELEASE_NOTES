@@ -108,6 +108,8 @@
 
 - **Agent chat right rail: collapse/expand now matches the left navigation sidebar** — the right rail (Session Log / Workspace Browser) now collapses and expands using the same icon, animation, and interaction pattern as the left navigation sidebar, giving the chat layout a consistent feel on both sides. (#905)
 
+- **Shipped process templates: routing label vocabulary updated** — the built-in `core-sdlc`, `dispatched-sdlc`, and `extended-sdlc` templates and the dispatcher/business-analyst catalog roles have had their routing label tokens renamed for readability and consistency: `ready` → `ready-for-implementation`, `human:dispatch` → `approved-for-dispatch`, `req:refine` / `req:approved` → `needs-refinement` / `requirements-approved`, `design:approved` → `design-approved`, `dispatch` → `dispatched-for-implementation`, and several others. Prompt text, trigger filters, outcome actions, and channel definitions are all updated in step so templates remain internally consistent. **Existing live teams are unaffected** — the rename applies only to the shipped template definitions; newly materialized teams will use the new vocabulary. (#943)
+
 ### Breaking Changes
 
 - **Token Usage page now restricted to System Admins** — the `/token-usage` route and all five usage API endpoints (`/api/usage/summary`, `/summary/export`, `/work-items`, `/work-items/export`, `/work-items/:owner/:repo/:number`) now return 403 for any caller who is not a System Admin or environment admin. The nav entry is hidden for Team Members and Team Admins. (#810)

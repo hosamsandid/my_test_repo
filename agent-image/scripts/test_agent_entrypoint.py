@@ -2415,5 +2415,298 @@ class TriggerClaudeFailureRetry(unittest.IsolatedAsyncioTestCase):
         scheduler._client.room_send.assert_not_awaited()
 
 
+class ClaimPlanResolution(unittest.TestCase):
+    """`_claim_plan` turns the declarative `claim` trigger field into a concrete
+    label swap — and only for a `github-event` trigger woken by an event that
+    actually carries an issue or PR to label."""
+
+    GH = {"repo": "acme/repo", "payload": {"issue": {"number": 957}}}
+    CLAIM = {"remove": "ready", "add": "ready:wip"}
+
+    def test_github_event_with_issue_resolves(self):
+        plan = entrypoint._claim_plan(
+            {"id": "t1", "type": "github-event", "claim": self.CLAIM}, self.GH)
+        self.assertEqual(plan, {"repo": "acme/repo", "number": 957,
+                                "remove": "ready", "add": "ready:wip"})
+
+    def test_pull_request_payload_resolves(self):
+        plan = entrypoint._claim_plan(
+            {"type": "github-event", "claim": self.CLAIM},
+            {"repo": "acme/repo", "payload": {"pull_request": {"number": 42}}})
+        self.assertEqual(plan["number"], 42)
+
+    def test_label_names_are_stripped(self):
+        plan = entrypoint._claim_plan(
+            {"type": "github-event",
+             "claim": {"remove": " ready ", "add": "\tready:wip\n"}}, self.GH)
+        self.assertEqual((plan["remove"], plan["add"]), ("ready", "ready:wip"))
+
+    def test_no_claim_for_non_github_event_triggers(self):
+        # cron/once/http/loop have no wake label to swap or restore.
+        for ttype in ("cron", "once", "http", "loop"):
+            self.assertIsNone(entrypoint._claim_plan(
+                {"type": ttype, "claim": self.CLAIM}, self.GH), msg=ttype)
+
+    def test_missing_or_malformed_claim_field(self):
+        for claim in ({}, "ready", ["ready"], {"remove": "ready"},
+                      {"add": "ready:wip"}, {"remove": "", "add": "x"},
+                      {"remove": "r", "add": "   "},
+                      {"remove": 1, "add": 2}):
+            self.assertIsNone(entrypoint._claim_plan(
+                {"type": "github-event", "claim": claim}, self.GH),
+                msg=repr(claim))
+        self.assertIsNone(entrypoint._claim_plan(
+            {"type": "github-event"}, self.GH))
+
+    def test_event_without_a_labelable_issue_or_repo(self):
+        for gh in (None, {}, {"repo": "acme/repo", "payload": {}},
+                   {"repo": "acme/repo", "payload": {"ref": "refs/heads/main"}},
+                   {"payload": {"issue": {"number": 1}}},
+                   {"repo": "no-slash", "payload": {"issue": {"number": 1}}},
+                   {"repo": "acme/repo", "payload": {"issue": {"number": 0}}},
+                   {"repo": "acme/repo", "payload": {"issue": {"number": "7"}}}):
+            self.assertIsNone(entrypoint._claim_plan(
+                {"type": "github-event", "claim": self.CLAIM}, gh), msg=repr(gh))
+
+
+class TriggerClaimLabels(unittest.IsolatedAsyncioTestCase):
+    """The claim swap (#957) is executed mechanically by the runner before the
+    claude invoke, and rolled back exactly when the run failed both attempts —
+    so a run that dies leaves the wake label back on the issue and the poller
+    restarts the chain event-natively. A failed swap never blocks the run."""
+
+    def _trigger(self, claim=True):
+        t = {"id": "t1", "type": "github-event"}
+        if claim:
+            t["claim"] = {"remove": "ready", "add": "ready:wip"}
+        return t
+
+    def _ctx(self):
+        return {"github": {"repo": "acme/repo", "eventId": "42",
+                           "payload": {"issue": {"number": 957}}}}
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(return_value="$evt"), blueprint_id=None,
+        )
+
+    def _run(self, scheduler, call_mock, swap_mock, append_mock, trigger, ctx):
+        patches = [
+            patch.object(entrypoint, "_load_dm_room_id",
+                         return_value="!room:local"),
+            patch.object(entrypoint, "_load_dm_agent_config",
+                         return_value={"sessionPolicy": "per-invocation"}),
+            patch.object(entrypoint, "_base_run_context",
+                         return_value={"agentId": "agent-1"}),
+            patch.object(entrypoint, "_new_session", return_value={"id": "s1"}),
+            patch.object(entrypoint, "_bump_active"),
+            patch.object(entrypoint, "_append_event", append_mock),
+            patch.object(entrypoint, "_knowledge_autonomy_level",
+                         return_value=0),
+            patch.object(entrypoint, "_harvest_shared_lessons",
+                         side_effect=lambda text, cid: text),
+            patch.object(entrypoint, "_write_last_response_at"),
+            patch.object(entrypoint, "TRIGGER_RETRY_DELAY_SEC", 0),
+            patch.object(entrypoint, "_call_claude_once", call_mock),
+            patch.object(entrypoint, "_gh_swap_labels", swap_mock),
+            patch.object(scheduler, "_post_trigger_notice", AsyncMock()),
+        ]
+
+        async def go():
+            for p in patches:
+                p.start()
+            try:
+                return await scheduler._execute_inner(trigger, ctx)
+            finally:
+                for p in patches:
+                    p.stop()
+        return go()
+
+    @staticmethod
+    def _rows(append_mock, row_type):
+        return [c.args[1] for c in append_mock.call_args_list
+                if c.args[1].get("type") == row_type]
+
+    async def test_claim_executed_before_invoke_and_logged(self):
+        scheduler = self._scheduler()
+        order = []
+        swap_mock = unittest.mock.Mock(
+            side_effect=lambda *a: order.append(("swap",) + a) or True)
+        call_mock = unittest.mock.Mock(
+            side_effect=lambda *a, **k: order.append(("claude",)) or ("ok", None))
+        append_mock = unittest.mock.Mock()
+        await self._run(scheduler, call_mock, swap_mock, append_mock,
+                        self._trigger(), self._ctx())
+        # The swap precedes the LLM call, and is the only one (no rollback).
+        self.assertEqual([e[0] for e in order], ["swap", "claude"])
+        self.assertEqual(order[0][1:], ("acme/repo", 957, "ready", "ready:wip"))
+        rows = self._rows(append_mock, "trigger.claimed")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            (rows[0]["ok"], rows[0]["removed"], rows[0]["added"],
+             rows[0]["repo"], rows[0]["number"], rows[0]["triggerId"]),
+            (True, "ready", "ready:wip", "acme/repo", 957, "t1"))
+        self.assertEqual(self._rows(append_mock, "trigger.claim-rolled-back"), [])
+        scheduler._send_formatted.assert_awaited_once()
+
+    async def test_claim_runs_after_the_precheck_gate(self):
+        # A preCheck that fails skips the LLM — and must skip the claim too,
+        # otherwise a gated-out run silently eats the wake label.
+        scheduler = self._scheduler()
+        swap_mock = unittest.mock.Mock(return_value=True)
+        call_mock = unittest.mock.Mock(return_value=("ok", None))
+        trigger = self._trigger()
+        trigger["preCheckScript"] = "exit 1"
+        with patch.object(entrypoint, "_run_pre_check", return_value=(1, "")):
+            await self._run(scheduler, call_mock, swap_mock,
+                            unittest.mock.Mock(), trigger, self._ctx())
+        swap_mock.assert_not_called()
+        call_mock.assert_not_called()
+
+    async def test_trigger_without_claim_field_never_swaps(self):
+        scheduler = self._scheduler()
+        swap_mock = unittest.mock.Mock(return_value=True)
+        call_mock = unittest.mock.Mock(return_value=("ok", None))
+        append_mock = unittest.mock.Mock()
+        await self._run(scheduler, call_mock, swap_mock, append_mock,
+                        self._trigger(claim=False), self._ctx())
+        swap_mock.assert_not_called()
+        self.assertEqual(self._rows(append_mock, "trigger.claimed"), [])
+
+    async def test_swap_failure_does_not_block_the_run(self):
+        # Claiming is observability, never a start gate.
+        scheduler = self._scheduler()
+        swap_mock = unittest.mock.Mock(return_value=False)
+        call_mock = unittest.mock.Mock(return_value=("ok", None))
+        append_mock = unittest.mock.Mock()
+        await self._run(scheduler, call_mock, swap_mock, append_mock,
+                        self._trigger(), self._ctx())
+        call_mock.assert_called_once()
+        scheduler._send_formatted.assert_awaited_once()
+        self.assertFalse(self._rows(append_mock, "trigger.claimed")[0]["ok"])
+
+    async def test_rollback_on_double_failure_restores_the_wake_label(self):
+        scheduler = self._scheduler()
+        err = subprocess.CalledProcessError(1, "claude")
+        swap_mock = unittest.mock.Mock(return_value=True)
+        call_mock = unittest.mock.Mock(side_effect=[err, err])
+        append_mock = unittest.mock.Mock()
+        with self.assertRaises(subprocess.CalledProcessError):
+            await self._run(scheduler, call_mock, swap_mock, append_mock,
+                            self._trigger(), self._ctx())
+        self.assertEqual(call_mock.call_count, 2)
+        # Claim, then exactly one rollback with the two labels reversed.
+        self.assertEqual(swap_mock.call_count, 2)
+        self.assertEqual(swap_mock.call_args_list[0].args,
+                         ("acme/repo", 957, "ready", "ready:wip"))
+        self.assertEqual(swap_mock.call_args_list[1].args,
+                         ("acme/repo", 957, "ready:wip", "ready"))
+        rows = self._rows(append_mock, "trigger.claim-rolled-back")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["ok"], rows[0]["removed"], rows[0]["added"]),
+                         (True, "ready:wip", "ready"))
+        # The failure DM must not ask for a manual re-issue any more — the
+        # restored label re-fires the chain by itself.
+        content = scheduler._client.room_send.await_args.kwargs["content"]
+        self.assertEqual(
+            content["io.aee.triggerFailure"]["claimRolledBack"], "ready")
+        self.assertIn("rolled back", content["body"])
+        self.assertNotIn("will NOT re-fire", content["body"])
+
+    async def test_no_rollback_when_the_claim_swap_itself_failed(self):
+        # The wake label was never removed, so there is nothing to restore —
+        # re-adding it would be a spurious second event.
+        scheduler = self._scheduler()
+        err = subprocess.CalledProcessError(1, "claude")
+        swap_mock = unittest.mock.Mock(return_value=False)
+        call_mock = unittest.mock.Mock(side_effect=[err, err])
+        append_mock = unittest.mock.Mock()
+        with self.assertRaises(subprocess.CalledProcessError):
+            await self._run(scheduler, call_mock, swap_mock, append_mock,
+                            self._trigger(), self._ctx())
+        swap_mock.assert_called_once()  # the claim attempt only
+        self.assertEqual(self._rows(append_mock, "trigger.claim-rolled-back"), [])
+        content = scheduler._client.room_send.await_args.kwargs["content"]
+        self.assertNotIn("claimRolledBack", content["io.aee.triggerFailure"])
+
+    async def test_no_rollback_on_single_transient_failure(self):
+        # The retry succeeded, so the claim legitimately stays on the issue.
+        scheduler = self._scheduler()
+        err = subprocess.CalledProcessError(1, "claude")
+        swap_mock = unittest.mock.Mock(return_value=True)
+        call_mock = unittest.mock.Mock(side_effect=[err, ("done", None)])
+        append_mock = unittest.mock.Mock()
+        await self._run(scheduler, call_mock, swap_mock, append_mock,
+                        self._trigger(), self._ctx())
+        swap_mock.assert_called_once()
+        self.assertEqual(self._rows(append_mock, "trigger.claim-rolled-back"), [])
+
+    async def test_no_rollback_on_user_abort(self):
+        # A human stopped the run and is present — restoring the wake label
+        # would immediately re-fire the work they just cancelled.
+        scheduler = self._scheduler()
+        err = subprocess.CalledProcessError(1, "claude")
+        err.user_aborted = True
+        swap_mock = unittest.mock.Mock(return_value=True)
+        call_mock = unittest.mock.Mock(side_effect=[err])
+        append_mock = unittest.mock.Mock()
+        with self.assertRaises(subprocess.CalledProcessError):
+            await self._run(scheduler, call_mock, swap_mock, append_mock,
+                            self._trigger(), self._ctx())
+        swap_mock.assert_called_once()
+        self.assertEqual(self._rows(append_mock, "trigger.claim-rolled-back"), [])
+        scheduler._client.room_send.assert_not_awaited()
+
+
+class GhSwapLabels(unittest.TestCase):
+    """`_gh_swap_labels` shells out to `gh` once and never raises."""
+
+    ENV = {"GH_TOKEN": "t"}
+
+    def test_single_gh_issue_edit_call(self):
+        proc = unittest.mock.Mock(returncode=0, stderr="")
+        with patch.dict(entrypoint.os.environ, self.ENV, clear=False), \
+                patch.object(entrypoint.subprocess, "run",
+                             return_value=proc) as run:
+            self.assertTrue(
+                entrypoint._gh_swap_labels("acme/repo", 957, "ready", "ready:wip"))
+        self.assertEqual(run.call_args.args[0], [
+            "gh", "issue", "edit", "957", "--repo", "acme/repo",
+            "--remove-label", "ready", "--add-label", "ready:wip"])
+
+    def test_non_zero_exit_returns_false(self):
+        proc = unittest.mock.Mock(returncode=1, stderr="label not found")
+        with patch.dict(entrypoint.os.environ, self.ENV, clear=False), \
+                patch.object(entrypoint.subprocess, "run", return_value=proc):
+            self.assertFalse(
+                entrypoint._gh_swap_labels("acme/repo", 957, "ready", "ready:wip"))
+
+    def test_subprocess_error_returns_false(self):
+        with patch.dict(entrypoint.os.environ, self.ENV, clear=False), \
+                patch.object(entrypoint.subprocess, "run",
+                             side_effect=subprocess.TimeoutExpired("gh", 30)):
+            self.assertFalse(
+                entrypoint._gh_swap_labels("acme/repo", 957, "ready", "ready:wip"))
+
+    def test_unexpected_exception_returns_false(self):
+        # Anything escaping would abort the run before the invoke (claim site)
+        # or mask the CalledProcessError (rollback site).
+        with patch.dict(entrypoint.os.environ, self.ENV, clear=False), \
+                patch.object(entrypoint.subprocess, "run",
+                             side_effect=RuntimeError("boom")):
+            self.assertFalse(
+                entrypoint._gh_swap_labels("acme/repo", 957, "ready", "ready:wip"))
+
+    def test_no_token_skips_without_shelling_out(self):
+        env = {k: v for k, v in entrypoint.os.environ.items()
+               if k not in ("GH_TOKEN", "GITHUB_TOKEN")}
+        with patch.dict(entrypoint.os.environ, env, clear=True), \
+                patch.object(entrypoint.subprocess, "run") as run:
+            self.assertFalse(
+                entrypoint._gh_swap_labels("acme/repo", 957, "ready", "ready:wip"))
+        run.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

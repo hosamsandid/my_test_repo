@@ -13,8 +13,10 @@ or directly:
 """
 import asyncio
 import importlib.util
+import subprocess
 import tempfile
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -2333,6 +2335,84 @@ class ThinkingTokenThrottleTests(unittest.TestCase):
         self.assertIsNone(thr.offer({"type": "system_event",
                                      "subtype": "thinking_tokens", "raw": {}}))
         self.assertIsNotNone(thr.flush())
+
+
+class TriggerClaudeFailureRetry(unittest.IsolatedAsyncioTestCase):
+    """A triggered run whose claude invocation fails transiently is retried
+    exactly once; a second failure posts a plain failure notice to the room
+    (the firing event is consumed and will never re-fire — silence would stall
+    the delivery chain); a user-requested stop is never retried."""
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(return_value="$evt"), blueprint_id=None,
+        )
+
+    def _run(self, scheduler, call_mock, trigger=None):
+        trigger = trigger or {"id": "t1", "type": "github-event"}
+        patches = [
+            patch.object(entrypoint, "_load_dm_room_id",
+                         return_value="!room:local"),
+            patch.object(entrypoint, "_load_dm_agent_config",
+                         return_value={"sessionPolicy": "per-invocation"}),
+            patch.object(entrypoint, "_base_run_context",
+                         return_value={"agentId": "agent-1"}),
+            patch.object(entrypoint, "_new_session",
+                         return_value={"id": "s1"}),
+            patch.object(entrypoint, "_bump_active"),
+            patch.object(entrypoint, "_append_event"),
+            patch.object(entrypoint, "_knowledge_autonomy_level",
+                         return_value=0),
+            patch.object(entrypoint, "_harvest_shared_lessons",
+                         side_effect=lambda text, cid: text),
+            patch.object(entrypoint, "_write_last_response_at"),
+            patch.object(entrypoint, "TRIGGER_RETRY_DELAY_SEC", 0),
+            patch.object(entrypoint, "_call_claude_once", call_mock),
+            patch.object(scheduler, "_post_trigger_notice", AsyncMock()),
+        ]
+        async def go():
+            for p in patches:
+                p.start()
+            try:
+                return await scheduler._execute_inner(trigger, None)
+            finally:
+                for p in patches:
+                    p.stop()
+        return go()
+
+    async def test_transient_failure_retried_once_then_posts_result(self):
+        scheduler = self._scheduler()
+        err = subprocess.CalledProcessError(1, "claude")
+        call_mock = unittest.mock.Mock(side_effect=[err, ("done", None)])
+        await self._run(scheduler, call_mock)
+        self.assertEqual(call_mock.call_count, 2)
+        scheduler._send_formatted.assert_awaited_once()
+        self.assertEqual(scheduler._send_formatted.await_args.args[1], "done")
+        scheduler._client.room_send.assert_not_awaited()  # no failure notice
+
+    async def test_double_failure_posts_notice_and_raises(self):
+        scheduler = self._scheduler()
+        err = subprocess.CalledProcessError(1, "claude")
+        call_mock = unittest.mock.Mock(side_effect=[err, err])
+        with self.assertRaises(subprocess.CalledProcessError):
+            await self._run(scheduler, call_mock)
+        self.assertEqual(call_mock.call_count, 2)
+        scheduler._send_formatted.assert_not_awaited()
+        scheduler._client.room_send.assert_awaited_once()
+        content = scheduler._client.room_send.await_args.kwargs["content"]
+        self.assertIn("io.aee.triggerFailure", content)
+        self.assertEqual(content["io.aee.triggerFailure"]["triggerId"], "t1")
+
+    async def test_user_abort_is_not_retried_and_stays_silent(self):
+        scheduler = self._scheduler()
+        err = subprocess.CalledProcessError(1, "claude")
+        err.user_aborted = True
+        call_mock = unittest.mock.Mock(side_effect=[err])
+        with self.assertRaises(subprocess.CalledProcessError):
+            await self._run(scheduler, call_mock)
+        self.assertEqual(call_mock.call_count, 1)
+        scheduler._client.room_send.assert_not_awaited()
 
 
 if __name__ == "__main__":

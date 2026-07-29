@@ -450,6 +450,12 @@ MEMBER_CACHE_TTL_SEC = 30
 VERIFY_WAIT_SEC = int(os.environ.get("LOOP_VERIFY_WAIT_SEC", "1800"))
 VERIFY_POLL_SEC = float(os.environ.get("LOOP_VERIFY_POLL_SEC", "10"))
 
+# A triggered run whose claude invocation dies on a transient infra error
+# (API 5xx, connection closed mid-response) gets exactly one retry after this
+# delay; the GitHub event that woke it has already been consumed, so without
+# the retry the whole delivery chain silently stalls (#902 incident).
+TRIGGER_RETRY_DELAY_SEC = int(os.environ.get("TRIGGER_RETRY_DELAY_SEC", "60"))
+
 # Module-level state shared with the SIGUSR1 handler.
 _active_claude_proc: subprocess.Popen | None = None
 _user_stop_requested = False
@@ -4656,6 +4662,37 @@ class TriggerScheduler:
             content=content,
         )
 
+    async def _post_trigger_failure_notice(self, trigger: dict, room_id: str,
+                                           err: Exception) -> None:
+        """Post one plain DM notice when a triggered run failed on both
+        attempts. Best-effort, no Claude call — the triggering event is
+        consumed and will not re-fire, so a silent failure would leave the
+        delivery chain stalled with nobody the wiser."""
+        if not (isinstance(room_id, str) and _MATRIX_ROOM_ID_RE.match(room_id)):
+            return
+        tid = trigger.get("id", "?")
+        desc = trigger.get("description") or trigger.get("type") or "trigger"
+        body = (
+            f"⚠️ **Triggered run failed** — trigger `{tid}` ({desc}) crashed "
+            f"twice and was given up. The event that fired it is consumed and "
+            f"will NOT re-fire on its own — the work it should have done is "
+            f"still open. Please re-issue the event (e.g. toggle the label) "
+            f"or hand me the task directly.\n\nLast error: {err}"
+        )
+        content = {
+            "msgtype": "m.notice",
+            "body": body,
+            "io.aee.triggerFailure": {
+                "triggerId": tid,
+                "triggerType": trigger.get("type"),
+            },
+        }
+        await self._client.room_send(
+            room_id=room_id,
+            message_type="m.room.message",
+            content=content,
+        )
+
     async def _execute_and_clear_marker(self, trigger: dict, marker_id: str,
                                         ctx: dict | None = None) -> None:
         """Wrap `_execute` so the #506 in-flight marker is cleared once the
@@ -4806,30 +4843,71 @@ class TriggerScheduler:
             # pointer — otherwise the DM's resume id gets stolen. Bypass the
             # _call_claude wrapper for that case and call _call_claude_once
             # directly with resume_id=None.
-            try:
-                if is_per_invocation:
-                    result, _observed = await asyncio.to_thread(
-                        _call_claude_once,
-                        prompt, room_id, correlation_id, None,
-                        self._blueprint_id, timeout_sec, run_context,
-                    )
-                else:
-                    result = await asyncio.to_thread(
-                        _call_claude,
-                        prompt, room_id, correlation_id, self._blueprint_id, timeout_sec,
-                        run_context,
-                    )
-            except subprocess.CalledProcessError as err:
+            #
+            # The claude invocation gets one retry on transient failure: the
+            # triggering event is already consumed at this point, so giving up
+            # on the first API hiccup permanently stalls the delivery chain.
+            # A user-requested stop is never retried, and a run that fails both
+            # attempts is announced in the room instead of dying silently.
+            attempt = 0
+            while True:
+                attempt += 1
                 try:
-                    _append_event(room_id, {
-                        "type": "error",
-                        "correlationId": correlation_id,
-                        "stage": "claude",
-                        "message": str(err),
-                    })
-                except Exception:
-                    pass
-                raise
+                    if is_per_invocation:
+                        result, _observed = await asyncio.to_thread(
+                            _call_claude_once,
+                            prompt, room_id, correlation_id, None,
+                            self._blueprint_id, timeout_sec, run_context,
+                        )
+                    else:
+                        result = await asyncio.to_thread(
+                            _call_claude,
+                            prompt, room_id, correlation_id, self._blueprint_id,
+                            timeout_sec, run_context,
+                        )
+                    break
+                except subprocess.CalledProcessError as err:
+                    try:
+                        _append_event(room_id, {
+                            "type": "error",
+                            "correlationId": correlation_id,
+                            "stage": "claude",
+                            "attempt": attempt,
+                            "message": str(err),
+                        })
+                    except Exception:
+                        pass
+                    user_aborted = bool(getattr(err, "user_aborted", False))
+                    if user_aborted:
+                        raise
+                    if attempt >= 2:
+                        try:
+                            await self._post_trigger_failure_notice(
+                                trigger, room_id, err)
+                        except Exception as exc:
+                            print(
+                                f"[Runner:{self._agent_id}] Could not post "
+                                f"failure notice for {tid}: {exc}",
+                                file=sys.stderr,
+                            )
+                        raise
+                    delay = TRIGGER_RETRY_DELAY_SEC
+                    print(
+                        f"[Runner:{self._agent_id}] Trigger {tid}: claude run "
+                        f"failed (attempt {attempt}) — retrying in {delay}s: "
+                        f"{err}",
+                        file=sys.stderr,
+                    )
+                    try:
+                        _append_event(room_id, {
+                            "type": "trigger.retry",
+                            "correlationId": correlation_id,
+                            "triggerId": tid,
+                            "delaySec": delay,
+                        })
+                    except Exception:
+                        pass
+                    await asyncio.sleep(delay)
         finally:
             _bump_active(-1, session)
 

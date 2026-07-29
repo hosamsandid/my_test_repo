@@ -183,7 +183,7 @@ scope rule), not a prerequisite.
   `AEE_INSTANCE_ID=e2e`. A run starts from **fresh named volumes** and ends with
   `compose -p aee-e2e down -v` plus removal of dynamic `aee-e2e_agent-*` volumes and
   label-scoped container cleanup (`aee.agent.id` / instance labels). Nothing can leak
-  into (or survive from) the developer's normal `vgh-claw` stack, because every volume
+  into (or survive from) the developer's normal `agent-studio` stack, because every volume
   and container is project-prefixed.
 - **Isolation within a run:** created resources use a per-run unique suffix
   (`e2e-<runid>-…`) so specs never collide on ids; mutating flows run **serially**

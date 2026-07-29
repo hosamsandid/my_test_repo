@@ -1,5 +1,5 @@
 #
-# e-vgh-claw stack — Conduwuit + Orchestrator + Admin Console
+# agent-studio stack — Conduwuit + Orchestrator + Admin Console
 #
 # Usage:
 #   make up        # build the agent image + build + start the full stack
@@ -26,7 +26,7 @@ ACE_PLUGIN_SKILLS_DIR ?= $(HOME)/.claude/plugins/marketplaces/i-sase-marketplace
 SKILL_POOL_DEFAULTS    = $(CURDIR)/orchestrator/skill-pool
 SKILL_POOL_VOLUME      = $(COMPOSE_PROJECT_NAME)_claude-workspace
 ifeq ($(COMPOSE_PROJECT_NAME),)
-SKILL_POOL_VOLUME      = vgh-claw_claude-workspace
+SKILL_POOL_VOLUME      = agent-studio_claude-workspace
 endif
 
 # Admin Console version footer (#483) — resolved here (not inside the
@@ -50,7 +50,7 @@ export GIT_COMMIT GIT_DIRTY
 # this is a no-op rebuild when agent-image/ is unchanged and rebuilds on change.
 # `restart` and `update` route through `up`, so they inherit the build too.
 up: agent-image
-	@echo "Starting e-vgh-claw stack..."
+	@echo "Starting agent-studio stack..."
 	$(COMPOSE) -f $(COMPOSE_FILE) up -d --build
 	@echo ""
 	@echo "Stack started. Container status:"

@@ -1,5 +1,5 @@
 {
-  "name": "e-vgh-claw-admin-api",
+  "name": "agent-studio-admin-api",
   "version": "1.0.0",
   "scripts": {
     "test": "node --test"

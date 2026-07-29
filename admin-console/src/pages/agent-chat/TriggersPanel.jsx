@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Terminal, FileCode2, GitBranch } from 'lucide-react';
+import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Terminal, FileCode2, GitBranch, Repeat } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
 import ScriptViewerPanel from '../../components/ScriptViewerPanel';
@@ -10,6 +10,7 @@ import {
   GITHUB_EVENT_OPTIONS,
   LABEL_FILTERABLE_EVENTS,
   summarizeGithubEventTrigger,
+  summarizeLoopTrigger,
 } from './trigger-summary.js';
 import { DOW_LABELS, parseCronState, buildCron, describeCron } from './cron-format.js';
 
@@ -83,9 +84,12 @@ function TypeBadge({ type, dataFlow }) {
   const isOnce   = type === 'once';
   const isHttp   = type === 'http';
   const isGithub = type === 'github-event';
+  const isLoop   = type === 'loop';
   let bg, color, label, Icon;
   if (dataFlow) {
     bg = 'var(--eb-accent-muted)'; color = 'var(--eb-accent-primary)'; label = 'data flow'; Icon = GitBranch;
+  } else if (isLoop) {
+    bg = 'var(--eb-status-warning-bg)'; color = 'var(--eb-status-warning)'; label = 'loop'; Icon = Repeat;
   } else if (isCron) {
     bg = 'var(--eb-accent-muted)'; color = 'var(--eb-accent-primary)'; label = 'cron'; Icon = Clock;
   } else if (isOnce) {
@@ -297,6 +301,8 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
   let schedule;
   if (isDataFlow) {
     schedule = `wakes on push${trigger.repo ? ` to ${trigger.repo}` : ' to the team repo'}`;
+  } else if (trigger.type === 'loop') {
+    schedule = summarizeLoopTrigger(trigger);
   } else if (trigger.type === 'http') {
     schedule = `/hooks/${agentId}/${trigger.id}`;
   } else if (ghSummary) {
@@ -494,6 +500,32 @@ function generateSecret() {
   return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+// Derive the loop verifier editor mode from a persisted `verify` value.
+// `{ agentId }` → 'agent', `{ command }` → 'command', anything else → 'none'.
+function deriveVerifyMode(verify) {
+  if (verify && typeof verify === 'object') {
+    if (verify.agentId) return 'agent';
+    if (verify.command) return 'command';
+  }
+  return 'none';
+}
+
+// `maxIterations` is required and must be a positive whole number (concept
+// §4.4). Accepts the raw string the number input emits.
+function isValidMaxIterations(raw) {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0;
+}
+
+// Pick a sensible default sibling verifier from a roster (concept §4.2/§4.6:
+// "an agent must not grade its own work"). Prefer a reviewer / quality-gate
+// role, else the first sibling. Returns an agent id or ''.
+function pickDefaultVerifier(siblings) {
+  const list = Array.isArray(siblings) ? siblings : [];
+  const preferred = list.find(a => /review|quality|qa|test/i.test(`${a.id} ${a.displayName || ''}`));
+  return (preferred || list[0])?.id || '';
+}
+
 /* ── Trigger form (create & edit) ───────────────────────────────────── */
 // Shared by the agent-chat Triggers panel and the Flow-Editor schedule edge
 // editor (EdgeDialogs) — one source of truth for editing every trigger type.
@@ -506,7 +538,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
   // Draft mode (process-canvas drafts): there is no live agent/environment yet,
   // so the repo is unknown by design — it is applied at materialise time.
   const isDraftMode = ops.mode === 'draft';
-  const knownTypes = new Set(['cron', 'once', 'http', 'github-event']);
+  const knownTypes = new Set(['cron', 'once', 'http', 'github-event', 'loop']);
   const startedAsDataFlow = isDataFlowTrigger(initialValues);
   // 'data-flow' is a UI-only type that serializes to github-event / push / from.
   const initialType = startedAsDataFlow
@@ -527,6 +559,16 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     description: initialValues?.description ?? '',
     prompt:      initialValues?.prompt      ?? '',
     enabled:     initialValues?.enabled !== false,
+    // ── loop fields (type: 'loop') ───────────────────────────────────────
+    // Kept as strings in the form (number inputs emit strings); parsed on save.
+    maxIterations: initialValues?.maxIterations != null ? String(initialValues.maxIterations) : '',
+    maxTokens:     initialValues?.maxTokens     != null ? String(initialValues.maxTokens)     : '',
+    minGapSeconds: initialValues?.minGapSeconds != null ? String(initialValues.minGapSeconds) : '',
+    untilCommand:  (initialValues?.until && typeof initialValues.until === 'object' && initialValues.until.command) || '',
+    // verify: { command } | { agentId } | absent. Derive the editor mode.
+    verifyMode:    deriveVerifyMode(initialValues?.verify),
+    verifyCommand: (initialValues?.verify && typeof initialValues.verify === 'object' && initialValues.verify.command) || '',
+    verifyAgentId: (initialValues?.verify && typeof initialValues.verify === 'object' && initialValues.verify.agentId) || '',
   }));
   const isDataFlow = form.type === 'data-flow';
   const showLabelFilter = form.type === 'github-event'
@@ -584,6 +626,50 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     }
   }, [availableRepos, form.repo]);
 
+  // Loop verifier roster — for a team agent, the "separate verifier" default is
+  // enforced by the backend (concept §4.6), so the UI must reflect it: pre-fill
+  // a *sibling* role (never the agent itself) and let the author override. Only
+  // fetched when loop is the active type and there's a live environment (a draft
+  // has no roster — enforcement happens at materialise). `null` = not loaded.
+  const [loopRoster, setLoopRoster] = useState(isDraftMode ? { isTeamAgent: false, siblings: [] } : null);
+  useEffect(() => {
+    if (isDraftMode || form.type !== 'loop' || loopRoster !== null) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const agents = await apiCall('GET', '/api/agents');
+        const list = Array.isArray(agents) ? agents : [];
+        const self = list.find(a => a.id === agentId) || null;
+        const parentTeamId = self?.parentTeamId || null;
+        const isTeamAgent = !!parentTeamId;
+        // Siblings = same team, excluding self and the (runtime-less) team agent.
+        const siblings = isTeamAgent
+          ? list.filter(a => a.parentTeamId === parentTeamId && a.id !== agentId && a.role !== 'team')
+              .map(a => ({ id: a.id, displayName: a.displayName || a.id }))
+          : [];
+        if (!cancelled) setLoopRoster({ isTeamAgent, siblings });
+      } catch {
+        if (!cancelled) setLoopRoster({ isTeamAgent: false, siblings: [] });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [form.type, agentId, loopRoster, isDraftMode]);
+
+  // Enforced separate-verifier default: once the roster is known, a team agent
+  // with no authored verifier gets a sibling pre-filled (not left empty). Runs
+  // once per roster load; the author can still change the mode/target after.
+  const isTeamLoopAgent = !!loopRoster?.isTeamAgent;
+  useEffect(() => {
+    if (form.type !== 'loop' || !isTeamLoopAgent) return;
+    const siblings = loopRoster?.siblings || [];
+    setForm(f => {
+      if (f.verifyMode !== 'none' || f.verifyAgentId) return f; // author already chose
+      const pick = pickDefaultVerifier(siblings);
+      if (!pick) return f; // no sibling to assign — leave the notice to explain
+      return { ...f, verifyMode: 'agent', verifyAgentId: pick };
+    });
+  }, [form.type, isTeamLoopAgent, loopRoster]);
+
   // Lazy-generate a secret the first time http is selected, so users get a
   // working default without having to click "regenerate".
   function changeType(next) {
@@ -615,6 +701,11 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       if (!form.repo && !isDraftMode) { setFormError('A repository is required (the team repo agents push to).'); return; }
     }
     if (form.type === 'http' && !form.secret.trim()) { setFormError('Secret is required for HTTP triggers.'); return; }
+    if (form.type === 'loop') {
+      if (!isValidMaxIterations(form.maxIterations)) { setFormError('Max iterations is required and must be a positive whole number.'); return; }
+      if (form.verifyMode === 'command' && !form.verifyCommand.trim()) { setFormError('Enter the verifier command, or choose a different verifier mode.'); return; }
+      if (form.verifyMode === 'agent' && !form.verifyAgentId.trim()) { setFormError('Select the verifier agent, or choose a different verifier mode.'); return; }
+    }
     if (!form.prompt.trim()) { setFormError('Prompt is required.'); return; }
     const body = {
       type:        isDataFlow ? 'github-event' : form.type,
@@ -631,6 +722,22 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       body.dataFlow = true;
     } else if (form.type === 'cron')       body.cron = form.cron.trim();
     else if (form.type === 'once')         body.at   = form.at.trim();
+    else if (form.type === 'loop') {
+      body.maxIterations = Number(form.maxIterations);
+      const untilCmd = form.untilCommand.trim();
+      if (untilCmd) body.until = { command: untilCmd };
+      // verify: command form / agent form / omitted. A team agent's blank
+      // verifier is (re-)enforced to a sibling server-side (concept §4.6).
+      if (form.verifyMode === 'command' && form.verifyCommand.trim()) {
+        body.verify = { command: form.verifyCommand.trim() };
+      } else if (form.verifyMode === 'agent' && form.verifyAgentId.trim()) {
+        body.verify = { agentId: form.verifyAgentId.trim() };
+      }
+      const mt = Number(form.maxTokens);
+      if (form.maxTokens.trim() && Number.isFinite(mt) && mt > 0) body.maxTokens = mt;
+      const mg = Number(form.minGapSeconds);
+      if (form.minGapSeconds.trim() && Number.isFinite(mg) && mg >= 0) body.minGapSeconds = mg;
+    }
     else if (form.type === 'http')         body.secret = form.secret.trim();
     else if (form.type === 'github-event') {
       if (form.repo) body.repo = form.repo; // a draft's repo lands at materialise
@@ -675,6 +782,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
         >
           <option value="cron">Cron (recurring)</option>
           <option value="once">Once (one-shot)</option>
+          <option value="loop">Loop (re-run until done)</option>
           <option value="http">HTTP webhook</option>
           <option value="github-event">GitHub event</option>
           <option value="data-flow">Data flow (agent dependency)</option>
@@ -687,6 +795,126 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
 
       {form.type === 'once' && (
         <DateTimePicker value={form.at} onChange={v => set('at', v)} />
+      )}
+
+      {form.type === 'loop' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+          <div style={{
+            padding: 'var(--eb-space-2) var(--eb-space-3)',
+            background: 'var(--eb-status-warning-bg)', border: '1px solid var(--eb-status-warning)',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5,
+          }}>
+            <Repeat size={11} style={{ verticalAlign: 'middle', marginRight: 4, color: 'var(--eb-status-warning)' }} />
+            A <strong>loop</strong> re-runs this agent with the prompt below, chaining
+            each iteration into the next until a stop condition is met. It stops when
+            <code> until</code> exits <code>0</code> (done), the iteration cap or token
+            budget is reached (exhausted), or the safety backstop trips (paused).
+          </div>
+
+          <FormInput
+            label="Max iterations (required)"
+            type="number"
+            value={form.maxIterations}
+            onChange={v => set('maxIterations', v)}
+            placeholder="e.g. 25"
+            error={formError && !isValidMaxIterations(form.maxIterations) ? 'Required — a positive whole number.' : undefined}
+          />
+
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+              Stop condition — <code>until</code> command (optional)
+            </div>
+            <input
+              type="text"
+              value={form.untilCommand}
+              onChange={e => set('untilCommand', e.target.value)}
+              placeholder="e.g. npm test && test ! -s fix_plan.md"
+              style={{ ...FIELD_STYLE, width: '100%', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
+            />
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+              Runs after each iteration; exit code <code>0</code> means the goal is met and the loop is done.
+            </div>
+          </div>
+
+          {/* Verifier — command form, agent form, or none. For a team agent the
+              separation is enforced (concept §4.6): the picker is pre-filled and
+              cannot be silently emptied. */}
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+              Verifier (optional{isTeamLoopAgent ? ', enforced for team agents' : ', recommended'})
+            </div>
+            <select
+              value={form.verifyMode}
+              onChange={e => set('verifyMode', e.target.value)}
+              style={{ ...FIELD_STYLE, width: '100%' }}
+            >
+              <option value="none">No verifier{isTeamLoopAgent ? ' (a sibling is enforced server-side)' : ' (self-graded)'}</option>
+              <option value="command">Command — must exit 0 for the iteration to count</option>
+              <option value="agent">Agent — a separate role grades the work</option>
+            </select>
+
+            {form.verifyMode === 'command' && (
+              <input
+                type="text"
+                value={form.verifyCommand}
+                onChange={e => set('verifyCommand', e.target.value)}
+                placeholder="e.g. npm run lint && npm test"
+                style={{ ...FIELD_STYLE, width: '100%', marginTop: 'var(--eb-space-2)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
+              />
+            )}
+
+            {form.verifyMode === 'agent' && (
+              (loopRoster?.siblings?.length > 0) ? (
+                <select
+                  value={form.verifyAgentId}
+                  onChange={e => set('verifyAgentId', e.target.value)}
+                  style={{ ...FIELD_STYLE, width: '100%', marginTop: 'var(--eb-space-2)' }}
+                >
+                  <option value="">— Select a verifier agent —</option>
+                  {loopRoster.siblings.map(a => (
+                    <option key={a.id} value={a.id}>{a.displayName}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={form.verifyAgentId}
+                  onChange={e => set('verifyAgentId', e.target.value)}
+                  placeholder="verifier agent id (e.g. team-x-code-reviewer)"
+                  style={{ ...FIELD_STYLE, width: '100%', marginTop: 'var(--eb-space-2)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
+                />
+              )
+            )}
+
+            {isTeamLoopAgent && (
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                Team agents must not grade their own work — a separate sibling verifier
+                is assigned automatically and re-enforced on save even if left blank.
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', gap: 'var(--eb-space-3)' }}>
+            <div style={{ flex: 1 }}>
+              <FormInput
+                label="Token budget (optional)"
+                type="number"
+                value={form.maxTokens}
+                onChange={v => set('maxTokens', v)}
+                placeholder="e.g. 2000000"
+              />
+            </div>
+            <div style={{ flex: 1 }}>
+              <FormInput
+                label="Min gap seconds (optional)"
+                type="number"
+                value={form.minGapSeconds}
+                onChange={v => set('minGapSeconds', v)}
+                placeholder="0 = chain immediately"
+              />
+            </div>
+          </div>
+        </div>
       )}
 
       {isDataFlow && (

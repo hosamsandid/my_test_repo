@@ -54,6 +54,14 @@
 
 - **Agent Chat Sessions: default to the most recent finished session** — the Session Log panel now opens directly on the most recently completed session rather than on the live (still-writing) session. This makes it faster to review what an agent just did after a trigger run completes. The live session remains accessible via the session picker. (#910)
 
+- **New `loop` trigger type: governed continuation loops** — agent trigger configurations can now include a `loop` trigger that runs the agent's prompt back-to-back, chaining iterations automatically until a stop condition is met. Two stop conditions are supported: `until.command` (a shell command whose exit 0 signals "done") and `maxIterations` (required; a hard cap that prevents unbounded loops). Iterations are strictly sequential with an optional `minGapSeconds` pause between them. When a loop reaches its terminal state, the agent posts a single outcome DM reporting the reason (done vs. exhausted), iterations consumed, and the last `until` output. Maintenance Mode is honoured — the loop pauses inside a maintenance window and resumes with one catch-up iteration after. (#942)
+
+- **Loop trigger: per-iteration verifier gate** — each iteration of a `loop` trigger can now be gated by a `verify` step that must pass before the iteration counts as progress. Two verification modes are available: `verify.command` (a shell command — exit 0 means pass; on failure, the command's output is fed back into the next iteration's prompt as corrective context) and `verify.agentId` (routes the iteration's output to another agent for a `[PASS]`/`[FAIL]` verdict before proceeding). Fail-closed: an undeliverable, timed-out, or unparseable verdict counts as a failure, never as a silent pass. For team loop agents the verifier defaults to a sibling role (preferring `*-reviewer` or `quality-gate` roles) when none is specified, and team agents are prevented from self-grading. Standalone agents may opt in to self-verification with `verify.selfGraded`. (#947)
+
+- **Loop trigger: output-token budget and runaway backstop surfacing** — an optional `maxTokens` field on a `loop` trigger sets a total output-token budget for the run; when the cumulative token spend reaches the cap the loop stops with outcome `exhausted` and the terminal DM reports tokens spent vs budget alongside iterations used. The existing runaway spawn-backstop (#611) is now surfaced as a distinct `paused` outcome with a ⏸️ heading and an explanation, rather than silently dropping the iteration. (#949)
+
+- **Loop trigger: UI authoring in trigger form, canvas, and Scheduled Jobs** — the `loop` trigger type is now available in all three trigger-authoring surfaces: the chat right-rail Triggers panel, the Flows canvas edge dialog (via the shared `TriggerForm`), and the Scheduled Jobs page. The form exposes all loop fields: `maxIterations` (required — save is blocked without a positive whole number), `until.command` (stop condition), `verify` (none, command, or agent picker — team members get a sibling reviewer pre-filled by default with separation enforced server-side), `maxTokens`, and `minGapSeconds`. Loop trigger rows render a distinct ↻ badge and a compact stop-contract summary line. (#952)
+
 ### Bug Fixes
 
 - **Auto-curated skills now show descriptions in the agent Skills section** — skills created by the knowledge curator were written without YAML frontmatter, causing agents to see only the skill name with no indication of what the skill covers. The curator now writes a `name` + `description` frontmatter block into every generated SKILL.md. Existing skills are backfilled automatically the next time they are amended. (#807)
@@ -109,11 +117,38 @@
 - **Agent chat right rail: collapse/expand now matches the left navigation sidebar** — the right rail (Session Log / Workspace Browser) now collapses and expands using the same icon, animation, and interaction pattern as the left navigation sidebar, giving the chat layout a consistent feel on both sides. (#905)
 
 - **Shipped process templates: routing label vocabulary updated** — the built-in `core-sdlc`, `dispatched-sdlc`, and `extended-sdlc` templates and the dispatcher/business-analyst catalog roles have had their routing label tokens renamed for readability and consistency: `ready` → `ready-for-implementation`, `human:dispatch` → `approved-for-dispatch`, `req:refine` / `req:approved` → `needs-refinement` / `requirements-approved`, `design:approved` → `design-approved`, `dispatch` → `dispatched-for-implementation`, and several others. Prompt text, trigger filters, outcome actions, and channel definitions are all updated in step so templates remain internally consistent. **Existing live teams are unaffected** — the rename applies only to the shipped template definitions; newly materialized teams will use the new vocabulary. (#943)
+- **Process graph: gate and brake classification is now flag-driven** — whether a routing label acts as a human approval gate or a loop brake is now determined by its config flags (`humanGate: true` / `brake: true` in the label registry, `gate: 'human'` on a channel), not by the label's name. The former conventions — the `human:*` prefix and the hardcoded `hold`/`needs:human` brake set — are retired as a classification source. Labels flagged `brake: true` can now be applied by agents without triggering a lint error; only `humanGate`-flagged labels remain forbidden as agent emits. (#939)
 
 ### Breaking Changes
+
+- **Default `COMPOSE_PROJECT_NAME` renamed from `vgh-claw` to `agent-studio`** — the legacy customer name has been removed from the codebase. The compose project prefix (used for all container and named-volume names) now defaults to `agent-studio`. **This orphans your existing named volumes:** compose will create fresh, empty volumes under the new prefix, so the skill pool, agent workspaces, chat history and Claude `--resume` state will appear "lost" until you migrate. Package names (`agent-studio-admin-console`, `agent-studio-admin-api`), the poller/wizard `User-Agent` strings, and the orchestrator git-author email (`orchestrator@agent-studio.local`) changed too, but those are cosmetic. Choose one upgrade path before running `make up` on an existing stack:
+
+  **Option 1 — keep your old volumes (zero-risk, recommended for existing deployments).** Pin the old prefix in `.env` so nothing moves:
+  ```bash
+  echo 'COMPOSE_PROJECT_NAME=vgh-claw' >> .env   # or your existing custom prefix
+  ```
+
+  **Option 2 — adopt the new prefix and migrate volume data.** Podman has no in-place volume rename on older versions, so copy each volume via a helper container while the stack is stopped:
+  ```bash
+  make down
+  OLD=vgh-claw; NEW=agent-studio          # use your actual old prefix
+  for v in conduwuit-db agent-pool-workspace claude-workspace claude-home agent-control-plane; do
+    podman volume create "${NEW}_$v"
+    podman run --rm -v "${OLD}_$v":/from:ro -v "${NEW}_$v":/to \
+      docker.io/library/busybox sh -c 'cp -a /from/. /to/'
+  done
+  # If AEE_PER_AGENT_VOLUME=1, repeat for each ${OLD}_agent-<id> volume
+  # (list them with: podman volume ls | grep "^.*${OLD}_agent-")
+  make up
+  # After verifying the stack is healthy, remove the old volumes:
+  #   podman volume rm ${OLD}_conduwuit-db ${OLD}_agent-pool-workspace ${OLD}_claude-workspace ${OLD}_claude-home ${OLD}_agent-control-plane
+  ```
+  A live-deploy checkout previously kept at `~/Projects/e-vgh-claw` can be renamed for tidiness, but the directory name does not drive the compose prefix — only `COMPOSE_PROJECT_NAME` does. Fresh installs need no action. (#913)
 
 - **Token Usage page now restricted to System Admins** — the `/token-usage` route and all five usage API endpoints (`/api/usage/summary`, `/summary/export`, `/work-items`, `/work-items/export`, `/work-items/:owner/:repo/:number`) now return 403 for any caller who is not a System Admin or environment admin. The nav entry is hidden for Team Members and Team Admins. (#810)
 
 - **Credential and Model Provider visibility now requires Team Admin role** — SSH keys, GitHub tokens, and Model Providers are no longer visible to plain Team Members in the Working Environment editor's credential pickers, or on the respective admin pages. Only Team Admins (and System Admins) can view and manage these resources. (#803, #806)
 
 - **Removed trigger-level emits API endpoints** — `GET /api/agents/:id/triggers/:triggerId/emit-suggestions` and `PUT /api/agents/:id/triggers/:triggerId/emits` have been removed. Use the agent-level `emits` field (via `PUT /api/agents/:id`) instead. Any `emits` field supplied to `PUT /api/agents/:id/triggers/:triggerId` is silently stripped. (#788)
+
+- **Live teams: labels are no longer classified as gates or brakes by name alone** — on live teams without a bundle registry, labels whose names match the old conventions (`human:*` prefix, `hold`, `needs:human`) no longer carry implicit gate or brake semantics. Classification now reads the `humanGate` / `brake` flags that the platform writes into the label registry at materialisation time. Teams using custom label names that were previously classified by name convention will need to re-materialise (or update the team agent's `labels[]` config directly) to restore gate or brake behavior. Built-in templates (`core-sdlc`, `dispatched-sdlc`, `extended-sdlc`) ship the flags and are unaffected. (#939)

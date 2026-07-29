@@ -166,7 +166,7 @@ templates, process templates, and the reference MCP servers.
 > [ACE plugin installation](ace-plugin-installation.md) if you actually need it.
 
 > **If you changed `COMPOSE_PROJECT_NAME` in `.env`, seeding silently targets the wrong
-> volume.** `make` does not read `.env`, so it falls back to the `vgh-claw_claude-workspace`
+> volume.** `make` does not read `.env`, so it falls back to the `agent-studio_claude-workspace`
 > volume while compose creates `<yourname>_claude-workspace`. Pass it explicitly:
 > ```bash
 > COMPOSE_PROJECT_NAME=<yourname> make seed-pool

@@ -92,11 +92,11 @@ services:
       ACE_WATCH_INTERVAL_SECONDS: "${ACE_WATCH_INTERVAL_SECONDS:-30}"
       ACE_BRIEFING_ENV_ID: "${ACE_BRIEFING_ENV_ID:-briefing-pack}"
       HOOK_PORT: "${HOOK_PORT:-4003}"
-      COMPOSE_PROJECT_NAME: "${COMPOSE_PROJECT_NAME:-vgh-claw}"
+      COMPOSE_PROJECT_NAME: "${COMPOSE_PROJECT_NAME:-agent-studio}"
       # Instance identity for per-stack container eviction/reconcile scoping.
       # Lets multiple stacks share one Podman store without evicting each other's
       # agent containers. Defaults to COMPOSE_PROJECT_NAME when unset.
-      AEE_INSTANCE_ID: "${AEE_INSTANCE_ID:-${COMPOSE_PROJECT_NAME:-vgh-claw}}"
+      AEE_INSTANCE_ID: "${AEE_INSTANCE_ID:-${COMPOSE_PROJECT_NAME:-agent-studio}}"
     depends_on:
       conduwuit:
         condition: service_started

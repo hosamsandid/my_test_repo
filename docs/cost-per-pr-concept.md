@@ -196,8 +196,8 @@ One compact JSONL line **per invocation**, written at `result` time:
 ```json
 {
   "ts": "2026-07-16T14:03:22Z",
-  "agentId": "vgh-claw-developer",
-  "teamId": "vgh-claw",
+  "agentId": "agent-studio-developer",
+  "teamId": "agent-studio",
   "roleId": "developer",
   "flowInstanceId": null,
   "provider": "litellm-main",
@@ -205,7 +205,7 @@ One compact JSONL line **per invocation**, written at `result` time:
   "sessionId": "816d7386-…",
   "trigger": { "type": "github-event", "id": "dev-on-issue", "conversationKey": "issue:99" },
   "github": { "repo": "org/repo", "prNumber": null, "issueNumber": 99 },
-  "git": { "repo": "repo", "branch": "agent/vgh-claw-developer/issue-99", "headBefore": "ab12…", "headAfter": "cd34…" },
+  "git": { "repo": "repo", "branch": "agent/agent-studio-developer/issue-99", "headBefore": "ab12…", "headAfter": "cd34…" },
   "tokens": { "input": 10, "output": 42, "cacheCreationInput": 8141, "cacheReadInput": 17718 },
   "modelUsage": { "claude-sonnet-5": { "inputTokens": 532, "outputTokens": 54, "cacheReadInputTokens": 17718, "cacheCreationInputTokens": 8141 } },
   "durationMs": 191200

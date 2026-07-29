@@ -168,6 +168,24 @@ test('Trigger docs are injected only for autonomous agents', () => {
   assert.ok(!dm.includes('## Trigger management'));
 });
 
+test('the injected Trigger-management block documents the loop trigger and its stop contract (#937)', () => {
+  const auto = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null, autonomous: true });
+  // The loop type and its distinguishing "repeat until" framing are present.
+  assert.ok(auto.includes('**Loop (loop):**'));
+  assert.ok(auto.includes('"type": "loop"'));
+  // Stop-contract fields: maxIterations (required), until, maxTokens, verify + outcomes.
+  assert.ok(auto.includes('`maxIterations` is **required**'));
+  assert.ok(auto.includes('until.command'));
+  assert.ok(auto.includes('maxTokens'));
+  assert.ok(/done|exhausted|paused/.test(auto));
+  // Separate-verifier ("don't grade your own work") rule.
+  assert.ok(/Don't grade your own work/i.test(auto));
+  assert.ok(auto.includes('selfGraded'));
+  // A non-autonomous agent never sees any of it (no Trigger section at all).
+  const dm = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null, autonomous: false });
+  assert.ok(!dm.includes('**Loop (loop):**'));
+});
+
 test('interaction note gains the unattended-run framing only when autonomous', () => {
   assert.ok(!interactionNote(false).includes('unattended'));
   assert.ok(interactionNote(true).includes('unattended'));

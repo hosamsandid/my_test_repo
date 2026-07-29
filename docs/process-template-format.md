@@ -52,7 +52,8 @@ role's `{{vars}}` and the target repo are applied per member.
       "github": { "producesPr": true, "producesIssue": false },  // GitHub outputs (#380)
       "channels": [                          // PR/issue channels this role consumes (#380)
         { "artifact": "pr", "from": "developer", "label": "approved", "gate": "human",
-          "wakePrompt": "…" }                 // optional authored wake-prompt override (#868)
+          "wakePrompt": "…",               // optional authored wake-prompt override (#868)
+          "autoClaim": false }             // opt out of auto-derived claim (#958); default ON for labelled channels
       ],
       "triggers": [
         {
@@ -61,6 +62,7 @@ role's `{{vars}}` and the target repo are applied per member.
           "enabled": true,
           "events": ["issues.labeled"],   // github-event
           "labelFilter": "assigned:{{agentId}}",
+          "claim": { "remove": "assigned:{{agentId}}", "add": "assigned:{{agentId}}:wip" }, // optional; add MUST be <labelFilter>:wip (#958)
           "cron": "5 3 * * 1",            // cron
           "at": "2026-01-01T00:00:00Z",   // once
           "description": "…",

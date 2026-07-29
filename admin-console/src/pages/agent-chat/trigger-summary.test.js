@@ -7,6 +7,10 @@ import {
   summarizeGithubEventTrigger,
   summarizeLoopTrigger,
   summarizeLoopEdge,
+  hasClaim,
+  summarizeClaimEdge,
+  claimTooltip,
+  CLAIM_MARKER,
   GITHUB_EVENT_OPTIONS,
   LABEL_FILTERABLE_EVENTS,
 } from './trigger-summary.js';
@@ -157,4 +161,38 @@ test('summarizeLoopEdge: missing/blank summary never blank (edge case)', () => {
   assert.equal(summarizeLoopEdge({}), 'loop');
   assert.equal(summarizeLoopEdge(null), 'loop');
   assert.equal(summarizeLoopEdge(undefined), 'loop');
+});
+
+// ─── claim labels (#958) ─────────────────────────────────────────────────────
+
+test('hasClaim accepts only a well-formed claim blob', () => {
+  assert.equal(hasClaim({ remove: 'ready', add: 'ready:wip' }), true);
+  assert.equal(hasClaim(null), false);
+  assert.equal(hasClaim(undefined), false);
+  assert.equal(hasClaim({ remove: 'ready' }), false);
+  assert.equal(hasClaim({ add: 'ready:wip' }), false);
+  assert.equal(hasClaim({ remove: '', add: 'ready:wip' }), false);
+  assert.equal(hasClaim('ready:wip'), false);
+});
+
+test('summarizeClaimEdge abbreviates a conventional claim to its suffix', () => {
+  // `ready` is already on the chip, so the badge shows only what is added.
+  assert.equal(summarizeClaimEdge({ remove: 'ready', add: 'ready:wip' }), `${CLAIM_MARKER} wip`);
+  assert.equal(summarizeClaimEdge({ remove: 'ready-2', add: 'ready-2:wip' }), `${CLAIM_MARKER} wip`);
+});
+
+test('summarizeClaimEdge shows a non-conventional claim whole rather than mis-abbreviating', () => {
+  assert.equal(summarizeClaimEdge({ remove: 'ready', add: 'in-progress' }), `${CLAIM_MARKER} in-progress`);
+});
+
+test('summarizeClaimEdge is blank when there is no claim (no stray badge)', () => {
+  assert.equal(summarizeClaimEdge(null), '');
+  assert.equal(summarizeClaimEdge(undefined), '');
+  assert.equal(summarizeClaimEdge({ remove: 'ready' }), '');
+});
+
+test('claimTooltip spells the swap out in full', () => {
+  assert.equal(claimTooltip({ remove: 'ready', add: 'ready:wip' }),
+    'Claims the label when it wakes: ready → ready:wip');
+  assert.equal(claimTooltip(null), '');
 });

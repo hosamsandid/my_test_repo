@@ -32,6 +32,26 @@ export function partitionTriggers(triggers) {
   return { manual, derived };
 }
 
+// Find the derived listener a given channel port resolves to (#958), so the
+// channel row can show the claim the BACKEND derived rather than re-deriving the
+// `<wake>:wip` convention in the UI.
+//
+// Consolidation (#826) means the key is (artifact, label), not the channel's
+// `from`: several producers over the same label share ONE listener. The artifact
+// is matched through the trigger's event family, since a derived trigger carries
+// no artifact field of its own.
+export function derivedChannelTrigger(derived, channel) {
+  if (!channel) return null;
+  const label = typeof channel.label === 'string' ? channel.label.trim() : '';
+  if (!label) return null; // an "opened" channel derives no label listener
+  const family = channel.artifact === 'issue' ? 'issues.' : 'pull_request.';
+  return (Array.isArray(derived) ? derived : []).find(t =>
+    t && t.channel === true
+    && (typeof t.labelFilter === 'string' ? t.labelFilter.trim() : '') === label
+    && (Array.isArray(t.events) ? t.events.some(ev => typeof ev === 'string' && ev.startsWith(family)) : false),
+  ) || null;
+}
+
 // A short plain-language summary of a manual trigger's firing condition, for the
 // input row sentence. The github-event case defers to the shared summarizer so
 // friendly event wording stays single-sourced (#778); every other type gets a

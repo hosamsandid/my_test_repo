@@ -197,10 +197,12 @@ export const liveOps = {
     apiCall('PUT', `/api/agents/${roleId}`, { github: { producesPr: !!pr, producesIssue: !!issue } }),
   // Channels live on the *consumer*; the backend re-derives the github-event
   // triggers from them (reconcileTeamGithubChannels). Upsert keyed on (artifact, from).
-  addChannel: async (roleId, { artifact, from, label, gate, wakePrompt }) => {
+  addChannel: async (roleId, { artifact, from, label, gate, wakePrompt, autoClaim }) => {
     if (!from || from === roleId) return;
     const a = await apiCall('GET', `/api/agents/${roleId}`);
-    const channels = upsertChannel(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label, gate, wakePrompt });
+    // `autoClaim` (#958) rides along so the claim opt-out survives the live port
+    // write — otherwise the reconciler re-stamps the claim the author turned off.
+    const channels = upsertChannel(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label, gate, wakePrompt, autoClaim });
     await apiCall('PUT', `/api/agents/${roleId}`, { channels });
   },
   updateChannel: async (roleId, spec) => liveOps.addChannel(roleId, spec),
@@ -288,6 +290,9 @@ function templateToDraftRole(t, { id, displayName }) {
       enabled: tr.enabled !== false,
       ...(tr.events ? { events: tr.events } : {}),
       ...(tr.labelFilter ? { labelFilter: tr.labelFilter } : {}),
+      // Claim (#958) — carried so edit-as-draft round-trips it instead of
+      // dropping it and re-deriving a possibly-opted-out claim on re-materialise.
+      ...(tr.claim ? { claim: tr.claim } : {}),
       ...(tr.cron ? { cron: tr.cron } : {}),
       ...(tr.at ? { at: tr.at } : {}),
       ...(Array.isArray(tr.emits) ? { emits: tr.emits } : {}),

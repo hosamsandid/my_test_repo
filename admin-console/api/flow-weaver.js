@@ -29,7 +29,7 @@
 // wizard (#422) can explain what was auto-compensated.
 
 const { normalizeTemplatePorts, intrinsicTriggers } = require('./catalog-ports');
-const { validateProcessTemplate } = require('./process-template');
+const { validateProcessTemplate, deriveClaim } = require('./process-template');
 const { outcomeSetLabels, isAuthoredOutcomes } = require('./outcomes');
 
 const GENERIC_PATTERN_IDS = { scout: 'scout', 'stage-author': 'author', 'stage-companion': 'companion' };
@@ -224,11 +224,18 @@ function weaveProcess(input) {
     };
   });
 
+  // Every trigger the weaver GENERATES goes through here, so the claim (#958) is
+  // stamped by convention at the one choke point: a generated label listener
+  // claims its wake label as `<wake>:wip`, anything else (raw review/push events)
+  // derives null and is untouched. Triggers merely COPIED from a catalog template
+  // (`kept`/intrinsicTriggers) don't pass through addTrigger — those stay
+  // hand-authored, as the ticket requires.
   const addTrigger = (role, trigger) => {
     let id = trigger.id;
     let n = 2;
     while (role.triggers.some(t => t.id === id)) id = `${trigger.id}-${n++}`;
-    role.triggers.push({ ...trigger, id });
+    const claim = trigger.claim || deriveClaim(trigger.labelFilter);
+    role.triggers.push({ ...trigger, id, ...(claim ? { claim } : {}) });
   };
 
   const labelRegistry = new Map(); // name -> humanGate

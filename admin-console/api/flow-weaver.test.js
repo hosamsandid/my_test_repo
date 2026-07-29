@@ -257,3 +257,57 @@ test('#928: woven gates come from the flags, not the label name, and stay lint-c
   }
   assert.deepEqual(nonInfoLints(bundle), []);
 });
+
+// ─── claim labels on woven output (#958) ─────────────────────────────────────
+
+test('#958: every weaver-GENERATED label listener carries its derived claim, still lint-clean', () => {
+  const { bundle } = weaveProcess({
+    name: 'Claimed SDLC (woven)',
+    stages: [
+      { name: 'Requirements', roles: [tpl('issue-triage'), tpl('business-analyst')] },
+      { name: 'Design', roles: [tpl('scout'), tpl('stage-author'), tpl('stage-companion')] },
+      { name: 'Build', roles: [tpl('developer'), tpl('code-reviewer')] },
+    ],
+  });
+  assert.equal(validateProcessTemplate(bundle).ok, true, 'the claim must satisfy the bundle schema');
+  assert.deepEqual(nonInfoLints(bundle), [], 'woven output stays error/warning-clean');
+
+  // The weaver stamps the claim at its addTrigger choke point, so every listener
+  // it GENERATES claims its wake label. Triggers merely copied from a catalog
+  // template are hand-authored and deliberately excluded.
+  const generated = [];
+  for (const r of bundle.roles) {
+    for (const t of (r.triggers || [])) {
+      if (t.type !== 'github-event') continue;
+      if (!(typeof t.labelFilter === 'string' && t.labelFilter.trim())) continue;
+      if (!['author-wake', 'escalate-wake'].some(id => t.id === id || t.id.startsWith(`${id}-`))) continue;
+      generated.push({ role: r.id, id: t.id, labelFilter: t.labelFilter, claim: t.claim });
+    }
+  }
+  assert.ok(generated.length > 0, 'expected the weaver to generate label listeners');
+  for (const t of generated) {
+    assert.deepEqual(t.claim, { remove: t.labelFilter, add: `${t.labelFilter}:wip` },
+      `${t.role}/${t.id} must claim \`${t.labelFilter}\``);
+  }
+});
+
+test('#958: a woven derived channel listener claims its label too', () => {
+  const { bundle } = weaveProcess({
+    name: 'Two-stage (woven)',
+    stages: [
+      { name: 'Design', roles: [tpl('scout'), tpl('stage-author')] },
+      { name: 'Build', roles: [tpl('developer'), tpl('code-reviewer')] },
+    ],
+  });
+  // The stage boundary is a human-gated `<prefix>:approved` issue channel; after
+  // materialise-time expansion its derived listener carries the claim. Here the
+  // woven bundle still holds the PORT — assert the port survives weaving so the
+  // expander (covered in process-template.test.js) has something to stamp.
+  const withChannels = bundle.roles.filter(r => (r.channels || []).some(c => c.label));
+  assert.ok(withChannels.length > 0, 'expected a labelled stage-boundary channel');
+  for (const r of withChannels) {
+    for (const c of r.channels.filter(x => x.label)) {
+      assert.notEqual(c.autoClaim, false, 'a woven channel must not opt out of the claim');
+    }
+  }
+});

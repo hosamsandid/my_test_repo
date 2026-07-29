@@ -89,3 +89,35 @@ test('remove: empty-string label targets the label-less channel specifically', (
   assert.equal(next.length, 1);
   assert.equal(next[0].label, 'ready-to-merge');
 });
+
+// ─── claim opt-out on the port (#958) ────────────────────────────────────────
+
+test('upsertChannel persists only an explicit autoClaim:false', () => {
+  const base = { artifact: 'pr', from: 'dev', label: 'ready-for-test' };
+  // Default (auto-claim ON) leaves the port clean — no `autoClaim: true` noise.
+  assert.deepEqual(upsertChannel([], base), [base]);
+  assert.deepEqual(upsertChannel([], { ...base, autoClaim: true }), [base]);
+  assert.deepEqual(upsertChannel([], { ...base, autoClaim: undefined }), [base]);
+  // Opt-out is recorded, since the reconciler must see it to skip the claim.
+  assert.deepEqual(upsertChannel([], { ...base, autoClaim: false }),
+    [{ ...base, autoClaim: false }]);
+});
+
+test('upsertChannel toggles the claim opt-out in place, on the same (artifact, from, label) key', () => {
+  // The editor toggle is an upsert on the existing port, not a new sibling.
+  const off = upsertChannel([{ artifact: 'pr', from: 'dev', label: 'go' }],
+    { artifact: 'pr', from: 'dev', label: 'go', autoClaim: false });
+  assert.equal(off.length, 1);
+  assert.equal(off[0].autoClaim, false);
+  const on = upsertChannel(off, { artifact: 'pr', from: 'dev', label: 'go' });
+  assert.equal(on.length, 1);
+  assert.equal('autoClaim' in on[0], false, 're-enabling must clear the flag, not set it true');
+});
+
+test('upsertChannel keeps the claim opt-out independent per label sibling', () => {
+  let list = upsertChannel([], { artifact: 'pr', from: 'dev', label: 'a', autoClaim: false });
+  list = upsertChannel(list, { artifact: 'pr', from: 'dev', label: 'b' });
+  assert.equal(list.length, 2);
+  assert.equal(list.find(c => c.label === 'a').autoClaim, false);
+  assert.equal('autoClaim' in list.find(c => c.label === 'b'), false);
+});

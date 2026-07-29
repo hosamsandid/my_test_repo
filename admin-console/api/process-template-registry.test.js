@@ -9,6 +9,10 @@ const path = require('path');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { validateProcessTemplate } = require('./process-template');
 const { buildProcessGraph } = require('./process-graph');
+const {
+  bundleRoutingLabels, extractProseLabelTokens, proseSources,
+  auditProseLabels, formatFindings,
+} = require('./prompt-label-audit');
 
 function tmpRegistry(files) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proc-templates-'));
@@ -147,48 +151,17 @@ const RETIRED_TOKENS = [
   'design:escalate', 'design:approved', 'build:author-go', 'build:escalate',
   'human:dispatch', 'dispatch',
 ];
-// Explicitly kept (decision D5): GitHub-standard classification labels and
-// priority hints are not hand-off routing tokens and are NOT renamed.
-const NON_ROUTING_LABELS = new Set([
-  'bug', 'feature-request', 'question', 'duplicate', 'needs-triage',
-  'priority:high', 'priority:critical',
-]);
 const CATALOG_DIR = path.join(__dirname, '..', '..', 'orchestrator', 'skill-pool', 'agent-templates');
 
-// Every label-bearing surface of a bundle: the registry, the gates, and each
-// role's emits / channels / labelFilters / outcome setLabel actions.
-function routingLabels(bundle) {
-  const s = new Set();
-  for (const l of bundle.labels || []) s.add(l.name);
-  for (const g of bundle.gates || []) s.add(g.label);
-  for (const r of bundle.roles || []) {
-    for (const e of r.emits || []) s.add(e);
-    for (const c of r.channels || []) if (c.label) s.add(c.label);
-    for (const tr of r.triggers || []) if (tr.labelFilter) s.add(tr.labelFilter);
-    for (const o of (r.outcomes && r.outcomes.options) || []) {
-      for (const a of o.actions || []) if (a.type === 'setLabel' && a.label) s.add(a.label);
-    }
-  }
-  return s;
-}
+// The label surfaces and the prose scan both come from the shared pure audit
+// module (#929) so the guard below and its unit tests cannot drift apart.
+// `routingLabels` = the bundle's routing universe; `extractProseLabelTokens`
+// strips the generated marker blocks and keeps only label-shaped tokens.
+const routingLabels = bundleRoutingLabels;
 
-// Backtick-quoted tokens in prose — the surface AC3 audits. A label token never
-// contains whitespace, so ``[^`\s]+`` is a superset we then filter by vocabulary.
-function backtickedTokens(...texts) {
+function bundleProseTokens(bundle) {
   const out = [];
-  for (const t of texts) {
-    if (typeof t !== 'string') continue;
-    for (const m of t.matchAll(/`([^`\s]+)`/g)) out.push(m[1]);
-  }
-  return out;
-}
-
-function bundleProse(bundle) {
-  const out = [bundle.description];
-  for (const r of bundle.roles || []) {
-    out.push(r.systemPrompt);
-    for (const tr of r.triggers || []) out.push(tr.prompt, tr.description);
-  }
+  for (const src of proseSources(bundle)) out.push(...extractProseLabelTokens(src.text));
   return out;
 }
 
@@ -201,7 +174,7 @@ test('#927 AC2: no retired label token survives in the shipped process templates
     }
     // Prose is checked on the delimited form only, so the English words "ready"
     // and "dispatch" in ordinary sentences stay legal.
-    for (const tok of backtickedTokens(...bundleProse(b))) {
+    for (const tok of bundleProseTokens(b)) {
       assert.ok(!RETIRED_TOKENS.includes(tok),
         `${t.id}: prose still names the retired token \`${tok}\``);
     }
@@ -217,10 +190,15 @@ test('#927 AC2: no retired label token survives in the catalog role templates', 
     for (const label of labels) {
       assert.ok(!RETIRED_TOKENS.includes(label), `${f}: retired token "${label}" is still routed`);
     }
+    // Catalog roles carry their prose in `promptTemplate`/`additionalContextSnippet`
+    // rather than the bundle shape, so the fields are gathered here and only the
+    // extraction is shared.
     const prose = [r.description, r.promptTemplate, r.additionalContextSnippet];
     for (const tr of r.triggers || []) prose.push(tr.promptTemplate, tr.description);
-    for (const tok of backtickedTokens(...prose)) {
-      assert.ok(!RETIRED_TOKENS.includes(tok), `${f}: prose still names the retired token \`${tok}\``);
+    for (const text of prose) {
+      for (const tok of extractProseLabelTokens(text)) {
+        assert.ok(!RETIRED_TOKENS.includes(tok), `${f}: prose still names the retired token \`${tok}\``);
+      }
     }
   }
 });
@@ -232,20 +210,43 @@ test('#927 AC7: the conformant tokens are kept unchanged', () => {
   }
 });
 
-test('#927 AC3: every label token in prose is routed by that same template', () => {
-  const bundles = listProcessTemplates(CURATED_DIR)
-    .map(t => ({ id: t.id, b: loadProcessTemplate(CURATED_DIR, t.id) }));
-  // Vocabulary = every token any shipped template routes. A backticked token in
-  // this set but absent from the *own* template's routing is prompt↔routing
-  // drift: the agent would be told to apply a label its flow never listens for.
-  const vocabulary = new Set(bundles.flatMap(({ b }) => [...routingLabels(b)]));
-  for (const { id, b } of bundles) {
-    const own = routingLabels(b);
-    for (const tok of backtickedTokens(...bundleProse(b))) {
-      if (NON_ROUTING_LABELS.has(tok) || !vocabulary.has(tok) || own.has(tok)) continue;
-      assert.fail(`${id}: prose names \`${tok}\`, which this template does not route`);
-    }
+// ── #929 prompt↔routing lint ─────────────────────────────────────────────────
+// Supersedes the narrower #927 AC3 check, which only flagged a token that some
+// OTHER shipped template routed. This one holds every backticked label token in
+// a template's hand-authored prose against that template's own routing, so a
+// freshly invented token is caught too.
+
+test('#929: every label token in a template\'s prose is routed by that template', () => {
+  const findings = [];
+  for (const t of listProcessTemplates(CURATED_DIR)) {
+    const b = loadProcessTemplate(CURATED_DIR, t.id);
+    findings.push(...auditProseLabels(b, { template: t.id }));
   }
+  assert.deepEqual(findings, [], formatFindings(findings));
+});
+
+test('#929: the lint goes red on a drifted template (mutation check)', () => {
+  // Same load path as the guard above, with one prose token that no routing
+  // surface carries — the drift the CI assertion exists to catch.
+  const b = loadProcessTemplate(CURATED_DIR, 'core-sdlc');
+  assert.ok(b, 'core-sdlc must load');
+  b.roles[0].systemPrompt += '\n\nWhen you are done, apply `shipped-to-staging`.';
+  const findings = auditProseLabels(b, { template: 'core-sdlc' });
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].token, 'shipped-to-staging');
+  assert.equal(findings[0].role, b.roles[0].id);
+  assert.match(formatFindings(findings), /core-sdlc: role "[^"]+" \(systemPrompt\) names `shipped-to-staging`/);
+});
+
+test('#929: a generated marker block in a curated template is never audited', () => {
+  // Guards the exclusion end-to-end: a block naming an unrouted label is ignored
+  // where the identical hand-authored sentence would fail.
+  const b = loadProcessTemplate(CURATED_DIR, 'core-sdlc');
+  const sentence = 'Then: apply label `generated-only-token`.';
+  b.roles[0].systemPrompt += `\n\n<!-- outcomes:start -->\n${sentence}\n<!-- outcomes:end -->`;
+  assert.deepEqual(auditProseLabels(b, { template: 'core-sdlc' }), []);
+  b.roles[0].systemPrompt += `\n\n${sentence}`;
+  assert.equal(auditProseLabels(b, { template: 'core-sdlc' }).length, 1);
 });
 
 test('#927 AC4: no label is a prefix of another within one template (decision D1)', () => {

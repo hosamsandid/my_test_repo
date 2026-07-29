@@ -234,21 +234,22 @@ test('label registry echoes back unreferenced registry entries with their flags'
 test('template level: shipped dispatcher carries its role-level emits onto its node', () => {
   const g = buildProcessGraph([templateNode(loadTpl('dispatcher'))]);
   const dispatcher = g.nodes.find(n => n.id === 'dispatcher');
-  assert.ok(dispatcher.emits.includes('dispatch'),
-    'dispatcher should carry `dispatch` as a role-level emitted label');
+  assert.ok(dispatcher.emits.includes('dispatched-for-implementation'),
+    'dispatcher should carry `dispatched-for-implementation` as a role-level emitted label');
 });
 
 test('template level: a synthetic listener wires to a shipped emitter', () => {
-  // Prove the mechanism end-to-end: someone listening on `dispatch` gets an
-  // edge from the dispatcher (which emits it).
+  // Prove the mechanism end-to-end: someone listening on
+  // `dispatched-for-implementation` gets an edge from the dispatcher (which
+  // emits it).
   const listener = {
     id: 'consumer', role: 'template',
-    triggers: [{ id: 'l', type: 'github-event', labelFilter: 'dispatch' }],
+    triggers: [{ id: 'l', type: 'github-event', labelFilter: 'dispatched-for-implementation' }],
   };
   const g = buildProcessGraph([templateNode(loadTpl('dispatcher')), listener]);
   const e = g.edges.find(x => x.from === 'dispatcher' && x.to === 'consumer');
-  assert.ok(e, 'expected dispatcher → consumer edge on `dispatch`');
-  assert.equal(e.label, 'dispatch');
+  assert.ok(e, 'expected dispatcher → consumer edge on `dispatched-for-implementation`');
+  assert.equal(e.label, 'dispatched-for-implementation');
 });
 
 test('template level: {{var}} label tokens still wire emitter to listener', () => {

@@ -106,11 +106,11 @@ test('dispatcher wiring on developer is NOT intrinsic; curation and triage essen
   assert.ok(triage.outcomes, 'issue-triage has an outcomes port');
   const triageSetLabels = (triage.outcomes.options || []).flatMap(o =>
     (o.actions || []).filter(a => a.type === 'setLabel').map(a => a.label));
-  assert.deepEqual(triageSetLabels, ['req:refine']);
+  assert.deepEqual(triageSetLabels, ['needs-refinement']);
   const opened = triage.triggers.find(t => t.id === 'triage-issue-opened');
   assert.ok(!('emits' in opened), 'trigger-level emits removed (#783)');
   const ba = readTpl('business-analyst');
   const refine = ba.triggers.find(t => t.id === 'ba-on-refine');
-  assert.equal(refine.labelFilter, 'req:refine');
+  assert.equal(refine.labelFilter, 'needs-refinement');
   assert.equal(refine.intrinsic, true);
 });

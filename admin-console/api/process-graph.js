@@ -140,6 +140,17 @@ function triggerView(t) {
     v.cron = t.cron || null;
   } else if (t.type === 'once') {
     v.at = t.at || null;
+  } else if (t.type === 'loop') {
+    // Loop trigger (#932): a continuation primitive that re-arms itself until
+    // `until.command` exits 0 or `maxIterations` is hit. Carry the stop-contract
+    // summary so the graph view knows the fields; the self-edge + stop-contract
+    // badge on the canvas are a separate (UI) ticket.
+    if (t.maxIterations != null) v.maxIterations = t.maxIterations;
+    if (t.until && typeof t.until === 'object'
+        && typeof t.until.command === 'string' && t.until.command.trim()) {
+      v.until = { command: t.until.command };
+    }
+    if (t.minGapSeconds != null) v.minGapSeconds = t.minGapSeconds;
   } else if (t.type === 'http') {
     // Webhook trigger (#410) — fired by an external system via HOOK_PORT. The
     // secret is intentionally not carried into the graph view.

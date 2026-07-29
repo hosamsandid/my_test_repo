@@ -48,6 +48,12 @@
 
 - **GCP VM pilot: deploy via GitHub Actions or manual scripts** — the platform can now be hosted on a Google Cloud Platform virtual machine. A GitHub Actions workflow automates deployment on push, and manual deploy scripts support ad-hoc releases. The admin console runs on port 14000 in this hosting mode. (#890)
 
+- **Per-channel and per-input wake-prompt overrides** — each GitHub channel and data-flow input in the Flow Editor's Routing tab can now carry an optional wake-prompt override. When set, this text replaces the auto-derived prompt that the consuming agent receives when that specific channel or input fires, letting operators tailor the agent's starting context per connection without changing its overall system prompt. (#868)
+
+- **Per-agent model provider chip and in-chat switch** — the agent chat header now displays a chip showing the model provider currently active for that agent (name and auth type). Clicking the chip opens a popover where operators can switch the agent's provider on the spot, without navigating to the agent's settings page. The active provider is also shown in the Session Log next to each Claude invocation for full transparency. (#904)
+
+- **Agent Chat Sessions: default to the most recent finished session** — the Session Log panel now opens directly on the most recently completed session rather than on the live (still-writing) session. This makes it faster to review what an agent just did after a trigger run completes. The live session remains accessible via the session picker. (#910)
+
 ### Bug Fixes
 
 - **Auto-curated skills now show descriptions in the agent Skills section** — skills created by the knowledge curator were written without YAML frontmatter, causing agents to see only the skill name with no indication of what the skill covers. The curator now writes a `name` + `description` frontmatter block into every generated SKILL.md. Existing skills are backfilled automatically the next time they are amended. (#807)
@@ -67,6 +73,12 @@
 - **Knowledge consolidation panel: start gate now correctly accounts for unmatched candidates** — when the consolidation panel computed whether enough work existed to start a migration, it checked only candidates that mapped directly to a confirmed domain and ignored candidates with no domain match. This caused the Start button to remain enabled even when the only remaining items were unmatched candidates that could not be acted on in the current flow. The check now counts all startable work — matched candidates, unconsolidated skills, and unmatched candidates — and the panel transitions correctly to the "nothing left to do" state when only unmatched items remain. (#871)
 
 - **Agent chat: trigger notification cards now render as formatted text** — trigger notification messages (cron alerts, GitHub event notices, throttle warnings) were displayed as raw Markdown text in the agent chat. They are now rendered as sanitized Markdown, so bold text, code spans, lists, and other formatting in trigger prompts and notices appear correctly. (#884)
+
+- **Model provider chip/popover: UI labels now consistently in English** — the provider chip and its popover in the agent chat were displaying some labels in a non-English locale due to a missing i18n override. All strings are now English. (#906)
+
+- **Agent chat right rail: tab overflow restored after collapse/expand cycles** — collapsing and then re-expanding the right rail was losing the tab overflow state, causing the tab bar to clip or misalign when many tabs were present. Tab overflow is now correctly recomputed on each expand. (#924)
+
+- **Agent Chat Sessions: timestamp no longer wraps in the narrow session sidebar** — at narrow sidebar widths, the session timestamp in each session row wrapped onto a second line, breaking the row layout. The timestamp is now prevented from wrapping. (#930)
 
 ### Changes
 
@@ -91,6 +103,10 @@
 - **Flow Editor: four new outcome lints** — the process graph linter now surfaces four additional advisory warnings for structured outcome nodes: `outcome-without-consumer` (an outcome option routes to a label nobody listens on), `switch-with-one-option` (a switch node with a single option — consider a plain label hand-off instead), `same-label-multiple-outcomes` (two or more outcome options emit the same label, making the switch ambiguous), and `human-label-as-outcome` (an outcome emits a `human:*`-prefixed label, which should only be set by a human). All four are advisory — they appear in the lint panel without blocking materialisation. (#830)
 
 - **Flat `emits` retired from role templates; existing templates auto-migrated to structured outcomes** — the flat `emits` list on role and agent configs is no longer the authoring surface for outbound routing in process templates. All built-in role templates have been migrated to use structured `outcomes`. Existing process templates and live teams that still carry flat `emits` are automatically upgraded to the equivalent structured outcomes on import or materialisation — no manual edits required. Authoring new flat `emits` via the API is still accepted for backwards compatibility but the Flow Editor surfaces outcomes exclusively. (#831)
+
+- **Orchestrator baseline SSH key is now optional** — the `docker-compose.yml` no longer requires a baseline SSH key to be mounted into the orchestrator container. Operators who use only HTTPS-based repositories or GitHub token auth can now start the stack without pre-configuring an SSH key file. Existing deployments with an SSH key configured are unaffected. (#903)
+
+- **Agent chat right rail: collapse/expand now matches the left navigation sidebar** — the right rail (Session Log / Workspace Browser) now collapses and expands using the same icon, animation, and interaction pattern as the left navigation sidebar, giving the chat layout a consistent feel on both sides. (#905)
 
 ### Breaking Changes
 

@@ -445,6 +445,11 @@ def _handle_sigterm(signum: int, frame) -> None:
 CLAUDE_TIMEOUT_SEC = 3600
 MEMBER_CACHE_TTL_SEC = 30
 
+# Agent-form loop verifier (#933): how long to wait for a delegated verifier's
+# verdict, and how often to poll for it. Overridable for tests / slow reviewers.
+VERIFY_WAIT_SEC = int(os.environ.get("LOOP_VERIFY_WAIT_SEC", "1800"))
+VERIFY_POLL_SEC = float(os.environ.get("LOOP_VERIFY_POLL_SEC", "10"))
+
 # Module-level state shared with the SIGUSR1 handler.
 _active_claude_proc: subprocess.Popen | None = None
 _user_stop_requested = False
@@ -2769,7 +2774,201 @@ def _validate_loop_trigger(trigger: dict) -> tuple[bool, str]:
                                 or min_gap < 0):
         return False, "minGapSeconds must be a non-negative number"
 
+    verify = trigger.get("verify")
+    if verify is not None:
+        ok, reason = _validate_verify_spec(verify)
+        if not ok:
+            return False, reason
+
     return True, ""
+
+
+def _validate_verify_spec(verify) -> tuple[bool, str]:
+    """Validate a loop trigger's optional ``verify`` block (#933, concept §4.2).
+
+    A verifier takes exactly one of three shapes:
+
+    - ``{"command": "<sh>", "env": {}}`` — an exit-code gate (reuses
+      ``_run_pre_check``).
+    - ``{"agentId": "<other-agent>"}`` — delegate the check to a *different*
+      agent and block on its verdict.
+    - ``{"selfGraded": true}`` — an explicit "no separate verifier" opt-out
+      (permitted for standalone agents; a team agent's empty/self-graded verify
+      is re-enforced to a sibling at resolve time — the separation can never be
+      *silently* removed, concept §4.6 decision 1).
+
+    Shape only — the team-vs-standalone enforcement lives in
+    ``_resolve_loop_verify`` where the roster is known.
+    """
+    if not isinstance(verify, dict):
+        return False, "verify must be an object"
+    cmd = verify.get("command")
+    agent_id = verify.get("agentId")
+    self_graded = verify.get("selfGraded")
+    forms = sum(1 for present in (
+        cmd is not None, agent_id is not None, self_graded is True) if present)
+    if forms == 0:
+        return False, "verify must set one of command, agentId or selfGraded"
+    if forms > 1:
+        return False, "verify must set exactly one of command, agentId or selfGraded"
+    if cmd is not None and not (isinstance(cmd, str) and cmd.strip()):
+        return False, "verify.command must be a non-empty string"
+    if agent_id is not None and not (isinstance(agent_id, str) and agent_id.strip()):
+        return False, "verify.agentId must be a non-empty string"
+    if self_graded is not None and not isinstance(self_graded, bool):
+        return False, "verify.selfGraded must be a boolean"
+    env = verify.get("env")
+    if env is not None and not isinstance(env, dict):
+        return False, "verify.env must be an object"
+    return True, ""
+
+
+# Markers a reviewer/quality-gate agent ends its reply with so the loop can read
+# a machine verdict from a free-form review (#933). Fail-closed: a reply with no
+# recognised marker does NOT count as verified progress.
+_VERIFY_PASS_RE = re.compile(r"\[PASS\]|ace:pass|VERDICT:\s*PASS", re.IGNORECASE)
+_VERIFY_FAIL_RE = re.compile(r"\[FAIL\]|ace:fail|VERDICT:\s*FAIL", re.IGNORECASE)
+
+
+def _parse_verify_verdict(reply: str | None) -> tuple[bool, str]:
+    """Interpret a verifier agent's free-form reply into ``(passed, output)``.
+
+    A ``FAIL`` marker wins over a ``PASS`` marker (a reviewer who lists problems
+    then writes both should block). With neither marker the verdict is
+    **fail-closed** — an unparseable review must not be mistaken for a green
+    light. The trimmed reply is returned as the feedback output either way.
+    """
+    text = (reply or "").strip()
+    if _VERIFY_FAIL_RE.search(text):
+        return False, text
+    if _VERIFY_PASS_RE.search(text):
+        return True, text
+    return False, (text or "verifier returned no verdict")
+
+
+def _sibling_roster_entry_id(entry: dict) -> str | None:
+    """Normalise a roster entry's id (accepts ``agentId`` or ``id``)."""
+    for key in ("agentId", "id"):
+        val = entry.get(key)
+        if isinstance(val, str) and val.strip():
+            return val
+    return None
+
+
+_REVIEWER_HINT_RE = re.compile(
+    r"review|quality[-_ ]?gate|\bqa\b|verif|assess|approver", re.IGNORECASE)
+
+
+def _select_sibling_verifier(agent_id: str, roster: list) -> dict:
+    """Pick a sibling to verify a team loop agent's work (#933, concept §4.2/§4.6).
+
+    Never returns the worker itself. Prefers a reviewer / quality-gate sibling
+    (id, role or displayName hinting at review/QA); ties break deterministically
+    by id so the pick is stable across runs. Falls back to any other sibling —
+    AC3 requires a *different* sibling to be pre-filled, and any non-self sibling
+    still enforces "an agent must not grade its own work". Returns::
+
+        {"agentId": <str|None>, "reviewer": <bool>, "ambiguous": <bool>,
+         "candidates": <int>}
+
+    ``agentId`` is ``None`` only when the agent has no sibling at all (a
+    lone-member team) — the caller then falls back to a self-graded ack.
+    ``ambiguous`` flags "several equally-good reviewers" so the caller can note
+    that the pick could be overridden.
+    """
+    candidates = []
+    for entry in roster or []:
+        if not isinstance(entry, dict):
+            continue
+        rid = _sibling_roster_entry_id(entry)
+        if not rid or rid == agent_id:
+            continue
+        hay = " ".join(str(entry.get(k, "")) for k in ("agentId", "id", "role", "displayName"))
+        candidates.append((rid, bool(_REVIEWER_HINT_RE.search(hay)), entry))
+
+    if not candidates:
+        return {"agentId": None, "reviewer": False, "ambiguous": False, "candidates": 0}
+
+    reviewers = sorted((c for c in candidates if c[1]), key=lambda c: c[0])
+    if reviewers:
+        return {"agentId": reviewers[0][0], "reviewer": True,
+                "ambiguous": len(reviewers) > 1, "candidates": len(candidates)}
+    fallback = sorted(candidates, key=lambda c: c[0])
+    return {"agentId": fallback[0][0], "reviewer": False,
+            "ambiguous": len(fallback) > 1, "candidates": len(candidates)}
+
+
+def _resolve_loop_verify(trigger: dict, agent_id: str, *, is_team: bool,
+                         roster: list | None = None) -> dict:
+    """Resolve a loop's *effective* verifier (#933, concept §4.6 decision 1).
+
+    The enforced-separate-role default: a team loop agent that leaves ``verify``
+    empty (or tries to grade itself / opt out) gets a *different* sibling
+    pre-filled — the separation can be overridden but never silently removed.
+    Standalone agents fall back to a self-graded acknowledgement.
+
+    Returns a plan the runner acts on::
+
+        {"mode": "command"|"agent"|"self-graded",
+         "command": <str>, "env": <dict>,        # mode == command
+         "agentId": <str>,                        # mode == agent
+         "source": <str>, "note": <str>}          # provenance / human-readable
+
+    Invariant: ``mode == "agent"`` always targets an agent other than
+    ``agent_id`` — the worker can never be its own verifier.
+    """
+    roster = roster or []
+    verify = trigger.get("verify") if isinstance(trigger.get("verify"), dict) else None
+
+    # 1. Authored command verifier — always honoured.
+    if verify and verify.get("command"):
+        env = verify.get("env") if isinstance(verify.get("env"), dict) else {}
+        return {"mode": "command", "command": verify["command"], "env": env,
+                "source": "authored", "note": "command verifier (authored)"}
+
+    # 2. Authored agent verifier — honoured unless it points at the worker.
+    if verify and verify.get("agentId") and verify.get("agentId") != agent_id:
+        return {"mode": "agent", "agentId": verify["agentId"],
+                "source": "authored",
+                "note": f"agent verifier (authored): {verify['agentId']}"}
+
+    # Below here: no usable authored verifier (empty, self-graded ack, or an
+    # agentId that illegally pointed at the worker).
+
+    if is_team:
+        # A team agent may not silently self-grade — enforce a sibling.
+        sel = _select_sibling_verifier(agent_id, roster)
+        if sel["agentId"]:
+            kind = "reviewer sibling" if sel["reviewer"] else "sibling"
+            note = f"enforced {kind}: {sel['agentId']}"
+            if sel["ambiguous"]:
+                note += " (several candidates — override to change)"
+            return {"mode": "agent", "agentId": sel["agentId"],
+                    "source": "enforced-sibling", "reviewer": sel["reviewer"],
+                    "ambiguous": sel["ambiguous"], "note": note}
+        # Lone-member team: nobody to separate to — degrade to a self-graded
+        # ack, surfaced honestly rather than pretending separation holds.
+        return {"mode": "self-graded", "source": "team-no-sibling",
+                "note": "team has no sibling to verify — self-graded (no separation possible)"}
+
+    # 3. Standalone agent: self-graded is allowed (explicit ack or default).
+    src = "standalone-ack" if (verify and verify.get("selfGraded")) else "standalone-default"
+    return {"mode": "self-graded", "source": src,
+            "note": "self-graded (standalone agent, no forced verifier)"}
+
+
+def _build_verify_feedback(output: str, *, mode: str) -> str:
+    """Format a failed verifier's output for injection into the next iteration's
+    prompt (#933 self-correction). Kept pure so the runner stays thin."""
+    label = "verifier command" if mode == "command" else "verifier agent"
+    snippet = (output or "").strip()
+    if len(snippet) > 4000:
+        snippet = snippet[:4000] + "\n… [truncated]"
+    return (
+        f"The previous iteration did NOT pass the {label}. Address this feedback "
+        f"before continuing — the iteration does not count until the verifier "
+        f"passes:\n\n{snippet}"
+    )
 
 
 def _loop_stop_decision(iterations: int, max_iterations: int,
@@ -3439,9 +3638,19 @@ class TriggerScheduler:
         except (TypeError, ValueError):
             min_gap = 0.0
 
+        # Resolve the effective verifier once at loop start (#933): a team
+        # agent that left `verify` empty gets a *different* sibling enforced —
+        # the worker can never grade its own work (concept §4.6 decision 1).
+        verify_plan = await self._resolve_verify_plan(trigger)
+        print(f"[Runner:{self._agent_id}] loop {tid} verifier: {verify_plan.get('note')}",
+              file=sys.stderr)
+
         iterations = 0
         outcome: str | None = None
         last_until_output = ""
+        pending_feedback: str | None = None   # verifier feedback → next iteration
+        last_verify_output = ""
+        verify_failures = 0
         try:
             while not self._shutdown_event.is_set():
                 # Maintenance Mode parity with cron (#504): pause inside the
@@ -3458,15 +3667,38 @@ class TriggerScheduler:
                     print(f"[Runner:{self._agent_id}] loop {tid} resuming "
                           f"after maintenance mode ended", file=sys.stderr)
 
-                # One iteration through the shared chokepoint.
+                # One iteration through the shared chokepoint. A failed
+                # verifier's output from the previous pass is fed in via ctx.
+                ctx = {"loopFeedback": pending_feedback} if pending_feedback else None
                 try:
-                    await self._execute(trigger)
+                    await self._execute(trigger, ctx)
                 except Exception as exc:
                     print(f"[Runner:{self._agent_id}] loop _execute({tid}) error: {exc}",
                           file=sys.stderr)
                 iterations += 1
 
-                # Evaluate the stop contract for this iteration.
+                # Verifier gate (#933): the iteration only "counts" as progress
+                # when `verify` passes. On failure, feed the verifier output
+                # into the next iteration and DON'T evaluate the goal — but the
+                # attempt still consumes the maxIterations budget (the guardrail
+                # against an unbounded loop stays intact even if verify never
+                # passes).
+                verified, verify_output = await self._run_loop_verify(
+                    verify_plan, trigger, iterations)
+                if not verified:
+                    verify_failures += 1
+                    last_verify_output = verify_output
+                    pending_feedback = _build_verify_feedback(
+                        verify_output, mode=verify_plan.get("mode", ""))
+                    if iterations >= max_iterations:
+                        outcome = "exhausted"
+                        break
+                    if min_gap > 0:
+                        await asyncio.sleep(min_gap)
+                    continue
+
+                # Verified progress — clear feedback, then evaluate the goal.
+                pending_feedback = None
                 until_code: int | None = None
                 if until_cmd:
                     until_code, last_until_output = await asyncio.to_thread(
@@ -3488,18 +3720,25 @@ class TriggerScheduler:
 
         self._loop_done.add(tid)
         try:
-            await self._post_loop_outcome(trigger, outcome, iterations,
-                                          last_until_output)
+            await self._post_loop_outcome(
+                trigger, outcome, iterations, last_until_output,
+                verify_plan=verify_plan, verify_failures=verify_failures,
+                last_verify_output=last_verify_output)
         except Exception as exc:
             print(f"[Runner:{self._agent_id}] loop {tid} outcome DM failed: {exc}",
                   file=sys.stderr)
 
     async def _post_loop_outcome(self, trigger: dict, outcome: str,
-                                 iterations: int, last_until_output: str) -> None:
-        """Post the single terminal outcome DM for a finished loop (#932).
+                                 iterations: int, last_until_output: str,
+                                 *, verify_plan: dict | None = None,
+                                 verify_failures: int = 0,
+                                 last_verify_output: str = "") -> None:
+        """Post the single terminal outcome DM for a finished loop (#932/#933).
 
         This is the "completed" signal agents lack today: outcome
-        (done/exhausted), iterations used, and the last `until` output.
+        (done/exhausted), iterations used, the last `until` output, and — when a
+        verifier was in effect (#933) — the verifier used, how many iterations
+        it blocked, and the last failing verifier output.
         Best-effort — a missing DM room just skips it.
         """
         raw_room_id = trigger.get("roomId") or _load_dm_room_id()
@@ -3538,10 +3777,197 @@ class TriggerScheduler:
                 verdict = "passed" if outcome == "done" else "not met"
                 lines.append(f"- Stop check (`until`): {verdict} (no output)")
 
+        # Verifier gate summary (#933) — only when a real gate was in effect.
+        if isinstance(verify_plan, dict) and verify_plan.get("mode") in ("command", "agent"):
+            lines.append(f"- Verifier: {verify_plan.get('note') or verify_plan.get('mode')}")
+            lines.append(f"- Verifier-blocked iterations: {verify_failures}")
+            if verify_failures and (last_verify_output or "").strip():
+                snippet = last_verify_output.strip()
+                if len(snippet) > 500:
+                    snippet = snippet[:500] + " …"
+                lines += ["", "Last verifier output:", "```", snippet, "```"]
+
         body = "\n".join(lines)
         await self._send_formatted(room_id, body)
         print(f"[Runner:{self._agent_id}] loop {tid} → {outcome} "
               f"after {iterations} iteration(s)", file=sys.stderr)
+
+    # -- loop verifier gate (#933) -------------------------------------------
+
+    async def _resolve_verify_plan(self, trigger: dict) -> dict:
+        """Resolve a loop's effective verifier at start-up (#933).
+
+        Threads this agent's team membership + sibling roster into the pure
+        ``_resolve_loop_verify``. The roster is only fetched when it's actually
+        needed (a team agent with no usable authored verifier), so an authored
+        command/agent verifier costs no orchestrator round-trip.
+        """
+        cfg = _load_dm_agent_config()
+        is_team = bool(cfg.get("parentTeamId")) or cfg.get("role") in ("team", "team-member")
+        verify = trigger.get("verify") if isinstance(trigger.get("verify"), dict) else None
+        has_authored = bool(
+            verify and (
+                verify.get("command")
+                or (verify.get("agentId") and verify.get("agentId") != self._agent_id)
+            )
+        )
+        roster = [] if (has_authored or not is_team) else await self._fetch_team_roster()
+        return _resolve_loop_verify(trigger, self._agent_id,
+                                    is_team=is_team, roster=roster)
+
+    async def _fetch_team_roster(self) -> list:
+        """Fetch this agent's sibling roster from the orchestrator (#933).
+
+        Returns the ``siblings`` list (``[{agentId, role, displayName}, …]``,
+        excluding self) or ``[]`` on any failure — a missing roster just means
+        no sibling can be enforced, handled by the caller.
+        """
+        route = f"/internal/agents/{urllib.parse.quote(self._agent_id, safe='')}/team-roster"
+        status, body = await asyncio.to_thread(self._orch_get, route)
+        if status != 200:
+            return []
+        try:
+            data = json.loads(body)
+        except Exception:
+            return []
+        sibs = data.get("siblings") if isinstance(data, dict) else None
+        return sibs if isinstance(sibs, list) else []
+
+    async def _run_loop_verify(self, plan: dict, trigger: dict,
+                               iteration: int) -> tuple[bool, str]:
+        """Run one iteration's verifier gate (#933). Returns ``(passed, output)``.
+
+        - ``command`` → exit-code gate via ``_run_pre_check`` (0 == pass).
+        - ``agent``   → delegate to a different agent and block on its verdict.
+        - ``self-graded`` → no gate; the iteration always counts.
+        """
+        mode = plan.get("mode")
+        if mode == "command":
+            code, out = await asyncio.to_thread(
+                _run_pre_check, plan["command"], plan.get("env") or {})
+            return code == 0, out
+        if mode == "agent":
+            return await self._run_agent_verify(plan["agentId"], trigger, iteration)
+        return True, ""
+
+    async def _run_agent_verify(self, target_id: str, trigger: dict,
+                                iteration: int) -> tuple[bool, str]:
+        """Route the iteration's artifact to a *different* agent and block on its
+        verdict (#933, AC2). Delivery reuses the existing pending queue; the
+        verdict comes back through the orchestrator's loop-verify rendezvous.
+
+        Fail-closed: an undeliverable request or a timeout blocks progress (the
+        iteration doesn't count) rather than silently passing unverified work.
+        """
+        tid = trigger.get("id", "?")
+        token = f"lv:{self._agent_id}:{tid}:{iteration}:{int(time.time() * 1000)}"
+        verify = trigger.get("verify") if isinstance(trigger.get("verify"), dict) else {}
+        entry = {
+            "kind": "loop-verify",
+            "token": token,
+            "loopId": tid,
+            "iteration": iteration,
+            "requestedBy": self._agent_id,
+            "roomId": trigger.get("roomId"),
+            "task": trigger.get("prompt", ""),
+            "artifactHint": verify.get("artifact"),
+        }
+        route = f"/internal/agents/{urllib.parse.quote(target_id, safe='')}/enqueue-pending"
+        status, _body = await asyncio.to_thread(self._orch_post_json, route, entry)
+        if status not in (200, 202):
+            return False, (f"could not deliver verify request to {target_id} "
+                           f"(HTTP {status}) — treating iteration as unverified")
+        return await self._poll_verify_verdict(token, target_id)
+
+    async def _poll_verify_verdict(self, token: str,
+                                   target_id: str) -> tuple[bool, str]:
+        """Poll the orchestrator's loop-verify store for a verdict (#933)."""
+        route = f"/internal/loop-verify/verdict?token={urllib.parse.quote(token, safe='')}"
+        deadline = time.monotonic() + VERIFY_WAIT_SEC
+        while time.monotonic() < deadline and not self._shutdown_event.is_set():
+            status, body = await asyncio.to_thread(self._orch_get, route)
+            if status == 200:
+                try:
+                    data = json.loads(body)
+                except Exception:
+                    data = {}
+                if isinstance(data, dict) and data.get("found"):
+                    return bool(data.get("passed")), str(data.get("output") or "")
+            await asyncio.sleep(VERIFY_POLL_SEC)
+        return False, (f"verifier {target_id} did not return a verdict in time "
+                       f"— treating iteration as unverified")
+
+    async def _execute_loop_verify(self, entry: dict) -> None:
+        """Handle a `loop-verify` pending entry (#933, verifier side).
+
+        Runs a fresh Claude pass over the requester's artifact/task, parses a
+        pass/fail verdict from the reply, and posts it back to the orchestrator's
+        loop-verify store for the waiting loop to read. Best-effort; on any
+        failure a fail-closed verdict is still posted so the loop never hangs.
+        """
+        token = entry.get("token")
+        if not isinstance(token, str) or not token:
+            print(f"[Runner:{self._agent_id}] loop-verify: no token — skipping",
+                  file=sys.stderr)
+            return
+        requester = entry.get("requestedBy") or "?"
+        loop_id = entry.get("loopId") or "?"
+        iteration = entry.get("iteration")
+        task = entry.get("task") or ""
+        hint = entry.get("artifactHint")
+        prompt = (
+            "You are acting as the independent VERIFIER for another agent's "
+            f"work loop (`{loop_id}`, iteration {iteration}), requested by "
+            f"`{requester}`. An agent must not grade its own work — that is why "
+            "this check was routed to you.\n\n"
+            "Review the latest work for this task (inspect the repository: recent "
+            "commits, the open PR, and whether the stated goal is actually met "
+            "and correct). Do NOT do the work yourself — only judge it.\n\n"
+            f"The loop's task was:\n{task}\n"
+        )
+        if isinstance(hint, str) and hint.strip():
+            prompt += f"\nArtifact to focus on: {hint}\n"
+        prompt += (
+            "\nEnd your reply with a single verdict line: `[PASS]` if the "
+            "iteration's work is correct and complete, or `[FAIL]` followed by "
+            "the specific problems to fix. Without an explicit verdict the "
+            "iteration is treated as NOT passed."
+        )
+
+        # Use the verifier's OWN DM room for the run's session/log context — the
+        # requester's `roomId` belongs to another agent's container. The verdict
+        # travels back through the store, not Matrix, so no cross-room post.
+        own_room = _load_dm_room_id()
+        room_id = (
+            own_room
+            if isinstance(own_room, str) and _MATRIX_ROOM_ID_RE.match(own_room)
+            else None
+        )
+        correlation_id = f"loop-verify:{token}"
+        passed, output = False, "verifier did not run"
+        try:
+            reply = await asyncio.to_thread(
+                _call_claude, prompt, room_id or "", correlation_id,
+                self._blueprint_id, CLAUDE_TIMEOUT_SEC,
+            )
+            passed, output = _parse_verify_verdict(reply)
+        except Exception as exc:
+            output = f"verifier run failed: {exc}"
+            print(f"[Runner:{self._agent_id}] loop-verify Claude call failed: {exc}",
+                  file=sys.stderr)
+
+        # Post the verdict back to the rendezvous — always, so the loop never
+        # blocks waiting on a crashed verifier (fail-closed above).
+        try:
+            await asyncio.to_thread(
+                self._orch_post_json, "/internal/loop-verify/verdict",
+                {"token": token, "passed": passed, "output": output},
+            )
+        except Exception as exc:
+            print(f"[Runner:{self._agent_id}] loop-verify verdict post failed: {exc}",
+                  file=sys.stderr)
+        print(f"[Runner:{self._agent_id}] loop-verify {token} → "
+              f"{'PASS' if passed else 'FAIL'}", file=sys.stderr)
 
     # -- orchestrator HTTP (control→agent pull channel, #185) ----------------
 
@@ -3716,6 +4142,14 @@ class TriggerScheduler:
                         await self._execute_handover_dm(entry)
                     except Exception as exc:
                         print(f"[Runner:{self._agent_id}] handover-dm error: {exc}",
+                              file=sys.stderr)
+                    continue
+                if kind == "loop-verify":
+                    # #933: another agent asked us to verify its loop iteration.
+                    try:
+                        await self._execute_loop_verify(entry)
+                    except Exception as exc:
+                        print(f"[Runner:{self._agent_id}] loop-verify error: {exc}",
                               file=sys.stderr)
                     continue
                 if kind == "github-digest":
@@ -4180,6 +4614,11 @@ class TriggerScheduler:
         task_body = trigger.get("prompt", "")
         if pre_check_output:
             task_body += f"\n\nPre-check context:\n{pre_check_output}"
+        # Loop self-correction (#933): a failed verifier's output from the
+        # previous iteration is threaded in here so this iteration can fix it.
+        loop_feedback = (ctx or {}).get("loopFeedback")
+        if isinstance(loop_feedback, str) and loop_feedback.strip():
+            task_body += f"\n\n---\n{loop_feedback}"
         if gh:
             clamped = _clamp_event_deep(gh)
             task_body += (

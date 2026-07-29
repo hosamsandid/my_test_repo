@@ -746,6 +746,29 @@ test('triggerView: loop trigger carries its stop-contract summary', () => {
   assert.ok(!('prompt' in t) && !('roomId' in t) && !('env' in t));
 });
 
+test('triggerView: loop carries the verifier shape but never the command/env (#933)', () => {
+  const gCmd = buildProcessGraph([
+    { id: 'dev', role: 'agent', triggers: [{
+      id: 'l', type: 'loop', maxIterations: 5,
+      verify: { command: 'npm run lint', env: { CI: '1' } },
+    }] },
+  ]);
+  assert.deepEqual(gCmd.nodes[0].triggers[0].verify, { mode: 'command' });
+
+  const gAgent = buildProcessGraph([
+    { id: 'dev', role: 'agent', triggers: [{
+      id: 'l', type: 'loop', maxIterations: 5, verify: { agentId: 'team-x-reviewer' },
+    }] },
+  ]);
+  assert.deepEqual(gAgent.nodes[0].triggers[0].verify,
+    { mode: 'agent', agentId: 'team-x-reviewer' });
+
+  const gNone = buildProcessGraph([
+    { id: 'dev', role: 'agent', triggers: [{ id: 'l', type: 'loop', maxIterations: 5 }] },
+  ]);
+  assert.ok(!('verify' in gNone.nodes[0].triggers[0]));
+});
+
 test('triggerView: loop without an until command omits the until summary', () => {
   const g = buildProcessGraph([
     { id: 'dev', role: 'agent', triggers: [{ id: 'l', type: 'loop', maxIterations: 3 }] },

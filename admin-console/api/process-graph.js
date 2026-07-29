@@ -151,6 +151,19 @@ function triggerView(t) {
       v.until = { command: t.until.command };
     }
     if (t.minGapSeconds != null) v.minGapSeconds = t.minGapSeconds;
+    // Verifier gate summary (#933) so the graph view knows a separate check
+    // exists — the stop-contract badge that renders it is a separate UI ticket.
+    // Only the shape is surfaced (command presence / target agent), never the
+    // command string or its env.
+    if (t.verify && typeof t.verify === 'object') {
+      if (typeof t.verify.command === 'string' && t.verify.command.trim()) {
+        v.verify = { mode: 'command' };
+      } else if (typeof t.verify.agentId === 'string' && t.verify.agentId.trim()) {
+        v.verify = { mode: 'agent', agentId: t.verify.agentId };
+      } else if (t.verify.selfGraded === true) {
+        v.verify = { mode: 'self-graded' };
+      }
+    }
   } else if (t.type === 'http') {
     // Webhook trigger (#410) — fired by an external system via HOOK_PORT. The
     // secret is intentionally not carried into the graph view.

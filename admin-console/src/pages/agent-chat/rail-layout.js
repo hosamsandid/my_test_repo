@@ -24,6 +24,56 @@
 export const COLLAPSED_RAIL_WIDTH = 56;
 
 /**
+ * Width reserved (px) for the overflow "⋯" toggle when it is shown.
+ *
+ * Only a layout *budget* for the fit computation — the button sizes itself.
+ */
+export const OVERFLOW_BTN_WIDTH = 40;
+
+/**
+ * How many of the rail's tabs fit in the tab strip, left to right.
+ *
+ * Whatever doesn't fit belongs in the overflow "⋯" menu, so the answer has to
+ * account for the toggle's own width — but only once we know an overflow menu
+ * is needed at all, otherwise a strip that fits exactly would spill its last
+ * tab for no reason.
+ *
+ * At least one tab is always kept: a strip too narrow for even the first tab
+ * still reads as "one tab plus ⋯" rather than as a bare ⋯ button.
+ *
+ * @param {object}   opts
+ * @param {number}   opts.stripWidth     measured width of the tab strip
+ * @param {number[]} opts.tabWidths      natural width of each tab, in tab order
+ * @param {number}   opts.closeWidth     width of the collapse button sharing the strip
+ * @param {number}   opts.overflowWidth  budget for the "⋯" toggle
+ * @returns {number} count of leading tabs to render inline (0 when there are no tabs)
+ */
+export function fitTabCount({
+  stripWidth,
+  tabWidths,
+  closeWidth = 0,
+  overflowWidth = OVERFLOW_BTN_WIDTH,
+}) {
+  const widths = Array.isArray(tabWidths) ? tabWidths : [];
+  if (widths.length === 0) return 0;
+
+  const total = widths.reduce((a, b) => a + b, 0);
+  // Everything fits alongside the close button → no overflow menu, no budget
+  // for a toggle that won't be rendered.
+  if (total <= stripWidth - closeWidth) return widths.length;
+
+  const budget = stripWidth - closeWidth - overflowWidth;
+  let used = 0;
+  let count = 0;
+  for (const w of widths) {
+    if (used + w > budget) break;
+    used += w;
+    count += 1;
+  }
+  return Math.max(1, count);
+}
+
+/**
  * Clamp the stored panel widths so that
  * `left + rail + dividers + chatMin` never exceeds the container.
  *

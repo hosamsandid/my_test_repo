@@ -6,13 +6,11 @@ import WorkspaceBrowser from './WorkspaceBrowser';
 import TriggersPanel from './TriggersPanel';
 import PromptPreviewPanel from './PromptPreviewPanel';
 import AgentKnowledgePanel from './AgentKnowledgePanel';
+import { fitTabCount } from './rail-layout';
 import { apiCall } from '../../hooks/useApi';
 
 const TAB_KEY = 'agentChat.rightRailTab';
 const SESSION_POLL_MS = 3_000;
-// Width reserved (px) for the overflow "⋯" toggle when it is shown. Used only
-// as a layout budget in the fit computation; the button sizes itself.
-const OVERFLOW_BTN_WIDTH = 40;
 
 const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'prompt', 'knowledge'];
 
@@ -42,7 +40,9 @@ const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'prompt', 'knowledge'];
  * inline expand chevron plus the tab icons, each of which re-expands straight
  * to its tab. The component stays mounted across a collapse, so the active tab
  * survives the cycle; the tab bodies do not render while collapsed, so a
- * hidden rail costs no polling.
+ * hidden rail costs no polling. Because it stays mounted, the tab-strip
+ * measurement has to be re-run per collapse/expand rather than relying on a
+ * remount — see the `collapsed` dependency below (#924).
  */
 export default function RightRail({
   agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onOpen, onCostUpdate, onContextUpdate,
@@ -102,47 +102,43 @@ export default function RightRail({
 
   // --- Overflow measurement ---------------------------------------------
   // We render a hidden, full-width copy of the tab row to learn each tab's
-  // natural width, then greedily fit as many as the strip allows. Whatever
-  // doesn't fit spills into the overflow menu. Re-measured on resize and
-  // whenever a tab's width can change (e.g. the Sessions badge appears).
+  // natural width, then fit as many as the strip allows (`fitTabCount`).
+  // Whatever doesn't fit spills into the overflow menu. Re-measured on resize
+  // and whenever a tab's width can change (e.g. the Sessions badge appears).
   const stripRef = useRef(null);
   const measureRef = useRef(null);
   const closeRef = useRef(null);
   const [visibleCount, setVisibleCount] = useState(tabs.length);
 
+  // `collapsed` MUST stay in this dependency list. The rail no longer unmounts
+  // when it is hidden (#905) — it early-returns the collapsed strip instead, so
+  // the measured nodes come and go while the component (and therefore this
+  // effect) lives on. Without `collapsed` here the effect would bail out once
+  // on a rail that loads collapsed (`agentChat.logOpen` is persisted) and never
+  // run again, leaving `visibleCount` stale: every tab renders, the strip clips
+  // them, and no overflow toggle appears because nothing spilled (#924). It
+  // also has to re-observe on expand — the strip is a *new* DOM node each time.
   useLayoutEffect(() => {
     const strip = stripRef.current;
     const measure = measureRef.current;
-    if (!strip || !measure || typeof ResizeObserver === 'undefined') return undefined;
+    if (collapsed || !strip || !measure || typeof ResizeObserver === 'undefined') return undefined;
 
     const recompute = () => {
-      const stripWidth = strip.clientWidth;
-      const closeWidth = closeRef.current ? closeRef.current.offsetWidth : 0;
-      const widths = Array.from(measure.children).map((el) => el.getBoundingClientRect().width);
-      const total = widths.reduce((a, b) => a + b, 0);
-
-      // Everything fits alongside the close button → no overflow menu.
-      if (total <= stripWidth - closeWidth) {
-        setVisibleCount(tabs.length);
-        return;
-      }
-      // Otherwise reserve room for the "⋯" toggle and fit greedily.
-      const budget = stripWidth - closeWidth - OVERFLOW_BTN_WIDTH;
-      let used = 0;
-      let count = 0;
-      for (const w of widths) {
-        if (used + w > budget) break;
-        used += w;
-        count += 1;
-      }
-      setVisibleCount(Math.max(1, count)); // always keep at least one real tab
+      setVisibleCount(fitTabCount({
+        stripWidth: strip.clientWidth,
+        closeWidth: closeRef.current ? closeRef.current.offsetWidth : 0,
+        tabWidths: Array.from(measure.children).map((el) => el.getBoundingClientRect().width),
+      }));
     };
 
     recompute();
+    // Also carries the expand animation: the strip is still at the collapsed
+    // width when this runs, and the observer converges as the width transition
+    // advances.
     const ro = new ResizeObserver(recompute);
     ro.observe(strip);
     return () => ro.disconnect();
-  }, [tabs]);
+  }, [tabs, collapsed]);
 
   const visibleTabs = tabs.slice(0, visibleCount);
   const overflowTabs = tabs.slice(visibleCount);

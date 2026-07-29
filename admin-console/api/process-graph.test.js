@@ -626,3 +626,44 @@ test('AC3: a legacy flat-emits agent produces the identical lint set (no outcome
     assert.ok(!legacy.lints.some(l => l.code === code), `legacy flow must not emit ${code}`);
   }
 });
+
+// --- loop trigger normalisation (#932) -------------------------------------
+
+test('triggerView: loop trigger carries its stop-contract summary', () => {
+  const g = buildProcessGraph([
+    {
+      id: 'dev', role: 'agent', triggers: [{
+        id: 'drain', type: 'loop', enabled: true,
+        until: { command: 'npm test', env: { CI: '1' } },
+        maxIterations: 25, minGapSeconds: 5,
+        // fields the graph view must NOT surface:
+        prompt: 'do the thing', roomId: '!r:local',
+      }],
+    },
+  ]);
+  const t = g.nodes[0].triggers[0];
+  assert.equal(t.type, 'loop');
+  assert.equal(t.maxIterations, 25);
+  assert.equal(t.minGapSeconds, 5);
+  assert.deepEqual(t.until, { command: 'npm test' }); // env/prompt/roomId not leaked
+  assert.ok(!('prompt' in t) && !('roomId' in t) && !('env' in t));
+});
+
+test('triggerView: loop without an until command omits the until summary', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', role: 'agent', triggers: [{ id: 'l', type: 'loop', maxIterations: 3 }] },
+  ]);
+  const t = g.nodes[0].triggers[0];
+  assert.equal(t.maxIterations, 3);
+  assert.ok(!('until' in t));
+  assert.ok(!('minGapSeconds' in t));
+});
+
+test('a loop trigger contributes no graph edge or lint (canvas rendering is a separate ticket)', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', role: 'agent', triggers: [{ id: 'l', type: 'loop', maxIterations: 5 }] },
+  ]);
+  // No self-edge (unlike cron/once timers) and no orphan/dead-end noise.
+  assert.equal(g.edges.length, 0);
+  assert.equal(g.lints.length, 0);
+});

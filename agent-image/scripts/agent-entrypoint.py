@@ -2737,6 +2737,60 @@ def _run_pre_check(script_path: str, env: dict) -> tuple[int, str]:
     return proc.returncode, (proc.stdout or "")[:4000]
 
 
+def _validate_loop_trigger(trigger: dict) -> tuple[bool, str]:
+    """Validate a `loop` trigger's stop contract (#932).
+
+    Returns ``(ok, reason)``. ``maxIterations`` is **required** and must be a
+    positive integer — the guardrail that forbids an unbounded loop being
+    authored (concept §4.4). ``until`` (optional) must be an object whose
+    ``command`` — when present — is a non-empty string and whose ``env`` is an
+    object; ``minGapSeconds`` (optional) a non-negative number. Booleans are
+    rejected explicitly since ``bool`` is an ``int`` subclass in Python.
+    """
+    max_iterations = trigger.get("maxIterations")
+    if (not isinstance(max_iterations, int) or isinstance(max_iterations, bool)
+            or max_iterations < 1):
+        return False, "maxIterations is required and must be a positive integer"
+
+    until = trigger.get("until")
+    if until is not None:
+        if not isinstance(until, dict):
+            return False, "until must be an object"
+        cmd = until.get("command")
+        if cmd is not None and not (isinstance(cmd, str) and cmd.strip()):
+            return False, "until.command must be a non-empty string"
+        env = until.get("env")
+        if env is not None and not isinstance(env, dict):
+            return False, "until.env must be an object"
+
+    min_gap = trigger.get("minGapSeconds")
+    if min_gap is not None and (isinstance(min_gap, bool)
+                                or not isinstance(min_gap, (int, float))
+                                or min_gap < 0):
+        return False, "minGapSeconds must be a non-negative number"
+
+    return True, ""
+
+
+def _loop_stop_decision(iterations: int, max_iterations: int,
+                        until_exit_code: int | None) -> str | None:
+    """Decide a loop's terminal outcome *after* an iteration (#932, concept §4.2).
+
+    - ``until.command`` exited ``0`` → ``"done"`` (goal met).
+    - ``iterations >= max_iterations`` → ``"exhausted"`` (hard cap reached).
+    - otherwise → ``None`` (run another iteration).
+
+    ``until_exit_code`` is ``None`` when the loop has no ``until.command``.
+    ``done`` is evaluated first, so a goal met on the final permitted iteration
+    reports ``done`` rather than ``exhausted``.
+    """
+    if until_exit_code == 0:
+        return "done"
+    if iterations >= max_iterations:
+        return "exhausted"
+    return None
+
+
 def _clamp_event_deep(value, depth: int = 0):
     """Trim string fields in a GitHub webhook payload before injecting into
     the prompt. Mirrors agent-runner.js clampEventDeep (line 59), including
@@ -2915,6 +2969,8 @@ class TriggerScheduler:
         self._blueprint_id = blueprint_id
 
         self._cron_tasks: dict[str, dict] = {}  # triggerId -> {"task": Task, "expr": str}
+        self._loop_tasks: dict[str, dict] = {}  # loop triggerId -> {"task": Task} (#932)
+        self._loop_done: set[str] = set()  # loop triggers that reached a terminal state this lifetime (#932)
         self._running: set[str] = set()
         self._fired_once: set[str] = set()  # once-triggers already fired this lifetime (#185)
         # Blast-radius backstop (#611): caps concurrent + per-window triggered
@@ -2950,7 +3006,7 @@ class TriggerScheduler:
 
     async def stop(self) -> None:
         self._shutdown_event.set()
-        for entry in list(self._cron_tasks.values()):
+        for entry in (*self._cron_tasks.values(), *self._loop_tasks.values()):
             task = entry.get("task")
             if task and not task.done():
                 task.cancel()
@@ -2959,7 +3015,9 @@ class TriggerScheduler:
                 t.cancel()
         # Best-effort await so cancellation propagates before the event loop
         # exits.
-        for t in (self._sync_task, self._pending_task, *(e.get("task") for e in self._cron_tasks.values())):
+        for t in (self._sync_task, self._pending_task,
+                  *(e.get("task") for e in self._cron_tasks.values()),
+                  *(e.get("task") for e in self._loop_tasks.values())):
             if t is None:
                 continue
             try:
@@ -2967,6 +3025,7 @@ class TriggerScheduler:
             except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                 pass
         self._cron_tasks.clear()
+        self._loop_tasks.clear()
         try:
             asyncio.get_running_loop().remove_signal_handler(signal.SIGUSR2)
         except (NotImplementedError, RuntimeError, ValueError):
@@ -3164,6 +3223,7 @@ class TriggerScheduler:
         await self._pull_config_dm()
         triggers = _load_triggers()
         active_ids: set[str] = set()
+        active_loop_ids: set[str] = set()
         # Checked once per tick (not per overdue once-trigger) — a single
         # HTTP round-trip to the orchestrator covers the whole batch.
         maintenance_active = await self._maintenance_active()
@@ -3259,6 +3319,35 @@ class TriggerScheduler:
                 # tick — same drift behaviour as the Node reference, and
                 # self-healing across container restarts.
 
+            elif ttype == "loop":
+                # Loop trigger (#932): a continuation primitive that re-arms
+                # itself on completion until `until.command` exits 0 (done) or
+                # `maxIterations` is reached (exhausted). Scheduled like cron —
+                # one long-lived runner task per id — but the runner terminates
+                # on the stop contract rather than sleeping to a wall clock.
+                ok, reason = _validate_loop_trigger(trigger)
+                if not ok:
+                    print(f"[Runner:{self._agent_id}] Invalid loop trigger "
+                          f"{tid}: {reason} — skipping", file=sys.stderr)
+                    continue
+                active_loop_ids.add(tid)
+                # A loop that already reached a terminal state this lifetime is
+                # not re-armed (mirrors _fired_once for one-shots). A container
+                # restart re-runs it — same self-heal posture as cron/once.
+                if tid in self._loop_done:
+                    continue
+                existing = self._loop_tasks.get(tid)
+                if existing and not existing["task"].done():
+                    continue
+                # Snapshot so later edits to triggers.json don't mutate the
+                # running task's view (same as the cron path).
+                snapshot = dict(trigger)
+                task = asyncio.create_task(self._loop_runner(snapshot))
+                self._loop_tasks[tid] = {"task": task}
+                print(f"[Runner:{self._agent_id}] Loop scheduled: {tid} "
+                      f"(maxIterations={trigger.get('maxIterations')})",
+                      file=sys.stderr)
+
             # http / github-event triggers are scheduled by the pending-poll
             # loop (see _process_pending), not here.
 
@@ -3268,6 +3357,17 @@ class TriggerScheduler:
                 entry = self._cron_tasks.pop(tid)
                 entry["task"].cancel()
                 print(f"[Runner:{self._agent_id}] Trigger removed: {tid}",
+                      file=sys.stderr)
+
+        # Stop loop tasks that disappeared / got disabled (#932). A terminal
+        # loop's task is already done — dropping it here just tidies the map.
+        for tid in list(self._loop_tasks.keys()):
+            if tid not in active_loop_ids:
+                entry = self._loop_tasks.pop(tid)
+                task = entry.get("task")
+                if task and not task.done():
+                    task.cancel()
+                print(f"[Runner:{self._agent_id}] Loop removed: {tid}",
                       file=sys.stderr)
 
     async def _cron_runner(self, trigger: dict, expr: str) -> None:
@@ -3311,6 +3411,137 @@ class TriggerScheduler:
                           file=sys.stderr)
         except asyncio.CancelledError:
             return
+
+    async def _loop_runner(self, trigger: dict) -> None:
+        """Run a `loop` trigger (#932): a continuation primitive.
+
+        Sibling of `_cron_runner`, but instead of sleeping to a wall clock it
+        runs one iteration through the existing `_execute` chokepoint and, on
+        return, immediately arms the next — no overlap by construction
+        (strictly sequential), so `_running` stays only as a backstop. After
+        each iteration the stop contract is evaluated (concept §4.2):
+
+          - `until.command` exits 0 → done
+          - `maxIterations` reached → exhausted
+
+        On any terminal state a single outcome DM is posted. Maintenance Mode
+        is honoured exactly like cron (pause inside the window, one catch-up
+        iteration once it ends).
+        """
+        tid = trigger.get("id", "?")
+        max_iterations = trigger.get("maxIterations")
+        until = trigger.get("until") if isinstance(trigger.get("until"), dict) else {}
+        until_cmd = until.get("command")
+        until_cmd = until_cmd if isinstance(until_cmd, str) and until_cmd.strip() else None
+        until_env = until.get("env") if isinstance(until.get("env"), dict) else {}
+        try:
+            min_gap = float(trigger.get("minGapSeconds") or 0)
+        except (TypeError, ValueError):
+            min_gap = 0.0
+
+        iterations = 0
+        outcome: str | None = None
+        last_until_output = ""
+        try:
+            while not self._shutdown_event.is_set():
+                # Maintenance Mode parity with cron (#504): pause inside the
+                # window, then run exactly one catch-up iteration once it ends.
+                if await self._maintenance_active():
+                    print(f"[Runner:{self._agent_id}] loop {tid} paused "
+                          f"(maintenance mode active) — will resume once it ends",
+                          file=sys.stderr)
+                    while (not self._shutdown_event.is_set()
+                           and await self._maintenance_active()):
+                        await asyncio.sleep(5.0)
+                    if self._shutdown_event.is_set():
+                        break
+                    print(f"[Runner:{self._agent_id}] loop {tid} resuming "
+                          f"after maintenance mode ended", file=sys.stderr)
+
+                # One iteration through the shared chokepoint.
+                try:
+                    await self._execute(trigger)
+                except Exception as exc:
+                    print(f"[Runner:{self._agent_id}] loop _execute({tid}) error: {exc}",
+                          file=sys.stderr)
+                iterations += 1
+
+                # Evaluate the stop contract for this iteration.
+                until_code: int | None = None
+                if until_cmd:
+                    until_code, last_until_output = await asyncio.to_thread(
+                        _run_pre_check, until_cmd, until_env)
+                outcome = _loop_stop_decision(iterations, max_iterations, until_code)
+                if outcome:
+                    break
+
+                if min_gap > 0:
+                    await asyncio.sleep(min_gap)
+        except asyncio.CancelledError:
+            # Shutdown / trigger removed mid-flight — not a terminal state, so
+            # no outcome DM and the loop is left to re-run on the next start.
+            return
+
+        if not outcome:
+            # Exited via the shutdown check, not the stop contract.
+            return
+
+        self._loop_done.add(tid)
+        try:
+            await self._post_loop_outcome(trigger, outcome, iterations,
+                                          last_until_output)
+        except Exception as exc:
+            print(f"[Runner:{self._agent_id}] loop {tid} outcome DM failed: {exc}",
+                  file=sys.stderr)
+
+    async def _post_loop_outcome(self, trigger: dict, outcome: str,
+                                 iterations: int, last_until_output: str) -> None:
+        """Post the single terminal outcome DM for a finished loop (#932).
+
+        This is the "completed" signal agents lack today: outcome
+        (done/exhausted), iterations used, and the last `until` output.
+        Best-effort — a missing DM room just skips it.
+        """
+        raw_room_id = trigger.get("roomId") or _load_dm_room_id()
+        room_id = (
+            raw_room_id
+            if isinstance(raw_room_id, str) and _MATRIX_ROOM_ID_RE.match(raw_room_id)
+            else None
+        )
+        if not room_id:
+            print(f"[Runner:{self._agent_id}] loop outcome: no DM room available "
+                  "— skipping", file=sys.stderr)
+            return
+
+        tid = trigger.get("id", "?")
+        max_iterations = trigger.get("maxIterations")
+        heading = {
+            "done": "✅ **Loop done**",
+            "exhausted": "🛑 **Loop exhausted**",
+        }.get(outcome, f"**Loop {outcome}**")
+        desc = f" — {trigger['description']}" if trigger.get("description") else ""
+        lines = [
+            f"{heading} — `{tid}`{desc}",
+            "",
+            f"- Outcome: `{outcome}`",
+            f"- Iterations: {iterations} / {max_iterations}",
+        ]
+        until = trigger.get("until") if isinstance(trigger.get("until"), dict) else {}
+        if isinstance(until.get("command"), str) and until.get("command").strip():
+            snippet = (last_until_output or "").strip()
+            if len(snippet) > 500:
+                snippet = snippet[:500] + " …"
+            if snippet:
+                lines += ["", "Last stop-check (`until`) output:", "```",
+                          snippet, "```"]
+            else:
+                verdict = "passed" if outcome == "done" else "not met"
+                lines.append(f"- Stop check (`until`): {verdict} (no output)")
+
+        body = "\n".join(lines)
+        await self._send_formatted(room_id, body)
+        print(f"[Runner:{self._agent_id}] loop {tid} → {outcome} "
+              f"after {iterations} iteration(s)", file=sys.stderr)
 
     # -- orchestrator HTTP (control→agent pull channel, #185) ----------------
 

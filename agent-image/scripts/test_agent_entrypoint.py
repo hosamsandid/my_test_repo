@@ -658,6 +658,234 @@ class MaintenanceModeGating(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(maintenance_calls), 2)
 
 
+class LoopTriggerValidation(unittest.TestCase):
+    """#932: a `loop` trigger must declare a positive-integer `maxIterations`
+    (no unbounded loop may be authored); optional `until`/`minGapSeconds` are
+    shape-checked."""
+
+    def test_valid_loop_accepted(self):
+        ok, reason = entrypoint._validate_loop_trigger({
+            "id": "l", "type": "loop", "maxIterations": 10,
+            "until": {"command": "npm test", "env": {"CI": "1"}},
+            "minGapSeconds": 5,
+        })
+        self.assertTrue(ok, reason)
+
+    def test_valid_loop_minimal(self):
+        ok, _ = entrypoint._validate_loop_trigger({"maxIterations": 1})
+        self.assertTrue(ok)
+
+    def test_missing_maxIterations_rejected(self):
+        ok, reason = entrypoint._validate_loop_trigger({"id": "l", "type": "loop"})
+        self.assertFalse(ok)
+        self.assertIn("maxIterations", reason)
+
+    def test_zero_or_negative_maxIterations_rejected(self):
+        self.assertFalse(entrypoint._validate_loop_trigger({"maxIterations": 0})[0])
+        self.assertFalse(entrypoint._validate_loop_trigger({"maxIterations": -3})[0])
+
+    def test_non_int_maxIterations_rejected(self):
+        # bool is an int subclass in Python — must be rejected explicitly.
+        self.assertFalse(entrypoint._validate_loop_trigger({"maxIterations": True})[0])
+        self.assertFalse(entrypoint._validate_loop_trigger({"maxIterations": 2.5})[0])
+        self.assertFalse(entrypoint._validate_loop_trigger({"maxIterations": "5"})[0])
+
+    def test_bad_until_shape_rejected(self):
+        self.assertFalse(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "until": "npm test"})[0])
+        self.assertFalse(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "until": {"command": "  "}})[0])
+        self.assertFalse(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "until": {"command": "x", "env": "CI=1"}})[0])
+
+    def test_until_command_optional(self):
+        # An `until` object with no command (env-only / empty) is allowed —
+        # such a loop simply runs to `maxIterations`.
+        self.assertTrue(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "until": {}})[0])
+
+    def test_bad_minGapSeconds_rejected(self):
+        self.assertFalse(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "minGapSeconds": -1})[0])
+        self.assertFalse(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "minGapSeconds": "5"})[0])
+        self.assertFalse(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "minGapSeconds": True})[0])
+
+
+class LoopStopDecision(unittest.TestCase):
+    """#932: the pure done-vs-exhausted decision evaluated after each iteration."""
+
+    def test_until_exit_zero_is_done(self):
+        self.assertEqual(entrypoint._loop_stop_decision(1, 25, 0), "done")
+
+    def test_until_nonzero_continues_below_cap(self):
+        self.assertIsNone(entrypoint._loop_stop_decision(1, 25, 1))
+
+    def test_cap_reached_is_exhausted(self):
+        self.assertEqual(entrypoint._loop_stop_decision(25, 25, 1), "exhausted")
+
+    def test_no_until_command_runs_to_exhausted(self):
+        # until_exit_code None (no until.command) → never "done".
+        self.assertIsNone(entrypoint._loop_stop_decision(1, 3, None))
+        self.assertEqual(entrypoint._loop_stop_decision(3, 3, None), "exhausted")
+
+    def test_done_wins_over_exhausted_on_final_iteration(self):
+        # Goal met on the last permitted iteration reports done, not exhausted.
+        self.assertEqual(entrypoint._loop_stop_decision(25, 25, 0), "done")
+
+
+class LoopRunner(unittest.IsolatedAsyncioTestCase):
+    """#932: `_loop_runner` chains iterations through `_execute` and stops on the
+    stop contract, posting exactly one terminal outcome DM."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir",
+                               return_value=Path(self._tmpdir.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        client = AsyncMock()
+        return entrypoint.TriggerScheduler(
+            client=client, agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+
+    def _loop_trigger(self, **kw):
+        t = {"id": "lp", "type": "loop", "enabled": True, "roomId": "!room:local",
+             "maxIterations": 10, "prompt": "do it"}
+        t.update(kw)
+        return t
+
+    async def test_loop_runs_iterations_until_until_done(self):
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(
+            until={"command": "npm test"}, maxIterations=10)
+        precheck = patch.object(
+            entrypoint, "_run_pre_check",
+            side_effect=[(1, ""), (1, ""), (0, "all green")])
+        with patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
+             precheck:
+            await scheduler._loop_runner(trigger)
+        self.assertEqual(execute_mock.await_count, 3)
+        scheduler._send_formatted.assert_awaited_once()
+        body = scheduler._send_formatted.await_args.args[1]
+        self.assertIn("done", body)
+        self.assertIn("all green", body)
+        self.assertIn("lp", scheduler._loop_done)
+
+    async def test_loop_exhausted_without_until(self):
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(maxIterations=3)  # no `until` → runs to cap
+        with patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._loop_runner(trigger)
+        self.assertEqual(execute_mock.await_count, 3)
+        scheduler._send_formatted.assert_awaited_once()
+        body = scheduler._send_formatted.await_args.args[1]
+        self.assertIn("exhausted", body)
+        self.assertIn("3 / 3", body)
+        self.assertIn("lp", scheduler._loop_done)
+
+    async def test_loop_exhausted_when_until_never_passes(self):
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(until={"command": "false"}, maxIterations=2)
+        with patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
+             patch.object(entrypoint, "_run_pre_check", return_value=(1, "still failing")):
+            await scheduler._loop_runner(trigger)
+        self.assertEqual(execute_mock.await_count, 2)
+        scheduler._send_formatted.assert_awaited_once()
+        self.assertIn("exhausted", scheduler._send_formatted.await_args.args[1])
+
+    async def test_loop_pauses_for_maintenance_then_resumes(self):
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(until={"command": "npm test"}, maxIterations=5)
+        maintenance_calls = []
+
+        async def fake_maintenance_active():
+            maintenance_calls.append(None)
+            # Active on the first check (pause), inactive afterwards (resume).
+            return len(maintenance_calls) == 1
+
+        with patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
+             patch.object(scheduler, "_maintenance_active", fake_maintenance_active), \
+             patch.object(entrypoint.asyncio, "sleep", AsyncMock(return_value=None)), \
+             patch.object(entrypoint, "_run_pre_check", return_value=(0, "ok")):
+            await scheduler._loop_runner(trigger)
+        execute_mock.assert_awaited_once()  # one catch-up iteration, then done
+        self.assertGreaterEqual(len(maintenance_calls), 2)
+        self.assertIn("lp", scheduler._loop_done)
+
+    async def test_loop_shutdown_before_iteration_posts_no_dm(self):
+        scheduler = self._scheduler()
+        scheduler._shutdown_event.set()
+        trigger = self._loop_trigger(maxIterations=5)
+        with patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._loop_runner(trigger)
+        execute_mock.assert_not_awaited()
+        scheduler._send_formatted.assert_not_awaited()
+        self.assertNotIn("lp", scheduler._loop_done)
+
+
+class LoopSyncScheduling(unittest.IsolatedAsyncioTestCase):
+    """#932: `_sync` schedules a valid loop once, rejects an invalid one, and
+    never re-arms a loop that already reached a terminal state."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir",
+                               return_value=Path(self._tmpdir.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+
+    async def test_sync_schedules_valid_loop(self):
+        scheduler = self._scheduler()
+        trigger = {"id": "lp", "type": "loop", "enabled": True,
+                   "maxIterations": 5, "prompt": "x"}
+        with patch.object(entrypoint, "_load_triggers", return_value=[trigger]), \
+             patch.object(scheduler, "_loop_runner", AsyncMock()) as runner_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._sync()
+            await entrypoint.asyncio.sleep(0)
+        runner_mock.assert_called_once()
+        self.assertIn("lp", scheduler._loop_tasks)
+
+    async def test_sync_rejects_loop_without_maxIterations(self):
+        scheduler = self._scheduler()
+        trigger = {"id": "lp", "type": "loop", "enabled": True, "prompt": "x"}
+        with patch.object(entrypoint, "_load_triggers", return_value=[trigger]), \
+             patch.object(scheduler, "_loop_runner", AsyncMock()) as runner_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._sync()
+        runner_mock.assert_not_called()
+        self.assertNotIn("lp", scheduler._loop_tasks)
+
+    async def test_sync_does_not_rearm_terminated_loop(self):
+        scheduler = self._scheduler()
+        scheduler._loop_done.add("lp")
+        trigger = {"id": "lp", "type": "loop", "enabled": True,
+                   "maxIterations": 5, "prompt": "x"}
+        with patch.object(entrypoint, "_load_triggers", return_value=[trigger]), \
+             patch.object(scheduler, "_loop_runner", AsyncMock()) as runner_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._sync()
+        runner_mock.assert_not_called()
+        self.assertNotIn("lp", scheduler._loop_tasks)
+
+
 class TriggerBackstopUnit(unittest.TestCase):
     """#611: the pure per-agent backstop that caps concurrent + per-window
     triggered Claude spawns so a self-triggering loop can't fan out unbounded."""
